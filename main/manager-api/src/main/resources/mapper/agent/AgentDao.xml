@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="xiaozhi.modules.agent.dao.AgentDao">
+<mapper namespace="tbot.modules.agent.dao.AgentDao">
     <!-- 获取智能体的设备数量 -->
     <select id="getDeviceCountByAgentId" resultType="java.lang.Integer">
         SELECT COUNT(*) FROM ai_device WHERE agent_id = #{agentId}
     </select>
 
-    <resultMap id="AgentInfoMap" type="xiaozhi.modules.agent.vo.AgentInfoVO">
+    <resultMap id="AgentInfoMap" type="tbot.modules.agent.vo.AgentInfoVO">
         <id column="id"           property="id"/>
         <result column="userId"    property="userId"/>
         <result column="agentCode" property="agentCode"/>
@@ -19,6 +19,8 @@
         <result column="ttsModelId" property="ttsModelId"/>
         <result column="ttsVoiceId" property="ttsVoiceId"/>
         <result column="ttsLanguage" property="ttsLanguage"/>
+        <result column="voiceMode" property="voiceMode"/>
+        <result column="googleLiveConfigJson" property="googleLiveConfigJson"/>
         <result column="ttsVolume" property="ttsVolume"/>
         <result column="ttsRate" property="ttsRate"/>
         <result column="ttsPitch" property="ttsPitch"/>
@@ -53,6 +55,8 @@
                a.tts_model_id      AS ttsModelId,
                a.tts_voice_id      AS ttsVoiceId,
                a.tts_language      AS ttsLanguage,
+               a.voice_mode        AS voiceMode,
+               a.google_live_config_json AS googleLiveConfigJson,
                a.tts_volume        AS ttsVolume,
                a.tts_rate          AS ttsRate,
                a.tts_pitch         AS ttsPitch,
