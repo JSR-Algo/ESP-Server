@@ -63,6 +63,9 @@ import tbot.modules.timbre.service.TimbreService;
 @Service
 @AllArgsConstructor
 public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> implements AgentService {
+    private static final String VOICE_MODE_CLASSIC_PIPELINE = "classic_pipeline";
+    private static final String VOICE_MODE_GOOGLE_LIVE = "google_live";
+
     private final AgentDao agentDao;
     private final AgentTagDao agentTagDao;
     private final TimbreService timbreModelService;
@@ -284,6 +287,8 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
             throw new RenException(ErrorCode.AGENT_NOT_FOUND);
         }
 
+        validateVoiceModeUpdate(dto);
+
         // Only update provided non-null fields
         if (dto.getAgentName() != null) {
             existingEntity.setAgentName(dto.getAgentName());
@@ -317,6 +322,9 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         }
         if (dto.getVoiceMode() != null) {
             existingEntity.setVoiceMode(dto.getVoiceMode());
+            if (VOICE_MODE_CLASSIC_PIPELINE.equals(dto.getVoiceMode())) {
+                existingEntity.setGoogleLiveConfigJson(null);
+            }
         }
         if (dto.getGoogleLiveConfigJson() != null) {
             existingEntity.setGoogleLiveConfigJson(dto.getGoogleLiveConfigJson());
@@ -443,6 +451,26 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
             throw new RenException(ErrorCode.LLM_INTENT_PARAMS_MISMATCH);
         }
         this.updateById(existingEntity);
+    }
+
+    private void validateVoiceModeUpdate(AgentUpdateDTO dto) {
+        if (dto.getVoiceMode() != null
+                && !VOICE_MODE_CLASSIC_PIPELINE.equals(dto.getVoiceMode())
+                && !VOICE_MODE_GOOGLE_LIVE.equals(dto.getVoiceMode())) {
+            throw new RenException(
+                    ErrorCode.PARAM_TYPE_INVALID,
+                    "voiceMode must be classic_pipeline or google_live");
+        }
+
+        if (dto.getGoogleLiveConfigJson() != null) {
+            try {
+                JsonUtils.parseObject(dto.getGoogleLiveConfigJson(), Map.class);
+            } catch (RuntimeException ex) {
+                throw new RenException(
+                        ErrorCode.PARAM_JSON_INVALID,
+                        "googleLiveConfigJson must be valid JSON object");
+            }
+        }
     }
 
     /**
