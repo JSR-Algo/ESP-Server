@@ -1,24 +1,26 @@
 package tbot.modules.agent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.http.MediaType.APPLICATION_JSON;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.test.context.ActiveProfiles;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import tbot.common.redis.RedisUtils;
-import tbot.common.utils.Result;
 import tbot.modules.agent.controller.AgentController;
 import tbot.modules.agent.dto.AgentUpdateDTO;
 import tbot.modules.agent.service.AgentChatAudioService;
@@ -31,145 +33,98 @@ import tbot.modules.agent.service.AgentTagService;
 import tbot.modules.agent.service.AgentTemplateService;
 import tbot.modules.agent.vo.AgentInfoVO;
 import tbot.modules.correctword.service.CorrectWordFileService;
-import tbot.modules.device.entity.DeviceEntity;
-import tbot.modules.device.service.DeviceService;
 
-@SpringBootTest(classes = AgentControllerVoiceModeTest.TestConfig.class)
-@ActiveProfiles("dev")
 class AgentControllerVoiceModeTest {
 
-    @Autowired
-    private AgentController agentController;
+    private final AgentService agentService = Mockito.mock(AgentService.class);
+    private final AgentTemplateService agentTemplateService = Mockito.mock(AgentTemplateService.class);
+    private final tbot.modules.device.service.DeviceService deviceService = Mockito.mock(
+            tbot.modules.device.service.DeviceService.class);
+    private final AgentChatHistoryService agentChatHistoryService = Mockito.mock(AgentChatHistoryService.class);
+    private final AgentChatAudioService agentChatAudioService = Mockito.mock(AgentChatAudioService.class);
+    private final AgentPluginMappingService agentPluginMappingService = Mockito.mock(AgentPluginMappingService.class);
+    private final AgentContextProviderService agentContextProviderService = Mockito.mock(
+            AgentContextProviderService.class);
+    private final AgentChatSummaryService agentChatSummaryService = Mockito.mock(AgentChatSummaryService.class);
+    private final RedisUtils redisUtils = Mockito.mock(RedisUtils.class);
+    private final AgentTagService agentTagService = Mockito.mock(AgentTagService.class);
+    private final CorrectWordFileService correctWordFileService = Mockito.mock(CorrectWordFileService.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Autowired
-    private AgentService agentService;
-
-    @Autowired
-    private DeviceService deviceService;
+    private MockMvc mockMvc;
 
     @BeforeEach
-    void resetMocks() {
-        Mockito.reset(agentService, deviceService);
+    void setUp() {
+        Mockito.reset(
+                agentService,
+                agentTemplateService,
+                deviceService,
+                agentChatHistoryService,
+                agentChatAudioService,
+                agentPluginMappingService,
+                agentContextProviderService,
+                agentChatSummaryService,
+                redisUtils,
+                agentTagService,
+                correctWordFileService);
+
+        AgentController agentController = new AgentController(
+                agentService,
+                agentTemplateService,
+                deviceService,
+                agentChatHistoryService,
+                agentChatAudioService,
+                agentPluginMappingService,
+                agentContextProviderService,
+                agentChatSummaryService,
+                redisUtils,
+                agentTagService,
+                correctWordFileService);
+
+        mockMvc = MockMvcBuilders.standaloneSetup(agentController)
+                .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
+                .build();
     }
 
     @Test
-    @DisplayName("GET /agent/{id} includes voice mode fields")
-    void getAgentByIdIncludesVoiceModeFields() {
+    @DisplayName("GET /agent/{id} returns voice mode fields in JSON response")
+    void getAgentByIdReturnsVoiceModeFields() throws Exception {
         AgentInfoVO agent = new AgentInfoVO();
         agent.setId("agent-voice");
         agent.setVoiceMode("google_live");
         agent.setGoogleLiveConfigJson("{\"voice\":\"Kore\"}");
         when(agentService.getAgentById("agent-voice")).thenReturn(agent);
 
-        Result<AgentInfoVO> result = agentController.getAgentById("agent-voice");
-
-        assertEquals(0, result.getCode());
-        assertEquals("success", result.getMsg());
-        assertEquals("google_live", result.getData().getVoiceMode());
-        assertEquals("{\"voice\":\"Kore\"}", result.getData().getGoogleLiveConfigJson());
+        mockMvc.perform(get("/agent/{id}", "agent-voice"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.msg").value("success"))
+                .andExpect(jsonPath("$.data.id").value("agent-voice"))
+                .andExpect(jsonPath("$.data.voiceMode").value("google_live"))
+                .andExpect(jsonPath("$.data.googleLiveConfigJson").value("{\"voice\":\"Kore\"}"));
     }
 
     @Test
-    @DisplayName("PUT /agent/{id} accepts voice mode fields")
-    void updateAgentAcceptsVoiceModeFields() {
-        AgentUpdateDTO dto = new AgentUpdateDTO();
-        dto.setVoiceMode("google_live");
-        dto.setGoogleLiveConfigJson("{\"voice\":\"Kore\"}");
+    @DisplayName("PUT /agent/{id} binds voice mode fields from JSON body")
+    void updateAgentBindsVoiceModeFields() throws Exception {
+        String requestBody = """
+                {
+                  "voiceMode": "google_live",
+                  "googleLiveConfigJson": "{\\"voice\\":\\"Kore\\"}"
+                }
+                """;
 
-        Result<Void> result = agentController.update("agent-voice", dto);
-
-        assertEquals(0, result.getCode());
-        assertEquals("success", result.getMsg());
-        assertNull(result.getData());
+        mockMvc.perform(put("/agent/{id}", "agent-voice")
+                        .contentType(APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.msg").value("success"));
 
         ArgumentCaptor<AgentUpdateDTO> updateCaptor = ArgumentCaptor.forClass(AgentUpdateDTO.class);
         verify(agentService).updateAgentById(eq("agent-voice"), updateCaptor.capture());
-        assertEquals("google_live", updateCaptor.getValue().getVoiceMode());
-        assertEquals("{\"voice\":\"Kore\"}", updateCaptor.getValue().getGoogleLiveConfigJson());
-    }
-
-    @TestConfiguration
-    static class TestConfig {
-        @Bean
-        AgentController agentController(
-                AgentService agentService,
-                AgentTemplateService agentTemplateService,
-                DeviceService deviceService,
-                AgentChatHistoryService agentChatHistoryService,
-                AgentChatAudioService agentChatAudioService,
-                AgentPluginMappingService agentPluginMappingService,
-                AgentContextProviderService agentContextProviderService,
-                AgentChatSummaryService agentChatSummaryService,
-                RedisUtils redisUtils,
-                AgentTagService agentTagService,
-                CorrectWordFileService correctWordFileService) {
-            return new AgentController(
-                    agentService,
-                    agentTemplateService,
-                    deviceService,
-                    agentChatHistoryService,
-                    agentChatAudioService,
-                    agentPluginMappingService,
-                    agentContextProviderService,
-                    agentChatSummaryService,
-                    redisUtils,
-                    agentTagService,
-                    correctWordFileService);
-        }
-
-        @Bean
-        AgentService agentService() {
-            return Mockito.mock(AgentService.class);
-        }
-
-        @Bean
-        AgentTemplateService agentTemplateService() {
-            return Mockito.mock(AgentTemplateService.class);
-        }
-
-        @Bean
-        DeviceService deviceService() {
-            return Mockito.mock(DeviceService.class);
-        }
-
-        @Bean
-        AgentChatHistoryService agentChatHistoryService() {
-            return Mockito.mock(AgentChatHistoryService.class);
-        }
-
-        @Bean
-        AgentChatAudioService agentChatAudioService() {
-            return Mockito.mock(AgentChatAudioService.class);
-        }
-
-        @Bean
-        AgentPluginMappingService agentPluginMappingService() {
-            return Mockito.mock(AgentPluginMappingService.class);
-        }
-
-        @Bean
-        AgentContextProviderService agentContextProviderService() {
-            return Mockito.mock(AgentContextProviderService.class);
-        }
-
-        @Bean
-        AgentChatSummaryService agentChatSummaryService() {
-            return Mockito.mock(AgentChatSummaryService.class);
-        }
-
-        @Bean
-        RedisUtils redisUtils() {
-            return Mockito.mock(RedisUtils.class);
-        }
-
-        @Bean
-        AgentTagService agentTagService() {
-            return Mockito.mock(AgentTagService.class);
-        }
-
-        @Bean
-        CorrectWordFileService correctWordFileService() {
-            return Mockito.mock(CorrectWordFileService.class);
-        }
+        AgentUpdateDTO captured = updateCaptor.getValue();
+        org.junit.jupiter.api.Assertions.assertEquals("google_live", captured.getVoiceMode());
+        org.junit.jupiter.api.Assertions.assertEquals("{\"voice\":\"Kore\"}", captured.getGoogleLiveConfigJson());
     }
 }

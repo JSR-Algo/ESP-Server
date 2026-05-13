@@ -663,13 +663,6 @@ databaseChangeLog:
             encoding: utf8
             path: classpath:db/changelog/202605081008.sql
   - changeSet:
-      id: 202605131500
-      author: manhho
-      changes:
-        - sqlFile:
-            encoding: utf8
-            path: classpath:db/changelog/202605131500.sql
-  - changeSet:
       id: 202605131700
       author: Codex
       changes:

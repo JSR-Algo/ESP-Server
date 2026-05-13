@@ -19,6 +19,12 @@ import java.util.List;
 @Data
 public class AgentInfoVO extends AgentEntity
 {
+    @Schema(description = "Voice mode")
+    private String voiceMode;
+
+    @Schema(description = "Google Live config JSON")
+    private String googleLiveConfigJson;
+
     @Schema(description = "Plugin list ID")
     @TableField(typeHandler = JacksonTypeHandler.class)
     private List<AgentPluginMapping> functions;
