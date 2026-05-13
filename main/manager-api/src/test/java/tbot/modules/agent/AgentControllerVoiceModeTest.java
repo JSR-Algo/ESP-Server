@@ -1,6 +1,11 @@
 package tbot.modules.agent;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
@@ -20,9 +25,12 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import tbot.common.exception.ErrorCode;
+import tbot.common.exception.RenException;
 import tbot.common.redis.RedisUtils;
 import tbot.modules.agent.controller.AgentController;
 import tbot.modules.agent.dto.AgentUpdateDTO;
+import tbot.modules.agent.entity.AgentEntity;
 import tbot.modules.agent.service.AgentChatAudioService;
 import tbot.modules.agent.service.AgentChatHistoryService;
 import tbot.modules.agent.service.AgentChatSummaryService;
@@ -31,8 +39,15 @@ import tbot.modules.agent.service.AgentPluginMappingService;
 import tbot.modules.agent.service.AgentService;
 import tbot.modules.agent.service.AgentTagService;
 import tbot.modules.agent.service.AgentTemplateService;
+import tbot.modules.agent.service.impl.AgentServiceImpl;
+import tbot.modules.agent.dao.AgentDao;
+import tbot.modules.agent.dao.AgentTagDao;
 import tbot.modules.agent.vo.AgentInfoVO;
 import tbot.modules.correctword.service.CorrectWordFileService;
+import tbot.modules.device.service.DeviceService;
+import tbot.modules.model.service.ModelConfigService;
+import tbot.modules.model.service.ModelProviderService;
+import tbot.modules.timbre.service.TimbreService;
 
 class AgentControllerVoiceModeTest {
 
@@ -126,5 +141,65 @@ class AgentControllerVoiceModeTest {
         AgentUpdateDTO captured = updateCaptor.getValue();
         org.junit.jupiter.api.Assertions.assertEquals("google_live", captured.getVoiceMode());
         org.junit.jupiter.api.Assertions.assertEquals("{\"voice\":\"Kore\"}", captured.getGoogleLiveConfigJson());
+    }
+
+    @Test
+    @DisplayName("Service clears google live config when switching back to classic pipeline")
+    void serviceClearsGoogleLiveConfigForClassicPipeline() {
+        AgentEntity existing = new AgentEntity();
+        existing.setId("agent-voice");
+        existing.setVoiceMode("google_live");
+        existing.setGoogleLiveConfigJson("{\"voice\":\"Old\"}");
+
+        AgentUpdateDTO dto = new AgentUpdateDTO();
+        dto.setVoiceMode("classic_pipeline");
+        dto.setGoogleLiveConfigJson("{\"voice\":\"ShouldBeIgnored\"}");
+
+        AgentServiceImpl service = buildAgentServiceSpy(existing);
+
+        service.updateAgentById("agent-voice", dto);
+
+        assertEquals("classic_pipeline", existing.getVoiceMode());
+        assertNull(existing.getGoogleLiveConfigJson());
+        verify(service).updateById(existing);
+    }
+
+    @Test
+    @DisplayName("Service rejects invalid google live config JSON before persistence")
+    void serviceRejectsInvalidGoogleLiveConfigJson() {
+        AgentEntity existing = new AgentEntity();
+        existing.setId("agent-voice");
+
+        AgentUpdateDTO dto = new AgentUpdateDTO();
+        dto.setVoiceMode("google_live");
+        dto.setGoogleLiveConfigJson("{invalid");
+
+        AgentServiceImpl service = buildAgentServiceSpy(existing);
+
+        RenException exception = assertThrows(RenException.class, () -> service.updateAgentById("agent-voice", dto));
+
+        assertEquals(ErrorCode.PARAM_JSON_INVALID, exception.getCode());
+        assertEquals("googleLiveConfigJson must be valid JSON object", exception.getMessage());
+    }
+
+    private AgentServiceImpl buildAgentServiceSpy(AgentEntity existing) {
+        AgentServiceImpl service = Mockito.spy(new AgentServiceImpl(
+                Mockito.mock(AgentDao.class),
+                Mockito.mock(AgentTagDao.class),
+                Mockito.mock(TimbreService.class),
+                Mockito.mock(ModelConfigService.class),
+                redisUtils,
+                Mockito.mock(DeviceService.class),
+                agentPluginMappingService,
+                agentChatHistoryService,
+                agentTemplateService,
+                Mockito.mock(ModelProviderService.class),
+                agentContextProviderService,
+                agentTagService,
+                correctWordFileService));
+
+        doReturn(existing).when(service).getAgentById("agent-voice");
+        doReturn(true).when(service).updateById(any(AgentEntity.class));
+        return service;
     }
 }

@@ -322,11 +322,10 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         }
         if (dto.getVoiceMode() != null) {
             existingEntity.setVoiceMode(dto.getVoiceMode());
-            if (VOICE_MODE_CLASSIC_PIPELINE.equals(dto.getVoiceMode())) {
-                existingEntity.setGoogleLiveConfigJson(null);
-            }
         }
-        if (dto.getGoogleLiveConfigJson() != null) {
+        if (VOICE_MODE_CLASSIC_PIPELINE.equals(dto.getVoiceMode())) {
+            existingEntity.setGoogleLiveConfigJson(null);
+        } else if (dto.getGoogleLiveConfigJson() != null) {
             existingEntity.setGoogleLiveConfigJson(dto.getGoogleLiveConfigJson());
         }
         if (dto.getTtsVolume() != null) {
