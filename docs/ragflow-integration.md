@@ -5,7 +5,7 @@
 - 一、如何部署ragflow
 - 二、如何在智控台配置ragflow接口
 
-如果您对ragflow很熟悉，且已经部署了ragflow，可直接跳过第一部分，直接进入第二部分。但是如果你希望有人指导你部署ragflow，让它能够和`xiaozhi-esp32-server`共同使用`mysql`、`redis`基础服务，以减少资源成本，你需要从第一部分开始。
+如果您对ragflow很熟悉，且已经部署了ragflow，可直接跳过第一部分，直接进入第二部分。但是如果你希望有人指导你部署ragflow，让它能够和`tbot-esp32-server`共同使用`mysql`、`redis`基础服务，以减少资源成本，你需要从第一部分开始。
 
 # 第一部分 如何部署ragflow
 ## 第一步， 确认mysql、redis是否可用
@@ -28,13 +28,13 @@ telnet 127.0.0.1 6379
 
 修改前
 ``` yaml
-  xiaozhi-esp32-server-db:
+  tbot-esp32-server-db:
     ...
     networks:
       - default
     expose:
       - "3306:3306"
-  xiaozhi-esp32-server-redis:
+  tbot-esp32-server-redis:
     ...
     expose:
       - 6379
@@ -42,23 +42,23 @@ telnet 127.0.0.1 6379
 
 修改后
 ``` yaml
-  xiaozhi-esp32-server-db:
+  tbot-esp32-server-db:
     ...
     networks:
       - default
     ports:
       - "3306:3306"
-  xiaozhi-esp32-server-redis:
+  tbot-esp32-server-redis:
     ...
     ports:
       - "6379:6379"
 ```
 
-注意是将`xiaozhi-esp32-server-db`和`xiaozhi-esp32-server-redis`下面的`expose`改成`ports`。改完后，需要重新启动。以下是重启mysql的命令：
+注意是将`tbot-esp32-server-db`和`tbot-esp32-server-redis`下面的`expose`改成`ports`。改完后，需要重新启动。以下是重启mysql的命令：
 
 ``` shell
-# 进入你docker-compose_all.yml所在的文件夹，例如我的是xiaozhi-server
-cd xiaozhi-server
+# 进入你docker-compose_all.yml所在的文件夹，例如我的是tbot-server
+cd tbot-server
 docker compose -f docker-compose_all.yml down
 docker compose -f docker-compose.yml up -d
 ```
@@ -88,7 +88,7 @@ FLUSH PRIVILEGES;
 
 ## 第三步， 下载ragflow项目
 
-你需要在你电脑找一个文件夹，用来存放ragflow项目。例如我在`/home/system/xiaozhi`文件夹。
+你需要在你电脑找一个文件夹，用来存放ragflow项目。例如我在`/home/system/tbot`文件夹。
 
 你可以使用`git`命令，将ragflow项目下载到这个文件夹，本教程使用的是`v0.22.0`版本进行安装部署。
 ```

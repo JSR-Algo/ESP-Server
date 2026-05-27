@@ -11,7 +11,7 @@
     <div style="height: 1px;background: #e8f0ff;" />
     <div style="margin: 22px 15px;">
       <div style="font-weight: 400;text-align: left;color: #3d4566;">
-        <div style="color: red;display: inline-block;">*</div> {{ $t('addAgentDialog.agentName') }}：
+        <div style="color: red;display: inline-block;">*</div> {{ $t('addAgentDialog.agentName') }}:
       </div>
       <div class="input-46" style="margin-top: 12px;">
         <el-input maxLength="64" ref="inputRef" :placeholder="$t('addAgentDialog.placeholder')" v-model="wisdomBodyName" @keyup.enter.native="confirm" />

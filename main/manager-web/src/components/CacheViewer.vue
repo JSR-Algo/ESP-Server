@@ -51,10 +51,10 @@
           <h3>{{ $t('cache.cssResources').replace('{count}', cacheData.css.length) }}</h3>
           <el-table :data="cacheData.css" stripe style="width: 100%">
             <el-table-column prop="url" label="URL" width="auto" show-overflow-tooltip />
-            <el-table-column prop="cached" label="状态" width="100">
+            <el-table-column prop="cached" label="Status" width="100">
               <template slot-scope="scope">
-                <el-tag type="success" v-if="scope.row.cached">已缓存</el-tag>
-                <el-tag type="danger" v-else>未缓存</el-tag>
+                <el-tag type="success" v-if="scope.row.cached">Cached</el-tag>
+                <el-tag type="danger" v-else>Not cached</el-tag>
               </template>
             </el-table-column>
           </el-table>
@@ -110,27 +110,27 @@ export default {
       this.isLoading = true;
       
       try {
-        // 先检查是否支持缓存API
+        // Check cache support firstAPI
         if (!('caches' in window)) {
           this.cacheAvailable = false;
           this.isLoading = false;
           return;
         }
         
-        // 检查是否有Service Worker缓存
+        // Check whether hasService WorkerCache
         const cacheNames = await getCacheNames();
         this.cacheAvailable = cacheNames.length > 0;
         
         if (this.cacheAvailable) {
-          // 获取CDN缓存状态
+          // GetCDNCacheStatus
           this.cacheData = await checkCdnCacheStatus();
           
-          // 在控制台输出完整缓存状态
+          // Output full cache in consoleStatus
           await logCacheStatus();
         }
       } catch (error) {
-        console.error('加载缓存数据失败:', error);
-        this.$message.error('加载缓存数据失败');
+        console.error('Failed to load cache data:', error);
+        this.$message.error('Load cache data failed');
       } finally {
         this.isLoading = false;
       }
@@ -156,7 +156,7 @@ export default {
             this.$message.error(this.$t('cache.clearFailed'));
           }
         } catch (error) {
-          console.error('清除缓存失败:', error);
+          console.error('Clear cache failed:', error);
           this.$message.error(this.$t('cache.clearFailed'));
         }
       }).catch(() => {

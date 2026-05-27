@@ -2,9 +2,9 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="xiaozhi.modules.agent.dao.AgentPluginMappingMapper">
+<mapper namespace="tbot.modules.agent.dao.AgentPluginMappingMapper">
 
-    <resultMap id="BaseResultMap" type="xiaozhi.modules.agent.entity.AgentPluginMapping">
+    <resultMap id="BaseResultMap" type="tbot.modules.agent.entity.AgentPluginMapping">
         <id property="id" column="id" jdbcType="BIGINT"/>
         <result property="agentId" column="agent_id" jdbcType="VARCHAR"/>
         <result property="pluginId" column="plugin_id" jdbcType="VARCHAR"/>
@@ -12,7 +12,7 @@
     </resultMap>
 
     <!-- 用于映射根据agentId查询完整插件信息 -->
-    <resultMap id="AgentPluginWithCodeMap" type="xiaozhi.modules.agent.entity.AgentPluginMapping">
+    <resultMap id="AgentPluginWithCodeMap" type="tbot.modules.agent.entity.AgentPluginMapping">
         <id column="id" property="id" jdbcType="BIGINT"/>
         <result column="agentId" property="agentId" jdbcType="VARCHAR"/>
         <result column="pluginId" property="pluginId" jdbcType="VARCHAR"/>

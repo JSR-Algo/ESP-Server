@@ -7,7 +7,7 @@ server:
       min-spare: 30
   port: 8002
   servlet:
-    context-path: /xiaozhi
+    context-path: /tbot
     session:
       cookie:
         http-only: true
@@ -47,7 +47,7 @@ renren:
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
   #实体扫描，多个package用逗号或者分号分隔
-  typeAliasesPackage: xiaozhi.modules.*.entity
+  typeAliasesPackage: tbot.modules.*.entity
   global-config:
     #数据库相关配置
     db-config:

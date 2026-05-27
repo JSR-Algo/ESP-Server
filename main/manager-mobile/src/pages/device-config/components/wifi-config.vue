@@ -55,7 +55,7 @@ async function submitConfig() {
   // 检查ESP32连接
   const connected = await checkESP32Connection()
   if (!connected) {
-    toast.error(t('deviceConfig.connectXiaozhiHotspot'))
+    toast.error(t('deviceConfig.connectTbotHotspot'))
     return
   }
 
@@ -79,7 +79,7 @@ async function submitConfig() {
     console.log('WiFi配网响应:', response)
 
     if (response.statusCode === 200 && (response.data as any)?.success) {
-      toast.success(`${t('deviceConfig.configSuccess')}！${t('deviceConfig.deviceWillConnectTo')} ${props.selectedNetwork.ssid}，${t('deviceConfig.deviceWillRestart')}。${t('deviceConfig.pleaseDisconnectXiaozhiHotspot')}`)
+      toast.success(`${t('deviceConfig.configSuccess')}！${t('deviceConfig.deviceWillConnectTo')} ${props.selectedNetwork.ssid}，${t('deviceConfig.deviceWillRestart')}。${t('deviceConfig.pleaseDisconnectTbotHotspot')}`)
       // 设备退出配网模式
       setTimeout(() => {
         uni.request({
@@ -144,7 +144,7 @@ async function submitConfig() {
       </view>
       <view class="help-content">
         <text class="help-item">
-          1. {{ t('deviceConfig.phoneConnectXiaozhiHotspot') }} (xiaozhi-XXXXXX)
+          1. {{ t('deviceConfig.phoneConnectTbotHotspot') }} (tbot-XXXXXX)
         </text>
         <text class="help-item">
           2. {{ t('deviceConfig.selectTargetWifiNetwork') }}

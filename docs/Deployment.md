@@ -14,14 +14,14 @@
 
 #### 1.1.1 创建目录
 
-安装完docker后，你需要为这个项目找一个安放配置文件的目录，例如我们可以新建一个文件夹叫`xiaozhi-server`。
+安装完docker后，你需要为这个项目找一个安放配置文件的目录，例如我们可以新建一个文件夹叫`tbot-server`。
 
-创建好目录后，你需要在`xiaozhi-server`下面创建`data`文件夹和`models`文件夹，`models`下面还要再创建`SenseVoiceSmall`文件夹。
+创建好目录后，你需要在`tbot-server`下面创建`data`文件夹和`models`文件夹，`models`下面还要再创建`SenseVoiceSmall`文件夹。
 
 最终目录结构如下所示：
 
 ```
-xiaozhi-server
+tbot-server
   ├─ data
   ├─ models
      ├─ SenseVoiceSmall
@@ -40,24 +40,24 @@ xiaozhi-server
 
 ##### 1.1.3.1 下载 docker-compose.yaml
 
-用浏览器打开[这个链接](../main/xiaozhi-server/docker-compose.yml)。
+用浏览器打开[这个链接](../main/tbot-server/docker-compose.yml)。
 
 在页面的右侧找到名称为`RAW`按钮，在`RAW`按钮的旁边，找到下载的图标，点击下载按钮，下载`docker-compose.yml`文件。 把文件下载到你的
-`xiaozhi-server`中。
+`tbot-server`中。
 
 下载完后，回到本教程继续往下。
 
 ##### 1.1.3.2 创建 config.yaml
 
-用浏览器打开[这个链接](../main/xiaozhi-server/config.yaml)。
+用浏览器打开[这个链接](../main/tbot-server/config.yaml)。
 
 在页面的右侧找到名称为`RAW`按钮，在`RAW`按钮的旁边，找到下载的图标，点击下载按钮，下载`config.yaml`文件。 把文件下载到你的
-`xiaozhi-server`下面的`data`文件夹中，然后把`config.yaml`文件重命名为`.config.yaml`。
+`tbot-server`下面的`data`文件夹中，然后把`config.yaml`文件重命名为`.config.yaml`。
 
-下载完配置文件后，我们确认一下整个`xiaozhi-server`里面的文件如下所示：
+下载完配置文件后，我们确认一下整个`tbot-server`里面的文件如下所示：
 
 ```
-xiaozhi-server
+tbot-server
   ├─ docker-compose.yml
   ├─ data
     ├─ .config.yaml
@@ -77,7 +77,7 @@ xiaozhi-server
 
 ## 3. 执行docker命令
 
-打开命令行工具，使用`终端`或`命令行`工具 进入到你的`xiaozhi-server`，执行以下命令
+打开命令行工具，使用`终端`或`命令行`工具 进入到你的`tbot-server`，执行以下命令
 
 ```
 docker compose up -d
@@ -86,7 +86,7 @@ docker compose up -d
 执行完后，再执行以下命令，查看日志信息。
 
 ```
-docker logs -f xiaozhi-esp32-server
+docker logs -f tbot-esp32-server
 ```
 
 这时，你就要留意日志信息，可以根据这个教程，判断是否成功了。[跳转到运行状态确认](#运行状态确认)
@@ -101,12 +101,12 @@ docker logs -f xiaozhi-esp32-server
 5.2、执行以下命令
 
 ```
-docker stop xiaozhi-esp32-server
-docker rm xiaozhi-esp32-server
-docker stop xiaozhi-esp32-server-web
-docker rm xiaozhi-esp32-server-web
-docker rmi ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest
-docker rmi ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
+docker stop tbot-esp32-server
+docker rm tbot-esp32-server
+docker stop tbot-esp32-server-web
+docker rm tbot-esp32-server-web
+docker rmi ghcr.nju.edu.cn/xinnan-tech/tbot-esp32-server:server_latest
+docker rmi ghcr.nju.edu.cn/xinnan-tech/tbot-esp32-server:web_latest
 ```
 
 5.3、重新按docker方式部署
@@ -128,9 +128,9 @@ docker rmi ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
 ![conda_env](./images/conda_env_2.png)
 
 ```
-conda remove -n xiaozhi-esp32-server --all -y
-conda create -n xiaozhi-esp32-server python=3.10 -y
-conda activate xiaozhi-esp32-server
+conda remove -n tbot-esp32-server --all -y
+conda create -n tbot-esp32-server python=3.10 -y
+conda activate tbot-esp32-server
 
 # 添加清华源通道
 conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
@@ -150,18 +150,18 @@ conda install libiconv -y
 
 你先要下载本项目源码，源码可以通过`git clone`命令下载，如果你不熟悉`git clone`命令。
 
-你可以用浏览器打开这个地址`https://github.com/xinnan-tech/xiaozhi-esp32-server.git`
+你可以用浏览器打开这个地址`https://github.com/xinnan-tech/tbot-esp32-server.git`
 
 打开完，找到页面中一个绿色的按钮，写着`Code`的按钮，点开它，然后你就看到`Download ZIP`的按钮。
 
-点击它，下载本项目源码压缩包。下载到你电脑后，解压它，此时它的名字可能叫`xiaozhi-esp32-server-main`
-你需要把它重命名成`xiaozhi-esp32-server`，在这个文件里，进入到`main`文件夹，再进入到`xiaozhi-server`，好了请记住这个目录`xiaozhi-server`。
+点击它，下载本项目源码压缩包。下载到你电脑后，解压它，此时它的名字可能叫`tbot-esp32-server-main`
+你需要把它重命名成`tbot-esp32-server`，在这个文件里，进入到`main`文件夹，再进入到`tbot-server`，好了请记住这个目录`tbot-server`。
 
 ```
 # 继续使用conda环境
-conda activate xiaozhi-esp32-server
-# 进入到你的项目根目录，再进入main/xiaozhi-server
-cd main/xiaozhi-server
+conda activate tbot-esp32-server
+# 进入到你的项目根目录，再进入main/tbot-server
+cd main/tbot-server
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 pip install -r requirements.txt
 ```
@@ -181,8 +181,8 @@ pip install -r requirements.txt
 ## 5.运行项目
 
 ```
-# 确保在xiaozhi-server目录下执行
-conda activate xiaozhi-esp32-server
+# 确保在tbot-server目录下执行
+conda activate tbot-esp32-server
 python app.py
 ```
 这时，你就要留意日志信息，可以根据这个教程，判断是否成功了。[跳转到运行状态确认](#运行状态确认)
@@ -192,12 +192,12 @@ python app.py
 
 ## 配置项目
 
-如果你的`xiaozhi-server`目录没有`data`，你需要创建`data`目录。
+如果你的`tbot-server`目录没有`data`，你需要创建`data`目录。
 如果你的`data`下面没有`.config.yaml`文件，有两个方式，任选一种：
 
-第一个方式：你可以把`xiaozhi-server`目录下的`config.yaml`文件复制到`data`，并重命名为`.config.yaml`。在此文件上修改
+第一个方式：你可以把`tbot-server`目录下的`config.yaml`文件复制到`data`，并重命名为`.config.yaml`。在此文件上修改
 
-第二个方式：你也可以创建在`data`目录下手动创建`.config.yaml`空文件，然后在这个文件中增加必要的配置信息，系统会优先读取`.config.yaml`文件的配置，如果`.config.yaml`没有配置的，系统会自动去加载`xiaozhi-server`目录下的`config.yaml`的配置。推荐使用这种方式，这种方式是最简洁的方式。
+第二个方式：你也可以创建在`data`目录下手动创建`.config.yaml`空文件，然后在这个文件中增加必要的配置信息，系统会优先读取`.config.yaml`文件的配置，如果`.config.yaml`没有配置的，系统会自动去加载`tbot-server`目录下的`config.yaml`的配置。推荐使用这种方式，这种方式是最简洁的方式。
 
 - 默认的LLM使用的是`ChatGLMLLM`，你需要配置密钥，因为他们的模型，虽然有免费的，但是仍要去[官网](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)注册密钥，才能启动。
 
@@ -205,7 +205,7 @@ python app.py
 
 ```
 server:
-  websocket: ws://你的ip或者域名:端口号/xiaozhi/v1/
+  websocket: ws://你的ip或者域名:端口号/tbot/v1/
 prompt: |
   我是一个叫小智/小志的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗。
   我的男朋友是一个程序员，梦想是开发出一个机器人，能够帮助人们解决生活中的各种问题。
@@ -220,7 +220,7 @@ LLM:
     api_key: xxxxxxxxxxxxxxx.xxxxxx
 ```
 
-建议先将最简单的配置运行起来，然后再去`xiaozhi/config.yaml`阅读配置的使用说明。
+建议先将最简单的配置运行起来，然后再去`tbot/config.yaml`阅读配置的使用说明。
 比如你要换更换模型，修改`selected_module`下的配置就行。
 
 ## 模型文件
@@ -238,8 +238,8 @@ LLM:
 如果你能看到，类似以下日志,则是本项目服务启动成功的标志。
 
 ```
-250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-OTA接口是           http://192.168.4.123:8003/xiaozhi/ota/
-250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-Websocket地址是     ws://192.168.4.123:8000/xiaozhi/v1/
+250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-OTA接口是           http://192.168.4.123:8003/tbot/ota/
+250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-Websocket地址是     ws://192.168.4.123:8000/tbot/v1/
 250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-=======上面的地址是websocket协议地址，请勿用浏览器访问=======
 250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-如想测试websocket请用谷歌浏览器打开test目录下的test_page.html
 250427 13:04:20[0.3.11_SiFuChTTnofu][__main__]-INFO-=======================================================
@@ -249,7 +249,7 @@ LLM:
 但是如果你用docker部署，那么你的日志里给出的接口地址信息就不是真实的接口地址。
 
 最正确的方法，是根据电脑的局域网IP来确定你的接口地址。
-如果你的电脑的局域网IP比如是`192.168.1.25`，那么你的接口地址就是：`ws://192.168.1.25:8000/xiaozhi/v1/`，对应的OTA地址就是：`http://192.168.1.25:8003/xiaozhi/ota/`。
+如果你的电脑的局域网IP比如是`192.168.1.25`，那么你的接口地址就是：`ws://192.168.1.25:8000/tbot/v1/`，对应的OTA地址就是：`http://192.168.1.25:8003/tbot/ota/`。
 
 这个信息很有用的，后面`编译esp32固件`需要用到。
 
@@ -271,7 +271,7 @@ LLM:
 ## 部署相关教程
 1、[如何自动拉取本项目最新代码自动编译和启动](./dev-ops-integration.md)<br/>
 2、[如何部署MQTT网关开启MQTT+UDP协议](./mqtt-gateway-integration.md)<br/>
-3、[如何与Nginx集成](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/791)<br/>
+3、[如何与Nginx集成](https://github.com/xinnan-tech/tbot-esp32-server/issues/791)<br/>
 ## 拓展相关教程
 1、[如何开启手机号码注册智控台](./ali-sms-integration.md)<br/>
 2、[如何集成HomeAssistant实现智能家居控制](./homeassistant-integration.md)<br/>
@@ -288,4 +288,5 @@ LLM:
 4、[如何部署集成PaddleSpeech本地语音](./paddlespeech-deploy.md)<br/>
 ## 性能测试教程
 1、[各组件速度测试指南](./performance_tester.md)<br/>
-2、[定期公开测试结果](https://github.com/xinnan-tech/xiaozhi-performance-research)<br/>
+2、[定期公开测试结果](https://github.com/xinnan-tech/tbot-performance-research)<br/>
+Admin123

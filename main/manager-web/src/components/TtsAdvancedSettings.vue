@@ -15,7 +15,7 @@
 
     <div class="drawer-content">
       <el-form label-position="top">
-        <!-- 音量 -->
+        <!-- Volume -->
         <el-form-item :label="$t('roleConfig.ttsVolume')">
           <div class="slider-container">
             <el-slider
@@ -30,7 +30,7 @@
           </div>
         </el-form-item>
 
-        <!-- 语速 -->
+        <!-- Speech rate -->
         <el-form-item :label="$t('roleConfig.ttsRate')">
           <div class="slider-container">
             <el-slider
@@ -45,7 +45,7 @@
           </div>
         </el-form-item>
 
-        <!-- 音调 -->
+        <!-- Pitch -->
         <el-form-item :label="$t('roleConfig.ttsPitch')">
           <div class="slider-container">
             <el-slider
@@ -61,7 +61,7 @@
         </el-form-item>
 
       </el-form>
-      <!-- 关联替换词 -->
+      <!-- Related replacement words -->
       <div>
         <h4 class="replacement-label">
           {{ $t('roleConfig.replacementWordLabel') }}
@@ -139,7 +139,7 @@ export default {
   watch: {
     visible(newVal) {
       if (newVal) {
-        // 当抽屉打开时，复制当前设置到本地
+        // When drawer opens, copy current settings to local
         this.localSettings = { ...this.settings };
         this.replacementWordIds = [...this.checkedReplacementWordIds];
         this.fetchReplacementWordList();
@@ -151,11 +151,11 @@ export default {
       this.$emit('update:visible', false);
     },
     handleCancel() {
-      // 取消时不保存，直接关闭
+      // Do not save on cancel, close directly
       this.handleClose();
     },
     handleSave() {
-      // 保存设置并关闭
+      // Save settings and close
       this.$emit('save', { ...this.localSettings, replacementWordIds: this.replacementWordIds });
       this.handleClose();
     },

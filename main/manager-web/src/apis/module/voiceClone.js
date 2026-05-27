@@ -2,7 +2,7 @@ import { getServiceUrl } from '../api';
 import RequestService from '../httpRequest';
 
 export default {
-    // 分页查询音色资源
+    // Page query voice resources
     getVoiceCloneList(params, callback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/voiceClone`)
@@ -13,14 +13,14 @@ export default {
                 callback(res);
             })
             .networkFail((err) => {
-                console.error('获取音色列表失败:', err);
+                console.error('Failed to get voice list:', err);
                 RequestService.reAjaxFun(() => {
                     this.getVoiceCloneList(params, callback);
                 });
             }).send();
     },
 
-    // 上传音频文件
+    // UploadAudio file
     uploadVoice(formData, callback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/voiceClone/upload`)
@@ -31,14 +31,14 @@ export default {
                 callback(res);
             })
             .networkFail((err) => {
-                console.error('上传音频失败:', err);
+                console.error('Upload audio failed:', err);
                 RequestService.reAjaxFun(() => {
                     this.uploadVoice(formData, callback);
                 });
             }).send();
     },
 
-    // 更新音色名称
+    // UpdateVoice name
     updateName(params, callback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/voiceClone/updateName`)
@@ -49,14 +49,14 @@ export default {
                 callback(res);
             })
             .networkFail((err) => {
-                console.error('更新名称失败:', err);
+                console.error('Update name failed:', err);
                 RequestService.reAjaxFun(() => {
                     this.updateName(params, callback);
                 });
             }).send();
     },
 
-    // 获取音频下载ID
+    // Get audio download ID
     getAudioId(id, callback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/voiceClone/audio/${id}`)
@@ -66,19 +66,19 @@ export default {
                 callback(res);
             })
             .networkFail((err) => {
-                console.error('获取音频ID失败:', err);
+                console.error('Failed to get audio ID:', err);
                 RequestService.reAjaxFun(() => {
                     this.getAudioId(id, callback);
                 });
             }).send();
     },
 
-    // 获取音频播放URL
+    // Get audio playbackURL
     getPlayVoiceUrl(uuid) {
         return `${getServiceUrl()}/voiceClone/play/${uuid}`;
     },
 
-    // 复刻音频
+    // Cloned audio
     cloneAudio(params, callback, errorCallback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/voiceClone/cloneAudio`)
@@ -89,7 +89,7 @@ export default {
                 callback(res);
             })
             .fail((res) => {
-                // 业务失败回调
+                // Business failure callback
                 RequestService.clearRequestTime();
                 if (errorCallback) {
                     errorCallback(res);
@@ -98,7 +98,7 @@ export default {
                 }
             })
             .networkFail((err) => {
-                console.error('上传失败:', err);
+                console.error('Upload failed:', err);
                 RequestService.reAjaxFun(() => {
                     this.cloneAudio(params, callback, errorCallback);
                 });

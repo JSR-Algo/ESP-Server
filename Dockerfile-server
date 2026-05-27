@@ -1,7 +1,8 @@
-# 生产镜像，仅包含应用代码
-FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base
+# Runtime image with application code only.
+ARG TBOT_SERVER_BASE_IMAGE=ghcr.io/xinnan-tech/tbot-esp32-server:server-base
+FROM ${TBOT_SERVER_BASE_IMAGE}
 
-COPY main/xiaozhi-server .
+COPY main/tbot-server .
 
-# 启动应用
+# Start the server.
 CMD ["python", "app.py"]

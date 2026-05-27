@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "createdAt": "2026-05-18T05:46:55.012Z",
+  "updatedAt": "2026-05-18T05:54:53.053Z",
+  "briefPath": ".omx/ultragoal/brief.md",
+  "goalsPath": ".omx/ultragoal/goals.json",
+  "ledgerPath": ".omx/ultragoal/ledger.jsonl",
+  "codexGoalMode": "aggregate",
+  "goals": [
+    {
+      "id": "G001-production-harden-google-live-api-vo",
+      "title": "Production-harden Google Live API voice mode for TBOT robot. Requirem...",
+      "objective": "Production-harden Google Live API voice mode for TBOT robot. Requirements: Vietnamese accuracy, clean audio, local barge-in, no inbound audio drop by default, echo protection, stale response isolation, reconnect/fallback, admin manager compatibility, no secrets/raw audio logs, classic_pipeline/MQTT/websocket/firmware compatibility, verified tests and real-device smoke evidence. Current evidence: device OTA/WS/Google Live smoke started; remaining hardening includes manager async config deadlock, local OTA route with manager API, bootstrap missing FunASR, private config log overflow, verification, and final production report with rollback.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-05-18T05:46:55.012Z",
+      "updatedAt": "2026-05-18T05:54:53.053Z",
+      "startedAt": "2026-05-18T05:47:11.647Z",
+      "evidence": "G001-production-harden-google-live-api-vo complete for .omx/ultragoal/goals.json and ledger.jsonl: implementation/config/test hardening done; 90 unittest tests OK; git diff --check OK; tbot_server restarted; ports 8000/8003 listening; OTA GET 200 with local websocket URL; review APPROVE/CLEAR; live device OTA/WS/Google Live audio flow observed but 10-cycle live soak not completed.",
+      "completedAt": "2026-05-18T05:54:53.053Z"
+    }
+  ],
+  "codexObjective": "Complete all ultragoal stories in .omx/ultragoal/goals.json: G001-production-harden-google-live-api-vo Production-harden Google Live API voice mode for TBOT robot. Requirem..."
+}

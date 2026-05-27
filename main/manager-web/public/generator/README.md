@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-本目录包含从 [xiaozhi-assets-generator](https://github.com/xinnan-tech/xiaozhi-assets-generator) 项目打包的静态文件，用于语音盒子主题的在线自定义与生成。用户可以通过此工具配置唤醒词、字体、表情和聊天背景等元素，并导出为 `assets.bin` 文件。
+本目录包含从 [tbot-assets-generator](https://github.com/xinnan-tech/tbot-assets-generator) 项目打包的静态文件，用于语音盒子主题的在线自定义与生成。用户可以通过此工具配置唤醒词、字体、表情和聊天背景等元素，并导出为 `assets.bin` 文件。
 
 ## 目录结构
 

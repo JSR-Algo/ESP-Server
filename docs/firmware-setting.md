@@ -1,14 +1,14 @@
 # 基于虾哥编译好的固件配置自定义服务器
 
 ## 第1步 确认版本
-烧录虾哥已经编译好的[1.6.1版本以上固件](https://github.com/78/xiaozhi-esp32/releases)
+烧录虾哥已经编译好的[1.6.1版本以上固件](https://github.com/78/tbot-esp32/releases)
 
 ## 第2步 准备你的ota地址
 如果你按照教程使用的是全模块部署，就应该会有ota地址。
 
 此刻，请你用浏览器打开你的ota地址，例如我的ota地址
 ```
-https://2662r3426b.vicp.fun/xiaozhi/ota/
+https://2662r3426b.vicp.fun/tbot/ota/
 ```
 
 如果显示“OTA接口运行正常，websocket集群数量：X”。那就往下。
@@ -22,7 +22,7 @@ https://2662r3426b.vicp.fun/xiaozhi/ota/
 - 3、在列表中找到`server.websocket`项目，输入你的`Websocket`地址。例如我的就是
 
 ```
-wss://2662r3426b.vicp.fun/xiaozhi/v1/
+wss://2662r3426b.vicp.fun/tbot/v1/
 ```
 
 配置完后，再使用浏览器刷新你的ota接口地址，看看是不是正常了。如果还不正常就，就再次确认一下Websocket是否正常启动，是否配置了Websocket地址。

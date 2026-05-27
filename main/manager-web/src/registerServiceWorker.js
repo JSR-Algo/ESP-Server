@@ -5,21 +5,21 @@ export const register = () => {
     window.addEventListener('load', () => {
       const swUrl = `${process.env.BASE_URL}service-worker.js`;
       
-      console.info(`[小智服务] 正在尝试注册Service Worker，URL: ${swUrl}`);
+      console.info(`[TBOT] Trying to register Service Worker, URL: ${swUrl}`);
       
-      // 先检查Service Worker是否已注册
+      // Check firstService WorkerAlreadyRegister
       navigator.serviceWorker.getRegistrations().then(registrations => {
         if (registrations.length > 0) {
-          console.info('[小智服务] 发现已有Service Worker注册，正在检查更新');
+          console.info('[TBOT] Existing Service Worker registration found, checking for updates');
         }
         
-        // 继续注册Service Worker
+        // ContinueRegisterService Worker
         navigator.serviceWorker
           .register(swUrl)
           .then(registration => {
-            console.info('[小智服务] Service Worker注册成功');
+            console.info('[TBOT] Service Worker registered successfully');
             
-            // 更新处理
+            // Update handling
             registration.onupdatefound = () => {
               const installingWorker = registration.installing;
               if (installingWorker == null) {
@@ -28,9 +28,9 @@ export const register = () => {
               installingWorker.onstatechange = () => {
                 if (installingWorker.state === 'installed') {
                   if (navigator.serviceWorker.controller) {
-                    // 内容已缓存更新，通知用户刷新
-                    console.log('[小智服务] 新内容可用，请刷新页面');
-                    // 可以在这里展示更新提示
+                    // ContentCachedUpdate, notify user refresh
+                    console.log('[TBOT] New content available, refresh page');
+                    // Can show update herePrompt
                     const updateNotification = document.createElement('div');
                     updateNotification.style.cssText = `
                       position: fixed;
@@ -45,8 +45,8 @@ export const register = () => {
                     `;
                     updateNotification.innerHTML = `
                       <div style="display: flex; align-items: center;">
-                        <span style="margin-right: 10px;">发现新版本，点击刷新应用</span>
-                        <button style="background: white; color: #409EFF; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">刷新</button>
+                        <span style="margin-right: 10px;">New version found, click refresh app</span>
+                        <button style="background: white; color: #409EFF; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Refresh</button>
                       </div>
                     `;
                     document.body.appendChild(updateNotification);
@@ -54,12 +54,12 @@ export const register = () => {
                       window.location.reload();
                     });
                   } else {
-                    // 一切正常，Service Worker已成功安装
-                    console.log('[小智服务] 内容已缓存供离线使用');
+                    // All normal,Service WorkerSuccessfully installed
+                    console.log('[TBOT] Content cached for offline use');
                     
-                    // 可以在这里初始化缓存
+                    // Can initialize cache here
                     setTimeout(() => {
-                      // 预热CDN缓存
+                      // preHotCDNCache
                       const cdnUrls = [
                         'https://unpkg.com/element-ui@2.15.14/lib/theme-chalk/index.css',
                         'https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css',
@@ -71,10 +71,10 @@ export const register = () => {
                         'https://unpkg.com/opus-decoder@0.7.7/dist/opus-decoder.min.js'
                       ];
                       
-                      // 预热缓存
+                      // preHotCache
                       cdnUrls.forEach(url => {
                         fetch(url, { mode: 'no-cors' }).catch(err => {
-                          console.log(`预热缓存 ${url} 失败`, err);
+                          console.log(`Preheat cache ${url} failed`, err);
                         });
                       });
                     }, 2000);
@@ -84,13 +84,13 @@ export const register = () => {
             };
           })
           .catch(error => {
-            console.error('Service Worker 注册失败:', error);
+            console.error('Service Worker registration failed:', error);
             
             if (error.name === 'TypeError' && error.message.includes('Failed to register a ServiceWorker')) {
-              console.warn('[小智服务] 注册Service Worker时出现网络错误，CDN资源可能无法缓存');
+              console.warn('[TBOT] Network error registering Service Worker, CDN resources may not be cached');
               if (process.env.NODE_ENV === 'production') {
                 console.info(
-                  '可能原因：1. 服务器未配置正确的MIME类型 2. 服务器SSL证书问题 3. 服务器未返回service-worker.js文件'
+                  'Possible causes: 1. Server MIME type not configured correctly 2. Server SSL certificate issue 3. Server did not return service-worker.js file'
                 );
               }
             }

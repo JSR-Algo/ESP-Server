@@ -84,7 +84,7 @@
         </el-table>
       </div>
 
-      <!-- 自定义滚动条 -->
+      <!-- Custom scrollbar -->
       <div class="custom-scrollbar" ref="scrollbar">
         <div class="custom-scrollbar-track" ref="scrollbarTrack" @click="handleTrackClick">
           <div class="custom-scrollbar-thumb" ref="scrollbarThumb" @mousedown="startDrag"></div>
@@ -141,7 +141,7 @@ export default {
       selectAll: false,
       selectedRows: [],
       loading: false,
-      showReferenceColumns: false, // 控制是否显示参考列
+      showReferenceColumns: false, // Control whether show reference column
     };
   },
   watch: {
@@ -149,8 +149,8 @@ export default {
       this.localVisible = newVal;
       if (newVal) {
         this.currentPage = 1;
-        this.updateShowReferenceColumns(); // 更新显示状态
-        this.loadData(); // 对话框显示时加载数据
+        this.updateShowReferenceColumns(); // Update displayStatus
+        this.loadData(); // Load data when dialog shows
         this.$nextTick(() => {
           this.updateScrollbar();
         });
@@ -187,7 +187,7 @@ export default {
     window.removeEventListener('mousemove', this.handleDrag);
   },
   methods: {
-    // 更新是否显示参考列
+    // Update whether show reference column
     updateShowReferenceColumns() {
       if (this.modelConfig && this.modelConfig.configJson) {
         const providerType = this.modelConfig.configJson.type;
@@ -231,7 +231,7 @@ export default {
         }
         this.loading = false;
       }, (err) => {
-        console.error('加载失败:', err);
+        console.error('Load failed:', err);
         this.$message.error({
           message: this.$t('ttsModel.loadVoiceDataFailed'),
           showClose: true
@@ -241,7 +241,7 @@ export default {
     },
 
     handleClose() {
-      // 重置状态
+      // ResetStatus
       this.ttsModels = [];
       this.currentPage = 1;
       this.total = 0;
@@ -347,7 +347,7 @@ export default {
     },
 
     cancelEdit(row) {
-      // 通过新增创建的数据，取消编辑时，需要从数组中移除
+      // Created through new add data. When cancel editing, need remove from array
       if (!row.id) {
         this.ttsModels.shift(row);
       } else {
@@ -378,7 +378,7 @@ export default {
           sort: row.sort
         };
 
-        // 只有在显示参考列的情况下才添加参考字段
+        // Add reference field only when reference column displayed
         if (this.showReferenceColumns) {
           params.referenceAudio = row.referenceAudio;
           params.referenceText = row.referenceText;
@@ -386,21 +386,21 @@ export default {
 
         let res;
         if (row.id) {
-          // 已有ID，执行更新操作
+          // ExistingID, execute update operation
           Api.timbre.updateVoice(params, (response) => {
             res = response;
             this.handleResponse(res, row);
           });
         } else {
-          // 没有ID，执行新增操作
+          // NoneID, execute add operation
           Api.timbre.saveVoice(params, (response) => {
             res = response;
             this.handleResponse(res, row);
           });
         }
       } catch (error) {
-        console.error('操作失败:', error);
-        // 异常情况下也恢复原始数据
+        console.error('Operation failed:', error);
+        // ExceptionAlso restore original data in case
         if (row.originalData) {
           Object.assign(row, row.originalData);
           row.editing = false;
@@ -421,9 +421,9 @@ export default {
         });
         row.editing = false;
         delete row.originalData;
-        this.loadData(); // 刷新数据
+        this.loadData(); // Refresh data
       } else {
-        // 保存失败时恢复原始数据
+        // SaveRestore original data on failure
         if (row.originalData) {
           Object.assign(row, row.originalData);
           row.editing = false;
@@ -464,14 +464,14 @@ export default {
         referenceText: '',
         selected: false,
         editing: true,
-        sort: 0 // 新增数据默认排序在顶部
+        sort: 0 // New data defaultSortAt top
       };
 
       this.ttsModels.unshift(newRow);
     },
 
     deleteRow(row) {
-      // 处理单个音色或音色数组
+      // Handle single voice or voice array
       const voices = Array.isArray(row) ? row : [row];
 
       if (Array.isArray(row) && row.length === 0) {
@@ -499,7 +499,7 @@ export default {
               message: this.$t('ttsModel.deleteVoiceSuccess', {count: voiceCount}),
               showClose: true
             });
-            this.loadData(); // 刷新参数列表
+            this.loadData(); // Refresh param list
           } else {
             this.$message.error({
               message: data.msg || this.$t('ttsModel.deleteFailed'),
@@ -544,7 +544,7 @@ export default {
   margin: 0 !important;
 }
 
-/* 表格样式 */
+/* Table style */
 ::v-deep .data-table .el-table__header th {
   color: black;
   padding: 6px 0 !important;
@@ -570,7 +570,7 @@ export default {
   border: none !important;
 }
 
-/* 关闭按钮 */
+/* Close button */
 .custom-close-btn {
   position: absolute;
   top: 15px;
@@ -597,7 +597,7 @@ export default {
   border-color: #409EFF;
 }
 
-/* 备注文本 */
+/* NotesText */
 ::v-deep .remark-input .el-textarea__inner {
   border-radius: 4px;
   border: 1px solid #e6e6e6;
@@ -619,7 +619,7 @@ export default {
 }
 
 
-/* 滚动容器 */
+/* Scroll container */
 .scroll-wrapper {
   display: flex;
   max-height: 55vh;
@@ -638,7 +638,7 @@ export default {
   display: none;
 }
 
-/* 自定义滚动条 */
+/* Custom scrollbar */
 .custom-scrollbar {
   width: 8px;
   background: #f1f1f1;
@@ -685,7 +685,7 @@ export default {
   display: none;
 }
 
-/* 音频播放器容器样式 */
+/* Audio player container style */
 .custom-audio-container {
   width: 90%;
   margin: 0 auto;
@@ -715,7 +715,7 @@ export default {
   color: #5cca8e !important;
 }
 
-/* 表格单元格自适应 */
+/* Table cell adaptive */
 ::v-deep .el-table__body-wrapper {
   overflow-x: hidden !important;
 }
@@ -725,26 +725,26 @@ export default {
   word-break: break-all !important;
 }
 
-/* 按钮组定位调整 */
+/* Button group positioning adjustment */
 .action-buttons {
   position: static;
   padding: 15px 0;
   background: white;
 }
 
-/* 输入框自适应 */
+/* Input box adaptive */
 ::v-deep .el-input__inner,
 ::v-deep .el-textarea__inner {
   width: 100% !important;
   min-width: 120px;
 }
 
-/* 音频输入框特殊处理 */
+/* Special handling for audio input box */
 .audio-input ::v-deep .el-input__inner {
   min-width: 200px;
 }
 
-/* 操作按钮弹性布局 */
+/* Action button flex layout */
 ::v-deep .el-table__row .el-button {
   flex-shrink: 0;
   margin: 2px !important;

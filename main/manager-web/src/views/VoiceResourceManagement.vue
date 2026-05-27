@@ -91,7 +91,7 @@
             </div>
         </div>
 
-        <!-- 新增音色资源对话框 -->
+        <!-- Add voice resource dialog -->
         <voice-clone-dialog :title="$t('voiceClone.addVoiceClone')" :visible.sync="dialogVisible" :form="voiceCloneForm"
             @submit="handleSubmit" @cancel="dialogVisible = false" />
 
@@ -363,7 +363,7 @@ export default {
 }
 
 .main-wrapper {
-    // 顶部 63px 底部 35px 查询72px
+    // Top 63px Bottom 35px Query72px
     height: calc(100vh - 63px - 35px - 72px);
     margin: 0 22px;
     border-radius: 15px;

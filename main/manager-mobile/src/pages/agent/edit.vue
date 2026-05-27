@@ -782,7 +782,7 @@ onMounted(async () => {
           <text class="text-[26rpx] text-[#65686f]">
             {{ t('agent.contextProviderSuccess', { count: providerStore.providers.length }) }}
           </text>
-          <a class="text-[26rpx] text-[#5778ff] no-underline" href="https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/context-provider-integration.md" target="_blank">
+          <a class="text-[26rpx] text-[#5778ff] no-underline" href="https://github.com/xinnan-tech/tbot-esp32-server/blob/main/docs/context-provider-integration.md" target="_blank">
             {{ t('agent.contextProviderDocLink') }}
           </a>
           <wd-button class="!bg-[rgba(51,108,255,0.1)] !text-[#336cff]" size="small" @click="openContextProviderDialog">

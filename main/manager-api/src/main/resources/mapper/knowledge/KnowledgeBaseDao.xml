@@ -2,9 +2,9 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="xiaozhi.modules.knowledge.dao.KnowledgeBaseDao">
+<mapper namespace="tbot.modules.knowledge.dao.KnowledgeBaseDao">
 
-    <resultMap id="BaseResultMap" type="xiaozhi.modules.knowledge.entity.KnowledgeBaseEntity">
+    <resultMap id="BaseResultMap" type="tbot.modules.knowledge.entity.KnowledgeBaseEntity">
         <id property="id" column="id" jdbcType="VARCHAR"/>
         <result property="datasetId" column="dataset_id" jdbcType="VARCHAR"/>
         <result property="ragModelId" column="rag_model_id" jdbcType="VARCHAR"/>

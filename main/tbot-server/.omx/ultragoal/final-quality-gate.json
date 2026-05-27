@@ -1,0 +1,20 @@
+{
+  "aiSlopCleaner": {
+    "status": "passed",
+    "evidence": "Scoped cleanup/review over changed Google Live, config, OTA, websocket, connection, and test files. Fallback-like paths classified as grounded compatibility/fail-safe behavior with regression coverage; no raw audio or secret logging added."
+  },
+  "verification": {
+    "status": "passed",
+    "commands": [
+      "./.venv311/bin/python -m unittest tests.test_google_live_provider_fallback tests.test_google_live_event_mapping tests.test_google_live_client tests.test_voice_provider_factory tests.test_config_voice_mode_merge tests.test_connection_voice_provider_routing tests.test_classic_pipeline_provider tests.test_ota_websocket_url -v",
+      "git diff --check -- app.py config/config_loader.py core/http_server.py core/websocket_server.py core/connection.py core/api/ota_handler.py core/voice/session_provider/google_live.py tests/test_config_voice_mode_merge.py tests/test_google_live_provider_fallback.py tests/test_voice_provider_factory.py tests/test_ota_websocket_url.py config.yaml",
+      "python3 OTA GET probe for http://127.0.0.1:8003/tbot/ota/"
+    ],
+    "evidence": "90 unittest tests OK; diff whitespace check OK; server restarted in tmux and ports 8000/8003 listening; OTA GET returned 200 with ws://192.168.100.154:8000/tbot/v1/."
+  },
+  "codeReview": {
+    "recommendation": "APPROVE",
+    "architectStatus": "CLEAR",
+    "evidence": "Manual review of scoped diffs found no blocker for websocket/firmware/MQTT compatibility, classic fallback, secret masking, or response isolation. Remaining live-soak and classic Gemini dependency risks documented."
+  }
+}

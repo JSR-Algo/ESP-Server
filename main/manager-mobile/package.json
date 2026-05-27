@@ -1,23 +1,23 @@
 {
-  "name": "xiaozhi-mobile-admin",
+  "name": "tbot-mobile-admin",
   "type": "commonjs",
   "version": "3.4.0",
   "unibest-version": "3.4.0",
   "packageManager": "pnpm@10.10.0",
-  "description": "xiaozhi-esp32-server的移动端管理后台",
+  "description": "tbot-esp32-server的移动端管理后台",
   "generate-time": "2025-08-04",
   "author": {
     "name": "huangjunsen",
     "zhName": "黄俊森",
-    "email": "huangjunsen@xiaozhi.com",
+    "email": "huangjunsen@tbot.com",
     "github": "https://github.com/huangjunsen0406",
     "gitee": "https://gitee.com/huang-jun-sen"
   },
   "license": "MIT",
-  "homepage": "https://github.com/xinnan-tech/xiaozhi-esp32-server",
-  "repository": "https://github.com/xinnan-tech/xiaozhi-esp32-server",
+  "homepage": "https://github.com/xinnan-tech/tbot-esp32-server",
+  "repository": "https://github.com/xinnan-tech/tbot-esp32-server",
   "bugs": {
-    "url": "https://github.com/xinnan-tech/xiaozhi-esp32-server/issues"
+    "url": "https://github.com/xinnan-tech/tbot-esp32-server/issues"
   },
   "engines": {
     "node": ">=18",

@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'main/xiaozhi-server/requirements.txt'
+      - 'main/tbot-server/requirements.txt'
       - 'Dockerfile-server-base'
       - '.github/workflows/build-base-image.yml'
 

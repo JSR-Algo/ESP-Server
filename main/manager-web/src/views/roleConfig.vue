@@ -63,7 +63,7 @@
                     <el-form-item>
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.agentName')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.agentName') }}：</span>
+                          <span>{{ $t('roleConfig.agentName') }}:</span>
                         </el-tooltip>
                       </template>
                       <el-input
@@ -75,7 +75,7 @@
                     <el-form-item>
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.roleTemplate')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.roleTemplate') }}：</span>
+                          <span>{{ $t('roleConfig.roleTemplate') }}:</span>
                         </el-tooltip>
                       </template>
                       <div class="template-container">
@@ -93,12 +93,12 @@
                     <el-form-item class="context-provider-item">
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.contextProvider')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.contextProvider') }}：</span>
+                          <span>{{ $t('roleConfig.contextProvider') }}:</span>
                         </el-tooltip>
                       </template>
                       <div style="display: flex; align-items: center; justify-content: space-between;">
                         <span style="color: #606266; font-size: 13px;">
-                          {{ $t('roleConfig.contextProviderSuccess', { count: currentContextProviders.length }) }}<a href="https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/context-provider-integration.md" target="_blank" class="doc-link">{{ $t('roleConfig.contextProviderDocLink') }}</a>
+                          {{ $t('roleConfig.contextProviderSuccess', { count: currentContextProviders.length }) }}<a href="docs/context-provider-integration.md" target="_blank" class="doc-link">{{ $t('roleConfig.contextProviderDocLink') }}</a>
                         </span>
                         <el-button
                           class="edit-function-btn"
@@ -112,7 +112,7 @@
                     <el-form-item>
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.roleIntroduction')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.roleIntroduction') }}：</span>
+                          <span>{{ $t('roleConfig.roleIntroduction') }}:</span>
                         </el-tooltip>
                       </template>
                       <el-input
@@ -130,7 +130,7 @@
                     <el-form-item>
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.memoryHis')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.memoryHis') }}：</span>
+                          <span>{{ $t('roleConfig.memoryHis') }}:</span>
                         </el-tooltip>
                       </template>
                       <el-input
@@ -149,7 +149,7 @@
                     >
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.languageCode')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.languageCode') }}：</span>
+                          <span>{{ $t('roleConfig.languageCode') }}:</span>
                         </el-tooltip>
                       </template>
                       <el-input
@@ -165,7 +165,7 @@
                     >
                       <template #label>
                         <el-tooltip :content="$t('roleConfig.tooltip.interactionLanguage')" placement="top" effect="light" popper-class="custom-tooltip">
-                          <span>{{ $t('roleConfig.interactionLanguage') }}：</span>
+                          <span>{{ $t('roleConfig.interactionLanguage') }}:</span>
                         </el-tooltip>
                       </template>
                       <el-input
@@ -313,7 +313,7 @@
                             placement="top"
                           >
                             <div slot="content">
-                              <div><strong>功能名称:</strong> {{ func.name }}</div>
+                              <div><strong>Function name:</strong> {{ func.name }}</div>
                             </div>
                             <div class="icon-dot">
                               {{ getFunctionDisplayChar(func.name) }}
@@ -349,7 +349,210 @@
                       </div>
                     </el-form-item>
                     <div class="model-row">
-                      <!-- 语言筛选器 -->
+                      <el-form-item class="model-item">
+                        <template #label>
+                          <el-tooltip :content="$t('roleConfig.tooltip.voiceMode')" placement="top" effect="light" popper-class="custom-tooltip">
+                            <span>{{ $t('roleConfig.voiceMode') }}</span>
+                          </el-tooltip>
+                        </template>
+                        <div class="model-select-wrapper">
+                          <el-select
+                            v-model="form.voiceMode"
+                            :placeholder="$t('roleConfig.pleaseSelect')"
+                            class="form-select"
+                          >
+                            <el-option
+                              :label="$t('roleConfig.classicPipeline')"
+                              value="classic_pipeline"
+                            />
+                            <el-option
+                              :label="$t('roleConfig.googleLiveApi')"
+                              value="google_live"
+                            />
+                          </el-select>
+                        </div>
+                      </el-form-item>
+                    </div>
+                    <div v-if="form.voiceMode === 'google_live'" class="google-live-panel">
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveApiKey') }}</span>
+                          </template>
+                          <el-input
+                            v-model="form.googleLiveConfig.api_key"
+                            type="password"
+                            show-password
+                            class="form-input"
+                            maxlength="256"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveModel') }}</span>
+                          </template>
+                          <el-input
+                            v-model="form.googleLiveConfig.model"
+                            class="form-input"
+                            maxlength="128"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveVoiceName') }}</span>
+                          </template>
+                          <el-input
+                            v-model="form.googleLiveConfig.voice_name"
+                            class="form-input"
+                            maxlength="128"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveConnectTimeoutSec') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.connect_timeout_sec"
+                            :min="1"
+                            :max="120"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveRecvTimeoutSec') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.recv_timeout_sec"
+                            :min="1"
+                            :max="300"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveInputFlushDelaySec') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.input_flush_delay_sec"
+                            :min="0"
+                            :max="10"
+                            :step="0.1"
+                            :precision="1"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveInputSampleRate') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.input_sample_rate"
+                            :min="8000"
+                            :max="48000"
+                            :step="1000"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveOutputSampleRate') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.output_sample_rate"
+                            :min="8000"
+                            :max="48000"
+                            :step="1000"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveReconnectBackoffMs') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.reconnect.backoff_ms"
+                            :min="0"
+                            :max="10000"
+                            :step="100"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                      </div>
+                      <div class="google-live-switches">
+                        <el-switch
+                          v-model="form.googleLiveConfig.enable_audio_input"
+                          :active-text="$t('roleConfig.googleLiveEnableAudioInput')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.enable_audio_output"
+                          :active-text="$t('roleConfig.googleLiveEnableAudioOutput')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.native_voice"
+                          :active-text="$t('roleConfig.googleLiveNativeVoice')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.barge_in"
+                          :active-text="$t('roleConfig.googleLiveBargeIn')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.send_llm_state_events"
+                          :active-text="$t('roleConfig.googleLiveSendLlmStateEvents')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.send_transcript_events"
+                          :active-text="$t('roleConfig.googleLiveSendTranscriptEvents')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.reconnect.enabled"
+                          :active-text="$t('roleConfig.googleLiveReconnectEnabled')"
+                        />
+                        <el-switch
+                          v-model="form.googleLiveConfig.fallback_to_classic_on_error"
+                          :active-text="$t('roleConfig.googleLiveFallback')"
+                        />
+                      </div>
+                      <div class="model-row">
+                        <el-form-item class="model-item">
+                          <template #label>
+                            <span>{{ $t('roleConfig.googleLiveReconnectMaxRetries') }}</span>
+                          </template>
+                          <el-input-number
+                            v-model="form.googleLiveConfig.reconnect.max_retries"
+                            :min="0"
+                            :max="10"
+                            :controls="false"
+                            class="form-input"
+                            style="width: 100%;"
+                          />
+                        </el-form-item>
+                      </div>
+                    </div>
+                    <div class="model-row">
+                      <!-- LanguageFilter -->
                       <el-form-item class="model-item language-select-item">
                         <template #label>
                           <el-tooltip :content="$t('roleConfig.tooltip.language')" placement="top" effect="light" popper-class="custom-tooltip">
@@ -373,7 +576,7 @@
                         </div>
                       </el-form-item>
 
-                      <!-- 音色选择器 -->
+                      <!-- Voice selector -->
                       <el-form-item class="model-item">
                         <template #label>
                           <el-tooltip :content="$t('roleConfig.tooltip.voiceType')" placement="top" effect="light" popper-class="custom-tooltip">
@@ -491,6 +694,15 @@ export default {
       form: {
         agentCode: "",
         agentName: "",
+        voiceMode: "classic_pipeline",
+        googleLiveConfigJson: "",
+        googleLiveConfig: {
+          model: "gemini-2.5-flash-native-audio-preview-12-2025",
+          enable_audio_input: true,
+          enable_audio_output: true,
+          native_voice: true,
+          fallback_to_classic_on_error: true,
+        },
         ttsVoiceId: "",
         ttsVolume: null,
         ttsRate: null,
@@ -527,7 +739,7 @@ export default {
       templates: [],
       loadingTemplate: false,
       voiceOptions: [],
-      voiceDetails: {}, // 保存完整的音色信息
+      voiceDetails: {}, // SaveCompleteVoice info
       showFunctionDialog: false,
       currentFunctions: [],
       currentContextProviders: [],
@@ -537,13 +749,13 @@ export default {
       isPaused: false,
       currentAudio: null,
       currentPlayingVoiceId: null,
-      // 语言筛选相关状态
-      languageOptions: [], // 语言选项列表
-      selectedLanguage: '', // 当前选中的语言
-      // 功能状态
+      // LanguageFilter relatedStatus
+      languageOptions: [], // LanguageOption list
+      selectedLanguage: '', // Currently selectedLanguage
+      // FunctionStatus
       featureStatus: {
-        vad: false, // 语言检测活动功能状态
-        asr: false, // 语音识别功能状态
+        vad: false, // LanguageDetect activity featureStatus
+        asr: false, // Speech recognition featureStatus
       },
       dynamicTags: [],
       inputVisible: false,
@@ -552,6 +764,67 @@ export default {
     };
   },
   methods: {
+    createDefaultGoogleLiveConfig() {
+      return {
+        api_key: "",
+        model: "gemini-2.5-flash-native-audio-preview-12-2025",
+        voice_name: "",
+        enable_audio_input: true,
+        enable_audio_output: true,
+        native_voice: true,
+        connect_timeout_sec: 10,
+        recv_timeout_sec: 30,
+        input_flush_delay_sec: 0.8,
+        input_sample_rate: 16000,
+        output_sample_rate: 24000,
+        interrupt_on_input_while_speaking: true,
+        interrupt_rms_threshold: 600,
+        interrupt_min_output_age_sec: 0.25,
+        interrupt_suppress_audio_sec: 0.25,
+        drop_input_while_speaking: false,
+        barge_in: true,
+        barge_in_rms_threshold: 600,
+        barge_in_min_output_age_sec: 0.25,
+        send_transcript_events: true,
+        send_llm_state_events: false,
+        reconnect: {
+          enabled: true,
+          max_retries: 2,
+          backoff_ms: 500,
+        },
+        fallback_to_classic_on_error: true,
+      };
+    },
+    normalizeGoogleLiveConfig(config) {
+      const defaults = this.createDefaultGoogleLiveConfig();
+      if (!config || typeof config !== "object" || Array.isArray(config)) {
+        return defaults;
+      }
+      return {
+        ...defaults,
+        ...config,
+        reconnect: {
+          ...defaults.reconnect,
+          ...(config.reconnect && typeof config.reconnect === "object" && !Array.isArray(config.reconnect)
+            ? config.reconnect
+            : {}),
+        },
+      };
+    },
+    parseGoogleLiveConfig(jsonValue) {
+      if (!jsonValue) {
+        return this.createDefaultGoogleLiveConfig();
+      }
+      try {
+        return this.normalizeGoogleLiveConfig(JSON.parse(jsonValue));
+      } catch (error) {
+        console.warn("Invalid googleLiveConfigJson, using defaults", error);
+        return this.createDefaultGoogleLiveConfig();
+      }
+    },
+    buildGoogleLiveConfigJson() {
+      return JSON.stringify(this.normalizeGoogleLiveConfig(this.form.googleLiveConfig));
+    },
     goToHome() {
       this.$router.push("/home");
     },
@@ -559,7 +832,7 @@ export default {
       try {
         await this.handleSaveAgentTags(this.$route.query.agentId);
       } catch (error) {
-        console.error('保存标签失败:', error);
+        console.error('Save tag failed:', error);
         return;
       }
 
@@ -582,6 +855,11 @@ export default {
         langCode: this.form.langCode,
         language: this.form.language,
         sort: this.form.sort,
+        voiceMode: this.form.voiceMode,
+        googleLiveConfigJson:
+          this.form.voiceMode === "google_live"
+            ? this.buildGoogleLiveConfigJson()
+            : null,
         functions: this.currentFunctions.map((item) => {
           return {
             pluginId: item.id,
@@ -592,7 +870,7 @@ export default {
         correctWordFileIds: this.checkedReplacementWordIds,
       };
 
-      // 只在用户设置了TTS参数时才传递（不为null/undefined）
+      // Only when user setTTSPass only when parameter (notnull/undefined)
       if (this.form.ttsVolume !== null && this.form.ttsVolume !== undefined) {
         configData.ttsVolume = this.form.ttsVolume;
       }
@@ -627,6 +905,9 @@ export default {
           this.form = {
             agentCode: "",
             agentName: "",
+            voiceMode: "classic_pipeline",
+            googleLiveConfigJson: "",
+            googleLiveConfig: this.createDefaultGoogleLiveConfig(),
             ttsVoiceId: "",
             chatHistoryConf: 0,
             systemPrompt: "",
@@ -677,15 +958,26 @@ export default {
           message: i18n.t("roleConfig.applyTemplateFailed"),
           showClose: true,
         });
-        console.error("应用模板失败:", error);
+        console.error("Apply template failed:", error);
       } finally {
         this.loadingTemplate = false;
       }
     },
     applyTemplateData(templateData) {
+      const nextVoiceMode = templateData.voiceMode || this.form.voiceMode;
+      const nextGoogleLiveConfigJson =
+        nextVoiceMode === "google_live"
+          ? templateData.googleLiveConfigJson || this.form.googleLiveConfigJson
+          : "";
       this.form = {
         ...this.form,
         agentName: templateData.agentName || this.form.agentName,
+        voiceMode: nextVoiceMode,
+        googleLiveConfigJson: nextGoogleLiveConfigJson,
+        googleLiveConfig:
+          nextVoiceMode === "google_live"
+            ? this.parseGoogleLiveConfig(nextGoogleLiveConfigJson)
+            : this.createDefaultGoogleLiveConfig(),
         ttsVoiceId: templateData.ttsVoiceId || this.form.ttsVoiceId,
         chatHistoryConf: templateData.chatHistoryConf || this.form.chatHistoryConf,
         systemPrompt: templateData.systemPrompt || this.form.systemPrompt,
@@ -710,6 +1002,11 @@ export default {
           this.form = {
             ...this.form,
             ...data.data,
+            voiceMode: data.data.voiceMode || "classic_pipeline",
+            googleLiveConfigJson: data.data.googleLiveConfigJson || "",
+            googleLiveConfig: this.parseGoogleLiveConfig(
+              data.data.googleLiveConfigJson
+            ),
             model: {
               ttsModelId: data.data.ttsModelId,
               vadModelId: data.data.vadModelId,
@@ -722,46 +1019,46 @@ export default {
             },
           };
 
-          // 同步TTS设置到ttsSettings
+          // SyncTTSSet tottsSettings
           this.ttsSettings = {
             volume: this.form.ttsVolume || 0,
             speed: this.form.ttsRate || 0,
             pitch: this.form.ttsPitch || 0
           };
-          // 同步替换词到checkedReplacementWordIds
+          // SyncReplacement wordtocheckedReplacementWordIds
           this.checkedReplacementWordIds = data.data.correctWordFileIds || [];
 
-          // 后端只给了最小映射：[{ id, agentId, pluginId }, ...]
+          // Backend only gave minimal mapping:[{ id, agentId, pluginId }, ...]
           const savedMappings = data.data.functions || [];
           
-          // 加载上下文配置
+          // Load context config
           this.currentContextProviders = data.data.contextProviders || [];
 
-          // 先保证 allFunctions 已经加载（如果没有，则先 fetchAllFunctions）
+          // Ensure first allFunctions Already loaded (if not, first fetchAllFunctions)
           const ensureFuncs = this.allFunctions.length
             ? Promise.resolve()
             : this.fetchAllFunctions();
 
           ensureFuncs.then(() => {
-            // 合并：按照 pluginId（id 字段）把全量元数据信息补齐
+            // Merge: according to pluginId(id Field) put fullMetadataInfoComplete
             this.currentFunctions = savedMappings.map((mapping) => {
               const meta = this.allFunctions.find((f) => f.id === mapping.pluginId);
               if (!meta) {
-                // 插件定义没找到，退化处理
+                // Plugin definition not found, fallback handling
                 return { id: mapping.pluginId, name: mapping.pluginId, params: {} };
               }
               return {
                 id: mapping.pluginId,
                 name: meta.name,
-                // 后端如果还有 paramInfo 字段就用 mapping.paramInfo，否则用 meta.params 默认值
+                // If backend still has paramInfo Use field mapping.paramInfoOtherwise use meta.params Default value
                 params: mapping.paramInfo || { ...meta.params },
-                fieldsMeta: meta.fieldsMeta, // 保留以便对话框渲染 tooltip
+                fieldsMeta: meta.fieldsMeta, // Keep for dialog render tooltip
               };
             });
-            // 备份原始，以备取消时恢复
+            // Back up original, for restore on cancel
             this.originalFunctions = JSON.parse(JSON.stringify(this.currentFunctions));
 
-            // 确保意图识别选项的可见性正确
+            // Ensure intent recognition option visibility correct
             this.updateIntentOptionsVisibility();
           });
         } else {
@@ -784,7 +1081,7 @@ export default {
                 }))
               );
 
-              // 如果是意图识别选项，需要根据当前LLM类型更新可见性
+              // If intent recognition option, need based on currentLLMType update visibility
               if (model.type === "Intent") {
                 this.updateIntentOptionsVisibility();
               }
@@ -806,7 +1103,7 @@ export default {
               });
               this.$set(this.modelOptions, model.type, LLMdata);
             } else {
-              this.$message.error(data.msg || "获取LLM模型列表失败");
+              this.$message.error(data.msg || "Failed to get LLM model list");
             }
           });
         }
@@ -822,13 +1119,13 @@ export default {
       }
       Api.model.getModelVoices(modelId, "", ({ data }) => {
         if (data.code === 0 && data.data) {
-          // 保存完整的音色信息
+          // SaveCompleteVoice info
           this.voiceDetails = data.data.reduce((acc, voice) => {
             acc[voice.id] = voice;
             return acc;
           }, {});
           
-          // 提取所有语言选项并去重
+          // Extract allLanguageOptions and deduplicate
           const allLanguages = new Set();
           data.data.forEach(voice => {
             if (voice.languages) {
@@ -842,14 +1139,14 @@ export default {
             label: lang
           }));
 
-          // 使用后端返回的用户选择的语言，如果没有则使用第一个语言选项
+          // Use user-selected returned by backendLanguage, if none, use first oneLanguageOption
           if (this.form.ttsLanguage && this.languageOptions.some(option => option.value === this.form.ttsLanguage)) {
             this.selectedLanguage = this.form.ttsLanguage;
           } else if (this.languageOptions.length > 0) {
             this.selectedLanguage = this.languageOptions[0].value;
           }
 
-          // 根据选中的语言筛选音色
+          // Based on selectedLanguageFilter voice
           this.filterVoicesByLanguage();
         } else {
           this.voiceOptions = [];
@@ -860,7 +1157,7 @@ export default {
       });
     },
     
-    // 根据语言筛选音色
+    // Based onLanguageFilter voice
     filterVoicesByLanguage() {
       if (!this.voiceDetails || Object.keys(this.voiceDetails).length === 0) {
         this.voiceOptions = [];
@@ -869,10 +1166,10 @@ export default {
 
       const allVoices = Object.values(this.voiceDetails);
 
-      // 根据选中的语言筛选音色
+      // Based on selectedLanguageFilter voice
       const filteredVoices = allVoices.filter(voice => {
         if (!voice.languages) {
-          // 对于没有语言信息的克隆音色，始终显示
+          // For noneLanguageInfocloned voice, always show
           return Boolean(voice.isClone);
         }
         const languagesArray = voice.languages.split(/[、；;,，]/).map(lang => lang.trim()).filter(lang => lang);
@@ -888,7 +1185,7 @@ export default {
         train_status: voice.trainStatus,
       }));
 
-      // 检查当前选中的音色是否支持当前语言，如果不支持则选择第一个
+      // Check whether current selected voice supports currentLanguage, if unsupported select first
       const currentVoiceSupportsLanguage = this.form.ttsVoiceId &&
         filteredVoices.some(voice => voice.id === this.form.ttsVoiceId);
 
@@ -896,7 +1193,7 @@ export default {
         this.form.ttsVoiceId = filteredVoices.length > 0 ? filteredVoices[0].id : '';
       }
 
-      // 同步到ttsSettings（如果值为null，使用0作为显示默认值，但不修改form中的值）
+      // Sync tottsSettings(if value isnull, use0as display default value, but notModifyformValue in)
       this.ttsSettings = {
         volume: this.form.ttsVolume !== null && this.form.ttsVolume !== undefined ? this.form.ttsVolume : 0,
         speed: this.form.ttsRate !== null && this.form.ttsRate !== undefined ? this.form.ttsRate : 0,
@@ -914,7 +1211,7 @@ export default {
         }
       }
 
-      // 如果没有找到有效字符，返回第一个字符
+      // If no valid character found, return first character
       return name.charAt(0);
     },
     showFunctionIcons(type) {
@@ -926,10 +1223,10 @@ export default {
       }
       if (type === "Memory") {
         if (value === "Memory_nomem") {
-          // 无记忆功能的模型，默认不记录聊天记录
+          // Model without memory, defaultDo not recordChat history
           this.form.chatHistoryConf = 0;
         } else {
-          // 有记忆功能的模型，默认记录文本和语音
+          // Model with memory, defaultRecord textAnd voice
           this.form.chatHistoryConf = 2;
         }
         if (value === "Memory_nomem" || value === "Memory_mem_report_only") {
@@ -941,7 +1238,7 @@ export default {
         }
       }
       if (type === "LLM") {
-        // 当LLM类型改变时，更新意图识别选项的可见性
+        // whenLLMWhen type changes, update visibility of intent recognition options
         this.updateIntentOptionsVisibility();
       }
     },
@@ -966,7 +1263,7 @@ export default {
       });
     },
     openFunctionDialog() {
-      // 显示编辑对话框时，确保 allFunctions 已经加载
+      // When showing edit dialog, ensure allFunctions Already loaded
       if (this.allFunctions.length === 0) {
         this.fetchAllFunctions().then(() => (this.showFunctionDialog = true));
       } else {
@@ -982,7 +1279,7 @@ export default {
     handleTtsSettingsSave(settings) {
       const { replacementWordIds, ...ttsSettings } = settings;
       this.checkedReplacementWordIds = replacementWordIds;
-      // 保存TTS设置
+      // SaveTTSSet
       this.ttsSettings = ttsSettings;
       this.form.ttsVolume = ttsSettings.volume;
       this.form.ttsRate = ttsSettings.speed;
@@ -1003,7 +1300,7 @@ export default {
       this.showFunctionDialog = false;
     },
     updateIntentOptionsVisibility() {
-      // 根据当前选择的LLM类型更新意图识别选项的可见性
+      // Based on current selectedLLMUpdate intent recognition option visibility by type
       const currentLlmId = this.form.model.llmModelId;
       if (!currentLlmId || !this.modelOptions["Intent"]) return;
 
@@ -1012,76 +1309,76 @@ export default {
 
       this.modelOptions["Intent"].forEach((item) => {
         if (item.value === "Intent_function_call") {
-          // 如果llmType是openai或ollama，允许选择function_call
-          // 否则隐藏function_call选项
+          // IfllmTypeisopenaiorollama, allow selectfunction_call
+          // Otherwise hidefunction_callOption
           if (llmType === "openai" || llmType === "ollama") {
             item.isHidden = false;
           } else {
             item.isHidden = true;
           }
         } else {
-          // 其他意图识别选项始终可见
+          // Other intent recognition options always visible
           item.isHidden = false;
         }
       });
 
-      // 如果当前选择的意图识别是function_call，但LLM类型不支持，则设置为可选的第一项
+      // If current selected intent recognition isfunction_call, butLLMIf type unsupported, set to first optional item
       if (
         this.form.model.intentModelId === "Intent_function_call" &&
         llmType !== "openai" &&
         llmType !== "ollama"
       ) {
-        // 找到第一个可见的选项
+        // Find first visible option
         const firstVisibleOption = this.modelOptions["Intent"].find(
           (item) => !item.isHidden
         );
         if (firstVisibleOption) {
           this.form.model.intentModelId = firstVisibleOption.value;
         } else {
-          // 如果没有可见选项，设置为Intent_nointent
+          // If no visible option, set toIntent_nointent
           this.form.model.intentModelId = "Intent_nointent";
         }
       }
     },
-    // 检查是否有音频预览
+    // Check if audio preview exists
     hasAudioPreview(item) {
-      // 检查是否为克隆音频
-      // 使用后端实际返回的 isClone 字段
+      // Check if cloned audio
+      // Use backend actual returned isClone Field
       const isCloneAudio = Boolean(item.isClone);
       
-      // 检查是否有有效的音频URL，只使用后端实际返回的字段
+      // Check if valid audio existsURL, only use fields actually returned by backend
       const hasValidAudioUrl = !!((item.voice_demo || item.voiceDemo)?.trim());
       
-      // 克隆音频始终显示播放按钮，普通音频需要有有效URL才显示
+      // Clone audio always shows play button. Normal audio needs validURLShow only
       return isCloneAudio || hasValidAudioUrl;
     },
 
-    // 播放/暂停音频切换
+    // Play/Pause audio switch
     toggleAudioPlayback(voiceId) {
-      // 如果点击的是当前正在播放的音频，则切换暂停/播放状态
+      // If clicked audio is currently playing audio, toggle pause/PlayStatus
       if (this.playingVoice && this.currentPlayingVoiceId === voiceId) {
         if (this.isPaused) {
-          // 从暂停状态恢复播放
+          // From pauseStatusResume playback
           this.currentAudio.play().catch((error) => {
-            console.error("恢复播放失败:", error);
+            console.error("Resume playback failed:", error);
             this.$message.warning(this.$t('roleConfig.cannotResumeAudio'));
           });
           this.isPaused = false;
         } else {
-          // 暂停播放
+          // Pause playback
           this.currentAudio.pause();
           this.isPaused = true;
         }
         return;
       }
 
-      // 否则开始播放新的音频
+      // Otherwise start playing new audio
       this.playVoicePreview(voiceId);
     },
 
-    // 播放音色预览
+    // Play voice preview
     playVoicePreview(voiceId = null) {
-      // 如果传入了voiceId，则使用传入的，否则使用当前选中的
+      // If passed invoiceId, use passed-in if provided, otherwise use currently selected
       const targetVoiceId = voiceId || this.form.ttsVoiceId;
 
       if (!targetVoiceId) {
@@ -1089,117 +1386,117 @@ export default {
         return;
       }
 
-      // 停止当前正在播放的音频
+      // Stop currently playing audio
       if (this.currentAudio) {
         this.currentAudio.pause();
         this.currentAudio = null;
       }
 
-      // 重置播放状态
+      // Reset playbackStatus
       this.isPaused = false;
       this.currentPlayingVoiceId = targetVoiceId;
 
       try {
-        // 从保存的音色详情中获取音频URL
+        // fromSaveGet audio from voice detailsURL
         const voiceDetail = this.voiceDetails[targetVoiceId];
 
-        // 添加调试信息
-        console.log("当前选择的音色ID:", targetVoiceId);
-        console.log("音色详情:", voiceDetail);
+        // Add debugInfo
+        console.log("Currently selected voice ID:", targetVoiceId);
+        console.log("Voice details:", voiceDetail);
 
-        // 尝试多种可能的音频属性名
+        // Try multiple possible audio property names
         let audioUrl = null;
         let isCloneAudio = false;
 
         if (voiceDetail) {
-          // 使用后端实际返回的 isClone 字段判断是否为克隆音频
+          // Use backend actual returned isClone field determines whether cloned audio
           isCloneAudio = Boolean(voiceDetail.isClone);
           console.log(
-            "克隆音频判断结果:",
+            "Cloned audio judgment result:",
             isCloneAudio,
-            "训练状态:",
+            "Training status:",
             voiceDetail.train_status
           );
 
-          // 获取音频URL
+          // Get audioURL
           if (isCloneAudio && voiceDetail.id) {
-            // 对于克隆音频，使用后端提供的正确接口
-            // 注意：这里需要通过两步获取音频URL
-            // 1. 首先获取音频下载ID
-            // 2. 然后使用这个ID构建播放URL
-            // 由于异步操作，我们需要先请求getAudioId
-            console.log("检测到克隆音频，准备获取音频URL:", voiceDetail.id);
+            // For clone audio, use correct interface provided by backend
+            // Note: need get audio through two steps hereURL
+            // 1. FirstGet audio download ID
+            // 2. Then use thisIDBuild playbackURL
+            // Due to async operation, need request firstgetAudioId
+            console.log("Cloned audio detected, preparing to get audio URL:", voiceDetail.id);
 
-            // 创建一个Promise来处理异步获取音频URL的操作
+            // Create onePromiseHandle async audio fetchURLOperation of
             const getCloneAudioUrl = () => {
               return new Promise((resolve) => {
-                // 首先调用getAudioId接口获取临时UUID
+                // First callgetAudioIdAPI get temporaryUUID
                 RequestService.sendRequest()
                   .url(`${getServiceUrl()}/voiceClone/audio/${voiceDetail.id}`)
                   .method("POST")
                   .success((res) => {
                     if (res.data.code === 0 && res.data.data) {
-                      // 处理返回的数据格式，在res.data基础上再套一层.data
+                      // Handle returned data format, atres.dataWrap another layer on top.data
                       const audioId = res.data.data;
-                      console.log("获取到的音频ID:", audioId);
-                      // 使用返回的UUID构建播放URL
+                      console.log("Got audio ID:", audioId);
+                      // Use returnedUUIDBuild playbackURL
                       const playUrl = `${getServiceUrl()}/voiceClone/play/${audioId}`;
-                      console.log("构建克隆音频播放URL:", playUrl);
+                      console.log("Build cloned audio playback URL:", playUrl);
                       resolve(playUrl);
                     } else {
-                      console.error("获取音频ID失败:", res.msg);
+                      console.error("Failed to get audio ID:", res.msg);
                       resolve(null);
                     }
                   })
                   .networkFail((err) => {
-                    console.error("请求音频ID接口失败:", err);
+                    console.error("Audio ID request API failed:", err);
                     resolve(null);
                   })
                   .send();
               });
             };
 
-            // 设置播放状态
+            // Set playbackStatus
             this.playingVoice = true;
-            // 创建Audio实例
+            // CreateAudioInstance
             this.currentAudio = new Audio();
-            // 设置音量
+            // Set volume
             this.currentAudio.volume = 1.0;
 
-            // 设置超时，防止加载过长时间
+            // Set timeout to prevent too long loading
             const timeoutId = setTimeout(() => {
               if (this.currentAudio && this.playingVoice) {
                 this.$message.warning(this.$t('roleConfig.audioLoadTimeout'));
                 this.playingVoice = false;
               }
-            }, 10000); // 10秒超时
+            }, 10000); // 10Second timeout
 
-            // 监听播放错误
+            // Listen playbackError
             this.currentAudio.onerror = () => {
               clearTimeout(timeoutId);
-              console.error("克隆音频播放错误");
+              console.error("Clone audio playback error");
               this.$message.warning(this.$t('roleConfig.cloneAudioPlayFailed'));
               this.playingVoice = false;
             };
 
-            // 监听播放开始，清除超时
+            // Listen playback start, clear timeout
             this.currentAudio.onplay = () => {
               clearTimeout(timeoutId);
             };
 
-            // 监听播放结束
+            // Listen playback end
             this.currentAudio.onended = () => {
               this.playingVoice = false;
             };
 
-            // 处理异步获取URL并播放
+            // Handle async getURLAnd play
             getCloneAudioUrl().then((url) => {
               if (url) {
-                // 设置音频URL并播放
+                // Set audioURLAnd play
                 this.currentAudio.src = url;
                 this.currentAudio.play().catch((error) => {
                   clearTimeout(timeoutId);
-                  console.error("播放克隆音频失败:", error);
+                  console.error("Failed to play cloned audio:", error);
                   this.$message.warning(this.$t('roleConfig.cannotPlayCloneAudio'));
                   this.playingVoice = false;
                 });
@@ -1210,16 +1507,16 @@ export default {
               }
             });
 
-            // 返回，避免继续执行下面的普通音频播放逻辑
+            // Return, avoid continuing normal audio playback logic below
             return;
           } else {
-            // 对于普通音频，只使用后端实际返回的字段
+            // For normal audio, only use fields actually returned by backend
             audioUrl =
               voiceDetail.voiceDemo ||
               voiceDetail.voice_demo;
           }
 
-          // 如果没有找到，尝试检查是否有URL格式的字段
+          // If not found, try check whether hasURLformat field
           if (!audioUrl) {
             for (const key in voiceDetail) {
               const value = voiceDetail[key];
@@ -1232,7 +1529,7 @@ export default {
                   value.endsWith(".ogg"))
               ) {
                 audioUrl = value;
-                console.log(`发现可能的音频URL在字段 '${key}':`, audioUrl);
+                console.log(`Found possible audioURLIn field '${key}':`, audioUrl);
                 break;
               }
             }
@@ -1240,59 +1537,59 @@ export default {
         }
 
         if (!audioUrl) {
-          // 如果没有音频URL，显示友好的提示
+          // If no audioURLShow friendlyPrompt
           this.$message.warning(this.$t('roleConfig.noPreviewAudio'));
           return;
         }
 
-        // 非克隆音频的处理逻辑
+        // Processing logic for non-cloned audio
         if (!isCloneAudio) {
-          // 设置播放状态
+          // Set playbackStatus
           this.playingVoice = true;
 
-          // 创建并播放音频
+          // Create andPlay audio
           this.currentAudio = new Audio();
           this.currentAudio.src = audioUrl;
 
-          // 设置音量
+          // Set volume
           this.currentAudio.volume = 1.0;
 
-          // 设置超时，防止加载过长时间
+          // Set timeout to prevent too long loading
           const timeoutId = setTimeout(() => {
             if (this.currentAudio && this.playingVoice) {
               this.$message.warning(this.$t('roleConfig.audioLoadTimeout'));
               this.playingVoice = false;
             }
-          }, 10000); // 10秒超时
+          }, 10000); // 10Second timeout
 
-          // 监听播放错误
+          // Listen playbackError
           this.currentAudio.onerror = () => {
             clearTimeout(timeoutId);
-            console.error("音频播放错误");
+            console.error("Audio playback error");
             this.$message.warning(this.$t('roleConfig.audioPlayFailed'));
             this.playingVoice = false;
           };
 
-          // 监听播放开始，清除超时
+          // Listen playback start, clear timeout
           this.currentAudio.onplay = () => {
             clearTimeout(timeoutId);
           };
 
-          // 监听播放结束
+          // Listen playback end
           this.currentAudio.onended = () => {
             this.playingVoice = false;
           };
 
-          // 开始播放音频
+          // StartPlay audio
           this.currentAudio.play().catch((error) => {
             clearTimeout(timeoutId);
-            console.error("播放失败:", error);
+            console.error("Playback failed:", error);
             this.$message.warning(this.$t('roleConfig.cannotPlayAudio'));
             this.playingVoice = false;
           });
         }
       } catch (error) {
-        console.error("播放音频过程出错:", error);
+        console.error("Error during audio playback:", error);
         this.$message.error(this.$t('roleConfig.audioPlayError'));
         this.playingVoice = false;
       }
@@ -1302,17 +1599,17 @@ export default {
         this.form.chatHistoryConf = 0;
       }
     },
-    // 加载功能状态
+    // Load functionStatus
     async loadFeatureStatus() {
       try {
-        // 确保featureManager已初始化完成
+        // EnsurefeatureManagerInitialization completed
         await featureManager.waitForInitialization();
         const config = featureManager.getConfig();
         this.featureStatus.voiceprintRecognition = config.voiceprintRecognition || false;
         this.featureStatus.vad = config.vad || false;
         this.featureStatus.asr = config.asr || false;
       } catch (error) {
-        console.error("加载功能状态失败:", error);
+        console.error("Failed to load feature status:", error);
       }
     },
     handleClose(id) {
@@ -1385,7 +1682,7 @@ export default {
     }
     this.fetchModelOptions();
     this.fetchTemplates();
-    // 加载功能状态，确保featureManager已初始化
+    // Load functionStatus, ensurefeatureManagerInitialized
     await this.loadFeatureStatus();
   },
 };
@@ -1640,6 +1937,17 @@ export default {
 
 .model-row .language-select-item .language-select {
   width: 100%;
+}
+
+.google-live-panel {
+  margin-bottom: 12px;
+}
+
+.google-live-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 4px 0 8px 72px;
 }
 
 .model-row .el-form-item__label {

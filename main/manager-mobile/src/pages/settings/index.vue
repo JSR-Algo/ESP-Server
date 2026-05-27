@@ -11,7 +11,7 @@
 <script lang="ts" setup>
 import type { Language } from '@/store/lang'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useToast } from 'wot-design-uni'
+import { useToast } from 'wot-design-uni/components/wd-toast'
 import { changeLanguage, getCurrentLanguage, getSupportedLanguages, t } from '@/i18n'
 import { useConfigStore } from '@/store'
 import { clearServerBaseUrlOverride, getEnvBaseUrl, getServerBaseUrlOverride, setServerBaseUrlOverride } from '@/utils'
@@ -68,7 +68,7 @@ function validateUrl() {
     return
   }
 
-  if (!/^https?:\/\/.+\/xiaozhi$/.test(baseUrlInput.value)) {
+  if (!/^https?:\/\/.+\/tbot$/.test(baseUrlInput.value)) {
     urlError.value = t('settings.validServerUrl')
   }
 }
@@ -78,7 +78,7 @@ async function testServerBaseUrl() {
   // 先清除错误信息
   urlError.value = ''
 
-  if (!baseUrlInput.value || !/^https?:\/\/.+\/xiaozhi$/.test(baseUrlInput.value)) {
+  if (!baseUrlInput.value || !/^https?:\/\/.+\/tbot$/.test(baseUrlInput.value)) {
     return false
   }
 
@@ -112,7 +112,7 @@ async function testServerBaseUrl() {
 
 // 保存服务端地址
 async function saveServerBaseUrl() {
-  if (!baseUrlInput.value || !/^https?:\/\/.+\/xiaozhi$/.test(baseUrlInput.value)) {
+  if (!baseUrlInput.value || !/^https?:\/\/.+\/tbot$/.test(baseUrlInput.value)) {
     toast.warning(t('settings.validServerUrl'))
     return
   }

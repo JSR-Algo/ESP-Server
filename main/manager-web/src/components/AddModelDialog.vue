@@ -10,7 +10,7 @@
         ×
       </button>
 
-      <!-- 模型信息部分 -->
+      <!-- ModelInfoPart -->
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
         <div style="font-size: 20px; font-weight: bold; color: #3d4566;">{{ $t('modelConfigDialog.modelInfo') }}</div>
         <div style="display: flex; align-items: center; gap: 20px;">
@@ -165,7 +165,7 @@ export default {
             label: f.label,
             prop: f.key,
             type: f.type === 'password' ? 'password' : 'text',
-            placeholder: `请输入${f.key}`
+            placeholder: `Please enter ${f.key}`
           }))
         }))
         this.providersLoaded = true
@@ -200,7 +200,7 @@ export default {
     confirm() {
       this.saving = true;
 
-      // 校验模型ID不能为纯文字或空格
+      // ValidateModel IDCannot be plain text or spaces
       if (this.formData.id && !this.validateModelId(this.formData.id)) {
         this.$message.error(this.$t('modelConfigDialog.invalidModelId'));
         this.saving = false;
@@ -254,39 +254,39 @@ export default {
         isDefault: true,
         configJson: {}
       };
-      // 重置加载状态
+      // Reset loadingStatus
       this.providers = [];
       this.providersLoaded = false;
-      // 重置字段配置
+      // Reset field config
       this.providerFields = [];
       this.currentProvider = null;
     },
     
-    // 校验模型ID：不能为纯文字或空格
+    // ValidateModel ID: cannot be pure text or spaces
     validateModelId(modelId) {
       if (!modelId || typeof modelId !== 'string') {
         return false;
       }
       
-      // 去除首尾空格
+      // Trim leading/trailing spaces
       const trimmedId = modelId.trim();
       
-      // 检查是否为空或纯空格
+      // Check whether empty or only spaces
       if (trimmedId === '') {
         return false;
       }
       
-      // 检查是否只包含字母（纯文字）
+      // Check whether only contains letters (pure text)
       if (/^[a-zA-Z]+$/.test(trimmedId)) {
         return false;
       }
       
-      // 检查是否包含空格
+      // Check whether contains spaces
       if (/\s/.test(trimmedId)) {
         return false;
       }
       
-      // 允许字母、数字、下划线、连字符
+      // Allow letters, numbers, underscores, hyphens
       if (!/^[a-zA-Z0-9_-]+$/.test(trimmedId)) {
         return false;
       }

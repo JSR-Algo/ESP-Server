@@ -37,7 +37,7 @@ export default {
     agentId: { type: String, required: true }
   },
   data() {
-    // MAC地址验证规则
+    // MAC addressValidation rules
     const validateMac = (rule, value, callback) => {
       const macRegex = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/;
       if (!value) {
@@ -78,7 +78,7 @@ export default {
         const res = await Api.dict.getDictDataByType('FIRMWARE_TYPE');
         this.firmwareTypes = res.data;
       } catch (error) {
-        console.error('获取固件类型失败:', error);
+        console.error('Failed to get firmware type:', error);
         this.$message.error(error.message || this.$t('manualAddDeviceDialog.getFirmwareTypeFailed'));
       }
     },

@@ -28,9 +28,9 @@
             </div>
             <div class="divider"></div>
             
-            <!-- 功能分组容器 - 左右布局 -->
+            <!-- Feature group container - Left-right layout -->
             <div class="feature-groups-container">
-              <!-- 功能管理分组 -->
+              <!-- Feature management group -->
               <div v-if="featureManagementFeatures.length > 0" class="feature-group">
                 <h3 class="group-title">{{ $t('featureManagement.group.featureManagement') }}</h3>
                 <div class="features-grid">
@@ -55,7 +55,7 @@
                 </div>
               </div>
               
-              <!-- 语音管理分组 -->
+              <!-- Voice management group -->
               <div v-if="voiceManagementFeatures.length > 0" class="feature-group">
                 <h3 class="group-title">{{ $t('featureManagement.group.voiceManagement') }}</h3>
                 <div class="features-grid">
@@ -113,29 +113,29 @@ export default {
       pendingChanges: false,
       featureManagementFeatures: [],
       voiceManagementFeatures: [],
-      isSaving: false // 添加保存状态锁定
+      isSaving: false // AddSaveStatusLock
     }
   },
   computed: {
-    // 所有功能列表
+    // All feature list
     filteredFeatures() {
       return [...this.featureManagementFeatures, ...this.voiceManagementFeatures]
     },
     
-    // 判断是否所有功能都已选中
+    // Determine whether all functions selected
     isAllSelected() {
       const allFeatures = [...this.featureManagementFeatures, ...this.voiceManagementFeatures]
       return allFeatures.length > 0 && allFeatures.every(feature => feature.enabled)
     }
   },
   async created() {
-    // 等待功能配置管理器初始化完成
+    // WaitFunction configManager initialization complete
     try {
       await featureManager.waitForInitialization()
       await this.loadFeatures()
       this.setupConfigChangeListener()
     } catch (error) {
-      console.error('功能配置管理器初始化等待失败:', error)
+      console.error('Feature config manager init wait failed:', error)
       await this.loadFeatures()
       this.setupConfigChangeListener()
     }
@@ -146,7 +146,7 @@ export default {
   },
   
   methods: {
-    // 根据ID列表获取功能
+    // Based onIDList get feature
     async getFeaturesByIds(featureIds) {
       try {
         const featureConfig = await featureManager.getAllFeatures()
@@ -162,8 +162,8 @@ export default {
         
         return result
       } catch (error) {
-        console.error('获取功能配置失败:', error)
-        // 如果获取失败，返回默认配置
+        console.error('Failed to get feature config:', error)
+        // If get fails, return default config
         return featureIds.map(id => ({
           id: id,
           name: this.$t(`feature.${id}.name`),
@@ -173,20 +173,20 @@ export default {
       }
     },
     
-    // 加载功能配置
+    // LoadFunction config
     async loadFeatures() {
-      // 保存当前用户的选择状态
+      // SaveCurrent user selectionStatus
       const currentFeatureStates = {}
       const allCurrentFeatures = [...this.featureManagementFeatures, ...this.voiceManagementFeatures]
       allCurrentFeatures.forEach(feature => {
         currentFeatureStates[feature.id] = feature.enabled
       })
       
-      // 重新加载配置
+      // Reload config
       this.featureManagementFeatures = await this.getFeaturesByIds(['voiceprintRecognition', 'voiceClone', 'knowledgeBase', 'mcpAccessPoint'])
       this.voiceManagementFeatures = await this.getFeaturesByIds(['vad', 'asr'])
       
-      // 恢复用户的选择状态（如果存在）
+      // Restore user selectionStatus(If exists)
       const allFeatures = [...this.featureManagementFeatures, ...this.voiceManagementFeatures]
       allFeatures.forEach(feature => {
         if (currentFeatureStates.hasOwnProperty(feature.id)) {
@@ -194,9 +194,9 @@ export default {
         }
       })
     },
-    // 切换功能状态
+    // Toggle functionStatus
     async toggleFeature(feature) {
-      // 如果正在保存，阻止操作
+      // If ongoingSave, block operation
       if (this.isSaving) {
         return
       }
@@ -204,9 +204,9 @@ export default {
       feature.enabled = !feature.enabled
       this.pendingChanges = true
       
-      // 不再立即更新到配置管理器，只在保存时统一更新
+      // No longer update to config manager immediately, only inSaveUpdate uniformly when
     },
-    // 保存配置
+    // SaveConfig
     async handleSave() {
       if (!this.pendingChanges) {
         this.$message.info({
@@ -216,11 +216,11 @@ export default {
         return
       }
       
-      // 设置保存状态，锁定界面
+      // SetSaveStatus, lock UI
       this.isSaving = true
       
       try {
-        // 获取当前所有功能的状态并保存
+        // Get current all functionsStatusandSave
         const featureUpdates = {}
         const allFeatures = [...this.featureManagementFeatures, ...this.voiceManagementFeatures]
         allFeatures.forEach(feature => {
@@ -238,17 +238,17 @@ export default {
           this.loadFeatures()
         }, 1000)
       } catch (error) {
-        console.error('保存配置失败:', error)
+        console.error('Save config failed:', error)
         this.$message.error({
           message: this.$t('featureManagement.saveError'),
           showClose: true
         })
       } finally {
-        // 无论成功与否，都解除保存状态锁定
+        // Release regardless of successSaveStatusLock
         this.isSaving = false
       }
     },
-    // 设置配置变化监听器
+    // Set config change listener
     setupConfigChangeListener() {
       this.configChangeHandler = () => {
         this.loadFeatures()
@@ -256,14 +256,14 @@ export default {
       window.addEventListener('featureConfigReloaded', this.configChangeHandler)
     },
     
-    // 移除配置变化监听器
+    // Remove config change listener
     removeConfigChangeListener() {
       if (this.configChangeHandler) {
         window.removeEventListener('featureConfigReloaded', this.configChangeHandler)
       }
     },
     
-    // 重置配置
+    // Reset config
     async handleReset() {
       try {
         await this.$confirm(
@@ -290,16 +290,16 @@ export default {
           this.$router.go(0)
         }, 1000)
       } catch (error) {
-        // 用户取消操作
+        // User canceled operation
       }
     },
-    // 搜索功能（预留接口）
+    // Search function (reserved API)
     handleSearch() {
-      // 搜索功能待实现
+      // Search function pending
     },
-    // 全选/取消全选
+    // Select all/Deselect all
     toggleSelectAll() {
-      // 如果正在保存，阻止操作
+      // If ongoingSave, block operation
       if (this.isSaving) {
         return
       }
@@ -541,7 +541,7 @@ export default {
 }
 
 
-/* 功能分组容器 - 左右布局 */
+/* Feature group container - Left-right layout */
 .feature-groups-container {
   display: flex;
   gap: 32px;
@@ -549,7 +549,7 @@ export default {
   position: relative;
 }
 
-/* 分组之间的分隔线 */
+/* Divider between groups */
 .feature-groups-container::before {
   content: '';
   position: absolute;
@@ -563,7 +563,7 @@ export default {
   transform: translateX(-50%);
 }
 
-/* 分组样式 */
+/* Group style */
 .feature-group {
   flex: 1;
   min-width: 0;

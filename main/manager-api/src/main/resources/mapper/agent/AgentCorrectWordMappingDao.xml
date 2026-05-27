@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="xiaozhi.modules.agent.dao.AgentCorrectWordMappingDao">
+<mapper namespace="tbot.modules.agent.dao.AgentCorrectWordMappingDao">
 
     <delete id="deleteByAgentId">
         DELETE FROM ai_agent_correct_word_mapping WHERE agent_id = #{agentId}
@@ -18,7 +18,7 @@
         </foreach>
     </insert>
 
-    <select id="selectByAgentId" resultType="xiaozhi.modules.agent.entity.AgentCorrectWordMappingEntity">
+    <select id="selectByAgentId" resultType="tbot.modules.agent.entity.AgentCorrectWordMappingEntity">
         SELECT id, agent_id, file_id, creator, created_at, updater, updated_at
         FROM ai_agent_correct_word_mapping
         WHERE agent_id = #{agentId}

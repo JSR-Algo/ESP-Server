@@ -74,7 +74,7 @@ export default {
   props: {
     title: {
       type: String,
-      default: '新增替换词'
+      default: 'Add replacement word'
     },
     visible: {
       type: Boolean,

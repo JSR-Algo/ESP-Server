@@ -1,0 +1,199 @@
+import time
+import asyncio
+from collections import deque
+from config.logger import setup_logging
+
+TAG = __name__
+logger = setup_logging()
+
+
+class AudioRateController:
+    """
+    Audio rate controller - precisely controls audio sending by 60ms frame duration
+    Fixes time accumulation error under high concurrency
+    """
+
+    def __init__(self, frame_duration=60):
+        """
+        Args:
+            frame_duration: single audio frame duration (ms), default 60ms
+        """
+        self.frame_duration = frame_duration
+        self.queue = deque()
+        self.play_position = 0  # Virtual playback position (ms)
+        self.start_timestamp = None  # StartTimestamp(read-only, noModify)
+        self.pending_send_task = None
+        self.logger = logger
+        self.queue_empty_event = asyncio.Event()  # Queue ClearEvent
+        self.queue_empty_event.set()  # Initially EmptyStatus
+        self.queue_has_data_event = asyncio.Event()  # Queue DataEvent
+        self._last_queue_empty_time = 0  # Last queue clear time (seconds)
+
+    def reset(self):
+        """Reset controller state"""
+        if self.pending_send_task and not self.pending_send_task.done():
+            self.pending_send_task.cancel()
+            # After task cancellation, task will nextEventClean up during loop, no blocking wait
+
+        self.queue.clear()
+        self.play_position = 0
+        self.start_timestamp = None  # Set by first audio packet
+        self._last_queue_empty_time = 0  # Reset Time
+        # RelatedEventProcess
+        self.queue_empty_event.set()
+        self.queue_has_data_event.clear()
+
+    def add_audio(self, opus_packet):
+        """Add audio packet to queue"""
+        # If queue was empty before, need adjustTimestampKeep playback time continuous
+        # This way, during tool call wait, newly added audio will not play early
+        # If interval short (<1frames), means normal streaming transmission, no reset needed
+        if len(self.queue) == 0 and self.play_position > 0:
+            elapsed_since_empty = (time.monotonic() - self._last_queue_empty_time) * 1000
+            # Only if interval exceeds1frame duration, then considered real"Pause/resume"
+            if elapsed_since_empty >= self.frame_duration:
+                self.start_timestamp = time.monotonic() - (self.play_position / 1000)
+                self.logger.bind(tag=TAG).debug(
+                    f"Queue recovered from empty, reset timestamp, current play position: {self.play_position}ms, interval: {elapsed_since_empty:.0f}ms"
+                )
+
+        self.queue.append(("audio", opus_packet))
+        # RelatedEventProcess
+        self.queue_empty_event.clear()
+        self.queue_has_data_event.set()
+
+    def add_message(self, message_callback):
+        """
+        Add message to queue (send immediately, does not occupy playback time)
+
+        Args:
+            message_callback: message send callback function async def()
+        """
+        if len(self.queue) == 0 and self.play_position > 0:
+            elapsed_since_empty = (time.monotonic() - self._last_queue_empty_time) * 1000
+            if elapsed_since_empty >= self.frame_duration:
+                self.start_timestamp = time.monotonic() - (self.play_position / 1000)
+                self.logger.bind(tag=TAG).debug(
+                    f"Queue recovered from empty, reset timestamp, current play position: {self.play_position}ms, interval: {elapsed_since_empty:.0f}ms"
+                )
+
+        self.queue.append(("message", message_callback))
+        # RelatedEventProcess
+        self.queue_empty_event.clear()
+        self.queue_has_data_event.set()
+
+    def _get_elapsed_ms(self):
+        """Get elapsed time (ms)"""
+        if self.start_timestamp is None:
+            return 0
+        return (time.monotonic() - self.start_timestamp) * 1000
+
+    async def check_queue(self, send_audio_callback):
+        """
+        Check queue and send audio/messages on time
+
+        Args:
+            send_audio_callback: callback function for sending audio async def(opus_packet)
+        """
+        while self.queue:
+            item = self.queue[0]
+            item_type = item[0]
+
+            if item_type == "message":
+                # MessageType: send immediately, does not occupy playback time
+                _, message_callback = item
+                self.queue.popleft()
+                try:
+                    await message_callback()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(f"Failed to send message: {e}")
+                    raise
+
+            elif item_type == "audio":
+                if self.start_timestamp is None:
+                    self.start_timestamp = time.monotonic()
+
+                _, opus_packet = item
+
+                # Loop wait until time reached
+                while True:
+                    # Calculate time difference
+                    elapsed_ms = self._get_elapsed_ms()
+                    output_ms = self.play_position
+
+                    if elapsed_ms < output_ms:
+                        # Not send time yet, calculate wait duration
+                        wait_ms = output_ms - elapsed_ms
+
+                        # After wait continue check (can be interrupted)
+                        try:
+                            await asyncio.sleep(wait_ms / 1000)
+                        except asyncio.CancelledError:
+                            self.logger.bind(tag=TAG).debug("Audio sending task canceled")
+                            raise
+                        # After wait ends recheck time (loop back to while True)
+                    else:
+                        # Time reached, break wait loop
+                        break
+
+                # Time reached, remove from queue and send
+                self.queue.popleft()
+                self.play_position += self.frame_duration
+                try:
+                    await send_audio_callback(opus_packet)
+                except Exception as e:
+                    self.logger.bind(tag=TAG).error(f"Failed to send audio: {e}")
+                    raise
+
+        # Clear after queue processedEvent
+        self.queue_empty_event.set()
+        self.queue_has_data_event.clear()
+        self._last_queue_empty_time = time.monotonic()  # Record queue clear time
+
+    def start_sending(self, send_audio_callback):
+        """
+        Start async send task
+
+        Args:
+            send_audio_callback: callback function for sending audio
+
+        Returns:
+            asyncio.Task: send task
+        """
+
+        async def _send_loop():
+            try:
+                while True:
+                    # Wait queue dataEvent, no polling wait occupyingCPU
+                    await self.queue_has_data_event.wait()
+
+                    await self.check_queue(send_audio_callback)
+            except asyncio.CancelledError:
+                self.logger.bind(tag=TAG).debug("Audio sending loop stopped")
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"Audio send loop exception: {e}")
+
+        self.pending_send_task = asyncio.create_task(_send_loop())
+        return self.pending_send_task
+
+    def stop_sending(self):
+        """Stop sending task"""
+        if self.pending_send_task and not self.pending_send_task.done():
+            self.pending_send_task.cancel()
+            self.logger.bind(tag=TAG).debug("Audio sending task canceled")
+
+    async def stop_sending_and_wait(self):
+        """Stop sending task and retrieve cancellation before loop shutdown."""
+        task = self.pending_send_task
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+            self.logger.bind(tag=TAG).debug("Audio sending task canceled")
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.pending_send_task is task:
+                self.pending_send_task = None

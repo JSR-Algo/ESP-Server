@@ -88,12 +88,12 @@ export default {
   },
   computed: {
     isTypeDisabled() {
-      // 如果有id，说明是编辑模式，禁用类型选择
+      // If hasidIndicates edit mode, disable type selection
       return !!this.form.id
     }
   },
   created() {
-    // 移除 getDictDataByType 调用
+    // Remove getDictDataByType Call
   },
   watch: {
     visible(val) {
@@ -104,7 +104,7 @@ export default {
     },
   },
   methods: {
-    // 移除 getFirmwareTypes 方法
+    // Remove getFirmwareTypes Method
     handleClose() {
       this.dialogVisible = false;
       this.$emit('cancel');
@@ -116,12 +116,12 @@ export default {
     handleSubmit() {
       this.$refs.form.validate(valid => {
         if (valid) {
-          // 如果是新增模式且没有上传文件，则提示错误
+          // If add mode and no file uploaded, show error
           if (!this.form.id && !this.form.firmwarePath) {
             this.$message.error(this.$t('firmwareDialog.requiredFirmwareFile'))
             return
           }
-          // 提交成功后将关闭对话框的逻辑交给父组件处理
+          // After submit succeeds, leave dialog close logic to parent component
           this.$emit('submit', this.form)
         }
       })
@@ -146,15 +146,15 @@ export default {
       this.uploadStatus = ''
       this.isUploading = true
 
-      // 使用setTimeout实现简单的0-50%过渡
+      // UsesetTimeoutImplement simple0-50%Transition
       const timer = setTimeout(() => {
-        if (this.uploadProgress < 50) {  // 只有当进度小于50%时才设置
+        if (this.uploadProgress < 50) {  // Only when progress less than50%Set only when
           this.uploadProgress = 50
         }
       }, 1000)
 
       Api.ota.uploadFirmware(file, (res) => {
-        clearTimeout(timer)  // 清除定时器
+        clearTimeout(timer)  // Clear timer
         res = res.data
         if (res.code === 0) {
           this.form.firmwarePath = res.data
@@ -162,7 +162,7 @@ export default {
           this.uploadProgress = 100
           this.uploadStatus = 'success'
           this.$message.success(this.$t('firmwareDialog.uploadSuccess'))
-          // 延迟2秒后隐藏进度条
+          // Delay2Hide progress bar after seconds
           setTimeout(() => {
             this.isUploading = false
           }, 2000)
@@ -174,11 +174,11 @@ export default {
       }, (progressEvent) => {
         if (progressEvent.total) {
           const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total)
-          // 只有当进度大于50%时才更新
+          // Only when progress greater than50%Update only when
           if (progress > 50) {
             this.uploadProgress = progress
           }
-          // 如果上传完成但还没收到成功响应，保持进度条显示
+          // If upload complete but success response not received, keep progress bar displayed
           if (progress === 100) {
             this.uploadStatus = ''
           }
@@ -193,16 +193,16 @@ export default {
       this.isUploading = false
     },
     handleOpen() {
-      // 重置上传相关状态
+      // Reset upload-related state
       this.uploadProgress = 0
       this.uploadStatus = ''
       this.isUploading = false
-      // 重置表单中的文件相关字段
-      if (!this.form.id) {  // 只在新增时重置
+      // Reset file-related fields in form
+      if (!this.form.id) {  // Reset only on add
         this.form.firmwarePath = ''
         this.form.size = 0
       }
-      // 无论是否编辑模式，都重置上传组件
+      // Reset upload component regardless of edit mode
       this.$nextTick(() => {
         if (this.$refs.upload) {
           this.$refs.upload.clearFiles()

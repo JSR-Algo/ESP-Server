@@ -45,7 +45,7 @@ conda install conda-forge::ffmpeg
 | Intent(意图识别) | function_call(函数调用) | function_call(函数调用) |
 | Memory(记忆功能) | mem_local_short(本地短期记忆） | mem_local_short（本地短期记忆） |
 
-如果您关心各组件的耗时，请查阅[小智各组件性能测试报告](https://github.com/xinnan-tech/xiaozhi-performance-research)，可按报告中的测试方法在您的环境中实际测试。
+如果您关心各组件的耗时，请查阅[小智各组件性能测试报告](https://github.com/xinnan-tech/tbot-performance-research)，可按报告中的测试方法在您的环境中实际测试。
 
 ### 6、我说话很慢，停顿时小智老是抢话 🗣️
 
@@ -64,7 +64,7 @@ VAD:
 2、[如何进行全模块部署](./Deployment_all.md)<br/>
 3、[如何部署MQTT网关开启MQTT+UDP协议](./mqtt-gateway-integration.md)<br/>
 4、[如何自动拉取本项目最新代码自动编译和启动](./dev-ops-integration.md)<br/>
-5、[如何与Nginx集成](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/791)<br/>
+5、[如何与Nginx集成](https://github.com/xinnan-tech/tbot-esp32-server/issues/791)<br/>
 
 ### 9、编译固件相关教程
 1、[如何自己编译小智固件](./firmware-build.md)<br/>
@@ -93,8 +93,8 @@ VAD:
 
 ### 12、性能测试教程
 1、[各组件速度测试指南](./performance_tester.md)<br/>
-2、[定期公开测试结果](https://github.com/xinnan-tech/xiaozhi-performance-research)<br/>
+2、[定期公开测试结果](https://github.com/xinnan-tech/tbot-performance-research)<br/>
 
 ### 13、更多问题，可联系我们反馈 💬
 
-可以在[issues](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues)提交您的问题。
+可以在[issues](https://github.com/xinnan-tech/tbot-esp32-server/issues)提交您的问题。

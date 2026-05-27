@@ -157,7 +157,7 @@ export default {
           mobile: this.searchPhone,
         },
         ({ data }) => {
-          this.loading = false; // 结束加载
+          this.loading = false; // End loading
           if (data.code === 0) {
             this.userList = data.data.list.map(item => ({
               ...item,
@@ -259,7 +259,7 @@ export default {
       }).then(() => {
         Api.admin.resetUserPassword(row.userid, ({ data }) => {
           if (data.code === 0) {
-            // 显示生成的默认密码
+            // Show generated default password
             this.$alert(this.$t('user.resetPasswordSuccess') + '\n\n' + this.$t('user.generatedPassword') + ': ' + data.data, this.$t('common.success'), {
               confirmButtonText: this.$t('common.confirm'),
               dangerouslyUseHTMLString: true
@@ -312,7 +312,7 @@ export default {
       this.fetchUsers();
     },
     handleChangeStatus(row, status) {
-      // 处理单个用户或用户数组
+      // Handle single user or user array
       const users = Array.isArray(row) ? row : [row];
       const actionText = status === 0 ? this.$t('user.disable') : this.$t('user.enable');
       const userCount = users.length;
@@ -334,7 +334,7 @@ export default {
               message: this.$t('user.statusChangeSuccess', { action: actionText, count: userCount }),
               showClose: true
             });
-            this.fetchUsers(); // 刷新用户列表
+            this.fetchUsers(); // Refresh user list
           } else {
             this.$message.error({
               message: this.$t('user.operationFailed'),
@@ -343,10 +343,10 @@ export default {
           }
         });
       }).catch(() => {
-        // 用户取消操作
+        // User canceled operation
       });
     },
-    // 这个方法已被batchDelete替代，保留用于向后兼容
+    // This method has beenbatchDeletereplacement, kept for backward compatibility
     handleBatchDelete() {
       this.batchDelete();
     },
@@ -381,7 +381,7 @@ export default {
 }
 
 .main-wrapper {
-  // 顶部 63px 底部 35px 查询72px
+  // Top 63px Bottom 35px Query72px
   height: calc(100vh - 63px - 35px - 72px);
   margin: 0 22px;
   border-radius: 15px;

@@ -9,34 +9,18 @@ import ptBR from './pt_BR';
 
 Vue.use(VueI18n);
 
-// 从本地存储获取语言设置，如果没有则使用浏览器语言或默认语言
+// Always default to English; respect explicit user override via localStorage.
 const getDefaultLanguage = () => {
   const savedLang = localStorage.getItem('userLanguage');
   if (savedLang) {
     return savedLang;
-  }
-  const browserLang = navigator.language || navigator.userLanguage;
-  if (browserLang.indexOf('zh') === 0) {
-    if (browserLang === 'zh-TW' || browserLang === 'zh-HK' || browserLang === 'zh-MO') {
-      return 'zh_TW';
-    }
-    return 'zh_CN';
-  }
-  if (browserLang.indexOf('de') === 0) {
-    return 'de';
-  }
-  if (browserLang.indexOf('vi') === 0) {
-    return 'vi';
-  }
-  if (browserLang === 'pt-BR' || browserLang === 'pt') {
-    return 'pt_BR';
   }
   return 'en';
 };
 
 const i18n = new VueI18n({
   locale: getDefaultLanguage(),
-  fallbackLocale: 'zh_CN',
+  fallbackLocale: 'en',
   messages: {
     'zh_CN': zhCN,
     'zh_TW': zhTW,
@@ -49,10 +33,10 @@ const i18n = new VueI18n({
 
 export default i18n;
 
-// 提供一个方法来切换语言
+// Provide method to switch language
 export const changeLanguage = (lang) => {
   i18n.locale = lang;
   localStorage.setItem('userLanguage', lang);
-  // 通知组件语言已更改
+  // Notify component language changed
   Vue.prototype.$eventBus.$emit('languageChanged', lang);
 };

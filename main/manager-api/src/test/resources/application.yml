@@ -18,5 +18,5 @@ renren:
 
 logging:
   level:
-    xiaozhi.modules.device: DEBUG
+    tbot.modules.device: DEBUG
     org.springframework.data.redis: DEBUG 

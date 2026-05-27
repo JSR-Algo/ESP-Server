@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useToast } from 'wot-design-uni'
+import { useToast } from 'wot-design-uni/components/wd-toast'
 import { t } from '@/i18n'
 
 // 类型定义
@@ -542,10 +542,10 @@ async function stopAudio() {
             2. {{ t('deviceConfig.clickGenerateAndPlaySoundWave') }}
           </text>
           <text class="help-item">
-            3. {{ t('deviceConfig.bringPhoneCloseToXiaozhiDevice') }}
+            3. {{ t('deviceConfig.bringPhoneCloseToTbotDevice') }}
           </text>
           <text class="help-item">
-            4. {{ t('deviceConfig.duringAudioPlaybackXiaozhiWillReceive') }}
+            4. {{ t('deviceConfig.duringAudioPlaybackTbotWillReceive') }}
           </text>
           <text class="help-item">
             5. {{ t('deviceConfig.afterConfigSuccessDeviceWillConnect') }}

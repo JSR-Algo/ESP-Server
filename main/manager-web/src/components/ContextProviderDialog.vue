@@ -149,7 +149,7 @@ export default {
   },
   methods: {
     initLocalData() {
-      // 深拷贝并将 headers 对象转换为数组
+      // Deep copy and set headers Object convert to array
       this.localProviders = this.providers.map(p => {
         const headers = p.headers || {};
         return {
@@ -158,7 +158,7 @@ export default {
         };
       });
       
-      // 如果为空，添加一个默认块
+      // If empty, add default block
       if (this.localProviders.length === 0) {
          this.localProviders.push({ url: '', headers: [{ key: '', value: '' }] });
       }
@@ -230,7 +230,7 @@ export default {
   flex: 1;
   border-radius: 12px;
   border: 1px solid #e4e7ed;
-  border-left: 4px solid #409EFF; /* 左侧强调色 */
+  border-left: 4px solid #409EFF; /* Left accent color */
   background-color: #fff;
   transition: all 0.3s ease;
   box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
@@ -261,7 +261,7 @@ export default {
   text-align: right;
   font-size: 13px;
   white-space: nowrap;
-  line-height: 32px; /* 垂直居中对齐 */
+  line-height: 32px; /* Vertical center align */
 }
 
 .flex-1 {

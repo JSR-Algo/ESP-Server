@@ -16,10 +16,10 @@
       </div>
     </div>
     <div class="device-name">
-      {{ $t('home.languageModel') }}：{{ device.llmModelName }}
+      {{ $t('home.languageModel') }}:{{ device.llmModelName }}
     </div>
     <div class="device-name">
-      {{ $t('home.voiceModel') }}：{{ device.ttsModelName }} ({{ device.ttsVoiceName }})
+      {{ $t('home.voiceModel') }}:{{ device.ttsModelName }} ({{ device.ttsVoiceName }})
     </div>
     <div style="display: flex;gap: 10px;align-items: center;">
       <div class="settings-btn" @click="handleConfigure">
@@ -40,7 +40,7 @@
       </div>
     </div>
     <div class="version-info">
-      <div>{{ $t('home.lastConversation') }}：{{ formattedLastConnectedTime }}</div>
+      <div>{{ $t('home.lastConversation') }}:{{ formattedLastConnectedTime }}</div>
       <el-tooltip :content="tags.join()" placement="top" effect="light">
         <div class="version-info-scroll">
           {{ tags.join() }}

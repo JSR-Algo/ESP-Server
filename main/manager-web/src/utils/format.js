@@ -1,4 +1,4 @@
-// 日期格式化函数
+// Date formatting function
 export function formatDate(date) {
   if (!date) return '';
   const d = new Date(date);
@@ -11,7 +11,7 @@ export function formatDate(date) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-// 文件大小格式化函数
+// File size format function
 export function formatFileSize(bytes) {
   if (!bytes || bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

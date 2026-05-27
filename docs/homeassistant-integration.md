@@ -47,13 +47,13 @@ http://homeassistant.local:8123
 
 ### 功能描述
 
-- 如您后续需要增加新的设备，该方法需要手动重启`xiaozhi-esp32-server服务端`以此更新设备信息**（重要**）。
+- 如您后续需要增加新的设备，该方法需要手动重启`tbot-esp32-server服务端`以此更新设备信息**（重要**）。
 
 - 需要您确保已经在HomeAssistant中集成`Xiaomi Home`，并将米家的设备导入进`HomeAssistant`。
 
-- 需要您确保`xiaozhi-esp32-server智控台`能正常使用。
+- 需要您确保`tbot-esp32-server智控台`能正常使用。
 
-- 我的`xiaozhi-esp32-server智控台`和`HomeAssistant`部署在同一台机器的另一个端口，版本是`0.3.10`
+- 我的`tbot-esp32-server智控台`和`HomeAssistant`部署在同一台机器的另一个端口，版本是`0.3.10`
 
   ```
   http://192.168.4.7:8002
@@ -142,9 +142,9 @@ http://homeassistant.local:8123
 
 ![image-20250504044046466](images/image-ha-integration-05.png)
 
-6. 切换到小智开源服务端`xiaozhi-esp32-server`的`config.yaml`文件内，在LLM配置中，找到Home Assistant，设置您的Home Assistant的网络地址，Api key和刚刚查询到的agent_id。
+6. 切换到小智开源服务端`tbot-esp32-server`的`config.yaml`文件内，在LLM配置中，找到Home Assistant，设置您的Home Assistant的网络地址，Api key和刚刚查询到的agent_id。
 7. 修改`config.yaml`文件内的`selected_module`属性的`LLM`为`HomeAssistant`，`Intent`为`nointent`。
-8. 重启小智开源服务端`xiaozhi-esp32-server`即可正常使用。
+8. 重启小智开源服务端`tbot-esp32-server`即可正常使用。
 
 ## 方法3：使用Home Assistant的MCP服务（推荐）
 
@@ -152,7 +152,7 @@ http://homeassistant.local:8123
 
 - 需要您提前在Home Assistant内集成并安装好HA集成——[Model Context Protocol Server](https://www.home-assistant.io/integrations/mcp_server/)。
 
-- 这个方法与方法2都是HA官方提供的解决方法，与方法2不同的是，您可以正常使用小智开源服务端`xiaozhi-esp32-server`的开源共建的插件，同时允许您随意使用任何一个支持function_call功能的LLM大模型。
+- 这个方法与方法2都是HA官方提供的解决方法，与方法2不同的是，您可以正常使用小智开源服务端`tbot-esp32-server`的开源共建的插件，同时允许您随意使用任何一个支持function_call功能的LLM大模型。
 
 ### 配置步骤
 
@@ -176,8 +176,8 @@ http://homeassistant.local:8123
 进入`data`目录，找到`.mcp_server_settings.json`文件。
 
 如果你的`data`目录下没有`.mcp_server_settings.json`文件，
-- 请把在`xiaozhi-server`文件夹根目录的`mcp_server_settings.json`文件复制到`data`目录下，并重命名为`.mcp_server_settings.json`
-- 或[下载这个文件](https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/main/xiaozhi-server/mcp_server_settings.json)，下载到`data`目录下，并重命名为`.mcp_server_settings.json`
+- 请把在`tbot-server`文件夹根目录的`mcp_server_settings.json`文件复制到`data`目录下，并重命名为`.mcp_server_settings.json`
+- 或[下载这个文件](https://github.com/xinnan-tech/tbot-esp32-server/blob/main/main/tbot-server/mcp_server_settings.json)，下载到`data`目录下，并重命名为`.mcp_server_settings.json`
 
 
 修改`"mcpServers"`里的这部分的内容：
@@ -221,6 +221,6 @@ http://homeassistant.local:8123
 
 1. **选择任意一款支持function_call的LLM大模型作为小智的LLM聊天助手（但不要选择Home Assistant作为LLM工具）**，本次我选择的模型是：免费的ChatGLM，它支持functioncall函数调用，但部分时候调用不太稳定，如果像追求稳定建议把LLM设置成：DoubaoLLM，使用的具体model_name是：doubao-1-5-pro-32k-250115。
 
-2. 切换到小智开源服务端`xiaozhi-esp32-server`的`config.yaml`文件内，设置您的LLM大模型配置，并且将`selected_module`配置的`Intent`调整为`function_call`。
+2. 切换到小智开源服务端`tbot-esp32-server`的`config.yaml`文件内，设置您的LLM大模型配置，并且将`selected_module`配置的`Intent`调整为`function_call`。
 
-3. 重启小智开源服务端`xiaozhi-esp32-server`即可正常使用。
+3. 重启小智开源服务端`tbot-esp32-server`即可正常使用。

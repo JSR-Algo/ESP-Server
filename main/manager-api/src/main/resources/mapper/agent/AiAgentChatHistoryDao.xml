@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="xiaozhi.modules.agent.dao.AiAgentChatHistoryDao">
-  <resultMap id="BaseResultMap" type="xiaozhi.modules.agent.entity.AgentChatHistoryEntity">
+<mapper namespace="tbot.modules.agent.dao.AiAgentChatHistoryDao">
+  <resultMap id="BaseResultMap" type="tbot.modules.agent.entity.AgentChatHistoryEntity">
     <!--@mbg.generated-->
     <!--@Table ai_agent_chat_history-->
     <id column="id" jdbcType="BIGINT" property="id" />

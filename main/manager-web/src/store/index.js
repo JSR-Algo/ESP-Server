@@ -9,8 +9,8 @@ Vue.use(Vuex)
 export default new Vuex.Store({
   state: {
     token: '',
-    userInfo: {}, // 添加用户信息存储
-    pubConfig: { // 添加公共配置存储
+    userInfo: {}, // Add user info storage
+    pubConfig: { // Add common config storage
       version: '',
       beianIcpNum: 'null',
       beianGaNum: 'null',
@@ -53,14 +53,14 @@ export default new Vuex.Store({
     }
   },
   actions: {
-    // 添加 logout action
+    // Add logout action
     logout({ commit }) {
       return new Promise((resolve) => {
         commit('clearAuth')
         goToPage(Constant.PAGE.LOGIN, true);
       })
     },
-    // 添加获取公共配置的 action
+    // Add get public config action
     fetchPubConfig({ commit }) {
       return new Promise((resolve) => {
         Api.user.getPubConfig(({ data }) => {

@@ -6,7 +6,7 @@ export default {
   'login.requiredMobile': 'Please enter a valid mobile phone number',
   'login.loginSuccess': 'Login successful!',
 
-  // HeaderBar组件文本
+  // HeaderBarComponent text
   'header.smartManagement': 'Agents',
   'header.modelConfig': 'Models',
   'header.knowledgeBase': 'Knowledge',
@@ -17,7 +17,7 @@ export default {
   'header.paramDictionary': 'More',
   'header.paramManagement': 'Params Management',
   'header.dictManagement': 'Dict Management',
-  'header.agentTemplate': 'Default Role Templates', // 添加这一行
+  'header.agentTemplate': 'Default Role Templates', // Add this line
   'header.searchHistory': 'Search History',
   'header.clearHistory': 'Clear History',
   'header.providerManagement': 'Provider Management',
@@ -31,10 +31,10 @@ export default {
   // McpToolCallDialog component text
   'mcpToolCall.title': 'Tool Call',
   'mcpToolCall.execute': 'Execute',
-  'mcpToolCall.chooseFunction': '1、Choose Function',
+  'mcpToolCall.chooseFunction': '1,Choose Function',
   'mcpToolCall.searchFunction': 'Search Function',
   'mcpToolCall.noResults': 'No matching functions found',
-  'mcpToolCall.settings': '2、Parameter Settings',
+  'mcpToolCall.settings': '2,Parameter Settings',
   'mcpToolCall.inputPlaceholder': 'Please enter {label}',
   'mcpToolCall.valueRange': 'Value range: {min} - {max}',
   'mcpToolCall.selectPlaceholder': 'Please select {label}',
@@ -46,7 +46,7 @@ export default {
   'mcpToolCall.minValue': 'Minimum value is {value}',
   'mcpToolCall.maxValue': 'Maximum value is {value}',
   'mcpToolCall.selectTool': 'Please select a tool to execute',
-  'mcpToolCall.executionResult': '3、Execution Result',
+  'mcpToolCall.executionResult': '3,Execution Result',
   'mcpToolCall.copyResult': 'Copy Result',
   'mcpToolCall.noResultYet': 'No result yet',
   'mcpToolCall.loadingToolList': 'Loading tool list...',
@@ -204,7 +204,7 @@ export default {
   'firmwareDialog.firmwareFile': 'Firmware File',
   'firmwareDialog.clickUpload': 'Click to Upload',
   'firmwareDialog.uploadTip': 'Only firmware files (.bin/.apk) are supported, and size should not exceed 100MB',
-  'firmwareDialog.uploadHint': 'Warm reminder: Please upload the pre-merged xiaozhi.bin file, not the merged merged-binary.bin file',
+  'firmwareDialog.uploadHint': 'Warm reminder: Please upload the pre-merged firmware.bin file, not the merged merged-binary.bin file',
   'firmwareDialog.remark': 'Remark',
   'firmwareDialog.remarkPlaceholder': 'Please enter remark information',
   'firmwareDialog.requiredFirmwareName': 'Please enter firmware name (board + version)',
@@ -298,7 +298,7 @@ export default {
 
   // Register page related
   'register.title': 'Create Account',
-  'register.welcome': 'Welcome to XiaoZhi AI',
+  'register.welcome': 'Welcome to TBOT',
   'register.usernamePlaceholder': 'Please enter username',
   'register.mobilePlaceholder': 'Please enter mobile phone number',
   'register.captchaPlaceholder': 'Please enter captcha',
@@ -582,7 +582,7 @@ export default {
   'button.close': 'Close',
 
   // System information
-  'system.name': 'XiaoZhi Service',
+  'system.name': 'TBOT Service',
 
   // Voiceprint related
   'voiceprint.management': 'Voiceprint Management',
@@ -706,8 +706,8 @@ export default {
   'common.loading': 'Loading',
 
   // Language switch
-  'language.zhCN': '中文简体',
-  'language.zhTW': '中文繁體',
+  'language.zhCN': 'Simplified Chinese',
+  'language.zhTW': 'Traditional Chinese',
   'language.en': 'English',
   'language.de': 'Deutsch',
   'language.vi': 'Tiếng Việt',
@@ -715,7 +715,7 @@ export default {
 
   // Home page text
   'home.addAgent': 'Add Agent',
-  'home.greeting': 'Hi XiaoZhi',
+  'home.greeting': 'Hi TBOT',
   'home.wish': "Let's have a wonderful day!",
   'home.languageModel': 'LLM',
   'home.voiceModel': 'TTS',
@@ -763,7 +763,7 @@ export default {
   'paramManagement.deleteFailed': 'Deletion failed, please try again',
   'paramManagement.operationCancelled': 'Deletion cancelled',
   'paramManagement.operationClosed': 'Operation closed',
-  'paramManagement.updateSuccess': 'Update successful. Some configurations will take effect only after restarting the xiaozhi-server module.',
+  'paramManagement.updateSuccess': 'Update successful. Some configurations will take effect only after restarting the TBOT server.',
   'paramManagement.addSuccess': 'Add successful',
   'paramManagement.updateFailed': 'Update failed',
   'paramManagement.addFailed': 'Add failed',
@@ -813,6 +813,27 @@ export default {
   'roleConfig.memoryHis': 'Memory',
   'roleConfig.memory': 'Memory Model',
   'roleConfig.intent': 'Intent Recognition',
+  'roleConfig.voiceMode': 'Voice Mode',
+  'roleConfig.classicPipeline': 'Classic Pipeline',
+  'roleConfig.googleLiveApi': 'Google Live API',
+  'roleConfig.googleLiveApiKey': 'Google Live API Key',
+  'roleConfig.googleLiveModel': 'Google Live Model',
+  'roleConfig.googleLiveVoiceName': 'Google Live Voice Name',
+  'roleConfig.googleLiveConnectTimeoutSec': 'Connect Timeout (sec)',
+  'roleConfig.googleLiveRecvTimeoutSec': 'Receive Timeout (sec)',
+  'roleConfig.googleLiveInputFlushDelaySec': 'Input Flush Delay (sec)',
+  'roleConfig.googleLiveInputSampleRate': 'Input Sample Rate (Hz)',
+  'roleConfig.googleLiveOutputSampleRate': 'Output Sample Rate (Hz)',
+  'roleConfig.googleLiveEnableAudioInput': 'Enable Audio Input',
+  'roleConfig.googleLiveEnableAudioOutput': 'Enable Audio Output',
+  'roleConfig.googleLiveNativeVoice': 'Native Voice',
+  'roleConfig.googleLiveBargeIn': 'Enable Barge-In',
+  'roleConfig.googleLiveSendTranscriptEvents': 'Send Transcript Events',
+  'roleConfig.googleLiveSendLlmStateEvents': 'Send LLM State Events',
+  'roleConfig.googleLiveReconnectEnabled': 'Enable Reconnect',
+  'roleConfig.googleLiveReconnectMaxRetries': 'Reconnect Max Retries',
+  'roleConfig.googleLiveReconnectBackoffMs': 'Reconnect Backoff (ms)',
+  'roleConfig.googleLiveFallback': 'Fallback To Classic On Error',
   'roleConfig.language': 'Select Language',
   'roleConfig.selectLanguage': 'Please select language',
   'roleConfig.voiceType': 'Voice Type',
@@ -858,7 +879,8 @@ export default {
   // Form field Tooltip descriptions
   'roleConfig.tooltip.agentName': 'Set the name of your AI agent for identification and recognition',
   'roleConfig.tooltip.roleTemplate': 'Choose from preset role templates to quickly configure your agent\'s basic settings',
-  'roleConfig.tooltip.contextProvider': 'When XiaoZhi is awakened, fetch external system data and dynamically inject it into the LLM system prompt',
+  'roleConfig.tooltip.voiceMode': 'Choose between the existing classic pipeline and the Google Live streaming provider',
+  'roleConfig.tooltip.contextProvider': 'When TBOT is awakened, fetch external system data and dynamically inject it into the LLM system prompt',
   'roleConfig.tooltip.roleIntroduction': 'Define the AI agent\'s role positioning, personality traits, behavioral norms, and professional knowledge background',
   'roleConfig.tooltip.memoryHis': 'Summarize chat record content',
   'roleConfig.tooltip.languageCode': 'Set language code such as zh-CN, en-US, etc., used for specific feature recognition',
@@ -947,7 +969,7 @@ export default {
   'modelConfig.enableSuccess': 'Enable successful',
   'modelConfig.disableSuccess': 'Disable successful',
   'modelConfig.operationFailed': 'Operation failed',
-  'modelConfig.setDefaultSuccess': 'Set default model successful, please restart the xiaozhi-server module manually in time',
+  'modelConfig.setDefaultSuccess': 'Set default model successful, please restart the TBOT server manually in time',
   'modelConfig.itemsPerPage': '{items} items/page',
   'modelConfig.firstPage': 'First Page',
   'modelConfig.prevPage': 'Previous Page',

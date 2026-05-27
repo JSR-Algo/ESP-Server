@@ -1,0 +1,154 @@
+package tbot.modules.sys.service.impl;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+
+import lombok.AllArgsConstructor;
+import tbot.common.exception.RenException;
+import tbot.common.exception.ErrorCode;
+import tbot.common.page.PageData;
+import tbot.common.service.impl.BaseServiceImpl;
+import tbot.common.utils.ConvertUtils;
+import tbot.modules.sys.dao.SysDictTypeDao;
+import tbot.modules.sys.dao.SysUserDao;
+import tbot.modules.sys.dto.SysDictTypeDTO;
+import tbot.modules.sys.entity.SysDictTypeEntity;
+import tbot.modules.sys.entity.SysUserEntity;
+import tbot.modules.sys.service.SysDictDataService;
+import tbot.modules.sys.service.SysDictTypeService;
+import tbot.modules.sys.vo.SysDictTypeVO;
+
+/**
+ * Dictionary Type
+ */
+@Service
+@AllArgsConstructor
+public class SysDictTypeServiceImpl extends BaseServiceImpl<SysDictTypeDao, SysDictTypeEntity>
+        implements SysDictTypeService {
+    private final SysUserDao sysUserDao;
+    private final SysDictDataService sysDictDataService;
+
+    @Override
+    public PageData<SysDictTypeVO> page(Map<String, Object> params) {
+        IPage<SysDictTypeEntity> page = baseDao.selectPage(getPage(params, "sort", true), getWrapper(params));
+
+        PageData<SysDictTypeVO> pageData = getPageData(page, SysDictTypeVO.class);
+
+        setUserName(pageData.getList());
+
+        return pageData;
+    }
+
+    private QueryWrapper<SysDictTypeEntity> getWrapper(Map<String, Object> params) {
+        String dictType = (String) params.get("dictType");
+        String dictName = (String) params.get("dictName");
+
+        QueryWrapper<SysDictTypeEntity> wrapper = new QueryWrapper<>();
+        wrapper.like(StringUtils.isNotBlank(dictType), "dict_type", dictType);
+        wrapper.like(StringUtils.isNotBlank(dictName), "dict_name", dictName);
+
+        return wrapper;
+    }
+
+    @Override
+    public SysDictTypeVO get(Long id) {
+        SysDictTypeEntity entity = baseDao.selectById(id);
+        if (entity == null) {
+            throw new RenException(ErrorCode.DICT_TYPE_NOT_EXIST);
+        }
+
+        return ConvertUtils.sourceToTarget(entity, SysDictTypeVO.class);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void save(SysDictTypeDTO dto) {
+        // Dictionary type code cannot be duplicate
+        checkDictTypeUnique(dto.getDictType(), null);
+
+        SysDictTypeEntity entity = ConvertUtils.sourceToTarget(dto, SysDictTypeEntity.class);
+
+        insert(entity);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void update(SysDictTypeDTO dto) {
+        // Dictionary type code cannot be duplicate
+        checkDictTypeUnique(dto.getDictType(), String.valueOf(dto.getId()));
+
+        SysDictTypeEntity entity = ConvertUtils.sourceToTarget(dto, SysDictTypeEntity.class);
+
+        updateById(entity);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void delete(Long[] ids) {
+        // Delete corresponding dictionary data first
+        for (Long id : ids) {
+            sysDictDataService.deleteByTypeId(id);
+        }
+        // Then delete dictionary type
+        deleteBatchIds(Arrays.asList(ids));
+    }
+
+    @Override
+    public List<SysDictTypeVO> list(Map<String, Object> params) {
+        List<SysDictTypeEntity> entityList = baseDao.selectList(getWrapper(params));
+        List<SysDictTypeVO> sysDictTypeVOList = ConvertUtils.sourceToTarget(entityList, SysDictTypeVO.class);
+        // Set username
+        setUserName(sysDictTypeVOList);
+
+        return sysDictTypeVOList;
+    }
+
+    /**
+     * Set username
+     *
+     * @param sysDictTypeList Dict type collection
+     */
+    private void setUserName(List<SysDictTypeVO> sysDictTypeList) {
+        // Collect all users ID
+        Set<Long> userIds = sysDictTypeList.stream().flatMap(vo -> Stream.of(vo.getCreator(), vo.getUpdater()))
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+
+        // Set updater and creator names
+        if (!userIds.isEmpty()) {
+            List<SysUserEntity> sysUserEntities = sysUserDao.selectBatchIds(userIds);
+            // putListConvert toMap,Map<Long, String>
+            Map<Long, String> userNameMap = sysUserEntities.stream().collect(Collectors.toMap(SysUserEntity::getId,
+                    SysUserEntity::getUsername, (existing, replacement) -> existing));
+
+            sysDictTypeList.forEach(vo -> {
+                vo.setCreatorName(userNameMap.get(vo.getCreator()));
+                vo.setUpdaterName(userNameMap.get(vo.getUpdater()));
+            });
+        }
+    }
+
+    private void checkDictTypeUnique(String dictType, String excludeId) {
+        LambdaQueryWrapper<SysDictTypeEntity> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(SysDictTypeEntity::getDictType, dictType);
+        if (StringUtils.isNotBlank(excludeId)) {
+            queryWrapper.ne(SysDictTypeEntity::getId, excludeId);
+        }
+        boolean exists = baseDao.exists(queryWrapper);
+        if (exists) {
+            throw new RenException(ErrorCode.DICT_TYPE_DUPLICATE);
+        }
+    }
+}

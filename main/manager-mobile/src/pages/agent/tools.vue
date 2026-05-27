@@ -9,7 +9,7 @@
 </route>
 
 <script lang="ts" setup>
-import { useMessage } from 'wot-design-uni'
+import { useMessage } from 'wot-design-uni/components/wd-message-box'
 import { getMcpAddress, getMcpTools } from '@/api/agent/agent'
 import { t } from '@/i18n'
 import { usePluginStore } from '@/store'

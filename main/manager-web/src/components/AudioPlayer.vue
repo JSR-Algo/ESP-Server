@@ -9,7 +9,7 @@
     ></audio>
 
     <div class="custom-controls">
-      <!-- 播放/暂停按钮 -->
+      <!-- Play/Pause button -->
       <button class="play-btn" @click="togglePlay">
         <svg width="20" height="20" viewBox="0 0 20 20">
           <path
@@ -21,10 +21,10 @@
         </svg>
       </button>
 
-      <!-- 时间显示 -->
+      <!-- Time display -->
       <span class="time-display">{{ formattedCurrentTime }}/{{ formattedDuration }}</span>
 
-      <!-- 进度条 -->
+      <!-- Progress bar -->
       <div class="progress-container">
         <div class="progress-bar" @click="handleProgressClick">
           <div
@@ -39,7 +39,7 @@
         </div>
       </div>
 
-      <!-- 音量控制 -->
+      <!-- Volume control -->
       <div class="volume-control" ref="volumeControl">
         <button
           @click="toggleMute"
@@ -85,24 +85,24 @@ const props = defineProps({
   audioUrl: String
 })
 
-// 音频元素引用
+// Audio element ref
 const audioRef = ref(null)
 const volumeButton = ref(null)
 const volumeSlider = ref(null)
 
-// 播放状态
+// PlayStatus
 const isPlaying = ref(false)
 const currentTime = ref(0)
 const duration = ref(0)
 const progress = ref(0)
 
-// 音量状态
+// VolumeStatus
 const volume = ref(0.7)
 const isMuted = ref(false)
 const showVolumeSlider = ref(false)
 let volumeSliderHideTimer = null
 
-// 格式化时间为 MM:SS
+// Format time as MM:SS
 const formatTime = (seconds) => {
   const sec = Math.floor(seconds || 0)
   return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`
@@ -111,7 +111,7 @@ const formatTime = (seconds) => {
 const formattedCurrentTime = computed(() => formatTime(currentTime.value))
 const formattedDuration = computed(() => formatTime(duration.value))
 
-// 根据音量状态返回对应的图标路径
+// By volumeStatusReturn corresponding icon path
 const volumeIconPath = computed(() => {
   if (isMuted.value || volume.value === 0) {
     return 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z'
@@ -119,7 +119,7 @@ const volumeIconPath = computed(() => {
   return 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'
 })
 
-// 播放控制
+// Playback control
 const togglePlay = () => {
   if (isPlaying.value) {
     audioRef.value.pause()
@@ -148,12 +148,12 @@ const handleProgressClick = (e) => {
   seekToPercentage(percentage)
 }
 
-// 音量控制
+// Volume control
 const toggleMute = () => {
   isMuted.value = !isMuted.value
   audioRef.value.muted = isMuted.value
 
-  // 如果取消静音且音量为0，则恢复默认音量
+  // If unmuting and volume is0, restore default volume
   if (!isMuted.value && volume.value === 0) {
     volume.value = 0.5
     audioRef.value.volume = 0.5
@@ -166,7 +166,7 @@ const handleVolumeChange = (e) => {
   isMuted.value = newVolume === 0
 }
 
-// 进度条拖拽功能
+// Progress bar drag feature
 let isDragging = false
 
 const startDrag = (e) => {
@@ -196,7 +196,7 @@ const seekToPercentage = (percentage) => {
   audioRef.value.currentTime = (clampedPercentage / 100) * duration.value
 }
 
-// 音量滑块显示/隐藏控制
+// Volume slider display/Hide control
 const startVolumeSliderHideTimer = () => {
   volumeSliderHideTimer = setTimeout(() => {
     showVolumeSlider.value = false
@@ -207,7 +207,7 @@ const cancelVolumeSliderHideTimer = () => {
   clearTimeout(volumeSliderHideTimer)
 }
 
-// 音量滑块定位
+// Volume slider positioning
 const updateSliderPosition = () => {
   nextTick(() => {
     if (!volumeButton.value || !volumeSlider.value) return
@@ -215,11 +215,11 @@ const updateSliderPosition = () => {
     const buttonRect = volumeButton.value.getBoundingClientRect()
     const slider = volumeSlider.value
 
-    // 计算相对于视口的位置
+    // Calculate position relative to viewport
     const left = buttonRect.left + window.scrollX
     const top = buttonRect.top + window.scrollY
 
-    // 定位到按钮正中间，垂直居中
+    // Position at button center, vertically centered
     slider.style.left = `${left + 5}px`
     slider.style.top = `${top - 85}px`
   })
@@ -230,7 +230,7 @@ const handleVolumeMouseEnter = () => {
   updateSliderPosition()
 }
 
-// 初始化
+// Initialize
 onMounted(() => {
   if (audioRef.value) {
     audioRef.value.volume = volume.value

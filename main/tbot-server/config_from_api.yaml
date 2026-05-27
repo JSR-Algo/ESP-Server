@@ -1,0 +1,20 @@
+# If you only need a lightweight local-config tbot-server install, ignore this file.
+# To fetch config from manager-api, copy this file into tbot-server/data as .config.yaml.
+# If data/.config.yaml already exists, remove it first.
+# Start manager-api and manager-web, then register the first account as the administrator.
+# In Parameter Management, find server.secret and copy its value. It changes on every clean deploy.
+# Set manager-api.secret below to that server.secret value.
+server:
+  ip: 0.0.0.0
+  port: 8000
+  # HTTP service port used by the vision analysis API.
+  http_port: 8003
+  # Vision analysis URL sent to devices. Use a LAN URL for Docker/LAN deploys or a public URL for public deploys.
+  vision_explain: http://your-ip-or-domain:port/mcp/vision/explain
+manager-api:
+  # manager-api URL. Prefer a LAN address. In Docker, use http://tbot-esp32-server-web:8002/tbot.
+  url: http://127.0.0.1:8002/tbot
+  # manager-api token. Use the server.secret value copied from Parameter Management.
+  secret: your-server-secret
+# Default system prompt template file.
+prompt_template: agent-base-prompt.txt

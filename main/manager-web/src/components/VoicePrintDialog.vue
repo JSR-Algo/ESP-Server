@@ -53,7 +53,7 @@ export default {
   props: {
     title: {
       type: String,
-      default: '添加说话人'
+      default: 'Add speaker'
     },
     visible: {
       type: Boolean,
@@ -83,13 +83,13 @@ export default {
       ],
       rules: {
         introduce: [
-          { required: true, message: '请输入描述', trigger: "blur" }
+          { required: true, message: 'Enter description', trigger: "blur" }
         ],
         sourceName: [
-          { required: true, message: '请输入名称', trigger: "blur" }
+          { required: true, message: 'Enter name', trigger: "blur" }
         ],
         audioId: [
-          { required: true, message: '请选择音频向量', trigger: "change" }
+          { required: true, message: 'Select audio vector', trigger: "change" }
         ]
       }
     };
@@ -103,7 +103,7 @@ export default {
     },
     playAudio(audioId) {
       if (this.playingAudioId === audioId) {
-        // 如果正在播放当前音频，则停止播放
+        // If current audio playing, stop playback
         if (this.audioElement) {
           this.audioElement.pause();
           this.audioElement = null;
@@ -112,17 +112,17 @@ export default {
         return;
       }
 
-      // 停止当前正在播放的音频
+      // Stop currently playing audio
       if (this.audioElement) {
         this.audioElement.pause();
         this.audioElement = null;
       }
 
-      // 先获取音频下载ID
+      // firstGet audio download ID
       this.playingAudioId = audioId;
       api.agent.getAudioId(audioId, (res) => {
         if (res.data && res.data.data) {
-          // 使用获取到的下载ID播放音频
+          // Use obtained downloadIDPlay audio
           this.audioElement = new Audio(api.getServiceUrl() + `/agent/play/${res.data.data}`);
 
           this.audioElement.onended = () => {
@@ -137,11 +137,11 @@ export default {
     submit() {
       this.$refs.form.validate((valid) => {
         if (valid) {
-          this.saving = true; // 开始加载
+          this.saving = true; // Start loading
           this.$emit('submit', {
             form: this.form,
             done: () => {
-              this.saving = false; // 加载完成
+              this.saving = false; // Load complete
             }
           });
 
@@ -152,7 +152,7 @@ export default {
       });
     },
     cancel() {
-      this.saving = false; // 取消时重置状态
+      this.saving = false; // Reset on cancelStatus
       this.dialogKey = Date.now();
       this.$emit('cancel');
     }

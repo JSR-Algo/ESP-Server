@@ -48,7 +48,7 @@ function goBack() {
         </view>
         <view class="mb-[24rpx]">
           <text class="text-[28rpx] text-[#333333] leading-[1.8]">
-            Welcome to use the XiaoZhi Backend Service (hereinafter referred to as "the Service"). The operator of this Service is the actual deployer and administrator of the Service (hereinafter referred to as "Operator" or "we"). We fully understand the importance of your personal information and will do our best to protect your personal information security.
+            Welcome to use the TBot Backend Service (hereinafter referred to as "the Service"). The operator of this Service is the actual deployer and administrator of the Service (hereinafter referred to as "Operator" or "we"). We fully understand the importance of your personal information and will do our best to protect your personal information security.
           </text>
         </view>
         <view class="mb-[24rpx]">
