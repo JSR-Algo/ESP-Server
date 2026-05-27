@@ -1,0 +1,101 @@
+version: "2.4"
+
+services:
+  tbot-esp32-server:
+    image: ${TBOT_SERVER_IMAGE:?set TBOT_SERVER_IMAGE}
+    container_name: tbot-esp32-server
+    restart: unless-stopped
+    depends_on:
+      tbot-esp32-server-db:
+        condition: service_healthy
+      tbot-esp32-server-redis:
+        condition: service_healthy
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    ports:
+      - "${TBOT_WS_PORT:-8000}:8000"
+      - "${TBOT_HTTP_PORT:-8003}:8003"
+    volumes:
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/models:/opt/tbot-esp32-server/models
+    networks:
+      - tbot
+
+  tbot-esp32-server-web:
+    image: ${TBOT_WEB_IMAGE:?set TBOT_WEB_IMAGE}
+    container_name: tbot-esp32-server-web
+    restart: unless-stopped
+    depends_on:
+      tbot-esp32-server-db:
+        condition: service_healthy
+      tbot-esp32-server-redis:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://tbot-esp32-server-db:3306/${MYSQL_DATABASE:-tbot_esp32_server}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE:-Asia/Ho_Chi_Minh}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
+      SPRING_DATASOURCE_DRUID_USERNAME: root
+      SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      SPRING_DATA_REDIS_HOST: tbot-esp32-server-redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      SPRING_DATA_REDIS_PORT: 6379
+    ports:
+      - "${TBOT_ADMIN_PORT:-8002}:8002"
+    volumes:
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
+    networks:
+      - tbot
+
+  tbot-esp32-server-db:
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    container_name: tbot-esp32-server-db
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tbot_esp32_server}
+      MYSQL_INITDB_ARGS: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    expose:
+      - "3306"
+    volumes:
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/mysql/data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p\"$${MYSQL_ROOT_PASSWORD}\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    networks:
+      - tbot
+
+  tbot-esp32-server-redis:
+    image: ${REDIS_IMAGE:-redis:8.0}
+    container_name: tbot-esp32-server-redis
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        fi
+        exec redis-server --appendonly yes
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    expose:
+      - "6379"
+    volumes:
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/redis/data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - tbot
+
+networks:
+  tbot:
+    name: tbot
