@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 224" role="img" aria-label="TBOT logo">
+  <defs>
+    <linearGradient id="tbot-logo-bg" x1="32" y1="28" x2="192" y2="196" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4f6fff"/>
+      <stop offset="0.55" stop-color="#1f9bff"/>
+      <stop offset="1" stop-color="#18d6c8"/>
+    </linearGradient>
+    <filter id="tbot-logo-shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#1b2f6f" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <circle cx="112" cy="112" r="99" fill="url(#tbot-logo-bg)" filter="url(#tbot-logo-shadow)"/>
+  <circle cx="112" cy="112" r="82" fill="none" stroke="#ffffff" stroke-opacity="0.32" stroke-width="8"/>
+  <text x="112" y="123" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="92" font-weight="800" letter-spacing="0" fill="#ffffff">T</text>
+  <text x="112" y="164" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="800" letter-spacing="0" fill="#ffffff">BOT</text>
+</svg>

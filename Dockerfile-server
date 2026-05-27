@@ -1,0 +1,8 @@
+# Runtime image with application code only.
+ARG TBOT_SERVER_BASE_IMAGE=ghcr.io/xinnan-tech/tbot-esp32-server:server-base
+FROM ${TBOT_SERVER_BASE_IMAGE}
+
+COPY main/tbot-server .
+
+# Start the server.
+CMD ["python", "app.py"]

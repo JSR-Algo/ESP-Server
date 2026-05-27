@@ -1,0 +1,6 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /main/tbot-server
+    schedule:
+      interval: weekly

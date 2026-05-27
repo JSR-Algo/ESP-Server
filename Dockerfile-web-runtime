@@ -1,0 +1,23 @@
+FROM bellsoft/liberica-runtime-container:jre-21-glibc
+
+RUN apk update && \
+    apk add --no-cache --no-scripts \
+        nginx \
+        bash \
+        fontconfig \
+        ttf-dejavu \
+    && rm -rf /var/cache/apk/* \
+    && mkdir -p /run/nginx /var/log/nginx /var/tmp/nginx /etc/nginx/conf.d
+
+COPY main/manager-web/public/generator/static/fonts/*.ttf /usr/share/fonts/
+RUN fc-cache -f -v
+
+COPY docs/docker/nginx.conf /etc/nginx/nginx.conf
+COPY main/manager-web/dist /usr/share/nginx/html
+COPY main/manager-api/target/tbot-esp32-api.jar /app/tbot-esp32-api.jar
+
+EXPOSE 8002
+
+COPY docs/docker/start.sh /start.sh
+RUN chmod +x /start.sh
+CMD ["/start.sh"]
