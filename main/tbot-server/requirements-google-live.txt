@@ -20,7 +20,7 @@ requests==2.32.5
 cozepy==0.20.0
 bs4==0.0.2
 mcp==1.22.0
-cnlunar==0.2.0
+cnlunar==0.2.4
 PySocks==1.7.1
 chardet==5.2.0
 aioconsole==0.8.2
