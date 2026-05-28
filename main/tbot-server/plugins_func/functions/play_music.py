@@ -37,9 +37,20 @@ play_music_function_desc = {
 }
 
 
+def _sanitize_song_name(song_name: str) -> str:
+    """Sanitize song name input to prevent command injection."""
+    if not isinstance(song_name, str):
+        song_name = str(song_name) if song_name is not None else ""
+    song_name = song_name.strip()[:200]
+    if any(c in song_name for c in [';', '|', '&', '$', '`', '\\', '<', '>', '\n', '\r']):
+        raise ValueError("Invalid song_name parameter")
+    return song_name
+
+
 @register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
 def play_music(conn: "ConnectionHandler", song_name: str):
     try:
+        song_name = _sanitize_song_name(song_name)
         music_intent = (
             f"Play Music {song_name}" if song_name != "random" else "Play random music"
         )

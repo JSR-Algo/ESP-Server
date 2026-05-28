@@ -23,6 +23,13 @@ interface ImportMetaEnv {
   readonly VITE_UPLOAD_BASEURL: string
   /** 是否清除console */
   readonly VITE_DELETE_CONSOLE: string
+  readonly VITE_SERVER_BASEURL__WEIXIN_DEVELOP: string
+  readonly VITE_SERVER_BASEURL__WEIXIN_TRIAL: string
+  readonly VITE_SERVER_BASEURL__WEIXIN_RELEASE: string
+  readonly VITE_UPLOAD_BASEURL__WEIXIN_DEVELOP: string
+  readonly VITE_UPLOAD_BASEURL__WEIXIN_TRIAL: string
+  readonly VITE_UPLOAD_BASEURL__WEIXIN_RELEASE: string
+  readonly VITE_DEFAULT_AVATAR_URL: string
   // 更多环境变量...
 }
 

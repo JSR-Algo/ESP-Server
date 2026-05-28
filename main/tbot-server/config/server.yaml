@@ -1,0 +1,8 @@
+server:
+  port: 8000
+  auth:
+    enabled: true
+    allowed_devices: []
+    token_expiry_seconds: 86400
+  enable_websocket_ping: true
+  max_connections: 100

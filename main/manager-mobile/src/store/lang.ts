@@ -28,7 +28,14 @@ export const useLangStore = defineStore(
       key: 'lang',
       serializer: {
         serialize: state => JSON.stringify(state.currentLang),
-        deserialize: value => ({ currentLang: JSON.parse(value) }),
+        deserialize: value => {
+          try {
+            return { currentLang: JSON.parse(value) }
+          }
+          catch {
+            return { currentLang: 'zh_CN' as Language }
+          }
+        },
       },
     },
   },

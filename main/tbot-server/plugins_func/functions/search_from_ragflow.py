@@ -25,16 +25,26 @@ SEARCH_FROM_RAGFLOW_FUNCTION_DESC = {
 }
 
 
+def _sanitize_question(question: str) -> str:
+    """Sanitize RAGFlow question input to prevent command injection."""
+    if not isinstance(question, str):
+        question = str(question) if question is not None else ""
+    question = question.strip()[:500]
+    if any(c in question for c in [';', '|', '&', '$', '`', '\\', '<', '>', '\n', '\r']):
+        raise ValueError("Invalid question parameter")
+    return question
+
+
 @register_function(
     "search_from_ragflow", SEARCH_FROM_RAGFLOW_FUNCTION_DESC, ToolType.SYSTEM_CTL
 )
 def search_from_ragflow(conn: "ConnectionHandler", question=None):
     # Ensure string params handle encoding correctly
     if question and isinstance(question, str):
-        # Ensure question param isUTF-8encoded string
-        pass
+        question = _sanitize_question(question)
     else:
         question = str(question) if question is not None else ""
+        question = _sanitize_question(question)
 
     ragflow_config = conn.config.get("plugins", {}).get("search_from_ragflow", {})
     base_url = ragflow_config.get("base_url", "")

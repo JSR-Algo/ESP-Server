@@ -14,6 +14,11 @@ from .device_iot import DeviceIoTExecutor
 from .device_mcp import DeviceMCPExecutor
 from .mcp_endpoint import MCPEndpointExecutor
 from core.handle.sendAudioHandle import send_display_message
+from core.handle.tbotToolHandler import (
+    validate_mcp_tool_call,
+    audit_log_tool_call,
+    check_mcp_rate_limit,
+)
 
 
 class UnifiedToolHandler:
@@ -173,6 +178,34 @@ class UnifiedToolHandler:
                 await send_display_message(self.conn, f"% {function_name}")
             except Exception as e:
                 self.logger.warning(f"Failed to send tool-call display message: {e}")
+
+            # ── MCP security gate ──
+            tool_type = self.tool_manager.get_tool_type(function_name)
+            if tool_type in (ToolType.SERVER_MCP, ToolType.DEVICE_MCP, ToolType.MCP_ENDPOINT):
+                # 1. Rate limit check (per-connection)
+                if hasattr(conn, "_mcp_tool_call_times"):
+                    allowed, updated = check_mcp_rate_limit(conn._mcp_tool_call_times)
+                    conn._mcp_tool_call_times = updated
+                    if not allowed:
+                        self.logger.warning(
+                            f"MCP tool '{function_name}' rejected: rate limit exceeded"
+                        )
+                        return ActionResponse(
+                            action=Action.ERROR,
+                            response="Too many tool calls. Please slow down.",
+                        )
+
+                # 2. Allowlist / blocklist / argument validation
+                allowed, reason = validate_mcp_tool_call(function_name, arguments)
+                if not allowed:
+                    self.logger.warning(
+                        f"MCP tool '{function_name}' rejected: {reason}"
+                    )
+                    return ActionResponse(action=Action.ERROR, response=reason)
+
+                # 3. Audit log
+                device_id = getattr(conn, "device_id", None)
+                audit_log_tool_call(function_name, arguments, device_id)
 
             # Execute tool call
             result = await self.tool_manager.execute_tool(function_name, arguments)

@@ -53,80 +53,7 @@ json_escape() {
 }
 
 write_compose() {
-  local path="$1"
-  cat >"${path}" <<'YAML'
-services:
-  tbot-esp32-server:
-    image: ${TBOT_SERVER_IMAGE}
-    container_name: tbot-esp32-server
-    depends_on:
-      - tbot-esp32-server-db
-      - tbot-esp32-server-redis
-    restart: always
-    ports:
-      - "8000:8000"
-      - "8003:8003"
-    security_opt:
-      - seccomp:unconfined
-    environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-    volumes:
-      - /opt/tbot/data:/opt/tbot-esp32-server/data
-      - /opt/tbot/models/SenseVoiceSmall/model.pt:/opt/tbot-esp32-server/models/SenseVoiceSmall/model.pt
-
-  tbot-esp32-server-web:
-    image: ${TBOT_WEB_IMAGE}
-    container_name: tbot-esp32-server-web
-    restart: always
-    depends_on:
-      tbot-esp32-server-db:
-        condition: service_healthy
-      tbot-esp32-server-redis:
-        condition: service_healthy
-    ports:
-      - "8002:8002"
-    environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://tbot-esp32-server-db:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Ho_Chi_Minh&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
-      SPRING_DATASOURCE_DRUID_USERNAME: ${MYSQL_USER:-root}
-      SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      SPRING_DATA_REDIS_HOST: tbot-esp32-server-redis
-      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      SPRING_DATA_REDIS_PORT: 6379
-    volumes:
-      - /opt/tbot/uploadfile:/uploadfile
-
-  tbot-esp32-server-db:
-    image: mysql:8
-    container_name: tbot-esp32-server-db
-    restart: always
-    expose:
-      - "3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
-      timeout: 45s
-      interval: 10s
-      retries: 10
-    environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-tbot_esp32_server}
-      MYSQL_INITDB_ARGS: "--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
-    volumes:
-      - /opt/tbot/mysql/data:/var/lib/mysql
-
-  tbot-esp32-server-redis:
-    image: redis:8.0
-    container_name: tbot-esp32-server-redis
-    restart: always
-    expose:
-      - "6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-YAML
+  die "docker-compose.prod.yml is missing; cannot generate fallback. Please restore it."
 }
 
 write_env_example() {
@@ -199,11 +126,7 @@ printf 'Saving images to %s\n' "${RELEASE_DIR}"
 docker save "${SERVER_IMAGE}:${TAG}" | gzip -c >"${RELEASE_DIR}/${SERVER_TAR}"
 docker save "${WEB_IMAGE}:${TAG}" | gzip -c >"${RELEASE_DIR}/${WEB_TAR}"
 
-if [[ -f "${SCRIPT_DIR}/docker-compose.prod.yml" ]]; then
-  cp "${SCRIPT_DIR}/docker-compose.prod.yml" "${RELEASE_DIR}/docker-compose.prod.yml"
-else
-  write_compose "${RELEASE_DIR}/docker-compose.prod.yml"
-fi
+cp "${SCRIPT_DIR}/docker-compose.prod.yml" "${RELEASE_DIR}/docker-compose.prod.yml"
 write_env_example "${RELEASE_DIR}/.env.example"
 
 SERVER_SHA="$(checksum_file "${RELEASE_DIR}/${SERVER_TAR}")"

@@ -1,6 +1,22 @@
 version: 2
 updates:
-  - package-ecosystem: pip
-    directory: /main/tbot-server
+  - package-ecosystem: "pip"
+    directory: "/main/tbot-server"
     schedule:
-      interval: weekly
+      interval: "weekly"
+  - package-ecosystem: "maven"
+    directory: "/main/manager-api"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/main/manager-web"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/main/manager-mobile"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

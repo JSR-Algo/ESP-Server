@@ -20,7 +20,14 @@ export const useSpeedPitch = defineStore('speedPitch', () => {
     key: 'speedPitch',
     serializer: {
       serialize: state => JSON.stringify(state.speedPitch),
-      deserialize: value => ({ speedPitch: JSON.parse(value) }),
+      deserialize: value => {
+        try {
+          return { speedPitch: JSON.parse(value) }
+        }
+        catch {
+          return { speedPitch: { ttsVolume: 0, ttsRate: 0, ttsPitch: 0 } }
+        }
+      },
     },
   },
 })

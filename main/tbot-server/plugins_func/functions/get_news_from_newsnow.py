@@ -192,6 +192,16 @@ def fetch_news_detail(url):
         return "Cannot get detailsContent"
 
 
+def _sanitize_source(source: str) -> str:
+    """Sanitize news source input to prevent command injection."""
+    if not isinstance(source, str):
+        source = str(source) if source is not None else ""
+    source = source.strip()[:100]
+    if any(c in source for c in [';', '|', '&', '$', '`', '\\', '<', '>', '\n', '\r']):
+        raise ValueError("Invalid source parameter")
+    return source
+
+
 @register_function(
     "get_news_from_newsnow",
     GET_NEWS_FROM_NEWSNOW_FUNCTION_DESC,
@@ -205,6 +215,7 @@ def get_news_from_newsnow(
 ):
     """Get news and randomly select one to broadcast, or get details of previous news item"""
     try:
+        source = _sanitize_source(source)
         # Get currently configured news sources
         news_sources = get_news_sources_from_config(conn)
 

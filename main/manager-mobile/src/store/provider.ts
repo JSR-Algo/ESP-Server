@@ -17,7 +17,14 @@ export const useProvider = defineStore('provider', () => {
     key: 'providers',
     serializer: {
       serialize: state => JSON.stringify(state.providers),
-      deserialize: value => ({ providers: JSON.parse(value) }),
+      deserialize: value => {
+        try {
+          return { providers: JSON.parse(value) }
+        }
+        catch {
+          return { providers: [] }
+        }
+      },
     },
   },
 })

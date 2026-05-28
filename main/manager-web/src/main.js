@@ -17,6 +17,10 @@ Vue.use(ElementUI);
 
 Vue.config.productionTip = false
 
+Vue.config.errorHandler = (err, vm, info) => {
+  console.error('Vue Global Error:', err, info);
+};
+
 // RegisterService Worker
 registerServiceWorker();
 

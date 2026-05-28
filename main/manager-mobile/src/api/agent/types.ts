@@ -118,5 +118,5 @@ export interface PluginDefinition {
   updateDate: string
   creator: string
   createDate: string
-  [key: string]: any
+  [key: string]: unknown
 }

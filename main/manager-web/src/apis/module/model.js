@@ -93,10 +93,13 @@ export default {
   },
   // GetModel nameList
   getModelNames(modelType, modelName, callback) {
+    const queryParams = new URLSearchParams({
+      modelType: modelType || '',
+      modelName: modelName || ''
+    }).toString();
     RequestService.sendRequest()
-      .url(`${getServiceUrl()}/models/names`)
+      .url(`${getServiceUrl()}/models/names?${queryParams}`)
       .method('GET')
-      .data({ modelType, modelName })
       .success((res) => {
         RequestService.clearRequestTime();
         callback(res);
@@ -109,10 +112,12 @@ export default {
   },
   // GetLLMModel nameList
   getLlmModelCodeList(modelName, callback) {
+    const queryParams = new URLSearchParams({
+      modelName: modelName || ''
+    }).toString();
     RequestService.sendRequest()
-      .url(`${getServiceUrl()}/models/llm/names`)
+      .url(`${getServiceUrl()}/models/llm/names?${queryParams}`)
       .method('GET')
-      .data({ modelName })
       .success((res) => {
         RequestService.clearRequestTime();
         callback(res);

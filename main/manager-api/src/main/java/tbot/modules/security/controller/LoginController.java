@@ -25,6 +25,8 @@ import tbot.common.exception.RenException;
 import tbot.common.page.TokenDTO;
 import tbot.common.user.UserDetail;
 import tbot.common.utils.JsonUtils;
+import tbot.common.redis.RedisKeys;
+import tbot.common.redis.RedisUtils;
 import tbot.common.utils.Result;
 import tbot.common.utils.Sm2DecryptUtil;
 import tbot.common.validator.AssertUtils;
@@ -57,6 +59,10 @@ public class LoginController {
     private final CaptchaService captchaService;
     private final SysParamsService sysParamsService;
     private final SysDictDataService sysDictDataService;
+    private final RedisUtils redisUtils;
+
+    private static final int MAX_LOGIN_ATTEMPTS = 5;
+    private static final long LOCKOUT_DURATION_MINUTES = 15;
 
     @GetMapping("/captcha")
     @Operation(summary = "Verification code")
@@ -89,6 +95,14 @@ public class LoginController {
     @PostMapping("/login")
     @Operation(summary = "Login")
     public Result<TokenDTO> login(@RequestBody LoginDTO login) {
+        String username = login.getUsername();
+
+        // Check if account is locked
+        String lockKey = RedisKeys.getCaptchaKey("account_lock:" + username);
+        if (redisUtils.get(lockKey) != null) {
+            throw new RenException(ErrorCode.ACCOUNT_LOCKED);
+        }
+
         String password = login.getPassword();
 
         // Use utility class to decrypt and verifyVerification code
@@ -98,16 +112,37 @@ public class LoginController {
         login.setPassword(actualPassword);
 
         // According toUsernameGet User
-        SysUserDTO userDTO = sysUserService.getByUsername(login.getUsername());
+        SysUserDTO userDTO = sysUserService.getByUsername(username);
         // Check whether user exists
         if (userDTO == null) {
+            recordFailedLogin(username);
             throw new RenException(ErrorCode.ACCOUNT_PASSWORD_ERROR);
         }
         // DeterminePasswordwhether correct, if different then enterif
         if (!PasswordUtils.matches(login.getPassword(), userDTO.getPassword())) {
+            recordFailedLogin(username);
             throw new RenException(ErrorCode.ACCOUNT_PASSWORD_ERROR);
         }
+
+        // Successful login: clear failed attempts
+        clearFailedLogin(username);
         return sysUserTokenService.createToken(userDTO.getId());
+    }
+
+    private void recordFailedLogin(String username) {
+        String failKey = RedisKeys.getCaptchaKey("login_fail:" + username);
+        Long attempts = redisUtils.increment(failKey, LOCKOUT_DURATION_MINUTES * 60);
+        if (attempts != null && attempts >= MAX_LOGIN_ATTEMPTS) {
+            String lockKey = RedisKeys.getCaptchaKey("account_lock:" + username);
+            redisUtils.set(lockKey, "locked", LOCKOUT_DURATION_MINUTES * 60);
+        }
+    }
+
+    private void clearFailedLogin(String username) {
+        String failKey = RedisKeys.getCaptchaKey("login_fail:" + username);
+        String lockKey = RedisKeys.getCaptchaKey("account_lock:" + username);
+        redisUtils.delete(failKey);
+        redisUtils.delete(lockKey);
     }
 
     @PostMapping("/register")

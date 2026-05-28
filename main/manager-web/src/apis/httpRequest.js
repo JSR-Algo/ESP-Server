@@ -1,7 +1,7 @@
 import Fly from 'flyio/dist/npm/fly';
 import store from '../store/index';
 import Constant from '../utils/constant';
-import { goToPage, isNotNull, showDanger, showWarning } from '../utils/index';
+import { goToPage, isNotNull, showDanger, showWarning, safeParse } from '../utils/index';
 import i18n from '../i18n/index';
 
 const fly = new Fly()
@@ -38,8 +38,9 @@ function sendRequest() {
             }
             this._header['Accept-Language'] = acceptLanguage;
             
-            if (isNotNull(store.getters.getToken)) {
-                this._header.Authorization = 'Bearer ' + (JSON.parse(store.getters.getToken)).token
+            const tokenObj = safeParse(store.getters.getToken, {});
+            if (tokenObj && tokenObj.token) {
+                this._header.Authorization = 'Bearer ' + tokenObj.token;
             }
 
             // Print requestInfo

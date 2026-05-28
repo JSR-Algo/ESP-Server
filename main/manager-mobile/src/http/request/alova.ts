@@ -31,14 +31,9 @@ const { onAuthRequired, onResponseRefreshToken } = createServerTokenAuthenticati
       return error.response?.status === ResultEnum.Unauthorized
     },
     handler: async () => {
-      try {
-        // await authLogin();
-      }
-      catch (error) {
-        // 切换到登录页
-        await uni.reLaunch({ url: '/pages/login/index' })
-        throw error
-      }
+      // TODO: Implement refresh-token flow via /user/refresh.
+      // For now, redirect to login on 401.
+      await uni.reLaunch({ url: '/pages/login/index' })
     },
   },
 })
@@ -49,7 +44,7 @@ const { onAuthRequired, onResponseRefreshToken } = createServerTokenAuthenticati
 const alovaInstance = createAlova({
   baseURL: getEnvBaseUrl(),
   ...AdapterUniapp(),
-  timeout: 5000,
+  timeout: 15000,
   statesHook: VueHook,
 
   beforeRequest: onAuthRequired((method) => {
@@ -78,11 +73,15 @@ const alovaInstance = createAlova({
 
     const { config } = method
     const ignoreAuth = config.meta?.ignoreAuth
-    console.log('ignoreAuth===>', ignoreAuth)
-
     // 处理认证信息
     if (!ignoreAuth) {
-      const authInfo = JSON.parse(uni.getStorageSync('token') || '{}')
+      let authInfo: Record<string, unknown> = {}
+      try {
+        authInfo = JSON.parse(uni.getStorageSync('token') || '{}')
+      }
+      catch {
+        authInfo = {}
+      }
       if (!authInfo.token) {
         // 跳转到登录页
         uni.reLaunch({ url: '/pages/login/index' })
@@ -95,7 +94,6 @@ const alovaInstance = createAlova({
     // 处理动态域名
     if (config.meta?.domain) {
       method.baseURL = config.meta.domain
-      console.log('当前域名', method.baseURL)
     }
   }),
 
@@ -107,8 +105,6 @@ const alovaInstance = createAlova({
       data: rawData,
       errMsg,
     } = response as UniNamespace.RequestSuccessCallbackResult
-
-    console.log(response)
 
     // 处理特殊请求类型（上传/下载）
     if (requestType === 'upload' || requestType === 'download') {

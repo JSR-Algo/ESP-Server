@@ -38,8 +38,8 @@ class TTSProviderBase(ABC):
         self.audio_file_type = "wav"
         self.output_file = config.get("output_dir", "tmp/")
         self.tts_timeout = int(config.get("tts_timeout", 15))
-        self.tts_text_queue = queue.Queue()
-        self.tts_audio_queue = queue.Queue()
+        self.tts_text_queue = queue.Queue(maxsize=50)
+        self.tts_audio_queue = queue.Queue(maxsize=50)
         self.tts_audio_first_sentence = True
         self.before_stop_play_files = []
         self.report_on_last = False

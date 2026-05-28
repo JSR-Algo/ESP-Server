@@ -1,13 +1,21 @@
 # Docker安装Server
 
-version: '3'
+version: '3.8'
 services:
   tbot-esp32-server:
     image: local/tbot-server:latest
     container_name: tbot-esp32-server
-    restart: always
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     security_opt:
-      - seccomp:unconfined
+      - seccomp:../../deploy/seccomp/tbot-voice-server.json
+    # INF-01: custom seccomp profile documented at ESP-Server/deploy/seccomp/tbot-voice-server.json
+    # Rollback: remove security_opt lines above to revert to Docker default seccomp.
     environment:
       - TZ=Asia/Shanghai
     ports:
@@ -23,3 +31,16 @@ services:
       # classic_pipeline ASR support, replace placeholder with full ~250MB
       # model file then re-add this mount line.
       # - ./models/SenseVoiceSmall/model.pt:/opt/tbot-esp32-server/models/SenseVoiceSmall/model.pt
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M

@@ -158,15 +158,35 @@ def parse_weather_info(soup):
     return city_name, current_abstract, current_basic, temps_list
 
 
+def _sanitize_location(location: str) -> str:
+    """Sanitize location input to prevent command injection."""
+    if not isinstance(location, str):
+        location = str(location) if location is not None else ""
+    location = location.strip()[:100]  # Limit length
+    # Reject dangerous characters
+    if any(c in location for c in [';', '|', '&', '$', '`', '\\', '<', '>', '\n', '\r']):
+        raise ValueError("Invalid location parameter")
+    return location
+
+
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh_CN"):
     from core.utils.cache.manager import cache_manager, CacheType
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
     api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
-    api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
+    api_key = weather_config.get("api_key", "")
+    if not api_key or api_key == "__REPLACE_ME__":
+        conn.logger.bind(tag=TAG).error("Weather API key is not configured")
+        return ActionResponse(
+            Action.REQLLM, "Weather service is not available because the API key is not configured.", None
+        )
     default_location = weather_config.get("default_location", "Guangzhou")
     client_ip = conn.client_ip
+
+    # Sanitize location input
+    if location:
+        location = _sanitize_location(location)
 
     # Prefer user-providedlocationParameter
     if not location:

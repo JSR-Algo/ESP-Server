@@ -18,10 +18,10 @@ export default uniHelper({
     'src/service/app/**',
   ],
   rules: {
-    'no-console': 'off',
+    'no-console': process.env.CI ? 'error' : 'warn',
     'no-unused-vars': 'off',
-    'vue/no-unused-refs': 'off',
-    'unused-imports/no-unused-vars': 'off',
+    'vue/no-unused-refs': 'error',
+    'unused-imports/no-unused-vars': 'error',
     'eslint-comments/no-unlimited-disable': 'off',
     'jsdoc/check-param-names': 'off',
     'jsdoc/require-returns-description': 'off',

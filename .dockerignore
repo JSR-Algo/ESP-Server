@@ -20,3 +20,7 @@ data/
 **/logs
 **/log
 *.log
+main/tbot-server/test/
+main/tbot-server/tests/
+test/
+tests/

@@ -1,4 +1,26 @@
 #!/bin/sh
+# ============================================================================
+# ⚠️  BOOTSTRAP-ONLY SCRIPT — INF-04
+# ============================================================================
+# DEPRECATION NOTICE (2026-05-27):
+#   This script is intended for FIRST-TIME BOOTSTRAP and DEMO environments only.
+#   It is NOT idempotent, NOT suitable for production fleets, and requires
+#   interactive whiptail dialogs.
+#
+# PRODUCTION FLEET INSTRUCTIONS:
+#   1. Use docker compose directly with your own orchestrator (ECS, K8s, systemd).
+#   2. Pull pre-built images from your private registry (do not build on host).
+#   3. Inject secrets via env files or vault (never interactively).
+#   4. Mount volumes via CSI/driver, not host bind paths.
+#   5. Use the hardened docker-compose.prod.yml in ESP-Server/deploy/.
+#
+# NON-INTERACTIVE / IDEMPOTENT PATH:
+#   Set NONINTERACTIVE=1 before running to skip all whiptail prompts.
+#   Example: NONINTERACTIVE=1 ./docker-setup.sh
+#   In non-interactive mode the script skips optional prompts and uses defaults.
+#
+# Rollback: re-image the host or run: docker compose -f /opt/tbot-server/docker-compose_all.yml down
+# ============================================================================
 # 脚本作者@VanillaNahida
 # 本文件是用于一键自动下载本项目所需文件，自动创建好目录
 # 暂且只支持X86版本的Ubuntu系统，其他系统未测试
@@ -62,22 +84,35 @@ check_whiptail() {
 
 check_whiptail
 
-# 创建确认对话框
-whiptail --title "安装确认" --yesno "即将安装小智服务端，是否继续？" \
-  --yes-button "继续" --no-button "退出" 10 50
+# INF-04: non-interactive helper
+is_noninteractive() {
+    [ "${NONINTERACTIVE:-0}" = "1" ]
+}
 
-# 根据用户选择执行操作
-case $? in
-  0)
-    ;;
-  1)
-    exit 1
-    ;;
-esac
+# 创建确认对话框
+if is_noninteractive; then
+    echo "[NONINTERACTIVE] Skipping install confirmation prompt."
+else
+    whiptail --title "安装确认" --yesno "即将安装小智服务端，是否继续？" \
+      --yes-button "继续" --no-button "退出" 10 50
+
+    # 根据用户选择执行操作
+    case $? in
+      0)
+        ;;
+      1)
+        exit 1
+        ;;
+    esac
+fi
 
 # 检查root权限
 if [ $EUID -ne 0 ]; then
-    whiptail --title "权限错误" --msgbox "请使用root权限运行本脚本" 10 50
+    if is_noninteractive; then
+        echo "ERROR: Root required. Run with sudo."
+    else
+        whiptail --title "权限错误" --msgbox "请使用root权限运行本脚本" 10 50
+    fi
     exit 1
 fi
 
@@ -85,11 +120,19 @@ fi
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     if [ "$ID" != "debian" ] && [ "$ID" != "ubuntu" ]; then
-        whiptail --title "系统错误" --msgbox "该脚本只支持Debian/Ubuntu系统执行" 10 60
+        if is_noninteractive; then
+            echo "ERROR: This script only supports Debian/Ubuntu."
+        else
+            whiptail --title "系统错误" --msgbox "该脚本只支持Debian/Ubuntu系统执行" 10 60
+        fi
         exit 1
     fi
 else
-    whiptail --title "系统错误" --msgbox "无法确定系统版本，该脚本只支持Debian/Ubuntu系统执行" 10 60
+    if is_noninteractive; then
+        echo "ERROR: Cannot determine OS. This script only supports Debian/Ubuntu."
+    else
+        whiptail --title "系统错误" --msgbox "无法确定系统版本，该脚本只支持Debian/Ubuntu系统执行" 10 60
+    fi
     exit 1
 fi
 
@@ -99,7 +142,11 @@ check_and_download() {
     local url=$2
     if [ ! -f "$filepath" ]; then
         if ! curl -fL --progress-bar "$url" -o "$filepath"; then
-            whiptail --title "错误" --msgbox "${filepath}文件下载失败" 10 50
+            if is_noninteractive; then
+                echo "ERROR: Download failed for ${filepath}"
+            else
+                whiptail --title "错误" --msgbox "${filepath}文件下载失败" 10 50
+            fi
             exit 1
         fi
     else
@@ -133,7 +180,10 @@ check_installed() {
 
 # 更新相关
 if check_installed; then
-    if whiptail --title "已安装检测" --yesno "检测到小智服务端已安装，是否进行升级？" 10 60; then
+    if is_noninteractive; then
+        echo "[NONINTERACTIVE] Existing installation detected. Skipping interactive upgrade prompt."
+        echo "[NONINTERACTIVE] Run 'docker compose -f /opt/tbot-server/docker-compose_all.yml pull && up -d' manually to upgrade."
+    elif whiptail --title "已安装检测" --yesno "检测到小智服务端已安装，是否进行升级？" 10 60; then
         # 用户选择升级，执行清理操作
         echo "开始升级操作..."
         
@@ -248,7 +298,11 @@ if ! command -v docker &> /dev/null; then
         echo "------------------------------------------------------------"
         echo "Docker安装完成！"
     else
-        whiptail --title "错误" --msgbox "Docker安装失败，请检查日志。" 10 50
+        if is_noninteractive; then
+            echo "ERROR: Docker installation failed."
+        else
+            whiptail --title "错误" --msgbox "Docker安装失败，请检查日志。" 10 50
+        fi
         exit 1
     fi
 else
@@ -256,49 +310,55 @@ else
 fi
 
 # Docker镜像源配置
-MIRROR_OPTIONS=(
-    "1" "轩辕镜像 (推荐)"
-    "2" "腾讯云镜像源"
-    "3" "中科大镜像源"
-    "4" "网易163镜像源"
-    "5" "华为云镜像源"
-    "6" "阿里云镜像源"
-    "7" "自定义镜像源"
-    "8" "跳过配置"
-)
+# INF-04: In non-interactive mode, skip mirror selection and use default (no mirror).
+if is_noninteractive; then
+    echo "[NONINTERACTIVE] Skipping Docker mirror selection. Using default registry."
+    MIRROR_URL=""
+else
+    MIRROR_OPTIONS=(
+        "1" "轩辕镜像 (推荐)"
+        "2" "腾讯云镜像源"
+        "3" "中科大镜像源"
+        "4" "网易163镜像源"
+        "5" "华为云镜像源"
+        "6" "阿里云镜像源"
+        "7" "自定义镜像源"
+        "8" "跳过配置"
+    )
 
-MIRROR_CHOICE=$(whiptail --title "选择Docker镜像源" --menu "请选择要使用的Docker镜像源" 20 60 10 \
-"${MIRROR_OPTIONS[@]}" 3>&1 1>&2 2>&3) || {
-    echo "用户取消选择，退出脚本"
-    exit 1
-}
+    MIRROR_CHOICE=$(whiptail --title "选择Docker镜像源" --menu "请选择要使用的Docker镜像源" 20 60 10 \
+    "${MIRROR_OPTIONS[@]}" 3>&1 1>&2 2>&3) || {
+        echo "用户取消选择，退出脚本"
+        exit 1
+    }
 
-case $MIRROR_CHOICE in
-    1) MIRROR_URL="https://docker.xuanyuan.me" ;; 
-    2) MIRROR_URL="https://mirror.ccs.tencentyun.com" ;; 
-    3) MIRROR_URL="https://docker.mirrors.ustc.edu.cn" ;; 
-    4) MIRROR_URL="https://hub-mirror.c.163.com" ;; 
-    5) MIRROR_URL="https://05f073ad3c0010ea0f4bc00b7105ec20.mirror.swr.myhuaweicloud.com" ;; 
-    6) MIRROR_URL="https://registry.aliyuncs.com" ;; 
-    7) MIRROR_URL=$(whiptail --title "自定义镜像源" --inputbox "请输入完整的镜像源URL:" 10 60 3>&1 1>&2 2>&3) ;; 
-    8) MIRROR_URL="" ;; 
-esac
+    case $MIRROR_CHOICE in
+        1) MIRROR_URL="https://docker.xuanyuan.me" ;; 
+        2) MIRROR_URL="https://mirror.ccs.tencentyun.com" ;; 
+        3) MIRROR_URL="https://docker.mirrors.ustc.edu.cn" ;; 
+        4) MIRROR_URL="https://hub-mirror.c.163.com" ;; 
+        5) MIRROR_URL="https://05f073ad3c0010ea0f4bc00b7105ec20.mirror.swr.myhuaweicloud.com" ;; 
+        6) MIRROR_URL="https://registry.aliyuncs.com" ;; 
+        7) MIRROR_URL=$(whiptail --title "自定义镜像源" --inputbox "请输入完整的镜像源URL:" 10 60 3>&1 1>&2 2>&3) ;; 
+        8) MIRROR_URL="" ;; 
+    esac
 
-if [ -n "$MIRROR_URL" ]; then
-    mkdir -p /etc/docker
-    if [ -f /etc/docker/daemon.json ]; then
-        cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
-    fi
-    cat > /etc/docker/daemon.json <<EOF
+    if [ -n "$MIRROR_URL" ]; then
+        mkdir -p /etc/docker
+        if [ -f /etc/docker/daemon.json ]; then
+            cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
+        fi
+        cat > /etc/docker/daemon.json <<EOF
 {
     "dns": ["8.8.8.8", "114.114.114.114"],
     "registry-mirrors": ["$MIRROR_URL"]
 }
 EOF
-    whiptail --title "配置成功" --msgbox "已成功添加镜像源: $MIRROR_URL\n请按Enter键重启Docker服务并继续..." 12 60
-    echo "------------------------------------------------------------"
-    echo "开始重启Docker服务..."
-    systemctl restart docker.service
+        whiptail --title "配置成功" --msgbox "已成功添加镜像源: $MIRROR_URL\n请按Enter键重启Docker服务并继续..." 12 60
+        echo "------------------------------------------------------------"
+        echo "开始重启Docker服务..."
+        systemctl restart docker.service
+    fi
 fi
 
 # 创建安装目录
@@ -332,7 +392,11 @@ if [ ! -f "$MODEL_PATH" ]; then
     done
     ) | whiptail --title "下载中" --gauge "开始下载语音识别模型..." 10 60 0
     curl -fL --progress-bar https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt -o "$MODEL_PATH" || {
-        whiptail --title "错误" --msgbox "model.pt文件下载失败" 10 50
+        if is_noninteractive; then
+            echo "ERROR: model.pt download failed."
+        else
+            whiptail --title "错误" --msgbox "model.pt文件下载失败" 10 50
+        fi
         exit 1
     }
 else
@@ -364,7 +428,11 @@ START_TIME=$(date +%s)
 while true; do
     CURRENT_TIME=$(date +%s)
     if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then
-        whiptail --title "错误" --msgbox "服务启动超时，未在指定时间内找到预期日志内容" 10 60
+        if is_noninteractive; then
+            echo "ERROR: Service startup timed out."
+        else
+            whiptail --title "错误" --msgbox "服务启动超时，未在指定时间内找到预期日志内容" 10 60
+        fi
         exit 1
     fi
     
@@ -381,14 +449,19 @@ done
 )
 
 # 密钥配置
+# INF-04: In non-interactive mode, skip secret key configuration.
+# Production fleets must inject secrets via env files or vault, never interactively.
+if is_noninteractive; then
+    echo "[NONINTERACTIVE] Skipping interactive secret key configuration."
+    echo "[NONINTERACTIVE] Set manager-api secret in /opt/tbot-server/data/.config.yaml manually or via your secret manager."
+else
+    # 获取服务器公网地址
+    PUBLIC_IP=$(hostname -I | awk '{print $1}')
+    whiptail --title "配置服务器密钥" --msgbox "请使用浏览器，访问下方链接，打开智控台并注册账号: \n\n内网地址：http://127.0.0.1:8002/\n公网地址：http://$PUBLIC_IP:8002/ (若是云服务器请在服务器安全组放行端口 8000 8001 8002)。\n\n注册的第一个用户即是超级管理员，以后注册的用户都是普通用户。普通用户只能绑定设备和配置智能体; 超级管理员可以进行模型管理、用户管理、参数配置等功能。\n\n注册好后请按Enter键继续" 18 70
+    SECRET_KEY=$(whiptail --title "配置服务器密钥" --inputbox "请使用超级管理员账号登录智控台\n内网地址：http://127.0.0.1:8002/\n公网地址：http://$PUBLIC_IP:8002/\n在顶部菜单 参数字典 → 参数管理 找到参数编码: server.secret (服务器密钥) \n复制该参数值并输入到下面输入框\n\n请输入密钥(留空则跳过配置):" 15 60 3>&1 1>&2 2>&3)
 
-# 获取服务器公网地址
-PUBLIC_IP=$(hostname -I | awk '{print $1}')
-whiptail --title "配置服务器密钥" --msgbox "请使用浏览器，访问下方链接，打开智控台并注册账号: \n\n内网地址：http://127.0.0.1:8002/\n公网地址：http://$PUBLIC_IP:8002/ (若是云服务器请在服务器安全组放行端口 8000 8001 8002)。\n\n注册的第一个用户即是超级管理员，以后注册的用户都是普通用户。普通用户只能绑定设备和配置智能体; 超级管理员可以进行模型管理、用户管理、参数配置等功能。\n\n注册好后请按Enter键继续" 18 70
-SECRET_KEY=$(whiptail --title "配置服务器密钥" --inputbox "请使用超级管理员账号登录智控台\n内网地址：http://127.0.0.1:8002/\n公网地址：http://$PUBLIC_IP:8002/\n在顶部菜单 参数字典 → 参数管理 找到参数编码: server.secret (服务器密钥) \n复制该参数值并输入到下面输入框\n\n请输入密钥(留空则跳过配置):" 15 60 3>&1 1>&2 2>&3)
-
-if [ -n "$SECRET_KEY" ]; then
-    python3 -c "
+    if [ -n "$SECRET_KEY" ]; then
+        python3 -c "
 import sys, yaml; 
 config_path = '/opt/tbot-server/data/.config.yaml'; 
 with open(config_path, 'r') as f: 
@@ -397,17 +470,18 @@ config['manager-api'] = {'url': 'http://tbot-esp32-server-web:8002/tbot', 'secre
 with open(config_path, 'w') as f: 
     yaml.dump(config, f); 
 "
-    docker restart tbot-esp32-server
+        docker restart tbot-esp32-server
+    fi
+
+    # 获取并显示地址信息
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+
+    # 修复日志文件获取不到ws的问题，改为硬编码
+    whiptail --title "安装完成！" --msgbox "\
+    服务端相关地址如下：\n\
+    管理后台访问地址: http://$LOCAL_IP:8002\n\
+    OTA 地址: http://$LOCAL_IP:8002/tbot/ota/\n\
+    视觉分析接口地址: http://$LOCAL_IP:8003/mcp/vision/explain\n\
+    WebSocket 地址: ws://$LOCAL_IP:8000/tbot/v1/\n\
+    \n安装完毕！感谢您的使用！\n按Enter键退出..." 16 70
 fi
-
-# 获取并显示地址信息
-LOCAL_IP=$(hostname -I | awk '{print $1}')
-
-# 修复日志文件获取不到ws的问题，改为硬编码
-whiptail --title "安装完成！" --msgbox "\
-服务端相关地址如下：\n\
-管理后台访问地址: http://$LOCAL_IP:8002\n\
-OTA 地址: http://$LOCAL_IP:8002/tbot/ota/\n\
-视觉分析接口地址: http://$LOCAL_IP:8003/mcp/vision/explain\n\
-WebSocket 地址: ws://$LOCAL_IP:8000/tbot/v1/\n\
-\n安装完毕！感谢您的使用！\n按Enter键退出..." 16 70

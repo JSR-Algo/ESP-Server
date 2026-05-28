@@ -3,7 +3,7 @@ package tbot.modules.sys.service.impl;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
+import java.security.SecureRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -179,16 +179,19 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserDao, SysUserEntit
         return new PageData<>(list, page.getTotal());
     }
 
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile(
+        "^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>/?]).{12,}$"
+    );
+
     private boolean isStrongPassword(String password) {
-        // Weak password regex
-        String weakPasswordRegex = "^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z]).+$";
-        Pattern pattern = Pattern.compile(weakPasswordRegex);
-        Matcher matcher = pattern.matcher(password);
-        return matcher.matches();
+        if (password == null || password.length() < 12) {
+            return false;
+        }
+        return PASSWORD_PATTERN.matcher(password).matches();
     }
 
     private static final String CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
-    private static final Random random = new Random();
+    private static final SecureRandom random = new SecureRandom();
 
     /**
      * Generate random password

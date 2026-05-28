@@ -84,87 +84,83 @@ class WebSocketServer:
         self._memory = modules["memory"] if "memory" in modules else None
 
         auth_config = self.config["server"].get("auth", {})
-        self.auth_enable = auth_config.get("enabled", False)
+        self.auth_enable = auth_config.get("enabled", True)
         # Device whitelist
         self.allowed_devices = set(auth_config.get("allowed_devices", []))
         secret_key = self.config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds", None)
         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+        self._shutdown_event = asyncio.Event()
+        self.connections_active = 0
+        self.connections_total = 0
+        max_conn = auth_config.get("max_connections", 100)
+        self._connection_semaphore = asyncio.Semaphore(max_conn)
 
     async def start(self):
         server_config = self.config["server"]
         host = server_config.get("ip", "0.0.0.0")
         port = int(server_config.get("port", 8000))
 
-        async with websockets.serve(
+        self._server = await websockets.serve(
             self._handle_connection, host, port, process_request=self._http_response
-        ):
-            await asyncio.Future()
+        )
+        await self._shutdown_event.wait()
+
+    async def stop(self):
+        """Gracefully close the WebSocket server."""
+        self._shutdown_event.set()
+        if hasattr(self, "_server") and self._server:
+            self._server.close()
+            await self._server.wait_closed()
 
     async def _handle_connection(self, websocket: websockets.ServerConnection):
-        headers = dict(websocket.request.headers)
-        if headers.get("device-id", None) is None:
-            # Try from URL Get from query params of device-id
-            from urllib.parse import parse_qs, urlparse
-
-            # from WebSocket Get path from request
-            request_path = websocket.request.path
-            if not request_path:
-                self.logger.bind(tag=TAG).error("Cannot get request path")
-                await websocket.close()
-                return
-            parsed_url = urlparse(request_path)
-            query_params = parse_qs(parsed_url.query)
-            if "device-id" not in query_params:
+        self.connections_active += 1
+        self.connections_total += 1
+        async with self._connection_semaphore:
+            headers = dict(websocket.request.headers)
+            if headers.get("device-id", None) is None:
                 await websocket.send("Port normal. To test connection, use test_page.html")
                 await websocket.close()
                 return
-            else:
-                websocket.request.headers["device-id"] = query_params["device-id"][0]
-            if "client-id" in query_params:
-                websocket.request.headers["client-id"] = query_params["client-id"][0]
-            if "authorization" in query_params:
-                websocket.request.headers["authorization"] = query_params[
-                    "authorization"
-                ][0]
 
-        """Handle new connection, create independent ConnectionHandler each time"""
-        # Authenticate first, then connect
-        try:
-            await self._handle_auth(websocket)
-        except AuthenticationError:
-            await websocket.send("Authentication failed")
-            await websocket.close()
-            return
-        # CreateConnectionHandlerPass current whenserverInstance
-        handler = ConnectionHandler(
-            self.config,
-            self._vad,
-            self._asr,
-            self._llm,
-            self._memory,
-            self._intent,
-            self,  # Pass inserverInstance
-        )
-        try:
-            await handler.handle_connection(websocket)
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"Error handling connection: {e}")
-        finally:
-            # Force close connection (if not closed yet)
+            """Handle new connection, create independent ConnectionHandler each time"""
+            # Authenticate first, then connect
             try:
-                # Safely checkWebSocketStatusAnd close
-                if hasattr(websocket, "closed") and not websocket.closed:
-                    await websocket.close()
-                elif hasattr(websocket, "state") and websocket.state.name != "CLOSED":
-                    await websocket.close()
-                else:
-                    # If noneclosedAttribute, try close directly
-                    await websocket.close()
-            except Exception as close_error:
-                self.logger.bind(tag=TAG).error(
-                    f"Error when server forcibly closed connection: {close_error}"
-                )
+                await self._handle_auth(websocket)
+            except AuthenticationError:
+                await websocket.send("Authentication failed")
+                await websocket.close()
+                return
+            # CreateConnectionHandlerPass current whenserverInstance
+            handler = ConnectionHandler(
+                self.config,
+                self._vad,
+                self._asr,
+                self._llm,
+                self._memory,
+                self._intent,
+                self,  # Pass inserverInstance
+            )
+            try:
+                await handler.handle_connection(websocket)
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"Error handling connection: {e}")
+            finally:
+                self.connections_active -= 1
+                # Force close connection (if not closed yet)
+                try:
+                    # Safely checkWebSocketStatusAnd close
+                    if hasattr(websocket, "closed") and not websocket.closed:
+                        await websocket.close()
+                    elif hasattr(websocket, "state") and websocket.state.name != "CLOSED":
+                        await websocket.close()
+                    else:
+                        # If noneclosedAttribute, try close directly
+                        await websocket.close()
+                except Exception as close_error:
+                    self.logger.bind(tag=TAG).error(
+                        f"Error when server forcibly closed connection: {close_error}"
+                    )
 
     async def _http_response(self, websocket, request_headers):
         # Check whether is WebSocket Upgrade Request

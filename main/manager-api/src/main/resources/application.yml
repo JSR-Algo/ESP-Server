@@ -14,8 +14,8 @@ server:
 
 spring:
   # 环境 dev|test|prod
-  profiles:
-    active: dev
+  # profiles:
+  #   active: dev
   messages:
     encoding: UTF-8
     basename: i18n/messages
@@ -28,11 +28,12 @@ spring:
     allow-bean-definition-overriding: true
 
 knife4j:
-  enable: true
+  enable: false
   basic:
     enable: false
-    username: admin
-    password: admin
+    # SECURITY FIX: Hardcoded password removed. Use env var or disable in production.
+    username: ${KNIFE4J_USERNAME:admin}
+    password: ${KNIFE4J_PASSWORD:}
   setting:
     enableFooter: false
 
@@ -64,3 +65,22 @@ mybatis-plus:
     prefix:
     blobType: BLOB
     boolValue: TRUE
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # SECURITY FIX: Only expose health (for container probes). info/metrics removed.
+        include: health
+      base-path: /actuator
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      # SECURITY FIX: Never show health details (no Spring Security integration,
+      # so 'when_authorized' would not work correctly with Shiro anyway).
+      show-details: never
+  info:
+    env:
+      # SECURITY FIX: Disable env info exposure to prevent secret leakage.
+      enabled: false

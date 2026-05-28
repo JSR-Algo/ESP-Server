@@ -33,13 +33,10 @@ except ImportError:
 
 TAG = __name__
 logger = setup_logging()
-PLACEHOLDER_MARKERS = ("your-", "your ", "You", "Your")
-
-
 def _contains_placeholder(value) -> bool:
     if not isinstance(value, str):
         return False
-    return any(marker in value for marker in PLACEHOLDER_MARKERS)
+    return "__REPLACE_ME__" in value
 
 
 async def wait_for_exit() -> None:
@@ -168,6 +165,11 @@ async def main():
     finally:
         # Stop global GC manager.
         await gc_manager.stop()
+
+        # Gracefully close servers before canceling tasks.
+        await ws_server.stop()
+        if ota_server:
+            await ota_server.stop()
 
         # Cancel all tasks.
         stdin_task.cancel()

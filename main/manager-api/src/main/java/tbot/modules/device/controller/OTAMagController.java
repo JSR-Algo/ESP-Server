@@ -262,8 +262,13 @@ public class OTAMagController {
         }
 
         try {
-            // Calculate fileMD5value
-            String md5 = calculateMD5(file);
+            // Validate magic bytes
+            byte[] magicBytes = file.getBytes();
+            if (!isValidMagicBytes(magicBytes, extension)) {
+                return new Result<String>().error("Invalid file format: magic bytes do not match extension");
+            }
+            // Calculate file SHA-256 value
+            String sha256 = calculateSHA256(file);
 
             // Set storage path
             String uploadDir = "uploadfile";
@@ -274,8 +279,8 @@ public class OTAMagController {
                 Files.createDirectories(uploadPath);
             }
 
-            // UseMD5AsFilenameFixed use.binExtension
-            String uniqueFileName = md5 + extension;
+            // Use SHA-256 as filename fixed use .bin extension
+            String uniqueFileName = sha256 + extension;
             Path filePath = uploadPath.resolve(uniqueFileName);
 
             // Check whether file exists
@@ -329,13 +334,27 @@ public class OTAMagController {
         return result;
     }
 
-    private String calculateMD5(MultipartFile file) throws IOException, NoSuchAlgorithmException {
-        MessageDigest md = MessageDigest.getInstance("MD5");
+    private String calculateSHA256(MultipartFile file) throws IOException, NoSuchAlgorithmException {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
         byte[] digest = md.digest(file.getBytes());
         StringBuilder sb = new StringBuilder();
         for (byte b : digest) {
             sb.append(String.format("%02x", b));
         }
         return sb.toString();
+    }
+
+    private boolean isValidMagicBytes(byte[] bytes, String extension) {
+        if (bytes == null || bytes.length < 4) {
+            return false;
+        }
+        if (".bin".equals(extension)) {
+            // ESP-IDF application image magic byte: 0xE9
+            return bytes[0] == (byte) 0xE9;
+        } else if (".apk".equals(extension)) {
+            // APK / ZIP magic: PK (0x50 0x4B)
+            return bytes[0] == 0x50 && bytes[1] == 0x4B;
+        }
+        return false;
     }
 }

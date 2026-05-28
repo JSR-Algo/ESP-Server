@@ -1,4 +1,4 @@
-version: "2.4"
+version: "3.8"
 
 services:
   tbot-esp32-server:
@@ -10,10 +10,14 @@ services:
         condition: service_healthy
       tbot-esp32-server-redis:
         condition: service_healthy
-    security_opt:
-      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      TZ: ${TZ:-UTC}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     ports:
       - "${TBOT_WS_PORT:-8000}:8000"
@@ -21,8 +25,25 @@ services:
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/models:/opt/tbot-esp32-server/models
+    security_opt:
+      - seccomp:./seccomp/tbot-voice-server.json
+    # INF-01: custom seccomp profile documented at deploy/seccomp/tbot-voice-server.json
+    # Rollback: remove security_opt lines above to revert to Docker default seccomp.
     networks:
       - tbot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   tbot-esp32-server-web:
     image: ${TBOT_WEB_IMAGE:?set TBOT_WEB_IMAGE}
@@ -33,10 +54,17 @@ services:
         condition: service_healthy
       tbot-esp32-server-redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/tbot/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://tbot-esp32-server-db:3306/${MYSQL_DATABASE:-tbot_esp32_server}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE:-Asia/Ho_Chi_Minh}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
-      SPRING_DATASOURCE_DRUID_USERNAME: root
+      TZ: ${TZ:-UTC}
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://tbot-esp32-server-db:3306/${MYSQL_DATABASE:-tbot_esp32_server}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE:-UTC}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
+      # SECURITY FIX: DB username now comes from env; no hardcoded root.
+      SPRING_DATASOURCE_DRUID_USERNAME: ${MYSQL_USERNAME:-root}
       SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
       SPRING_DATA_REDIS_HOST: tbot-esp32-server-redis
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -47,13 +75,26 @@ services:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
     networks:
       - tbot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1536M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   tbot-esp32-server-db:
     image: ${MYSQL_IMAGE:-mysql:8.4}
     container_name: tbot-esp32-server-db
     restart: unless-stopped
     environment:
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      TZ: ${TZ:-UTC}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-tbot_esp32_server}
       MYSQL_INITDB_ARGS: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
@@ -62,13 +103,26 @@ services:
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/mysql/data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p\"$${MYSQL_ROOT_PASSWORD}\" || exit 1"]
+      test: ["CMD-SHELL", "export MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" && mysqladmin ping -h localhost -u root || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 45s
     networks:
       - tbot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   tbot-esp32-server-redis:
     image: ${REDIS_IMAGE:-redis:8.0}
@@ -95,6 +149,19 @@ services:
       retries: 6
     networks:
       - tbot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
 networks:
   tbot:

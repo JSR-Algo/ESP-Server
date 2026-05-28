@@ -6,7 +6,7 @@ import Constant from '../utils/constant'
  * Judge whether userLogin
  */
 export function checkUserLogin(fn) {
-    let token = localStorage.getItem(Constant.STORAGE_KEY.TOKEN)
+    let token = localStorage.getItem('token')
     let userType = localStorage.getItem(Constant.STORAGE_KEY.USER_TYPE)
     if (isNull(token) || isNull(userType)) {
         goToPage('console', true)
@@ -285,5 +285,13 @@ export function debounce(fn, delay = 500, immediate = false) {
             timer = null;
         }, delay);
     };
+}
+
+export function safeParse(str, fallback = null) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    return fallback;
+  }
 }
 

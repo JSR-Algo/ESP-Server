@@ -260,4 +260,6 @@ public interface ErrorCode {
     // Replacement word-related error codes
     int CORRECT_WORD_FILE_NAME_EXISTS = 10203; // Filename already exists
     int FILE_SIZE_OVER_LIMIT = 10204; // File size exceeds limit
+    int RATE_LIMIT_EXCEEDED = 10205; // Request rate limit exceeded
+    int ACCOUNT_LOCKED = 10206; // Account locked due to too many failed login attempts
 }

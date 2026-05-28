@@ -1,6 +1,7 @@
 package tbot.common.interceptor;
 
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.ibatis.executor.Executor;
 import org.apache.ibatis.mapping.BoundSql;
@@ -14,7 +15,6 @@ import com.baomidou.mybatisplus.extension.plugins.inner.InnerInterceptor;
 import cn.hutool.core.util.StrUtil;
 import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.expression.Expression;
-import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.select.PlainSelect;
@@ -27,6 +27,12 @@ import net.sf.jsqlparser.statement.select.Select;
  */
 public class DataFilterInterceptor implements InnerInterceptor {
 
+    // SECURITY FIX: Only allow simple column/operator/value patterns in sqlFilter.
+    // This is a defense-in-depth measure. The primary fix is JSQLParser expression parsing.
+    private static final Pattern SQL_FILTER_SAFETY_PATTERN = Pattern.compile(
+            "^[a-zA-Z_][a-zA-Z0-9_]*\\s*(=|!=|<>|>=|<=|>|<|LIKE|NOT LIKE|IN|NOT IN)\\s*.+$",
+            Pattern.CASE_INSENSITIVE);
+
     @SuppressWarnings("rawtypes")
     @Override
     public void beforeQuery(Executor executor, MappedStatement ms, Object parameter, RowBounds rowBounds,
@@ -37,8 +43,14 @@ public class DataFilterInterceptor implements InnerInterceptor {
             return;
         }
 
+        // SECURITY FIX: Validate sqlFilter before parsing to prevent injection.
+        String sqlFilter = scope.getSqlFilter().trim();
+        if (!isSqlFilterSafe(sqlFilter)) {
+            throw new IllegalArgumentException("Unsafe sqlFilter detected and blocked: " + sqlFilter);
+        }
+
         // Concat newSQL
-        String buildSql = getSelect(boundSql.getSql(), scope);
+        String buildSql = getSelect(boundSql.getSql(), sqlFilter);
 
         // RewriteSQL
         PluginUtils.mpBoundSql(boundSql).sql(buildSql);
@@ -64,22 +76,49 @@ public class DataFilterInterceptor implements InnerInterceptor {
         return null;
     }
 
-    private String getSelect(String buildSql, DataScope scope) {
+    /**
+     * SECURITY FIX: Defense-in-depth validation for sqlFilter strings.
+     * Rejects patterns that look like stacked queries, comments, or boolean-based injection.
+     */
+    private boolean isSqlFilterSafe(String sqlFilter) {
+        if (sqlFilter == null || sqlFilter.isEmpty()) {
+            return true;
+        }
+        // Block stacked queries, union, comments, and semicolons
+        String lower = sqlFilter.toLowerCase();
+        String[] forbidden = { ";", "--", "/*", "*/", "union", "insert ", "update ", "delete ", "drop ", "alter ",
+                "create ", "exec(", "execute(", "xp_", "sp_" };
+        for (String f : forbidden) {
+            if (lower.contains(f)) {
+                return false;
+            }
+        }
+        // Must match a simple condition pattern
+        return SQL_FILTER_SAFETY_PATTERN.matcher(sqlFilter).matches();
+    }
+
+    private String getSelect(String buildSql, String sqlFilter) {
         try {
             Select select = (Select) CCJSqlParserUtil.parse(buildSql);
             PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
 
+            // SECURITY FIX: Parse sqlFilter as a real JSQLParser Expression AST
+            // instead of using StringValue (which wraps it in SQL quotes) and then
+            // stripping quotes with replaceAll("'","") — that was an SQL injection vulnerability.
+            Expression filterExpression = CCJSqlParserUtil.parseCondExpression(sqlFilter);
+
             Expression expression = plainSelect.getWhere();
             if (expression == null) {
-                plainSelect.setWhere(new StringValue(scope.getSqlFilter()));
+                plainSelect.setWhere(filterExpression);
             } else {
-                AndExpression andExpression = new AndExpression(expression, new StringValue(scope.getSqlFilter()));
+                AndExpression andExpression = new AndExpression(expression, filterExpression);
                 plainSelect.setWhere(andExpression);
             }
 
-            return select.toString().replaceAll("'", "");
+            return select.toString();
         } catch (JSQLParserException e) {
-            return buildSql;
+            // If parsing fails, do NOT inject raw SQL. Return original query unchanged.
+            throw new IllegalArgumentException("Invalid sqlFilter expression: " + sqlFilter, e);
         }
     }
 }

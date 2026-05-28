@@ -16,14 +16,16 @@ const routes = [
     name: 'RoleConfig',
     component: function () {
       return import('../views/roleConfig.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/voice-print',
     name: 'VoicePrint',
     component: function () {
       return import('../views/VoicePrint.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/login',
@@ -37,7 +39,8 @@ const routes = [
     name: 'home',
     component: function () {
       return import('../views/home.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/register',
@@ -59,7 +62,8 @@ const routes = [
     name: 'DeviceManagement',
     component: function () {
       return import('../views/DeviceManagement.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   // AddUser managementRoute
   {
@@ -67,14 +71,16 @@ const routes = [
     name: 'UserManagement',
     component: function () {
       return import('../views/UserManagement.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/model-config',
     name: 'ModelConfig',
     component: function () {
       return import('../views/ModelConfig.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/params-management',
@@ -159,14 +165,16 @@ const routes = [
     name: 'DictManagement',
     component: function () {
       return import('../views/DictManagement.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   {
     path: '/provider-management',
     name: 'ProviderManagement',
     component: function () {
       return import('../views/ProviderManagement.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   // Add default role management route
   {
@@ -174,7 +182,8 @@ const routes = [
     name: 'AgentTemplateManagement',
     component: function () {
       return import('../views/AgentTemplateManagement.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   // Add template quick config route
   {
@@ -182,7 +191,8 @@ const routes = [
     name: 'TemplateQuickConfig',
     component: function () {
       return import('../views/TemplateQuickConfig.vue')
-    }
+    },
+    meta: { requiresAuth: true }
   },
   // Function configPage Route
   {
@@ -214,36 +224,25 @@ const router = new VueRouter({
   routes
 })
 
-// Globally handle duplicate navigation, change to refresh page
-const originalPush = VueRouter.prototype.push
+const originalPush = VueRouter.prototype.push;
 VueRouter.prototype.push = function push(location) {
   return originalPush.call(this, location).catch(err => {
     if (err.name === 'NavigationDuplicated') {
-      // If duplicate navigation, refresh page
-      window.location.reload()
-    } else {
-      // OtherErrorThrow Normally
-      throw err
+      return Promise.resolve();
     }
-  })
-}
+    throw err;
+  });
+};
 
-// NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload']
-
-// Route Guard
 router.beforeEach((to, from, next) => {
-  // Check whether route needs protection
-  if (protectedRoutes.includes(to.name)) {
-    // fromlocalStorageGettoken
-    const token = localStorage.getItem('token')
+  if (to.meta && to.meta.requiresAuth) {
+    const token = localStorage.getItem('token');
     if (!token) {
-      // not yetLogin, jump toLoginpage
-      next({ name: 'login', query: { redirect: to.fullPath } })
-      return
+      next({ name: 'login', query: { redirect: to.fullPath } });
+      return;
     }
   }
-  next()
-})
+  next();
+});
 
 export default router

@@ -32,6 +32,10 @@ COPY main/manager-web/public/generator/static/fonts/*.ttf /usr/share/fonts/
 # 更新字体缓存
 RUN fc-cache -f -v
 
+RUN addgroup -S tbot && adduser -S tbot -G tbot && \
+    mkdir -p /var/cache/nginx /var/run/nginx && \
+    chown -R tbot:tbot /var/cache/nginx /var/run/nginx /var/log/nginx /usr/share/nginx/html /app /run/nginx /var/tmp/nginx /etc/nginx/conf.d
+
 # 配置Nginx
 COPY docs/docker/nginx.conf /etc/nginx/nginx.conf
 
@@ -47,4 +51,5 @@ EXPOSE 8002
 # 启动脚本
 COPY docs/docker/start.sh /start.sh
 RUN chmod +x /start.sh
+USER tbot
 CMD ["/start.sh"]

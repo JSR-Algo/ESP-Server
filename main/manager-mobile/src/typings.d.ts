@@ -13,7 +13,7 @@ declare global {
     files?: UniApp.UploadFileOptionFiles[]
     filePath?: string
     name?: string
-    formData?: any
+    formData?: Record<string, unknown>
   }
 
   interface IUserInfo {

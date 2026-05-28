@@ -9,7 +9,10 @@ import tbot.common.exception.RenException;
  * SQLFilter
  * Copyright (c) Renren Open Source All rights reserved.
  * Website: https://www.renren.io
+ * @deprecated DEPRECATED: Rely on MyBatis #{} parameterization. Do not use for security.
+ *             Blacklist filters are trivially bypassed and provide false confidence.
  */
+@Deprecated
 public class SqlFilter {
 
     /**

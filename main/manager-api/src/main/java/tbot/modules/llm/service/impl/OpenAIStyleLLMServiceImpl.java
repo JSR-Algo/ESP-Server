@@ -1,5 +1,6 @@
 package tbot.modules.llm.service.impl;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,6 +20,7 @@ import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import tbot.common.exception.RenException;
 import tbot.modules.llm.service.LLMService;
 import tbot.modules.model.entity.ModelConfigEntity;
 import tbot.modules.model.service.ModelConfigService;
@@ -32,19 +34,22 @@ import tbot.modules.model.service.ModelConfigService;
 public class OpenAIStyleLLMServiceImpl implements LLMService {
 
     // NeedDisableThinking mode platform domain and corresponding parameters
-    private static final Map<String, Map<String, Object>> THINKING_DISABLED_DOMAINS = new LinkedHashMap<>();
+    private static final Map<String, Map<String, Object>> THINKING_DISABLED_DOMAINS;
     static {
-        THINKING_DISABLED_DOMAINS.put("aliyuncs.com", Map.of("enable_thinking", false));
+        Map<String, Map<String, Object>> map = new LinkedHashMap<>();
+        map.put("aliyuncs.com", Map.of("enable_thinking", false));
         Map<String, Object> thinkingDisabled = Map.of("thinking", Map.of("type", "disabled"));
-        THINKING_DISABLED_DOMAINS.put("bigmodel.cn", thinkingDisabled);
-        THINKING_DISABLED_DOMAINS.put("moonshot.cn", thinkingDisabled);
-        THINKING_DISABLED_DOMAINS.put("volces.com", thinkingDisabled);
+        map.put("bigmodel.cn", thinkingDisabled);
+        map.put("moonshot.cn", thinkingDisabled);
+        map.put("volces.com", thinkingDisabled);
+        THINKING_DISABLED_DOMAINS = Collections.unmodifiableMap(map);
     }
 
     @Autowired
     private ModelConfigService modelConfigService;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    @Autowired
+    private RestTemplate restTemplate;
 
     /**
      * Auto-disable thinking mode by domain
@@ -56,6 +61,18 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
                 log.info("Disable thinking mode for domain {}, parameters: {}", baseUrl, entry.getValue());
                 break;
             }
+        }
+    }
+
+    /**
+     * Validate LLM response body for security and size
+     */
+    private void validateLlmResponse(String responseBody) {
+        if (responseBody == null || responseBody.isEmpty()) {
+            throw new RenException("LLM response is empty");
+        }
+        if (responseBody.length() > 100000) {
+            throw new RenException("LLM response exceeds maximum size");
         }
     }
 
@@ -149,6 +166,7 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
                     apiUrl, HttpMethod.POST, entity, String.class);
 
             if (response.getStatusCode().is2xxSuccessful()) {
+                validateLlmResponse(response.getBody());
                 JSONObject responseJson = JSONUtil.parseObj(response.getBody());
                 JSONArray choices = responseJson.getJSONArray("choices");
                 if (choices != null && choices.size() > 0) {
@@ -245,6 +263,7 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
                     apiUrl, HttpMethod.POST, entity, String.class);
 
             if (response.getStatusCode().is2xxSuccessful()) {
+                validateLlmResponse(response.getBody());
                 JSONObject responseJson = JSONUtil.parseObj(response.getBody());
                 JSONArray choices = responseJson.getJSONArray("choices");
                 if (choices != null && choices.size() > 0) {
@@ -399,6 +418,7 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
                     apiUrl, HttpMethod.POST, entity, String.class);
 
             if (response.getStatusCode().is2xxSuccessful()) {
+                validateLlmResponse(response.getBody());
                 JSONObject responseJson = JSONUtil.parseObj(response.getBody());
                 JSONArray choices = responseJson.getJSONArray("choices");
                 if (choices != null && choices.size() > 0) {

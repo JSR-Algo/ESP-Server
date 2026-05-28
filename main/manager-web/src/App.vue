@@ -47,6 +47,7 @@ nav {
 <script>
 import CacheViewer from '@/components/CacheViewer.vue';
 import { logCacheStatus } from '@/utils/cacheViewer';
+import { safeParse } from '@/utils/index';
 
 export default {
   name: 'App',
@@ -61,8 +62,8 @@ export default {
   },
   created() {
     // Mount store Status
-    this.$store.commit('setUserInfo', JSON.parse(localStorage.getItem('userInfo') || '{}'));
-    this.$store.commit('setPubConfig', JSON.parse(localStorage.getItem('pubConfig') || '{}'));
+    this.$store.commit('setUserInfo', safeParse(localStorage.getItem('userInfo'), {}));
+    this.$store.commit('setPubConfig', safeParse(localStorage.getItem('pubConfig'), {}));
   },
   mounted() {
     // Check whether mobile device andVUE_APP_H5_URLNot empty, if both conditions met then jump toH5Page

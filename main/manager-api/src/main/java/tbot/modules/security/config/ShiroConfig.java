@@ -56,6 +56,13 @@ public class ShiroConfig {
         shiroFilter.setSecurityManager(securityManager);
         shiroFilter.setShiroFilterConfiguration(config);
 
+        // SECURITY FIX: Explicitly set fixed URLs to prevent any open-redirect behavior
+        // in Shiro's default authentication filters (CVE-2023-46749 style path normalization
+        // or redirect parameter injection). We never redirect to external URLs.
+        shiroFilter.setLoginUrl("/tbot/user/login");
+        shiroFilter.setUnauthorizedUrl("/tbot/user/login");
+        shiroFilter.setSuccessUrl("/tbot/");
+
         Map<String, Filter> filters = new HashMap<>();
         // oauthFilter
         filters.put("oauth2", new Oauth2Filter());
@@ -73,11 +80,13 @@ public class ShiroConfig {
          */
         Map<String, String> filterMap = new LinkedHashMap<>();
         filterMap.put("/ota/**", "anon");
-        filterMap.put("/otaMag/download/**", "anon");
+        filterMap.put("/otaMag/download/**", "oauth2");
         filterMap.put("/webjars/**", "anon");
-        filterMap.put("/druid/**", "anon");
-        filterMap.put("/v3/api-docs/**", "anon");
-        filterMap.put("/doc.html", "anon");
+        // CRITICAL FIX: Druid monitoring console must NOT be anonymous.
+        // Previously exposed without auth (P0). Now requires oauth2 token.
+        filterMap.put("/druid/**", "oauth2");
+        filterMap.put("/v3/api-docs/**", "oauth2");
+        filterMap.put("/doc.html", "oauth2");
         filterMap.put("/favicon.ico", "anon");
         filterMap.put("/user/captcha", "anon");
         filterMap.put("/user/smsVerification", "anon");

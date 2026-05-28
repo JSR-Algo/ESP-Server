@@ -12,7 +12,8 @@ class BaseHandler:
         response.headers["Access-Control-Allow-Headers"] = (
             "client-id, content-type, device-id, authorization"
         )
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+        # SECURITY: Never combine wildcard origin with allow-credentials.
+        # Devices and browsers send tokens via Authorization header; cookies not required.
         response.headers["Access-Control-Allow-Origin"] = "*"
 
     async def handle_options(self, request):

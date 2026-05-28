@@ -1,6 +1,6 @@
 # Docker安装全模块
 
-version: '3'
+version: '3.8'
 services:
   # Server模块
   tbot-esp32-server:
@@ -9,7 +9,11 @@ services:
     depends_on:
       - tbot-esp32-server-db
       - tbot-esp32-server-redis
-    restart: always
+    restart: unless-stopped
+    security_opt:
+      - seccomp:../../deploy/seccomp/tbot-voice-server.json
+    # INF-01: custom seccomp profile documented at ESP-Server/deploy/seccomp/tbot-voice-server.json
+    # Rollback: remove security_opt lines above to revert to Docker default seccomp.
     networks:
       - default
     ports:
@@ -17,8 +21,12 @@ services:
       - "8000:8000"
       # http服务的端口，用于视觉分析接口
       - "8003:8003"
-    security_opt:
-      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     environment:
       - TZ=Asia/Shanghai
     volumes:
@@ -26,6 +34,19 @@ services:
       - ./data:/opt/tbot-esp32-server/data
       # 模型文件挂接，很重要
       - ./models/SenseVoiceSmall/model.pt:/opt/tbot-esp32-server/models/SenseVoiceSmall/model.pt
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   # manager-api和manager-web模块
   tbot-esp32-server-web:
@@ -34,7 +55,7 @@ services:
       dockerfile: Dockerfile-web
     image: local/tbot-server:web
     container_name: tbot-esp32-server-web
-    restart: always
+    restart: unless-stopped
     networks:
       - default
     depends_on:
@@ -45,27 +66,48 @@ services:
     ports:
       # 智控台
       - "8002:8002"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/tbot/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     environment:
       - TZ=Asia/Shanghai
       - SPRING_DATASOURCE_DRUID_URL=jdbc:mysql://tbot-esp32-server-db:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
       - SPRING_DATASOURCE_DRUID_USERNAME=root
-      - SPRING_DATASOURCE_DRUID_PASSWORD=123456
+      - SPRING_DATASOURCE_DRUID_PASSWORD=${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
       - SPRING_DATA_REDIS_HOST=tbot-esp32-server-redis
-      - SPRING_DATA_REDIS_PASSWORD=
+      - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - SPRING_DATA_REDIS_PORT=6379
     volumes:
       # 配置文件目录
       - ./uploadfile:/uploadfile
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1536M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
   # 数据库模块
   tbot-esp32-server-db:
-    image: mysql:latest
+    image: mysql:8.4
     container_name: tbot-esp32-server-db
     healthcheck:
-      test: [ "CMD", "mysqladmin" ,"ping", "-h", "localhost" ]
-      timeout: 45s
+      test: ["CMD-SHELL", "export MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" && mysqladmin ping -h localhost -u root || exit 1"]
+      timeout: 5s
       interval: 10s
-      retries: 10
-    restart: always
+      retries: 12
+      start_period: 45s
+    restart: unless-stopped
     networks:
       - default
     expose:
@@ -74,22 +116,50 @@ services:
       - ./mysql/data:/var/lib/mysql
     environment:
       - TZ=Asia/Shanghai
-      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
       - MYSQL_DATABASE=tbot_esp32_server
-      - MYSQL_INITDB_ARGS="--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
+      - MYSQL_INITDB_ARGS=--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
   # redis模块
   tbot-esp32-server-redis:
     image: redis:8.0
     expose:
       - 6379
     container_name: tbot-esp32-server-redis
-    restart: always
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 6
     networks:
       - default
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
 networks:
   default:

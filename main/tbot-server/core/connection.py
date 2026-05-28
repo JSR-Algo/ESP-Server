@@ -28,7 +28,11 @@ from core.utils.modules_initialize import (
 )
 from core.handle.reportHandle import report, enqueue_tool_report
 from core.providers.tts.default import DefaultTTS
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+
+# Shared module-level executor to avoid per-connection thread proliferation
+_shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 from core.utils.dialogue import Message, Dialogue
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
@@ -138,10 +142,11 @@ class ConnectionHandler:
         # Thread task related
         self.loop = None  # in handle_connection Get running fromEventLoop
         self.stop_event = threading.Event()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = _shared_executor
+        self._owns_executor = False
 
         # Add report thread pool
-        self.report_queue = queue.Queue()
+        self.report_queue = queue.Queue(maxsize=100)
         self.report_thread = None
         # Future can viaModifyHere, adjustasrreport andttsreporting, currently enabled by default
         self.report_asr_enable = self.read_config_from_api
@@ -176,7 +181,7 @@ class ConnectionHandler:
         # Because actual deployment may use public localASR, cannot expose variables to publicASR
         # So related toASRVariables need define here,Belongs toconnectionprivate variable
         self.asr_audio = []
-        self.asr_audio_queue = queue.Queue()
+        self.asr_audio_queue = queue.Queue(maxsize=100)
         self.current_speaker = None  # Store current speaker
 
         # llmRelated Variables
@@ -211,6 +216,12 @@ class ConnectionHandler:
 
         # InitializePromptWord Manager
         self.prompt_manager = PromptManager(self.config, self.logger)
+
+        # Tool call history for cycle detection
+        self._tool_call_history = []
+
+        # MCP tool call rate limiting state (per-connection)
+        self._mcp_tool_call_times = []
 
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:
@@ -756,7 +767,7 @@ class ConnectionHandler:
         try:
             # In thread poolInitialize component
             self.executor.submit(self._initialize_components)
-        except Exception as e:
+        except RuntimeError as e:
             self.logger.bind(tag=TAG).error(f"Background initialization failed: {e}")
 
     async def _initialize_private_config_async(self):
@@ -1022,8 +1033,11 @@ class ConnectionHandler:
 
     def change_system_prompt(self, prompt):
         self.prompt = prompt
+        # Wrap system prompt in delimiter boundary for injection resistance
+        if prompt and not prompt.strip().startswith("<system>"):
+            prompt = f"<system>\n{prompt}\n</system>"
         # Update Systempromptto Context
-        self.dialogue.update_system_message(self.prompt)
+        self.dialogue.update_system_message(prompt)
 
     def chat(self, query, depth=0):
         # Savecurrent tasksentence_idTo local variable, avoid being overwritten by new task
@@ -1031,6 +1045,12 @@ class ConnectionHandler:
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"LLM received user message: {query}")
+            # Detect prompt injection attempts
+            if self.detect_prompt_injection(query):
+                self.logger.bind(tag=TAG).warning("Prompt injection detected, blocking unsafe query")
+                query = "I can only help with safe requests."
+            # Wrap user message in delimiter boundary
+            query = f"<user>\n{query}\n</user>"
 
         # Create new when topmostSession IDAnd sendFIRSTRequest
         if depth == 0:
@@ -1150,6 +1170,7 @@ class ConnectionHandler:
                                     new_part = da_text[sent_len:safe_end]
                                     # Clean delta may leak in JSON Close Garbage
                                     new_part = self._clean_response_garbage(new_part)
+                                    new_part = self.sanitize_llm_output(new_part)
                                     if new_part:
                                         tc["_da_sent"] = safe_end
                                         self.tts.tts_text_queue.put(
@@ -1174,14 +1195,16 @@ class ConnectionHandler:
                 if content is not None and len(content) > 0:
                     if not tool_call_flag:
                         response_message.append(content)
-                        self.tts.tts_text_queue.put(
-                            TTSMessageDTO(
-                                sentence_id=current_sentence_id,
-                                sentence_type=SentenceType.MIDDLE,
-                                content_type=ContentType.TEXT,
-                                content_detail=content,
+                        sanitized_content = self.sanitize_llm_output(content)
+                        if sanitized_content:
+                            self.tts.tts_text_queue.put(
+                                TTSMessageDTO(
+                                    sentence_id=current_sentence_id,
+                                    sentence_type=SentenceType.MIDDLE,
+                                    content_type=ContentType.TEXT,
+                                    content_detail=sanitized_content,
+                                )
                             )
-                        )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
             self.tts.tts_text_queue.put(
@@ -1248,6 +1271,7 @@ class ConnectionHandler:
                             remaining = da_response[sent_len:]
                             if remaining:
                                 remaining = self._clean_response_garbage(remaining)
+                                remaining = self.sanitize_llm_output(remaining)
                                 if remaining:
                                     self.tts.tts_text_queue.put(
                                         TTSMessageDTO(
@@ -1259,6 +1283,7 @@ class ConnectionHandler:
                                     )
                             # Write conversation history
                             da_response = self._clean_response_garbage(da_response)
+                            da_response = self.sanitize_llm_output(da_response)
                             self.tts.store_tts_text(current_sentence_id, da_response)
                             self.dialogue.put(Message(role="assistant", content=da_response))
 
@@ -1283,7 +1308,7 @@ class ConnectionHandler:
                 # LLM text already broadcast in streaming stage
                 streamed_text = ""
                 if len(response_message) > 0:
-                    streamed_text = "".join(response_message)
+                    streamed_text = self.sanitize_llm_output("".join(response_message))
                     self.tts.store_tts_text(current_sentence_id, streamed_text)
                     self.dialogue.put(Message(role="assistant", content=streamed_text))
                 response_message.clear()
@@ -1297,6 +1322,14 @@ class ConnectionHandler:
 
                     # Use common method to report tool call
                     tool_input = json.loads(tool_call_data.get("arguments") or "{}")
+
+                    # Check tool call rate to prevent loops
+                    if not self._check_tool_call_rate(tool_call_data['name'], tool_input):
+                        self.logger.bind(tag=TAG).warning(
+                            f"Tool call loop detected for {tool_call_data['name']}, skipping"
+                        )
+                        continue
+
                     enqueue_tool_report(self, tool_call_data['name'], tool_input)
 
                     future = asyncio.run_coroutine_threadsafe(
@@ -1337,7 +1370,7 @@ class ConnectionHandler:
 
         # Store DialogueContent
         if len(response_message) > 0:
-            text_buff = "".join(response_message)
+            text_buff = self.sanitize_llm_output("".join(response_message))
             self.tts.store_tts_text(current_sentence_id, text_buff)
             self.dialogue.put(Message(role="assistant", content=text_buff))
 
@@ -1374,8 +1407,9 @@ class ConnectionHandler:
                         f"Skipping duplicate TTS for tool {tool_call_data['name']}, already streamed"
                     )
                 else:
-                    self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
-                    self.tts.store_tts_text(self.sentence_id, text)
+                    sanitized_text = self.sanitize_llm_output(text)
+                    self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=sanitized_text)
+                    self.tts.store_tts_text(self.sentence_id, sanitized_text)
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
                 need_llm_tools.append((result, tool_call_data))
@@ -1480,11 +1514,11 @@ class ConnectionHandler:
                         continue
                     # Submit task to thread pool
                     self.executor.submit(self._process_report, *item)
-                except Exception as e:
+                except RuntimeError as e:
                     self.logger.bind(tag=TAG).error(f"Chat history report threadException: {e}")
             except queue.Empty:
                 continue
-            except Exception as e:
+            except (RuntimeError, ValueError) as e:
                 self.logger.bind(tag=TAG).error(f"Chat history reporting worker threadException: {e}")
 
         self.logger.bind(tag=TAG).info("Chat record reporting thread exited")
@@ -1494,7 +1528,7 @@ class ConnectionHandler:
         try:
             # Execute async report (inEventrun in loop)
             asyncio.run(report(self, type, text, audio_data, report_time))
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             self.logger.bind(tag=TAG).error(f"Report ProcessingException: {e}")
         finally:
             # Mark task complete
@@ -1599,11 +1633,23 @@ class ConnectionHandler:
             if self.asr:
                 await self.asr.close()
 
+            # SECURITY: Cleanup any session audio files left in tmp/
+            if self.config.get('delete_audio', True):
+                import glob
+                tmp_dir = self.config.get('log', {}).get('log_dir', 'tmp')
+                for pattern in [f"{tmp_dir}/asr_*_{self.session_id}_*.wav"]:
+                    for fpath in glob.glob(pattern):
+                        try:
+                            os.remove(fpath)
+                        except OSError:
+                            pass
+
             # Finally close thread pool (avoid blocking)
-            if self.executor:
+            # Only shut down if this connection owns its own executor
+            if self.executor and getattr(self, "_owns_executor", True):
                 try:
                     self.executor.shutdown(wait=False)
-                except Exception as executor_error:
+                except RuntimeError as executor_error:
                     self.logger.bind(tag=TAG).error(
                         f"Error closing thread pool: {executor_error}"
                     )
@@ -1759,6 +1805,15 @@ class ConnectionHandler:
         # Clean trailing residual JSON Close Symbol
         result = re.sub(r'["\'}\]]+$', '', result.rstrip()).rstrip()
         return result
+
+    def _check_tool_call_rate(self, tool_name: str, args: dict) -> bool:
+        """Prevent tool call loops. Returns True if allowed."""
+        recent_calls = [c for c in self._tool_call_history[-10:] if c['tool'] == tool_name]
+        same_args_count = sum(1 for c in recent_calls if c.get('args') == args)
+        if same_args_count >= 3:
+            return False
+        self._tool_call_history.append({'tool': tool_name, 'args': args, 'time': time.time()})
+        return True
 
     def _merge_tool_calls(self, tool_calls_list, tools_call):
         """Merge tool call list

@@ -1,7 +1,7 @@
 package tbot.modules.security.service.impl;
 
 import java.io.IOException;
-import java.util.Random;
+import java.security.SecureRandom;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
@@ -143,7 +143,7 @@ public class CaptchaServiceImpl implements CaptchaService {
      */
     private String generateValidateCode(Integer length) {
         String chars = "0123456789"; // Character range can be custom: digits
-        Random random = new Random();
+        SecureRandom random = new SecureRandom();
         StringBuilder code = new StringBuilder();
         for (int i = 0; i < length; i++) {
             code.append(chars.charAt(random.nextInt(chars.length())));

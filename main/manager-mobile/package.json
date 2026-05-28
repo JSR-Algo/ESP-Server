@@ -1,6 +1,6 @@
 {
   "name": "tbot-mobile-admin",
-  "type": "commonjs",
+  "type": "module",
   "version": "3.4.0",
   "unibest-version": "3.4.0",
   "packageManager": "pnpm@10.10.0",
@@ -70,7 +70,7 @@
     "build:quickapp-webview-union": "uni build -p quickapp-webview-union",
     "type-check": "vue-tsc --noEmit",
     "openapi-ts-request": "openapi-ts",
-    "prepare": "git init && husky",
+    "prepare": "husky",
     "lint": "eslint",
     "lint:fix": "eslint --fix"
   },

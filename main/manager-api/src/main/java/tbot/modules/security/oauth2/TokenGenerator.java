@@ -1,20 +1,28 @@
 package tbot.modules.security.oauth2;
 
-import java.security.MessageDigest;
-import java.util.UUID;
-
-import tbot.common.exception.ErrorCode;
-import tbot.common.exception.RenException;
+import java.security.SecureRandom;
 
 /**
- * Generatetoken
+ * Generate token
  * Copyright (c) Renren Open Source All rights reserved.
  * Website: https://www.renren.io
  */
 public class TokenGenerator {
 
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
     public static String generateValue() {
-        return generateValue(UUID.randomUUID().toString());
+        byte[] bytes = new byte[32];
+        SECURE_RANDOM.nextBytes(bytes);
+        return bytesToHex(bytes);
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     private static final char[] HEX_CODE = "0123456789abcdef".toCharArray();
@@ -31,15 +39,4 @@ public class TokenGenerator {
         return r.toString();
     }
 
-    public static String generateValue(String param) {
-        try {
-            MessageDigest algorithm = MessageDigest.getInstance("MD5");
-            algorithm.reset();
-            algorithm.update(param.getBytes());
-            byte[] messageDigest = algorithm.digest();
-            return toHexString(messageDigest);
-        } catch (Exception e) {
-            throw new RenException(ErrorCode.TOKEN_GENERATE_ERROR, e);
-        }
-    }
 }

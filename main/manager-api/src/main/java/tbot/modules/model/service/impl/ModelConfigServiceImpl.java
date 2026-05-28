@@ -117,6 +117,9 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
         // 4. VerifyLLMConfig
         validateLlmConfiguration(modelConfigBodyDTO);
 
+        // 4.5 Security validation for model config
+        validateModelConfigSecurity(modelConfigBodyDTO);
+
         // 5. Prepare update entity and handle sensitive data
         ModelConfigEntity modelConfigEntity = prepareUpdateEntity(modelConfigBodyDTO, originalEntity, modelType, id);
 
@@ -135,6 +138,8 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
         validateAddParameters(modelType, provideCode, modelConfigBodyDTO);
 
         validateModelProvider(modelType, provideCode);
+
+        validateModelConfigSecurity(modelConfigBodyDTO);
 
         ModelConfigEntity modelConfigEntity = prepareAddEntity(modelConfigBodyDTO, modelType);
 
@@ -299,6 +304,34 @@ public class ModelConfigServiceImpl extends BaseServiceImpl<ModelConfigDao, Mode
             throw new RenException(ErrorCode.RESOURCE_NOT_FOUND);
         }
         return originalEntity;
+    }
+
+    /**
+     * Security validation for model config fields
+     */
+    private void validateModelConfigSecurity(ModelConfigBodyDTO dto) {
+        if (dto == null || dto.getConfigJson() == null) {
+            return;
+        }
+        JSONObject configJson = dto.getConfigJson();
+        String baseUrl = configJson.getStr("base_url");
+        String apiKey = configJson.getStr("api_key");
+        String modelName = dto.getModelName();
+
+        if (StringUtils.isNotBlank(baseUrl) && !baseUrl.startsWith("https://")) {
+            if (!baseUrl.startsWith("http://localhost") && !baseUrl.startsWith("http://127.0.0.1")) {
+                throw new RenException("Model base URL must use HTTPS");
+            }
+        }
+        if (StringUtils.isNotBlank(apiKey) && apiKey.length() < 10) {
+            throw new RenException("API key is too short");
+        }
+        if (StringUtils.isNotBlank(modelName)) {
+            String lower = modelName.toLowerCase();
+            if (lower.contains("<script") || lower.contains("<iframe") || lower.contains("<object") || lower.contains("<embed")) {
+                throw new RenException("Model name contains invalid characters");
+            }
+        }
     }
 
     /**

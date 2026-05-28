@@ -4,5 +4,9 @@ FROM ${TBOT_SERVER_BASE_IMAGE}
 
 COPY main/tbot-server .
 
+RUN groupadd -r tbot && useradd -r -g tbot -d /opt/tbot-esp32-server -s /sbin/nologin tbot && \
+    chown -R tbot:tbot /opt/tbot-esp32-server
+USER tbot
+
 # Start the server.
 CMD ["python", "app.py"]

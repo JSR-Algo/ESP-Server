@@ -143,6 +143,16 @@ def map_category(category_text):
     return category_map.get(normalized_category, category_text)
 
 
+def _sanitize_category(category: str) -> str:
+    """Sanitize news category input to prevent command injection."""
+    if not isinstance(category, str):
+        category = str(category) if category is not None else ""
+    category = category.strip()[:100]
+    if any(c in category for c in [';', '|', '&', '$', '`', '\\', '<', '>', '\n', '\r']):
+        raise ValueError("Invalid category parameter")
+    return category
+
+
 @register_function(
     "get_news_from_chinanews",
     GET_NEWS_FROM_CHINANEWS_FUNCTION_DESC,
@@ -156,6 +166,8 @@ def get_news_from_chinanews(
 ):
     """Get news and randomly select one to broadcast, or get details of previous news item"""
     try:
+        if category:
+            category = _sanitize_category(category)
         # If detail is True, get detailed content of previous news item
         if detail:
             if (

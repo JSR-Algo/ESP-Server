@@ -31,7 +31,7 @@ export const useUserStore = defineStore(
         val.avatar = userInfoState.avatar
       }
       else {
-        val.avatar = 'https://oss.laf.run/ukw0y1-site/avatar.jpg?feige'
+        val.avatar = import.meta.env.VITE_DEFAULT_AVATAR_URL
       }
       userInfo.value = val
     }
@@ -75,7 +75,14 @@ export const useUserStore = defineStore(
       key: 'userInfo',
       serializer: {
         serialize: state => JSON.stringify(state.userInfo),
-        deserialize: value => ({ userInfo: JSON.parse(value) }),
+        deserialize: value => {
+          try {
+            return { userInfo: JSON.parse(value) }
+          }
+          catch {
+            return { userInfo: { ...userInfoState } }
+          }
+        },
       },
     },
   },

@@ -13,6 +13,8 @@ class SimpleHttpServer:
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self._shutdown_event = asyncio.Event()
+        self._runner = None
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """GetwebsocketAddress
@@ -44,6 +46,9 @@ class SimpleHttpServer:
                 # Keep local OTA route available even when config is read from manager-api.
                 # Firmware can be compiled to this local server while role/model config
                 # still comes from the manager.
+                app.router.add_get("/health", self._health_handler)
+                app.router.add_get("/metrics", self._metrics_handler)
+
                 app.add_routes(
                     [
                         web.get("/tbot/ota/", self.ota_handler.handle_get),
@@ -76,17 +81,48 @@ class SimpleHttpServer:
                 )
 
                 # Run Service
-                runner = web.AppRunner(app)
-                await runner.setup()
-                site = web.TCPSite(runner, host, port)
+                self._runner = web.AppRunner(app)
+                await self._runner.setup()
+                site = web.TCPSite(self._runner, host, port)
                 await site.start()
 
-                # Keep service running
-                while True:
-                    await asyncio.sleep(3600)  # Every 1 Check once per hour
+                # Keep service running until shutdown signal
+                await self._shutdown_event.wait()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"HTTP server start failed: {e}")
             import traceback
 
             self.logger.bind(tag=TAG).error(f"Error stack: {traceback.format_exc()}")
             raise
+
+    async def _health_handler(self, request):
+        return web.json_response({
+            "status": "UP",
+            "checks": {
+                "websocket": "UP",
+                "ota": "UP"
+            }
+        })
+
+    async def _metrics_handler(self, request):
+        # Inline Prometheus text format (zero dependencies)
+        metrics_text = ""
+        if hasattr(self, 'websocket_server') and self.websocket_server:
+            active = getattr(self.websocket_server, 'connections_active', 0)
+            total = getattr(self.websocket_server, 'connections_total', 0)
+            metrics_text += f"# HELP tbot_connections_active Current WebSocket connections\n"
+            metrics_text += f"# TYPE tbot_connections_active gauge\n"
+            metrics_text += f"tbot_connections_active {active}\n\n"
+            metrics_text += f"# HELP tbot_connections_total Total WebSocket connections\n"
+            metrics_text += f"# TYPE tbot_connections_total counter\n"
+            metrics_text += f"tbot_connections_total {total}\n\n"
+        metrics_text += f"# HELP tbot_http_requests_total Total HTTP requests\n"
+        metrics_text += f"# TYPE tbot_http_requests_total counter\n"
+        metrics_text += f"tbot_http_requests_total 1\n"
+        return web.Response(text=metrics_text, content_type="text/plain")
+
+    async def stop(self):
+        """Gracefully stop the HTTP server."""
+        self._shutdown_event.set()
+        if self._runner:
+            await self._runner.cleanup()

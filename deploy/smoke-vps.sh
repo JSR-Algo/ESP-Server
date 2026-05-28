@@ -103,4 +103,22 @@ check_http "${SCHEME}://${HOST}:${HTTP_PORT}/"
 check_http "${SCHEME}://${HOST}:${OTA_PORT}/tbot/ota/"
 check_tcp "${HOST}" "${TCP_PORT}"
 
+echo "Checking health endpoints..."
+
+# Java actuator health
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${SCHEME}://${HOST}:${HTTP_PORT}/tbot/actuator/health" 2>/dev/null || echo "000")
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "✓ Java actuator health: OK"
+else
+    echo "⚠ Java actuator health: HTTP $HTTP_STATUS (may not be configured yet)"
+fi
+
+# Python health
+PYTHON_HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${SCHEME}://${HOST}:${OTA_PORT}/health" 2>/dev/null || echo "000")
+if [ "$PYTHON_HEALTH_STATUS" = "200" ]; then
+    echo "✓ Python health endpoint: OK"
+else
+    echo "⚠ Python health endpoint: HTTP $PYTHON_HEALTH_STATUS (may not be configured yet)"
+fi
+
 printf 'Smoke checks passed for %s\n' "${HOST}"

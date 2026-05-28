@@ -28,6 +28,8 @@ ENV LANG=en_US.UTF-8 \
 
 WORKDIR /opt/tbot-esp32-server
 
+RUN groupadd -r tbot && useradd -r -g tbot -d /opt/tbot-esp32-server -s /sbin/nologin tbot
+
 # Copy requirements.
 ARG REQUIREMENTS_FILE=main/tbot-server/requirements.txt
 COPY ${REQUIREMENTS_FILE} requirements.txt

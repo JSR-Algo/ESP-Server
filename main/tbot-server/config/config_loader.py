@@ -1,7 +1,9 @@
 import os
 import asyncio
+import warnings
 import yaml
 from collections.abc import Mapping
+from config.models import TBotConfig
 from config.manage_api_client import (
     init_service,
     get_server_config,
@@ -114,20 +116,48 @@ def load_config():
     if not isinstance(custom_config, Mapping):
         custom_config = {}
 
-    if custom_config.get("manager-api", {}).get("url"):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            config = asyncio.run(get_config_from_api_async(custom_config))
-        else:
-            raise RuntimeError(
-                "load_config() cannot fetch manager-api config from a running event loop; "
-                "use load_config_async() instead"
-            )
+    # Try split configs first; fall back to monolithic with deprecation warning
+    split_config, has_split = _load_split_configs(get_project_dir())
+    if has_split:
+        # Merge: default < split < custom
+        config = merge_configs(default_config, split_config)
+        config = merge_configs(config, custom_config)
     else:
-        # Merge Config
-        config = merge_configs(default_config, custom_config)
+        if custom_config.get("manager-api", {}).get("url"):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                config = asyncio.run(get_config_from_api_async(custom_config))
+            else:
+                raise RuntimeError(
+                    "load_config() cannot fetch manager-api config from a running event loop; "
+                    "use load_config_async() instead"
+                )
+        else:
+            # Merge Config
+            config = merge_configs(default_config, custom_config)
+        warnings.warn(
+            "Monolithic config.yaml is deprecated. Split your config into "
+            "config/server.yaml, config/voice.yaml, and config/plugins.yaml.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     config = normalize_voice_config(config)
+
+    # Validate merged config with Pydantic (split configs path)
+    if has_split:
+        try:
+            TBotConfig(**config)
+        except Exception as e:
+            raise SystemExit(f"Config validation failed: {e}")
+
+    # Fail fast on unconfigured secrets
+    try:
+        _check_replace_me(config)
+    except ValueError as e:
+        raise SystemExit(f"Config validation failed: {e}")
+
     # Initialize directory
     ensure_directories(config)
 
@@ -154,11 +184,37 @@ async def load_config_async():
     if not isinstance(custom_config, Mapping):
         custom_config = {}
 
-    if custom_config.get("manager-api", {}).get("url"):
-        config = await get_config_from_api_async(custom_config)
+    # Try split configs first; fall back to monolithic with deprecation warning
+    split_config, has_split = _load_split_configs(get_project_dir())
+    if has_split:
+        config = merge_configs(default_config, split_config)
+        config = merge_configs(config, custom_config)
     else:
-        config = merge_configs(default_config, custom_config)
+        if custom_config.get("manager-api", {}).get("url"):
+            config = await get_config_from_api_async(custom_config)
+        else:
+            config = merge_configs(default_config, custom_config)
+        warnings.warn(
+            "Monolithic config.yaml is deprecated. Split your config into "
+            "config/server.yaml, config/voice.yaml, and config/plugins.yaml.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     config = normalize_voice_config(config)
+
+    # Validate merged config with Pydantic (split configs path)
+    if has_split:
+        try:
+            TBotConfig(**config)
+        except Exception as e:
+            raise SystemExit(f"Config validation failed: {e}")
+
+    try:
+        _check_replace_me(config)
+    except ValueError as e:
+        raise SystemExit(f"Config validation failed: {e}")
+
     ensure_directories(config)
     cache_manager.set(CacheType.CONFIG, "main_config", config)
     return config
@@ -217,6 +273,39 @@ async def get_private_config_from_api(config, device_id, client_id):
     if correct_words:
         private_config["correct_words"] = correct_words
     return normalize_voice_config(private_config)
+
+
+def _check_replace_me(config, path="config"):
+    """Recursively scan config dict for __REPLACE_ME__ sentinel values."""
+    if isinstance(config, dict):
+        for key, value in config.items():
+            _check_replace_me(value, f"{path}.{key}")
+    elif isinstance(config, list):
+        for idx, item in enumerate(config):
+            _check_replace_me(item, f"{path}[{idx}]")
+    elif isinstance(config, str) and config == "__REPLACE_ME__":
+        raise ValueError(f"Config placeholder not replaced at {path}")
+
+
+def _load_split_configs(project_dir: str) -> dict:
+    """Load split config files if they exist."""
+    split_dir = os.path.join(project_dir, "config")
+    split_files = {
+        "server": os.path.join(split_dir, "server.yaml"),
+        "voice": os.path.join(split_dir, "voice.yaml"),
+        "plugins": os.path.join(split_dir, "plugins.yaml"),
+    }
+    merged = {}
+    any_found = False
+    for key, filepath in split_files.items():
+        if os.path.isfile(filepath):
+            any_found = True
+            data = read_config(filepath)
+            if isinstance(data, dict) and key in data:
+                merged[key] = data[key]
+            elif isinstance(data, dict):
+                merged[key] = data
+    return merged, any_found
 
 
 def ensure_directories(config):

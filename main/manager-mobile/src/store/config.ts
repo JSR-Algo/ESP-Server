@@ -59,7 +59,14 @@ export const useConfigStore = defineStore(
       key: 'config',
       serializer: {
         serialize: state => JSON.stringify(state.config),
-        deserialize: value => ({ config: JSON.parse(value) }),
+        deserialize: value => {
+          try {
+            return { config: JSON.parse(value) }
+          }
+          catch {
+            return { config: { ...initialConfigState } }
+          }
+        },
       },
     },
   },

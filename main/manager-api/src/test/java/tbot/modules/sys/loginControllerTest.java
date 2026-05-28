@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import tbot.common.constant.Constant;
 import tbot.common.exception.ErrorCode;
 import tbot.common.exception.RenException;
+import tbot.common.redis.RedisUtils;
 import tbot.common.utils.SM2Utils;
 import tbot.common.utils.Result;
 import tbot.modules.security.controller.LoginController;
@@ -52,13 +53,15 @@ class loginControllerTest {
         captchaService = mock(CaptchaService.class);
         sysParamsService = mock(SysParamsService.class);
         SysDictDataService sysDictDataService = mock(SysDictDataService.class);
+        RedisUtils redisUtils = mock(RedisUtils.class);
 
         loginController = new LoginController(
                 sysUserService,
                 sysUserTokenService,
                 captchaService,
                 sysParamsService,
-                sysDictDataService);
+                sysDictDataService,
+                redisUtils);
 
         Map<String, String> keyPair = SM2Utils.createKey();
         privateKey = keyPair.get(SM2Utils.KEY_PRIVATE_KEY);

@@ -28,7 +28,7 @@ public class XssUtils extends Safelist {
                         "small",
                         "strike", "strong", "sub", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u",
                         "ul",
-                        "embed", "object", "param", "span")
+                        "span")
 
                 // Supported tag attributes
                 .addAttributes("a", "href", "class", "style", "target", "rel", "nofollow")
@@ -46,22 +46,16 @@ public class XssUtils extends Safelist {
                 .addAttributes("ul", "type", "style")
                 .addAttributes("pre", "class", "style")
                 .addAttributes("div", "class", "id", "style")
-                .addAttributes("embed", "src", "wmode", "flashvars", "pluginspage", "allowFullScreen",
-                        "allowfullscreen",
-                        "quality", "width", "height", "align", "allowScriptAccess", "allowscriptaccess",
-                        "allownetworking", "type")
-                .addAttributes("object", "type", "id", "name", "data", "width", "height", "style", "classid",
-                        "codebase")
-                .addAttributes("param", "name", "value")
+
                 .addAttributes("span", "class", "style")
 
                 // Protocol corresponding to tag attribute
                 .addProtocols("a", "href", "ftp", "http", "https", "mailto")
-                .addProtocols("img", "src", "http", "https")
+                .addProtocols("img", "src", "http", "https", "data")
                 .addProtocols("blockquote", "cite", "http", "https")
                 .addProtocols("cite", "cite", "http", "https")
                 .addProtocols("q", "cite", "http", "https")
-                .addProtocols("embed", "src", "http", "https");
+                .addProtocols("cite", "cite", "http", "https");
     }
 
 }

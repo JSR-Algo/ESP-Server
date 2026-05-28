@@ -39,8 +39,19 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
+        String corsOrigins = System.getenv("TBOT_CORS_ORIGINS");
+        String[] origins;
+        if (corsOrigins != null && !corsOrigins.isEmpty()) {
+            origins = corsOrigins.split(",");
+            for (int i = 0; i < origins.length; i++) {
+                origins[i] = origins[i].trim();
+            }
+        } else {
+            // Default: no cross-origin allowed in production
+            origins = new String[]{"http://localhost:8002"};
+        }
         registry.addMapping("/**")
-                .allowedOriginPatterns("*")
+                .allowedOriginPatterns(origins)
                 .allowCredentials(true)
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .maxAge(3600);

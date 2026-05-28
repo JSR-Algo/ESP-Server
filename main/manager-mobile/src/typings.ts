@@ -11,5 +11,5 @@ export interface IUniUploadFileOptions {
   files?: UniApp.UploadFileOptionFiles[]
   filePath?: string
   name?: string
-  formData?: any
+  formData?: Record<string, unknown>
 }

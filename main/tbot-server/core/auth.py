@@ -19,7 +19,7 @@ class AuthManager:
     in Websocket in,header:{Device-ID: device_id, Client-ID: client_id, Authorization: Bearer token, ......}
     """
 
-    def __init__(self, secret_key: str, expire_seconds: int = 60 * 60 * 24 * 30):
+    def __init__(self, secret_key: str, expire_seconds: int = 60 * 60 * 24):
         if not expire_seconds or expire_seconds < 0:
             self.expire_seconds = 60 * 60 * 24 * 30
         else:
@@ -68,5 +68,5 @@ class AuthManager:
                 return False
 
             return True
-        except Exception:
+        except (ValueError, IndexError):
             return False

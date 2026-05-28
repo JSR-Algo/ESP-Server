@@ -3,8 +3,9 @@ knife4j:
   enable: true
   basic:
     enable: false
-    username: renren
-    password: 2ZABCDEUgF
+    # SECURITY FIX: Hardcoded dev password removed. Override via KNIFE4J_USERNAME / KNIFE4J_PASSWORD.
+    username: ${KNIFE4J_USERNAME:renren}
+    password: ${KNIFE4J_PASSWORD:}
   setting:
     enableFooter: false
 spring:
@@ -14,7 +15,7 @@ spring:
       driver-class-name: com.mysql.cj.jdbc.Driver
       url: jdbc:mysql://127.0.0.1:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true
       username: root
-      password: 123456
+      password: ${MYSQL_ROOT_PASSWORD:-}
       initial-size: 10
       max-active: 100
       min-idle: 10
@@ -35,7 +36,7 @@ spring:
           merge-sql: false
         wall:
           config:
-            multi-statement-allow: true
+            multi-statement-allow: false
   data:
     redis:
       host: 127.0.0.1         # Redis服务器地址
