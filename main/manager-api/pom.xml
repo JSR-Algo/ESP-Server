@@ -32,7 +32,7 @@
         <liquibase-core.version>4.20.0</liquibase-core.version>
         <aliyun-sms-version>4.1.0</aliyun-sms-version>
         <okio-version>3.4.0</okio-version>
-        <lombok.version>1.18.36</lombok.version>
+        <lombok.version>1.18.46</lombok.version>
     </properties>
 
     <dependencies>
