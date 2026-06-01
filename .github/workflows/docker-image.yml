@@ -59,7 +59,7 @@ jobs:
 
       # 构建 tbot-server 镜像
       - name: Build and push tbot-server
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile-server
@@ -74,7 +74,7 @@ jobs:
 
       # 构建 manager-api 镜像
       - name: Build and push manager-web
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile-web
