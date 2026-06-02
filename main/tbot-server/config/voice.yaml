@@ -1,0 +1,4 @@
+voice:
+  voice_mode: realtime
+  sample_rate: 16000
+  frame_duration: 60

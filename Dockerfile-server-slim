@@ -1,0 +1,36 @@
+# Slim local image for voice_mode=google_live (Gemini does VAD/ASR/LLM/TTS).
+# websocket_server.py:48 sets init_classic_bootstrap=False under google_live, so the
+# torch-based SileroVAD / funasr / sherpa local-ML stack is never imported. We drop
+# those heavy deps to build in ~1-2 min instead of pulling the multi-GB torch base.
+FROM python:3.10-slim
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONIOENCODING=utf-8 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libopus0 ffmpeg curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/tbot-esp32-server
+
+COPY main/tbot-server/requirements.txt requirements.txt
+# Strip local-ML deps not used by google_live mode.
+RUN sed -E '/^(torch|torchaudio|silero_vad|funasr|sherpa_onnx|vosk|modelscope|speexdsp|mem0ai|powermem)([=;> ].*)?$/d' requirements.txt > requirements.slim.txt && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.slim.txt && \
+    rm -f requirements.slim.txt
+
+COPY main/tbot-server .
+
+# Local dev: neutralize unused __REPLACE_ME__ secret sentinels so config_loader's
+# global placeholder check (config_loader.py:_check_replace_me) passes. The ONLY real
+# secret that matters in google_live mode is google_live.api_key, which is supplied at
+# runtime via ${GOOGLE_API_KEY}; everything else here is for modules that are never
+# initialized when voice_mode=google_live.
+RUN sed -i 's/__REPLACE_ME__/dummy-local-dev/g' config.yaml 2>/dev/null || true; \
+    sed -i 's/__REPLACE_ME__/dummy-local-dev/g' config/plugins.yaml 2>/dev/null || true
+
+EXPOSE 8000 8003
+CMD ["python", "app.py"]

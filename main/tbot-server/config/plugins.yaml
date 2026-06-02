@@ -1,0 +1,5 @@
+plugins:
+  get_weather:
+    provider: qweather
+    api_key: __REPLACE_ME__
+  # Add other plugin configs here
