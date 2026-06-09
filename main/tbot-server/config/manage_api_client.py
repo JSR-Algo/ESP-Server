@@ -270,3 +270,168 @@ def init_service(config):
 
 def manage_api_http_safe_close():
     ManageApiClient.safe_close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# US-006 lesson runtime backend legs (LANE-ESP S6 pull-on-connect + S9 forward).
+#
+# DELIBERATE DIVERGENCE FROM plan §6.4/§6.5b (surfaced, not silently reconciled):
+# the plan said reuse the manager-api ``ManageApiClient`` (base ``manager-api.url``
+# + that service's Bearer). Live config (config.yaml:21-28, locked 2026-06-04)
+# makes ``server.api_url`` — the NestJS backend, ``.../v1`` — the SOLE authority
+# for the ``/v1/devices/*`` + ``/v1/lessons/*`` routes the lesson slice calls; the
+# Java manager-api is "admin/legacy only" and does NOT serve them. So these legs
+# target ``server.api_url`` via a caller-owned dedicated client. The plan's pins
+# (method ``post_lesson_event`` lives here; retry/backoff reused; result->outcome
+# renamed HERE as the single translation point) are preserved.
+#
+# D-RUNTOKEN (ADR 0013 §F) wants a device-scoped token; the ESP has no device-token
+# minting path today, so ``token`` is injectable and OPTIONAL — cross-device authz
+# is enforced backend-side on the ``device_id`` claim. Token wiring is an ops/backend
+# follow-up; surfaced, not invented here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LESSON_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def _lesson_is_transient(exc: Exception) -> bool:
+    if httpx is not None and isinstance(
+        exc, (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError)
+    ):
+        return True
+    if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _LESSON_RETRYABLE_STATUS
+    return False
+
+
+def _lesson_auth_headers(token: Optional[str]) -> Dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+def _normalize_lesson_event(event: Dict) -> Dict:
+    """Single ``result -> outcome`` translation point (plan §5.7/§6.4.1) + COPPA
+    strip of the authored ``detail.utterance`` (it never enters progress_events)."""
+    out = dict(event)
+    if "result" in out and "outcome" not in out:
+        out["outcome"] = out.pop("result")
+    else:
+        out.pop("result", None)
+    detail = out.get("detail")
+    if isinstance(detail, dict) and "utterance" in detail:
+        detail = {k: v for k, v in detail.items() if k != "utterance"}
+        if detail:
+            out["detail"] = detail
+        else:
+            out.pop("detail", None)
+    return out
+
+
+async def _lesson_request_with_retry(
+    client, method: str, url: str, *, max_retries: int = 2, retry_delay: float = 1.0, **kwargs
+):
+    import asyncio
+
+    attempt = 0
+    while True:
+        response = None
+        try:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            if response.status_code == 204 or not response.content:
+                return None
+            return response.json()
+        except Exception as exc:  # noqa: BLE001 - retry decision is explicit below
+            if attempt < max_retries and _lesson_is_transient(exc):
+                attempt += 1
+                await asyncio.sleep(retry_delay)
+                continue
+            raise
+        finally:
+            if response is not None:
+                await response.aclose()
+
+
+def _lesson_base(base_url: str) -> str:
+    return (base_url or "").rstrip("/")
+
+
+async def get_current_assignment(
+    client, base_url: str, device_id: str, *, token: Optional[str] = None
+) -> Optional[Dict]:
+    """S6 pull-on-connect — GET /v1/devices/:deviceId/assignment/current.
+
+    Returns the ``data.assignment`` object (or ``None`` when the device has no
+    active assignment). The authoritative offline-catch-up hand-off (ADR 0013 §A/§B).
+    """
+    url = f"{_lesson_base(base_url)}/devices/{device_id}/assignment/current"
+    payload = await _lesson_request_with_retry(
+        client, "GET", url, headers=_lesson_auth_headers(token)
+    )
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data") or {}
+    return data.get("assignment")
+
+
+async def get_lesson_manifest(
+    client,
+    base_url: str,
+    lesson_id: str,
+    profile: str,
+    *,
+    token: Optional[str] = None,
+    renderer_capabilities: Optional[list] = None,
+):
+    """S6 — GET /v1/lessons/:lessonId/manifest?profile=... Returns ``(manifest, etag)``.
+
+    The manifest's ``steps[].scene`` is the frozen 3-layer scene the ESP projects
+    verbatim into ``lesson_step``; ``assets[]`` carry the critical sha256 set.
+
+    L3 P3 — renderer-capability negotiation. ``renderer_capabilities`` is the
+    device's advertised renderer-version set (e.g. ``['teebot-lesson-renderer.v1']``).
+    When provided, it is forwarded to the backend manifest endpoint BOTH as a
+    ``rendererCapabilities`` query param (comma-joined) AND as an
+    ``X-Renderer-Capabilities`` header, so the backend can serve a manifest the
+    device can actually render (it defaults to v1 backend-side). When OMITTED
+    (older call sites / tests), the request is byte-identical to today's v1 call —
+    no extra param, no extra header. This stays renderer v1: no protocol-version
+    change today; the negotiation is a structural guard for when a v2 renderer ships.
+    """
+    url = f"{_lesson_base(base_url)}/lessons/{lesson_id}/manifest"
+    params: Dict[str, str] = {"profile": profile}
+    headers = _lesson_auth_headers(token)
+    if renderer_capabilities:
+        joined = ",".join(renderer_capabilities)
+        params["rendererCapabilities"] = joined
+        headers["X-Renderer-Capabilities"] = joined
+    response = await client.request(
+        "GET", url, params=params, headers=headers
+    )
+    try:
+        response.raise_for_status()
+        body = response.json()
+        etag = response.headers.get("ETag") or response.headers.get("etag")
+    finally:
+        await response.aclose()
+    manifest = (body.get("data") or {}).get("manifest") if isinstance(body, dict) else None
+    return manifest, etag
+
+
+async def post_lesson_event(
+    client, base_url: str, device_id: str, batch: Dict, *, token: Optional[str] = None
+) -> Optional[Dict]:
+    """S9 — POST /v1/devices/:deviceId/lesson-events (OWN dispatch path, NOT the
+    chat-history report queue). Owns the single wire ``result -> outcome`` rename and
+    the COPPA ``detail.utterance`` strip before the body leaves the ESP (plan §6.4)."""
+    url = f"{_lesson_base(base_url)}/devices/{device_id}/lesson-events"
+    body = dict(batch)
+    body["events"] = [_normalize_lesson_event(e) for e in batch.get("events", [])]
+    payload = await _lesson_request_with_retry(
+        client, "POST", url, json=body, headers=_lesson_auth_headers(token)
+    )
+    if isinstance(payload, dict):
+        return payload.get("data") or payload
+    return None
