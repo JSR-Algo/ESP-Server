@@ -13,6 +13,9 @@ fi
 
 BACKUP_DIR="${TBOT_BACKUP_DIR:-./backups}"
 DB_CONTAINER="${TBOT_DB_CONTAINER:-tbot-esp32-server-db}"
+# The real schema is tbot_esp32_server (NOT 'tbot'); keep in sync with MYSQL_DATABASE.
+DB_NAME="${MYSQL_DATABASE:-tbot_esp32_server}"
+DB_USER="${MYSQL_USER:-root}"
 RETENTION_DAYS=7
 
 echo "Starting database backup..."
@@ -24,9 +27,9 @@ BACKUP_FILE="$BACKUP_DIR/tbot_backup_$TIMESTAMP.sql.gz"
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would create: $BACKUP_FILE"
-    echo "[DRY RUN] Would run: docker exec $DB_CONTAINER mysqldump --single-transaction --quick -uroot -p\$MYSQL_ROOT_PASSWORD tbot | gzip > $BACKUP_FILE"
+    echo "[DRY RUN] Would run: docker exec $DB_CONTAINER mysqldump --single-transaction --quick -u$DB_USER -p\$MYSQL_ROOT_PASSWORD $DB_NAME | gzip > $BACKUP_FILE"
 else
-    docker exec "$DB_CONTAINER" mysqldump --single-transaction --quick -uroot -p"${MYSQL_ROOT_PASSWORD}" tbot | gzip > "$BACKUP_FILE"
+    docker exec "$DB_CONTAINER" mysqldump --single-transaction --quick -u"${DB_USER}" -p"${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD}}" "$DB_NAME" | gzip > "$BACKUP_FILE"
     echo "Backup created: $BACKUP_FILE"
 fi
 

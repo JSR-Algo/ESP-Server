@@ -35,12 +35,20 @@ services:
         condition: service_healthy
     environment:
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://tbot-esp32-server-db:3306/${MYSQL_DATABASE:-tbot_esp32_server}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE:-Asia/Ho_Chi_Minh}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
-      SPRING_DATASOURCE_DRUID_USERNAME: root
-      SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
-      SPRING_DATA_REDIS_HOST: tbot-esp32-server-redis
+      # DB host/port/user/db/password are all env-overridable (defaults keep the
+      # in-stack MySQL service). Point at an external/managed MySQL by setting
+      # MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD -- no image rebuild.
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://${MYSQL_HOST:-tbot-esp32-server-db}:${MYSQL_PORT:-3306}/${MYSQL_DATABASE:-tbot_esp32_server}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE:-Asia/Ho_Chi_Minh}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
+      SPRING_DATASOURCE_DRUID_USERNAME: ${MYSQL_USER:-root}
+      SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}}
+      SPRING_DATA_REDIS_HOST: ${REDIS_HOST:-tbot-esp32-server-redis}
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PORT: ${REDIS_PORT:-6379}
+      # Course CMS (/nestjs) upstream backend + optional shared token. Rendered into
+      # nginx at container start (start.sh). Repoint the NestJS course backend later
+      # by editing these env vars and restarting -- no image rebuild.
+      NESTJS_UPSTREAM_HOST: ${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}
+      NESTJS_TOKEN: ${NESTJS_TOKEN:-}
     ports:
       - "${TBOT_ADMIN_PORT:-8002}:8002"
     volumes:
