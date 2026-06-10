@@ -224,7 +224,9 @@ plugins:
   # After applying, find your apihost via this link: https://console.qweather.com/setting?lang=zh
   get_weather:
     api_host: "mj7p3y7naa.re.qweatherapi.com"
-    api_key: "a861d0d5e7bf4ee1a83d9a9e4f96d4da"
+    # SECURITY: previously-committed key was exposed in git and MUST be ROTATED.
+    # Set via env QWEATHER_API_KEY (or override in data/.config.yaml); do not commit a literal key.
+    api_key: ${QWEATHER_API_KEY:}
     default_location: "Ho Chi Minh City"
   # Get news plugin configuration. Pass URL for required news type. Default supports social, tech, and financial news.
   # More news list types: https://www.chinanews.com.cn/rss/

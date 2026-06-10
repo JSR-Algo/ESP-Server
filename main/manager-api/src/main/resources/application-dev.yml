@@ -4,7 +4,9 @@ knife4j:
   basic:
     enable: false
     username: renren
-    password: 2ZABCDEUgF
+    # SECURITY: previously-committed password was exposed in git and MUST be ROTATED.
+    # No default on purpose (this is a prod-facing gate); set via env KNIFE4J_PASSWORD.
+    password: ${KNIFE4J_PASSWORD:}
   setting:
     enableFooter: false
 spring:
@@ -14,7 +16,9 @@ spring:
       driver-class-name: com.mysql.cj.jdbc.Driver
       url: jdbc:mysql://127.0.0.1:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true
       username: root
-      password: 123456
+      # SECURITY: previously-committed dev password was exposed in git and SHOULD be ROTATED.
+      # Local dev default kept working; override via env MYSQL_PASSWORD in shared/prod envs.
+      password: ${MYSQL_PASSWORD:123456}
       initial-size: 10
       max-active: 100
       min-idle: 10

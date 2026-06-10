@@ -72,6 +72,47 @@ def read_config(config_path):
     return config
 
 
+# Env var -> nested config path. Each entry overlays an os.environ value onto
+# the merged config so deployment-specific endpoints/secrets can change without
+# editing config.yaml or data/.config.yaml. Additive + null-safe: nested dicts
+# are created if absent, and an override only applies when the env var is set to
+# a non-empty value.
+_ENV_CONFIG_OVERRIDES = (
+    ("MANAGER_API_URL", ("manager-api", "url")),
+    ("MANAGER_API_SECRET", ("manager-api", "secret")),
+    # Read at core/lesson/runtime.py:639 as server_cfg.get("api_url").
+    ("COURSE_BACKEND_URL", ("server", "api_url")),
+    ("PUBLIC_WS_URL", ("server", "websocket")),
+    ("PUBLIC_OTA_URL", ("server", "ota")),
+)
+
+
+def apply_env_overrides(config):
+    """Overlay os.environ values onto the merged config dict.
+
+    Mutates and returns ``config``. Only non-empty env vars override existing
+    values; nested dicts are created on demand. Safe to call when ``config`` is
+    not a Mapping (returns it unchanged).
+    """
+    if not isinstance(config, Mapping):
+        return config
+
+    for env_name, path in _ENV_CONFIG_OVERRIDES:
+        value = os.environ.get(env_name)
+        if value is None or value == "":
+            continue
+        target = config
+        for key in path[:-1]:
+            child = target.get(key)
+            if not isinstance(child, Mapping):
+                child = {}
+                target[key] = child
+            target = child
+        target[path[-1]] = value
+
+    return config
+
+
 def normalize_voice_config(config):
     """Ensure voice provider config defaults exist."""
     if not isinstance(config, Mapping):
@@ -128,6 +169,8 @@ def load_config():
         # Merge Config
         config = merge_configs(default_config, custom_config)
     config = normalize_voice_config(config)
+    # Overlay env vars onto the merged config before any consumer reads it.
+    config = apply_env_overrides(config)
     # Initialize directory
     ensure_directories(config)
 
@@ -159,6 +202,8 @@ async def load_config_async():
     else:
         config = merge_configs(default_config, custom_config)
     config = normalize_voice_config(config)
+    # Overlay env vars onto the merged config before any consumer reads it.
+    config = apply_env_overrides(config)
     ensure_directories(config)
     cache_manager.set(CacheType.CONFIG, "main_config", config)
     return config

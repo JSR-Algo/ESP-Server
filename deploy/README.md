@@ -120,52 +120,133 @@ docker compose --env-file .env -f docker-compose.prod.yml up -d TJBot-esp32-serv
 
 If the VPS only has `docker-compose` v1 and it fails with `KeyError: 'ContainerConfig'`, do not keep retrying Compose. Use the manual fallback below.
 
+## Source of truth: `docker-compose.prod.yml` is canonical
+
+`deploy/docker-compose.prod.yml` is the **single source of truth** for how every
+container runs (names, network `tbot`, ports, volumes, env wiring, healthchecks,
+`depends_on` ordering, and security options). Anything below is either driven by it
+(`docker compose ... up -d`) or a **scoped fallback** that must reproduce the same
+env knobs so it cannot drift from compose.
+
+The drift this section exists to prevent: the historical live-prod manual run set
+Redis up **without** `--requirepass` while compose sets it, and omitted the
+`NESTJS_*` and external-MySQL knobs. The fallback and helper below pass every knob
+from one env file so the manual path stays byte-identical to compose.
+
+Knobs that MUST be passed by any manual run so it matches compose:
+
+- `TZ`, `GOOGLE_API_KEY`
+- `SPRING_DATASOURCE_DRUID_URL` / `_USERNAME` / `_PASSWORD`
+  (built from `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_DATABASE`/`MYSQL_USER`/`MYSQL_PASSWORD`)
+- `SPRING_DATA_REDIS_HOST` / `SPRING_DATA_REDIS_PORT` / **`SPRING_DATA_REDIS_PASSWORD`**
+  (must equal `REDIS_PASSWORD`; Redis must run `--requirepass "$REDIS_PASSWORD"`)
+- `NESTJS_UPSTREAM_HOST` / `NESTJS_TOKEN` (the `/nestjs` course-CMS proxy upstream)
+
+> Prefer compose. Reach for the manual fallback only when Compose v1 cannot
+> recreate containers cleanly. For a **web-only** image bump, prefer
+> `deploy/redeploy-web.sh` (below) — it swaps just the web container with the
+> same `--env-file` and includes a healthcheck + automatic rollback.
+
 ## Compose v1 Manual Fallback
 
-Use this only when Docker Compose v1 cannot recreate containers cleanly. It keeps MySQL data and reuses the existing Docker network.
+Use this only when Docker Compose v1 cannot recreate containers cleanly. It keeps
+MySQL data and reuses the existing Docker network `tbot`.
+
+This fallback reads **one** env file (`/opt/tbot/.env`, the same file compose uses)
+so the manual run can never silently diverge from compose. Set every knob there
+(see `deploy/.env.example`), including `REDIS_PASSWORD`, `NESTJS_UPSTREAM_HOST`,
+and any external-MySQL overrides.
 
 ```sh
 TAG=<tag>
-MYSQL_ROOT_PASSWORD="$(awk -F= '$1=="MYSQL_ROOT_PASSWORD"{print $2}' /opt/TJBot/current/.env)"
-MYSQL_DATABASE="$(awk -F= '$1=="MYSQL_DATABASE"{print $2}' /opt/TJBot/current/.env)"
-mkdir -p /opt/TJBot/{data,models,uploadfile,redis/data}
-docker network inspect TJBot >/dev/null 2>&1 || docker network create TJBot
+ENV_FILE=/opt/tbot/.env
+set -a; . "$ENV_FILE"; set +a            # load .env so the knobs below are populated
 
-docker rm -f TJBot-esp32-server-redis 2>/dev/null || true
-docker run -d --name TJBot-esp32-server-redis --restart unless-stopped \
-  --network TJBot -v /opt/TJBot/redis/data:/data \
-  redis:8.0 sh -c 'exec redis-server --appendonly yes'
+: "${TBOT_SERVER_IMAGE:?set TBOT_SERVER_IMAGE in $ENV_FILE}"
+: "${TBOT_WEB_IMAGE:?set TBOT_WEB_IMAGE in $ENV_FILE}"
+: "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in $ENV_FILE}"
 
-docker rm -f TJBot-esp32-server 2>/dev/null || true
-docker run -d --name TJBot-esp32-server --restart unless-stopped \
-  --network TJBot --security-opt seccomp:unconfined \
-  -e TZ=Asia/Ho_Chi_Minh -e GOOGLE_API_KEY= \
-  -p 8000:8000 -p 8003:8003 \
-  -v /opt/TJBot/data:/opt/TJBot-esp32-server/data \
-  -v /opt/TJBot/models:/opt/TJBot-esp32-server/models \
-  "dinhmanh11/TJBot-server:$TAG"
+# Resolve the same defaults compose uses so the manual run matches it exactly.
+TZ="${TZ:-Asia/Ho_Chi_Minh}"
+MYSQL_HOST="${MYSQL_HOST:-tbot-esp32-server-db}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MYSQL_DATABASE="${MYSQL_DATABASE:-tbot_esp32_server}"
+MYSQL_USER="${MYSQL_USER:-root}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
+MYSQL_SERVER_TIMEZONE="${MYSQL_SERVER_TIMEZONE:-Asia/Ho_Chi_Minh}"
+REDIS_HOST="${REDIS_HOST:-tbot-esp32-server-redis}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+NESTJS_UPSTREAM_HOST="${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}"
+NESTJS_TOKEN="${NESTJS_TOKEN:-}"
+REMOTE_ROOT="${TBOT_REMOTE_ROOT:-/opt/tbot}"
 
-docker rm -f TJBot-esp32-server-web 2>/dev/null || true
-docker run -d --name TJBot-esp32-server-web --restart unless-stopped \
-  --network TJBot \
-  -e TZ=Asia/Ho_Chi_Minh \
-  -e "SPRING_DATASOURCE_DRUID_URL=jdbc:mysql://TJBot-esp32-server-db:3306/${MYSQL_DATABASE}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Ho_Chi_Minh&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10" \
-  -e SPRING_DATASOURCE_DRUID_USERNAME=root \
-  -e "SPRING_DATASOURCE_DRUID_PASSWORD=$MYSQL_ROOT_PASSWORD" \
-  -e SPRING_DATA_REDIS_HOST=TJBot-esp32-server-redis \
-  -e SPRING_DATA_REDIS_PASSWORD= \
-  -e SPRING_DATA_REDIS_PORT=6379 \
-  -p 8002:8002 \
-  -v /opt/TJBot/uploadfile:/uploadfile \
-  "dinhmanh11/TJBot-server-web:$TAG"
+mkdir -p "$REMOTE_ROOT"/{data,models,uploadfile,redis/data}
+docker network inspect tbot >/dev/null 2>&1 || docker network create tbot
+
+# Redis — match compose: enable --requirepass whenever REDIS_PASSWORD is set.
+docker rm -f tbot-esp32-server-redis 2>/dev/null || true
+if [ -n "$REDIS_PASSWORD" ]; then REDIS_AUTH="--requirepass \"$REDIS_PASSWORD\""; else REDIS_AUTH=""; fi
+docker run -d --name tbot-esp32-server-redis --restart unless-stopped \
+  --network tbot -v "$REMOTE_ROOT/redis/data":/data \
+  "${REDIS_IMAGE:-redis:8.0}" sh -c "exec redis-server --appendonly yes $REDIS_AUTH"
+
+docker rm -f tbot-esp32-server 2>/dev/null || true
+docker run -d --name tbot-esp32-server --restart unless-stopped \
+  --network tbot --security-opt seccomp:unconfined \
+  -e "TZ=$TZ" -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}" \
+  -p "${TBOT_WS_PORT:-8000}:8000" -p "${TBOT_HTTP_PORT:-8003}:8003" \
+  -v "$REMOTE_ROOT/data":/opt/tbot-esp32-server/data \
+  -v "$REMOTE_ROOT/models":/opt/tbot-esp32-server/models \
+  "$TBOT_SERVER_IMAGE"
+
+docker rm -f tbot-esp32-server-web 2>/dev/null || true
+docker run -d --name tbot-esp32-server-web --restart unless-stopped \
+  --network tbot \
+  -e "TZ=$TZ" \
+  -e "SPRING_DATASOURCE_DRUID_URL=jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=${MYSQL_SERVER_TIMEZONE}&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10" \
+  -e "SPRING_DATASOURCE_DRUID_USERNAME=$MYSQL_USER" \
+  -e "SPRING_DATASOURCE_DRUID_PASSWORD=$MYSQL_PASSWORD" \
+  -e "SPRING_DATA_REDIS_HOST=$REDIS_HOST" \
+  -e "SPRING_DATA_REDIS_PASSWORD=$REDIS_PASSWORD" \
+  -e "SPRING_DATA_REDIS_PORT=$REDIS_PORT" \
+  -e "NESTJS_UPSTREAM_HOST=$NESTJS_UPSTREAM_HOST" \
+  -e "NESTJS_TOKEN=$NESTJS_TOKEN" \
+  -p "${TBOT_ADMIN_PORT:-8002}:8002" \
+  -v "$REMOTE_ROOT/uploadfile":/uploadfile \
+  "$TBOT_WEB_IMAGE"
 ```
 
 After fallback, verify the running images:
 
 ```sh
-docker inspect TJBot-esp32-server TJBot-esp32-server-web \
+docker inspect tbot-esp32-server tbot-esp32-server-web \
   --format '{{.Name}} {{.Config.Image}} {{.State.Status}} restart={{.State.Restarting}}'
 ```
+
+## Web-only redeploy (`redeploy-web.sh`)
+
+For the common case — a new web/admin image with the rest of the stack unchanged —
+use the helper instead of the full fallback. It loads `/opt/tbot/.env`, saves the
+current web image as a rollback point, stops + renames the old container, runs the
+new one with the **same env knobs as compose**, healthchecks `:8002`, and rolls
+back automatically if the healthcheck fails.
+
+```sh
+# pull-based image (DockerHub):
+deploy/redeploy-web.sh --tag <new-tag>
+
+# tarball-based image (offline / package-release):
+deploy/redeploy-web.sh --image-tar /opt/tbot/current/tbot-server-web.tar.gz
+
+# repoint the env file or admin port if they differ from the defaults:
+deploy/redeploy-web.sh --tag <new-tag> --env-file /opt/tbot/.env --admin-port 8002
+```
+
+It only touches `tbot-esp32-server-web`; MySQL, Redis, and the Python server are
+left running. Because it reads the same `/opt/tbot/.env` as compose, the new web
+container picks up `SPRING_*` (incl. the Redis password), `NESTJS_UPSTREAM_HOST`,
+and any external-MySQL knobs without drift.
 
 ## Runtime
 
