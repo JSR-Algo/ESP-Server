@@ -18,6 +18,8 @@ function resolve(dir) {
 
 // 确保加载 .env 文件
 dotenv.config();
+// Load local dev overrides (NestJS proxy target + admin token; gitignored).
+dotenv.config({ path: '.env.development.local', override: true });
 
 // 定义CDN资源列表，确保Service Worker也能访问
 const cdnResources = {
@@ -46,6 +48,31 @@ module.exports = defineConfig({
       '/tbot': {
         target: 'http://127.0.0.1:8002',
         changeOrigin: true
+      },
+      // Course-customization CRUD is owned by the NestJS tbot-backend
+      // (/v1/admin/*) — the SAME backend the robot reads lessons from. manager-web
+      // reaches it through this server-side proxy (so the browser never makes a
+      // cross-origin call, sidestepping the NestJS backend's lack of CORS). The
+      // NestJS admin bearer token is injected here for dev; set NESTJS_TARGET and
+      // NESTJS_ADMIN_TOKEN in .env.development.local. Per-user NestJS login (and a
+      // prod reverse-proxy route for /nestjs) is a later slice.
+      '/nestjs': {
+        target: process.env.NESTJS_TARGET || 'http://localhost:3000',
+        changeOrigin: true,
+        pathRewrite: { '^/nestjs': '' },
+        onProxyReq(proxyReq) {
+          // Per-user NestJS session token (from the manager-web NestJS login)
+          // rides X-Nest-Authorization, because flyio's request layer force-
+          // overwrites Authorization with the manager-api token. Promote it to
+          // Authorization; otherwise fall back to the shared dev token.
+          const perUser = proxyReq.getHeader('x-nest-authorization');
+          if (perUser) {
+            proxyReq.setHeader('Authorization', perUser);
+            proxyReq.removeHeader('x-nest-authorization');
+          } else if (process.env.NESTJS_ADMIN_TOKEN) {
+            proxyReq.setHeader('Authorization', 'Bearer ' + process.env.NESTJS_ADMIN_TOKEN);
+          }
+        }
       }
     },
     client: {

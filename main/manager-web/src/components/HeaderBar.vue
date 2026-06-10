@@ -4,7 +4,7 @@
       <!-- Left element -->
       <div class="header-left" @click="handleRouter('home')">
         <img loading="lazy" alt="" src="@/assets/tbot-logo.png" class="logo-img" />
-        <img loading="lazy" alt="" :src="tbotAiIcon" class="brand-img" />
+        <span class="brand-text">Tbot Console</span>
       </div>
 
       <!-- Middle navigation menu -->
@@ -137,6 +137,9 @@
             <el-dropdown-item @click.native="handleRouter('featureManagement')">
                 {{ $t("header.featureManagement") }}
               </el-dropdown-item>
+            <el-dropdown-item @click.native="handleRouter('courseManagement')">
+              {{ $t("header.courseManagement") }}
+            </el-dropdown-item>
           </el-dropdown-menu>
         </el-dropdown>
       </div>
@@ -239,6 +242,7 @@ export default {
         replacementWordManagement: "/replacement-word-management",
         serverSideManagement: "/server-side-management",
         featureManagement: "/feature-management",
+        courseManagement: "/course-management",
       }
     };
   },
@@ -272,26 +276,6 @@ export default {
           return this.$t("language.ptBR");
         default:
           return this.$t("language.en");
-      }
-    },
-    // By currentLanguageGet correspondingtbot-aiIcon
-    tbotAiIcon() {
-      const currentLang = this.currentLanguage;
-      switch (currentLang) {
-        case "zh_CN":
-          return require("@/assets/tbot-ai.png");
-        case "zh_TW":
-          return require("@/assets/tbot-ai_zh_TW.png");
-        case "en":
-          return require("@/assets/tbot-ai_en.png");
-        case "de":
-          return require("@/assets/tbot-ai_de.png");
-        case "vi":
-          return require("@/assets/tbot-ai_vi.png");
-        case "pt_BR":
-          return require("@/assets/tbot-ai_en.png");
-        default:
-          return require("@/assets/tbot-ai_en.png");
       }
     },
     // User menu options
@@ -648,8 +632,12 @@ export default {
   height: 42px;
 }
 
-.brand-img {
-  height: 20px;
+.brand-text {
+  color: #2f365f;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .header-center {

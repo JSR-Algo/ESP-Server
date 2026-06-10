@@ -208,6 +208,40 @@ const routes = [
       title: 'Replacement word management'
     }
   },
+  // Course customization CRUD (backed by the NestJS authoring API via /nestjs proxy)
+  {
+    path: '/course-management',
+    name: 'CourseManagement',
+    component: function () {
+      return import('../views/CourseManagement.vue')
+    },
+    meta: {
+      requiresAuth: true,
+      title: 'Course management'
+    }
+  },
+  {
+    path: '/course-lessons',
+    name: 'CourseLessons',
+    component: function () {
+      return import('../views/CourseLessons.vue')
+    },
+    meta: {
+      requiresAuth: true,
+      title: 'Course lessons'
+    }
+  },
+  {
+    path: '/lesson-editor',
+    name: 'LessonEditor',
+    component: function () {
+      return import('../views/LessonEditor.vue')
+    },
+    meta: {
+      requiresAuth: true,
+      title: 'Lesson editor'
+    }
+  },
 ]
 const router = new VueRouter({
   base: process.env.VUE_APP_PUBLIC_PATH || '/',
@@ -229,7 +263,7 @@ VueRouter.prototype.push = function push(location) {
 }
 
 // NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload']
+const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor']
 
 // Route Guard
 router.beforeEach((to, from, next) => {

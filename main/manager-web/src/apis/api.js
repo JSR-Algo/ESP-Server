@@ -11,6 +11,9 @@ import voiceClone from './module/voiceClone.js'
 import voiceResource from './module/voiceResource.js'
 import knowledgeBase from './module/knowledgeBase.js'
 import correctWord from './module/correctWord.js'
+import course from './module/course.js'
+import lesson from './module/lesson.js'
+import nestAuth from './module/nestAuth.js'
 
 
 
@@ -29,9 +32,21 @@ export function getServiceUrl() {
     return DEV_API_SERVICE
 }
 
+/**
+ * Base URL for the NestJS tbot-backend authoring API (course/lesson domain),
+ * reached through the dev-server `/nestjs` proxy (see vue.config.js). Distinct
+ * from getServiceUrl() (manager-api at /tbot). Override the prefix with
+ * VUE_APP_NESTJS_BASE_URL if a different proxy path is used in prod.
+ * @returns {string}
+ */
+export function getNestUrl() {
+    return (process.env.VUE_APP_NESTJS_BASE_URL || '/nestjs') + '/v1/admin'
+}
+
 /** requestService wrapper */
 export default {
     getServiceUrl,
+    getNestUrl,
     user,
     admin,
     agent,
@@ -43,5 +58,8 @@ export default {
     voiceResource,
     voiceClone,
     knowledgeBase,
-    correctWord
+    correctWord,
+    course,
+    lesson,
+    nestAuth
   }
