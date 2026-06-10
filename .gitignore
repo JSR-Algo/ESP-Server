@@ -189,3 +189,15 @@ uploadfile
 !main/manager-mobile/**/.env*
 !main/manager-mobile/**/*.json
 !main/tbot-server/**/*.json
+
+# OMC/agent orchestration state and logs
+.omx/
+*.log
+
+# Python bytecode caches at any depth
+**/__pycache__/
+
+# Local-only env overrides (secrets/tokens, never commit)
+.env*.local
+# ...but keep the manager-mobile env files tracked as before
+!main/manager-mobile/**/.env*
