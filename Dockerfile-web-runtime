@@ -12,7 +12,7 @@ RUN apk update && \
 COPY main/manager-web/public/generator/static/fonts/*.ttf /usr/share/fonts/
 RUN fc-cache -f -v
 
-COPY docs/docker/nginx.conf /etc/nginx/nginx.conf
+COPY docs/docker/nginx.conf /etc/nginx/nginx.conf.template
 COPY main/manager-web/dist /usr/share/nginx/html
 COPY main/manager-api/target/tbot-esp32-api.jar /app/tbot-esp32-api.jar
 

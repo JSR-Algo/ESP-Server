@@ -32,8 +32,8 @@ COPY main/manager-web/public/generator/static/fonts/*.ttf /usr/share/fonts/
 # 更新字体缓存
 RUN fc-cache -f -v
 
-# 配置Nginx
-COPY docs/docker/nginx.conf /etc/nginx/nginx.conf
+# 配置Nginx (rendered from env at start by start.sh)
+COPY docs/docker/nginx.conf /etc/nginx/nginx.conf.template
 
 # 复制前端构建产物
 COPY --from=web-builder /app/dist /usr/share/nginx/html

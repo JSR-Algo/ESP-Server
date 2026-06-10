@@ -175,7 +175,13 @@ export default {
         },
         (msg) => {
           this.loading = false;
-          this.$message.error(msg || this.$t('course.loadFail'));
+          // Not signed in and no shared token configured -> guide to Author
+          // sign-in instead of a scary error toast.
+          if (!this.nestLoggedIn && this.$refs.nestLogin) {
+            this.$refs.nestLogin.open();
+          } else {
+            this.$message.error(msg || this.$t('course.loadFail'));
+          }
         },
       );
     },
