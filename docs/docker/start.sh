@@ -13,8 +13,10 @@ java -jar /app/tbot-esp32-api.jar \
 # config from env (configurable bridge: to repoint the course backend later, change
 # NESTJS_UPSTREAM_HOST / NESTJS_TOKEN in the container env and restart -- no rebuild).
 : "${NESTJS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"
+: "${NESTJS_UPSTREAM_SCHEME:=https}"
 : "${NESTJS_TOKEN:=}"
 sed -e "s|__NESTJS_UPSTREAM_HOST__|${NESTJS_UPSTREAM_HOST}|g" \
+    -e "s|__NESTJS_UPSTREAM_SCHEME__|${NESTJS_UPSTREAM_SCHEME}|g" \
     -e "s|__NESTJS_TOKEN__|${NESTJS_TOKEN}|g" \
     /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
