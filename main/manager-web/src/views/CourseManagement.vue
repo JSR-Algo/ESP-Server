@@ -12,14 +12,6 @@
       </div>
       <div class="right-operations">
         <span class="backend-hint">{{ $t('course.backendHint') }}</span>
-        <el-button
-          size="small"
-          :type="nestLoggedIn ? 'success' : 'default'"
-          :icon="nestLoggedIn ? 'el-icon-check' : 'el-icon-user'"
-          @click="$refs.nestLogin.open()"
-        >
-          {{ nestLoggedIn ? $t('nestLogin.signedIn') : $t('nestLogin.signIn') }}
-        </el-button>
         <el-button type="primary" size="small" @click="openCreate">
           {{ $t('course.createBtn') }}
         </el-button>
@@ -120,19 +112,16 @@
         <el-button type="primary" size="small" :loading="cloning" @click="doClone">{{ $t('course.clone') }}</el-button>
       </span>
     </el-dialog>
-
-    <nest-login-dialog ref="nestLogin" @logged-in="onNestLoggedIn" />
   </div>
 </template>
 
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
-import NestLoginDialog from '@/components/NestLoginDialog.vue';
 import Api from '@/apis/api';
 
 export default {
   name: 'CourseManagement',
-  components: { HeaderBar, NestLoginDialog },
+  components: { HeaderBar },
   data() {
     return {
       list: [],
@@ -140,7 +129,6 @@ export default {
       dialogVisible: false,
       editing: false,
       saving: false,
-      nestLoggedIn: false,
       kindFilter: 'all',
       cloneVisible: false,
       cloning: false,
@@ -157,7 +145,6 @@ export default {
     },
   },
   created() {
-    this.nestLoggedIn = Api.nestAuth.hasToken();
     this.fetchList();
   },
   methods: {
@@ -175,19 +162,9 @@ export default {
         },
         (msg) => {
           this.loading = false;
-          // Not signed in and no shared token configured -> guide to Author
-          // sign-in instead of a scary error toast.
-          if (!this.nestLoggedIn && this.$refs.nestLogin) {
-            this.$refs.nestLogin.open();
-          } else {
-            this.$message.error(msg || this.$t('course.loadFail'));
-          }
+          this.$message.error(msg || this.$t('course.loadFail'));
         },
       );
-    },
-    onNestLoggedIn() {
-      this.nestLoggedIn = true;
-      this.fetchList();
     },
     openLessons(row) {
       this.$router.push({
