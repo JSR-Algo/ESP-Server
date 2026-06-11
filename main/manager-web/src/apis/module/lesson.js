@@ -92,6 +92,10 @@ export default {
     };
     if (input.helperText) data.helperText = input.helperText;
     if (input.l1TransferHint) data.l1TransferHint = input.l1TransferHint;
+    // fillBlank choices (single-correct enforced server-side); only send when present
+    if (Array.isArray(input.choices) && input.choices.length) data.choices = input.choices;
+    // free-form scene/media body; only send when populated (server defaults to {})
+    if (input.stepBody && Object.keys(input.stepBody).length) data.stepBody = input.stepBody;
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/steps`,
       method: 'POST',

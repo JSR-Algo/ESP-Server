@@ -54,6 +54,8 @@ export function normalizeStep(raw) {
     subject: r.subject ?? '',
     helperText: r.helper_text ?? r.helperText ?? '',
     l1TransferHint: r.l1_transfer_hint ?? r.l1TransferHint ?? '',
+    choices: Array.isArray(r.choices) ? r.choices : (r.choices ?? null),
+    stepBody: r.step_body ?? r.stepBody ?? {},
     robotState: r.robot_state ?? r.robotState ?? '',
     pose: r.pose ?? '',
     expression: r.expression ?? '',
