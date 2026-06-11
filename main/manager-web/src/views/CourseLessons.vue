@@ -29,11 +29,29 @@
               <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column :label="$t('lesson.colActions')" width="180">
+          <el-table-column :label="$t('lesson.colActions')" width="260">
             <template slot-scope="scope">
               <el-button type="text" size="small" @click="openEditor(scope.row)">
                 {{ $t('lesson.editSteps') }}
               </el-button>
+              <!-- Published lessons are immutable: editing branches a NEW DRAFT at
+                   v+1 (steps + assets copied). Publishing it replaces the live one.
+                   Drafts are edited directly (no button needed). -->
+              <el-tooltip
+                v-if="scope.row.status === 'published'"
+                effect="dark"
+                :content="$t('lesson.newVersionHint')"
+                placement="top"
+              >
+                <el-button
+                  type="text"
+                  size="small"
+                  :loading="branchingId === scope.row.lessonId"
+                  @click="createNextVersion(scope.row)"
+                >
+                  {{ $t('lesson.newVersion') }}
+                </el-button>
+              </el-tooltip>
               <el-button
                 v-if="scope.row.status === 'draft'"
                 type="text"
@@ -88,6 +106,7 @@ export default {
       loading: false,
       dialogVisible: false,
       saving: false,
+      branchingId: '',
       form: { lessonKey: '', title: '', locale: 'en', ageBand: '6-8' },
     };
   },
@@ -178,6 +197,35 @@ export default {
               this.fetchList();
             },
             (msg) => this.$message.error(msg),
+          );
+        })
+        .catch(() => {});
+    },
+    // Branch a PUBLISHED lesson into a NEW DRAFT at v+1 (published lessons are
+    // immutable). On success, jump into the editor for the new draft so the author
+    // customizes + publishes v2 — which replaces the live version.
+    createNextVersion(row) {
+      this.$confirm(
+        this.$t('lesson.newVersionConfirm', { key: row.lessonKey }),
+        this.$t('lesson.newVersion'),
+        { type: 'warning' },
+      )
+        .then(() => {
+          this.branchingId = row.lessonId;
+          Api.lesson.createNextVersion(
+            row.lessonId,
+            (lesson) => {
+              this.branchingId = '';
+              this.$message.success(
+                this.$t('lesson.newVersionCreated', { v: lesson.lessonVersion }),
+              );
+              // Edit the new draft directly (its own id), then publish v2.
+              this.openEditor(lesson);
+            },
+            (msg) => {
+              this.branchingId = '';
+              this.$message.error(msg);
+            },
           );
         })
         .catch(() => {});

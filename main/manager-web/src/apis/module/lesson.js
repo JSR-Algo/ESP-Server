@@ -74,6 +74,20 @@ export default {
     });
   },
 
+  // POST /v1/admin/lessons/:lessonId/new-version -> new DRAFT lesson at v+1
+  // "Edit a published lesson": published lessons are immutable, so the edit path is
+  // a fresh draft (same lesson_key + course_id, next lesson_version) with the steps
+  // + assets deep-copied. Publishing it supersedes the live version. Server 400s if
+  // the source is not published or a draft of the next version already exists.
+  createNextVersion(lessonId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/new-version`,
+      method: 'POST',
+      onSuccess: (p) => onSuccess(normalizeLesson(p)),
+      onError,
+    });
+  },
+
   // GET /v1/admin/lessons/:lessonId/steps -> Step[]
   listSteps(lessonId, onSuccess, onError) {
     nestRequest({
