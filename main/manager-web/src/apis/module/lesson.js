@@ -11,8 +11,10 @@ import {
  * Lesson / step / asset / validate / preview / publish CRUD — backed by the
  * NestJS tbot-backend authoring API (/v1/admin/*), reached through the `/nestjs`
  * proxy. Same conventions as course.js (2xx success, {data} envelope unwrap,
- * snake→camel). The render triple (robotState/pose/expression/phase/entrance) is
- * SERVER-DERIVED — never sent on createStep (the controller 400s if present).
+ * snake→camel). robotState/pose/phase/entrance are SERVER-DERIVED — never sent on
+ * createStep (the controller 400s if present). `expression` is the one overridable
+ * lever: sent via an explicit `renderOverride` envelope, validated to the
+ * firmware-supported set server-side.
  */
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
@@ -96,6 +98,11 @@ export default {
     if (Array.isArray(input.choices) && input.choices.length) data.choices = input.choices;
     // free-form scene/media body; only send when populated (server defaults to {})
     if (input.stepBody && Object.keys(input.stepBody).length) data.stepBody = input.stepBody;
+    // per-step robot-face override {expression}; server validates against the
+    // firmware-supported set and overlays it onto the derived render triple.
+    if (input.renderOverride && input.renderOverride.expression) {
+      data.renderOverride = { expression: input.renderOverride.expression };
+    }
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/steps`,
       method: 'POST',
@@ -140,9 +147,34 @@ export default {
   },
 
   // POST /v1/admin/lessons/:lessonId/assets/upload (multipart; server digests)
-  // fields: optional { profile, layer, role, assetKey, critical }
+  // fields: optional { profile, layer, role, assetKey, critical }. Also the
+  // REPLACE path: re-upload under an existing assetKey upserts in place.
   uploadAsset(lessonId, file, fields, onSuccess, onError) {
     nestUpload(`/lessons/${lessonId}/assets/upload`, file, fields, onSuccess, onError);
+  },
+
+  // GET /v1/admin/lessons/:lessonId/assets[?profile] -> { profiles, assets:[...] }
+  // Read-only bundle listing across profiles; empty bundle -> { profiles:[], assets:[] }.
+  listAssets(lessonId, profile, onSuccess, onError) {
+    const q = profile ? `?profile=${encodeURIComponent(profile)}` : '';
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/assets${q}`,
+      method: 'GET',
+      onSuccess: (p) =>
+        onSuccess(p && Array.isArray(p.assets) ? p : { profiles: [], assets: [] }),
+      onError,
+    });
+  },
+
+  // DELETE /v1/admin/lessons/:lessonId/assets/:assetKey?profile= (draft only)
+  // Removes the assets row (NOT the content-addressed blob); returns nothing useful.
+  deleteAsset(lessonId, assetKey, profile, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/assets/${encodeURIComponent(assetKey)}?profile=${encodeURIComponent(profile || 'espTft')}`,
+      method: 'DELETE',
+      onSuccess: () => onSuccess && onSuccess(),
+      onError,
+    });
   },
 
   // POST /v1/admin/lessons/:lessonId/validate -> { valid, profiles }

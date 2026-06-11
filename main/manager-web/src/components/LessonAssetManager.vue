@@ -54,25 +54,52 @@
         <el-button size="small">{{ $t('lesson.pickImage') }}</el-button>
       </el-upload>
       <el-button type="primary" size="small" :loading="uploading" :disabled="!pickedFile || disabled" @click="uploadAsset">
-        {{ $t('lesson.uploadAsset') }}
+        {{ replaceMode ? $t('lesson.replaceAsset') : $t('lesson.uploadAsset') }}
       </el-button>
+      <el-button v-if="replaceMode" size="small" @click="cancelReplace">{{ $t('lesson.cancel') }}</el-button>
       <span class="muted small">{{ $t('lesson.assetHint') }}</span>
     </div>
 
-    <!-- Session-local list of what was uploaded -->
-    <div v-if="uploaded.length" class="asset-list">
-      <div class="list-title muted small">{{ $t('lesson.assetList') }}</div>
-      <div v-for="(a, i) in uploaded" :key="i" class="asset-row">
-        <img v-if="a.url" :src="a.url" class="thumb" :alt="a.assetKey" />
-        <div class="asset-meta">
-          <div class="kv"><span class="muted">{{ $t('lesson.assetKey') }}</span><span class="mono">{{ a.assetKey }}</span></div>
-          <div class="kv"><span class="muted">{{ $t('lesson.layer') }}</span><span>{{ a.layer }}<span v-if="a.critical"> · {{ $t('lesson.critical') }}</span></span></div>
-          <div class="kv" v-if="a.width"><span class="muted">{{ $t('lesson.assetPreview') }}</span><span class="mono">{{ a.width }}×{{ a.height }} {{ a.mediaType }}</span></div>
-          <div class="kv"><span class="muted">sha256</span><span class="mono">{{ a.sha256 }}</span></div>
-        </div>
+    <!-- Server-backed bundle asset list, grouped by layer -->
+    <div class="asset-list">
+      <div class="list-toolbar">
+        <span class="list-title muted small">{{ $t('lesson.assetList') }}</span>
+        <el-button type="text" size="mini" icon="el-icon-refresh" :loading="loadingList" @click="reload">{{ $t('lesson.refresh') }}</el-button>
       </div>
-      <div class="muted small">{{ $t('lesson.assetSessionOnly') }}</div>
+      <div v-if="!loadingList && !serverAssets.length" class="muted small">{{ $t('lesson.assetListEmpty') }}</div>
+      <div v-for="layerName in layerOrder" :key="layerName">
+        <template v-if="assetsByLayer[layerName] && assetsByLayer[layerName].length">
+          <div class="layer-title muted small">{{ layerLabel(layerName) }}</div>
+          <div v-for="a in assetsByLayer[layerName]" :key="a.profile + '/' + a.assetKey" class="asset-row">
+            <img
+              v-if="isPreviewable(a.url)"
+              :src="a.url"
+              class="thumb"
+              :alt="a.assetKey"
+              @click="openPreview(a)"
+            />
+            <div v-else class="thumb thumb-placeholder">{{ $t('lesson.noPreview') }}</div>
+            <div class="asset-meta">
+              <div class="kv"><span class="muted">{{ $t('lesson.assetKey') }}</span><span class="mono">{{ a.assetKey }}</span></div>
+              <div class="kv"><span class="muted">{{ $t('lesson.layer') }}</span><span>{{ a.layer }} · {{ a.role }}<span v-if="a.critical"> · {{ $t('lesson.critical') }}</span></span></div>
+              <div class="kv" v-if="a.dimensions"><span class="muted">{{ $t('lesson.assetPreview') }}</span><span class="mono">{{ a.dimensions.width }}×{{ a.dimensions.height }} {{ a.mediaType }} · {{ a.bytes }}B</span></div>
+              <div class="kv"><span class="muted">sha256</span><span class="mono">{{ shortSha(a.sha256) }}</span></div>
+            </div>
+            <div class="asset-actions">
+              <el-button size="mini" :disabled="disabled" @click="startReplace(a)">{{ $t('lesson.replaceAsset') }}</el-button>
+              <el-popconfirm :title="$t('lesson.assetDeleteConfirm')" @confirm="onDelete(a)">
+                <el-button slot="reference" type="danger" size="mini" icon="el-icon-delete" :disabled="disabled" />
+              </el-popconfirm>
+            </div>
+          </div>
+        </template>
+      </div>
     </div>
+
+    <!-- Full-size preview -->
+    <el-dialog :visible.sync="previewVisible" :title="previewAsset ? previewAsset.assetKey : ''" width="640px" append-to-body>
+      <img v-if="previewAsset && isPreviewable(previewAsset.url)" :src="previewAsset.url" class="preview-full" :alt="previewAsset ? previewAsset.assetKey : ''" />
+    </el-dialog>
   </el-card>
 </template>
 
@@ -100,10 +127,93 @@ export default {
       critical: true,
       pickedFile: null,
       uploading: false,
-      uploaded: [],
+      // Server-backed source of truth (replaces the old session-local uploaded[]).
+      serverAssets: [],
+      loadingList: false,
+      replaceMode: false,
+      previewVisible: false,
+      previewAsset: null,
+      layerOrder: ['backgroundScene', 'teachingObject', 'robotOverlay'],
     };
   },
+  computed: {
+    assetsByLayer() {
+      const by = {};
+      this.serverAssets.forEach((a) => {
+        const k = a.layer || 'other';
+        (by[k] || (by[k] = [])).push(a);
+      });
+      return by;
+    },
+  },
+  mounted() {
+    this.reload();
+  },
   methods: {
+    // Backend returns the relative public_id when LESSON_ASSET_ORIGIN_BASE is unset;
+    // only render a thumbnail for an absolute http(s) URL.
+    isPreviewable(url) {
+      return /^https?:\/\//.test(String(url || ''));
+    },
+    shortSha(sha) {
+      const s = String(sha || '');
+      return s.length > 16 ? s.slice(0, 16) + '…' : s;
+    },
+    layerLabel(layer) {
+      const map = {
+        backgroundScene: 'lesson.layerBackground',
+        teachingObject: 'lesson.layerTeachingObject',
+        robotOverlay: 'lesson.layerRobotOverlay',
+      };
+      return map[layer] ? this.$t(map[layer]) : layer;
+    },
+    reload() {
+      this.loadingList = true;
+      Api.lesson.listAssets(
+        this.lessonId,
+        'espTft',
+        (res) => {
+          this.loadingList = false;
+          this.serverAssets = Array.isArray(res.assets) ? res.assets : [];
+          // Lift the loaded list up so the Scene editor can reference real assetKeys.
+          this.$emit('assets-loaded', this.serverAssets);
+        },
+        (msg) => { this.loadingList = false; this.$message.error(msg); },
+      );
+    },
+    openPreview(a) {
+      this.previewAsset = a;
+      this.previewVisible = true;
+    },
+    // Prefill the upload form from a row, keeping layer/role stable so the key's
+    // placement does not change on replace (upsert-by-assetKey).
+    startReplace(a) {
+      this.replaceMode = true;
+      this.layer = a.layer;
+      this.role = a.role;
+      this.assetKey = a.assetKey;
+      this.critical = !!a.critical;
+      if (a.layer === 'robotOverlay') {
+        const p = (a.assetKey || '').split('.')[1];
+        if (p) this.pose = p;
+      }
+      this.pickedFile = null;
+      if (this.$refs.uploader) this.$refs.uploader.clearFiles();
+    },
+    cancelReplace() {
+      this.replaceMode = false;
+      this.pickedFile = null;
+      if (this.$refs.uploader) this.$refs.uploader.clearFiles();
+    },
+    onDelete(a) {
+      Api.lesson.deleteAsset(
+        this.lessonId,
+        a.assetKey,
+        a.profile,
+        () => { this.$message.success(this.$t('lesson.assetDeleted')); this.reload(); },
+        (msg) => this.$message.error(msg),
+      );
+    },
     // Seed-convention default assetKey for the current layer/pose/subject.
     defaultAssetKey() {
       if (this.layer === 'backgroundScene') return 'backgroundScene.poster';
@@ -145,22 +255,18 @@ export default {
         (asset) => {
           this.uploading = false;
           const a = (asset && asset.asset) ? asset.asset : (asset || {});
-          this.uploaded.unshift({
-            assetKey: a.asset_key || a.assetKey || key,
-            layer: a.layer || layer,
-            role: a.role || fields.role,
-            critical: this.critical,
-            url: a.url || a.src || '',
-            sha256: a.sha256 || '',
-            bytes: a.bytes || '',
-            width: a.width || '',
-            height: a.height || '',
-            mediaType: a.media_type || a.mediaType || '',
-          });
           this.pickedFile = null;
+          this.replaceMode = false;
           if (this.$refs.uploader) this.$refs.uploader.clearFiles();
           this.$message.success(this.$t('lesson.uploadOk'));
-          this.$emit('uploaded', this.uploaded[0]);
+          // Refetch so the server list (incl. upsert/replace) is authoritative;
+          // reload() emits 'assets-loaded' to refresh the Scene editor dropdowns.
+          this.reload();
+          // Keep 'uploaded' so LessonEditor can refresh validate/preview state.
+          this.$emit('uploaded', {
+            assetKey: a.asset_key || a.assetKey || key,
+            layer: a.layer || layer,
+          });
         },
         (msg) => {
           this.uploading = false;
@@ -182,10 +288,15 @@ export default {
 .field-label { font-size: 12px; color: #909399; }
 .add-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 .asset-list { margin-top: 16px; }
+.list-toolbar { display: flex; align-items: center; justify-content: space-between; }
 .list-title { margin-bottom: 8px; }
-.asset-row { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid #ebeef5; }
-.thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; border: 1px solid #ebeef5; }
+.layer-title { margin: 12px 0 4px; font-weight: 600; }
+.asset-row { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid #ebeef5; align-items: flex-start; }
+.thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; border: 1px solid #ebeef5; cursor: pointer; }
+.thumb-placeholder { display: flex; align-items: center; justify-content: center; text-align: center; font-size: 11px; color: #c0c4cc; cursor: default; }
 .asset-meta { flex: 1; }
+.asset-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.preview-full { max-width: 100%; max-height: 60vh; display: block; margin: 0 auto; }
 .kv { display: flex; gap: 10px; padding: 1px 0; }
 .kv .muted { width: 90px; display: inline-block; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }

@@ -67,9 +67,12 @@
               <span v-else class="muted">—</span>
             </template>
           </el-table-column>
-          <el-table-column :label="$t('lesson.renderTriple')" min-width="170">
+          <el-table-column :label="$t('lesson.renderTriple')" min-width="200">
             <template slot-scope="scope">
               <span class="muted mono small">{{ scope.row.robotState }}/{{ scope.row.pose }}/{{ scope.row.phase }}</span>
+              <el-tag v-if="isExpressionOverride(scope.row)" size="mini" type="warning" effect="plain" style="margin-left: 6px">
+                {{ scope.row.expression }}
+              </el-tag>
             </template>
           </el-table-column>
           <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
@@ -91,7 +94,7 @@
 
       <!-- Asset authoring (draft only): layer + role + stable assetKey + critical
            + robot pose picker + per-session preview list. -->
-      <LessonAssetManager v-if="isDraft" :lesson-id="lessonId" :subject-hint="lastSubject" />
+      <LessonAssetManager v-if="isDraft" :lesson-id="lessonId" :subject-hint="lastSubject" @assets-loaded="onAssetsLoaded" />
     </div>
 
     <!-- Step editor dialog (draft only) -->
@@ -119,6 +122,116 @@
         </el-form-item>
         <el-form-item :label="$t('lesson.l1TransferHint')">
           <el-input v-model="stepForm.l1TransferHint" :placeholder="$t('lesson.l1TransferHint')" />
+        </el-form-item>
+
+        <!-- Robot expression override (face only; default empty = auto from stepType) -->
+        <el-form-item :label="$t('lesson.renderExpression')">
+          <el-select v-model="stepForm.renderExpression" clearable :placeholder="$t('lesson.renderExpressionAuto')" style="width: 100%">
+            <el-option v-for="e in expressionOptions" :key="e.value" :label="e.label" :value="e.value" />
+          </el-select>
+          <span class="muted small">{{ $t('lesson.renderExpressionHint') }}</span>
+        </el-form-item>
+
+        <!-- Vocabulary (stored under stepBody.vocab; author-metadata, firmware-inert) -->
+        <el-divider content-position="left">{{ $t('lesson.vocabSection') }}</el-divider>
+        <div class="grid-2">
+          <el-form-item :label="$t('lesson.vocabWord')">
+            <el-input v-model="stepForm.vocab.word" :placeholder="$t('lesson.vocabWord')" size="small" />
+          </el-form-item>
+          <el-form-item :label="$t('lesson.vocabIpa')">
+            <el-input v-model="stepForm.vocab.ipa" placeholder="/bɑːrn/" size="small" />
+          </el-form-item>
+          <el-form-item :label="$t('lesson.vocabPos')">
+            <el-select v-model="stepForm.vocab.partOfSpeech" clearable :placeholder="$t('lesson.vocabPos')" size="small" style="width: 100%">
+              <el-option v-for="p in partsOfSpeech" :key="p" :label="$t('lesson.pos_' + p)" :value="p" />
+            </el-select>
+          </el-form-item>
+          <el-form-item :label="$t('lesson.vocabTranslation')">
+            <el-input v-model="stepForm.vocab.translationVi" :placeholder="$t('lesson.vocabTranslation')" size="small" />
+          </el-form-item>
+        </div>
+        <el-form-item :label="$t('lesson.vocabDefinition')">
+          <el-input v-model="stepForm.vocab.definition" type="textarea" :rows="2" :placeholder="$t('lesson.vocabDefinition')" />
+        </el-form-item>
+        <el-form-item :label="$t('lesson.vocabExamples')">
+          <div v-for="(ex, i) in stepForm.vocab.examples" :key="'ex' + i" class="choice-row">
+            <el-input v-model="ex.text" :placeholder="$t('lesson.vocabExampleText')" size="small" style="flex: 1" />
+            <el-input v-model="ex.translation" :placeholder="$t('lesson.vocabExampleTranslation')" size="small" style="flex: 1" />
+            <el-button type="text" class="danger-text" @click="removeExample(i)">{{ $t('lesson.removeExample') }}</el-button>
+          </div>
+          <el-button type="text" icon="el-icon-plus" @click="addExample">{{ $t('lesson.addExample') }}</el-button>
+        </el-form-item>
+
+        <!-- Scene composer (builds stepBody.scene from lifted bundle assets) -->
+        <el-divider content-position="left">{{ $t('lesson.sceneSection') }}</el-divider>
+        <span v-if="!hasBundleAssets" class="muted small">{{ $t('lesson.sceneNoAssets') }}</span>
+
+        <el-form-item :label="$t('lesson.backgroundScene')">
+          <el-select v-model="stepForm.scene.backgroundKey" clearable :placeholder="$t('lesson.sceneNone')" style="width: 100%">
+            <el-option v-for="a in backgroundAssets" :key="a.assetKey" :label="a.assetKey" :value="a.assetKey" />
+          </el-select>
+        </el-form-item>
+        <div class="grid-2" v-if="stepForm.scene.backgroundKey">
+          <el-form-item :label="$t('lesson.altCaption')">
+            <el-input v-model="stepForm.scene.altCaption" :placeholder="$t('lesson.altCaption')" size="small" />
+          </el-form-item>
+          <el-form-item :label="$t('lesson.fit')">
+            <el-select v-model="stepForm.scene.fit" size="small" style="width: 100%">
+              <el-option label="cover" value="cover" />
+              <el-option label="contain" value="contain" />
+            </el-select>
+          </el-form-item>
+        </div>
+
+        <el-form-item :label="$t('lesson.teachingObject')">
+          <el-select v-model="stepForm.scene.objectKey" clearable :placeholder="$t('lesson.sceneNone')" style="width: 100%">
+            <el-option v-for="a in teachingObjectAssets" :key="a.assetKey" :label="a.assetKey" :value="a.assetKey" />
+          </el-select>
+        </el-form-item>
+        <div class="grid-2" v-if="stepForm.scene.objectKey">
+          <el-form-item :label="$t('lesson.primaryWord')">
+            <el-input v-model="stepForm.scene.primaryWord" :placeholder="$t('lesson.primaryWord')" size="small" />
+          </el-form-item>
+          <el-form-item :label="$t('lesson.placement')">
+            <el-select v-model="stepForm.scene.placementAnchor" size="small" style="width: 100%">
+              <el-option label="center" value="center" />
+              <el-option label="top" value="top" />
+              <el-option label="bottom" value="bottom" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <el-form-item v-if="stepForm.scene.objectKey" :label="$t('lesson.supportWords')">
+          <el-select v-model="stepForm.scene.supportWords" multiple filterable allow-create default-first-option :placeholder="$t('lesson.supportWords')" style="width: 100%">
+            <el-option v-for="w in stepForm.scene.supportWords" :key="w" :label="w" :value="w" />
+          </el-select>
+        </el-form-item>
+
+        <!-- focusTarget: model step only (matches seed s4); clamped [0,1] + tStart<tEnd guard -->
+        <template v-if="stepForm.stepType === 'model'">
+          <div class="muted small focus-title">{{ $t('lesson.focusTarget') }}</div>
+          <div v-for="(w, i) in stepForm.scene.activeWindows" :key="'win' + i" class="focus-row">
+            <el-input-number v-model="w.tStart" :min="0" :step="0.1" size="mini" controls-position="right" :placeholder="'tStart'" />
+            <el-input-number v-model="w.tEnd" :min="0" :step="0.1" size="mini" controls-position="right" :placeholder="'tEnd'" />
+            <el-input-number v-model="w.x" :min="0" :max="1" :step="0.01" size="mini" controls-position="right" :placeholder="'x'" />
+            <el-input-number v-model="w.y" :min="0" :max="1" :step="0.01" size="mini" controls-position="right" :placeholder="'y'" />
+            <el-input-number v-model="w.w" :min="0" :max="1" :step="0.01" size="mini" controls-position="right" :placeholder="'w'" />
+            <el-input-number v-model="w.h" :min="0" :max="1" :step="0.01" size="mini" controls-position="right" :placeholder="'h'" />
+            <el-button type="text" class="danger-text" @click="removeWindow(i)">{{ $t('lesson.removeChoice') }}</el-button>
+          </div>
+          <el-button type="text" icon="el-icon-plus" @click="addWindow">{{ $t('lesson.addWindow') }}</el-button>
+          <div class="grid-2">
+            <el-form-item :label="$t('lesson.successUtterance')">
+              <el-input v-model="stepForm.scene.successUtterance" size="small" />
+            </el-form-item>
+            <el-form-item :label="$t('lesson.missUtterance')">
+              <el-input v-model="stepForm.scene.missUtterance" size="small" />
+            </el-form-item>
+          </div>
+          <span class="muted small">{{ $t('lesson.focusHint') }}</span>
+        </template>
+
+        <el-form-item :label="$t('lesson.timeoutSec')">
+          <el-input-number v-model="stepForm.scene.timeoutSec" :min="1" :max="120" size="small" />
         </el-form-item>
 
         <!-- Choices editor (fillBlank): single-correct enforced client-side -->
@@ -171,9 +284,20 @@ export default {
       publishing: false,
       renaming: false,
       stepDialogVisible: false,
-      stepForm: { stepType: '', prompt: '', subject: '', helperText: '', l1TransferHint: '', choices: [] },
+      stepForm: this.blankStepForm(),
       correctChoiceId: '',
       lastSubject: '',
+      // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
+      bundleAssets: [],
+      // Part-of-speech enum + firmware-supported expression overrides (with REAL
+      // on-device emoji so the author is not misled: listening ≡ thinking face).
+      partsOfSpeech: ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'determiner'],
+      expressionOptions: [
+        { value: 'teaching', label: 'teaching · happy 😊' },
+        { value: 'listening', label: 'listening · thinking 🤔' },
+        { value: 'thinking', label: 'thinking · thinking 🤔' },
+        { value: 'celebrating', label: 'celebrating · laughing 😄' },
+      ],
       preview: null,
       publishMessage: '',
       renameVisible: false,
@@ -197,6 +321,25 @@ export default {
     isChoiceStep() {
       return this.stepForm.stepType === 'fillBlank';
     },
+    backgroundAssets() {
+      return this.bundleAssets.filter((a) => a.layer === 'backgroundScene');
+    },
+    teachingObjectAssets() {
+      return this.bundleAssets.filter((a) => a.layer === 'teachingObject');
+    },
+    hasBundleAssets() {
+      return this.backgroundAssets.length > 0 || this.teachingObjectAssets.length > 0;
+    },
+  },
+  watch: {
+    // Mirror subject into vocab.word + scene.primaryWord while they track it
+    // (don't clobber an author-edited value).
+    'stepForm.subject'(val, old) {
+      const v = this.stepForm.vocab;
+      if (v && (!v.word || v.word === old)) v.word = val;
+      const sc = this.stepForm.scene;
+      if (sc && (!sc.primaryWord || sc.primaryWord === old)) sc.primaryWord = val;
+    },
   },
   created() {
     if (!this.lessonId) {
@@ -210,6 +353,145 @@ export default {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
       return 'warning';
+    },
+    // Fresh step-form skeleton incl. scene + vocab + expression-override state.
+    blankStepForm() {
+      return {
+        stepType: '',
+        prompt: '',
+        subject: '',
+        helperText: '',
+        l1TransferHint: '',
+        choices: [],
+        renderExpression: '',
+        vocab: {
+          word: '',
+          ipa: '',
+          partOfSpeech: '',
+          translationVi: '',
+          definition: '',
+          examples: [],
+        },
+        scene: {
+          backgroundKey: '',
+          altCaption: '',
+          fit: 'cover',
+          objectKey: '',
+          primaryWord: '',
+          placementAnchor: 'center',
+          supportWords: [],
+          activeWindows: [],
+          successUtterance: '',
+          missUtterance: '',
+          timeoutSec: 12,
+        },
+      };
+    },
+    onAssetsLoaded(assets) {
+      this.bundleAssets = Array.isArray(assets) ? assets : [];
+    },
+    // A step carries an expression override when its persisted expression differs
+    // from the stepType-derived default. Server-derived steps look "auto"; we flag
+    // the divergence so authors see which rows were overridden.
+    isExpressionOverride(row) {
+      const expected = {
+        greeting: 'teaching', review: 'teaching', focus: 'teaching', model: 'teaching',
+        listen: 'listening', repeat: 'listening', fillBlank: 'thinking', feedback: 'teaching',
+        celebrate: 'celebrating',
+      };
+      const def = expected[row.stepType];
+      return !!def && !!row.expression && row.expression !== def;
+    },
+    addExample() {
+      this.stepForm.vocab.examples.push({ text: '', translation: '' });
+    },
+    removeExample(i) {
+      this.stepForm.vocab.examples.splice(i, 1);
+    },
+    addWindow() {
+      this.stepForm.scene.activeWindows.push({ tStart: 0, tEnd: 1, x: 0.5, y: 0.5, w: 0.4, h: 0.4 });
+    },
+    removeWindow(i) {
+      this.stepForm.scene.activeWindows.splice(i, 1);
+    },
+    assetByKey(key) {
+      return this.bundleAssets.find((a) => a.assetKey === key) || null;
+    },
+    // Build the stepBody.vocab object, dropping empty sub-fields. Returns null when
+    // nothing was authored. locale = lesson locale (default 'vi').
+    buildVocab(subject) {
+      const v = this.stepForm.vocab;
+      const word = (v.word || subject || '').trim();
+      const out = {};
+      if (word) out.word = word;
+      if ((v.ipa || '').trim()) out.ipa = v.ipa.trim();
+      if (v.partOfSpeech) out.partOfSpeech = v.partOfSpeech;
+      const tr = (v.translationVi || '').trim();
+      if (tr) {
+        const loc = (this.lesson && this.lesson.locale) || 'vi';
+        out.translation = { [loc]: tr };
+      }
+      if ((v.definition || '').trim()) out.definition = v.definition.trim();
+      const examples = (v.examples || [])
+        .filter((e) => (e.text || '').trim())
+        .map((e) => {
+          const ex = { text: e.text.trim() };
+          if ((e.translation || '').trim()) ex.translation = e.translation.trim();
+          return ex;
+        });
+      if (examples.length) out.examples = examples;
+      // Only emit when more than the auto-mirrored word is present.
+      return Object.keys(out).length > (out.word ? 1 : 0) || out.word ? out : null;
+    },
+    // Build the stepBody.scene object from the lifted bundle assets, matching the
+    // 076 seed shape. Returns null when nothing was authored.
+    buildScene(subject) {
+      const s = this.stepForm.scene;
+      const scene = {};
+      const bg = this.assetByKey(s.backgroundKey);
+      if (bg) {
+        scene.backgroundScene = {
+          mode: 'poster',
+          poster: { key: bg.assetKey, src: bg.url, fit: s.fit || 'cover', sha256: bg.sha256 },
+          video: null,
+          altCaption: (s.altCaption || '').trim(),
+        };
+      }
+      const obj = this.assetByKey(s.objectKey);
+      if (obj) {
+        const teachingObject = {
+          primaryWord: (s.primaryWord || subject || '').trim(),
+          supportWords: Array.isArray(s.supportWords) ? s.supportWords.filter(Boolean) : [],
+          placement: { anchor: s.placementAnchor || 'center', paddingTopPercent: 8 },
+          asset: { key: obj.assetKey, src: obj.url, sha256: obj.sha256 },
+        };
+        // focusTarget: model step only; clamp [0,1] + enforce tStart<tEnd here so a
+        // bad window cannot 400 the lesson at publish.
+        if (this.stepForm.stepType === 'model' && s.activeWindows.length) {
+          const clamp = (n) => Math.min(1, Math.max(0, Number(n) || 0));
+          const windows = s.activeWindows
+            .map((w) => ({
+              tStart: Math.max(0, Number(w.tStart) || 0),
+              tEnd: Math.max(0, Number(w.tEnd) || 0),
+              x: clamp(w.x), y: clamp(w.y), w: clamp(w.w), h: clamp(w.h),
+            }))
+            .filter((w) => w.tStart < w.tEnd);
+          if (windows.length) {
+            teachingObject.focusTarget = {
+              activeWindows: windows,
+              successUtterance: (s.successUtterance || '').trim(),
+              missUtterance: (s.missUtterance || '').trim(),
+            };
+          }
+        }
+        scene.teachingObject = teachingObject;
+      }
+      if (Object.keys(scene).length) {
+        scene.audio = { via: 'tts' };
+        scene.timeoutSec = Number(s.timeoutSec) || 12;
+        return scene;
+      }
+      return null;
     },
     fetchAll() {
       this.loading = true;
@@ -260,14 +542,14 @@ export default {
     },
     openStepDialog() {
       const firstId = 'c1';
-      this.stepForm = {
-        stepType: this.stepTypes.length ? this.stepTypes[0].stepType : '',
-        prompt: '',
-        subject: this.lastSubject || '',
-        helperText: '',
-        l1TransferHint: '',
-        choices: [{ id: firstId, label: '' }, { id: 'c2', label: '' }],
-      };
+      const form = this.blankStepForm();
+      form.stepType = this.stepTypes.length ? this.stepTypes[0].stepType : '';
+      form.subject = this.lastSubject || '';
+      form.choices = [{ id: firstId, label: '' }, { id: 'c2', label: '' }];
+      // Prefill vocab.word + scene.primaryWord from the carried subject.
+      form.vocab.word = this.lastSubject || '';
+      form.scene.primaryWord = this.lastSubject || '';
+      this.stepForm = form;
       this.correctChoiceId = firstId;
       this.stepDialogVisible = true;
     },
@@ -308,6 +590,16 @@ export default {
           isCorrect: c.id === this.correctChoiceId,
         }));
       }
+      // Assemble stepBody from the Scene composer + structured Vocabulary. Both are
+      // optional; only send a non-empty stepBody (the server defaults to {}).
+      const stepBody = {};
+      const scene = this.buildScene(f.subject);
+      if (scene) Object.assign(stepBody, scene);
+      const vocab = this.buildVocab(f.subject);
+      if (vocab) stepBody.vocab = vocab;
+      if (Object.keys(stepBody).length) payload.stepBody = stepBody;
+      // Per-step robot-face override (server validates against firmware-supported set).
+      if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
       this.addingStep = true;
       Api.lesson.createStep(
         this.lessonId,
@@ -401,4 +693,8 @@ export default {
 .preview-card { margin-bottom: 16px; }
 .choice-group { display: block; }
 .choice-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.focus-title { margin: 6px 0; font-weight: 600; }
+.focus-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.focus-row .el-input-number { width: 110px; }
 </style>
