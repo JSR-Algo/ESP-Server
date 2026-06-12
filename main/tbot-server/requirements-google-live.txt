@@ -4,7 +4,7 @@ numpy==1.26.4
 speexdsp==0.1.1
 websockets==14.2
 pyyml==0.0.2
-opuslib_next==1.1.5
+opuslib_next==1.1.6
 pydub==0.25.1
 openai==2.8.1
 google-genai==1.16.1
