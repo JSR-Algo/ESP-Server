@@ -626,6 +626,21 @@ class LessonRuntime:
 
 
 async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
+    """Serialize concurrent lesson pulls (connect-time pull + spoken start_lesson) so
+    they cannot create two runtimes / emit duplicate lesson_prepare (deep-audit). The
+    per-connection lock is lazily created; the lazy-init is atomic under asyncio (no
+    await between the getattr and the assignment), so two schedulers racing here both
+    end up using the same lock, then run the impl serially — the loser re-reads
+    conn.lesson_runtime and returns the winner's session instead of duplicating it."""
+    lock = getattr(conn, "_lesson_pull_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        conn._lesson_pull_lock = lock
+    async with lock:
+        return await _maybe_start_lesson_on_connect_impl(conn)
+
+
+async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRuntime]:
     """S6 pull-on-connect glue (authoritative hand-off, ADR 0013 §A/§B).
 
     Gated by the dark-rollout flag. Fetches the device's current assignment + the
@@ -805,6 +820,16 @@ async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
         manifest_checksum=parse_manifest_checksum(etag),
         alarm=alarm,
     )
+    # Close any prior runtime for a DIFFERENT assignment before replacing it, so its
+    # forwarder worker task + asset httpx client are not leaked (deep-audit #7). The
+    # same-assignment republish path above already closed + nulled it (prior is None
+    # there); this catches the new-assignment case that fell straight through.
+    prior = getattr(conn, "lesson_runtime", None)
+    if prior is not None and prior is not runtime:
+        try:
+            await prior.close()
+        except Exception as exc:  # pragma: no cover - teardown is best-effort
+            _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
     conn.lesson_runtime = runtime
     try:
         await runtime.start()

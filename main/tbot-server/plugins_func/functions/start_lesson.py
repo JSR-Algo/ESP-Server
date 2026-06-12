@@ -101,6 +101,16 @@ def start_lesson(conn: "ConnectionHandler"):
 
             task = loop.create_task(maybe_start_lesson_on_connect(conn))
 
+        # Track the task on the connection so close() cancels it (deep-audit #9: it
+        # was a local var, so a disconnect mid-pull left it running -> leak / use-
+        # after-close now that the lesson HTTP layer is restored). Supersede any
+        # in-flight pull task first — the spoken trigger is the user's explicit
+        # "start the lesson now".
+        prior_task = getattr(conn, "lesson_pull_task", None)
+        if prior_task is not None and not prior_task.done():
+            prior_task.cancel()
+        conn.lesson_pull_task = task
+
         def _handle_done(fut):
             try:
                 fut.result()
