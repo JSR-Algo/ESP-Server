@@ -87,6 +87,24 @@ _ENV_CONFIG_OVERRIDES = (
 )
 
 
+def _set_nested(config, path, value):
+    """Set ``config[path[0]][path[1]]...`` = value, creating nested dicts."""
+    target = config
+    for key in path[:-1]:
+        child = target.get(key)
+        if not isinstance(child, Mapping):
+            child = {}
+            target[key] = child
+        target = child
+    target[path[-1]] = value
+
+
+# Truthy/falsey spellings accepted for boolean env overrides. Anything else
+# (or an unset/empty var) leaves the existing config value untouched.
+_ENV_TRUE = {"1", "true", "yes", "on"}
+_ENV_FALSE = {"0", "false", "no", "off"}
+
+
 def apply_env_overrides(config):
     """Overlay os.environ values onto the merged config dict.
 
@@ -101,14 +119,36 @@ def apply_env_overrides(config):
         value = os.environ.get(env_name)
         if value is None or value == "":
             continue
-        target = config
-        for key in path[:-1]:
-            child = target.get(key)
-            if not isinstance(child, Mapping):
-                child = {}
-                target[key] = child
-            target = child
-        target[path[-1]] = value
+        _set_nested(config, path, value)
+
+    # LESSON_RUNTIME_ENABLED dark-rollout flag (recon: connection.py
+    # _lesson_runtime_enabled reads config["lesson"]["runtime_enabled"], default
+    # False). Parsed as a BOOLEAN — a generic string overlay would coerce the
+    # literal "false" to truthy. Only an explicit true/false spelling applies;
+    # an unset or unrecognized value leaves the config default unchanged.
+    raw_flag = os.environ.get("LESSON_RUNTIME_ENABLED")
+    if raw_flag is not None and raw_flag.strip() != "":
+        token = raw_flag.strip().lower()
+        if token in _ENV_TRUE:
+            _set_nested(config, ("lesson", "runtime_enabled"), True)
+        elif token in _ENV_FALSE:
+            _set_nested(config, ("lesson", "runtime_enabled"), False)
+
+    # COURSE_BACKEND_URL is already overlaid onto server.api_url above. The
+    # lesson runtime reads ``lesson.api_base`` first and falls back to
+    # ``server.api_url`` (runtime.py: base_url = lesson_cfg.get("api_base") or
+    # server_cfg.get("api_url")). Mirror it onto lesson.api_base as an explicit,
+    # null-safe fallback so the lesson layer fetches from the live NestJS even if
+    # an operator only set the lesson block's flag. Never overwrites an
+    # author-provided lesson.api_base.
+    course_backend_url = os.environ.get("COURSE_BACKEND_URL")
+    if course_backend_url:
+        lesson_cfg = config.get("lesson")
+        if not isinstance(lesson_cfg, Mapping):
+            lesson_cfg = {}
+            config["lesson"] = lesson_cfg
+        if not lesson_cfg.get("api_base"):
+            lesson_cfg["api_base"] = course_backend_url
 
     return config
 

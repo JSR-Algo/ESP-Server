@@ -190,6 +190,33 @@ google_live:
     backoff_ms: 250
     backoff_multiplier: 2
 
+# ── Conversational lesson runtime (US-006) ───────────────────────────────────
+# DARK by default: connection.py:_lesson_runtime_enabled() reads
+# lesson.runtime_enabled (default False), and the start_lesson voice trigger
+# honors the same gate. Flip runtime_enabled to true to allow:
+#   - connect-time pull (maybe_start_lesson_on_connect), and
+#   - the spoken "switch to lesson / chuyển sang bài học" trigger
+#     (plugins_func/functions/start_lesson.py).
+#
+# api_base is the live NestJS course backend /v1 base used to fetch the device's
+# current assignment + manifest. The runtime reads lesson.api_base FIRST and
+# falls back to server.api_url. Both can be supplied by env instead of editing
+# this file (additive, defaults unchanged when env unset):
+#   LESSON_RUNTIME_ENABLED=true   -> lesson.runtime_enabled  (boolean parsed)
+#   COURSE_BACKEND_URL=<.../v1>    -> server.api_url AND, as a fallback,
+#                                    lesson.api_base (only if api_base unset)
+# See config/config_loader.py apply_env_overrides().
+lesson:
+  # Master gate. Leave false in any deploy that should stay voice-only.
+  runtime_enabled: false
+  # NestJS course backend base, e.g. https://<host>/v1 . Leave empty to inherit
+  # server.api_url (set from COURSE_BACKEND_URL). If both are empty the lesson
+  # pull short-circuits (logged "skipped: no api_base or device_id").
+  api_base: ""
+  # Optional device-scoped bearer token for /v1/devices/:id/... calls. Optional
+  # today (D-RUNTOKEN); backend authorizes on the device_id claim.
+  # device_token: ""
+
 # Module test config
 module_test:
   test_sentences:
@@ -342,6 +369,20 @@ Intent:
       - get_news_from_newsnow
       - play_music
       - raise_left_arm
+      - raise_right_arm
+      - lower_left_arm
+      - lower_right_arm
+      - raise_both_arms
+      - lower_both_arms
+      - set_left_arm_percent
+      - set_right_arm_percent
+      - set_both_arms_percent
+      - turn_head_left
+      - turn_head_right
+      - center_head
+      - set_head_angle
+      - set_head_percent
+      - turn_head_left_then_right_max
   function_call:
     # No need to change type
     type: function_call
@@ -350,8 +391,26 @@ Intent:
     # Below is an example of loading plugins for weather query, role switching, and news query
     functions:
       - change_role
+      # Conversational "switch to lesson" trigger (plugins_func/functions/start_lesson.py).
+      # Must be listed here for the LLM/Gemini Live to be allowed to call it.
+      # The runtime still only starts when lesson.runtime_enabled is true.
+      - start_lesson
       - change_volume
       - raise_left_arm
+      - raise_right_arm
+      - lower_left_arm
+      - lower_right_arm
+      - raise_both_arms
+      - lower_both_arms
+      - set_left_arm_percent
+      - set_right_arm_percent
+      - set_both_arms_percent
+      - turn_head_left
+      - turn_head_right
+      - center_head
+      - set_head_angle
+      - set_head_percent
+      - turn_head_left_then_right_max
       - get_weather
       # - search_from_ragflow
       # - get_news_from_chinanews
