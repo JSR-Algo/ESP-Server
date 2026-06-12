@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 # Fast Google Live runtime profile. Local ASR/VAD/model packages are omitted.
-numpy==1.26.4
+numpy==2.4.6
 speexdsp==0.1.1
 websockets==14.2
 pyyml==0.0.2
