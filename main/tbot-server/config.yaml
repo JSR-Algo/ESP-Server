@@ -353,6 +353,12 @@ lesson:
   runtime_enabled: true
   api_base: "https://tbot-backend-8wmh.onrender.com/v1"
   # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim
+  # Device-renderer profile gate: profiles this firmware can actually render. Current
+  # firmware is espTft-only — a non-espTft (piTft/mobile) lesson_prepare renders BLANK
+  # (lesson_handler.cc:402). The runtime start() gate skips a lesson whose profile is
+  # not listed here (LESSON_VERSION_UNSUPPORTED, no frame on the wire). Add 'piTft' /
+  # 'mobile' here ONLY when that firmware ships.
+  supported_profiles: ['espTft']
 
 # Intent recognition, a module used to understand user intent, e.g., play music
 Intent:

@@ -493,6 +493,41 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "LESSON_VERSION_UNSUPPORTED")
         self.assertEqual(conn.websocket.sent, [])
 
+    # 5b) device-renderer profile gate -------------------------------------------
+
+    async def test_profile_gate_rejects_non_esptft_profile(self):
+        # FIX#1: a published lesson with a non-espTft profile (piTft/mobile) renders
+        # BLANK on espTft-only firmware. With the default supported_profiles (['espTft'],
+        # i.e. conn.config has no lesson.supported_profiles) a runtime whose assignment
+        # profile is 'piTft' must be REJECTED from start() with LESSON_VERSION_UNSUPPORTED
+        # and put NO frame on the wire (skipped, not rendered blank).
+        from core.lesson.runtime import LessonRuntime
+
+        conn = _FakeConn()  # config = {} -> supported_profiles defaults to ['espTft']
+        assignment = _build_assignment()
+        assignment["profile"] = "piTft"
+        rt = LessonRuntime(
+            conn,
+            assignment=assignment,
+            manifest=_build_manifest(),
+            asset_cache=_FakeAssetCache(ready=True),
+            forwarder=_FakeForwarder(),
+            manifest_checksum=_manifest_checksum(),
+        )
+        with self.assertRaises(LessonError) as ctx:
+            await rt.start()
+        self.assertEqual(ctx.exception.code, "LESSON_VERSION_UNSUPPORTED")
+        self.assertEqual(conn.websocket.sent, [])  # nothing emitted
+
+    async def test_profile_gate_passes_esptft_profile(self):
+        # The espTft profile is in the default supported set -> the gate passes and the
+        # runtime proceeds to emit lesson_prepare (unchanged behaviour for current FW).
+        rt = self._runtime()  # _build_assignment() -> profile 'espTft'
+        await rt.start()  # must NOT raise
+        self.assertEqual(rt.state, "PRELOADING")
+        sent_types = [json.loads(p)["type"] for p in rt.conn.websocket.sent]
+        self.assertEqual(sent_types, ["lesson_prepare"])
+
     # 6) STEP_TIMEOUT distinct from PROTOCOL_SEQUENCE_ERROR ----------------------
 
     async def test_step_timeout_distinct_from_protocol_sequence_error(self):

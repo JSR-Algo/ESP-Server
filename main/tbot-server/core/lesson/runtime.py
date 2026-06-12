@@ -221,6 +221,22 @@ class LessonRuntime:
             raise self.last_error
         # Gate passed -> the negotiated version is the served version (validated above).
         self.negotiated_version = manifest_version
+        # DEVICE-RENDERER profile gate: a published lesson with a non-espTft profile
+        # (piTft/mobile) can be accepted upstream, but espTft-only firmware renders a
+        # non-espTft lesson_prepare BLANK. The backend has no device-renderer model, so
+        # the gate lives HERE where both the device AND the assignment's profile are
+        # known. CONFIG-DRIVEN: a future piTft/mobile firmware just adds its profile to
+        # config lesson.supported_profiles (do NOT hardcode espTft). Default ['espTft'].
+        # Mirrors the capability/manifestVersion gates above -> caller logs, NO frame on
+        # the wire, the lesson is skipped instead of rendering blank.
+        config = getattr(self.conn, "config", {}) or {}
+        supported = (config.get("lesson", {}) or {}).get("supported_profiles") or ["espTft"]
+        if self.profile not in supported:
+            self.last_error = LessonError(
+                LESSON_VERSION_UNSUPPORTED,
+                f"profile {self.profile!r} not renderable by this device (supported={supported})",
+            )
+            raise self.last_error
         # Profile reject (forced full-video espTft backgroundScene) BEFORE prepare.
         self.asset_cache.assert_profile_renderable()
 
