@@ -2,6 +2,7 @@ import sys
 import uuid
 import signal
 import asyncio
+import os
 try:
     from aioconsole import ainput
 except ModuleNotFoundError:
@@ -9,7 +10,7 @@ except ModuleNotFoundError:
     async def ainput(prompt: str = ""):
         return await asyncio.to_thread(input, prompt)
 from config.settings import load_config
-from config.config_loader import load_config_async
+from config.config_loader import load_config_async, get_project_dir
 from config.logger import setup_logging
 from core.utils.util import get_local_ip, validate_mcp_endpoint
 from core.http_server import SimpleHttpServer
@@ -34,12 +35,48 @@ except ImportError:
 TAG = __name__
 logger = setup_logging()
 PLACEHOLDER_MARKERS = ("your-", "your ", "You", "Your")
+AUTH_KEY_FILE = "data/.auth_key"
 
 
 def _contains_placeholder(value) -> bool:
     if not isinstance(value, str):
         return False
     return any(marker in value for marker in PLACEHOLDER_MARKERS)
+
+def _resolve_auth_key(config) -> str:
+    """Return one stable key for OTA token minting and WebSocket verify.
+
+    Public OTA and WS can be exposed through different tunnels or processes.
+    A random in-memory fallback makes a token minted by one process unverifiable
+    by another, so persist the generated fallback under data/ when no explicit
+    config or manager secret is available.
+    """
+    auth_key = config.get("server", {}).get("auth_key", "")
+    if auth_key and not _contains_placeholder(auth_key):
+        return auth_key
+
+    auth_key = config.get("manager-api", {}).get("secret", "")
+    if auth_key and not _contains_placeholder(auth_key):
+        return auth_key
+
+    key_path = os.path.join(get_project_dir(), AUTH_KEY_FILE)
+    try:
+        with open(key_path, "r", encoding="utf-8") as file:
+            auth_key = file.read().strip()
+        if auth_key and not _contains_placeholder(auth_key):
+            return auth_key
+    except FileNotFoundError:
+        pass
+
+    auth_key = uuid.uuid4().hex
+    os.makedirs(os.path.dirname(key_path), exist_ok=True)
+    with open(key_path, "w", encoding="utf-8") as file:
+        file.write(auth_key + "\n")
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+    return auth_key
 
 
 async def wait_for_exit() -> None:
@@ -77,23 +114,8 @@ async def main():
         config.get("voice_mode", {}).get("type", "classic_pipeline"),
     )
 
-    # Initialize plugin descriptions after config load, before services start.
-    try:
-        from plugins_func.functions.get_news_from_newsnow import init_news_description
-        init_news_description(config)
-    except Exception:
-        pass
-
-    # auth_key priority: config server.auth_key > manager-api.secret > generated key.
-    # auth_key is used for JWT auth and OTA/websocket token generation.
-    auth_key = config["server"].get("auth_key", "")
-
-    if not auth_key or len(auth_key) == 0 or _contains_placeholder(auth_key):
-        auth_key = config.get("manager-api", {}).get("secret", "")
-        if not auth_key or len(auth_key) == 0 or _contains_placeholder(auth_key):
-            auth_key = str(uuid.uuid4().hex)
-
-    config["server"]["auth_key"] = auth_key
+    # auth_key is used for OTA token generation and WebSocket verification.
+    config["server"]["auth_key"] = _resolve_auth_key(config)
 
     # Add stdin monitor task.
     stdin_task = asyncio.create_task(monitor_stdin())
@@ -155,7 +177,7 @@ async def main():
         "=======Address above is websocket protocol address. Do not visit with browser======="
     )
     logger.bind(tag=TAG).info(
-        "To test websocket, use Google Chrome to open test_page.html in test directory"
+        "To test websocket, start digital-human module and open browser interaction test"
     )
     logger.bind(tag=TAG).info(
         "=============================================================\n"

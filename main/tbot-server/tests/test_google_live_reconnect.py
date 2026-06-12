@@ -239,6 +239,39 @@ class ReconnectBufferCapacityTest(unittest.TestCase):
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _AlwaysFailClient())
         self.assertEqual(provider._pending_reconnect_audio.maxlen, 1)
 
+class SessionResumptionStateTest(unittest.TestCase):
+    def test_resumption_update_is_saved_and_reused_on_next_connect(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _AlwaysFailClient())
+
+        provider._handle_session_resumption_update(
+            {
+                "type": "session_resumption_update",
+                "handle": "resume-handle-1",
+                "resumable": True,
+            }
+        )
+        live_config = provider._get_live_config_with_functions()
+
+        self.assertEqual(conn.google_live_session_resumption_handle, "resume-handle-1")
+        self.assertEqual(live_config["session_resumption_handle"], "resume-handle-1")
+        self.assertTrue(live_config["session_resumption_enabled"])
+
+    def test_non_resumable_update_does_not_replace_saved_handle(self):
+        conn = _Conn()
+        conn.google_live_session_resumption_handle = "old-handle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _AlwaysFailClient())
+
+        provider._handle_session_resumption_update(
+            {
+                "type": "session_resumption_update",
+                "handle": "new-but-not-resumable",
+                "resumable": False,
+            }
+        )
+
+        self.assertEqual(conn.google_live_session_resumption_handle, "old-handle")
+
 
 class RecvTimerResetLogTest(unittest.TestCase):
     """P2.5 — recv_timer_reset log fires for audio-bearing messages only."""
@@ -429,6 +462,38 @@ class MidStreamBlipReconnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             conn.logger.has_message(
                 "replayed_buffered_audio frames=3 bytes=21", level="info"
+            )
+        )
+
+    async def test_reconnect_replays_only_current_turn_buffered_audio(self):
+        conn = _Conn()
+
+        class _DummyBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            def decode_input_audio(self, packet):
+                return packet
+
+            async def forward_decoded_input_audio(self, decoded):
+                self.forwarded.append(decoded)
+
+            async def forward_input_audio(self, raw):
+                self.forwarded.append(raw)
+
+        bridge = _DummyBridge()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _AlwaysFailNetworkClient())
+        provider._bridge = bridge
+        provider._response_generation = 7
+        provider._pending_reconnect_audio.append((6, b"old-turn"))
+        provider._pending_reconnect_audio.append((7, b"current-turn"))
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertEqual(bridge.forwarded, [b"current-turn"])
+        self.assertTrue(
+            conn.logger.has_message(
+                "reconnect_replay_skipped reason=stale_turn", level="info"
             )
         )
 

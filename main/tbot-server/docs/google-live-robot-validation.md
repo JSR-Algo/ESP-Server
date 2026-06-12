@@ -84,7 +84,7 @@ AC6 and AC7 are separate workstreams:
 |---|---|---|
 | `first_tts_start_timeout` on every cycle | Server not running or wrong voice_mode | check Docker `docker ps`, agent config |
 | `bargein_latency_ms > 500` but `transcript=True` | network jitter or model still on cold start | rerun, retain only steady-state cycles |
-| `transcript=False` but `bargein_latency_ms` good | `disable_server_side_interruptions=true` AND `barge_in_min_input_duration_sec` too high — input dropped before turn close | lower `barge_in_min_input_duration_sec` slightly OR re-check `model_output_unblock_timeout_sec` |
+| `transcript=False` but `bargein_latency_ms` good | Live interruption reached the server, but the captured user turn was too short or got suppressed before turn close | check `activity_handling=START_OF_ACTIVITY_INTERRUPTS`, `input_live_chunk_ms=20`, `input_flush_delay_sec=1.0`, and `model_output_unblock_timeout_sec` |
 | `goaway_seen > 0` and PR2 deployed | confirm `recv_timeout_sec=60`, `reconnect_buffer_ms=2000` are active in container, restart server | |
 | Repeated `IDLE_CYCLE false_positives > 0` | echo (no AEC) is exceeding `barge_in_rms_threshold`. Pause and run controlled measurement: silent room vs talking-robot, compare RMS in `tmp/server.log` `input_audio_diag` lines | |
 | `fallback_triggered > 0` | non-retriable error class — open `server.log`, find `reason=...`. Most often `auth` (bad key) or `quota` (429) |

@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import sys
@@ -37,6 +38,17 @@ class _DummyWebSocket:
     async def send(self, payload):
         self.sent_messages.append(payload)
 
+class _BlockingWebSocket:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.sent_messages = []
+
+    async def send(self, payload):
+        self.sent_messages.append(payload)
+        self.started.set()
+        await self.release.wait()
+
 
 class _DummyConn:
     def __init__(self, google_live_config=None):
@@ -63,7 +75,12 @@ class _DummyConn:
 
 
 class _DummyClient:
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.sent_audio = []
+
     async def send_audio(self, audio_bytes):
+        self.sent_audio.append(audio_bytes)
         return None
 
 
@@ -196,8 +213,23 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             json.loads(conn.websocket.sent_messages[0]),
-            {"type": "llm", "text": "thinking", "session_id": "session-1"},
+            {
+                "type": "llm",
+                "text": "thinking",
+                "emotion": "thinking",
+                "session_id": "session-1",
+            },
         )
+
+    async def test_model_transcript_llm_surface_derives_emotion_from_text(self):
+        conn = _DummyConn({"send_llm_state_events": True})
+        bridge = self._build_bridge(conn)
+
+        await bridge.handle_event(
+            {"type": "transcript", "text": "I am sorry 😔", "source": "model"}
+        )
+
+        self.assertEqual(json.loads(conn.websocket.sent_messages[0])["emotion"], "sad")
 
     async def test_model_transcript_llm_surface_preserves_json_escaping(self):
         conn = _DummyConn({"send_llm_state_events": True})
@@ -209,7 +241,12 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             json.loads(conn.websocket.sent_messages[0]),
-            {"type": "llm", "text": 'say "hi"\nnow', "session_id": "session-1"},
+            {
+                "type": "llm",
+                "text": 'say "hi"\nnow',
+                "emotion": "happy",
+                "session_id": "session-1",
+            },
         )
 
     async def test_interruption_sets_client_abort(self):
@@ -223,23 +260,80 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(conn.client_abort)
         self.assertEqual(
             json.loads(conn.websocket.sent_messages[0]),
-            {"type": "tts", "state": "stop", "session_id": "session-1"},
+            {"type": "tts", "state": "stop", "reason": "interrupt", "session_id": "session-1"},
         )
         self.assertFalse(conn.client_is_speaking)
         self.assertEqual(conn.clear_queue_calls, 1)
 
-    async def test_server_interruption_is_ignored_when_disabled_by_config(self):
-        conn = _DummyConn({"disable_server_side_interruptions": True})
+    async def test_interruption_clears_queue_before_tts_stop_send_finishes(self):
+        conn = _DummyConn()
+        conn.websocket = _BlockingWebSocket()
+        bridge = self._build_bridge(conn)
+
+        task = asyncio.create_task(bridge.handle_event({"type": "interruption"}))
+        await conn.websocket.started.wait()
+
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertTrue(conn.client_abort)
+        self.assertFalse(task.done())
+
+        conn.websocket.release.set()
+        self.assertTrue(await task)
+
+    async def test_interruption_handler_clears_playback_under_150ms(self):
+        conn = _DummyConn()
+        bridge = self._build_bridge(conn)
+
+        started_at = time.monotonic()
+        handled = await bridge.handle_event({"type": "interruption"})
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+
+        self.assertTrue(handled)
+        self.assertLess(elapsed_ms, 150)
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertTrue(conn.client_abort)
+        self.assertFalse(conn.client_is_speaking)
+
+    async def test_interruption_logs_output_queue_lengths_before_clear(self):
+        conn = _DummyConn()
+        conn.tts = types.SimpleNamespace(
+            tts_text_queue=["pending text"],
+            tts_audio_queue=[b"audio-1", b"audio-2"],
+        )
+        conn.report_queue = ["report-1", "report-2", "report-3"]
+        conn.audio_rate_controller = types.SimpleNamespace(
+            queue=["packet-1", "packet-2", "packet-3", "packet-4"],
+            reset=lambda: None,
+        )
+        bridge = self._build_bridge(conn)
+        bridge._active_response_id = "response-7"
+
+        handled = await bridge.handle_event({"type": "interruption"})
+
+        self.assertTrue(handled)
+        clear_logs = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info" and args and "output_queue_cleared" in args[0]
+        ]
+        self.assertEqual(len(clear_logs), 1)
+        self.assertEqual(clear_logs[0][1:], ("response-7", 1, 2, 3, 4))
+
+    async def test_server_interruption_stops_audio_even_with_explicit_ignore_config(self):
+        conn = _DummyConn({"ignore_server_interruptions": True})
         bridge = self._build_bridge(conn)
         conn.client_is_speaking = True
 
         handled = await bridge.handle_event({"type": "interruption"})
 
         self.assertTrue(handled)
-        self.assertFalse(conn.client_abort)
-        self.assertTrue(conn.client_is_speaking)
-        self.assertEqual(conn.websocket.sent_messages, [])
-        self.assertEqual(conn.clear_queue_calls, 0)
+        self.assertTrue(conn.client_abort)
+        self.assertFalse(conn.client_is_speaking)
+        self.assertEqual(
+            json.loads(conn.websocket.sent_messages[0]),
+            {"type": "tts", "state": "stop", "reason": "interrupt", "session_id": "session-1"},
+        )
+        self.assertEqual(conn.clear_queue_calls, 1)
 
     async def test_cancelled_response_audio_chunks_are_dropped(self):
         conn = _DummyConn()
@@ -276,7 +370,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
             [json.loads(message) for message in conn.websocket.sent_messages],
             [
                 {"type": "tts", "state": "start", "session_id": "session-1"},
-                {"type": "tts", "state": "stop", "session_id": "session-1"},
+                {"type": "tts", "state": "stop", "reason": "interrupt", "session_id": "session-1"},
             ],
         )
 
@@ -290,7 +384,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [json.loads(message) for message in conn.websocket.sent_messages],
-            [{"type": "tts", "state": "stop", "session_id": "session-1"}],
+            [{"type": "tts", "state": "stop", "reason": "interrupt", "session_id": "session-1"}],
         )
 
     async def test_stop_output_blocks_delayed_audio_start_until_clean_user_turn(self):
@@ -391,6 +485,33 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
                 for level, args, _kwargs in conn.logger.messages
             )
         )
+
+    async def test_live_input_pcm_is_split_into_20ms_chunks(self):
+        conn = _DummyConn({"input_sample_rate": 16000, "input_live_chunk_ms": 20})
+        client = _DummyClient({"input_sample_rate": 16000, "input_live_chunk_ms": 20})
+        bridge = self._build_bridge(conn)
+        bridge.client = client
+
+        sixty_ms_pcm16 = b"\x01\x00" * int(16000 * 0.060)
+
+        await bridge.forward_decoded_input_audio(sixty_ms_pcm16)
+
+        self.assertEqual(len(client.sent_audio), 3)
+        self.assertEqual([len(chunk) for chunk in client.sent_audio], [640, 640, 640])
+
+    async def test_live_input_flush_sends_buffered_tail_before_audio_stream_end(self):
+        conn = _DummyConn({"input_sample_rate": 16000, "input_live_chunk_ms": 20})
+        client = _DummyClient({"input_sample_rate": 16000, "input_live_chunk_ms": 20})
+        bridge = self._build_bridge(conn)
+        bridge.client = client
+
+        ten_ms_pcm16 = b"\x01\x00" * int(16000 * 0.010)
+        await bridge.forward_decoded_input_audio(ten_ms_pcm16)
+        self.assertEqual(client.sent_audio, [])
+
+        await bridge.flush_pending_input_audio()
+
+        self.assertEqual(client.sent_audio, [ten_ms_pcm16])
 
     async def test_corrupt_input_opus_is_dropped_without_forwarding(self):
         conn = _DummyConn()

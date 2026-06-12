@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from plugins_func.functions import raise_left_arm as raise_left_arm_module
@@ -17,8 +18,10 @@ class _DummyLogger:
 
 
 class _FakeMCPClient:
-    def __init__(self, ready=True, tools=(raise_left_arm_module.LEFT_ARM_TOOL,)):
+    def __init__(self, ready=True, tools=None):
         self._ready = ready
+        if tools is None:
+            tools = raise_left_arm_module.ARM_TOOL_BY_FUNCTION.values()
         self.tools = {name: {} for name in tools}
 
     async def is_ready(self):
@@ -54,21 +57,23 @@ def _patched_call_mcp_tool(capturing):
     )
 
 
-class RaiseLeftArmTest(unittest.IsolatedAsyncioTestCase):
-    async def test_calls_device_mcp_tool(self):
+class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_calls_device_mcp_tools(self):
         conn = _FakeConn(mcp_client=_FakeMCPClient())
-        capturing = _CapturingCallMcp()
+        expected = []
 
-        with _patched_call_mcp_tool(capturing):
-            result = await raise_left_arm_module.raise_left_arm(conn)
+        for function_name, tool_name in raise_left_arm_module.ARM_TOOL_BY_FUNCTION.items():
+            capturing = _CapturingCallMcp()
+            with _patched_call_mcp_tool(capturing):
+                result = await getattr(raise_left_arm_module, function_name)(conn)
 
-        self.assertEqual(result.action, Action.RESPONSE)
-        self.assertEqual(result.result, "ok")
-        self.assertEqual(result.response, "Đã nâng tay trái.")
-        self.assertEqual(
-            capturing.calls,
-            [{"tool": raise_left_arm_module.LEFT_ARM_TOOL, "args": "{}"}],
-        )
+            self.assertEqual(result.action, Action.RESPONSE, function_name)
+            self.assertEqual(result.result, "ok", function_name)
+            expected.append({"tool": tool_name, "args": "{}"})
+            self.assertEqual(capturing.calls, [{"tool": tool_name, "args": "{}"}])
+
+        expected_tools = [call["tool"] for call in expected]
+        self.assertEqual(expected_tools, list(raise_left_arm_module.ARM_TOOL_BY_FUNCTION.values()))
 
     async def test_returns_error_when_mcp_client_missing(self):
         result = await raise_left_arm_module.raise_left_arm(_FakeConn())
@@ -108,7 +113,27 @@ class RaiseLeftArmTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_tool_name_uses_sanitized_mcp_name(self):
-        self.assertEqual(
-            raise_left_arm_module.LEFT_ARM_TOOL,
-            "self_robot_left_arm_raise",
-        )
+        self.assertEqual(raise_left_arm_module.LEFT_ARM_TOOL, "self_robot_left_arm_raise")
+        self.assertEqual(raise_left_arm_module.RIGHT_ARM_TOOL, "self_robot_right_arm_raise")
+        self.assertEqual(raise_left_arm_module.LEFT_ARM_LOWER_TOOL, "self_robot_left_arm_lower")
+        self.assertEqual(raise_left_arm_module.RIGHT_ARM_LOWER_TOOL, "self_robot_right_arm_lower")
+        self.assertEqual(raise_left_arm_module.BOTH_ARMS_RAISE_TOOL, "self_robot_both_arms_raise")
+        self.assertEqual(raise_left_arm_module.BOTH_ARMS_LOWER_TOOL, "self_robot_both_arms_lower")
+
+    def test_raise_descriptions_include_vietnamese_do_tay_phrase(self):
+        descriptions = [
+            raise_left_arm_module._function_desc("raise_left_arm")["function"]["description"],
+            raise_left_arm_module._function_desc("raise_right_arm")["function"]["description"],
+            raise_left_arm_module._function_desc("raise_both_arms")["function"]["description"],
+        ]
+
+        self.assertIn("dơ tay trái", descriptions[0])
+        self.assertIn("dơ tay phải", descriptions[1])
+        self.assertIn("dơ cả hai tay", descriptions[2])
+
+    def test_server_plugin_exposes_robot_arm_functions_by_default(self):
+        source = Path(raise_left_arm_module.__file__).parents[2] / "core/providers/tools/server_plugins/plugin_executor.py"
+        text = source.read_text(encoding="utf-8")
+
+        for function_name in raise_left_arm_module.ARM_TOOL_BY_FUNCTION:
+            self.assertIn(function_name, text)

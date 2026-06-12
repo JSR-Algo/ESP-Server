@@ -216,6 +216,12 @@ class _ProviderConn:
         self.sample_rate = 24000
         self.google_live_audio_out_started_at = None
 
+    def clear_queues(self):
+        pass
+
+    def clearSpeakStatus(self):
+        self.client_is_speaking = False
+
 
 class _FakeFuncHandler:
     def __init__(self, action_response, functions=None):
@@ -229,6 +235,21 @@ class _FakeFuncHandler:
     async def handle_llm_function_call(self, conn, payload):
         self.calls.append(payload)
         return self._response
+
+class _SlowFuncHandler(_FakeFuncHandler):
+    def __init__(self, action_response, delay_sec, functions=None):
+        super().__init__(action_response, functions=functions)
+        self.delay_sec = delay_sec
+
+    async def handle_llm_function_call(self, conn, payload):
+        self.calls.append(payload)
+        await asyncio.sleep(self.delay_sec)
+        return self._response
+
+class _RaisingFuncHandler(_FakeFuncHandler):
+    async def handle_llm_function_call(self, conn, payload):
+        self.calls.append(payload)
+        raise RuntimeError("tool exploded")
 
 
 class _RecordingClient:
@@ -273,6 +294,17 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["name"], "get_weather")
         self.assertEqual(response["response"]["result"], "30°C tại Hà Nội")
         self.assertEqual(response["response"]["action"], "reqllm")
+        completion_logs = [
+            args
+            for level, args, _kwargs in provider.conn.logger.messages
+            if level == "info" and args and "tool_call_completed" in args[0]
+        ]
+        self.assertEqual(len(completion_logs), 1)
+        self.assertEqual(completion_logs[0][1], "get_weather")
+        self.assertEqual(completion_logs[0][2], "call-1")
+        self.assertGreaterEqual(completion_logs[0][3], 0)
+        self.assertTrue(completion_logs[0][4])
+        self.assertEqual(completion_logs[0][5], "")
 
     async def test_tool_call_event_maps_error_action_to_error_payload(self):
         provider, _handler = self._make_provider(
@@ -287,7 +319,18 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         )
 
         response = provider._client.sent_responses[0][0]
-        self.assertEqual(response["response"], {"error": "rate limit"})
+        self.assertEqual(
+            response["response"],
+            {"ok": False, "errorCode": "TOOL_ERROR", "message": "rate limit"},
+        )
+        completion_logs = [
+            args
+            for level, args, _kwargs in provider.conn.logger.messages
+            if level == "info" and args and "tool_call_completed" in args[0]
+        ]
+        self.assertEqual(len(completion_logs), 1)
+        self.assertFalse(completion_logs[0][4])
+        self.assertEqual(completion_logs[0][5], "TOOL_ERROR")
 
     async def test_tool_call_event_without_func_handler_returns_error_payload(self):
         conn = _ProviderConn(func_handler=None)
@@ -302,7 +345,128 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         )
 
         response = provider._client.sent_responses[0][0]
-        self.assertEqual(response["response"], {"error": "Tool handler unavailable"})
+        self.assertEqual(
+            response["response"],
+            {
+                "ok": False,
+                "errorCode": "TOOL_HANDLER_UNAVAILABLE",
+                "message": "Tool handler unavailable",
+            },
+        )
+
+    async def test_tool_failure_returns_structured_error_payload(self):
+        conn = _ProviderConn(func_handler=_RaisingFuncHandler(None))
+        provider = GoogleLiveProvider(conn)
+        provider._client = _RecordingClient()
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "call-err", "name": "get_weather", "args": {}}],
+            }
+        )
+
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["id"], "call-err")
+        self.assertEqual(
+            response["response"],
+            {
+                "ok": False,
+                "errorCode": "TOOL_EXCEPTION",
+                "message": "tool exploded",
+            },
+        )
+
+    async def test_tool_call_timeout_returns_structured_error_payload(self):
+        handler = _SlowFuncHandler(
+            ActionResponse(action=Action.REQLLM, response="late"),
+            delay_sec=0.05,
+        )
+        conn = _ProviderConn(func_handler=handler)
+        conn.config["google_live"]["tool_timeout_sec"] = 0.01
+        provider = GoogleLiveProvider(conn)
+        provider._client = _RecordingClient()
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "call-timeout", "name": "get_weather", "args": {}}],
+            }
+        )
+
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["id"], "call-timeout")
+        self.assertEqual(response["response"]["ok"], False)
+        self.assertEqual(response["response"]["errorCode"], "TOOL_TIMEOUT")
+
+    async def test_tool_call_with_non_mapping_args_is_rejected_before_handler(self):
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="should not run"),
+        )
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "call-badargs", "name": "get_weather", "args": ["bad"]}],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(
+            response["response"],
+            {
+                "ok": False,
+                "errorCode": "INVALID_TOOL_ARGS",
+                "message": "Tool arguments must be an object",
+            },
+        )
+
+    async def test_tool_call_cancellation_suppresses_stale_result(self):
+        handler = _SlowFuncHandler(
+            ActionResponse(action=Action.REQLLM, response="late result"),
+            delay_sec=0.03,
+        )
+        conn = _ProviderConn(func_handler=handler)
+        provider = GoogleLiveProvider(conn)
+        provider._client = _RecordingClient()
+
+        task = asyncio.create_task(
+            provider._handle_tool_call_event(
+                {
+                    "type": "tool_call",
+                    "calls": [
+                        {"id": "call-cancel", "name": "get_weather", "args": {"city": "Hà Nội"}}
+                    ],
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        await provider._handle_tool_call_cancellation_event(
+            {"type": "tool_call_cancellation", "ids": ["call-cancel"]}
+        )
+        await task
+
+        self.assertEqual(provider._client.sent_responses, [])
+        self.assertNotIn("call-cancel", provider._pending_tool_calls)
+
+    async def test_dangerous_tool_requires_confirmation(self):
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="rebooted"),
+        )
+        provider.conn.config["google_live"]["dangerous_tool_names"] = ["reboot_device"]
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "call-danger", "name": "reboot_device", "args": {}}],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["response"]["ok"], False)
+        self.assertEqual(response["response"]["errorCode"], "CONFIRMATION_REQUIRED")
 
     async def test_tool_call_cancellation_clears_pending_set(self):
         provider, _handler = self._make_provider(
@@ -377,6 +541,61 @@ class AudioBridgeToolCallForwardingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(received, [event])
+
+
+class VietnameseMusicControlIntentTest(unittest.IsolatedAsyncioTestCase):
+    def _make_provider(self):
+        handler = _FakeFuncHandler(ActionResponse(action=Action.NONE, response="ok"))
+        conn = _ProviderConn(func_handler=handler)
+        conn._music_session = SimpleNamespace(stop_event=SimpleNamespace(is_set=lambda: False))
+        provider = GoogleLiveProvider(conn)
+
+        class _Client:
+            connected = True
+
+            async def interrupt(self):
+                return None
+
+            async def end_audio_stream(self):
+                return None
+
+        provider._client = _Client()
+        return provider, handler, conn
+
+    async def test_stop_pause_resume_music_commands_dispatch_local_tools(self):
+        cases = [
+            ("tắt nhạc", "stop_music"),
+            ("dừng nhạc", "stop_music"),
+            ("tạm dừng nhạc", "pause_music"),
+            ("nghe tiếp", "resume_music"),
+            ("phát tiếp", "resume_music"),
+            ("tiếp tục phát nhạc", "resume_music"),
+        ]
+
+        for text, expected_tool in cases:
+            provider, handler, _conn = self._make_provider()
+            handled = await provider._dispatch_music_control_intent(text)
+
+            self.assertTrue(handled, text)
+            self.assertEqual(handler.calls[-1]["name"], expected_tool)
+
+    async def test_named_play_music_uses_spoken_title_and_does_not_invent_song(self):
+        provider, handler, _conn = self._make_provider()
+
+        handled = await provider._dispatch_music_control_intent("phát bài Nơi này có anh")
+
+        self.assertTrue(handled)
+        payload = handler.calls[-1]
+        self.assertEqual(payload["name"], "play_music")
+        self.assertEqual(payload["arguments"]["song_name"], "Nơi này có anh")
+
+    async def test_named_play_music_without_title_is_not_dispatched(self):
+        provider, handler, _conn = self._make_provider()
+
+        handled = await provider._dispatch_music_control_intent("phát bài")
+
+        self.assertFalse(handled)
+        self.assertEqual(handler.calls, [])
 
     async def test_handle_event_handles_tool_call_cancellation(self):
         from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge

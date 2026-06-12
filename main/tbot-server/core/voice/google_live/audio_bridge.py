@@ -1,8 +1,54 @@
 from collections.abc import Mapping
 import asyncio
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"'audioop' is deprecated and slated for removal in Python 3\.13",
+    category=DeprecationWarning,
+)
+
 import audioop
 import json
 import time
+
+from core.utils import textUtils
+
+
+EMOTION_EMOJI = {
+    "happy": "🙂",
+    "laughing": "😆",
+    "funny": "😂",
+    "sad": "😔",
+    "crying": "😭",
+    "angry": "😠",
+    "loving": "😍",
+    "surprised": "😲",
+    "shocked": "😱",
+    "thinking": "🤔",
+    "relaxed": "😌",
+    "sleepy": "😴",
+    "silly": "😜",
+    "confused": "🙄",
+    "neutral": "😶",
+    "embarrassed": "😳",
+    "winking": "😉",
+    "cool": "😎",
+    "delicious": "🤤",
+    "kissy": "😘",
+    "confident": "😏",
+}
+
+
+EMOTION_KEYWORDS = (
+    ("sad", ("sorry", "unfortunately", "sad", "buồn", "tiếc", "xin lỗi")),
+    ("thinking", ("think", "maybe", "let me", "hmm", "xem", "nghĩ", "có thể")),
+    ("surprised", ("wow", "amazing", "really", "thật à", "bất ngờ")),
+    ("happy", ("great", "good", "thanks", "nice", "tốt", "vui", "được")),
+)
+
+
+FALLBACK_EMOTION_CYCLE = ("happy", "thinking", "confident", "winking", "surprised")
 
 class GoogleLiveAudioBridge:
     """Bridge between websocket audio frames and live transport events."""
@@ -47,9 +93,12 @@ class GoogleLiveAudioBridge:
         self._output_resampler_state = None
         self._input_resampler_rates = None
         self._output_resampler_rates = None
+        self._input_live_chunk_buffer = bytearray()
         self._unblock_timer_task = None
         self._accepted_user_turn_after_block = False
         self._waiting_for_interrupted_audio_end = False
+        self._fallback_emotion_index = 0
+        self._last_emotion_sent = None
         # Rolling buffer of recently-transcribed model speech, used to detect
         # speaker echo that Gemini STT mis-attributes to the user and would
         # otherwise fire a transcript_barge_in mid-sentence.
@@ -67,7 +116,20 @@ class GoogleLiveAudioBridge:
             )
             return None
         self._log_input_audio_diagnostics(pcm_bytes)
-        await self.client.send_audio(pcm_bytes)
+        self._input_live_chunk_buffer.extend(pcm_bytes)
+        chunk_bytes = self._get_live_input_chunk_bytes()
+        while len(self._input_live_chunk_buffer) >= chunk_bytes:
+            chunk = bytes(self._input_live_chunk_buffer[:chunk_bytes])
+            del self._input_live_chunk_buffer[:chunk_bytes]
+            await self.client.send_audio(chunk)
+
+    async def flush_pending_input_audio(self):
+        if not self._input_live_chunk_buffer:
+            return 0
+        chunk = bytes(self._input_live_chunk_buffer)
+        self._input_live_chunk_buffer.clear()
+        await self.client.send_audio(chunk)
+        return len(chunk)
 
     def decode_input_audio(self, audio_bytes):
         return self._decode_input_audio(audio_bytes)
@@ -103,6 +165,8 @@ class GoogleLiveAudioBridge:
             if self._should_send_llm_state(event):
                 await self._send_llm_message(transcript_text)
                 return True
+            if event.get("source") == "model":
+                await self._send_emotion_message(transcript_text)
             await self._send_display_message(transcript_text)
             return True
 
@@ -493,15 +557,52 @@ class GoogleLiveAudioBridge:
             return
         import json
 
+        emotion = self._derive_emotion(text)
+
         await self.conn.websocket.send(
             json.dumps(
                 {
                     "type": "llm",
                     "text": text,
+                    "emotion": emotion,
                     "session_id": self.conn.session_id,
                 }
             )
         )
+        self._last_emotion_sent = emotion
+
+    async def _send_emotion_message(self, text):
+        if self.conn.websocket is None:
+            return
+        emotion = self._derive_emotion(text)
+        if emotion == self._last_emotion_sent:
+            return
+        self._last_emotion_sent = emotion
+        await self.conn.websocket.send(
+            json.dumps(
+                {
+                    "type": "llm",
+                    "text": EMOTION_EMOJI.get(emotion, "🙂"),
+                    "emotion": emotion,
+                    "session_id": self.conn.session_id,
+                }
+            )
+        )
+
+    def _derive_emotion(self, text):
+        text = text or ""
+        for char in text:
+            if char in textUtils.EMOJI_MAP:
+                return textUtils.EMOJI_MAP[char]
+        lowered = text.lower()
+        for emotion, keywords in EMOTION_KEYWORDS:
+            if any(keyword in lowered for keyword in keywords):
+                return emotion
+        emotion = FALLBACK_EMOTION_CYCLE[
+            self._fallback_emotion_index % len(FALLBACK_EMOTION_CYCLE)
+        ]
+        self._fallback_emotion_index += 1
+        return emotion
 
     async def _send_tts_message(self, state):
         if self.conn.websocket is None:
@@ -511,17 +612,26 @@ class GoogleLiveAudioBridge:
         await send_tts_message(self.conn, state)
         if state == "start":
             self.conn.client_is_speaking = True
+        elif state == "stop":
+            self.conn.client_is_speaking = False
+            self._mark_echo_tail_suppression("tts_stop")
 
     async def _send_tts_stop_now(self):
         if self.conn.websocket is None:
             return
         if hasattr(self.conn, "clearSpeakStatus"):
             self.conn.clearSpeakStatus()
+        self.conn.client_is_speaking = False
+        self._mark_echo_tail_suppression("tts_stop_now")
         await self.conn.websocket.send(
             json.dumps(
                 {
                     "type": "tts",
                     "state": "stop",
+                    # Patch 3.4: this sender is interrupt-only (barge-in). Tag the
+                    # stop so the device cuts playback immediately (ResetDecoder)
+                    # instead of draining the queue like a normal end-of-turn stop.
+                    "reason": "interrupt",
                     "session_id": self.conn.session_id,
                 }
             )
@@ -647,16 +757,15 @@ class GoogleLiveAudioBridge:
             "google_live", {}
         )
         try:
-            value = float(config.get("interruption_min_output_age_sec", 0.5))
+            # GLIVE-2: default lowered 0.5 -> 0.2 so an early barge-in in the first
+            # half-second of output is not swallowed. Still overridable via config.
+            value = float(config.get("interruption_min_output_age_sec", 0.2))
         except (TypeError, ValueError):
-            value = 0.5
+            value = 0.2
         return max(0.0, value)
 
     def _server_side_interruptions_disabled(self):
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
-        return client_config.get("disable_server_side_interruptions") is True
+        return False
 
     def _get_transcript_echo_window_sec(self):
         config = getattr(self.client, "config", None) or self.conn.config.get(
@@ -771,6 +880,22 @@ class GoogleLiveAudioBridge:
         sample_rate = int(getattr(self.conn, "sample_rate", 24000))
         return int(sample_rate * 60 / 1000)
 
+    def _get_live_input_chunk_bytes(self):
+        client_config = getattr(self.client, "config", None) or self.conn.config.get(
+            "google_live",
+            {},
+        )
+        try:
+            chunk_ms = int(client_config.get("input_live_chunk_ms", 20))
+        except (TypeError, ValueError):
+            chunk_ms = 20
+        chunk_ms = min(40, max(20, chunk_ms))
+        try:
+            sample_rate = int(client_config.get("input_sample_rate", 16000))
+        except (TypeError, ValueError):
+            sample_rate = 16000
+        return max(2, int(sample_rate * chunk_ms / 1000) * 2)
+
     def _get_output_encoder(self, sample_rate):
         from core.utils.opus_encoder_utils import OpusEncoderUtils
 
@@ -794,8 +919,20 @@ class GoogleLiveAudioBridge:
         return current_response_id is not None and response_id != current_response_id
 
     def _clear_conn_queues(self):
+        tts_text_queue, tts_audio_queue, report_queue, rate_queue = (
+            self._current_output_queue_lengths()
+        )
         if hasattr(self.conn, "clear_queues"):
             self.conn.clear_queues()
+        self.logger.bind(tag="GoogleLive").info(
+            "output_queue_cleared reason=interrupt response_id={} "
+            "tts_text_queue={} tts_audio_queue={} report_queue={} rate_queue={}",
+            self._active_response_id,
+            tts_text_queue,
+            tts_audio_queue,
+            report_queue,
+            rate_queue,
+        )
         rate_controller = getattr(self.conn, "audio_rate_controller", None)
         if rate_controller is not None and hasattr(rate_controller, "reset"):
             try:
@@ -804,6 +941,29 @@ class GoogleLiveAudioBridge:
                 self.logger.bind(tag="GoogleLive").warning(
                     "Google Live audio_rate_controller reset failed: {}", exc
                 )
+
+    def _current_output_queue_lengths(self):
+        tts = getattr(self.conn, "tts", None)
+        tts_text_queue = self._safe_queue_length(getattr(tts, "tts_text_queue", None))
+        tts_audio_queue = self._safe_queue_length(getattr(tts, "tts_audio_queue", None))
+        report_queue = self._safe_queue_length(getattr(self.conn, "report_queue", None))
+        rate_controller = getattr(self.conn, "audio_rate_controller", None)
+        rate_queue = self._safe_queue_length(getattr(rate_controller, "queue", None))
+        return tts_text_queue, tts_audio_queue, report_queue, rate_queue
+
+    @staticmethod
+    def _safe_queue_length(queue_obj):
+        if queue_obj is None:
+            return 0
+        if hasattr(queue_obj, "qsize"):
+            try:
+                return int(queue_obj.qsize())
+            except Exception:
+                return 0
+        try:
+            return len(queue_obj)
+        except Exception:
+            return 0
 
     def _reset_output_encoder(self):
         self._output_encoder = None
@@ -823,6 +983,23 @@ class GoogleLiveAudioBridge:
         except (TypeError, ValueError):
             suppress_sec = 0.25
         return max(0, suppress_sec)
+
+    def _mark_echo_tail_suppression(self, reason):
+        config = self.conn.config.get("google_live", {})
+        try:
+            tail_ms = float(config.get("echo_tail_suppression_ms", 400))
+        except (TypeError, ValueError):
+            tail_ms = 400.0
+        if tail_ms <= 0:
+            return
+        until = time.monotonic() + tail_ms / 1000.0
+        current_until = getattr(self.conn, "google_live_echo_suppress_until", 0.0)
+        self.conn.google_live_echo_suppress_until = max(current_until, until)
+        self.logger.bind(tag="GoogleLive").info(
+            "echo_tail_suppression_started reason={} duration_ms={:.0f}",
+            reason,
+            tail_ms,
+        )
 
     # ------------------------------------------------------------------
     # AEC integration

@@ -28,6 +28,13 @@ EMOJI_MAP = {
     "😘": "kissy",
     "😏": "confident",
 }
+EMOTION_EMOJI = {emotion: emoji for emoji, emotion in EMOJI_MAP.items()}
+EMOTION_KEYWORDS = (
+    ("sad", ("sorry", "unfortunately", "sad", "buồn", "tiếc", "xin lỗi")),
+    ("thinking", ("think", "maybe", "let me", "hmm", "xem", "nghĩ", "có thể")),
+    ("surprised", ("wow", "amazing", "really", "thật à", "bất ngờ")),
+    ("happy", ("great", "good", "thanks", "nice", "tốt", "vui", "được")),
+)
 EMOJI_RANGES = [
     (0x1F600, 0x1F64F),
     (0x1F300, 0x1F5FF),
@@ -81,15 +88,24 @@ def is_punctuation_or_emoji(char):
     return is_emoji(char)
 
 
-async def get_emotion(conn: "ConnectionHandler", text):
-    """Get emotion message from text"""
-    emoji = "🙂"
-    emotion = "happy"
+def infer_emotion(text, default_emotion="happy"):
+    """Infer display emoji/emotion from response text."""
+    text = text or ""
     for char in text:
         if char in EMOJI_MAP:
-            emoji = char
-            emotion = EMOJI_MAP[char]
-            break
+            return char, EMOJI_MAP[char]
+
+    lowered = text.lower()
+    for emotion, keywords in EMOTION_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            return EMOTION_EMOJI.get(emotion, "🙂"), emotion
+
+    return EMOTION_EMOJI.get(default_emotion, "🙂"), default_emotion
+
+
+async def get_emotion(conn: "ConnectionHandler", text):
+    """Get emotion message from text"""
+    emoji, emotion = infer_emotion(text)
     try:
         await conn.websocket.send(
             json.dumps(

@@ -59,7 +59,16 @@ class ServerPluginExecutor(ToolExecutor):
         tools = {}
 
         # Get required functions
-        necessary_functions = ["handle_exit_intent", "get_lunar", "raise_left_arm"]
+        necessary_functions = [
+            "handle_exit_intent",
+            "get_lunar",
+            "raise_left_arm",
+            "raise_right_arm",
+            "lower_left_arm",
+            "lower_right_arm",
+            "raise_both_arms",
+            "lower_both_arms",
+        ]
 
         # Get function in config
         config_functions = self.config["Intent"][
@@ -92,6 +101,11 @@ class ServerPluginExecutor(ToolExecutor):
                         func_item.description["function"][
                             "description"
                         ] = fun_description
+
+                # 新闻插件：根据配置更新新闻源参数描述
+                if func_name == "get_news_from_newsnow":
+                    self._init_news_source_description(func_item, func_name)
+
                 tools[func_name] = ToolDefinition(
                     name=func_name,
                     description=func_item.description,
@@ -103,3 +117,20 @@ class ServerPluginExecutor(ToolExecutor):
     def has_tool(self, tool_name: str) -> bool:
         """Check whether specified server-side plugin tool exists"""
         return tool_name in all_function_registry
+
+    def _init_news_source_description(self, func_item, func_name):
+        """根据连接配置初始化新闻工具的参数描述"""
+        news_sources = (
+            self.config.get("plugins", {})
+            .get(func_name, {})
+            .get("news_sources", "")
+        )
+        if not news_sources:
+            news_sources = "澎湃新闻;百度热搜;财联社"
+        sources_str = news_sources.replace(";", "、")
+        try:
+            func_item.description["function"]["parameters"]["properties"]["source"][
+                "description"
+            ] = f"新闻源的标准中文名称，例如{sources_str}等。可选参数，如果不提供则使用默认新闻源"
+        except (KeyError, TypeError):
+            pass

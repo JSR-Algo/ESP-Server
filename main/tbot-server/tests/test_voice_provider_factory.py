@@ -116,6 +116,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
                         "port": 8000,
                         "http_port": 8003,
                         "websocket": "wss://public.example.com/tbot/v1/",
+                        "api_url": "https://backend.example.com/v1",
                         "vision_explain": "https://public.example.com/mcp/vision/explain",
                         "auth_key": "local-auth",
                     },
@@ -126,4 +127,59 @@ class VoiceProviderFactoryTest(unittest.TestCase):
         self.assertEqual(
             config["server"]["websocket"],
             "wss://public.example.com/tbot/v1/",
+        )
+        self.assertEqual(
+            config["server"]["api_url"],
+            "https://backend.example.com/v1",
+        )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TBOT_PUBLIC_WEBSOCKET_URL": "wss://env.example.com/tbot/v1/",
+            "TBOT_BACKEND_API_URL": "https://backend-env.example.com/v1/",
+        },
+    )
+    @patch("config.config_loader.init_service")
+    @patch("config.config_loader.get_server_config")
+    def test_manager_api_config_env_overrides_stale_public_endpoints(
+        self,
+        get_server_config,
+        _init_service,
+    ):
+        async def server_config():
+            return {
+                "server": {"auth": {"enabled": False}},
+                "selected_module": {},
+                "prompt_template": "agent-base-prompt.txt",
+            }
+
+        get_server_config.side_effect = server_config
+        config = asyncio.run(
+            get_config_from_api_async(
+                {
+                    "manager-api": {
+                        "url": "http://manager-api/tbot",
+                        "secret": "secret",
+                    },
+                    "server": {
+                        "ip": "0.0.0.0",
+                        "port": 8000,
+                        "http_port": 8003,
+                        "websocket": "wss://stale.example.com/tbot/v1/",
+                        "api_url": "https://stale-backend.example.com/v1",
+                        "vision_explain": "https://public.example.com/mcp/vision/explain",
+                        "auth_key": "local-auth",
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(
+            config["server"]["websocket"],
+            "wss://env.example.com/tbot/v1/",
+        )
+        self.assertEqual(
+            config["server"]["api_url"],
+            "https://backend-env.example.com/v1",
         )

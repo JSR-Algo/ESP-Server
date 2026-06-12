@@ -156,6 +156,63 @@ class OTAHandler(BaseHandler):
             return websocket_config
         return f"ws://{local_ip}:{port}/tbot/v1/"
 
+    def _get_api_url(self, local_ip: str, port: int) -> str:
+        """Return the backend API base URL advertised to firmware.
+
+        The ESP server can be fronted separately from the Nest backend, so this
+        must be explicit config when the deployment needs firmware to poll
+        backend device config or claim routes.
+        """
+        del local_ip, port
+        server_config = self.config["server"]
+        api_config = server_config.get("api_url", "")
+
+        if api_config and not is_placeholder_websocket_url(api_config):
+            return api_config.rstrip("/")
+        return ""
+
+    def _get_firmware_download_url(self, filename: str, local_ip: str, port: int) -> str:
+        """Build the firmware download URL for a cached data/bin artifact.
+
+        The public deploy usually configures server.vision_explain to the same
+        origin as this OTA service. Older configs can leave it blank or set it to
+        a placeholder; in that case do not suppress a valid firmware update just
+        because the URL template is unusable. Fall back to the local OTA origin.
+        """
+        vision_url = get_vision_url(self.config)
+        download_path = f"/tbot/ota/download/{filename}"
+        if vision_url and "/mcp/vision/explain" in vision_url:
+            return vision_url.replace("/mcp/vision/explain", download_path)
+        return f"http://{local_ip}:{port}{download_path}"
+
+    def _mint_websocket_token(self, client_id: str, device_id: str) -> str:
+        """Mint the WebSocket auth token advertised in the OTA response.
+
+        Gating contract (must mirror WebSocketServer._handle_auth):
+        - auth disabled                      -> "" (no auth enforced)
+        - auth enabled + device whitelisted  -> "" (handshake bypasses token)
+        - auth enabled + device NOT in list  -> real signed, NON-EMPTY token
+
+        Raises:
+            RuntimeError: if a token is required but the signer returns an empty
+                string. Shipping an empty token while auth is enforced would
+                guarantee a handshake rejection (firmware lockout), so fail loud
+                here instead of silently advertising an unusable token.
+        """
+        if not self.auth_enable:
+            return ""
+        # Whitelisted devices skip token verification on the WS side, so the OTA
+        # response carries no token for them (kept consistent with _handle_auth).
+        if self.allowed_devices and device_id in self.allowed_devices:
+            return ""
+        token = self.auth.generate_token(client_id, device_id)
+        if not token:
+            raise RuntimeError(
+                "WS auth is enabled but token minting returned empty; refusing "
+                "to advertise an unusable token (would lock out the device)."
+            )
+        return token
+
     async def handle_post(self, request):
         """Process OTA POST Request
 
@@ -247,6 +304,10 @@ class OTAHandler(BaseHandler):
                 },
             }
 
+            api_url = self._get_api_url(local_ip, http_port)
+            if api_url:
+                return_json["api_url"] = api_url
+
             # existing mqtt/websocket logic (unchanged)
             mqtt_gateway_endpoint = server_config.get("mqtt_gateway")
 
@@ -296,14 +357,12 @@ class OTAHandler(BaseHandler):
                 self.logger.bind(tag=TAG).info(f"For device {device_id} IssueMQTTGateway Config")
 
             else:  # mqtt_gateway not configured, send WebSocket
-                # If authentication enabled, perform auth check
-                token = ""
-                if self.auth_enable:
-                    if self.allowed_devices:
-                        if device_id not in self.allowed_devices:
-                            token = self.auth.generate_token(client_id, device_id)
-                    else:
-                        token = self.auth.generate_token(client_id, device_id)
+                # Mint the WebSocket auth token. This MUST stay in lockstep with
+                # WebSocketServer._handle_auth (core/websocket_server.py): when
+                # auth is disabled, or the device is whitelisted (token bypass),
+                # the token is intentionally empty; otherwise a real, signed,
+                # non-empty token is minted so the WS handshake can verify it.
+                token = self._mint_websocket_token(client_id, device_id)
                 # NOTE: use websocket_port here
                 return_json["websocket"] = {
                     "url": self._get_websocket_url(local_ip, websocket_port),
@@ -331,19 +390,14 @@ class OTAHandler(BaseHandler):
                     if _is_higher_version(ver, device_version):
                         # build download url (only allow download via our download endpoint)
                         chosen_version = ver
-                        # Use get_vision_url to get the base URL and replace the path
-                        vision_url = get_vision_url(self.config)
-                        # Replace the path from "/mcp/vision/explain" to "/tbot/ota/download/{fname}"
-                        chosen_url = vision_url.replace(
-                            "/mcp/vision/explain", f"/tbot/ota/download/{fname}"
-                        )
+                        chosen_url = self._get_firmware_download_url(fname, local_ip, http_port)
                         break
 
                 if chosen_url:
                     return_json["firmware"]["version"] = chosen_version
                     return_json["firmware"]["url"] = chosen_url
                     self.logger.bind(tag=TAG).info(
-                        f"For device {device_id} Issue Firmware {chosen_version} [If address prefix wrong, check config fileserver.vision_explain]-> {chosen_url} "
+                        f"For device {device_id} Issue Firmware {chosen_version} [If address prefix wrong, check config server.vision_explain]-> {chosen_url} "
                     )
                 else:
                     self.logger.bind(tag=TAG).info(
@@ -392,6 +446,10 @@ class OTAHandler(BaseHandler):
         - Only allow downloading .bin files under data/bin directory
         - filename must be basename and match safe pattern
         """
+        fname = ""
+        device_id = request.headers.get("device-id", "")
+        client_id = request.headers.get("client-id", "")
+        user_agent = request.headers.get("user-agent", "")
         try:
             fname = request.match_info.get("filename", "")
             if not fname:
@@ -416,9 +474,21 @@ class OTAHandler(BaseHandler):
             if not os.path.isfile(file_real):
                 raise web.HTTPNotFound(text="file not found")
 
+            file_size = os.path.getsize(file_real)
+            self.logger.bind(tag=TAG).info(
+                "Firmware download request "
+                f"filename={fname} device_id={device_id} "
+                f"client_id={client_id} user_agent={user_agent} size={file_size}"
+            )
+
             # use FileResponse to stream file
             resp = web.FileResponse(path=file_real)
         except web.HTTPError as e:
+            self.logger.bind(tag=TAG).warning(
+                "Firmware download rejected "
+                f"filename={fname} device_id={device_id} "
+                f"client_id={client_id} status={e.status} reason={e.reason}"
+            )
             resp = e
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Firmware DownloadException: {e}")

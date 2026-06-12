@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import core.websocket_server as websocket_server
 
@@ -131,4 +132,41 @@ class WebSocketServerManagerBootstrapTest(unittest.TestCase):
                 (False, False, False, False, False, False),
                 (False, False, False, False, False, False),
             ],
+        )
+
+    def test_query_authorization_is_used_when_device_headers_exist(self):
+        websocket = SimpleNamespace(
+            request=SimpleNamespace(
+                path="/tbot/v1/?authorization=Bearer%20token-from-query",
+                headers={
+                    "device-id": "3c:0f:02:de:c2:e0",
+                    "client-id": "agent-1",
+                },
+            )
+        )
+
+        websocket_server.WebSocketServer._copy_query_identity_headers(websocket)
+
+        self.assertEqual(
+            websocket.request.headers["authorization"],
+            "Bearer token-from-query",
+        )
+
+    def test_query_authorization_does_not_override_header(self):
+        websocket = SimpleNamespace(
+            request=SimpleNamespace(
+                path="/tbot/v1/?authorization=Bearer%20token-from-query",
+                headers={
+                    "device-id": "3c:0f:02:de:c2:e0",
+                    "client-id": "agent-1",
+                    "authorization": "Bearer token-from-header",
+                },
+            )
+        )
+
+        websocket_server.WebSocketServer._copy_query_identity_headers(websocket)
+
+        self.assertEqual(
+            websocket.request.headers["authorization"],
+            "Bearer token-from-header",
         )

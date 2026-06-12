@@ -164,7 +164,7 @@ def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
     api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
-    api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
+    api_key = weather_config.get("api_key", "")
     default_location = weather_config.get("default_location", "Guangzhou")
     client_ip = conn.client_ip
 

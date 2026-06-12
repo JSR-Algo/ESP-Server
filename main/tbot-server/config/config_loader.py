@@ -20,12 +20,20 @@ GOOGLE_LIVE_DEFAULTS = {
     "input_sample_rate": 16000,
     "output_audio_format": "pcm16",
     "output_sample_rate": 24000,
-    "input_flush_delay_sec": 0.8,
+    "input_live_chunk_ms": 20,
+    "interrupt_policy": "wake_or_transcript",
+    "raw_audio_barge_in_enabled": False,
+    "input_flush_delay_sec": 1.0,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
     "interrupt_speech_tail_ms": 240,
     "interrupt_max_capture_ms": 1200,
-    "disable_server_side_interruptions": True,
+    "interrupt_replay_buffer_ms": 900,
+    "reconnect_buffer_ms": 2000,
+    "echo_tail_suppression_ms": 400,
+    "music_auto_pause_on_user_speech": True,
+    "disable_server_side_interruptions": False,
+    "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
     "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
     "log_audio_diagnostics": True,
     "interrupt_on_input_while_speaking": False,
@@ -48,10 +56,17 @@ GOOGLE_LIVE_DEFAULTS = {
     # When False, RMS-based loud-input bypass of the echo gate cannot fire a
     # mid-sentence interrupt — for hardware where speaker echo crosses the
     # bypass threshold and would otherwise cut the model off.
-    "echo_bypass_interrupt_enabled": True,
-    "server_side_vad_enabled": False,
+    "echo_bypass_interrupt_enabled": False,
+    "server_side_vad_enabled": True,
     "send_transcript_events": True,
     "send_llm_state_events": False,
+    "session_resumption_enabled": True,
+    "session_resumption_transparent": True,
+    "context_window_compression_enabled": True,
+    "context_window_trigger_tokens": 24000,
+    "context_window_target_tokens": 12000,
+    "tool_timeout_sec": 10.0,
+    "dangerous_tool_names": [],
     "reconnect": {
         "enabled": True,
         "max_retries": 6,
@@ -72,87 +87,6 @@ def read_config(config_path):
     return config
 
 
-# Env var -> nested config path. Each entry overlays an os.environ value onto
-# the merged config so deployment-specific endpoints/secrets can change without
-# editing config.yaml or data/.config.yaml. Additive + null-safe: nested dicts
-# are created if absent, and an override only applies when the env var is set to
-# a non-empty value.
-_ENV_CONFIG_OVERRIDES = (
-    ("MANAGER_API_URL", ("manager-api", "url")),
-    ("MANAGER_API_SECRET", ("manager-api", "secret")),
-    # Read at core/lesson/runtime.py:639 as server_cfg.get("api_url").
-    ("COURSE_BACKEND_URL", ("server", "api_url")),
-    ("PUBLIC_WS_URL", ("server", "websocket")),
-    ("PUBLIC_OTA_URL", ("server", "ota")),
-)
-
-
-def _set_nested(config, path, value):
-    """Set ``config[path[0]][path[1]]...`` = value, creating nested dicts."""
-    target = config
-    for key in path[:-1]:
-        child = target.get(key)
-        if not isinstance(child, Mapping):
-            child = {}
-            target[key] = child
-        target = child
-    target[path[-1]] = value
-
-
-# Truthy/falsey spellings accepted for boolean env overrides. Anything else
-# (or an unset/empty var) leaves the existing config value untouched.
-_ENV_TRUE = {"1", "true", "yes", "on"}
-_ENV_FALSE = {"0", "false", "no", "off"}
-
-
-def apply_env_overrides(config):
-    """Overlay os.environ values onto the merged config dict.
-
-    Mutates and returns ``config``. Only non-empty env vars override existing
-    values; nested dicts are created on demand. Safe to call when ``config`` is
-    not a Mapping (returns it unchanged).
-    """
-    if not isinstance(config, Mapping):
-        return config
-
-    for env_name, path in _ENV_CONFIG_OVERRIDES:
-        value = os.environ.get(env_name)
-        if value is None or value == "":
-            continue
-        _set_nested(config, path, value)
-
-    # LESSON_RUNTIME_ENABLED dark-rollout flag (recon: connection.py
-    # _lesson_runtime_enabled reads config["lesson"]["runtime_enabled"], default
-    # False). Parsed as a BOOLEAN — a generic string overlay would coerce the
-    # literal "false" to truthy. Only an explicit true/false spelling applies;
-    # an unset or unrecognized value leaves the config default unchanged.
-    raw_flag = os.environ.get("LESSON_RUNTIME_ENABLED")
-    if raw_flag is not None and raw_flag.strip() != "":
-        token = raw_flag.strip().lower()
-        if token in _ENV_TRUE:
-            _set_nested(config, ("lesson", "runtime_enabled"), True)
-        elif token in _ENV_FALSE:
-            _set_nested(config, ("lesson", "runtime_enabled"), False)
-
-    # COURSE_BACKEND_URL is already overlaid onto server.api_url above. The
-    # lesson runtime reads ``lesson.api_base`` first and falls back to
-    # ``server.api_url`` (runtime.py: base_url = lesson_cfg.get("api_base") or
-    # server_cfg.get("api_url")). Mirror it onto lesson.api_base as an explicit,
-    # null-safe fallback so the lesson layer fetches from the live NestJS even if
-    # an operator only set the lesson block's flag. Never overwrites an
-    # author-provided lesson.api_base.
-    course_backend_url = os.environ.get("COURSE_BACKEND_URL")
-    if course_backend_url:
-        lesson_cfg = config.get("lesson")
-        if not isinstance(lesson_cfg, Mapping):
-            lesson_cfg = {}
-            config["lesson"] = lesson_cfg
-        if not lesson_cfg.get("api_base"):
-            lesson_cfg["api_base"] = course_backend_url
-
-    return config
-
-
 def normalize_voice_config(config):
     """Ensure voice provider config defaults exist."""
     if not isinstance(config, Mapping):
@@ -170,8 +104,46 @@ def normalize_voice_config(config):
         if not isinstance(google_live, Mapping):
             google_live = {}
         config["google_live"] = merge_configs(GOOGLE_LIVE_DEFAULTS, google_live)
+        _apply_google_live_runtime_safety_policy(config["google_live"])
     elif not isinstance(google_live, Mapping):
         config["google_live"] = {}
+    return config
+
+def _apply_google_live_runtime_safety_policy(google_live):
+    """Keep manager/private configs from re-enabling unsafe Live interrupts."""
+    google_live["interrupt_policy"] = "wake_or_transcript"
+    google_live["raw_audio_barge_in_enabled"] = False
+    google_live["disable_server_side_interruptions"] = False
+    google_live["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
+    google_live["barge_in"] = False
+    google_live["interrupt_on_input_while_speaking"] = False
+    google_live["server_side_vad_enabled"] = True
+    google_live["session_resumption_enabled"] = True
+    google_live["context_window_compression_enabled"] = True
+
+def _clean_env(name):
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+def _apply_server_endpoint_env_overrides(config):
+    """Let Docker/.env repair public OTA endpoints without editing volumes."""
+    if not isinstance(config, Mapping):
+        return config
+
+    websocket_url = _clean_env("TBOT_PUBLIC_WEBSOCKET_URL")
+    api_url = _clean_env("TBOT_BACKEND_API_URL")
+    if not websocket_url and not api_url:
+        return config
+
+    server_config = config.get("server")
+    if not isinstance(server_config, Mapping):
+        server_config = {}
+        config["server"] = server_config
+
+    if websocket_url:
+        server_config["websocket"] = websocket_url
+    if api_url:
+        server_config["api_url"] = api_url.rstrip("/")
     return config
 
 
@@ -208,9 +180,8 @@ def load_config():
     else:
         # Merge Config
         config = merge_configs(default_config, custom_config)
+    config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
-    # Overlay env vars onto the merged config before any consumer reads it.
-    config = apply_env_overrides(config)
     # Initialize directory
     ensure_directories(config)
 
@@ -241,9 +212,8 @@ async def load_config_async():
         config = await get_config_from_api_async(custom_config)
     else:
         config = merge_configs(default_config, custom_config)
+    config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
-    # Overlay env vars onto the merged config before any consumer reads it.
-    config = apply_env_overrides(config)
     ensure_directories(config)
     cache_manager.set(CacheType.CONFIG, "main_config", config)
     return config
@@ -272,6 +242,7 @@ async def get_config_from_api_async(config):
             "port": config["server"].get("port", ""),
             "http_port": config["server"].get("http_port", ""),
             "websocket": config["server"].get("websocket", ""),
+            "api_url": config["server"].get("api_url", ""),
             "vision_explain": config["server"].get("vision_explain", ""),
             "auth_key": config["server"].get("auth_key", ""),
         }
@@ -279,6 +250,7 @@ async def get_config_from_api_async(config):
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    config_data = _apply_server_endpoint_env_overrides(config_data)
     return normalize_voice_config(config_data)
 
 

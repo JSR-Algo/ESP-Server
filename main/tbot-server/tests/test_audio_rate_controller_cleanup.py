@@ -1,6 +1,8 @@
 import asyncio
 import unittest
 
+from websockets.exceptions import ConnectionClosedOK
+
 from core.utils.audioRateController import AudioRateController
 
 
@@ -18,6 +20,24 @@ class AudioRateControllerCleanupTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(task.done())
         self.assertIsNone(controller.pending_send_task)
+
+    async def test_normal_websocket_close_drains_queue_and_stops_send_loop(self):
+        controller = AudioRateController(frame_duration=1)
+
+        async def send_audio(_packet):
+            raise ConnectionClosedOK(None, None)
+
+        task = controller.start_sending(send_audio)
+        controller.add_audio(b"packet-1")
+        controller.add_audio(b"packet-2")
+
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(task.done())
+        self.assertIsNone(controller.pending_send_task)
+        self.assertEqual(list(controller.queue), [])
+        self.assertTrue(controller.queue_empty_event.is_set())
+        self.assertFalse(controller.queue_has_data_event.is_set())
 
 
 if __name__ == "__main__":
