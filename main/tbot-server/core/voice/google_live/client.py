@@ -292,17 +292,8 @@ class GoogleLiveClient:
         text = str(prompt).strip()
         if not text:
             return None
-        # Live API accepts either a Content object or a plain dict. We use the
-        # dict form so we do not depend on SDK version differences in how the
-        # Content type is exposed.
-        if self._types is not None and hasattr(self._types, "Content"):
-            try:
-                return self._types.Content(
-                    role="user",
-                    parts=[self._types.Part(text=text)],
-                )
-            except Exception:
-                pass
+        # Use a plain JSON-compatible payload. Some google-genai SDK Content
+        # objects serialize preview-only fields that the Live endpoint rejects.
         return {"parts": [{"text": text}], "role": "user"}
 
     def _system_instruction_length(self, instruction):

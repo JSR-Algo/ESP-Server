@@ -645,7 +645,7 @@
       v-model="showFunctionDialog"
       :functions="currentFunctions"
       :all-functions="allFunctions"
-      :agent-id="$route.query.agentId"
+      :agent-id="$route.query.agentId || ''"
       @update-functions="handleUpdateFunctions"
       @dialog-closed="handleDialogClosed"
     />

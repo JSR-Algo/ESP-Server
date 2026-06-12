@@ -350,6 +350,36 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         # Override path replaces (rather than extends) func_handler list.
         self.assertNotIn("get_weather", names)
 
+    async def test_intent_function_call_override_keeps_robot_motion_tools_live(self):
+        import plugins_func.functions.raise_left_arm  # noqa: F401
+        import plugins_func.functions.robot_arm_actions  # noqa: F401
+        import plugins_func.functions.turn_head  # noqa: F401
+
+        conn = _ProviderConn(func_handler=None)
+        conn.config["selected_module"] = {"Intent": "function_call"}
+        conn.config["Intent"] = {
+            "function_call": {
+                # Mirrors production: a narrow whitelist existed before the
+                # head/percent tools were added.
+                "functions": ["raise_left_arm"],
+            }
+        }
+        provider = GoogleLiveProvider(conn)
+
+        config = provider._get_live_config_with_functions()
+
+        names = [t["function"]["name"] for t in config["functions"]]
+        self.assertIn("raise_left_arm", names)
+        self.assertIn("turn_head_left", names)
+        self.assertIn("turn_head_right", names)
+        self.assertIn("center_head", names)
+        self.assertIn("set_head_angle", names)
+        self.assertIn("set_head_percent", names)
+        self.assertIn("turn_head_left_then_right_max", names)
+        self.assertIn("set_left_arm_percent", names)
+        self.assertIn("set_right_arm_percent", names)
+        self.assertIn("set_both_arms_percent", names)
+
 
 class AudioBridgeToolCallForwardingTest(unittest.IsolatedAsyncioTestCase):
     async def test_handle_event_forwards_tool_call_to_handler(self):

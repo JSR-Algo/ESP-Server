@@ -474,7 +474,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
     # Music tools temporarily removed per user request ("Bỏ function nghe nhạc
     # trước") — focus on voice-only interaction until audio mixing /
     # music-pause synchronisation is fully stable.
-    _LIVE_ALWAYS_INCLUDE = ("change_volume",)
+    _LIVE_ALWAYS_INCLUDE = (
+        "change_volume",
+        "raise_left_arm",
+        "raise_right_arm",
+        "lower_left_arm",
+        "lower_right_arm",
+        "raise_both_arms",
+        "lower_both_arms",
+        "set_left_arm_percent",
+        "set_right_arm_percent",
+        "set_both_arms_percent",
+        "turn_head_left",
+        "turn_head_right",
+        "center_head",
+        "set_head_angle",
+        "set_head_percent",
+        "turn_head_left_then_right_max",
+    )
 
     # Plugins that depend on classic-pipeline state (conn.tts, conn.sentence_id,
     # tts_text_queue) which Google Live does not initialise. Listing them as
@@ -496,7 +513,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         try:
             override_names = self._resolve_override_function_names()
             if override_names:
-                descriptions = self._build_descriptions_for(override_names)
+                descriptions = self._build_descriptions_for(
+                    self._with_live_always_include(override_names)
+                )
                 if descriptions:
                     return descriptions
 
@@ -555,8 +574,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
         live_cfg = self._get_live_config()
         override = live_cfg.get("functions") if isinstance(live_cfg, Mapping) else None
         if isinstance(override, list) and override:
-            return [str(name) for name in override if name]
+            return self._with_live_always_include(str(name) for name in override if name)
         return list(self._LIVE_ALWAYS_INCLUDE)
+
+    def _with_live_always_include(self, names):
+        merged = []
+        seen = set()
+        for name in list(names or []) + list(self._LIVE_ALWAYS_INCLUDE):
+            if not name:
+                continue
+            text = str(name)
+            if text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+        return merged
 
     def _resolve_override_function_names(self):
         """Live mode tool list, resolved independently of selected_module.Intent.

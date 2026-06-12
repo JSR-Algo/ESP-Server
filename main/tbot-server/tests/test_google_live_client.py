@@ -368,6 +368,37 @@ class GoogleLiveClientTest(unittest.TestCase):
 
         self.assertNotIn("realtime_input_config", config)
 
+    def test_system_instruction_uses_plain_json_even_when_sdk_types_exist(self):
+        class _Types:
+            class Part:
+                def __init__(self, *, text):
+                    self.text = text
+
+            class Content:
+                def __init__(self, *, role, parts):
+                    self.role = role
+                    self.parts = parts
+
+        client = GoogleLiveClient(
+            {"system_prompt": "Bạn là TBOT. Trả lời ngắn bằng tiếng Việt."},
+            _DummyLogger(),
+        )
+        client._types = _Types
+
+        config = client._build_connect_config()
+
+        self.assertEqual(
+            config["system_instruction"],
+            {
+                "parts": [
+                    {"text": "Bạn là TBOT. Trả lời ngắn bằng tiếng Việt."},
+                ],
+                "role": "user",
+            },
+        )
+        self.assertIsInstance(config["system_instruction"], dict)
+        self.assertIsInstance(config["system_instruction"]["parts"][0], dict)
+
 class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_connect_honors_configured_timeout(self):
         logger = _DummyLogger()
