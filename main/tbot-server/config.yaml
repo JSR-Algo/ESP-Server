@@ -319,6 +319,18 @@ selected_module:
   # The default free ChatGLMLLM already supports function_call, but for better stability, it is recommended to set LLM to: DoubaoLLM, using the specific model_name: doubao-1-5-pro-32k-250115
   Intent: function_call
 
+# ── Conversational lesson runtime (US-006) ───────────────────────────────────
+# Enables BOTH connect-time pull AND the spoken "switch to lesson / chuyển sang
+# bài học" trigger (plugins_func/functions/start_lesson.py -> core.lesson.runtime
+# .maybe_start_lesson_on_connect). api_base is the live NestJS course backend /v1
+# base used to fetch the device's assignment + manifest; falls back to
+# server.api_url. Can also be supplied by env (LESSON_RUNTIME_ENABLED /
+# COURSE_BACKEND_URL) where config/config_loader.py applies env overrides.
+lesson:
+  runtime_enabled: true
+  api_base: "https://tbot-backend-8wmh.onrender.com/v1"
+  # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim
+
 # Intent recognition, a module used to understand user intent, e.g., play music
 Intent:
   # Disable intent recognition
@@ -348,6 +360,11 @@ Intent:
     # Below is an example of loading plugins for weather query, role switching, and news query
     functions:
       - change_role
+      # Conversational "switch to lesson / chuyển sang bài học" voice trigger
+      # (plugins_func/functions/start_lesson.py). Must be listed here for Gemini
+      # Live / function_call to be ALLOWED to call it. Runtime still gated by
+      # lesson.runtime_enabled below.
+      - start_lesson
       - change_volume
       - raise_left_arm
       - get_weather
