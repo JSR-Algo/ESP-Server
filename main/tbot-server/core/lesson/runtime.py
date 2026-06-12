@@ -592,7 +592,7 @@ class LessonRuntime:
     def _step_body(self, step: Dict[str, Any]) -> Dict[str, Any]:
         # Byte-consistent with the fixture lesson_step.body: the scene IS the frozen
         # 3-layer projection from the manifest step (back->front, no lessonUi).
-        return {
+        body = {
             "assignmentVersion": self.assignment_version,
             "stepType": step.get("type"),
             "profile": self.profile,
@@ -600,6 +600,17 @@ class LessonRuntime:
             "audio": step.get("audio"),
             "scene": step.get("scene"),
         }
+        # Renderer-v1 additive field (NO protocol-version bump): forward the AUTHOR's
+        # explicit ``completionClass`` ('passive'|'interactive') so the firmware uses
+        # it as the authoritative passive/interactive classifier instead of re-deriving
+        # from ``stepType`` (which MISCLASSIFIES author-defined step types -> spurious
+        # step_completed / off-by-one). camelCase mirrors ``stepType``. Omitted when the
+        # manifest step lacks it, keeping the wire body byte-identical to the frozen
+        # fixtures (whose firmware then falls back to the v1 type-set, unchanged).
+        completion_class = step.get("completionClass")
+        if completion_class is not None:
+            body["completionClass"] = completion_class
+        return body
 
     # ── progress forward (own dispatch path) ────────────────────────────────────
 

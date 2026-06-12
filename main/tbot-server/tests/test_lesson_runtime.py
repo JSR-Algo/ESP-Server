@@ -1103,6 +1103,16 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(_ack(2, 2))  # start-ack -> RUNNING + emits songBreak
         self.assertEqual(rt.state, "RUNNING")
 
+        # FIX#7: the emitted lesson_step.body must FORWARD the author's explicit
+        # completionClass (renderer-v1 additive field) so the firmware uses it as the
+        # authoritative classifier instead of re-deriving from the (author-defined,
+        # PASSIVE_STEP_TYPES-unknown) stepType.
+        step_frame = next(
+            f for f in self._sent_frames(conn) if f["type"] == "lesson_step"
+        )
+        self.assertEqual(step_frame["body"]["completionClass"], "passive")
+        self.assertEqual(step_frame["body"]["stepType"], "songBreak")
+
         # Ack ALONE finishes the passive author step -> lesson_stop (no step_completed).
         await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
         self.assertIn("lesson_stop", [f["type"] for f in self._sent_frames(conn)])
@@ -1169,6 +1179,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(_ack(1, 1))
         await rt._preload_task
         await rt.on_lesson_ack(_ack(2, 2))  # RUNNING + greeting (S->F 3)
+
+        # FIX#7: a manifest step WITHOUT completionClass must OMIT the field from the
+        # wire body (not emit completionClass=null), keeping the body byte-identical to
+        # the frozen v1 fixtures whose firmware then falls back to PASSIVE_STEP_TYPES.
+        greeting_frame = next(
+            f for f in self._sent_frames(conn) if f["type"] == "lesson_step"
+        )
+        self.assertNotIn("completionClass", greeting_frame["body"])
 
         # PASSIVE greeting (fallback, no completionClass): ack ALONE auto-advances.
         await rt.on_lesson_ack(_ack(3, 3, step_id="s1"))
