@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from unittest.mock import patch
 
 
 class GoogleLiveSmokeScriptTest(unittest.TestCase):
@@ -22,6 +23,27 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
 
         self.assertFalse(config["native_voice"])
         self.assertEqual(config["voice_name"], "")
+
+    def test_has_resolvable_api_key_rejects_missing_placeholder_env(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(
+                smoke._has_resolvable_api_key({"api_key": "${GOOGLE_API_KEY}"})
+            )
+
+    def test_has_resolvable_api_key_accepts_placeholder_env(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": " key "}, clear=True):
+            self.assertTrue(
+                smoke._has_resolvable_api_key({"api_key": "${GOOGLE_API_KEY}"})
+            )
+
+    def test_has_resolvable_api_key_accepts_literal_manager_key(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        self.assertTrue(smoke._has_resolvable_api_key({"api_key": "literal-key"}))
 
 
 if __name__ == "__main__":

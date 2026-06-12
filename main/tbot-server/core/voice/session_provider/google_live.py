@@ -7,6 +7,10 @@ from collections import deque
 from collections.abc import Mapping
 
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
+from core.voice.google_live.interaction_controller import (
+    GoogleLiveInteractionController,
+    InteractionState,
+)
 from core.voice.session_provider.base import VoiceSessionProvider
 from core.voice.session_provider.classic_pipeline import ClassicPipelineProvider
 from plugins_func.register import Action
@@ -69,9 +73,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # log spam during music playback (each mic frame is ~60ms).
         self._last_echo_suppressed_log_at = {}
         self._pending_tool_calls = set()
+        self._cancelled_tool_call_ids = set()
         self._user_audio_allowed_until = 0.0
         self._echo_bypass_pending_interrupt = False
         self._last_clean_user_turn_response_id = None
+        self._interaction = GoogleLiveInteractionController(conn)
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -188,6 +194,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if listen_state == "start":
             await self._open_user_audio_window("listen_start")
             return True
+        if listen_state == "stop":
+            await self._finalize_user_audio_input("listen_stop")
+            return True
         text = self._extract_user_text_message(message)
         if text is None:
             return False
@@ -214,7 +223,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return await self._fallback_provider.handle_audio_bytes(audio_bytes)
         if self._reconnecting:
             if audio_bytes:
-                self._pending_reconnect_audio.append(audio_bytes)
+                self._pending_reconnect_audio.append(
+                    (self._response_generation, audio_bytes)
+                )
             return True
         if self._bridge is None:
             return False
@@ -238,14 +249,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.client_abort = False
                 return True
             elif should_suppress_echo:
+                self._log_audio_decision(
+                    "suppress_echo",
+                    self._current_audio_suppression_reason(),
+                    decoded_audio,
+                )
                 self.conn.client_abort = False
                 return True
             if self._should_hold_interrupt_audio(decoded_audio):
+                self._log_audio_decision("hold_interrupt_audio", "blocked_output", decoded_audio)
                 self.conn.client_abort = False
                 return True
             if self._should_interrupt_for_input(decoded_audio):
                 await self._begin_user_interrupt("audio_input")
             elif self._should_drop_input_during_output():
+                self._log_audio_decision("drop_input", "output_active", decoded_audio)
                 self.conn.client_abort = False
                 return True
             self.conn.client_abort = False
@@ -255,6 +273,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._bridge.forward_decoded_input_audio(decoded_audio)
             else:
                 await self._bridge.forward_input_audio(audio_bytes)
+            self._log_audio_decision("forward_input", "accepted", decoded_audio)
             if self._interrupt_capture_response_id == self._response_generation:
                 self._interrupt_forwarded_once = True
             if not buffered_current_frame:
@@ -301,6 +320,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     )
                     self._schedule_proactive_reconnect(event)
                     continue
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "session_resumption_update"
+                ):
+                    self._handle_session_resumption_update(event)
+                    continue
                 await self._bridge.handle_event(event)
         except asyncio.CancelledError:
             raise
@@ -346,6 +371,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not self._should_fallback_to_classic():
             raise exc
 
+        self._interaction.transition(InteractionState.FALLBACK)
         self.conn.logger.bind(tag="GoogleLive").warning(
             "Google Live fallback_triggered reason={}",
             self._safe_error_message(exc),
@@ -434,8 +460,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _open_live_session(self):
         self._session_generation += 1
         generation = self._session_generation
+        self._interaction.start_live_connection(generation)
         self._cancelled_response_ids.clear()
         self._pending_tool_calls.clear()
+        self._cancelled_tool_call_ids.clear()
         self._client = self._client_factory(
             self._get_live_config_with_functions(),
             self.conn.logger,
@@ -462,6 +490,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         functions = self._resolve_functions_for_live()
         if functions:
             config["functions"] = functions
+        if config.get("session_resumption_enabled", True):
+            handle = getattr(self.conn, "google_live_session_resumption_handle", None)
+            if handle:
+                config["session_resumption_handle"] = handle
         # Pass agent's system prompt into Live so the model knows when to
         # call device-control tools (volume, brightness, theme). Without
         # system_instruction the model only chats verbally and ignores
@@ -470,6 +502,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if prompt:
             config["system_prompt"] = prompt
         return config
+
+    def _handle_session_resumption_update(self, event):
+        if not isinstance(event, Mapping):
+            return False
+        handle = event.get("handle")
+        if not event.get("resumable") or not handle:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live session_resumption_update ignored resumable={} has_handle={}",
+                bool(event.get("resumable")),
+                bool(handle),
+            )
+            return False
+        self.conn.google_live_session_resumption_handle = str(handle)
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live session_resumption_handle_updated has_handle=True"
+        )
+        return True
 
     # Music tools temporarily removed per user request ("Bỏ function nghe nhạc
     # trước") — focus on voice-only interaction until audio mixing /
@@ -580,7 +629,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     def _build_descriptions_for(self, names):
         try:
-            from plugins_func.register import all_function_registry
+            import importlib
+            import sys
+
+            registry_module = importlib.import_module("plugins_func.register")
+            if not hasattr(registry_module, "all_function_registry"):
+                sys.modules.pop("plugins_func.register", None)
+                registry_module = importlib.import_module("plugins_func.register")
+            all_function_registry = registry_module.all_function_registry
         except Exception:
             return None
         necessary = {"handle_exit_intent", "get_lunar"}
@@ -591,6 +647,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 continue
             seen.add(name)
             wanted.append(name)
+
+        module_aliases = {"get_lunar": "get_time"}
+        for name in wanted:
+            if name in all_function_registry:
+                continue
+            module_name = module_aliases.get(name, name)
+            try:
+                module = importlib.import_module(f"plugins_func.functions.{module_name}")
+                if name not in all_function_registry:
+                    importlib.reload(module)
+            except Exception as exc:
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "Google Live failed to import live tool {}: {}",
+                    name,
+                    self._safe_error_message(exc),
+                )
 
         plugin_overrides = {}
         plugins_cfg = self.conn.config.get("plugins", {}) if isinstance(self.conn.config, Mapping) else {}
@@ -663,6 +735,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
 
         self._reconnecting = True
+        self._interaction.transition(InteractionState.RECONNECTING)
         try:
             await self._close_live_resources()
             while self._reconnect_attempts < reconnect_config["max_retries"]:
@@ -673,6 +746,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     "Google Live reconnect attempt {} after runtime failure: {}",
                     attempt_number,
                     self._safe_error_message(exc),
+                )
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "reconnect_started reason={} attempt={} state={}",
+                    error_class,
+                    attempt_number,
+                    self._interaction.state.value,
                 )
                 if backoff_ms > 0:
                     await asyncio.sleep(backoff_ms / 1000.0)
@@ -687,13 +766,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         "Google Live reconnect attempt {} succeeded",
                         attempt_number,
                     )
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "reconnect_succeeded attempt={} live_connection_id={}",
+                        attempt_number,
+                        self._interaction.live_connection_id,
+                    )
                     return True
                 except Exception as reconnect_exc:
                     await self._close_live_resources()
+                    reconnect_error_class = self._classify_error(reconnect_exc)
                     self.conn.logger.bind(tag="GoogleLive").warning(
                         "Google Live reconnect attempt {} failed: {}",
                         attempt_number,
                         self._safe_error_message(reconnect_exc),
+                    )
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        "reconnect_failed attempt={} error_class={}",
+                        attempt_number,
+                        reconnect_error_class,
                     )
             return False
         finally:
@@ -706,7 +796,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
         replay_frames = 0
         replay_bytes = 0
         while self._pending_reconnect_audio:
-            packet = self._pending_reconnect_audio.popleft()
+            item = self._pending_reconnect_audio.popleft()
+            if isinstance(item, tuple) and len(item) == 2:
+                buffered_response_id, packet = item
+                if buffered_response_id != self._response_generation:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "reconnect_replay_skipped reason=stale_turn buffered_response_id={} current_response_id={}",
+                        buffered_response_id,
+                        self._response_generation,
+                    )
+                    continue
+            else:
+                packet = item
             if not packet:
                 continue
             replay_frames += 1
@@ -893,6 +994,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._flush_input_after_idle(flush_delay, generation)
         )
 
+    async def _finalize_user_audio_input(self, reason):
+        self._cancel_input_flush_task()
+        if self._client is None or not hasattr(self._client, "end_audio_stream"):
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live input_finalization_skipped reason={} client=missing",
+                reason,
+            )
+            return
+        if hasattr(self._client, "connected") and not self._client.connected:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live input_finalization_skipped reason={} client=disconnected",
+                reason,
+            )
+            return
+        if self._bridge is not None and hasattr(self._bridge, "flush_pending_input_audio"):
+            await self._bridge.flush_pending_input_audio()
+        await self._client.end_audio_stream()
+        self._interaction.transition(InteractionState.WAITING_MODEL)
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live input_finalized reason={} state={} response_id={}",
+            reason,
+            self._interaction.state.value,
+            self._response_generation,
+        )
+
     def _schedule_forced_interrupt_input_flush(self, reason):
         flush_delay = self._get_interrupt_finalization_delay()
         if flush_delay is None:
@@ -933,6 +1059,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if hasattr(self._client, "connected") and not self._client.connected:
                 return
             await self._replay_pending_interrupt_audio("interrupt_finalized")
+            if self._bridge is not None and hasattr(self._bridge, "flush_pending_input_audio"):
+                await self._bridge.flush_pending_input_audio()
             await self._client.end_audio_stream()
             if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
                 self._bridge.allow_model_output()
@@ -968,6 +1096,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if hasattr(self._client, "connected") and not self._client.connected:
                 return
+            if self._bridge is not None and hasattr(self._bridge, "flush_pending_input_audio"):
+                await self._bridge.flush_pending_input_audio()
             await self._client.end_audio_stream()
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live input stream flushed after {:.0f} ms idle",
@@ -1105,15 +1235,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             merged = merge_configs(GOOGLE_LIVE_DEFAULTS, config)
         except Exception:
             merged = dict(config)
-        # Force stable Live behaviour:
-        # The admin API sometimes returns disable_server_side_interruptions=False,
-        # which makes Gemini cut itself off mid-sentence whenever the mic picks
-        # up speaker echo or background noise. For TBOT we always want server-
-        # side interruptions filtered — the device's wake-word path handles
-        # user interruptions explicitly.
-        merged["disable_server_side_interruptions"] = True
+        # Force stable local interruption behaviour while keeping Gemini Live's
+        # official activity interruption path enabled. Raw/RMS local barge-in is
+        # still disabled; speaker echo is handled by AEC, echo gates, and queue
+        # clearing when Live reports serverContent.interrupted.
+        merged["disable_server_side_interruptions"] = False
+        merged["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
         merged["barge_in"] = False
         merged["interrupt_on_input_while_speaking"] = False
+        merged["server_side_vad_enabled"] = True
+        merged["session_resumption_enabled"] = True
+        merged["context_window_compression_enabled"] = True
         # Force the RMS-based loud-input bypass interrupt OFF unless caller
         # has explicitly opted in via google_live config. Speaker echo on
         # TBOT hardware can cross the bypass RMS threshold (observed ~700-
@@ -1217,6 +1349,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return response_id in self._cancelled_response_ids
 
     def _mark_clean_user_turn_opened(self, reason):
+        self._interaction.transition(InteractionState.USER_STREAMING)
         if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
             self._bridge.allow_model_output()
         if self._last_clean_user_turn_response_id == self._response_generation:
@@ -1253,24 +1386,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
 
     async def _dispatch_music_control_intent(self, transcript_text):
-        # Music feature disabled per user request — short-circuit so the
-        # classifier does not try to invoke removed tools. Live API will
-        # respond verbally as a normal turn.
-        return False
-        # Unreachable below; kept for fast re-enable when music returns.
-        tool_name = self._classify_music_control_intent(transcript_text)
-        if tool_name is None:
+        payload = self._classify_music_control_intent(transcript_text)
+        if payload is None:
             return False
         await self._begin_user_interrupt("music_control_intent")
-        responses = {
-            "stop_music": "Đã tắt nhạc.",
-            "pause_music": "Đã tạm dừng nhạc.",
-            "resume_music": "Phát tiếp nhạc.",
-        }
-        payload = {
-            "name": tool_name,
-            "arguments": {"response_success": responses[tool_name]},
-        }
         func_handler = getattr(self.conn, "func_handler", None)
         if func_handler is None:
             return False
@@ -1278,14 +1397,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await func_handler.handle_llm_function_call(self.conn, payload)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live music_control_intent tool={} text_preview={!r}",
-                tool_name,
+                payload.get("name"),
                 (transcript_text or "")[:40],
+            )
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "music_state_changed state={} trigger=vietnamese_command",
+                self._music_state_for_tool(payload.get("name")),
             )
             return True
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live music_control_intent failed tool={} error={}",
-                tool_name,
+                payload.get("name"),
                 self._safe_error_message(exc),
             )
             return False
@@ -1296,34 +1419,71 @@ class GoogleLiveProvider(VoiceSessionProvider):
         text = self._normalize_intent_text(transcript_text)
         if not text:
             return None
-        mentions_music = "nhac" in text or "bai hat" in text or "music" in text
-        if not mentions_music:
-            return None
         resume_markers = (
-            "tiep tuc",
             "phat tiep",
             "nghe tiep",
-            "mo lai",
-            "bat lai",
-            "resume",
-            "continue",
+            "tiep tuc phat nhac",
         )
-        pause_markers = ("tam dung", "pause", "ngat nhac", "dung tam")
+        pause_markers = ("tam dung nhac", "pause nhac", "dung tam nhac")
         stop_markers = (
-            "tat",
             "dung nhac",
-            "ngung",
+            "tat nhac",
+            "ngung nhac",
             "thoi nhac",
-            "stop",
-            "ket thuc",
+            "stop nhac",
+            "ket thuc nhac",
         )
         if any(marker in text for marker in resume_markers):
-            return "resume_music"
+            return {
+                "name": "resume_music",
+                "arguments": {"response_success": "Phát tiếp nhạc."},
+            }
         if any(marker in text for marker in pause_markers):
-            return "pause_music"
+            return {
+                "name": "pause_music",
+                "arguments": {"response_success": "Đã tạm dừng nhạc."},
+            }
         if any(marker in text for marker in stop_markers):
-            return "stop_music"
+            return {
+                "name": "stop_music",
+                "arguments": {"response_success": "Đã tắt nhạc."},
+            }
+        title = self._extract_strict_music_title(transcript_text)
+        if title:
+            return {
+                "name": "play_music",
+                "arguments": {
+                    "song_name": title,
+                    "response_success": "Đang phát {title}.",
+                },
+            }
         return None
+
+    def _extract_strict_music_title(self, text):
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        patterns = (
+            r"^\s*phát\s+bài\s+(.+)$",
+            r"^\s*phát\s+nhạc\s+bài\s+(.+)$",
+            r"^\s*mở\s+bài\s+(.+)$",
+            r"^\s*nghe\s+bài\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, raw, flags=re.IGNORECASE)
+            if not match:
+                continue
+            title = match.group(1).strip(" .!?\t\n\r")
+            return title if title else None
+        return None
+
+    def _music_state_for_tool(self, tool_name):
+        return {
+            "stop_music": "stopped",
+            "pause_music": "paused",
+            "resume_music": "playing",
+            "play_music": "playing",
+        }.get(tool_name, "unknown")
 
     def _normalize_intent_text(self, text):
         normalized = unicodedata.normalize("NFD", str(text or "").lower())
@@ -1345,6 +1505,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     def _auto_pause_music_for_interaction(self):
         """Pause any active music playback so the user-AI exchange is audible."""
+        config = self._get_live_config()
+        if not bool(config.get("music_auto_pause_on_user_speech", True)):
+            return
         session = getattr(self.conn, "_music_session", None)
         if session is None:
             return
@@ -1358,6 +1521,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "music_auto_paused trigger=user_interrupt"
+                )
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "music_state_changed state=paused trigger=user_interrupt"
                 )
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
@@ -1377,19 +1543,34 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return True
         return True
 
+    def _has_audible_music_session(self):
+        if not self._has_music_session():
+            return False
+        session = getattr(self.conn, "_music_session", None)
+        if hasattr(session, "is_paused"):
+            try:
+                return not session.is_paused()
+            except Exception:
+                return True
+        return True
+
     def _should_suppress_robot_output_echo(self, pcm_audio=None):
         config = self._get_live_config()
         if not bool(config.get("suppress_robot_output_echo", True)):
             return False
-        if time.monotonic() < self._user_audio_allowed_until:
-            return False
+        now = time.monotonic()
         reason = None
-        if getattr(self.conn, "client_is_speaking", False) or self._has_active_output():
+        if now < getattr(self.conn, "google_live_echo_suppress_until", 0.0):
+            reason = "echo_tail"
+        elif self._has_active_output():
             reason = "robot_speaking"
-        elif self._has_music_session():
+        elif self._has_audible_music_session():
             reason = "music_playing"
         if reason is None:
             return False
+        # A wake/listen window only authorizes a clean user turn after output has
+        # been stopped. It must not let the robot's own speaker/music/tail audio
+        # back into Gemini while output is active.
         rms = "n/a"
         if pcm_audio and self._bridge is not None and hasattr(self._bridge, "input_rms"):
             try:
@@ -1408,7 +1589,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # Without throttling, during music playback this fires every 60ms
         # (16 lines/sec), causing logger IO contention that delays audio
         # chunk forwarding and produces audible jitter on the device.
-        now = time.monotonic()
         last_at = self._last_echo_suppressed_log_at.get(reason, 0.0)
         if now - last_at >= 1.0:
             self._last_echo_suppressed_log_at[reason] = now
@@ -1420,6 +1600,48 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 rms,
             )
         return True
+
+    def _current_audio_suppression_reason(self):
+        if time.monotonic() < getattr(self.conn, "google_live_echo_suppress_until", 0.0):
+            return "echo_tail"
+        if self._has_active_output():
+            return "robot_speaking"
+        if self._has_audible_music_session():
+            return "music_playing"
+        return "unknown"
+
+    def _current_interaction_state_for_audio(self):
+        if self._reconnecting:
+            return InteractionState.RECONNECTING
+        if time.monotonic() < getattr(self.conn, "google_live_echo_suppress_until", 0.0):
+            return InteractionState.MUTED
+        if self._has_active_output():
+            return InteractionState.MODEL_SPEAKING
+        if self._has_audible_music_session():
+            return InteractionState.MUSIC_PLAYING
+        return InteractionState.USER_STREAMING
+
+    def _log_audio_decision(self, decision, reason, pcm_audio=None):
+        identity = self._interaction.next_audio_identity(
+            self._current_interaction_state_for_audio()
+        )
+        rms = "n/a"
+        if pcm_audio and self._bridge is not None and hasattr(self._bridge, "input_rms"):
+            try:
+                rms = self._bridge.input_rms(pcm_audio)
+            except Exception:
+                rms = "n/a"
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "audio_decision decision={} reason={} state={} turn_id={} response_id={} audio_seq={} bytes={} rms={}",
+            decision,
+            reason,
+            identity["state"],
+            identity["turn_id"],
+            identity["response_id"],
+            identity["audio_seq"],
+            len(pcm_audio or b""),
+            rms,
+        )
 
     def _should_bypass_echo_gate_for_loud_user(self, config, rms):
         if not isinstance(rms, (int, float)):
@@ -1496,7 +1718,38 @@ class GoogleLiveProvider(VoiceSessionProvider):
             args = call.get("args") if isinstance(call, Mapping) else {}
             if call_id is not None:
                 self._pending_tool_calls.add(call_id)
-            response_payload = await self._execute_tool_call(name, args)
+                self._cancelled_tool_call_ids.discard(call_id)
+            started_at = time.monotonic()
+            response_payload = await self._execute_tool_call_with_timeout(
+                name,
+                args,
+                call_id=call_id,
+            )
+            latency_ms = (time.monotonic() - started_at) * 1000
+            if call_id is not None and call_id in self._cancelled_tool_call_ids:
+                self._pending_tool_calls.discard(call_id)
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live stale_tool_result_dropped id={} name={} latency_ms={:.1f}",
+                    call_id,
+                    name,
+                    latency_ms,
+                )
+                continue
+            ok = not (
+                isinstance(response_payload, Mapping)
+                and response_payload.get("ok") is False
+            )
+            error_code = ""
+            if isinstance(response_payload, Mapping):
+                error_code = str(response_payload.get("errorCode") or "")
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live tool_call_completed name={} id={} latency_ms={:.1f} ok={} error_code={}",
+                name,
+                call_id,
+                latency_ms,
+                ok,
+                error_code,
+            )
             responses.append(
                 {
                     "id": call_id,
@@ -1526,17 +1779,55 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         for call_id in ids:
             self._pending_tool_calls.discard(call_id)
+            self._cancelled_tool_call_ids.add(call_id)
         self.conn.logger.bind(tag="GoogleLive").info(
             "Google Live tool_call_cancellation ids={}",
             ",".join(str(i) for i in ids),
         )
 
-    async def _execute_tool_call(self, name, args):
+    async def _execute_tool_call_with_timeout(self, name, args, call_id=None):
+        try:
+            timeout = self._get_tool_timeout_sec()
+            if timeout is None:
+                return await self._execute_tool_call(name, args, call_id=call_id)
+            return await asyncio.wait_for(
+                self._execute_tool_call(name, args, call_id=call_id),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live tool timeout name={} id={} timeout_ms={:.0f}",
+                name,
+                call_id,
+                (self._get_tool_timeout_sec() or 0) * 1000,
+            )
+            return self._tool_error(
+                "TOOL_TIMEOUT",
+                "Tool execution timed out",
+            )
+
+    async def _execute_tool_call(self, name, args, call_id=None):
         if not name:
-            return {"error": "Missing function name"}
+            return self._tool_error("MISSING_FUNCTION_NAME", "Missing function name")
+        if args is None:
+            args = {}
+        if not isinstance(args, Mapping):
+            return self._tool_error(
+                "INVALID_TOOL_ARGS",
+                "Tool arguments must be an object",
+            )
+        args = dict(args)
+        if self._requires_tool_confirmation(name, args):
+            return self._tool_error(
+                "CONFIRMATION_REQUIRED",
+                "Tool requires explicit user confirmation before execution",
+            )
         func_handler = getattr(self.conn, "func_handler", None)
         if func_handler is None:
-            return {"error": "Tool handler unavailable"}
+            return self._tool_error(
+                "TOOL_HANDLER_UNAVAILABLE",
+                "Tool handler unavailable",
+            )
         try:
             try:
                 self.conn.logger.bind(tag="GoogleLive").info(
@@ -1553,7 +1844,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
             result = await func_handler.handle_llm_function_call(
                 self.conn,
-                {"name": name, "arguments": args or {}},
+                {"name": name, "arguments": args},
             )
             try:
                 action_name = getattr(getattr(result, "action", None), "name", "?")
@@ -1571,8 +1862,42 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 name,
                 self._safe_error_message(exc),
             )
-            return {"error": str(exc)}
+            return self._tool_error("TOOL_EXCEPTION", self._safe_error_message(exc))
         return self._format_tool_response_payload(result)
+
+    def _get_tool_timeout_sec(self):
+        config = self._get_live_config()
+        try:
+            timeout = float(config.get("tool_timeout_sec", 10.0))
+        except (TypeError, ValueError):
+            timeout = 10.0
+        if timeout <= 0:
+            return None
+        return timeout
+
+    def _requires_tool_confirmation(self, name, args):
+        if args.get("confirmed") is True:
+            return False
+        config = self._get_live_config()
+        explicit_names = config.get("dangerous_tool_names") or []
+        try:
+            explicit = {str(item) for item in explicit_names if item}
+        except TypeError:
+            explicit = set()
+        if name in explicit:
+            return True
+        danger_pattern = config.get(
+            "dangerous_tool_name_pattern",
+            r"(?i)(delete|remove|shutdown|reboot|factory|reset|transfer|purchase|pay|send_money)",
+        )
+        try:
+            return re.search(str(danger_pattern), str(name or "")) is not None
+        except re.error:
+            return False
+
+    @staticmethod
+    def _tool_error(error_code, message):
+        return {"ok": False, "errorCode": error_code, "message": message}
 
     def _format_tool_response_payload(self, action_response):
         if action_response is None:
@@ -1588,10 +1913,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             text = str(action_response.result)
         action_name = action.name.lower() if action is not None and hasattr(action, "name") else None
         if action is not None and action == Action.ERROR:
-            return {"error": text or "tool error"}
+            return self._tool_error("TOOL_ERROR", text or "tool error")
         if action is not None and action == Action.NOTFOUND:
-            return {"error": text or "tool not found"}
-        payload = {"result": text}
+            return self._tool_error("TOOL_NOT_FOUND", text or "tool not found")
+        payload = {"ok": True, "result": text}
         if action_name:
             payload["action"] = action_name
         return payload
@@ -1600,21 +1925,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
         {"audio_input", "transcript_barge_in", "loud_input"}
     )
 
-    # Reasons that are ALWAYS allowed during music playback (explicit user
-    # actions or music control intents). Anything not in this set will be
-    # rejected when a music session is active, preserving the music flow.
+    # Reasons allowed during music playback. Ambient/raw audio remains blocked,
+    # while explicit user gates and tested loud-speech bypass can pause music
+    # and open a clean user turn.
     _MUSIC_ALLOWED_INTERRUPT_REASONS = frozenset(
-        {"music_control_intent", "text_input", "explicit_interrupt"}
+        {
+            "music_control_intent",
+            "text_input",
+            "explicit_interrupt",
+            "listen_start",
+            "wake_word",
+            "transcript_barge_in",
+            "loud_input",
+        }
     )
 
     async def _begin_user_interrupt(self, reason):
-        # Music-protection gate: if a music session is active, drop any
-        # interrupt reason that is not an explicit user action or music
-        # control intent. User wanted: "Để khỏi vỡ luồng hãy cho khi nhạc
-        # không cho ngắt ngang" — keep music playing through ambient voice,
-        # RMS spikes, and live-VAD transcript barge-in. Only "dừng nhạc" /
-        # "pause music" voice commands (which arrive as music_control_intent
-        # after Live API NLU) can still take over.
+        # Music-protection gate: keep ambient/raw audio from interrupting music,
+        # but allow wake/listen, transcript, text, explicit interrupt, music
+        # commands, and explicitly enabled loud-speech bypass.
         if (
             self._has_music_session()
             and reason not in self._MUSIC_ALLOWED_INTERRUPT_REASONS
@@ -1643,10 +1972,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
         previous_response_id = self._response_generation
         self._response_generation += 1
         self._cancelled_response_ids.add(previous_response_id)
+        self._interaction.begin_interrupt(
+            reason=reason,
+            turn_id=self._response_generation,
+            response_id=self._response_generation,
+        )
         if len(self._cancelled_response_ids) > 20:
             self._cancelled_response_ids = set(
                 sorted(self._cancelled_response_ids)[-10:]
             )
+
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "interrupt_started reason={} state={} turn_id={} response_id={}",
+            reason,
+            self._interaction.state.value,
+            self._interaction.turn_id,
+            self._interaction.response_id,
+        )
 
         self.conn.client_abort = True
         self.conn.google_live_audio_out_started_at = None
@@ -1671,6 +2013,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and hasattr(self._client, "end_audio_stream")
         ):
             try:
+                if self._bridge is not None and hasattr(self._bridge, "flush_pending_input_audio"):
+                    await self._bridge.flush_pending_input_audio()
                 await self._client.end_audio_stream()
             except RuntimeError as exc:
                 self.conn.logger.bind(tag="GoogleLive").info(

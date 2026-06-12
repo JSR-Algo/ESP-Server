@@ -47,6 +47,12 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         conn.logger.bind(tag=TAG).debug(f"Client audio format: {format}")
         conn.audio_format = format
         conn.welcome_msg["audio_params"] = audio_params
+        sample_rate = audio_params.get("sample_rate")
+        if sample_rate:
+            conn.sample_rate = int(sample_rate)
+            conn.logger.bind(tag=TAG).info(
+                f"Set output audio sample rate from client hello to: {conn.sample_rate}"
+            )
     features = msg_json.get("features")
     if features:
         conn.logger.bind(tag=TAG).debug(f"Client features: {features}")
@@ -82,42 +88,49 @@ async def checkWakeupWords(conn: "ConnectionHandler", text):
         return False
 
     conn.just_woken_up = True
-    await send_tts_message(conn, "start")
+    tts_stopped = False
 
-    # Get current voice
-    voice = getattr(conn.tts, "voice", "default")
-    if not voice:
-        voice = "default"
+    try:
+        # Get current voice
+        voice = getattr(conn.tts, "voice", "default")
+        if not voice:
+            voice = "default"
 
-    # Get wake-word reply config
-    response = wakeup_words_config.get_wakeup_response(voice)
-    if not response or not response.get("file_path"):
-        response = {
-            "voice": "default",
-            "file_path": "config/assets/wakeup_words_short.wav",
-            "time": 0,
-            "text": "I'm here!",
-        }
+        # Get wake-word reply config
+        response = wakeup_words_config.get_wakeup_response(voice)
+        if not response or not response.get("file_path"):
+            response = {
+                "voice": "default",
+                "file_path": "config/assets/wakeup_words_short.wav",
+                "time": 0,
+                "text": "I'm here!",
+            }
 
-    # Get audio data
-    opus_packets = await audio_to_data(response.get("file_path"), use_cache=False)
-    # Play wake word reply
-    conn.client_abort = False
+        # Get audio data
+        opus_packets = await audio_to_data(response.get("file_path"), use_cache=False)
+        # Play wake word reply
+        conn.client_abort = False
 
-    # Treat wake word reply as new session, generate new sentence_id, ensure flow controller reset
-    conn.sentence_id = str(uuid.uuid4().hex)
+        # Treat wake word reply as new session, generate new sentence_id, ensure flow controller reset
+        conn.sentence_id = str(uuid.uuid4().hex)
 
-    conn.logger.bind(tag=TAG).info(f"Play wake word reply: {response.get('text')}")
-    await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, response.get("text"))
-    await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        conn.logger.bind(tag=TAG).info(f"Play wake word reply: {response.get('text')}")
+        await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, response.get("text"))
+        await sendAudioMessage(conn, SentenceType.LAST, [], None)
+        tts_stopped = True
 
-    # Supplement Dialogue
-    conn.dialogue.put(Message(role="assistant", content=response.get("text")))
+        # Supplement Dialogue
+        conn.dialogue.put(Message(role="assistant", content=response.get("text")))
 
-    # Check whether wake word reply needs update
-    if time.time() - response.get("time", 0) > WAKEUP_CONFIG["refresh_time"]:
-        if not _wakeup_response_lock.locked():
-            asyncio.create_task(wakeupWordsResponse(conn))
+        # Check whether wake word reply needs update
+        if time.time() - response.get("time", 0) > WAKEUP_CONFIG["refresh_time"]:
+            if not _wakeup_response_lock.locked():
+                asyncio.create_task(wakeupWordsResponse(conn))
+    except Exception as e:
+        conn.logger.bind(tag=TAG).warning(f"Wake word reply failed: {e}")
+    finally:
+        if getattr(conn, "client_is_speaking", False) and not tts_stopped:
+            await send_tts_message(conn, "stop", None)
     return True
 
 

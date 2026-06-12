@@ -167,6 +167,27 @@ class InterruptDebounceTest(unittest.IsolatedAsyncioTestCase):
 
 
 class EndAudioStreamGuardTest(unittest.IsolatedAsyncioTestCase):
+    async def test_listen_stop_finalizes_audio_stream_without_idle_delay(self):
+        conn = _Conn()
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        handled = await provider.handle_text_message(
+            '{"type":"listen","state":"stop"}'
+        )
+        await provider.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(client.end_stream_calls, 1)
+        self.assertEqual(provider._interaction.state.value, "WAITING_MODEL")
+        self.assertTrue(
+            any(
+                "input_finalized" in str(args[0]) and "listen_stop" in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
     async def test_end_audio_stream_called_after_interrupt_when_connected(self):
         conn = _Conn()
         client = _Client(connected=True)
@@ -254,6 +275,22 @@ class UnblockTimerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.08)
         self.assertTrue(bridge._block_model_output_until_user_ack)
         await bridge.close()
+
+
+class EchoSuppressionPolicyTest(unittest.IsolatedAsyncioTestCase):
+    def _bridge(self, conn):
+        return GoogleLiveAudioBridge(conn, _Client(), _Logger())
+
+    async def test_echo_tail_suppresses_mic_after_output_stop(self):
+        conn = _Conn()
+        conn.google_live_echo_suppress_until = time.monotonic() + 0.4
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        self.assertTrue(provider._should_suppress_robot_output_echo(b"\x00\x00" * 10))
+
+        await provider.close()
 
     async def test_allow_model_output_cancels_pending_unblock_timer(self):
         conn = _Conn()
@@ -701,6 +738,24 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             any("echo_suppressed" in str(args[0]) for _, args, _ in conn.logger.messages)
         )
 
+    async def test_wake_audio_window_does_not_bypass_robot_speaking_echo_gate(self):
+        conn = _Conn()
+        conn.websocket = None
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 0.1
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._bridge = _PassthroughBridge(rms=180)
+        provider._user_audio_allowed_until = time.monotonic() + 5.0
+
+        handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
+
+        self.assertTrue(handled)
+        self.assertEqual(provider._bridge.forwarded, [])
+        self.assertFalse(conn.client_abort)
+        self.assertTrue(
+            any("suppress_echo" in str(args) for _, args, _ in conn.logger.messages)
+        )
+
     async def test_loud_user_audio_interrupts_while_robot_is_speaking(self):
         conn = _Conn()
         conn.client_is_speaking = True
@@ -808,7 +863,10 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         await provider.handle_audio_bytes(interrupt_frame)
         sent_before_drain = list(client.sent_audio)
         await bridge.handle_event({"type": "audio_end"})
-        await asyncio.sleep(0.04)
+        for _ in range(30):
+            if client.sent_audio:
+                break
+            await asyncio.sleep(0.01)
         await provider.close()
 
         self.assertEqual(sent_before_drain, [])
@@ -887,9 +945,9 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_wake_word_opens_audio_window_during_music(self):
+    async def test_wake_word_interrupts_and_opens_audio_window_during_music(self):
         conn = _Conn()
-        conn._music_session = object()
+        conn._music_session = _MusicSession()
         client = _Client()
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
         provider._client = client
@@ -902,7 +960,43 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.sent_text, [])
+        self.assertEqual(client.interrupt_calls, 1)
+        self.assertTrue(conn._music_session.is_paused())
+        self.assertEqual(provider.current_response_id(), 1)
         self.assertEqual(provider._bridge.forwarded, [b"\x01\x02" * 320])
+
+    async def test_user_transcript_interrupts_music_without_raw_audio_gate(self):
+        conn = _Conn()
+        conn._music_session = _MusicSession()
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _PassthroughBridge()
+
+        await provider._on_user_transcript_barge_in("xin nghe tôi nói")
+
+        self.assertEqual(client.interrupt_calls, 1)
+        self.assertTrue(conn._music_session.is_paused())
+        self.assertEqual(provider.current_response_id(), 1)
+
+    async def test_loud_speech_bypass_can_interrupt_music_only_when_enabled(self):
+        conn = _Conn()
+        conn._music_session = _MusicSession()
+        conn.config["google_live"]["echo_bypass_interrupt_enabled"] = True
+        conn.config["google_live"]["robot_output_echo_bypass_rms_threshold"] = 1000
+        conn.config["google_live"]["robot_output_echo_bypass_min_duration_sec"] = 0
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _PassthroughBridge(rms=2000)
+
+        handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
+
+        self.assertTrue(handled)
+        self.assertEqual(client.interrupt_calls, 1)
+        self.assertTrue(conn._music_session.is_paused())
+        self.assertEqual(provider.current_response_id(), 1)
+        self.assertEqual(provider._bridge.forwarded, [])
 
     async def test_mic_frames_are_suppressed_while_music_session_is_active(self):
         conn = _Conn()
@@ -926,11 +1020,6 @@ class _MusicSession:
     def pause(self):
         self._paused = True
 
-@unittest.skip(
-    "Music feature temporarily disabled per user request — "
-    "_dispatch_music_control_intent is short-circuited. Re-enable when music "
-    "audio mixing / pause synchronisation is stable."
-)
 class MusicControlTranscriptTest(unittest.IsolatedAsyncioTestCase):
     async def test_stop_music_transcript_dispatches_local_tool(self):
         from plugins_func.register import ActionResponse, Action
@@ -1014,17 +1103,16 @@ class InterruptionOutputAgeGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(conn.google_live_audio_out_started_at)
         self.assertTrue(conn.client_abort)
 
-    async def test_dsi_disabled_blocks_interruption_regardless_of_age(self):
+    async def test_explicit_ignore_server_interruptions_cannot_block_live_interruption(self):
         conn = _Conn()
-        conn.config["google_live"]["disable_server_side_interruptions"] = True
+        conn.config["google_live"]["ignore_server_interruptions"] = True
         conn.google_live_audio_out_started_at = time.monotonic() - 5.0  # plenty old
         bridge = self._bridge(conn)
         result = await bridge.handle_event({"type": "interruption"})
         await bridge.close()
         self.assertTrue(result)
-        # output age still set, no abort
-        self.assertIsNotNone(conn.google_live_audio_out_started_at)
-        self.assertFalse(conn.client_abort)
+        self.assertIsNone(conn.google_live_audio_out_started_at)
+        self.assertTrue(conn.client_abort)
 
 
 class BargeInConfigTuneTest(unittest.TestCase):
@@ -1045,7 +1133,7 @@ class BargeInConfigTuneTest(unittest.TestCase):
         google_live = data["google_live"]
         self.assertEqual(google_live["barge_in_rms_threshold"], 4500)
         self.assertEqual(google_live["barge_in_min_input_duration_sec"], 0.30)
-        self.assertFalse(google_live["server_side_vad_enabled"])
+        self.assertTrue(google_live["server_side_vad_enabled"])
         self.assertTrue(google_live["suppress_robot_output_echo"])
         self.assertEqual(google_live["wake_audio_allow_window_sec"], 5.0)
         self.assertEqual(google_live["interrupt_forced_flush_delay_sec"], 0.8)
@@ -1063,7 +1151,7 @@ class BargeInConfigTuneTest(unittest.TestCase):
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["barge_in_min_input_duration_sec"], 0.30)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["barge_in"])
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["interrupt_on_input_while_speaking"])
-        self.assertFalse(GOOGLE_LIVE_DEFAULTS["server_side_vad_enabled"])
+        self.assertTrue(GOOGLE_LIVE_DEFAULTS["server_side_vad_enabled"])
         self.assertTrue(GOOGLE_LIVE_DEFAULTS["suppress_robot_output_echo"])
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["wake_audio_allow_window_sec"], 5.0)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["interrupt_forced_flush_delay_sec"], 0.8)

@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import warnings
 from contextlib import suppress
 from collections.abc import Iterable, Mapping
 
@@ -11,8 +12,30 @@ from collections.abc import Iterable, Mapping
 # inside _import_genai_module() and disconnects before Live session is ready.
 # Failure mode (no SDK installed) is preserved: _import_genai_module() still
 # raises RuntimeError at call time, just from a cached None instead of import.
+def _import_google_genai_with_known_warning_filters():
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Using `@model_validator` with mode='after' on a classmethod is deprecated.*",
+            category=Warning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"You are using a Python version 3\.9 past its end of life.*",
+            category=FutureWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*",
+            category=Warning,
+        )
+        from google import genai as genai_module
+
+    return genai_module
+
+
 try:
-    from google import genai as _GENAI_MODULE_EAGER
+    _GENAI_MODULE_EAGER = _import_google_genai_with_known_warning_filters()
 except ImportError:
     _GENAI_MODULE_EAGER = None
 
@@ -31,15 +54,6 @@ class GoogleLiveClient:
         self._audio_started = False
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
-        # Debug: confirm disable_server_side_interruptions actually lands in client config
-        try:
-            self.logger.bind(tag="GoogleLive").info(
-                "Google Live client config disable_server_side_interruptions={} barge_in={}",
-                self.config.get("disable_server_side_interruptions"),
-                self.config.get("barge_in"),
-            )
-        except Exception:
-            pass
 
     async def connect(self):
         genai_module = self._import_genai_module()
@@ -260,6 +274,12 @@ class GoogleLiveClient:
         realtime_input_config = self._build_realtime_input_config()
         if realtime_input_config:
             connect_config["realtime_input_config"] = realtime_input_config
+        session_resumption = self._build_session_resumption_config()
+        if session_resumption:
+            connect_config["session_resumption"] = session_resumption
+        context_window_compression = self._build_context_window_compression_config()
+        if context_window_compression:
+            connect_config["context_window_compression"] = context_window_compression
         tools = self._build_tools()
         if tools:
             connect_config["tools"] = tools
@@ -423,18 +443,6 @@ class GoogleLiveClient:
         return speech_config or None
 
     def _build_realtime_input_config(self):
-        if bool(self.config.get("disable_server_side_interruptions", True)):
-            return {
-                "activity_handling": "NO_INTERRUPTION",
-                "turn_coverage": self.config.get(
-                    "turn_coverage",
-                    "TURN_INCLUDES_ALL_INPUT",
-                ),
-            }
-        # DSI=false: Live VAD is in charge of interruption. Expose sensitivity
-        # knobs so we can dial down trigger-on-echo without flipping back to
-        # no-interruption mode. These pass straight through to the Live API
-        # `automatic_activity_detection` sub-config when set.
         aad = {}
         for key in (
             "start_of_speech_sensitivity",
@@ -451,15 +459,69 @@ class GoogleLiveClient:
                 aad[key] = int(value)
             except (TypeError, ValueError):
                 continue
-        if not aad:
+        disable_server_side_interruptions = bool(
+            self.config.get("disable_server_side_interruptions", True)
+        )
+        explicit_activity_handling = "activity_handling" in self.config
+        if (
+            not disable_server_side_interruptions
+            and not aad
+            and not explicit_activity_handling
+        ):
             return None
-        return {
-            "automatic_activity_detection": aad,
+        activity_handling = str(
+            self.config.get("activity_handling") or "START_OF_ACTIVITY_INTERRUPTS"
+        )
+        if activity_handling == "NO_INTERRUPTION":
+            activity_handling = "START_OF_ACTIVITY_INTERRUPTS"
+        realtime_input_config = {
+            "activity_handling": activity_handling,
             "turn_coverage": self.config.get(
                 "turn_coverage",
                 "TURN_INCLUDES_ALL_INPUT",
             ),
         }
+        if aad:
+            realtime_input_config["automatic_activity_detection"] = aad
+        return realtime_input_config
+
+    def _build_session_resumption_config(self):
+        if not bool(self.config.get("session_resumption_enabled", True)):
+            return None
+        config = {"transparent": bool(self.config.get("session_resumption_transparent", True))}
+        handle = self.config.get("session_resumption_handle")
+        if handle:
+            config["handle"] = str(handle)
+        return config
+
+    def _build_context_window_compression_config(self):
+        if not bool(self.config.get("context_window_compression_enabled", True)):
+            return None
+        trigger_tokens = self._normalize_positive_int(
+            self.config.get("context_window_trigger_tokens")
+        )
+        target_tokens = self._normalize_positive_int(
+            self.config.get("context_window_target_tokens")
+        )
+        if trigger_tokens is None and target_tokens is None:
+            return {"sliding_window": {}}
+        config = {}
+        if trigger_tokens is not None:
+            config["trigger_tokens"] = trigger_tokens
+        sliding_window = {}
+        if target_tokens is not None:
+            sliding_window["target_tokens"] = target_tokens
+        config["sliding_window"] = sliding_window
+        return config
+
+    def _normalize_positive_int(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     def _get_connect_timeout(self):
         timeout_value = self.config.get("connect_timeout_sec")
@@ -512,7 +574,7 @@ class GoogleLiveClient:
         # Fallback: if eager import failed at module load (package missing),
         # retry here and raise the same RuntimeError as before.
         try:
-            from google import genai as genai_module
+            genai_module = _import_google_genai_with_known_warning_filters()
         except ImportError as exc:
             raise RuntimeError(
                 "google-genai package is required for Google Live mode"
@@ -529,6 +591,16 @@ class GoogleLiveClient:
                     "time_left_ms": self._extract_time_left_ms(go_away),
                 }
             )
+
+        session_resumption_update = self._extract_field(
+            message,
+            "session_resumption_update",
+        )
+        session_resumption_event = self._normalize_session_resumption_update(
+            session_resumption_update
+        )
+        if session_resumption_event is not None:
+            events.append(session_resumption_event)
 
         tool_call = self._extract_field(message, "tool_call")
         tool_call_event = self._normalize_tool_call(tool_call)
@@ -588,6 +660,20 @@ class GoogleLiveClient:
         if not cancelled_ids:
             return None
         return {"type": "tool_call_cancellation", "ids": cancelled_ids}
+
+    def _normalize_session_resumption_update(self, update):
+        if update is None:
+            return None
+        handle = self._extract_field(update, "new_handle") or self._extract_field(
+            update,
+            "handle",
+        )
+        resumable = self._extract_field(update, "resumable")
+        return {
+            "type": "session_resumption_update",
+            "handle": handle,
+            "resumable": bool(resumable),
+        }
 
     def _extract_time_left_ms(self, go_away):
         time_left = self._extract_field(go_away, "time_left")

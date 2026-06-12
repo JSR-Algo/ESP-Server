@@ -1,5 +1,17 @@
 import asyncio
 import logging
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*",
+    category=Warning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"'audioop' is deprecated and slated for removal in Python 3\.13",
+    category=DeprecationWarning,
+)
 
 import websockets
 from config.logger import setup_logging
@@ -30,7 +42,6 @@ def _setup_websockets_logger():
 _setup_websockets_logger()
 
 
-from core.connection import ConnectionHandler
 from config.config_loader import get_config_from_api_async
 from core.auth import AuthManager, AuthenticationError
 from core.utils.modules_initialize import initialize_modules
@@ -102,31 +113,18 @@ class WebSocketServer:
             await asyncio.Future()
 
     async def _handle_connection(self, websocket: websockets.ServerConnection):
+        self._copy_query_identity_headers(websocket)
         headers = dict(websocket.request.headers)
         if headers.get("device-id", None) is None:
-            # Try from URL Get from query params of device-id
-            from urllib.parse import parse_qs, urlparse
-
-            # from WebSocket Get path from request
-            request_path = websocket.request.path
-            if not request_path:
+            if not getattr(websocket.request, "path", ""):
                 self.logger.bind(tag=TAG).error("Cannot get request path")
                 await websocket.close()
                 return
-            parsed_url = urlparse(request_path)
-            query_params = parse_qs(parsed_url.query)
-            if "device-id" not in query_params:
-                await websocket.send("Port normal. To test connection, use test_page.html")
-                await websocket.close()
-                return
-            else:
-                websocket.request.headers["device-id"] = query_params["device-id"][0]
-            if "client-id" in query_params:
-                websocket.request.headers["client-id"] = query_params["client-id"][0]
-            if "authorization" in query_params:
-                websocket.request.headers["authorization"] = query_params[
-                    "authorization"
-                ][0]
+            await websocket.send(
+                "Port normal. To test connection, start digital-human test."
+            )
+            await websocket.close()
+            return
 
         """Handle new connection, create independent ConnectionHandler each time"""
         # Authenticate first, then connect
@@ -137,6 +135,8 @@ class WebSocketServer:
             await websocket.close()
             return
         # CreateConnectionHandlerPass current whenserverInstance
+        from core.connection import ConnectionHandler
+
         handler = ConnectionHandler(
             self.config,
             self._vad,
@@ -165,6 +165,19 @@ class WebSocketServer:
                 self.logger.bind(tag=TAG).error(
                     f"Error when server forcibly closed connection: {close_error}"
                 )
+
+    @staticmethod
+    def _copy_query_identity_headers(websocket):
+        """Accept firmware/browser query auth even when device headers are present."""
+        from urllib.parse import parse_qs, urlparse
+
+        request_path = getattr(websocket.request, "path", "")
+        if not request_path:
+            return
+        query_params = parse_qs(urlparse(request_path).query)
+        for name in ("device-id", "client-id", "authorization"):
+            if websocket.request.headers.get(name, None) is None and name in query_params:
+                websocket.request.headers[name] = query_params[name][0]
 
     async def _http_response(self, websocket, request_headers):
         # Check whether is WebSocket Upgrade Request

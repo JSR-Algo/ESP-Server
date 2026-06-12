@@ -8,11 +8,6 @@ from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textHandler.serverMessageHandler import ServerTextMessageHandler
 from core.handle.textHandler.pingMessageHandler import PingMessageHandler
-from core.handle.textHandler.lessonMessageHandler import (
-    LessonAckHandler,
-    LessonProgressHandler,
-    LessonErrorHandler,
-)
 
 TAG = __name__
 
@@ -34,10 +29,6 @@ class TextMessageHandlerRegistry:
             McpTextMessageHandler(),
             ServerTextMessageHandler(),
             PingMessageHandler(),
-            # US-006 lesson inbound handlers (additive — voice/control handlers above untouched).
-            LessonAckHandler(),
-            LessonProgressHandler(),
-            LessonErrorHandler(),
         ]
 
         for handler in handlers:

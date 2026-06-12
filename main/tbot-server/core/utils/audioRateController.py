@@ -3,6 +3,19 @@ import asyncio
 from collections import deque
 from config.logger import setup_logging
 
+try:
+    from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
+except Exception:  # pragma: no cover - websockets is a runtime dependency
+    ConnectionClosed = None
+    ConnectionClosedOK = None
+
+_NORMAL_TRANSPORT_CLOSE_EXCEPTIONS = (
+    (ConnectionClosedOK,) if ConnectionClosedOK is not None else ()
+)
+_TRANSPORT_CLOSE_EXCEPTIONS = (
+    (ConnectionClosed,) if ConnectionClosed is not None else ()
+)
+
 TAG = __name__
 logger = setup_logging()
 
@@ -42,6 +55,12 @@ class AudioRateController:
         # RelatedEventProcess
         self.queue_empty_event.set()
         self.queue_has_data_event.clear()
+
+    def _drain_queue(self):
+        self.queue.clear()
+        self.queue_empty_event.set()
+        self.queue_has_data_event.clear()
+        self._last_queue_empty_time = time.monotonic()
 
     def add_audio(self, opus_packet):
         """Add audio packet to queue"""
@@ -105,6 +124,10 @@ class AudioRateController:
                 self.queue.popleft()
                 try:
                     await message_callback()
+                except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS:
+                    raise
+                except _TRANSPORT_CLOSE_EXCEPTIONS:
+                    raise
                 except Exception as e:
                     self.logger.bind(tag=TAG).error(f"Failed to send message: {e}")
                     raise
@@ -141,14 +164,16 @@ class AudioRateController:
                 self.play_position += self.frame_duration
                 try:
                     await send_audio_callback(opus_packet)
+                except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS:
+                    raise
+                except _TRANSPORT_CLOSE_EXCEPTIONS:
+                    raise
                 except Exception as e:
                     self.logger.bind(tag=TAG).error(f"Failed to send audio: {e}")
                     raise
 
         # Clear after queue processedEvent
-        self.queue_empty_event.set()
-        self.queue_has_data_event.clear()
-        self._last_queue_empty_time = time.monotonic()  # Record queue clear time
+        self._drain_queue()
 
     def start_sending(self, send_audio_callback):
         """
@@ -162,6 +187,7 @@ class AudioRateController:
         """
 
         async def _send_loop():
+            current_task = asyncio.current_task()
             try:
                 while True:
                     # Wait queue dataEvent, no polling wait occupyingCPU
@@ -169,9 +195,24 @@ class AudioRateController:
 
                     await self.check_queue(send_audio_callback)
             except asyncio.CancelledError:
+                self._drain_queue()
                 self.logger.bind(tag=TAG).debug("Audio sending loop stopped")
+            except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS as e:
+                self._drain_queue()
+                self.logger.bind(tag=TAG).info(
+                    f"audio_output_transport_closed reason=normal_close detail={e}"
+                )
+            except _TRANSPORT_CLOSE_EXCEPTIONS as e:
+                self._drain_queue()
+                self.logger.bind(tag=TAG).warning(
+                    f"audio_output_transport_closed reason=connection_closed detail={e}"
+                )
             except Exception as e:
+                self._drain_queue()
                 self.logger.bind(tag=TAG).error(f"Audio send loop exception: {e}")
+            finally:
+                if self.pending_send_task is current_task:
+                    self.pending_send_task = None
 
         self.pending_send_task = asyncio.create_task(_send_loop())
         return self.pending_send_task

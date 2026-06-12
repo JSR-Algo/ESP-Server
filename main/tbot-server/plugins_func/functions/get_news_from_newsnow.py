@@ -88,25 +88,7 @@ def get_news_sources_from_config(conn):
 
 
 # Get available news sources from default configName(runtime byget_news_sources_from_configdynamic get)
-example_sources_str = DEFAULT_NEWS_SOURCES.replace(";",",")
-
-def init_news_description(config: dict):
-    """Call once at project startup to update news source examples in tool description based on config"""
-    from types import SimpleNamespace
-    from plugins_func.register import all_function_registry
-
-    # Reuseget_news_sources_from_config, useSimpleNamespaceSimulateconn
-    conn_wrapper = SimpleNamespace(config=config)
-    news_sources = get_news_sources_from_config(conn_wrapper)
-
-    sources_str = news_sources.replace(";",",")
-
-    func_item = all_function_registry.get("get_news_from_newsnow")
-    if func_item:
-        func_item.description["function"]["parameters"]["properties"]["source"][
-            "description"
-        ] = f"Standard Chinese name of news source, e.g. {sources_str}. Optional; if not provided, default news source used"
-        logger.bind(tag=TAG).info(f"News tool description initialized, available news sources: {sources_str}")
+example_sources_str = DEFAULT_NEWS_SOURCES.replace(";", ",")
 
 GET_NEWS_FROM_NEWSNOW_FUNCTION_DESC = {
     "type": "function",

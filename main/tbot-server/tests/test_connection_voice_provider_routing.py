@@ -35,6 +35,9 @@ def _install_connection_import_stubs():
         def get_llm_dialogue(self):
             return list(self.dialogue)
 
+        def update_system_message(self, prompt):
+            self.system_prompt = prompt
+
     class DummyMessage:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -75,6 +78,13 @@ def _install_connection_import_stubs():
 
     class DummyAuthenticationError(Exception):
         pass
+
+    class DummyAuthManager:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def verify_token(self, *args, **kwargs):
+            return True
 
     class DummyDeviceNotFoundException(Exception):
         pass
@@ -149,6 +159,7 @@ def _install_connection_import_stubs():
     modules["plugins_func.loadplugins"].auto_import_modules = lambda *args, **kwargs: None
     modules["plugins_func.register"].Action = DummyAction
     modules["plugins_func.register"].ActionResponse = DummyActionResponse
+    modules["core.auth"].AuthManager = DummyAuthManager
     modules["core.auth"].AuthenticationError = DummyAuthenticationError
     modules["config.config_loader"].get_private_config_from_api = _noop_async
     modules["core.providers.tts.dto.dto"].ContentType = object
@@ -442,6 +453,169 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         await handler._discard_message_with_bind_prompt()
 
         self.assertEqual(handler.last_bind_prompt_time, 0)
+
+    async def test_component_init_continues_when_tts_import_fails(self):
+        handler = self._build_handler()
+        handler.loop = asyncio.get_running_loop()
+        handler.config.update(
+            {
+                "prompt": "system prompt",
+                "voiceprint": {},
+                "Memory": {},
+                "Intent": {"Intent_nointent": {"type": "nointent"}},
+                "selected_module": {"Intent": "Intent_nointent"},
+            }
+        )
+        handler._asr = None
+        handler.asr = None
+        handler.vad = None
+        handler._vad = object()
+        handler.memory = None
+        handler.intent = None
+        open_calls = []
+        original_initialize_tts = connection_module.initialize_tts
+        original_default_tts = connection_module.DefaultTTS
+        original_initialize_asr = connection_module.initialize_asr
+
+        class DummyFallbackTTS:
+            async def open_audio_channels(self, conn):
+                open_calls.append(conn)
+
+        class DummyASR:
+            async def open_audio_channels(self, conn):
+                open_calls.append(conn)
+
+        try:
+            connection_module.initialize_tts = lambda *args, **kwargs: (_ for _ in ()).throw(
+                ImportError("edge_tts missing")
+            )
+            connection_module.DefaultTTS = lambda *args, **kwargs: DummyFallbackTTS()
+            connection_module.initialize_asr = lambda *args, **kwargs: DummyASR()
+
+            handler._initialize_components()
+            await asyncio.sleep(0.05)
+        finally:
+            connection_module.initialize_tts = original_initialize_tts
+            connection_module.DefaultTTS = original_default_tts
+            connection_module.initialize_asr = original_initialize_asr
+
+        self.assertIsNotNone(handler.tts)
+        self.assertIsNotNone(handler.asr)
+        self.assertEqual(handler.prompt, "system prompt")
+        self.assertEqual(len(open_calls), 2)
+
+    async def test_classic_fallback_initializes_missing_llm_after_google_live_skip(self):
+        handler = self._build_handler()
+        handler.loop = asyncio.get_running_loop()
+        handler.read_config_from_api = True
+        handler.config.update(
+            {
+                "read_config_from_api": True,
+                "voice_mode": {"type": "google_live"},
+                "selected_module": {
+                    "LLM": "LLM_Test",
+                    "Memory": "Memory_nomem",
+                    "Intent": "Intent_nointent",
+                },
+                "LLM": {"LLM_Test": {"type": "test"}},
+                "Memory": {"Memory_nomem": {"type": "nomem"}},
+                "Intent": {"Intent_nointent": {"type": "nointent"}},
+            }
+        )
+        handler.llm = None
+        handler.memory = None
+        handler.intent = None
+        init_calls = []
+        original_initialize_modules = connection_module.initialize_modules
+
+        class DummyMemory:
+            def __init__(self):
+                self.init_calls = []
+
+            def init_memory(self, **kwargs):
+                self.init_calls.append(kwargs)
+
+        dummy_memory = DummyMemory()
+
+        async def fake_background_initialize():
+            return None
+
+        def fake_initialize_modules(logger, config, *flags):
+            init_calls.append(flags)
+            return {"llm": "llm", "memory": dummy_memory, "intent": "intent"}
+
+        try:
+            connection_module.initialize_modules = fake_initialize_modules
+            handler._background_initialize = fake_background_initialize
+
+            await handler._start_classic_pipeline_session()
+        finally:
+            connection_module.initialize_modules = original_initialize_modules
+
+        self.assertEqual(init_calls, [(False, False, True, False, True, True)])
+        self.assertEqual(handler.llm, "llm")
+        self.assertIs(handler.memory, dummy_memory)
+        self.assertEqual(handler.intent, "intent")
+        self.assertEqual(len(dummy_memory.init_calls), 1)
+
+    async def test_manager_bind_event_waits_until_private_google_live_config_applied(self):
+        handler = self._build_handler()
+        handler.read_config_from_api = True
+        handler.config.update(
+            {
+                "read_config_from_api": True,
+                "voice_mode": {"type": "classic_pipeline"},
+                "google_live": {"api_key": "${GOOGLE_API_KEY}"},
+                "selected_module": {"VAD": "VAD_Base", "ASR": "ASR_Base"},
+            }
+        )
+        handler.headers = {
+            "device-id": "device-1",
+            "client-id": "client-1",
+        }
+        handler.common_config = dict(handler.config)
+        handler.loop = asyncio.get_running_loop()
+        original_get_private_config = connection_module.get_private_config_from_api
+        original_check_vad_update = connection_module.check_vad_update
+        original_check_asr_update = connection_module.check_asr_update
+        original_merge_configs = connection_module.merge_configs
+        bind_states_during_google_live_merge = []
+
+        private_config = {
+            "voice_mode": {"type": "google_live"},
+            "google_live": {"api_key": "bot-key", "model": "live-model"},
+            "selected_module": {"VAD": "VAD_Base", "ASR": "ASR_Base"},
+        }
+
+        async def fake_get_private_config(*args, **kwargs):
+            return private_config
+
+        def merge_configs_without_early_bind(default_config, custom_config):
+            if custom_config is private_config["google_live"]:
+                bind_states_during_google_live_merge.append(
+                    handler.bind_completed_event.is_set()
+                )
+            return original_merge_configs(default_config, custom_config)
+
+        try:
+            connection_module.get_private_config_from_api = fake_get_private_config
+            connection_module.check_vad_update = lambda *args, **kwargs: False
+            connection_module.check_asr_update = lambda *args, **kwargs: False
+            connection_module.merge_configs = merge_configs_without_early_bind
+
+            await handler._initialize_private_config_async()
+        finally:
+            connection_module.get_private_config_from_api = original_get_private_config
+            connection_module.check_vad_update = original_check_vad_update
+            connection_module.check_asr_update = original_check_asr_update
+            connection_module.merge_configs = original_merge_configs
+
+        self.assertEqual(bind_states_during_google_live_merge, [False])
+        self.assertTrue(handler.bind_completed_event.is_set())
+        self.assertFalse(handler.need_bind)
+        self.assertEqual(handler.config["voice_mode"], {"type": "google_live"})
+        self.assertEqual(handler.config["google_live"]["api_key"], "bot-key")
+        self.assertEqual(handler.config["google_live"]["model"], "live-model")
 
     async def test_private_config_can_swap_classic_bootstrap_to_google_live_provider(self):
         handler = self._build_handler()

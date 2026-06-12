@@ -360,7 +360,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
             any("runtime failure" in message for message in warning_messages)
         )
 
-    async def test_default_audio_during_live_output_is_forwarded_not_dropped(self):
+    async def test_default_audio_during_live_output_is_suppressed_as_echo(self):
         conn = _DummyConn()
         conn.client_is_speaking = True
         conn.google_live_audio_out_started_at = time.monotonic()
@@ -379,7 +379,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(client.audio_packets, [b"pcm-frame"])
+        self.assertEqual(client.audio_packets, [])
         self.assertFalse(conn.client_abort)
 
     async def test_explicit_drop_input_during_output_preserves_old_behavior(self):
@@ -462,7 +462,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(client.audio_packets, [b"pcm-frame"])
 
-    async def test_loud_input_audio_interrupts_live_output_when_barge_in_enabled(self):
+    async def test_barge_in_flag_with_stale_speaking_status_forwards_audio(self):
         conn = _DummyConn()
         conn.client_is_speaking = True
         conn.config["google_live"]["barge_in"] = True
@@ -480,12 +480,12 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await provider.close()
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
+        self.assertEqual(client.interrupt_calls, 0)
         self.assertEqual(client.audio_packets, [b"decoded-pcm"])
         self.assertFalse(conn.client_abort)
-        self.assertFalse(conn.client_is_speaking)
-        self.assertEqual(conn.clear_queue_calls, 1)
-        self.assertEqual(conn.clear_speak_calls, 1)
+        self.assertTrue(conn.client_is_speaking)
+        self.assertEqual(conn.clear_queue_calls, 0)
+        self.assertEqual(conn.clear_speak_calls, 0)
 
     async def test_single_echo_frame_does_not_barge_in_when_duration_required(self):
         conn = _DummyConn()
@@ -507,11 +507,11 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(client.audio_packets, [b"echo-pcm"])
+        self.assertEqual(client.audio_packets, [])
         self.assertFalse(conn.client_abort)
         self.assertTrue(conn.client_is_speaking)
 
-    async def test_sustained_loud_input_barges_in_when_duration_required(self):
+    async def test_sustained_loud_input_does_not_barge_in_without_explicit_bypass(self):
         conn = _DummyConn()
         conn.client_is_speaking = True
         conn.google_live_audio_out_started_at = time.monotonic() - 2
@@ -532,10 +532,10 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await provider.close()
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
-        self.assertEqual(client.audio_packets, [b"user-pcm", b"user-pcm", b"user-pcm"])
+        self.assertEqual(client.interrupt_calls, 0)
+        self.assertEqual(client.audio_packets, [])
         self.assertFalse(conn.client_abort)
-        self.assertFalse(conn.client_is_speaking)
+        self.assertTrue(conn.client_is_speaking)
 
     async def test_new_audio_interrupts_active_live_response_and_forwards_latest_input(self):
         conn = _DummyConn()
@@ -556,11 +556,11 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await provider.close()
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
-        self.assertEqual(client.audio_packets, [b"new-user-pcm"])
-        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertEqual(client.interrupt_calls, 0)
+        self.assertEqual(client.audio_packets, [])
+        self.assertEqual(conn.clear_queue_calls, 0)
         self.assertFalse(conn.client_abort)
-        self.assertFalse(conn.client_is_speaking)
+        self.assertTrue(conn.client_is_speaking)
 
     async def test_interrupt_on_input_ignores_loud_echo_at_output_start(self):
         conn = _DummyConn()
@@ -582,7 +582,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(client.audio_packets, [b"echo-pcm"])
+        self.assertEqual(client.audio_packets, [])
 
     async def test_repeated_interrupts_advance_response_generation_without_fatal_log(self):
         conn = _DummyConn()
@@ -692,7 +692,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(client.audio_packets, [b"decoded-pcm"])
+        self.assertEqual(client.audio_packets, [])
 
     async def test_audio_during_reconnect_replays_buffered_frames_in_order(self):
         conn = _DummyConn()
@@ -758,7 +758,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.events, [{"type": "audio", "audio": b"live-audio-chunk"}])
 
-    async def test_send_failure_after_start_falls_back_to_classic_provider(self):
+    async def test_send_failure_after_start_reconnects_before_fallback(self):
         conn = _DummyConn()
         client = _SendFailingClient()
         provider = GoogleLiveProvider(conn, client_factory=lambda config, logger: client)
@@ -766,12 +766,13 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
         provider._bridge = _PassThroughBridge(client)
         handled = await provider.handle_audio_bytes(b"pcm-frame")
+        await provider.close()
 
         self.assertFalse(handled)
-        self.assertEqual(conn.classic_start_calls, 1)
-        self.assertEqual(conn.voice_provider.__class__.__name__, "ClassicPipelineProvider")
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIs(conn.voice_provider, provider)
 
-    async def test_receive_failure_after_start_falls_back_to_classic_provider(self):
+    async def test_receive_failure_after_start_reconnects_before_fallback(self):
         conn = _DummyConn()
         provider = GoogleLiveProvider(
             conn,
@@ -781,9 +782,10 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
+        await provider.close()
 
-        self.assertEqual(conn.classic_start_calls, 1)
-        self.assertEqual(conn.voice_provider.__class__.__name__, "ClassicPipelineProvider")
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIs(conn.voice_provider, provider)
 
     async def test_receive_failure_reconnects_before_fallback_when_budget_available(self):
         conn = _DummyConn()
@@ -815,6 +817,46 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
             bridge.events,
             [{"type": "audio", "audio": b"reconnected-audio"}],
         )
+
+    async def test_goaway_receive_loop_reconnects_with_session_resumption_handle(self):
+        conn = _DummyConn()
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+        }
+        expiring_client = _PersistentReceiveClient(
+            events=[
+                {
+                    "type": "session_resumption_update",
+                    "handle": "resume-handle-1",
+                    "resumable": True,
+                },
+                {"type": "session_expiring", "time_left_ms": 5000},
+            ]
+        )
+        healthy_client = _PersistentReceiveClient()
+        configs = []
+
+        def client_factory(config, logger):
+            configs.append(dict(config))
+            return [expiring_client, healthy_client][len(configs) - 1]
+
+        provider = GoogleLiveProvider(conn, client_factory=client_factory)
+
+        await provider.start_session()
+        expiring_client.release_event.set()
+        deadline = time.monotonic() + 1.0
+        while len(configs) < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        await provider.close()
+
+        self.assertEqual(len(configs), 2)
+        self.assertEqual(conn.google_live_session_resumption_handle, "resume-handle-1")
+        self.assertEqual(configs[1]["session_resumption_handle"], "resume-handle-1")
+        self.assertTrue(configs[1]["session_resumption_enabled"])
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIs(conn.voice_provider, provider)
 
     async def test_receive_loop_end_reconnects_before_silence(self):
         conn = _DummyConn()
@@ -1027,21 +1069,23 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_logs_mask_google_api_keys(self):
         conn = _DummyConn()
         provider = GoogleLiveProvider(conn)
+        fake_key = "AIza" + "SyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao"
 
         safe_message = provider._safe_error_message(
-            RuntimeError("bad key AIzaSyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao")
+            RuntimeError(f"bad key {fake_key}")
         )
 
-        self.assertNotIn("AIzaSyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao", safe_message)
+        self.assertNotIn(fake_key, safe_message)
         self.assertIn("AIza***", safe_message)
 
     async def test_fallback_trigger_log_masks_google_api_keys(self):
         conn = _DummyConn()
         conn.config["voice_mode"]["fallback_to_classic_on_error"] = True
         provider = GoogleLiveProvider(conn)
+        fake_key = "AIza" + "SyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao"
 
         await provider._activate_classic_fallback(
-            RuntimeError("bad key AIzaSyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao")
+            RuntimeError(f"bad key {fake_key}")
         )
 
         warning_args = [
@@ -1052,7 +1096,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(warning_args)
         self.assertFalse(
             any(
-                "AIzaSyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao" in str(args)
+                fake_key in str(args)
                 for args in warning_args
             )
         )

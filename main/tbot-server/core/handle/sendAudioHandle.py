@@ -22,11 +22,15 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     if sentence_id is not None and sentence_id != conn.sentence_id:
         return
 
+    has_audio = audios is not None and len(audios) > 0
+
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"Send first voice segment: {text}")
         conn.tts.tts_audio_first_sentence = False
 
     if sentenceType == SentenceType.FIRST:
+        if has_audio and not getattr(conn, "client_is_speaking", False):
+            await send_tts_message(conn, "start")
         # Subsequent of same sentenceMessageAdd to flow control queue, send immediately otherwise
         if (
             hasattr(conn, "audio_rate_controller")
@@ -286,8 +290,10 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         # Wait until all audio packets sent
         await _wait_for_audio_completion(conn)
 
-        # Check if current round
-        if current_sentence_id != conn.sentence_id:
+        # Check if current round. If the sentence changed but no new audio flow
+        # has started, still send stop so the device does not stay in Speaking.
+        flow_sentence_id = getattr(conn, "audio_flow_control", {}).get("sentence_id")
+        if current_sentence_id != conn.sentence_id and flow_sentence_id == conn.sentence_id:
             return
 
         # Stop audio sending loop (only call when flow controller initialized)
@@ -297,13 +303,14 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
     # SendMessageto Client
     await conn.websocket.send(json.dumps(message))
+    if state == "start":
+        conn.client_is_speaking = True
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):
     """Send STT status message"""
     end_prompt_str = conn.config.get("end_prompt", {}).get("prompt")
     if end_prompt_str and end_prompt_str == text:
-        await send_tts_message(conn, "start")
         return
 
     # ParseJSONFormat, extract actual user speechContent
@@ -325,9 +332,6 @@ async def send_stt_message(conn: "ConnectionHandler", text):
     await conn.websocket.send(
         json.dumps({"type": "stt", "text": stt_text, "session_id": conn.session_id})
     )
-    await send_tts_message(conn, "start")
-    # SendstartMessageAfter ClientStatuswill be speakingStatus,sync serverStatus
-    conn.client_is_speaking = True
 
 
 async def send_display_message(conn: "ConnectionHandler", text):

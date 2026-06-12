@@ -41,6 +41,38 @@ class AnalyzeGoogleLiveLogTest(unittest.TestCase):
         self.assertEqual(report["echo_bypass_rms"], {"count": 1, "min": 2600, "max": 2600, "mean": 2600, "median": 2600, "p95": 2600, "p99": 2600})
         self.assertEqual(report["interrupt_reason_distribution"], {"loud_input": 1})
 
+    def test_production_audio_gateway_markers_are_counted(self):
+        log = "\n".join(
+            [
+                "2026-05-28 10:00:00 Google Live receive loop started",
+                "2026-05-28 10:00:01 audio_decision decision=suppress_echo reason=robot_speaking state=MODEL_SPEAKING turn_id=2 response_id=3 audio_seq=9",
+                "2026-05-28 10:00:01 interrupt_started reason=wake state=INTERRUPTING turn_id=3 response_id=4",
+                "2026-05-28 10:00:01 output_queue_cleared reason=interrupt response_id=3",
+                "2026-05-28 10:00:02 reconnect_started reason=session_expiring attempt=1 state=RECONNECTING",
+                "2026-05-28 10:00:03 reconnect_succeeded attempt=1 live_connection_id=live-2",
+                "2026-05-28 10:00:04 reconnect_failed attempt=2 error_class=network",
+                "2026-05-28 10:00:05 fallback_triggered reason=auth",
+                "2026-05-28 10:00:06 music_state_changed state=paused trigger=user_interrupt",
+                "2026-05-28 10:00:06 audio_output_transport_closed reason=normal_close detail=received 1000 OK",
+                "2026-05-28 10:00:07 Google Live receive loop stopped",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "server.log"
+            path.write_text(log, encoding="utf-8")
+
+            report = analyze(path)
+
+        totals = report["totals"]
+        self.assertEqual(totals["audio_decision"], 1)
+        self.assertEqual(totals["interrupt_started"], 1)
+        self.assertEqual(totals["output_queue_cleared"], 1)
+        self.assertEqual(totals["reconnect_started"], 1)
+        self.assertEqual(totals["reconnect_succeeded"], 1)
+        self.assertEqual(totals["reconnect_failed"], 1)
+        self.assertEqual(totals["music_state_changed"], 1)
+        self.assertEqual(totals["audio_output_transport_closed"], 1)
+
 
 class SummarizePainsTest(unittest.TestCase):
     def _make_log(self, lines: list[str]) -> Path:

@@ -30,7 +30,7 @@ class GoogleLiveSmokeTest(unittest.IsolatedAsyncioTestCase):
                 "api_key": "${GOOGLE_API_KEY}",
                 "model": os.environ.get(
                     "GOOGLE_LIVE_MODEL",
-                    "gemini-2.5-flash-native-audio-preview-12-2025",
+                    "gemini-3.1-flash-live-preview",
                 ),
                 "enable_audio_input": True,
                 "enable_audio_output": True,

@@ -20,12 +20,20 @@ GOOGLE_LIVE_DEFAULTS = {
     "input_sample_rate": 16000,
     "output_audio_format": "pcm16",
     "output_sample_rate": 24000,
-    "input_flush_delay_sec": 0.8,
+    "input_live_chunk_ms": 20,
+    "interrupt_policy": "wake_or_transcript",
+    "raw_audio_barge_in_enabled": False,
+    "input_flush_delay_sec": 1.0,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
     "interrupt_speech_tail_ms": 240,
     "interrupt_max_capture_ms": 1200,
-    "disable_server_side_interruptions": True,
+    "interrupt_replay_buffer_ms": 900,
+    "reconnect_buffer_ms": 2000,
+    "echo_tail_suppression_ms": 400,
+    "music_auto_pause_on_user_speech": True,
+    "disable_server_side_interruptions": False,
+    "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
     "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
     "log_audio_diagnostics": True,
     "interrupt_on_input_while_speaking": False,
@@ -48,10 +56,17 @@ GOOGLE_LIVE_DEFAULTS = {
     # When False, RMS-based loud-input bypass of the echo gate cannot fire a
     # mid-sentence interrupt — for hardware where speaker echo crosses the
     # bypass threshold and would otherwise cut the model off.
-    "echo_bypass_interrupt_enabled": True,
-    "server_side_vad_enabled": False,
+    "echo_bypass_interrupt_enabled": False,
+    "server_side_vad_enabled": True,
     "send_transcript_events": True,
     "send_llm_state_events": False,
+    "session_resumption_enabled": True,
+    "session_resumption_transparent": True,
+    "context_window_compression_enabled": True,
+    "context_window_trigger_tokens": 24000,
+    "context_window_target_tokens": 12000,
+    "tool_timeout_sec": 10.0,
+    "dangerous_tool_names": [],
     "reconnect": {
         "enabled": True,
         "max_retries": 6,
@@ -89,8 +104,46 @@ def normalize_voice_config(config):
         if not isinstance(google_live, Mapping):
             google_live = {}
         config["google_live"] = merge_configs(GOOGLE_LIVE_DEFAULTS, google_live)
+        _apply_google_live_runtime_safety_policy(config["google_live"])
     elif not isinstance(google_live, Mapping):
         config["google_live"] = {}
+    return config
+
+def _apply_google_live_runtime_safety_policy(google_live):
+    """Keep manager/private configs from re-enabling unsafe Live interrupts."""
+    google_live["interrupt_policy"] = "wake_or_transcript"
+    google_live["raw_audio_barge_in_enabled"] = False
+    google_live["disable_server_side_interruptions"] = False
+    google_live["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
+    google_live["barge_in"] = False
+    google_live["interrupt_on_input_while_speaking"] = False
+    google_live["server_side_vad_enabled"] = True
+    google_live["session_resumption_enabled"] = True
+    google_live["context_window_compression_enabled"] = True
+
+def _clean_env(name):
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+def _apply_server_endpoint_env_overrides(config):
+    """Let Docker/.env repair public OTA endpoints without editing volumes."""
+    if not isinstance(config, Mapping):
+        return config
+
+    websocket_url = _clean_env("TBOT_PUBLIC_WEBSOCKET_URL")
+    api_url = _clean_env("TBOT_BACKEND_API_URL")
+    if not websocket_url and not api_url:
+        return config
+
+    server_config = config.get("server")
+    if not isinstance(server_config, Mapping):
+        server_config = {}
+        config["server"] = server_config
+
+    if websocket_url:
+        server_config["websocket"] = websocket_url
+    if api_url:
+        server_config["api_url"] = api_url.rstrip("/")
     return config
 
 
@@ -127,6 +180,7 @@ def load_config():
     else:
         # Merge Config
         config = merge_configs(default_config, custom_config)
+    config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
     # Initialize directory
     ensure_directories(config)
@@ -158,6 +212,7 @@ async def load_config_async():
         config = await get_config_from_api_async(custom_config)
     else:
         config = merge_configs(default_config, custom_config)
+    config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
     ensure_directories(config)
     cache_manager.set(CacheType.CONFIG, "main_config", config)
@@ -187,6 +242,7 @@ async def get_config_from_api_async(config):
             "port": config["server"].get("port", ""),
             "http_port": config["server"].get("http_port", ""),
             "websocket": config["server"].get("websocket", ""),
+            "api_url": config["server"].get("api_url", ""),
             "vision_explain": config["server"].get("vision_explain", ""),
             "auth_key": config["server"].get("auth_key", ""),
         }
@@ -194,6 +250,7 @@ async def get_config_from_api_async(config):
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    config_data = _apply_server_endpoint_env_overrides(config_data)
     return normalize_voice_config(config_data)
 
 

@@ -78,6 +78,16 @@ P_INTERRUPT_INPUT_FINALIZED = re.compile(
     r"frames=(?P<frames>\d+) bytes=(?P<bytes>\d+) peak_rms=(?P<peak_rms>\d+)"
 )
 P_TTS_STOP_SENT = re.compile(r"tts_state_stop_sent|tts_stop_sent")
+P_AUDIO_DECISION = re.compile(r"audio_decision decision=(?P<decision>\S+)")
+P_INTERRUPT_STARTED = re.compile(r"interrupt_started reason=(?P<reason>\S+)")
+P_OUTPUT_QUEUE_CLEARED = re.compile(r"output_queue_cleared reason=(?P<reason>\S+)")
+P_RECONNECT_STARTED = re.compile(r"reconnect_started reason=(?P<reason>\S+)")
+P_RECONNECT_SUCCEEDED = re.compile(r"reconnect_succeeded attempt=(?P<attempt>\d+)")
+P_RECONNECT_FAILED = re.compile(r"reconnect_failed attempt=(?P<attempt>\d+)")
+P_MUSIC_STATE_CHANGED = re.compile(r"music_state_changed state=(?P<state>\S+)")
+P_AUDIO_OUTPUT_TRANSPORT_CLOSED = re.compile(
+    r"audio_output_transport_closed reason=(?P<reason>\S+)"
+)
 
 # New markers — Phase 1.2 / 1.3 (google_live.py + audio_bridge.py)
 P_USER_SPEECH_PENDING = re.compile(
@@ -155,6 +165,14 @@ class SessionState:
     replayed_interrupt_frames: int = 0
     interrupt_input_finalized_count: int = 0
     interrupt_input_finalized_elapsed_ms: list[float] = field(default_factory=list)
+    audio_decision_count: int = 0
+    interrupt_started_count: int = 0
+    output_queue_cleared_count: int = 0
+    reconnect_started_count: int = 0
+    reconnect_succeeded_count: int = 0
+    reconnect_failed_count: int = 0
+    music_state_changed_count: int = 0
+    audio_output_transport_closed_count: int = 0
 
 
 def parse_timestamp(line: str) -> Optional[datetime]:
@@ -455,6 +473,38 @@ def analyze(log_path: Path) -> dict:
                 )
                 continue
 
+            if P_AUDIO_DECISION.search(line):
+                current.audio_decision_count += 1
+                continue
+
+            if P_INTERRUPT_STARTED.search(line):
+                current.interrupt_started_count += 1
+                continue
+
+            if P_OUTPUT_QUEUE_CLEARED.search(line):
+                current.output_queue_cleared_count += 1
+                continue
+
+            if P_RECONNECT_STARTED.search(line):
+                current.reconnect_started_count += 1
+                continue
+
+            if P_RECONNECT_SUCCEEDED.search(line):
+                current.reconnect_succeeded_count += 1
+                continue
+
+            if P_RECONNECT_FAILED.search(line):
+                current.reconnect_failed_count += 1
+                continue
+
+            if P_MUSIC_STATE_CHANGED.search(line):
+                current.music_state_changed_count += 1
+                continue
+
+            if P_AUDIO_OUTPUT_TRANSPORT_CLOSED.search(line):
+                current.audio_output_transport_closed_count += 1
+                continue
+
     return build_report(sessions, total_lines, log_path)
 
 
@@ -539,6 +589,16 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
                 s.interrupt_input_finalized_count for s in sessions
             ),
             "music_control_intents": sum(len(s.music_control_tools) for s in sessions),
+            "audio_decision": sum(s.audio_decision_count for s in sessions),
+            "interrupt_started": sum(s.interrupt_started_count for s in sessions),
+            "output_queue_cleared": sum(s.output_queue_cleared_count for s in sessions),
+            "reconnect_started": sum(s.reconnect_started_count for s in sessions),
+            "reconnect_succeeded": sum(s.reconnect_succeeded_count for s in sessions),
+            "reconnect_failed": sum(s.reconnect_failed_count for s in sessions),
+            "music_state_changed": sum(s.music_state_changed_count for s in sessions),
+            "audio_output_transport_closed": sum(
+                s.audio_output_transport_closed_count for s in sessions
+            ),
         },
         "interrupt_reason_distribution": dict(reason_counts),
         "music_control_tool_distribution": dict(music_tool_counts),
@@ -593,6 +653,13 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
                     summary_stats(s.interrupt_input_finalized_elapsed_ms)
                 ),
                 "music_control_tools": list(s.music_control_tools),
+                "audio_decision": s.audio_decision_count,
+                "interrupt_started": s.interrupt_started_count,
+                "output_queue_cleared": s.output_queue_cleared_count,
+                "reconnect_started": s.reconnect_started_count,
+                "reconnect_succeeded": s.reconnect_succeeded_count,
+                "reconnect_failed": s.reconnect_failed_count,
+                "music_state_changed": s.music_state_changed_count,
             }
             for s in sessions
         ],

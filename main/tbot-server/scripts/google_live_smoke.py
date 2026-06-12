@@ -44,6 +44,15 @@ def _build_env_config(model, voice_name):
         "recv_timeout_sec": 5,
     }
 
+def _has_resolvable_api_key(config):
+    api_key = str((config or {}).get("api_key") or "").strip()
+    if not api_key:
+        return False
+    if api_key.startswith("${") and api_key.endswith("}"):
+        env_name = api_key[2:-1]
+        return bool("".join(str(os.environ.get(env_name, "")).split()))
+    return bool("".join(api_key.split()))
+
 async def _load_manager_google_live_config(device_id, client_id):
     from config.config_loader import load_config_async, get_private_config_from_api
     from config.manage_api_client import ManageApiClient
@@ -79,7 +88,7 @@ def main():
         "--model",
         default=os.environ.get(
             "GOOGLE_LIVE_MODEL",
-            "gemini-2.5-flash-native-audio-preview-12-2025",
+            "gemini-3.1-flash-live-preview",
         ),
     )
     parser.add_argument(
@@ -108,7 +117,7 @@ def main():
     else:
         config = _build_env_config(args.model, args.voice_name)
 
-    if not config.get("api_key"):
+    if not _has_resolvable_api_key(config):
         print("GOOGLE_API_KEY is required", file=sys.stderr)
         return 1
 

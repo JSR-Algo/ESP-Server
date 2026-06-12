@@ -35,9 +35,8 @@ def create_instance(class_name, *args, **kwargs):
     provider_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "providers", "tts"))
     if os.path.exists(os.path.join(provider_dir, f'{class_name}.py')):
         lib_name = f'core.providers.tts.{class_name}'
-        if lib_name not in sys.modules:
-            sys.modules[lib_name] = importlib.import_module(f'{lib_name}')
-        return sys.modules[lib_name].TTSProvider(*args, **kwargs)
+        module = importlib.import_module(lib_name)
+        return module.TTSProvider(*args, **kwargs)
 
     raise ValueError(f"Unsupported TTS type: {class_name}, check whether type in this config is set correctly")
 

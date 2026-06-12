@@ -13,7 +13,7 @@ Optional overrides:
 
 ```bash
 GOOGLE_API_KEY=... \
-GOOGLE_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025 \
+GOOGLE_LIVE_MODEL=gemini-3.1-flash-live-preview \
 GOOGLE_LIVE_VOICE_NAME=Kore \
 ./.venv311/bin/python scripts/google_live_smoke.py
 ```

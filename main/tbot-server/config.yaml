@@ -18,6 +18,14 @@ server:
   # When deploying via Docker, set the WebSocket to a LAN address
   # If using public deployment, set websocket to public address
   websocket: ws://your-ip-or-domain:port/tbot/v1/
+  # Backend API base URL sent to firmware for /device/config and /claim routes.
+  # OWNERSHIP (locked 2026-06-04): NestJS /v1/claim is the SOLE consumer-claim
+  # authority; the Java manager-api device-bind flow is admin/legacy only.
+  # Point this at the Nest backend origin and keep the /v1 suffix — firmware
+  # appends /device/config and /claim/confirm. Default is the current onrender
+  # Nest backend; override per deployment (env / Admin Parameter Management /
+  # data/.config.yaml) when moving to *.skylabs.vn.
+  api_url: https://tbot-backend-8wmh.onrender.com/v1
   # Vision API URL
   # Endpoint for visual analysis sent to device
   # Using the default configuration below automatically generates a vision recognition URL, outputted in the startup logs. You can access this URL via browser to verify.
@@ -103,7 +111,7 @@ voice_mode:
 
 google_live:
   api_key: ${GOOGLE_API_KEY}
-  model: gemini-2.5-flash-native-audio-preview-12-2025
+  model: gemini-3.1-flash-live-preview
   enable_audio_input: true
   enable_audio_output: true
   native_voice: true
@@ -112,10 +120,11 @@ google_live:
   input_sample_rate: 16000
   output_audio_format: pcm16
   output_sample_rate: 24000
-  # Runtime sẽ force disable_server_side_interruptions=true để tránh loa
-  # robot bị mic thu lại làm Google Live tự ngắt nhầm. Ngắt ngang đi qua
-  # wake-word hoặc transcript/tool intent, không qua raw audio VAD.
+  input_live_chunk_ms: 20
+  # Keep Live automatic VAD active. Robot speaker echo is filtered locally by
+  # AEC/echo gates; serverContent.interrupted stops playback immediately.
   disable_server_side_interruptions: false
+  activity_handling: START_OF_ACTIVITY_INTERRUPTS
   turn_coverage: TURN_INCLUDES_ALL_INPUT
   # Giảm độ nhạy VAD để echo loa không kích hoạt ngắt nhầm.
   start_of_speech_sensitivity: START_SENSITIVITY_LOW
@@ -125,11 +134,14 @@ google_live:
   log_audio_diagnostics: true
   connect_timeout_sec: 10
   recv_timeout_sec: 60
-  input_flush_delay_sec: 0.8
+  interrupt_policy: wake_or_transcript
+  raw_audio_barge_in_enabled: false
+  input_flush_delay_sec: 1.0
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
   # risk of clipping the trailing syllable; higher = safer transcript
-  # but slower model turn-around. 0.8s matches input_flush_delay_sec.
+  # but slower model turn-around. 0.8s is the interrupt hard cap;
+  # ordinary mic idle finalization uses input_flush_delay_sec=1.0.
   interrupt_forced_flush_delay_sec: 0.8
   # Speech-aware interrupt-turn finalisation thresholds. The controller
   # waits until BOTH (elapsed >= min_capture) AND (silence_since_last_speech
@@ -142,28 +154,28 @@ google_live:
   interrupt_min_capture_ms: 360
   interrupt_speech_tail_ms: 240
   interrupt_max_capture_ms: 1200
+  interrupt_replay_buffer_ms: 900
   reconnect_buffer_ms: 2000
-  # ENABLED: with firmware CONFIG_USE_DEVICE_AEC=y, device strips most echo
-  # before sending mic to server, so RMS-local barge-in becomes safe.
-  # Without this flag, user cannot interrupt mid-response via voice (only
-  # via wake-word, which is masked by echo during Speaking).
-  barge_in: true
-  interrupt_on_input_while_speaking: true
-  # Transcript barge-in vẫn bật làm fallback khi VAD bỏ lỡ.
+  # Production-safe policy: raw audio/RMS barge-in stays off. User interrupts
+  # enter through wake/listen, confirmed transcript, or deterministic music
+  # commands. Loud-speech bypass requires explicit config + tests.
+  barge_in: false
+  interrupt_on_input_while_speaking: false
+  # Transcript barge-in stays enabled as the safe Live-recognized speech gate.
   barge_in_via_transcript: true
   barge_in_transcript_min_chars: 4
   drop_input_while_speaking: false
   interrupt_min_output_age_sec: 0.25
   interrupt_suppress_audio_sec: 0.25
+  echo_tail_suppression_ms: 400
   suppress_robot_output_echo: true
   wake_audio_allow_window_sec: 5.0
   # Cho phép user nói đủ lớn/ngắt thật sự lọt qua echo gate khi firmware
   # không gửi wake event trong lúc robot đang nói. Echo loa thường thấp hơn.
   robot_output_echo_bypass_rms_threshold: 650
   robot_output_echo_bypass_min_duration_sec: 0.06
-  # ENABLED: with device-AEC the post-AEC echo level is much lower than
-  # raw 700 RMS, so the bypass interrupt path is no longer false-positive.
-  echo_bypass_interrupt_enabled: true
+  echo_bypass_interrupt_enabled: false
+  music_auto_pause_on_user_speech: true
   hard_reconnect_on_interrupt: false
   interrupt_debounce_sec: 0.2
   model_output_unblock_timeout_sec: 1.5
@@ -178,12 +190,16 @@ google_live:
   barge_in_rms_threshold: 4500
   barge_in_min_input_duration_sec: 0.30
   barge_in_min_output_age_sec: 0.25
-  # PR4 P4.5: explicit flag preserving plan §5 decision — RMS-VAD is the
-  # single trigger; server-side Live VAD remains gated by
-  # disable_server_side_interruptions. Flip only after AC2/AC4 fail.
-  server_side_vad_enabled: false
+  server_side_vad_enabled: true
   send_transcript_events: true
   send_llm_state_events: false
+  session_resumption_enabled: true
+  session_resumption_transparent: true
+  context_window_compression_enabled: true
+  context_window_trigger_tokens: 24000
+  context_window_target_tokens: 12000
+  tool_timeout_sec: 10.0
+  dangerous_tool_names: []
   reconnect:
     enabled: true
     max_retries: 6
@@ -224,7 +240,7 @@ plugins:
   # After applying, find your apihost via this link: https://console.qweather.com/setting?lang=zh
   get_weather:
     api_host: "mj7p3y7naa.re.qweatherapi.com"
-    api_key: "a861d0d5e7bf4ee1a83d9a9e4f96d4da"
+    api_key: ${QWEATHER_API_KEY:}
     default_location: "Ho Chi Minh City"
   # Get news plugin configuration. Pass URL for required news type. Default supports social, tech, and financial news.
   # More news list types: https://www.chinanews.com.cn/rss/
@@ -236,6 +252,13 @@ plugins:
   get_news_from_newsnow:
     url: "https://newsnow.busiyi.world/api/s?id="
     news_sources: "BBC;Reuters;TechCrunch"
+  # Web search plugin config.
+  # Supported providers: metaso / tavily.
+  web_search:
+    provider: "metaso"
+    description: "Search the web when the user explicitly needs current online information."
+    max_results: 5
+    api_key: "mk-xxx"
   home_assistant:
     devices:
       - Living room,Toy light,switch.cuco_cn_460494544_cp1_on_p_2_1
@@ -336,6 +359,7 @@ Intent:
     # System loaded by default"handle_exit_intent(Exit recognition)"、"play_music(Music playback)"plugin, do not load repeatedly
     # Below is an example of loading plugins for weather query, role switching, and news query
     functions:
+      - web_search
       - get_weather
       - get_news_from_newsnow
       - play_music
@@ -350,6 +374,7 @@ Intent:
       - change_role
       - change_volume
       - raise_left_arm
+      - web_search
       - get_weather
       # - search_from_ragflow
       # - get_news_from_chinanews
@@ -1007,7 +1032,7 @@ TTS:
     response_format: wav
     reference_id: null
     reference_audio: ["config/assets/wakeup_words.wav",]
-    reference_text: ["Hello! I'm Xiaozhi, a sweet-voiced Taiwanese girl. So glad to meet you! What have you been up to? Don't forget to share some fun stories—I absolutely love gossip!",]
+    reference_text: ["Hello! I'm Tbot, a sweet-voiced Taiwanese girl. So glad to meet you! What have you been up to? Don't forget to share some fun stories—I absolutely love gossip!",]
     normalize: true
     max_new_tokens: 1024
     chunk_length: 200

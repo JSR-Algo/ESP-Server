@@ -162,14 +162,6 @@ class ConnectionHandler:
         self.voice_provider = None
         self.voice_provider_task = None
 
-        # US-006 lesson runtime (additive; dark unless lesson.runtime_enabled).
-        # Holds the per-device lesson session state when a lesson is in flight.
-        self.lesson_runtime = None
-        self.lesson_pull_task = None
-        # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
-        # lazily created on the first lesson pull. None until a lesson runs.
-        self.lesson_voice_alarm = None
-
         # vadRelated Variables
         self.client_audio_buffer = bytearray()
         self.client_have_voice = False
@@ -269,12 +261,6 @@ class ConnectionHandler:
             self.voice_provider_task = asyncio.create_task(
                 self._initialize_voice_session_async()
             )
-
-            # US-006 pull-on-connect (authoritative lesson hand-off, ADR 0013 §A/§B).
-            # Dark unless lesson.runtime_enabled; runs as a side task so it can NEVER
-            # delay or intercept the realtime voice path.
-            if self._lesson_runtime_enabled():
-                self.lesson_pull_task = asyncio.create_task(self._lesson_pull_on_connect())
 
             try:
                 async for message in self.websocket:
@@ -1578,114 +1564,6 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.logger.bind(tag=TAG).debug(f"Clear server speakingStatus")
 
-    # ── US-006 lesson runtime hooks (additive; never on the voice hot path) ──────
-
-    def _lesson_runtime_enabled(self) -> bool:
-        """LESSON_RUNTIME_ENABLED dark-rollout flag (plan §11.1). Default OFF, so the
-        lesson layer adds zero behavior to the existing voice/8-type path."""
-        lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
-        return bool(lesson_cfg.get("runtime_enabled", False))
-
-    def _disable_lesson_runtime(self) -> None:
-        """S13 auto-disable target (plan §11.2 / CP-8): flip the ESP-side
-        ``LESSON_RUNTIME_ENABLED`` flag OFF so no further ``lesson_*`` is sent.
-
-        This is the rollback lever the voice-latency-during-preload alarm pulls when
-        the measured p95 regresses (the lesson layer caused choppy audio). It mutates
-        only the in-process ``config["lesson"]["runtime_enabled"]`` — the voice +
-        8-type paths never depended on the flag and are unaffected (plan §12.1). Any
-        in-flight pull/runtime is left to finish/teardown via the existing close path;
-        the flag-off only prevents NEW lesson work on this and subsequent connects.
-        """
-        if not isinstance(self.config, dict):
-            return
-        lesson_cfg = self.config.get("lesson")
-        if not isinstance(lesson_cfg, dict):
-            lesson_cfg = {}
-            self.config["lesson"] = lesson_cfg
-        lesson_cfg["runtime_enabled"] = False
-        try:
-            self.logger.bind(tag=TAG).error(
-                "LESSON_RUNTIME_ENABLED auto-disabled (voice-latency-during-preload alarm)"
-            )
-        except Exception:
-            pass
-
-    def note_voice_round_trip(self, latency_ms: float) -> None:
-        """Feed one completed voice round-trip to the S13 alarm (plan §11.2 / CP-8).
-
-        THE single voice-side hook for the auto-disable guard. It is exception-safe
-        and a no-op when no lesson alarm exists, so the voice hot path can call it
-        unconditionally without risk: if the lesson layer is dark (or this turn was
-        not concurrent with a preload) the sample is simply not counted toward the
-        rollback p95. When the measured during-preload p95 regresses past the
-        threshold the alarm flips ``LESSON_RUNTIME_ENABLED`` off via
-        :meth:`_disable_lesson_runtime`."""
-        alarm = self.lesson_voice_alarm
-        if alarm is None:
-            return
-        try:
-            alarm.record_round_trip(latency_ms)
-        except Exception:  # pragma: no cover - alarm is observability-only, never fatal
-            pass
-
-    def _realtime_interaction_state(self):
-        """Provider-agnostic read of the realtime interaction state.
-
-        Reads the controller via ``getattr`` (NEVER hard-codes the private attr) so
-        the classic pipeline — which has no controller — simply returns None. Also
-        checks an active Google-Live fallback provider.
-        """
-        provider = self.voice_provider
-        for candidate in (provider, getattr(provider, "_fallback_provider", None)):
-            controller = getattr(candidate, "_interaction", None)
-            if controller is not None:
-                state = getattr(controller, "state", None)
-                if state is not None:
-                    return getattr(state, "value", state)
-        return None
-
-    def is_realtime_busy(self) -> bool:
-        """Realtime guard source (plan §6.2.6): the voice path always wins, so lesson
-        asset downloads PAUSE during any voice turn.
-
-        Exhaustive-by-default: ANY non-IDLE interaction state pauses (incl.
-        WAITING_MODEL / MUSIC_PLAYING / INTERRUPTING / RECONNECTING / FALLBACK /
-        MUTED). Plus two provider-independent fallback signals that also cover the
-        classic pipeline (which has no interaction controller):
-        - ``client_is_speaking`` — the robot is mid-TTS playback (output turn).
-        - ``client_have_voice``  — VAD currently hears the child (input turn).
-
-        NOTE (plan-vs-code, surfaced): plan §6.2.6 lists ``client_listen_mode`` as the
-        third condition, but in live code that field is a PERSISTENT mode
-        ("auto"/"manual", connection.py:135), not an open/closed window — pausing on
-        it would stall downloads for the whole session. The real transient
-        "child speaking now" signal is ``client_have_voice`` (set by VAD,
-        providers/vad/silero.py), used here instead.
-        """
-        if getattr(self, "client_is_speaking", False):
-            return True
-        if getattr(self, "client_have_voice", False):
-            return True
-        state = self._realtime_interaction_state()
-        if state is not None and state != "IDLE":
-            return True
-        return False
-
-    async def _lesson_pull_on_connect(self):
-        """Side task: fetch + drive the device's current lesson assignment.
-
-        Wrapped so a lesson failure can never crash the connection or touch voice.
-        """
-        try:
-            from core.lesson.runtime import maybe_start_lesson_on_connect
-
-            await maybe_start_lesson_on_connect(self)
-        except Exception as exc:
-            self.logger.bind(tag=TAG).warning(
-                f"lesson pull-on-connect failed: {type(exc).__name__}: {exc}"
-            )
-
     async def close(self, ws=None):
         """Resource cleanup method"""
         try:
@@ -1734,19 +1612,6 @@ class ConnectionHandler:
                 self.voice_provider_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self.voice_provider_task
-
-            # US-006 lesson runtime teardown (own dispatch path + asset client).
-            if self.lesson_pull_task and not self.lesson_pull_task.done():
-                self.lesson_pull_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.lesson_pull_task
-            if self.lesson_runtime is not None:
-                try:
-                    await self.lesson_runtime.close()
-                except Exception as lesson_cleanup_error:
-                    self.logger.bind(tag=TAG).error(
-                        f"Error cleaning lesson runtime: {lesson_cleanup_error}"
-                    )
 
             # Clear task queue
             self.clear_queues()

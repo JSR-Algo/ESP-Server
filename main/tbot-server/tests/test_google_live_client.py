@@ -4,6 +4,7 @@ import unittest
 from contextlib import suppress
 from types import SimpleNamespace
 
+from config.config_loader import GOOGLE_LIVE_DEFAULTS
 from core.voice.google_live.client import GoogleLiveClient
 
 
@@ -336,7 +337,7 @@ class GoogleLiveClientTest(unittest.TestCase):
         self.assertNotIn("output_audio_transcription", config)
         self.assertNotIn("speech_config", config)
 
-    def test_build_connect_config_disables_server_side_interruptions_by_default(self):
+    def test_build_connect_config_uses_start_activity_interrupts_by_default(self):
         client = GoogleLiveClient(
             {
                 "enable_audio_output": True,
@@ -350,23 +351,108 @@ class GoogleLiveClientTest(unittest.TestCase):
         self.assertEqual(
             config["realtime_input_config"],
             {
-                "activity_handling": "NO_INTERRUPTION",
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
                 "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
             },
         )
 
-    def test_build_connect_config_can_keep_sdk_server_interruptions(self):
+    def test_build_connect_config_with_production_defaults_sets_live_session_policy(self):
+        client = GoogleLiveClient(GOOGLE_LIVE_DEFAULTS, _DummyLogger())
+
+        config = client._build_connect_config()
+
+        self.assertEqual(config["response_modalities"], ["AUDIO"])
+        self.assertEqual(
+            config["realtime_input_config"],
+            {
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+                "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
+            },
+        )
+        self.assertEqual(config["session_resumption"], {"transparent": True})
+        self.assertEqual(
+            config["context_window_compression"],
+            {"trigger_tokens": 24000, "sliding_window": {"target_tokens": 12000}},
+        )
+
+    def test_build_connect_config_never_uses_forbidden_no_interruption(self):
         client = GoogleLiveClient(
             {
                 "enable_audio_output": True,
-                "disable_server_side_interruptions": False,
+                "disable_server_side_interruptions": True,
             },
             _DummyLogger(),
         )
 
         config = client._build_connect_config()
 
-        self.assertNotIn("realtime_input_config", config)
+        self.assertEqual(config["response_modalities"], ["AUDIO"])
+        self.assertNotEqual(
+            config["realtime_input_config"].get("activity_handling"),
+            "NO_INTERRUPTION",
+        )
+
+    def test_build_connect_config_enables_resumption_and_context_compression(self):
+        client = GoogleLiveClient(
+            {
+                "enable_audio_output": True,
+                "session_resumption_enabled": True,
+                "session_resumption_handle": "resume-handle-1",
+                "context_window_compression_enabled": True,
+                "context_window_trigger_tokens": 24000,
+                "context_window_target_tokens": 12000,
+            },
+            _DummyLogger(),
+        )
+
+        config = client._build_connect_config()
+
+        self.assertEqual(
+            config["session_resumption"],
+            {"handle": "resume-handle-1", "transparent": True},
+        )
+        self.assertEqual(
+            config["context_window_compression"],
+            {"trigger_tokens": 24000, "sliding_window": {"target_tokens": 12000}},
+        )
+
+    def test_normalize_message_yields_session_resumption_update(self):
+        client = GoogleLiveClient({}, _DummyLogger())
+        message = SimpleNamespace(
+            session_resumption_update=SimpleNamespace(
+                resumable=True,
+                new_handle="resume-handle-2",
+            ),
+            server_content=None,
+        )
+
+        events = client._normalize_message(message)
+
+        self.assertIn(
+            {
+                "type": "session_resumption_update",
+                "handle": "resume-handle-2",
+                "resumable": True,
+            },
+            events,
+        )
+
+    def test_build_connect_config_explicitly_sets_start_activity_interrupts(self):
+        client = GoogleLiveClient(
+            {
+                "enable_audio_output": True,
+                "disable_server_side_interruptions": False,
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            },
+            _DummyLogger(),
+        )
+
+        config = client._build_connect_config()
+
+        self.assertEqual(
+            config["realtime_input_config"]["activity_handling"],
+            "START_OF_ACTIVITY_INTERRUPTS",
+        )
 
 class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_connect_honors_configured_timeout(self):
