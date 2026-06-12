@@ -273,13 +273,22 @@ def manage_api_http_safe_close():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lesson HTTP functions (course backend, NOT manager-api).
+# Lesson runtime backend legs (US-006 LANE-ESP: S6 pull-on-connect + S9 forward).
+# Restored ADDITIVELY from deploy/lesson-voice after the prod-unify graft (4666631b)
+# dropped them; core/lesson/runtime.py (get_current_assignment, get_lesson_manifest)
+# and core/lesson/forwarder.py (post_lesson_event) bind these by attribute at call time.
 #
-# Standalone module-level coroutines that take their OWN ``httpx`` client/base_url
-# (course backend), distinct from the singleton ``ManageApiClient`` (manager-api).
-# Restored ADDITIVELY from deploy/lesson-voice after the prod-unify dropped them;
-# core/lesson/runtime.py (get_current_assignment, get_lesson_manifest) and
-# core/lesson/forwarder.py (post_lesson_event) bind these by attribute at call time.
+# DELIBERATE DIVERGENCE FROM plan §6.4/§6.5b (surfaced, not silently reconciled):
+# the plan said reuse the manager-api ``ManageApiClient`` (base ``manager-api.url``
+# + that service's Bearer). Live config (config.yaml:21-28, locked 2026-06-04) makes
+# ``server.api_url`` — the NestJS backend, ``.../v1`` — the SOLE authority for the
+# ``/v1/devices/*`` + ``/v1/lessons/*`` routes; the Java manager-api is admin/legacy
+# only and does NOT serve them. So these legs take their OWN caller-owned httpx
+# client/base_url. ``result -> outcome`` is renamed HERE as the single translation point.
+#
+# D-RUNTOKEN (ADR 0013 §F): no device-token minting path on the ESP yet, so
+# ``token`` is injectable and OPTIONAL — cross-device authz is enforced backend-side
+# on the ``device_id`` claim. Ops/backend follow-up; surfaced, not invented here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _LESSON_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}

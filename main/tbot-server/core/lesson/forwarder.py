@@ -14,9 +14,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-# Module ref (NOT a from-import) so this module imports cleanly even under the
-# test conftest stub that replaces config.manage_api_client; the attribute is
-# resolved at call time, where real tests inject a fake post_fn.
+# Module ref (NOT a from-import) so ``post_lesson_event`` is resolved as an
+# attribute at call time: tests inject a fake ``post_fn`` or monkeypatch the
+# module attribute, and the real coroutine is bound in production. (conftest does
+# NOT stub config.manage_api_client — it only filters warnings.)
 from config import manage_api_client as _backend_api
 
 TAG = "LessonForwarder"

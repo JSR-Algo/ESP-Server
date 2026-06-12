@@ -41,7 +41,9 @@ FIX = json.load(
 
 
 def _load_real_manage_api_client():
-    """conftest stubs ``config.manage_api_client``; load the real file directly."""
+    """Load a fresh, isolated copy of the real ``config.manage_api_client`` from
+    disk — immune to any monkeypatching other tests apply to the shared module
+    instance. (conftest does NOT stub this module; it only filters warnings.)"""
     spec = importlib.util.spec_from_file_location(
         "config._mac_real_for_test",
         os.path.join(os.path.dirname(__file__), "..", "config", "manage_api_client.py"),
@@ -1294,8 +1296,8 @@ class _CapRecordingClient:
 
 
 class LessonManifestCapabilityFetchTest(unittest.IsolatedAsyncioTestCase):
-    """Exercises the REAL config.manage_api_client.get_lesson_manifest (loaded past
-    the conftest stub) to pin how the device capability set is forwarded."""
+    """Exercises the REAL config.manage_api_client.get_lesson_manifest (a fresh
+    copy loaded from disk) to pin how the device capability set is forwarded."""
 
     def setUp(self):
         self.mac = _load_real_manage_api_client()
@@ -1453,8 +1455,8 @@ class _EvictableCache:
 
 class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
     def _patch_backend(self, assignment, manifest, etag='"lesson-3-espTft-9b1f7c2a"'):
-        """Monkeypatch the REAL config.manage_api_client the runtime resolves at
-        call time (conftest installs only no-op stubs). Returns an undo callable."""
+        """Monkeypatch the REAL config.manage_api_client attributes the runtime
+        resolves at call time (conftest does NOT stub this module). Returns an undo callable."""
         import config.manage_api_client as mac
 
         # Record the renderer_capabilities the runtime forwards to the manifest
