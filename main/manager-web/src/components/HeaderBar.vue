@@ -140,6 +140,9 @@
             <el-dropdown-item @click.native="handleRouter('courseManagement')">
               {{ $t("header.courseManagement") }}
             </el-dropdown-item>
+            <el-dropdown-item @click.native="handleRouter('lessonMonitoring')">
+              {{ $t("header.lessonMonitoring") }}
+            </el-dropdown-item>
           </el-dropdown-menu>
         </el-dropdown>
       </div>
@@ -243,6 +246,7 @@ export default {
         serverSideManagement: "/server-side-management",
         featureManagement: "/feature-management",
         courseManagement: "/course-management",
+        lessonMonitoring: "/lesson-monitoring",
       }
     };
   },

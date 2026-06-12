@@ -242,6 +242,18 @@ const routes = [
       title: 'Lesson editor'
     }
   },
+  // Admin lesson-monitoring view (backed by the NestJS API via /nestjs proxy)
+  {
+    path: '/lesson-monitoring',
+    name: 'LessonMonitoring',
+    component: function () {
+      return import('../views/LessonMonitoring.vue')
+    },
+    meta: {
+      requiresAuth: true,
+      title: 'Lesson monitoring'
+    }
+  },
 ]
 const router = new VueRouter({
   base: process.env.VUE_APP_PUBLIC_PATH || '/',
@@ -263,7 +275,7 @@ VueRouter.prototype.push = function push(location) {
 }
 
 // NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor']
+const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring']
 
 // Route Guard
 router.beforeEach((to, from, next) => {
