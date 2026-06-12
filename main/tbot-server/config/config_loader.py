@@ -125,10 +125,54 @@ def _clean_env(name):
     value = os.environ.get(name, "").strip()
     return value or None
 
+def _parse_bool_env(name):
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+def _apply_lesson_env_overrides(config):
+    """LESSON_RUNTIME_ENABLED dark-rollout flag + COURSE_BACKEND_URL endpoint, so an
+    operator can enable/point the lesson runtime via env without editing config
+    volumes. RESTORED 2026-06-12 (deep-audit): the unify checkout-subtree-replace
+    dropped main's apply_env_overrides, silently disabling these documented knobs.
+    Additive + null-safe; never overwrites an author-provided lesson.api_base.
+    LESSON_RUNTIME_ENABLED -> lesson.runtime_enabled (bool parsed). COURSE_BACKEND_URL
+    -> server.api_url AND, as a fallback, lesson.api_base (runtime reads lesson.api_base
+    first, else server.api_url)."""
+    if not isinstance(config, Mapping):
+        return config
+
+    flag = _parse_bool_env("LESSON_RUNTIME_ENABLED")
+    course_url = _clean_env("COURSE_BACKEND_URL")
+    if flag is None and not course_url:
+        return config
+
+    lesson_cfg = config.get("lesson")
+    if not isinstance(lesson_cfg, Mapping):
+        lesson_cfg = {}
+        config["lesson"] = lesson_cfg
+    if flag is not None:
+        lesson_cfg["runtime_enabled"] = flag
+
+    if course_url:
+        normalized = course_url.rstrip("/")
+        server_cfg = config.get("server")
+        if not isinstance(server_cfg, Mapping):
+            server_cfg = {}
+            config["server"] = server_cfg
+        server_cfg["api_url"] = normalized
+        if not lesson_cfg.get("api_base"):
+            lesson_cfg["api_base"] = normalized
+    return config
+
 def _apply_server_endpoint_env_overrides(config):
     """Let Docker/.env repair public OTA endpoints without editing volumes."""
     if not isinstance(config, Mapping):
         return config
+
+    # Restored lesson env knobs (runs even when no OTA-endpoint env is set).
+    config = _apply_lesson_env_overrides(config)
 
     websocket_url = _clean_env("TBOT_PUBLIC_WEBSOCKET_URL")
     api_url = _clean_env("TBOT_BACKEND_API_URL")
