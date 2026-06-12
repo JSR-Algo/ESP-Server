@@ -4,7 +4,7 @@ import RequestService from '../httpRequest';
 
 export default {
     // Get agent list
-    getAgentList(callback) {
+    getAgentList(callback, errorCallback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/agent/list`)
             .method('GET')
@@ -12,9 +12,15 @@ export default {
                 RequestService.clearRequestTime();
                 callback(res);
             })
+            // Business error (non-2xx) was unhandled -> the view's isLoading stuck on
+            // the skeleton forever. Surface it to the caller's error callback.
+            .fail((err) => {
+                RequestService.clearRequestTime();
+                if (errorCallback) errorCallback(err);
+            })
             .networkFail(() => {
                 RequestService.reAjaxFun(() => {
-                    this.getAgentList(callback);
+                    this.getAgentList(callback, errorCallback);
                 });
             }).send();
     },
@@ -387,7 +393,7 @@ export default {
     },
     
     // Search agent
-    searchAgent(keyword, searchType, callback) {
+    searchAgent(keyword, searchType, callback, errorCallback) {
         RequestService.sendRequest()
             .url(`${getServiceUrl()}/agent/list?keyword=${encodeURIComponent(keyword)}&searchType=${searchType}`)
             .method('GET')
@@ -395,9 +401,15 @@ export default {
                 RequestService.clearRequestTime();
                 callback(res);
             })
+            // home.vue handleSearch passes a 4th error callback but it was dead — a
+            // business error left isLoading stuck. Wire it through .fail.
+            .fail((err) => {
+                RequestService.clearRequestTime();
+                if (errorCallback) errorCallback(err);
+            })
             .networkFail(() => {
                 RequestService.reAjaxFun(() => {
-                    this.searchAgent(keyword, searchType, callback);
+                    this.searchAgent(keyword, searchType, callback, errorCallback);
                 });
             }).send();
     },

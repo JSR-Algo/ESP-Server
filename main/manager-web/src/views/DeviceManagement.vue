@@ -486,7 +486,10 @@ export default {
     },
     // Determine whether emoji, theme, font can be generatedbinFile
     isGenerate(row) {
-      const version = row.firmwareVersion.replace(/\./g, '');
+      // Guard null/undefined firmwareVersion: .replace on undefined threw inside the
+      // table render -> the whole device table went blank (deep-audit). Treat unknown
+      // firmware as not-generatable.
+      const version = (row.firmwareVersion || '').replace(/\./g, '');
       return Number(version) >= 200;
     },
   }
