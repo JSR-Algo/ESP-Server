@@ -89,6 +89,7 @@ export default {
   'monitoring.view': 'Xem',
   'monitoring.empty': 'Chưa có lượt học',
   'monitoring.loadFail': 'Tải danh sách lượt học thất bại',
+  'monitoring.capHint': 'Đang hiển thị tối đa — lọc thêm để thu hẹp danh sách.',
   'monitoring.eventsTitle': 'Dòng thời gian sự kiện',
   'monitoring.eventsLoadFail': 'Tải sự kiện thất bại',
   'monitoring.evType': 'Sự kiện',

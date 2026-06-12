@@ -46,6 +46,11 @@
           <el-button type="primary" size="small" :loading="loading" @click="fetchList">
             {{ $t('monitoring.refresh') }}
           </el-button>
+          <span
+            class="monitoring-count"
+            :class="{ 'is-capped': list.length >= limit }"
+            :title="list.length >= limit ? $t('monitoring.capHint') : ''"
+          >{{ list.length }}</span>
         </div>
 
         <el-table v-loading="loading" :data="list" stripe style="width: 100%">
@@ -145,6 +150,7 @@ export default {
     return {
       list: [],
       loading: false,
+      limit: 200, // backend caps at 200; raised from the silent default of 50
       filters: { deviceId: '', childId: '', state: '' },
       states: [
         'ASSIGNED',
@@ -192,6 +198,7 @@ export default {
           deviceId: this.filters.deviceId.trim(),
           childId: this.filters.childId.trim(),
           state: this.filters.state,
+          limit: this.limit,
         },
         (rows) => {
           this.loading = false;
@@ -276,5 +283,15 @@ export default {
 }
 .muted {
   color: #909399;
+}
+.monitoring-count {
+  margin-left: 12px;
+  font-size: 13px;
+  color: #909399;
+}
+.monitoring-count.is-capped {
+  color: #e6a23c;
+  cursor: help;
+  font-weight: 600;
 }
 </style>

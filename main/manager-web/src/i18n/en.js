@@ -89,6 +89,7 @@ export default {
   'monitoring.view': 'View',
   'monitoring.empty': 'No assignments',
   'monitoring.loadFail': 'Failed to load assignments',
+  'monitoring.capHint': 'Showing the maximum results — refine the filters to narrow the list.',
   'monitoring.eventsTitle': 'Event timeline',
   'monitoring.eventsLoadFail': 'Failed to load events',
   'monitoring.evType': 'Event',
