@@ -45,7 +45,7 @@ import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import jakarta.servlet.http.HttpServletRequest;
-import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import tbot.common.constant.Constant;
 import tbot.common.exception.ErrorCode;
@@ -75,7 +75,7 @@ import tbot.modules.sys.service.SysUserUtilService;
 
 @Slf4j
 @Service
-@AllArgsConstructor
+@RequiredArgsConstructor
 public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> implements DeviceService {
 
     private final DeviceDao deviceDao;
@@ -84,9 +84,12 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     private final RedisUtils redisUtils;
     private final OtaService otaService;
 
-    // Injected separately (not via @AllArgsConstructor) and marked @Lazy because
-    // AgentServiceImpl depends on DeviceService; constructor-injecting AgentService
-    // here would create an unresolvable circular dependency at startup.
+    // Field-injected (the class uses @RequiredArgsConstructor, which only puts the
+    // final fields above in the constructor — this NON-final field is excluded) and
+    // @Lazy because AgentServiceImpl depends on DeviceService; eager constructor
+    // injection of AgentService here created an unresolvable circular dependency that
+    // crashed Spring startup ("APPLICATION FAILED TO START"). @Lazy + field injection
+    // breaks the cycle with a lazy proxy.
     @Lazy
     @Autowired
     private AgentService agentService;
