@@ -1,6 +1,9 @@
 package tbot.modules.security.secret;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import java.io.IOException;
+import java.security.MessageDigest;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.shiro.web.filter.authc.AuthenticatingFilter;
@@ -61,7 +64,8 @@ public class ServerSecretFilter extends AuthenticatingFilter {
 
         // VerifytokenMatches
         String serverSecret = getServerSecret();
-        if (StringUtils.isBlank(serverSecret) || !serverSecret.equals(token)) {
+        if (StringUtils.isBlank(serverSecret)
+                || !MessageDigest.isEqual(serverSecret.getBytes(UTF_8), token.getBytes(UTF_8))) {
             // tokenInvalid, return401
             this.sendUnauthorizedResponse((HttpServletResponse) servletResponse, "Invalid server key");
             return false;

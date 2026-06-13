@@ -217,6 +217,7 @@ const routes = [
     },
     meta: {
       requiresAuth: true,
+      requiresSuperAdmin: true,
       title: 'Course management'
     }
   },
@@ -228,6 +229,7 @@ const routes = [
     },
     meta: {
       requiresAuth: true,
+      requiresSuperAdmin: true,
       title: 'Course lessons'
     }
   },
@@ -239,6 +241,7 @@ const routes = [
     },
     meta: {
       requiresAuth: true,
+      requiresSuperAdmin: true,
       title: 'Lesson editor'
     }
   },
@@ -251,6 +254,7 @@ const routes = [
     },
     meta: {
       requiresAuth: true,
+      requiresSuperAdmin: true,
       title: 'Lesson monitoring'
     }
   },
@@ -289,6 +293,25 @@ router.beforeEach((to, from, next) => {
       return
     }
   }
+
+  // Authorization guard: super-admin-only routes (e.g. lesson-monitoring,
+  // course management) render COPPA-sensitive child data. Read superAdmin
+  // from the same localStorage userInfo the HeaderBar nav gating uses.
+  if (to.matched.some(record => record.meta && record.meta.requiresSuperAdmin)) {
+    let isSuperAdmin = false
+    try {
+      const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}')
+      isSuperAdmin = !!userInfo.superAdmin
+    } catch (e) {
+      isSuperAdmin = false
+    }
+    if (!isSuperAdmin) {
+      // Logged-in non-super-admin: deny access, send to home
+      next({ name: 'home' })
+      return
+    }
+  }
+
   next()
 })
 

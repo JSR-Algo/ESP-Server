@@ -1322,6 +1322,11 @@ class _CapRecordingResponse:
     def __init__(self, manifest, etag):
         self._manifest = manifest
         self.headers = {"ETag": etag}
+        # get_lesson_manifest now routes through _lesson_request_with_retry, which
+        # inspects status_code/content for the 204/empty short-circuit. A real
+        # httpx.Response carries both, so the stand-in must too.
+        self.status_code = 200
+        self.content = b'{"data": {"manifest": {}}}'
 
     def raise_for_status(self):
         return None
@@ -1399,6 +1404,94 @@ class LessonManifestCapabilityFetchTest(unittest.IsolatedAsyncioTestCase):
         call = client.calls[0]
         self.assertEqual(call["params"], {"profile": "espTft"})
         self.assertNotIn("X-Renderer-Capabilities", call["headers"])
+
+
+# ── manifest leg shares the transient-retry path (MED: bare request had none) ────
+
+
+class _RetryingManifestResponse:
+    """httpx-Response stand-in that raises_for_status -> HTTPStatusError once."""
+
+    def __init__(self, manifest, etag, status_code):
+        import httpx
+
+        self._manifest = manifest
+        self.headers = {"ETag": etag}
+        self.status_code = status_code
+        self.content = b'{"data": {"manifest": {}}}'
+        self._httpx = httpx
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise self._httpx.HTTPStatusError(
+                "server error",
+                request=self._httpx.Request("GET", "http://backend.test/v1/x"),
+                response=self._httpx.Response(self.status_code),
+            )
+        return None
+
+    def json(self):
+        return {"data": {"manifest": self._manifest}}
+
+    async def aclose(self):
+        return None
+
+
+class _RetryingManifestClient:
+    """Yields a 500 on the first manifest request, then a 200 — proving the leg
+    now retries transient failures instead of aborting the whole pull."""
+
+    def __init__(self, manifest, etag='"lesson-3-espTft-9b1f7c2a"'):
+        self._manifest = manifest
+        self._etag = etag
+        self.attempts = 0
+
+    async def request(self, method, url, params=None, headers=None):
+        self.attempts += 1
+        status = 500 if self.attempts == 1 else 200
+        return _RetryingManifestResponse(self._manifest, self._etag, status)
+
+
+class LessonManifestRetryTest(unittest.IsolatedAsyncioTestCase):
+    """MED fix: get_lesson_manifest routes through _lesson_request_with_retry, so a
+    single transient 5xx no longer aborts the pull; falsy lesson_id is early-guarded."""
+
+    def setUp(self):
+        self.mac = _load_real_manage_api_client()
+        self.manifest = _build_manifest()
+
+    async def test_transient_5xx_is_retried_then_succeeds(self):
+        import asyncio as _asyncio
+
+        client = _RetryingManifestClient(self.manifest)
+        # Patch the real module's asyncio.sleep so the retry backoff is instant.
+        orig_sleep = _asyncio.sleep
+
+        async def _no_sleep(_delay):
+            return None
+
+        _asyncio.sleep = _no_sleep
+        try:
+            manifest, etag = await self.mac.get_lesson_manifest(
+                client, "http://backend.test/v1", "L", "espTft"
+            )
+        finally:
+            _asyncio.sleep = orig_sleep
+        self.assertEqual(client.attempts, 2)  # one 500, one 200
+        self.assertEqual(manifest, self.manifest)
+        self.assertTrue(etag)
+
+    async def test_falsy_lesson_id_short_circuits_without_request(self):
+        class _ExplodingClient:
+            async def request(self, *a, **k):
+                raise AssertionError("must not hit the wire on falsy lesson_id")
+
+        for bad in ("", None):
+            manifest, etag = await self.mac.get_lesson_manifest(
+                _ExplodingClient(), "http://backend.test/v1", bad, "espTft"
+            )
+            self.assertIsNone(manifest)
+            self.assertIsNone(etag)
 
 
 # ── L3 P3 pull-on-connect threads the device capability set to the fetch ──────────

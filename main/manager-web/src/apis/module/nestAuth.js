@@ -24,11 +24,13 @@ function post(url, data, onSuccess, onError) {
     .data(data)
     .success((res) => {
       RequestService.clearRequestTime();
-      settle(res, onSuccess, onError);
+      // handle401=false: a 401 from /auth/login|/mfa-verify is "bad credentials",
+      // not an expired session — surface it as a form error, don't redirect-loop.
+      settle(res, onSuccess, onError, false);
     })
     .networkFail((res) => {
       RequestService.clearRequestTime();
-      settle(res, onSuccess, onError);
+      settle(res, onSuccess, onError, false);
     })
     .send();
 }

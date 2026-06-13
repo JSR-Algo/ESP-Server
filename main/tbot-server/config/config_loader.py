@@ -187,7 +187,21 @@ def _apply_server_endpoint_env_overrides(config):
     if websocket_url:
         server_config["websocket"] = websocket_url
     if api_url:
-        server_config["api_url"] = api_url.rstrip("/")
+        normalized_api_url = api_url.rstrip("/")
+        prior_api_url = server_config.get("api_url")
+        server_config["api_url"] = normalized_api_url
+        # Keep lesson.api_base coherent with the server endpoint: the lesson
+        # runtime reads lesson.api_base first, else server.api_url. If api_base
+        # was only defaulted (empty, or synced to the previous server.api_url by
+        # _apply_lesson_env_overrides via COURSE_BACKEND_URL) then re-point it at
+        # TBOT_BACKEND_API_URL so the two halves don't split-brain across two
+        # backends. An explicitly author-set api_base (one that differs from the
+        # prior server.api_url) is preserved.
+        lesson_config = config.get("lesson")
+        if isinstance(lesson_config, Mapping):
+            lesson_api_base = lesson_config.get("api_base")
+            if not lesson_api_base or lesson_api_base == prior_api_url:
+                lesson_config["api_base"] = normalized_api_url
     return config
 
 
@@ -290,7 +304,7 @@ async def get_config_from_api_async(config):
             "vision_explain": config["server"].get("vision_explain", ""),
             "auth_key": config["server"].get("auth_key", ""),
         }
-    config_data["server"]["auth"] = {"enabled": auth_enabled}
+    config_data.setdefault("server", {})["auth"] = {"enabled": auth_enabled}
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")

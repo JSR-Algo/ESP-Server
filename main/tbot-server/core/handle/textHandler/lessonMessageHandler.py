@@ -38,7 +38,24 @@ async def _dispatch(conn: Any, msg_json: Dict[str, Any], method: str) -> None:
     handler = getattr(runtime, method, None)
     if handler is None:
         return
-    await handler(msg_json)
+    # ADDITIVE-ONLY ISOLATION: the lesson layer must NEVER break voice. An exception
+    # raised inside a lesson_* handler would propagate up through process_message
+    # (which only catches json.JSONDecodeError) into the connection receive loop,
+    # tearing down the whole WS connection — and the realtime voice session with it.
+    # Swallow + log here so a lesson fault degrades the LESSON ONLY; voice survives.
+    try:
+        await handler(msg_json)
+    except Exception:
+        logger = getattr(conn, "logger", None)
+        if logger is not None:
+            try:
+                logger.bind(tag=TAG).warning(
+                    f"lesson {method} handler raised; degrading lesson only "
+                    f"(type={msg_json.get('type')})",
+                    exc_info=True,
+                )
+            except Exception:
+                pass
 
 
 class LessonAckHandler(TextMessageHandler):

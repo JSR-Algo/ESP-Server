@@ -107,6 +107,27 @@ def _wire_timestamp() -> int:
     return int(time.time() * 1000)
 
 
+def _coerce_ack_seq(acked: Any) -> Optional[int]:
+    """Coerce an inbound ``body.acks`` to the int S->F sequence used as the
+    ``_outstanding`` dict key, or ``None`` if it is not a well-formed sequence.
+
+    Tolerates an ``int`` (canonical), a numeric ``str`` ("3"), or a ``bool`` (an int
+    subclass — explicitly rejected since True/False are never a real sequence). Any
+    unhashable/non-numeric value (list, dict, None, "abc") -> ``None`` so the caller
+    treats it as a malformed/stale ack and no-ops, instead of raising TypeError into
+    the dict ``.pop()`` (which would otherwise tear down the connection + voice)."""
+    if isinstance(acked, bool):
+        return None
+    if isinstance(acked, int):
+        return acked
+    if isinstance(acked, str):
+        try:
+            return int(acked.strip())
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def parse_manifest_checksum(etag: Optional[str]) -> str:
     """ETag is ``"lesson-<version>-<profile>-<checksum>"`` (backend etagFor)."""
     if not etag:
@@ -262,6 +283,13 @@ class LessonRuntime:
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return
         acked = body.get("acks")  # P0: correlate on body.acks, NOT envelope.sequence.
+        # DEFENSIVE COERCE: body.acks MUST be the int S->F sequence of the outstanding
+        # frame. A malformed firmware/replay frame could send a list (e.g. [3]) or a
+        # str — an unhashable/wrong-typed key would raise TypeError on the dict .pop()
+        # below, which (pre-isolation) tore down the connection + voice. Coerce to int;
+        # anything that is not a hashable int (None, list, dict, non-numeric str) is a
+        # malformed ack -> idempotent no-op, identical to a stale/unknown ack.
+        acked = _coerce_ack_seq(acked)
         frame = self._outstanding.pop(acked, None) if acked is not None else None
         if frame is None:
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).

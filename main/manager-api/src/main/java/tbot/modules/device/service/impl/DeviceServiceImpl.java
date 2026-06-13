@@ -21,6 +21,8 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.aop.framework.AopContext;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.context.request.RequestContextHolder;
@@ -56,6 +58,7 @@ import tbot.common.user.UserDetail;
 import tbot.common.utils.ConvertUtils;
 import tbot.common.utils.DateUtils;
 import tbot.common.utils.ToolUtil;
+import tbot.modules.agent.service.AgentService;
 import tbot.modules.device.dao.DeviceDao;
 import tbot.modules.device.dto.DeviceManualAddDTO;
 import tbot.modules.device.dto.DevicePageUserDTO;
@@ -80,6 +83,13 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     private final SysParamsService sysParamsService;
     private final RedisUtils redisUtils;
     private final OtaService otaService;
+
+    // Injected separately (not via @AllArgsConstructor) and marked @Lazy because
+    // AgentServiceImpl depends on DeviceService; constructor-injecting AgentService
+    // here would create an unresolvable circular dependency at startup.
+    @Lazy
+    @Autowired
+    private AgentService agentService;
 
     @Async
     public void updateDeviceConnectionInfo(String agentId, String deviceId, String appVersion) {
@@ -131,6 +141,12 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         UserDetail user = SecurityUser.getUser();
         if (user.getId() == null) {
             throw new RenException(ErrorCode.USER_NOT_LOGIN);
+        }
+
+        // Verify the caller actually owns the agent being bound, to prevent
+        // binding a device into another user's agent (IDOR).
+        if (!agentService.checkAgentPermission(agentId, user.getId())) {
+            throw new RenException(ErrorCode.AGENT_NOT_FOUND);
         }
 
         Date currentTime = new Date();
@@ -507,8 +523,8 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
         int length = Math.max(v1Parts.length, v2Parts.length);
         for (int i = 0; i < length; i++) {
-            int v1 = i < v1Parts.length ? Integer.parseInt(v1Parts[i]) : 0;
-            int v2 = i < v2Parts.length ? Integer.parseInt(v2Parts[i]) : 0;
+            int v1 = i < v1Parts.length ? parseVersionSegment(v1Parts[i]) : 0;
+            int v2 = i < v2Parts.length ? parseVersionSegment(v2Parts[i]) : 0;
 
             if (v1 > v2) {
                 return 1;
@@ -519,6 +535,23 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         return 0;
     }
 
+    /**
+     * Parse a single version segment defensively. The version string can come from
+     * an unauthenticated OTA report, so non-numeric or out-of-range segments must
+     * not blow up with NumberFormatException (which would surface as a 500).
+     * Unparseable/overflow segments are treated as 0.
+     */
+    private static int parseVersionSegment(String segment) {
+        if (segment == null || segment.isEmpty()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(segment.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     @Override
     public void manualAddDevice(Long userId, DeviceManualAddDTO dto) {
         // CheckmacAlready exists
@@ -527,6 +560,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         DeviceEntity exist = baseDao.selectOne(wrapper);
         if (exist != null) {
             throw new RenException(ErrorCode.MAC_ADDRESS_ALREADY_EXISTS);
+        }
+        // Verify the caller actually owns the agent being bound, to prevent
+        // binding a device into another user's agent (IDOR).
+        if (!agentService.checkAgentPermission(dto.getAgentId(), userId)) {
+            throw new RenException(ErrorCode.AGENT_NOT_FOUND);
         }
         Date now = new Date();
         DeviceEntity entity = new DeviceEntity();

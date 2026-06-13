@@ -60,7 +60,21 @@ class AssetState:
     __slots__ = ("key", "path", "sha256", "critical", "layer", "role", "media_type", "url", "state", "checksum_ok", "reason")
 
     def __init__(self, asset: Dict[str, Any]) -> None:
-        self.key: str = asset["key"]
+        # ``key`` is projected upstream as ``a.get("id") or a.get("assetId")``
+        # (runtime.py _critical_assets_payload), so a manifest asset that declares
+        # neither id nor assetId arrives here with key=None. A falsy key is unusable:
+        # _final_path would AttributeError on ``None.replace`` and None keys collide
+        # in _by_key — both crashes. Callers must filter these out BEFORE constructing
+        # an AssetState (see AssetCache.__init__); this guard is the last line of
+        # defense so a slipped-through bad asset fails loudly at construction, not
+        # silently mid-preload.
+        key = asset.get("key")
+        if not key:
+            raise ValueError(
+                "AssetState requires a non-empty 'key' (manifest asset is missing "
+                "both 'id' and 'assetId')"
+            )
+        self.key: str = key
         self.path: str = asset.get("path") or ""
         self.sha256: str = (asset.get("sha256") or "").lower()
         self.critical: bool = bool(asset.get("critical"))
@@ -137,8 +151,28 @@ class AssetCache:
         self._poll_interval = poll_interval
         self._deadline: Optional[float] = None
 
-        self.assets: List[AssetState] = [AssetState(a) for a in assets]
+        # Skip manifest assets with a falsy key (no id/assetId): they would crash
+        # _final_path (None.replace) and collide in _by_key (every None overwrites
+        # the prior). We drop + log them rather than abort the whole preload — one
+        # malformed asset must not block an otherwise-renderable lesson. A DROPPED
+        # *critical* asset cannot reach READY, so is_ready() naturally stays false
+        # via criticalReady < criticalTotal (no silent ready:true).
+        self.assets: List[AssetState] = []
+        for a in assets:
+            if not a.get("key"):
+                self._log(
+                    "warning",
+                    "skipping manifest asset with empty key "
+                    f"(missing id/assetId): {self._describe_keyless(a)}",
+                )
+                continue
+            self.assets.append(AssetState(a))
         self._by_key: Dict[str, AssetState] = {a.key: a for a in self.assets}
+
+    @staticmethod
+    def _describe_keyless(asset: Dict[str, Any]) -> str:
+        """Best-effort identifier for an asset we cannot key on (for the skip log)."""
+        return str(asset.get("path") or asset.get("layer") or asset.get("role") or "?")
 
     @staticmethod
     def _compose_cache_key(lesson_key: str, lesson_version: int, manifest_checksum: str) -> str:
@@ -226,18 +260,61 @@ class AssetCache:
         # after ready:true (plan §5.5).
         pending = [a for a in self.assets if a.state != READY]
         ordered = sorted(pending, key=lambda a: 0 if a.critical else 1)
+        # Wrap each per-asset coroutine as a Task so we can CANCEL still-running
+        # siblings when one fails. A bare ``gather(*coros)`` propagates the first
+        # exception but lets the other coroutines keep running detached on the shared
+        # client — orphan downloads that keep streaming + leave ``.part`` files behind
+        # (the finally _maybe_close_client(force=False) is a no-op, so they never even
+        # get their socket reclaimed). On any raise (critical AssetChecksumMismatch,
+        # PreloadTimeout, or wall-clock TimeoutError) we cancel the rest, await their
+        # unwind, and sweep orphan ``.part`` files before re-raising.
+        tasks = [asyncio.ensure_future(_run(a)) for a in ordered]
         try:
             # A single wall-clock bound (PRELOAD_TIMEOUT) over the whole fetch —
             # covers busy-starvation AND a pre-first-byte handshake hang.
             await asyncio.wait_for(
-                asyncio.gather(*[_run(a) for a in ordered]),
+                asyncio.gather(*tasks),
                 timeout=self.preload_timeout_sec,
             )
         except asyncio.TimeoutError:
+            await self._cancel_pending(tasks, ordered)
             raise PreloadTimeout()
+        except BaseException:
+            # AssetChecksumMismatch on a critical asset (or any other failure) —
+            # tear down siblings so no download outlives this preload.
+            await self._cancel_pending(tasks, ordered)
+            raise
         finally:
             await self._maybe_close_client()
         return self.is_ready()
+
+    async def _cancel_pending(
+        self, tasks: List["asyncio.Future"], assets: List[AssetState]
+    ) -> None:
+        """Cancel still-running download tasks and reap orphan ``.part`` files.
+
+        Called when ``gather`` raises (a critical checksum mismatch, a timeout) so
+        that no sibling download keeps streaming on the shared client after preload
+        has decided the lesson is not READY. Cancellation is best-effort and must not
+        mask the original error: we swallow CancelledError + cleanup faults here."""
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # Await every task so cancellation actually propagates into the coroutine
+        # (closing the in-flight ``stream(...)`` context) before we return and close
+        # the client. return_exceptions=True keeps a sibling fault from shadowing the
+        # original raise the caller is propagating.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Sweep any ``.part`` files left by a cancelled mid-stream write. A cancelled
+        # _download_one is interrupted at an ``await`` (it never reaches its own
+        # except/finally cleanup), so its tmp file is orphaned — remove it here.
+        for asset in assets:
+            try:
+                if asset.state == READY:
+                    continue
+                self._safe_remove(self._final_path(asset) + ".part")
+            except Exception:  # pragma: no cover - cleanup is best-effort
+                pass
 
     async def reattest(self) -> bool:
         """Restart re-attest (plan §6.3.5 / ADR 0013 §C): re-run sha256 over cached
@@ -361,6 +438,12 @@ class AssetCache:
 
     def _final_path(self, asset: AssetState) -> str:
         # Content lives under data/<lesson>/<assetKey>; keys are filesystem-safe slugs.
+        # Defensive: a falsy key would AttributeError on ``None.replace`` and is never
+        # a valid on-disk slug. Construction already rejects keyless assets, so this
+        # guards only a programmatic misuse path — fail loudly, never write to the
+        # cache_dir root.
+        if not asset.key:
+            raise ValueError("cannot resolve a cache path for an asset with an empty key")
         safe = asset.key.replace("/", "_").replace("..", "_")
         return os.path.join(self.cache_dir, safe)
 

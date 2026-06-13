@@ -107,6 +107,10 @@ public class AgentController {
     @Operation(summary = "Get agent details")
     @RequiresPermissions("sys:role:normal")
     public Result<AgentInfoVO> getAgentById(@PathVariable("id") String id) {
+        // Check Permission
+        if (!agentService.checkAgentPermission(id, SecurityUser.getUser().getId())) {
+            return new Result<AgentInfoVO>().error("No permission to access this agent");
+        }
         AgentInfoVO agent = agentService.getAgentById(id);
         return ResultUtils.success(agent);
     }
@@ -126,6 +130,10 @@ public class AgentController {
         if (device == null) {
             return new Result<>();
         }
+        // Check Permission
+        if (!agentService.checkAgentPermission(device.getAgentId(), SecurityUser.getUser().getId())) {
+            return new Result<Void>().error("No permission to update this agent");
+        }
         AgentUpdateDTO agentUpdateDTO = new AgentUpdateDTO();
         agentUpdateDTO.setSummaryMemory(dto.getSummaryMemory());
         agentService.updateAgentById(device.getAgentId(), agentUpdateDTO);
@@ -139,6 +147,10 @@ public class AgentController {
         DeviceEntity device = deviceService.getDeviceByMacAddress(macAddress);
         if (device == null) {
             return new Result<>();
+        }
+        // Check Permission
+        if (!agentService.checkAgentPermission(device.getAgentId(), SecurityUser.getUser().getId())) {
+            return new Result<Void>().error("No permission to update this agent");
         }
         AgentUpdateDTO agentUpdateDTO = new AgentUpdateDTO();
         agentUpdateDTO.setTtsVolume(dto.getTtsVolume());
@@ -178,6 +190,10 @@ public class AgentController {
     @Operation(summary = "Update agent")
     @RequiresPermissions("sys:role:normal")
     public Result<Void> update(@PathVariable String id, @RequestBody @Valid AgentUpdateDTO dto) {
+        // Check Permission
+        if (!agentService.checkAgentPermission(id, SecurityUser.getUser().getId())) {
+            return new Result<Void>().error("No permission to update this agent");
+        }
         agentService.updateAgentById(id, dto);
         return new Result<>();
     }
@@ -186,6 +202,10 @@ public class AgentController {
     @Operation(summary = "Delete agent")
     @RequiresPermissions("sys:role:normal")
     public Result<Void> delete(@PathVariable String id) {
+        // Check Permission
+        if (!agentService.checkAgentPermission(id, SecurityUser.getUser().getId())) {
+            return new Result<Void>().error("No permission to delete this agent");
+        }
         // firstDeleteAssociated device
         deviceService.deleteByAgentId(id);
         // DeleteAssociated chat history
@@ -220,6 +240,10 @@ public class AgentController {
     public Result<PageData<AgentChatSessionDTO>> getAgentSessions(
             @PathVariable("id") String id,
             @Parameter(hidden = true) @RequestParam Map<String, Object> params) {
+        // Check Permission
+        if (!agentService.checkAgentPermission(id, SecurityUser.getUser().getId())) {
+            return new Result<PageData<AgentChatSessionDTO>>().error("No permission to view this agent's sessions");
+        }
         params.put("agentId", id);
         PageData<AgentChatSessionDTO> page = agentChatHistoryService.getSessionListByAgentId(params);
         return new Result<PageData<AgentChatSessionDTO>>().ok(page);

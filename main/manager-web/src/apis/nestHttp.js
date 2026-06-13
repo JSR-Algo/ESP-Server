@@ -1,5 +1,7 @@
 import { getNestUrl } from './api';
 import RequestService from './httpRequest';
+import Constant from '../utils/constant';
+import { goToPage } from '../utils/index';
 
 /**
  * Shared helpers for talking to the NestJS tbot-backend authoring API
@@ -73,7 +75,27 @@ export function normalizeStepType(raw) {
   };
 }
 
-export function settle(res, onSuccess, onError) {
+// Clear the per-user NestJS session token and bounce to the manager-web login,
+// mirroring httpRequest.js's manager-api 401 handling (store clearAuth +
+// goToPage(LOGIN, replace)). Called when the /nestjs AdminSessionGuard rejects an
+// expired/invalid nestjs_session_token with a real HTTP 401. Without this the page
+// keeps an unusable token and every authoring request fails behind a generic toast.
+// NOTE: we clear localStorage directly (not nestAuth.setNestToken) to avoid a
+// circular import — nestAuth.js already imports from this module.
+export function clearNestSession() {
+  try {
+    localStorage.removeItem(NEST_TOKEN_KEY);
+  } catch (e) {
+    /* ignore */
+  }
+  goToPage(Constant.PAGE.LOGIN, true);
+}
+
+// `handle401` (default true) lets data-fetch callers (nestRequest/nestUpload) opt
+// into the clear-token + redirect behavior. The auth login/mfa flow passes false:
+// a 401 there means "bad credentials", not "expired session", so it must surface
+// as a normal form error instead of logging the user out / looping the redirect.
+export function settle(res, onSuccess, onError, handle401 = true) {
   const status = res && res.status;
   if (status >= 200 && status < 300) {
     const body = res.data;
@@ -81,6 +103,10 @@ export function settle(res, onSuccess, onError) {
       body && typeof body === 'object' && 'data' in body ? body.data : body;
     if (onSuccess) onSuccess(payload);
   } else {
+    if (status === 401 && handle401) {
+      clearNestSession();
+      return;
+    }
     const body = (res && res.data) || {};
     const msg =
       body.message ||
@@ -153,6 +179,10 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
       if (r.ok) {
         const payload = body && 'data' in body ? body.data : body;
         if (onSuccess) onSuccess(payload);
+      } else if (r.status === 401) {
+        // Expired/invalid nestjs_session_token rejected by the proxy guard:
+        // clear it and bounce to login, matching settle()'s data-fetch behavior.
+        clearNestSession();
       } else {
         const msg =
           (body && (body.message || (body.error && body.error.message))) ||

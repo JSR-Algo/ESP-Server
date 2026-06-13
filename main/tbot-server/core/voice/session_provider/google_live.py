@@ -1895,24 +1895,30 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return timeout
 
     def _requires_tool_confirmation(self, name, args):
-        if args.get("confirmed") is True:
-            return False
         config = self._get_live_config()
         explicit_names = config.get("dangerous_tool_names") or []
         try:
             explicit = {str(item) for item in explicit_names if item}
         except TypeError:
             explicit = set()
-        if name in explicit:
+        is_dangerous = name in explicit
+        if not is_dangerous:
+            danger_pattern = config.get(
+                "dangerous_tool_name_pattern",
+                r"(?i)(delete|remove|shutdown|reboot|factory|reset|transfer|purchase|pay|send_money)",
+            )
+            try:
+                is_dangerous = re.search(str(danger_pattern), str(name or "")) is not None
+            except re.error:
+                is_dangerous = False
+        # Dangerous tools always require out-of-band confirmation. The model
+        # supplies `args` in-band, so an args["confirmed"] flag is attacker
+        # (model) controlled and MUST NOT be trusted to bypass the gate —
+        # otherwise the model self-bypasses by re-issuing the call with
+        # {"confirmed": true}. Only honor the flag for non-dangerous tools.
+        if is_dangerous:
             return True
-        danger_pattern = config.get(
-            "dangerous_tool_name_pattern",
-            r"(?i)(delete|remove|shutdown|reboot|factory|reset|transfer|purchase|pay|send_money)",
-        )
-        try:
-            return re.search(str(danger_pattern), str(name or "")) is not None
-        except re.error:
-            return False
+        return False
 
     @staticmethod
     def _tool_error(error_code, message):

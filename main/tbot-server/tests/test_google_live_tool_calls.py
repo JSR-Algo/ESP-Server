@@ -468,6 +468,78 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["response"]["ok"], False)
         self.assertEqual(response["response"]["errorCode"], "CONFIRMATION_REQUIRED")
 
+    async def test_dangerous_tool_ignores_model_supplied_confirmed_flag(self):
+        # The model supplies `args` in-band, so it must not be able to
+        # self-bypass the dangerous-tool gate by re-issuing the call with
+        # {"confirmed": true}.
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="rebooted"),
+        )
+        provider.conn.config["google_live"]["dangerous_tool_names"] = ["reboot_device"]
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [
+                    {
+                        "id": "call-danger",
+                        "name": "reboot_device",
+                        "args": {"confirmed": True},
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["response"]["ok"], False)
+        self.assertEqual(response["response"]["errorCode"], "CONFIRMATION_REQUIRED")
+
+    async def test_pattern_matched_dangerous_tool_ignores_confirmed_flag(self):
+        # Same self-bypass protection for names matched by the danger pattern
+        # (not just the explicit dangerous_tool_names list).
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="deleted"),
+        )
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [
+                    {
+                        "id": "call-delete",
+                        "name": "delete_account",
+                        "args": {"confirmed": True},
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["response"]["errorCode"], "CONFIRMATION_REQUIRED")
+
+    async def test_non_dangerous_tool_unaffected_by_gate(self):
+        # Ordinary tools must still execute normally and are not gated.
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="22C"),
+        )
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [
+                    {"id": "call-ok", "name": "get_weather", "args": {"city": "x"}}
+                ],
+            }
+        )
+
+        response = provider._client.sent_responses[0][0]
+        self.assertNotEqual(
+            response["response"].get("errorCode"), "CONFIRMATION_REQUIRED"
+        )
+        self.assertEqual(len(handler.calls), 1)
+
     async def test_tool_call_cancellation_clears_pending_set(self):
         provider, _handler = self._make_provider(
             ActionResponse(action=Action.NONE, response=None),

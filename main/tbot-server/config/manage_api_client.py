@@ -330,8 +330,23 @@ def _normalize_lesson_event(event: Dict) -> Dict:
 
 
 async def _lesson_request_with_retry(
-    client, method: str, url: str, *, max_retries: int = 2, retry_delay: float = 1.0, **kwargs
+    client,
+    method: str,
+    url: str,
+    *,
+    max_retries: int = 2,
+    retry_delay: float = 1.0,
+    return_headers: bool = False,
+    **kwargs,
 ):
+    """Transient-retry wrapper shared by every lesson leg (S6 assignment, S6
+    manifest, S9 event forward) so a single 5xx/network blip can't abort the pull.
+
+    Default return is the decoded JSON body (or ``None`` on 204/empty), keeping the
+    assignment/event call-sites byte-identical. When ``return_headers`` is True the
+    return is the ``(body, headers)`` tuple so the manifest leg can read ``ETag``;
+    ``body`` is ``None`` on a 204/empty response while ``headers`` is still surfaced.
+    """
     import asyncio
 
     attempt = 0
@@ -341,8 +356,12 @@ async def _lesson_request_with_retry(
             response = await client.request(method, url, **kwargs)
             response.raise_for_status()
             if response.status_code == 204 or not response.content:
-                return None
-            return response.json()
+                body = None
+            else:
+                body = response.json()
+            if return_headers:
+                return body, response.headers
+            return body
         except Exception as exc:  # noqa: BLE001 - retry decision is explicit below
             if attempt < max_retries and _lesson_is_transient(exc):
                 attempt += 1
@@ -400,6 +419,10 @@ async def get_lesson_manifest(
     no extra param, no extra header. This stays renderer v1: no protocol-version
     change today; the negotiation is a structural guard for when a v2 renderer ships.
     """
+    # Early guard: a falsy lesson_id would build '/lessons//manifest' (a 404 the
+    # device can't recover from). Bail before the request — no assignment, no pull.
+    if not lesson_id:
+        return None, None
     url = f"{_lesson_base(base_url)}/lessons/{lesson_id}/manifest"
     params: Dict[str, str] = {"profile": profile}
     headers = _lesson_auth_headers(token)
@@ -407,15 +430,14 @@ async def get_lesson_manifest(
         joined = ",".join(renderer_capabilities)
         params["rendererCapabilities"] = joined
         headers["X-Renderer-Capabilities"] = joined
-    response = await client.request(
-        "GET", url, params=params, headers=headers
+    # Route through the shared retry helper (transient 5xx/network blips no longer
+    # abort the pull) while still surfacing the ETag header the device needs.
+    body, response_headers = await _lesson_request_with_retry(
+        client, "GET", url, params=params, headers=headers, return_headers=True
     )
-    try:
-        response.raise_for_status()
-        body = response.json()
-        etag = response.headers.get("ETag") or response.headers.get("etag")
-    finally:
-        await response.aclose()
+    etag = None
+    if response_headers is not None:
+        etag = response_headers.get("ETag") or response_headers.get("etag")
     manifest = (body.get("data") or {}).get("manifest") if isinstance(body, dict) else None
     return manifest, etag
 
