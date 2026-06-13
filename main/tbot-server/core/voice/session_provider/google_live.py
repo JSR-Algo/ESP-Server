@@ -521,9 +521,28 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return True
 
     # Music tools temporarily removed per user request ("Bỏ function nghe nhạc
-    # trước") — focus on voice-only interaction until audio mixing /
-    # music-pause synchronisation is fully stable.
-    _LIVE_ALWAYS_INCLUDE = ("change_volume",)
+    # trước") — plus the robot arm/head motor controls. These were prod-only (lived
+    # only in the deployed docker image) and the unify dropped them from git; recovered
+    # here to match the proven production image, where they run live alongside voice, so
+    # the earlier audio-mixing caution is resolved on-device.
+    _LIVE_ALWAYS_INCLUDE = (
+        "change_volume",
+        "raise_left_arm",
+        "raise_right_arm",
+        "lower_left_arm",
+        "lower_right_arm",
+        "raise_both_arms",
+        "lower_both_arms",
+        "set_left_arm_percent",
+        "set_right_arm_percent",
+        "set_both_arms_percent",
+        "turn_head_left",
+        "turn_head_right",
+        "center_head",
+        "set_head_angle",
+        "set_head_percent",
+        "turn_head_left_then_right_max",
+    )
 
     # Plugins that depend on classic-pipeline state (conn.tts, conn.sentence_id,
     # tts_text_queue) which Google Live does not initialise. Listing them as

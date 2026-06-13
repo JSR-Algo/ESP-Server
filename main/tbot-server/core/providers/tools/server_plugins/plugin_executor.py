@@ -68,6 +68,15 @@ class ServerPluginExecutor(ToolExecutor):
             "lower_right_arm",
             "raise_both_arms",
             "lower_both_arms",
+            "set_left_arm_percent",
+            "set_right_arm_percent",
+            "set_both_arms_percent",
+            "turn_head_left",
+            "turn_head_right",
+            "center_head",
+            "set_head_angle",
+            "set_head_percent",
+            "turn_head_left_then_right_max",
         ]
 
         # Get function in config
