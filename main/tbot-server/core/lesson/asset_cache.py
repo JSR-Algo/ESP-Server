@@ -312,7 +312,7 @@ class AssetCache:
             try:
                 if asset.state == READY:
                     continue
-                self._safe_remove(self._final_path(asset) + ".part")
+                self._safe_remove(self._tmp_path(asset))
             except Exception:  # pragma: no cover - cleanup is best-effort
                 pass
 
@@ -370,7 +370,7 @@ class AssetCache:
         # PRELOAD_TIMEOUT if the turn never yields within the deadline.
         await self._wait_while_busy()
         url = self._resolve_url(asset)
-        tmp_path = self._final_path(asset) + ".part"
+        tmp_path = self._tmp_path(asset)
         hasher = hashlib.sha256()
         try:
             async with self._client.stream("GET", url) as resp:
@@ -435,6 +435,17 @@ class AssetCache:
         if asset.url:
             return asset.url
         return asset.path
+
+    def _tmp_path(self, asset: AssetState) -> str:
+        # Per-INSTANCE (not per-call) temp path so concurrent robots running the same
+        # lesson never share a ``.part`` file — each ConnectionHandler gets its own
+        # AssetCache, so ``id(self)`` differs across connections -> disjoint temp files.
+        # Uniqueness is deterministic (id(self) + PID never change for a live instance),
+        # so a given instance always reproduces the same path: that's what lets the
+        # _cancel_pending orphan sweep reconstruct + remove THIS instance's tmp file.
+        # NOTE: a per-call uuid4 suffix would break that sweep (it could not rebuild the
+        # path) and leak orphan .part files on timeout/checksum-cancel.
+        return f"{self._final_path(asset)}.{os.getpid()}.{id(self):x}.part"
 
     def _final_path(self, asset: AssetState) -> str:
         # Content lives under data/<lesson>/<assetKey>; keys are filesystem-safe slugs.

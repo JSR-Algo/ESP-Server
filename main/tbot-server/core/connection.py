@@ -913,9 +913,18 @@ class ConnectionHandler:
                 for plugin, config_str in plugin_from_server.items():
                     plugin_from_server[plugin] = json.loads(config_str)
                 self.config["plugins"] = plugin_from_server
+                functions = list(plugin_from_server.keys())
+                # The conversational "switch to lesson / chuyển sang bài học" trigger
+                # (plugins_func/functions/start_lesson.py) is declared in config.yaml's
+                # function_call.functions, but this agent-config plugin list REPLACES
+                # that list wholesale -- silently dropping start_lesson so the child can
+                # never voice-switch into lesson mode. Re-add it whenever the lesson
+                # runtime is enabled; the call is still gated by _lesson_runtime_enabled().
+                if self._lesson_runtime_enabled() and "start_lesson" not in functions:
+                    functions.append("start_lesson")
                 self.config["Intent"][self.config["selected_module"]["Intent"]][
                     "functions"
-                ] = plugin_from_server.keys()
+                ] = functions
         if private_config.get("prompt", None) is not None:
             self.config["prompt"] = private_config["prompt"]
         # Get VoiceprintInfo

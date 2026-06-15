@@ -488,7 +488,13 @@ class GoogleLiveClient:
     def _build_session_resumption_config(self):
         if not bool(self.config.get("session_resumption_enabled", True)):
             return None
-        config = {"transparent": bool(self.config.get("session_resumption_transparent", True))}
+        # NOTE: `transparent` is a Vertex-AI-only field. The Gemini Developer API
+        # (api_key / AIza auth) rejects it at connect time with
+        # "transparent parameter is not supported in Gemini API", which kills the
+        # whole Google Live session. Omit it so session_resumption only carries a
+        # handle when actually resuming; an empty {} is falsy and won't be attached,
+        # matching the proven-working prod connect config.
+        config = {}
         handle = self.config.get("session_resumption_handle")
         if handle:
             config["handle"] = str(handle)

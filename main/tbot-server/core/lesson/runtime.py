@@ -756,7 +756,23 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         limits=httpx.Limits(max_keepalive_connections=0),
         follow_redirects=True,
     ) as client:
-        assignment = await backend_api.get_current_assignment(client, base_url, device_id, token=token)
+        # D-RUNTOKEN bridge: resolve the robot's Wi-Fi MAC -> backend device UUID
+        # + a short-lived device-scoped JWT so the assignment pull authenticates as
+        # the device. Any failure falls back to the legacy (MAC, no-token) path
+        # (a harmless 401) and the voice path is never affected.
+        backend_device_id = device_id
+        try:
+            from config.device_token_client import resolve_device_identity
+
+            minted_uuid, minted_token = await resolve_device_identity(
+                client, base_url, device_id, logger=logger
+            )
+            if minted_uuid and minted_token:
+                backend_device_id = minted_uuid
+                token = minted_token
+        except Exception as exc:  # pragma: no cover - bridge is best-effort
+            _log("warning", f"device-token mint unavailable: {type(exc).__name__}: {exc}")
+        assignment = await backend_api.get_current_assignment(client, base_url, backend_device_id, token=token)
         if not assignment:
             _log("info", "no current assignment for device; nothing to preload")
             return None
@@ -847,7 +863,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         logger=logger,
     )
     forwarder = LessonEventForwarder(
-        device_id=device_id, base_url=base_url, token=token, logger=logger
+        device_id=backend_device_id, base_url=base_url, token=token, logger=logger
     )
     # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8). One
     # alarm per connection, reused across runtimes so its sample window survives a
