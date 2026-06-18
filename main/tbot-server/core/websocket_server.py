@@ -54,7 +54,7 @@ class WebSocketServer:
     def __init__(self, config: dict):
         self.config = config
         self.logger = setup_logging()
-        self.config_lock = asyncio.Lock()
+        self.config_lock = None
         voice_mode_config = self.config.get("voice_mode", {})
         init_classic_bootstrap = not (
             isinstance(voice_mode_config, dict)
@@ -195,6 +195,8 @@ class WebSocketServer:
             bool: whether update succeeded
         """
         try:
+            if self.config_lock is None:
+                self.config_lock = asyncio.Lock()
             async with self.config_lock:
                 # Re-get config (use async version)
                 new_config = await get_config_from_api_async(self.config)
