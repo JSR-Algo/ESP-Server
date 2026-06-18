@@ -15,6 +15,9 @@
         <el-button size="small" @click="$router.push('/lesson-monitoring')">
           {{ $t('lesson.monitor') }}
         </el-button>
+        <el-button size="small" @click="$router.push('/course-insights')">
+          {{ $t('course.insights') }}
+        </el-button>
         <el-button type="primary" size="small" @click="openCreate">
           {{ $t('course.createBtn') }}
         </el-button>

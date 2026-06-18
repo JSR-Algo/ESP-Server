@@ -90,7 +90,10 @@
             $route.path === '/agent-template-management' ||
             $route.path === '/ota-management' ||
             $route.path === '/user-management' ||
-            $route.path === '/feature-management',
+            $route.path === '/feature-management' ||
+            $route.path === '/course-management' ||
+            $route.path === '/course-insights' ||
+            $route.path === '/lesson-monitoring',
         }" @visible-change="handleParamDropdownVisibleChange">
           <span class="el-dropdown-link">
             <img loading="lazy" alt="" src="@/assets/header/param_management.png" :style="{
@@ -102,7 +105,10 @@
                   $route.path === '/agent-template-management' ||
                   $route.path === '/ota-management' ||
                   $route.path === '/user-management' ||
-                  $route.path === '/feature-management'
+                  $route.path === '/feature-management' ||
+                  $route.path === '/course-management' ||
+                  $route.path === '/course-insights' ||
+                  $route.path === '/lesson-monitoring'
                   ? 'brightness(0) invert(1)'
                   : 'None',
             }" />
@@ -139,6 +145,9 @@
               </el-dropdown-item>
             <el-dropdown-item @click.native="handleRouter('courseManagement')">
               {{ $t("header.courseManagement") }}
+            </el-dropdown-item>
+            <el-dropdown-item @click.native="handleRouter('courseInsights')">
+              {{ $t("header.courseInsights") }}
             </el-dropdown-item>
             <el-dropdown-item @click.native="handleRouter('lessonMonitoring')">
               {{ $t("header.lessonMonitoring") }}
@@ -246,6 +255,7 @@ export default {
         serverSideManagement: "/server-side-management",
         featureManagement: "/feature-management",
         courseManagement: "/course-management",
+        courseInsights: "/course-insights",
         lessonMonitoring: "/lesson-monitoring",
       }
     };

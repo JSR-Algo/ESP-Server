@@ -14,6 +14,7 @@ import correctWord from './module/correctWord.js'
 import course from './module/course.js'
 import lesson from './module/lesson.js'
 import monitoring from './module/monitoring.js'
+import courseInsights from './module/courseInsights.js'
 import nestAuth from './module/nestAuth.js'
 
 
@@ -63,5 +64,6 @@ export default {
     course,
     lesson,
     monitoring,
+    courseInsights,
     nestAuth
   }

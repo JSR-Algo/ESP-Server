@@ -258,6 +258,18 @@ const routes = [
       title: 'Lesson monitoring'
     }
   },
+  {
+    path: '/course-insights',
+    name: 'CourseInsights',
+    component: function () {
+      return import('../views/CourseInsights.vue')
+    },
+    meta: {
+      requiresAuth: true,
+      requiresSuperAdmin: true,
+      title: 'Course insights'
+    }
+  },
 ]
 const router = new VueRouter({
   base: process.env.VUE_APP_PUBLIC_PATH || '/',
@@ -279,7 +291,7 @@ VueRouter.prototype.push = function push(location) {
 }
 
 // NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring']
+const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights']
 
 // Route Guard
 router.beforeEach((to, from, next) => {
