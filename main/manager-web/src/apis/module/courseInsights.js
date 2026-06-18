@@ -70,7 +70,13 @@ function normalizeQuality(raw) {
     avgSuccessRate: r.avgSuccessRate == null ? null : Number(r.avgSuccessRate),
     avgDurationSec: r.avgDurationSec == null ? null : Number(r.avgDurationSec),
     activeChildren: Number(r.activeChildren || 0),
+    personalizationRate: Number(r.personalizationRate || 0),
+    completionScore: Number(r.completionScore || 0),
+    successScore: Number(r.successScore || 0),
+    personalizationScore: Number(r.personalizationScore || 0),
     qualityScore: Number(r.qualityScore || 0),
+    riskLevel: r.riskLevel || 'watch',
+    issueTags: Array.isArray(r.issueTags) ? r.issueTags : [],
     lastActivityAt: r.lastActivityAt || null,
   };
 }

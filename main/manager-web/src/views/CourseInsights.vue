@@ -162,6 +162,12 @@
             class="quality-search"
             @keyup.enter.native="fetchQuality"
           />
+          <el-select v-model="qualityRiskFilter" size="small" class="risk-select">
+            <el-option :label="$t('insights.riskAll')" value="all" />
+            <el-option :label="$t('insights.riskAttention')" value="attention" />
+            <el-option :label="$t('insights.riskWatch')" value="watch" />
+            <el-option :label="$t('insights.riskHealthy')" value="healthy" />
+          </el-select>
           <el-button size="small" type="primary" @click="fetchQuality">{{ $t('insights.search') }}</el-button>
         </div>
         <div class="quality-stats">
@@ -177,17 +183,45 @@
             <span class="stat-label">{{ $t('insights.activeChildren') }}</span>
             <strong>{{ totalActiveChildren }}</strong>
           </div>
+          <div class="stat-item attention-stat">
+            <span class="stat-label">{{ $t('insights.needsAttention') }}</span>
+            <strong>{{ attentionCourses }}</strong>
+          </div>
         </div>
-        <el-table v-loading="qualityLoading" :data="qualityRows" stripe>
+        <el-table v-loading="qualityLoading" :data="filteredQualityRows" stripe>
           <el-table-column prop="courseKey" :label="$t('course.colKey')" min-width="150" />
           <el-table-column prop="title" :label="$t('course.colTitle')" min-width="160" />
+          <el-table-column :label="$t('insights.riskLevel')" width="130">
+            <template slot-scope="scope">
+              <el-tag size="mini" :type="riskTagType(scope.row.riskLevel)">{{ riskLabel(scope.row.riskLevel) }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('insights.qualityScore')" width="120">
             <template slot-scope="scope">
               <el-progress :percentage="scope.row.qualityScore" :stroke-width="8" :show-text="true" />
             </template>
           </el-table-column>
+          <el-table-column :label="$t('insights.scoreBreakdown')" min-width="230">
+            <template slot-scope="scope">
+              <div class="breakdown-row">
+                <span>{{ $t('insights.completionShort') }}</span>
+                <el-progress :percentage="scope.row.completionScore" :stroke-width="6" :show-text="false" />
+                <strong>{{ scope.row.completionScore }}</strong>
+              </div>
+              <div class="breakdown-row">
+                <span>{{ $t('insights.successShort') }}</span>
+                <el-progress :percentage="scope.row.successScore" :stroke-width="6" :show-text="false" />
+                <strong>{{ scope.row.successScore }}</strong>
+              </div>
+              <div class="breakdown-row">
+                <span>{{ $t('insights.personalizationShort') }}</span>
+                <el-progress :percentage="scope.row.personalizationScore" :stroke-width="6" :show-text="false" />
+                <strong>{{ scope.row.personalizationScore }}</strong>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('insights.coverage')" width="130">
-            <template slot-scope="scope">{{ scope.row.personalizedLessonCount }}/{{ scope.row.lessonCount }}</template>
+            <template slot-scope="scope">{{ scope.row.personalizedLessonCount }}/{{ scope.row.lessonCount }} · {{ scope.row.personalizationRate }}%</template>
           </el-table-column>
           <el-table-column :label="$t('insights.completionRate')" width="120">
             <template slot-scope="scope">{{ scope.row.completionRate }}%</template>
@@ -201,6 +235,14 @@
           <el-table-column prop="assignments" :label="$t('insights.assignments')" width="110" />
           <el-table-column prop="failed" :label="$t('insights.failed')" width="90" />
           <el-table-column prop="running" :label="$t('insights.running')" width="90" />
+          <el-table-column :label="$t('insights.issues')" min-width="190">
+            <template slot-scope="scope">
+              <span v-if="!scope.row.issueTags.length" class="muted small">{{ $t('insights.noIssues') }}</span>
+              <el-tag v-for="tag in scope.row.issueTags" :key="tag" size="mini" type="warning" class="tag-gap" effect="plain">
+                {{ issueLabel(tag) }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('insights.lastActivity')" width="170">
             <template slot-scope="scope">{{ formatTime(scope.row.lastActivityAt) }}</template>
           </el-table-column>
@@ -236,6 +278,7 @@ export default {
       qualityLoading: false,
       qualityWindow: 30,
       qualityKeyword: '',
+      qualityRiskFilter: 'all',
     };
   },
   computed: {
@@ -251,6 +294,13 @@ export default {
     },
     totalActiveChildren() {
       return this.qualityRows.reduce((sum, row) => sum + row.activeChildren, 0);
+    },
+    attentionCourses() {
+      return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
+    },
+    filteredQualityRows() {
+      if (this.qualityRiskFilter === 'all') return this.qualityRows;
+      return this.qualityRows.filter((row) => row.riskLevel === this.qualityRiskFilter);
     },
   },
   created() {
@@ -364,6 +414,19 @@ export default {
       const n = Number(sec || 0);
       if (n < 60) return `${n}s`;
       return `${Math.round(n / 60)}m`;
+    },
+    riskTagType(level) {
+      if (level === 'attention') return 'danger';
+      if (level === 'healthy') return 'success';
+      return 'warning';
+    },
+    riskLabel(level) {
+      return this.$t(`insights.${level === 'attention' ? 'riskAttention' : level === 'healthy' ? 'riskHealthy' : 'riskWatch'}`);
+    },
+    issueLabel(tag) {
+      const key = `insights.issue.${tag}`;
+      const value = this.$t(key);
+      return value === key ? tag : value;
     },
   },
 };
@@ -483,11 +546,30 @@ export default {
 .stat-item strong {
   font-size: 20px;
 }
+.attention-stat strong {
+  color: #f56c6c;
+}
 .window-select {
   width: 180px;
 }
 .quality-search {
   width: 280px;
+}
+.risk-select {
+  width: 170px;
+}
+.breakdown-row {
+  display: grid;
+  grid-template-columns: 36px minmax(80px, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  font-size: 12px;
+  color: #606266;
+}
+.breakdown-row strong {
+  color: #303133;
+  font-weight: 600;
 }
 @media (max-width: 1100px) {
   .split-layout {
@@ -509,7 +591,8 @@ export default {
   .filter-row .el-input,
   .preview-toolbar .el-input,
   .quality-search,
-  .window-select {
+  .window-select,
+  .risk-select {
     width: 100%;
   }
   .filter-row .el-button,
