@@ -12,6 +12,9 @@
       </div>
       <div class="right-operations">
         <span class="backend-hint">{{ $t('course.backendHint') }}</span>
+        <el-button size="small" @click="$router.push('/lesson-monitoring')">
+          {{ $t('lesson.monitor') }}
+        </el-button>
         <el-button type="primary" size="small" @click="openCreate">
           {{ $t('course.createBtn') }}
         </el-button>
@@ -22,6 +25,24 @@
     </div>
 
     <div class="main-wrapper">
+      <div class="course-stats">
+        <div class="stat-item">
+          <span class="stat-label">{{ $t('course.statTotal') }}</span>
+          <strong>{{ list.length }}</strong>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">{{ $t('course.statTemplates') }}</span>
+          <strong>{{ templateCount }}</strong>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">{{ $t('course.statCustom') }}</span>
+          <strong>{{ customCount }}</strong>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">{{ $t('course.statPublished') }}</span>
+          <strong>{{ publishedCount }}</strong>
+        </div>
+      </div>
       <el-card class="content-area" shadow="never">
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="courseKey" :label="$t('course.colKey')" min-width="160" />
@@ -142,6 +163,15 @@ export default {
       if (this.kindFilter === 'template') return this.list.filter((c) => c.isTemplate);
       if (this.kindFilter === 'custom') return this.list.filter((c) => !c.isTemplate);
       return this.list;
+    },
+    templateCount() {
+      return this.list.filter((c) => c.isTemplate).length;
+    },
+    customCount() {
+      return this.list.filter((c) => !c.isTemplate).length;
+    },
+    publishedCount() {
+      return this.list.filter((c) => c.status === 'published').length;
     },
   },
   created() {
@@ -327,10 +357,42 @@ export default {
 .main-wrapper {
   padding: 16px 24px;
 }
+.course-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.stat-item {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #fff;
+  padding: 12px 14px;
+}
+.stat-label {
+  display: block;
+  margin-bottom: 6px;
+  color: #606266;
+  font-size: 12px;
+}
+.stat-item strong {
+  font-size: 22px;
+  color: #303133;
+}
 .danger-text {
   color: #f56c6c;
 }
 .muted {
   color: #909399;
+}
+@media (max-width: 960px) {
+  .operation-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .course-stats {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
 }
 </style>

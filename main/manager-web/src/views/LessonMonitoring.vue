@@ -29,6 +29,14 @@
             class="filter-input"
             @keyup.enter.native="fetchList"
           />
+          <el-input
+            v-model="filters.lessonId"
+            :placeholder="$t('monitoring.filterLessonId')"
+            size="small"
+            clearable
+            class="filter-input"
+            @keyup.enter.native="fetchList"
+          />
           <el-select
             v-model="filters.state"
             :placeholder="$t('monitoring.filterState')"
@@ -151,7 +159,7 @@ export default {
       list: [],
       loading: false,
       limit: 200, // backend caps at 200; raised from the silent default of 50
-      filters: { deviceId: '', childId: '', state: '' },
+      filters: { deviceId: '', childId: '', lessonId: '', state: '' },
       states: [
         'ASSIGNED',
         'PRELOADING',
@@ -169,6 +177,9 @@ export default {
     };
   },
   created() {
+    if (this.$route.query.lessonId) {
+      this.filters.lessonId = String(this.$route.query.lessonId);
+    }
     this.fetchList();
   },
   methods: {
@@ -197,6 +208,7 @@ export default {
         {
           deviceId: this.filters.deviceId.trim(),
           childId: this.filters.childId.trim(),
+          lessonId: this.filters.lessonId.trim(),
           state: this.filters.state,
           limit: this.limit,
         },

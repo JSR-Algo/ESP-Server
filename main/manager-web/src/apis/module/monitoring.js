@@ -18,6 +18,7 @@ export default {
     const p = params || {};
     if (p.deviceId) qs.push(`deviceId=${encodeURIComponent(p.deviceId)}`);
     if (p.childId) qs.push(`childId=${encodeURIComponent(p.childId)}`);
+    if (p.lessonId) qs.push(`lessonId=${encodeURIComponent(p.lessonId)}`);
     if (p.state) qs.push(`state=${encodeURIComponent(p.state)}`);
     if (p.limit) qs.push(`limit=${encodeURIComponent(p.limit)}`);
     const q = qs.length ? `?${qs.join('&')}` : '';

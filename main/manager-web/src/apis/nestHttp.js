@@ -33,6 +33,7 @@ export function normalizeCourse(raw) {
 
 export function normalizeLesson(raw) {
   const r = raw || {};
+  const topicTags = r.topic_tags ?? r.topicTags ?? [];
   return {
     lessonId: r.id ?? r.lesson_id ?? r.lessonId ?? '',
     lessonKey: r.lesson_key ?? r.lessonKey ?? '',
@@ -44,6 +45,11 @@ export function normalizeLesson(raw) {
     ageBand: r.age_band ?? r.ageBand ?? '',
     manifestChecksum: r.manifest_checksum ?? r.manifestChecksum ?? '',
     publishedAt: r.published_at ?? r.publishedAt ?? null,
+    lessonType: r.lesson_type ?? r.lessonType ?? 'lesson',
+    topicTags: Array.isArray(topicTags) ? topicTags : [],
+    difficultyBand: r.difficulty_band ?? r.difficultyBand ?? '',
+    estimatedDurationSec: r.estimated_duration_sec ?? r.estimatedDurationSec ?? null,
+    monitorable: Boolean(r.monitorable ?? true),
   };
 }
 
