@@ -49,6 +49,9 @@ def test_ci_python_test_installs_speex_build_dependencies():
     install_deps = "sudo apt-get update && sudo apt-get install -y --no-install-recommends libspeexdsp-dev swig build-essential pkg-config"
     assert install_deps in python_test_job
     assert python_test_job.index(install_deps) < python_test_job.index("pip install -r requirements.txt")
+    assert "pip install pytest pytest-cov" in python_test_job
+    assert python_test_job.index("pip install -r requirements.txt") < python_test_job.index("pip install pytest pytest-cov")
+    assert python_test_job.index("pip install pytest pytest-cov") < python_test_job.index("pytest --cov --cov-report=xml")
 
 
 def test_ci_frontend_lint_install_is_best_effort_for_mobile_platform_deps():
