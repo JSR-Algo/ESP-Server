@@ -73,8 +73,44 @@ def _install_connection_import_stubs():
     class DummyActionResponse:
         pass
 
+    class DummyToolType:
+        SYSTEM_CTL = "SYSTEM_CTL"
+        CHANGE_SYS_PROMPT = "CHANGE_SYS_PROMPT"
+        WAIT = "WAIT"
+
+    def _dummy_register_function(*args, **kwargs):
+        def _decorator(func):
+            return func
+
+        return _decorator
+
     class DummyInterfaceType:
         LOCAL = "LOCAL"
+
+    class DummySentenceType:
+        FIRST = "FIRST"
+        MIDDLE = "MIDDLE"
+        LAST = "LAST"
+
+    class DummyContentType:
+        TEXT = "TEXT"
+        FILE = "FILE"
+        ACTION = "ACTION"
+
+    class DummyTTSMessageDTO:
+        def __init__(
+            self,
+            sentence_id,
+            sentence_type,
+            content_type,
+            content_detail=None,
+            content_file=None,
+        ):
+            self.sentence_id = sentence_id
+            self.sentence_type = sentence_type
+            self.content_type = content_type
+            self.content_detail = content_detail
+            self.content_file = content_file
 
     class DummyAuthenticationError(Exception):
         pass
@@ -104,9 +140,39 @@ def _install_connection_import_stubs():
         real_config_loader = importlib.import_module("config.config_loader")
     except Exception:
         real_config_loader = types.ModuleType("config.config_loader")
+    try:
+        real_plugin_register = importlib.import_module("plugins_func.register")
+    except Exception:
+        real_plugin_register = types.ModuleType("plugins_func.register")
+        real_plugin_register.Action = DummyAction
+        real_plugin_register.ActionResponse = DummyActionResponse
+        real_plugin_register.ToolType = DummyToolType
+        real_plugin_register.register_function = _dummy_register_function
+    try:
+        real_util = importlib.import_module("core.utils.util")
+        util_is_fallback = False
+    except Exception:
+        real_util = types.ModuleType("core.utils.util")
+        util_is_fallback = True
+    try:
+        real_auth = importlib.import_module("core.auth")
+        auth_is_fallback = False
+    except Exception:
+        real_auth = types.ModuleType("core.auth")
+        auth_is_fallback = True
+    try:
+        real_tts_dto = importlib.import_module("core.providers.tts.dto.dto")
+        tts_dto_is_fallback = False
+    except Exception:
+        real_tts_dto = types.ModuleType("core.providers.tts.dto.dto")
+        tts_dto_is_fallback = True
+    try:
+        real_text_utils = importlib.import_module("core.utils.textUtils")
+    except Exception:
+        real_text_utils = types.ModuleType("core.utils.textUtils")
 
     modules = {
-        "core.utils.util": types.ModuleType("core.utils.util"),
+        "core.utils.util": real_util,
         "core.utils.modules_initialize": types.ModuleType(
             "core.utils.modules_initialize"
         ),
@@ -119,24 +185,25 @@ def _install_connection_import_stubs():
             "core.providers.tools.unified_tool_handler"
         ),
         "plugins_func.loadplugins": types.ModuleType("plugins_func.loadplugins"),
-        "plugins_func.register": types.ModuleType("plugins_func.register"),
-        "core.auth": types.ModuleType("core.auth"),
+        "plugins_func.register": real_plugin_register,
+        "core.auth": real_auth,
         "config.config_loader": real_config_loader,
-        "core.providers.tts.dto.dto": types.ModuleType("core.providers.tts.dto.dto"),
+        "core.providers.tts.dto.dto": real_tts_dto,
         "config.logger": types.ModuleType("config.logger"),
         "config.manage_api_client": types.ModuleType("config.manage_api_client"),
         "core.utils.prompt_manager": types.ModuleType("core.utils.prompt_manager"),
         "core.utils.voiceprint_provider": types.ModuleType(
             "core.utils.voiceprint_provider"
         ),
-        "core.utils.textUtils": types.ModuleType("core.utils.textUtils"),
+        "core.utils.textUtils": real_text_utils,
     }
 
-    modules["core.utils.util"].extract_json_from_string = lambda value: value
-    modules["core.utils.util"].check_vad_update = lambda *args, **kwargs: False
-    modules["core.utils.util"].check_asr_update = lambda *args, **kwargs: False
-    modules["core.utils.util"].filter_sensitive_info = lambda value: value
-    modules["core.utils.util"].get_system_error_response = lambda *args, **kwargs: {}
+    if util_is_fallback:
+        modules["core.utils.util"].extract_json_from_string = lambda value: value
+        modules["core.utils.util"].check_vad_update = lambda *args, **kwargs: False
+        modules["core.utils.util"].check_asr_update = lambda *args, **kwargs: False
+        modules["core.utils.util"].filter_sensitive_info = lambda value: value
+        modules["core.utils.util"].get_system_error_response = lambda *args, **kwargs: {}
 
     modules["core.utils.modules_initialize"].initialize_modules = (
         lambda *args, **kwargs: {}
@@ -157,14 +224,14 @@ def _install_connection_import_stubs():
     modules["core.handle.textHandle"].handleTextMessage = _fake_handle_text_message
     modules["core.providers.tools.unified_tool_handler"].UnifiedToolHandler = object
     modules["plugins_func.loadplugins"].auto_import_modules = lambda *args, **kwargs: None
-    modules["plugins_func.register"].Action = DummyAction
-    modules["plugins_func.register"].ActionResponse = DummyActionResponse
-    modules["core.auth"].AuthManager = DummyAuthManager
-    modules["core.auth"].AuthenticationError = DummyAuthenticationError
+    if auth_is_fallback:
+        modules["core.auth"].AuthManager = DummyAuthManager
+        modules["core.auth"].AuthenticationError = DummyAuthenticationError
     modules["config.config_loader"].get_private_config_from_api = _noop_async
-    modules["core.providers.tts.dto.dto"].ContentType = object
-    modules["core.providers.tts.dto.dto"].TTSMessageDTO = object
-    modules["core.providers.tts.dto.dto"].SentenceType = object
+    if tts_dto_is_fallback:
+        modules["core.providers.tts.dto.dto"].ContentType = DummyContentType
+        modules["core.providers.tts.dto.dto"].TTSMessageDTO = DummyTTSMessageDTO
+        modules["core.providers.tts.dto.dto"].SentenceType = DummySentenceType
     modules["config.logger"].setup_logging = lambda: DummyLogger()
     modules["config.logger"].build_module_string = lambda *args, **kwargs: "stub"
     modules["config.logger"].create_connection_logger = lambda *args, **kwargs: DummyLogger()
@@ -369,6 +436,99 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         release_init.set()
         allow_route_return.set()
 
+        await asyncio.wait_for(handle_task, timeout=0.5)
+
+    async def test_handle_connection_schedules_lesson_pull_on_boot_without_blocking_voice_route(self):
+        handler = self._build_handler()
+        handler.config["lesson"] = {"runtime_enabled": True}
+        allow_route_return = asyncio.Event()
+        route_called = asyncio.Event()
+        lesson_pull_started = asyncio.Event()
+        allow_lesson_pull_finish = asyncio.Event()
+
+        async def fake_initialize_private_config_async():
+            handler.bind_completed_event.set()
+
+        async def fake_route_message(message):
+            route_called.set()
+            await allow_route_return.wait()
+
+        async def fake_background_initialize():
+            return None
+
+        async def fake_check_timeout():
+            return None
+
+        async def fake_lesson_pull_on_connect():
+            lesson_pull_started.set()
+            await allow_lesson_pull_finish.wait()
+
+        async def fake_save_and_close(ws):
+            return None
+
+        handler._initialize_private_config_async = fake_initialize_private_config_async
+        handler._background_initialize = fake_background_initialize
+        handler._route_message = fake_route_message
+        handler._check_timeout = fake_check_timeout
+        handler._lesson_pull_on_connect = fake_lesson_pull_on_connect
+        handler._save_and_close = fake_save_and_close
+
+        handle_task = asyncio.create_task(
+            handler.handle_connection(_FakeWebSocket(['{"type":"listen"}']))
+        )
+
+        await asyncio.wait_for(route_called.wait(), timeout=0.5)
+        await asyncio.wait_for(lesson_pull_started.wait(), timeout=0.5)
+        self.assertIsNotNone(handler.lesson_pull_task)
+        self.assertFalse(handler.lesson_pull_task.done())
+
+        allow_lesson_pull_finish.set()
+        allow_route_return.set()
+        await asyncio.wait_for(handle_task, timeout=0.5)
+
+    async def test_handle_connection_does_not_schedule_lesson_pull_when_runtime_disabled(self):
+        handler = self._build_handler()
+        handler.config["lesson"] = {"runtime_enabled": False}
+        allow_route_return = asyncio.Event()
+        route_called = asyncio.Event()
+        lesson_pull_started = asyncio.Event()
+
+        async def fake_initialize_private_config_async():
+            handler.bind_completed_event.set()
+
+        async def fake_route_message(message):
+            route_called.set()
+            await allow_route_return.wait()
+
+        async def fake_background_initialize():
+            return None
+
+        async def fake_check_timeout():
+            return None
+
+        async def fake_lesson_pull_on_connect():
+            lesson_pull_started.set()
+
+        async def fake_save_and_close(ws):
+            return None
+
+        handler._initialize_private_config_async = fake_initialize_private_config_async
+        handler._background_initialize = fake_background_initialize
+        handler._route_message = fake_route_message
+        handler._check_timeout = fake_check_timeout
+        handler._lesson_pull_on_connect = fake_lesson_pull_on_connect
+        handler._save_and_close = fake_save_and_close
+
+        handle_task = asyncio.create_task(
+            handler.handle_connection(_FakeWebSocket(['{"type":"listen"}']))
+        )
+
+        await asyncio.wait_for(route_called.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        self.assertIsNone(handler.lesson_pull_task)
+        self.assertFalse(lesson_pull_started.is_set())
+
+        allow_route_return.set()
         await asyncio.wait_for(handle_task, timeout=0.5)
 
     async def test_route_message_waits_for_bind_then_forwards_to_provider(self):
