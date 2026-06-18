@@ -278,6 +278,7 @@ export default {
       qualityLoading: false,
       qualityWindow: 30,
       qualityKeyword: '',
+      qualityCourseId: '',
       qualityRiskFilter: 'all',
     };
   },
@@ -305,6 +306,13 @@ export default {
   },
   created() {
     if (this.$route.query.tab === 'quality') this.activeTab = 'quality';
+    if (this.$route.query.keyword) {
+      const keyword = String(this.$route.query.keyword);
+      this.learnerKeyword = keyword;
+      this.previewKeyword = keyword;
+      this.qualityKeyword = keyword;
+    }
+    if (this.$route.query.courseId) this.qualityCourseId = String(this.$route.query.courseId);
     this.fetchLearners();
     this.fetchQuality();
   },
@@ -393,7 +401,7 @@ export default {
     fetchQuality() {
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
-        { windowDays: this.qualityWindow, keyword: this.qualityKeyword.trim() },
+        { windowDays: this.qualityWindow, courseId: this.qualityCourseId, keyword: this.qualityKeyword.trim() },
         (rows) => {
           this.qualityLoading = false;
           this.qualityRows = rows;

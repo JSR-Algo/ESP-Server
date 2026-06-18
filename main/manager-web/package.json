@@ -5,7 +5,8 @@
   "scripts": {
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
-    "analyze": "cross-env ANALYZE=true vue-cli-service build"
+    "analyze": "cross-env ANALYZE=true vue-cli-service build",
+    "test:course-admin-ui": "node scripts/check-course-admin-ui.mjs"
   },
   "dependencies": {
     "core-js": "^3.41.0",

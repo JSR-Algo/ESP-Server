@@ -11,11 +11,12 @@ import { nestRequest } from '../nestHttp';
  */
 
 export default {
-  // GET /v1/admin/lesson-monitoring/assignments?deviceId=&childId=&state=&limit=
+  // GET /v1/admin/lesson-monitoring/assignments?keyword=&deviceId=&childId=&state=&limit=
   //   -> { assignments: AssignmentProgress[] } (newest first)
   listAssignments(params, onSuccess, onError) {
     const qs = [];
     const p = params || {};
+    if (p.keyword) qs.push(`keyword=${encodeURIComponent(p.keyword)}`);
     if (p.deviceId) qs.push(`deviceId=${encodeURIComponent(p.deviceId)}`);
     if (p.childId) qs.push(`childId=${encodeURIComponent(p.childId)}`);
     if (p.lessonId) qs.push(`lessonId=${encodeURIComponent(p.lessonId)}`);

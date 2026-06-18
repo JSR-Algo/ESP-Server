@@ -14,6 +14,14 @@
       <el-card class="content-area" shadow="never">
         <div class="filter-row">
           <el-input
+            v-model="filters.keyword"
+            :placeholder="$t('monitoring.filterKeyword')"
+            size="small"
+            clearable
+            class="filter-input filter-keyword"
+            @keyup.enter.native="fetchList"
+          />
+          <el-input
             v-model="filters.deviceId"
             :placeholder="$t('monitoring.filterDeviceId')"
             size="small"
@@ -74,7 +82,12 @@
             </template>
           </el-table-column>
           <el-table-column prop="deviceId" :label="$t('monitoring.colDevice')" min-width="140" show-overflow-tooltip />
-          <el-table-column prop="childId" :label="$t('monitoring.colChild')" min-width="140" show-overflow-tooltip />
+          <el-table-column :label="$t('monitoring.colChild')" min-width="160" show-overflow-tooltip>
+            <template slot-scope="scope">
+              <div v-if="scope.row.childName" class="primary-text">{{ scope.row.childName }}</div>
+              <div class="muted small">{{ scope.row.childId }}</div>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('monitoring.colSteps')" width="100" align="center">
             <template slot-scope="scope">
               {{ scope.row.stepsSucceeded }}/{{ scope.row.stepsCompleted }}
@@ -159,7 +172,7 @@ export default {
       list: [],
       loading: false,
       limit: 200, // backend caps at 200; raised from the silent default of 50
-      filters: { deviceId: '', childId: '', lessonId: '', state: '' },
+      filters: { keyword: '', deviceId: '', childId: '', lessonId: '', state: '' },
       states: [
         'ASSIGNED',
         'PRELOADING',
@@ -177,6 +190,9 @@ export default {
     };
   },
   created() {
+    if (this.$route.query.keyword) {
+      this.filters.keyword = String(this.$route.query.keyword);
+    }
     if (this.$route.query.lessonId) {
       this.filters.lessonId = String(this.$route.query.lessonId);
     }
@@ -206,6 +222,7 @@ export default {
       this.loading = true;
       Api.monitoring.listAssignments(
         {
+          keyword: this.filters.keyword.trim(),
           deviceId: this.filters.deviceId.trim(),
           childId: this.filters.childId.trim(),
           lessonId: this.filters.lessonId.trim(),
