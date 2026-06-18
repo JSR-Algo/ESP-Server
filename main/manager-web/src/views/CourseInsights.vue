@@ -43,6 +43,7 @@
               <template slot-scope="scope">
                 <el-tag v-for="tag in scope.row.personality.interests" :key="tag" size="mini" class="tag-gap" effect="plain">{{ tag }}</el-tag>
                 <el-tag v-if="scope.row.personality.learningStyle" size="mini" type="success" effect="plain">{{ scope.row.personality.learningStyle }}</el-tag>
+                <el-tag v-if="scope.row.personality.parentCareer" size="mini" type="warning" effect="plain">{{ scope.row.personality.parentCareer }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column :label="$t('insights.progress')" width="110">
@@ -77,6 +78,15 @@
                   <el-option label="visual" value="visual" />
                   <el-option label="audio" value="audio" />
                   <el-option label="interactive" value="interactive" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="$t('insights.parentCareer')">
+                <el-select v-model="personalityForm.parentCareer" clearable filterable>
+                  <el-option label="teacher" value="teacher" />
+                  <el-option label="engineer" value="engineer" />
+                  <el-option label="healthcare" value="healthcare" />
+                  <el-option label="business" value="business" />
+                  <el-option label="artist" value="artist" />
                 </el-select>
               </el-form-item>
               <el-form-item :label="$t('insights.vocabularyLevel')">
@@ -196,7 +206,7 @@ export default {
       learners: [],
       learnersLoading: false,
       selectedLearner: {},
-      personalityForm: { interestsText: '', learningStyle: '', vocabularyLevel: '', attentionSpanSec: 120 },
+      personalityForm: { interestsText: '', learningStyle: '', parentCareer: '', vocabularyLevel: '', attentionSpanSec: 120 },
       savingPersonality: false,
       previewLessons: [],
       previewLoading: false,
@@ -254,6 +264,7 @@ export default {
       this.personalityForm = {
         interestsText: row.personality.interests.join(', '),
         learningStyle: row.personality.learningStyle,
+        parentCareer: row.personality.parentCareer,
         vocabularyLevel: row.personality.vocabularyLevel,
         attentionSpanSec: row.personality.attentionSpanSec || 120,
       };
@@ -273,6 +284,7 @@ export default {
         {
           interests: this.parseInterests(),
           learningStyle: this.personalityForm.learningStyle,
+          parentCareer: this.personalityForm.parentCareer,
           vocabularyLevel: this.personalityForm.vocabularyLevel,
           attentionSpanSec: this.personalityForm.attentionSpanSec,
         },

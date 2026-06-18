@@ -96,6 +96,7 @@ export default {
   'insights.interests': 'Interests',
   'insights.interestsHelp': 'animals, farm, visual',
   'insights.learningStyle': 'Learning style',
+  'insights.parentCareer': 'Parent career',
   'insights.vocabularyLevel': 'Vocabulary level',
   'insights.attentionSpan': 'Attention span (sec)',
   'insights.savePersonality': 'Save personality',

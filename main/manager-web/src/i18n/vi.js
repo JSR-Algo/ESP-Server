@@ -96,6 +96,7 @@ export default {
   'insights.interests': 'Sở thích',
   'insights.interestsHelp': 'animals, farm, visual',
   'insights.learningStyle': 'Kiểu học',
+  'insights.parentCareer': 'Nghề nghiệp phụ huynh',
   'insights.vocabularyLevel': 'Mức từ vựng',
   'insights.attentionSpan': 'Khả năng tập trung (giây)',
   'insights.savePersonality': 'Lưu personality',

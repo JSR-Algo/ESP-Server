@@ -19,6 +19,7 @@ function normalizeLearner(raw) {
       vocabularyLevel: p.vocabularyLevel || '',
       attentionSpanSec: p.attentionSpanSec || null,
       confidenceScore: p.confidenceScore || null,
+      parentCareer: p.parentCareer || '',
     },
     stats: {
       enrolledCourses: Number(s.enrolledCourses || 0),
