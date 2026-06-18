@@ -55,6 +55,9 @@ public class ShiroConfig {
         ShiroFilterFactoryBean shiroFilter = new ShiroFilterFactoryBean();
         shiroFilter.setSecurityManager(securityManager);
         shiroFilter.setShiroFilterConfiguration(config);
+        shiroFilter.setLoginUrl("/tbot/user/login");
+        shiroFilter.setUnauthorizedUrl("/tbot/user/login");
+        shiroFilter.setSuccessUrl("/tbot/");
 
         Map<String, Filter> filters = new HashMap<>();
         // oauthFilter
@@ -75,7 +78,7 @@ public class ShiroConfig {
         filterMap.put("/ota/**", "anon");
         filterMap.put("/otaMag/download/**", "anon");
         filterMap.put("/webjars/**", "anon");
-        filterMap.put("/druid/**", "anon");
+        filterMap.put("/druid/**", "oauth2");
         filterMap.put("/v3/api-docs/**", "anon");
         filterMap.put("/doc.html", "anon");
         filterMap.put("/favicon.ico", "anon");
