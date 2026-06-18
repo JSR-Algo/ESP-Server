@@ -104,6 +104,7 @@ export default {
     const p = params || {};
     const qs = [];
     if (p.courseId) qs.push(`courseId=${encodeURIComponent(p.courseId)}`);
+    if (p.keyword) qs.push(`keyword=${encodeURIComponent(p.keyword)}`);
     if (p.limit) qs.push(`limit=${encodeURIComponent(p.limit)}`);
     const q = qs.length ? `?${qs.join('&')}` : '';
     nestRequest({
@@ -122,6 +123,7 @@ export default {
     const qs = [];
     if (p.windowDays) qs.push(`windowDays=${encodeURIComponent(p.windowDays)}`);
     if (p.courseId) qs.push(`courseId=${encodeURIComponent(p.courseId)}`);
+    if (p.keyword) qs.push(`keyword=${encodeURIComponent(p.keyword)}`);
     const q = qs.length ? `?${qs.join('&')}` : '';
     nestRequest({
       url: `${getNestUrl()}/course-insights/course-quality${q}`,

@@ -5,6 +5,27 @@
     <div class="operation-bar">
       <h2 class="page-title">{{ $t('device.management') }}</h2>
       <div class="right-operations">
+        <el-select
+          v-model="selectedChildName"
+          filterable
+          remote
+          reserve-keyword
+          clearable
+          :remote-method="searchChildrenByKeyword"
+          :loading="childLoading"
+          :placeholder="$t('device.childNamePlaceholder')"
+          class="child-name-select"
+        >
+          <el-option
+            v-for="child in childOptions"
+            :key="child.childId"
+            :label="child.childName"
+            :value="child.childName"
+          >
+            <span>{{ child.childName }}</span>
+            <span class="child-option-meta">{{ child.parentEmail || child.parentId }}</span>
+          </el-option>
+        </el-select>
         <el-input :placeholder="$t('device.searchPlaceholder')" v-model="searchKeyword" class="search-input"
           @keyup.enter.native="handleSearch" clearable />
         <el-button class="btn-search" @click="handleSearch">{{ $t('device.search') }}</el-button>
@@ -63,6 +84,9 @@
                 <template slot-scope="scope">
                   <el-button size="mini" type="text" @click="handleUnbind(scope.row.device_id)">
                     {{ $t('device.unbind') }}
+                  </el-button>
+                  <el-button size="mini" type="text" :disabled="!selectedChildName" @click="applyChildNameToDevice(scope.row)">
+                    {{ $t('device.useChildName') }}
                   </el-button>
                   <el-button v-if="isGenerate(scope.row)" size="mini" type="text" @click="handleGenertor(scope.row)">
                     {{ $t('device.deviceThemeGeneration') }}
@@ -151,6 +175,9 @@ export default {
       pageSize: 10,
       pageSizeOptions: [10, 20, 50, 100],
       deviceList: [],
+      selectedChildName: '',
+      childOptions: [],
+      childLoading: false,
       loading: false,
       userApi: null,
       firmwareTypes: [],
@@ -163,7 +190,8 @@ export default {
       if (!keyword) return this.deviceList;
       return this.deviceList.filter(device =>
         (device.model && device.model.toLowerCase().includes(keyword)) ||
-        (device.macAddress && device.macAddress.toLowerCase().includes(keyword))
+        (device.macAddress && device.macAddress.toLowerCase().includes(keyword)) ||
+        (device.remark && device.remark.toLowerCase().includes(keyword))
       );
     },
 
@@ -204,6 +232,7 @@ export default {
   },
   created() {
     this.getFirmwareTypes()
+    this.fetchChildOptions('')
   },
   methods: {
     async getFirmwareTypes() {
@@ -222,6 +251,23 @@ export default {
     handleSearch() {
       this.activeSearchKeyword = this.searchKeyword;
       this.currentPage = 1;
+    },
+    searchChildrenByKeyword(keyword) {
+      this.fetchChildOptions(keyword || '');
+    },
+    fetchChildOptions(keyword) {
+      this.childLoading = true;
+      Api.courseInsights.listLearners(
+        { keyword: (keyword || '').trim(), limit: 50 },
+        (rows) => {
+          this.childLoading = false;
+          this.childOptions = rows;
+        },
+        () => {
+          this.childLoading = false;
+          this.childOptions = [];
+        },
+      );
     },
 
     handleSelectAll() {
@@ -305,6 +351,22 @@ export default {
           this.$message.error(resp.msg || this.$t('device.remarkSaveFailed'));
         }
         row._submitting = false;
+      });
+    },
+    applyChildNameToDevice(row) {
+      const childName = (this.selectedChildName || '').trim();
+      if (!childName) {
+        this.$message.warning(this.$t('device.selectChildNameFirst'));
+        return;
+      }
+      this.updateDeviceInfo(row.device_id, { alias: childName }, (ok, resp) => {
+        if (ok) {
+          row.remark = childName;
+          row._originalRemark = childName;
+          this.$message.success(this.$t('device.childNameApplied'));
+        } else {
+          this.$message.error(resp.msg || this.$t('device.remarkSaveFailed'));
+        }
       });
     },
     // Remark input: submit on blur
@@ -538,6 +600,17 @@ export default {
   display: flex;
   gap: 10px;
   margin-left: auto;
+}
+
+.child-name-select {
+  width: 230px;
+}
+
+.child-option-meta {
+  float: right;
+  color: #909399;
+  font-size: 12px;
+  margin-left: 12px;
 }
 
 .search-input {
@@ -806,6 +879,37 @@ export default {
 
 :deep(.el-table .el-button--text:hover) {
   color: #5a64b5;
+}
+
+@media (max-width: 900px) {
+  .welcome {
+    min-width: 0;
+  }
+
+  .operation-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .right-operations {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  .child-name-select,
+  .search-input {
+    width: 100%;
+  }
+
+  .btn-search {
+    width: 100%;
+  }
+
+  .main-wrapper {
+    margin: 0 12px;
+  }
 }
 
 :deep(.transparent-table) {

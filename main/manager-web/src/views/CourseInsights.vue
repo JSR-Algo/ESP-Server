@@ -31,6 +31,7 @@
               clearable
               @keyup.enter.native="fetchLearners"
             />
+            <el-button size="small" type="primary" @click="fetchLearners">{{ $t('insights.search') }}</el-button>
           </div>
           <el-table v-loading="learnersLoading" :data="learners" stripe highlight-current-row @current-change="selectLearner">
             <el-table-column prop="childName" :label="$t('insights.child')" min-width="150">
@@ -106,6 +107,17 @@
               </el-form-item>
             </el-form>
 
+            <div class="preview-toolbar">
+              <el-input
+                v-model="previewKeyword"
+                :placeholder="$t('insights.searchLessonKeyword')"
+                size="small"
+                clearable
+                @keyup.enter.native="fetchPreview"
+              />
+              <el-button size="small" :loading="previewLoading" @click="fetchPreview">{{ $t('insights.search') }}</el-button>
+            </div>
+
             <el-table v-loading="previewLoading" :data="previewLessons" stripe size="small" class="preview-table">
               <el-table-column prop="rank" :label="$t('insights.rank')" width="70" />
               <el-table-column prop="title" :label="$t('insights.lesson')" min-width="180">
@@ -142,6 +154,15 @@
             <el-option :label="$t('insights.window30')" :value="30" />
             <el-option :label="$t('insights.window90')" :value="90" />
           </el-select>
+          <el-input
+            v-model="qualityKeyword"
+            :placeholder="$t('insights.searchCourseKeyword')"
+            size="small"
+            clearable
+            class="quality-search"
+            @keyup.enter.native="fetchQuality"
+          />
+          <el-button size="small" type="primary" @click="fetchQuality">{{ $t('insights.search') }}</el-button>
         </div>
         <div class="quality-stats">
           <div class="stat-item">
@@ -208,11 +229,13 @@ export default {
       selectedLearner: {},
       personalityForm: { interestsText: '', learningStyle: '', parentCareer: '', vocabularyLevel: '', attentionSpanSec: 120 },
       savingPersonality: false,
+      previewKeyword: '',
       previewLessons: [],
       previewLoading: false,
       qualityRows: [],
       qualityLoading: false,
       qualityWindow: 30,
+      qualityKeyword: '',
     };
   },
   computed: {
@@ -306,7 +329,7 @@ export default {
       this.previewLoading = true;
       Api.courseInsights.previewLearnerLessons(
         this.selectedLearner.childId,
-        { limit: 50 },
+        { keyword: this.previewKeyword.trim(), limit: 50 },
         (payload) => {
           this.previewLoading = false;
           this.previewLessons = payload.lessons;
@@ -320,7 +343,7 @@ export default {
     fetchQuality() {
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
-        { windowDays: this.qualityWindow },
+        { windowDays: this.qualityWindow, keyword: this.qualityKeyword.trim() },
         (rows) => {
           this.qualityLoading = false;
           this.qualityRows = rows;
@@ -383,7 +406,10 @@ export default {
   gap: 16px;
 }
 .filter-row,
-.quality-toolbar {
+.quality-toolbar,
+.preview-toolbar {
+  display: flex;
+  gap: 8px;
   margin-bottom: 14px;
 }
 .detail-head {
@@ -460,14 +486,53 @@ export default {
 .window-select {
   width: 180px;
 }
+.quality-search {
+  width: 280px;
+}
 @media (max-width: 1100px) {
   .split-layout {
     grid-template-columns: 1fr;
   }
   .operation-bar,
   .detail-head,
-  .metric-line {
+  .metric-line,
+  .right-operations,
+  .quality-toolbar,
+  .preview-toolbar,
+  .filter-row {
     flex-wrap: wrap;
+  }
+  .operation-bar {
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .filter-row .el-input,
+  .preview-toolbar .el-input,
+  .quality-search,
+  .window-select {
+    width: 100%;
+  }
+  .filter-row .el-button,
+  .preview-toolbar .el-button,
+  .quality-toolbar .el-button {
+    width: 100%;
+  }
+}
+@media (max-width: 720px) {
+  .operation-bar,
+  .main-wrapper {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .left-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .metric-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 }
 </style>
