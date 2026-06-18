@@ -369,7 +369,7 @@ class GoogleLiveClientTest(unittest.TestCase):
                 "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
             },
         )
-        self.assertEqual(config["session_resumption"], {"transparent": True})
+        self.assertNotIn("session_resumption", config)
         self.assertEqual(
             config["context_window_compression"],
             {"trigger_tokens": 24000, "sliding_window": {"target_tokens": 12000}},
@@ -409,7 +409,7 @@ class GoogleLiveClientTest(unittest.TestCase):
 
         self.assertEqual(
             config["session_resumption"],
-            {"handle": "resume-handle-1", "transparent": True},
+            {"handle": "resume-handle-1"},
         )
         self.assertEqual(
             config["context_window_compression"],

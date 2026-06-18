@@ -7,6 +7,12 @@
 server:
   ip: 0.0.0.0
   port: 8000
+  # Public WebSocket URL advertised to firmware. Override in deployment or
+  # Admin Parameter Management; never commit ephemeral trycloudflare URLs.
+  websocket: ws://your-ip-or-domain:port/tbot/v1/
+  # Firmware-facing NestJS backend base. Keep the /v1 prefix so firmware can
+  # append device config, claim, and lesson-runtime routes.
+  api_url: https://tbot-backend-8wmh.onrender.com/v1
   # HTTP service port used by the vision analysis API.
   http_port: 8003
   # Vision analysis URL sent to devices. Use a LAN URL for Docker/LAN deploys or a public URL for public deploys.
