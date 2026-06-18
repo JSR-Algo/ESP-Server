@@ -51,7 +51,7 @@ def test_ci_python_test_installs_speex_build_dependencies():
     assert python_test_job.index(install_deps) < python_test_job.index("pip install -r requirements.txt")
 
 
-def test_ci_frontend_lint_uses_legacy_peer_deps_fallback():
+def test_ci_frontend_lint_install_is_best_effort_for_mobile_platform_deps():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
-    assert "npm ci || npm install --legacy-peer-deps" in workflow
+    assert 'npm ci || npm install --legacy-peer-deps || echo "Install failed"' in workflow
