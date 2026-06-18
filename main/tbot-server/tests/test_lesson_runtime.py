@@ -22,22 +22,22 @@ from core.lesson.errors import LessonError
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
 
-FIX = json.load(
-    open(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "..",
-            "..",
-            "docs",
-            "stories",
-            "US-006-learning-course-runtime",
-            "fixtures",
-            "lesson-protocol.v1.json",
-        )
-    )
+FIXTURE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "..",
+    "docs",
+    "stories",
+    "US-006-learning-course-runtime",
+    "fixtures",
+    "lesson-protocol.v1.json",
 )
+if not os.path.exists(FIXTURE_PATH):
+    raise unittest.SkipTest("lesson protocol fixture lives in sibling robot/docs checkout")
+
+FIX = json.load(open(FIXTURE_PATH))
 
 
 def _load_real_manage_api_client():
@@ -106,11 +106,13 @@ class _FakeAssetCache:
         ready=True,
         preload_error=None,
         profile_error=None,
+        local_urls=None,
     ):
         self.preload_timeout_sec = 90
         self._ready = ready
         self._preload_error = preload_error
         self._profile_error = profile_error
+        self._local_urls = local_urls or {}
         self.closed = False
 
     def assert_profile_renderable(self):
@@ -130,6 +132,9 @@ class _FakeAssetCache:
             "criticalReady": 2 if self._ready else 0,
             "assets": [],
         }
+
+    def public_url_for_source(self, source):
+        return self._local_urls.get(source)
 
     async def aclose(self):
         self.closed = True
@@ -411,6 +416,26 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(got, want, f"{ftype} not byte-consistent with fixture")
 
         self.assertEqual(rt.state, "COMPLETED")
+
+    async def test_step_body_rewrites_scene_sources_to_preloaded_asset_cache(self):
+        manifest = _build_manifest()
+        source = manifest["steps"][0]["scene"]["backgroundScene"]["poster"]["src"]
+        cached = "https://ota.test/tbot/lesson-assets/cache-token/poster"
+        rt = self._runtime(
+            manifest=manifest,
+            asset_cache=_FakeAssetCache(local_urls={source: cached}),
+        )
+
+        body = rt._step_body(manifest["steps"][0])
+
+        self.assertEqual(
+            body["scene"]["backgroundScene"]["poster"]["src"],
+            cached,
+        )
+        self.assertEqual(
+            manifest["steps"][0]["scene"]["backgroundScene"]["poster"]["src"],
+            source,
+        )
 
     # 2) ack correlation uses body.acks, never envelope.sequence / ackFor --------
 
@@ -1375,6 +1400,11 @@ class LessonManifestCapabilityFetchTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(etag)
         call = client.calls[0]
         # Default v1 capability set forwarded BOTH ways (query param + header).
+        self.assertEqual(call["method"], "GET")
+        self.assertEqual(
+            call["url"],
+            "http://backend.test/v1/lessons/w01-d01-barn-say-it/manifest",
+        )
         self.assertEqual(call["params"].get("profile"), "espTft")
         self.assertEqual(
             call["params"].get("rendererCapabilities"), "teebot-lesson-renderer.v1"
@@ -1500,6 +1530,7 @@ class LessonManifestRetryTest(unittest.IsolatedAsyncioTestCase):
 class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
     def _patch_backend(self, assignment, manifest, etag='"lesson-3-espTft-9b1f7c2a"'):
         import config.manage_api_client as mac
+        import config.device_token_client as dtc
 
         self.manifest_calls = []
 
@@ -1512,12 +1543,16 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             self.manifest_calls.append(renderer_capabilities)
             return manifest, etag
 
-        saved = (mac.get_current_assignment, mac.get_lesson_manifest)
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        saved = (mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity)
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
+        dtc.resolve_device_identity = _resolve_device_identity
 
         def _undo():
-            mac.get_current_assignment, mac.get_lesson_manifest = saved
+            mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity = saved
 
         return _undo
 
@@ -1546,6 +1581,76 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         # And the negotiated stamp on the wire is v1 (unchanged behaviour today).
         prepare = json.loads(conn.websocket.sent[0])
         self.assertEqual(prepare["protocolVersion"], "teebot-lesson-renderer.v1")
+
+
+class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_no_current_assignment_sets_user_visible_start_status(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn()
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return None
+
+        saved = (dtc.resolve_device_identity, mac.get_current_assignment)
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            dtc.resolve_device_identity, mac.get_current_assignment = saved
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "NO_CURRENT_ASSIGNMENT")
+        self.assertIn("chưa có bài học", conn.lesson_start_status["message"].lower())
+        self.assertEqual(conn.websocket.sent, [])
+
+    async def test_missing_device_token_is_surfaced_without_legacy_tokenless_pull(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn()
+        conn.device_id = "AA:BB:CC:DD:EE:FF"
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def warning(self, message, *args, **kwargs):
+                events.append(("warning", str(message)))
+                return None
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        conn.logger = _CapturingLogger()
+
+        async def _resolve_device_identity(client, base_url, mac_addr, *, logger=None):
+            self.assertEqual(mac_addr, "AA:BB:CC:DD:EE:FF")
+            return None, None
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            raise AssertionError("tokenless MAC fallback must not call assignment/current")
+
+        saved = (dtc.resolve_device_identity, mac.get_current_assignment)
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            dtc.resolve_device_identity, mac.get_current_assignment = saved
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertTrue(
+            any("device token required" in message for _level, message in events),
+            events,
+        )
 
 
 # ── P5 republish-on-connect (no reconnect) ──────────────────────────────────────
@@ -1577,15 +1682,21 @@ class _PinnedRuntime:
     """Stand-in for an already-running lesson session, so the republish guard can
     read its version identity + verify teardown is invoked."""
 
-    def __init__(self, *, assignment_id, lesson_version, assignment_version):
+    def __init__(self, *, assignment_id, lesson_version, assignment_version, state="RUNNING"):
         self.assignment_id = assignment_id
         self.lesson_version = lesson_version
         self.assignment_version = assignment_version
+        self.state = state
         self.asset_cache = _EvictableCache()
         self.closed = False
+        self.terminal_replay_calls = 0
 
     async def close(self):
         self.closed = True
+
+    async def replay_pending_terminal_event(self):
+        self.terminal_replay_calls += 1
+        return True
 
 
 class _EvictableCache:
@@ -1604,6 +1715,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         """Monkeypatch the REAL config.manage_api_client attributes the runtime
         resolves at call time (conftest does NOT stub this module). Returns an undo callable."""
         import config.manage_api_client as mac
+        import config.device_token_client as dtc
 
         # Record the renderer_capabilities the runtime forwards to the manifest
         # fetch (L3 P3) so a test can assert the device capability set is threaded
@@ -1626,12 +1738,16 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             )
             return manifest, etag
 
-        saved = (mac.get_current_assignment, mac.get_lesson_manifest)
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        saved = (mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity)
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
+        dtc.resolve_device_identity = _resolve_device_identity
 
         def _undo():
-            mac.get_current_assignment, mac.get_lesson_manifest = saved
+            mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity = saved
 
         return _undo
 
@@ -1670,6 +1786,99 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.websocket.sent, [])
+
+    async def test_unchanged_completed_session_replays_pending_terminal_event_on_reconnect_once(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="COMPLETED",
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1), _build_manifest()
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertEqual(conn.websocket.sent, [])
+
+    async def test_fresh_reconnect_replays_dead_lettered_terminal_event_before_restart(self):
+        import httpx
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+        from core.lesson.forwarder import LessonEventForwarder
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        prep = FIX["frames"]["lesson_prepare"]
+        terminal = {
+            "assignmentId": prep["assignmentId"],
+            "sessionId": "sess_reconnect_terminal",
+            "events": [{"type": "lesson_completed", "completedAt": 1_700_000_000_000}],
+        }
+
+        async def _fail_post(_client, _base_url, _device_id, _batch, *, token=None):
+            request = httpx.Request("POST", "http://backend.test/v1/devices/dev-republish/lesson-events")
+            response = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError("backend hiccup", request=request, response=response)
+
+        old_forwarder = LessonEventForwarder(
+            device_id="dev-republish",
+            base_url="http://backend.test/v1",
+            post_fn=_fail_post,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=0,
+        )
+        old_forwarder.enqueue(terminal)
+        await old_forwarder._queue.join()
+        await old_forwarder.aclose()
+
+        replayed = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED")
+
+        async def _get_manifest(*_args, **_kwargs):
+            raise AssertionError("terminal replay should prevent restarting the lesson")
+
+        async def _post_lesson_event(_client, _base_url, _device_id, batch, *, token=None):
+            replayed.append(batch)
+            return {"accepted": 1, "duplicates": 0}
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+            mac.post_lesson_event,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        mac.post_lesson_event = _post_lesson_event
+        try:
+            result = await maybe_start_lesson_on_connect(_RepublishConn())
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+                mac.post_lesson_event,
+            ) = saved
+
+        self.assertIsNone(result)
+        self.assertEqual(replayed, [terminal])
 
     async def test_changed_version_evicts_and_repulls_without_reconnect(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -1733,6 +1942,118 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.websocket.sent, [])
 
+
+    async def test_pull_uses_server_api_url_fallback_and_fetches_esptft_manifest(self):
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn(api_base=None)
+        conn.config["lesson"].pop("api_base", None)
+        conn.config["server"] = {"api_url": "http://course-backend.test/v1"}
+        calls = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            calls.append(("mint", base_url, device_id))
+            return "backend-device-123", "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            calls.append(("assignment", base_url, device_id, token))
+            return self._assignment(lesson_version=3, assignment_version=1)
+
+        async def _get_manifest(
+            client, base_url, lesson_id, profile, *, token=None, renderer_capabilities=None
+        ):
+            calls.append(("manifest", base_url, lesson_id, profile, token))
+            return _build_manifest(), '"lesson-3-espTft-9b1f7c2a"'
+
+        saved = (dtc.resolve_device_identity, mac.get_current_assignment, mac.get_lesson_manifest)
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            dtc.resolve_device_identity, mac.get_current_assignment, mac.get_lesson_manifest = saved
+
+        self.assertIsNotNone(result)
+        self.assertIn(("mint", "http://course-backend.test/v1", "dev-republish"), calls)
+        self.assertIn(
+            ("assignment", "http://course-backend.test/v1", "backend-device-123", "device-token"),
+            calls,
+        )
+        self.assertIn(
+            (
+                "manifest",
+                "http://course-backend.test/v1",
+                FIX["frames"]["lesson_prepare"]["lessonId"],
+                "espTft",
+                "device-token",
+            ),
+            calls,
+        )
+
+    async def test_start_lesson_pull_renders_background_step_and_completes(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        prep = FIX["frames"]["lesson_prepare"]
+        assignment = {
+            "assignmentId": prep["assignmentId"],
+            "assignmentVersion": prep["body"]["assignmentVersion"],
+            "lessonId": prep["lessonId"],
+            "lessonVersion": prep["lessonVersion"],
+            "profile": "espTft",
+            "state": "ASSIGNED",
+        }
+        conn = _RepublishConn()
+        undo = self._patch_backend(assignment, _build_manifest())
+        try:
+            rt = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        sent = lambda: [json.loads(p) for p in conn.websocket.sent]
+        self.assertIsNotNone(rt)
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+        self.assertEqual([f["type"] for f in sent()], ["lesson_prepare"])
+        rt.asset_cache = _FakeAssetCache(ready=True)
+        forwarder = _FakeForwarder()
+        rt.forwarder = forwarder
+
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        step = [f for f in sent() if f["type"] == "lesson_step"][-1]
+        poster = step["body"]["scene"]["backgroundScene"]["poster"]
+        self.assertTrue(poster["src"], "lesson_step must carry a background poster src")
+
+        await rt.on_lesson_ack(_ack(3, 3, step_id=step["stepId"]))
+        await rt.on_lesson_progress(
+            _progress(
+                4,
+                {
+                    "event": "step_completed",
+                    "stepType": step["body"]["stepType"],
+                    "result": "success",
+                    "detail": {"utterance": "barn"},
+                },
+                step_id=step["stepId"],
+            )
+        )
+        await rt.on_lesson_ack(_ack(4, 5))
+
+        self.assertEqual(rt.state, "COMPLETED")
+        self.assertEqual(
+            [f["type"] for f in sent()],
+            ["lesson_prepare", "lesson_start", "lesson_step", "lesson_stop"],
+        )
+        self.assertTrue(
+            any(
+                batch["events"] and batch["events"][0].get("type") == "lesson_completed"
+                for batch in forwarder.batches
+            ),
+            "lesson_completed event must be forwarded after stop ack",
+        )
 
 if __name__ == "__main__":
     unittest.main()
