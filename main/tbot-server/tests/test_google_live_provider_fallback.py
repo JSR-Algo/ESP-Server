@@ -33,6 +33,10 @@ class _DummyWebSocket:
         self.sent_messages.append(payload)
 
 
+class _VoiceConsentClient:
+    async def ensure_voice_allowed(self, _conn):
+        return True
+
 class _DummyConn:
     def __init__(self):
         self.config = {
@@ -43,6 +47,8 @@ class _DummyConn:
             "google_live": {
                 "api_key": "test-key",
                 "model": "gemini-live-test",
+                "aec_enabled": False,
+                "aec_required": False,
             },
         }
         self.logger = _DummyLogger()
@@ -55,6 +61,7 @@ class _DummyConn:
         self.client_is_speaking = False
         self.clear_queue_calls = 0
         self.clear_speak_calls = 0
+        self.voice_consent_client = _VoiceConsentClient()
 
     async def _start_classic_pipeline_session(self):
         self.classic_start_calls += 1
@@ -146,6 +153,20 @@ class _DecodedBridge:
 
     async def forward_decoded_input_audio(self, pcm_audio):
         await self.client.send_audio(pcm_audio)
+
+class _AsyncDecodedBridge(_DecodedBridge):
+    def __init__(self, client, pcm_audio, rms):
+        super().__init__(client, pcm_audio, rms)
+        self.sync_decode_calls = 0
+        self.async_decode_calls = 0
+
+    def decode_input_audio(self, audio_bytes):
+        self.sync_decode_calls += 1
+        return b"sync-pcm"
+
+    async def decode_input_audio_async(self, audio_bytes):
+        self.async_decode_calls += 1
+        return self.pcm_audio
 
 class _RecordingBridge:
     def __init__(self):
@@ -278,6 +299,25 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.connected)
         self.assertEqual(client.audio_packets, [b"pcm-frame"])
         self.assertTrue(client.closed)
+
+    async def test_handle_audio_bytes_prefers_async_decode_path(self):
+        conn = _DummyConn()
+        client = _PersistentReceiveClient()
+        provider = GoogleLiveProvider(
+            conn,
+            client_factory=lambda config, logger: client,
+        )
+
+        await provider.start_session()
+        bridge = _AsyncDecodedBridge(client, b"async-pcm", rms=100)
+        provider._bridge = bridge
+        handled = await provider.handle_audio_bytes(b"opus-frame")
+        await provider.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(bridge.async_decode_calls, 1)
+        self.assertEqual(bridge.sync_decode_calls, 0)
+        self.assertEqual(client.audio_packets, [b"async-pcm"])
 
     async def test_start_session_is_idempotent_for_active_live_client(self):
         conn = _DummyConn()

@@ -143,6 +143,27 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             with open(path, "rb") as fh:
                 self.assertEqual(_sha(fh.read()), a.sha256)
 
+    async def test_public_url_for_source_only_returns_verified_cached_asset(self):
+        assets = _critical_assets()
+        cache = self._cache(
+            assets,
+            client=_client_for(assets),
+            public_base_url="https://ota.test",
+        )
+
+        self.assertIsNone(cache.public_url_for_source("barn-round-field-poster.jpg"))
+
+        await cache.preload()
+
+        url = cache.public_url_for_source("barn-round-field-poster.jpg")
+        self.assertIsNotNone(url)
+        self.assertTrue(url.startswith("https://ota.test/tbot/lesson-assets/"))
+        self.assertTrue(url.endswith("/backgroundScene.poster"))
+        self.assertEqual(
+            cache.public_url_for_source("http://assets.test/barn-round-field-poster.jpg"),
+            url,
+        )
+
     async def test_critical_checksum_mismatch_blocks_ready_and_raises(self):
         assets = _critical_assets()
         client = _client_for(assets, corrupt=("teachingObject.barn", b"WRONG-BYTES"))

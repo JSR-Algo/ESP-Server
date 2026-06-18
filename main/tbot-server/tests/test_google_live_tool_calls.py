@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from plugins_func.register import Action, ActionResponse
 # Importing change_volume registers it in all_function_registry so
 # always-included live tools can be resolved during these tests.
 import plugins_func.functions.change_volume  # noqa: F401
+import plugins_func.functions.start_lesson as start_lesson_module
 
 
 class _DummyLogger:
@@ -259,6 +261,28 @@ class _RecordingClient:
 
     async def send_tool_response(self, responses):
         self.sent_responses.append(responses)
+
+class _RecordingWebSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+class _RecordingQueue:
+    def __init__(self):
+        self.items = []
+
+    def put(self, item):
+        self.items.append(item)
+
+class _RecordingTts:
+    def __init__(self):
+        self.tts_text_queue = _RecordingQueue()
+        self.stored_texts = []
+
+    def store_tts_text(self, sentence_id, text):
+        self.stored_texts.append((sentence_id, text))
 
 
 class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
@@ -552,7 +576,7 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider._pending_tool_calls, {"b"})
 
-    async def test_get_live_config_injects_functions_from_func_handler(self):
+    async def test_get_live_config_uses_child_product_toolset_not_func_handler_weather(self):
         handler = _FakeFuncHandler(
             ActionResponse(action=Action.NONE, response=None),
             functions=[_GET_WEATHER_SPEC],
@@ -563,9 +587,8 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         config = provider._get_live_config_with_functions()
 
         names = [t["function"]["name"] for t in config["functions"]]
-        self.assertIn("get_weather", names)
-        # change_volume is always-included for live mode so device speaker
-        # control works even when the API-supplied tool list omits it.
+        self.assertNotIn("get_weather", names)
+        self.assertIn("change_role", names)
         self.assertIn("change_volume", names)
 
     async def test_live_functions_extra_can_be_overridden_via_google_live_config(self):
@@ -583,7 +606,8 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         config = provider._get_live_config_with_functions()
         names = [t["function"]["name"] for t in config["functions"]]
         self.assertIn("change_volume", names)
-        # Override path replaces (rather than extends) func_handler list.
+        # google_live.functions no longer overrides the reviewed child product
+        # toolset, and weather remains excluded from child-facing Live tools.
         self.assertNotIn("get_weather", names)
 
 
@@ -613,6 +637,34 @@ class AudioBridgeToolCallForwardingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(received, [event])
+
+    async def test_user_transcript_forwards_to_local_intent_handler_when_idle(self):
+        from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+
+        received = []
+
+        async def _handler(text):
+            received.append(text)
+            return True
+
+        bridge = GoogleLiveAudioBridge(
+            conn=SimpleNamespace(
+                config={"google_live": {}},
+                websocket=None,
+                sample_rate=24000,
+                google_live_audio_out_started_at=None,
+            ),
+            client=SimpleNamespace(config={}),
+            logger=_DummyLogger(),
+            user_transcript_handler=_handler,
+        )
+
+        handled = await bridge.handle_event(
+            {"type": "transcript", "source": "user", "text": "bắt đầu bài học"}
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(received, ["bắt đầu bài học"])
 
 
 class VietnameseMusicControlIntentTest(unittest.IsolatedAsyncioTestCase):
@@ -668,6 +720,110 @@ class VietnameseMusicControlIntentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(handled)
         self.assertEqual(handler.calls, [])
+
+class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
+    def _make_provider(self):
+        handler = _FakeFuncHandler(ActionResponse(action=Action.NONE, response="ok"))
+        conn = _ProviderConn(func_handler=handler)
+        conn._lesson_runtime_enabled = lambda: True
+        provider = GoogleLiveProvider(conn)
+
+        class _Client:
+            connected = True
+            sent_texts = []
+
+            async def interrupt(self):
+                return None
+
+            async def end_audio_stream(self):
+                return None
+
+            async def send_text(self, text):
+                self.sent_texts.append(text)
+
+        provider._client = _Client()
+        return provider, handler
+
+    async def test_start_lesson_command_dispatches_local_tool(self):
+        provider, handler = self._make_provider()
+
+        handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.calls[-1]["name"], "start_lesson")
+        self.assertEqual(handler.calls[-1]["arguments"], {})
+
+    async def test_start_lesson_command_enqueues_audible_ack(self):
+        provider, handler = self._make_provider()
+        provider.conn.websocket = _RecordingWebSocket()
+        provider.conn.tts = _RecordingTts()
+        provider.conn.sentence_id = None
+
+        handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.calls[-1]["name"], "start_lesson")
+        self.assertGreaterEqual(len(provider.conn.websocket.sent), 1)
+        tts_message = json.loads(provider.conn.websocket.sent[0])
+        self.assertEqual(tts_message["type"], "tts")
+        self.assertEqual(tts_message["state"], "sentence_start")
+        self.assertEqual(tts_message["text"], "Bắt đầu bài học nhé.")
+        self.assertEqual(
+            provider.conn.tts.stored_texts[-1][1],
+            "Bắt đầu bài học nhé.",
+        )
+        self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
+
+    async def test_teach_me_now_command_is_not_lesson_start(self):
+        provider, handler = self._make_provider()
+
+        handled = await provider._dispatch_lesson_start_intent("dạy con học chữ")
+
+        self.assertFalse(handled)
+        self.assertEqual(handler.calls, [])
+
+
+class StartLessonNoAssignmentFeedbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_async_pull_without_assignment_sends_audible_failure(self):
+        class _VoiceProvider:
+            def __init__(self):
+                self.acks = []
+
+            async def _send_lesson_start_ack(self, action_response):
+                self.acks.append(action_response.response)
+                return True
+
+        class _Conn:
+            def __init__(self):
+                self.logger = _DummyLogger()
+                self.loop = asyncio.get_running_loop()
+                self.voice_provider = _VoiceProvider()
+                self.lesson_pull_task = None
+                self.lesson_start_status = None
+
+            def _lesson_runtime_enabled(self):
+                return True
+
+            async def _lesson_pull_on_connect(self):
+                self.lesson_start_status = {
+                    "code": "NO_CURRENT_ASSIGNMENT",
+                    "message": "Robot chưa có bài học nào được giao.",
+                }
+                return None
+
+        conn = _Conn()
+
+        response = start_lesson_module.start_lesson(conn)
+        for _ in range(10):
+            if conn.voice_provider.acks:
+                break
+            await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(
+            conn.voice_provider.acks,
+            ["Robot chưa có bài học nào được giao."],
+        )
 
     async def test_handle_event_handles_tool_call_cancellation(self):
         from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge

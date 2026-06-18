@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import warnings
 
 warnings.filterwarnings(
@@ -11,8 +13,10 @@ warnings.filterwarnings(
 import audioop
 import json
 import time
+import uuid
 
 from core.utils import textUtils
+from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 
 
 EMOTION_EMOJI = {
@@ -60,6 +64,7 @@ class GoogleLiveAudioBridge:
         logger,
         response_id_getter=None,
         response_cancelled_checker=None,
+        user_transcript_handler=None,
         user_transcript_barge_in_handler=None,
         tool_call_handler=None,
         tool_call_cancellation_handler=None,
@@ -72,6 +77,7 @@ class GoogleLiveAudioBridge:
         self._response_cancelled_checker = response_cancelled_checker or (
             lambda response_id: False
         )
+        self._user_transcript_handler = user_transcript_handler
         self._user_transcript_barge_in_handler = user_transcript_barge_in_handler
         self._tool_call_handler = tool_call_handler
         self._tool_call_cancellation_handler = tool_call_cancellation_handler
@@ -97,8 +103,14 @@ class GoogleLiveAudioBridge:
         self._unblock_timer_task = None
         self._accepted_user_turn_after_block = False
         self._waiting_for_interrupted_audio_end = False
+        self._moderation_block_active = False
         self._fallback_emotion_index = 0
         self._last_emotion_sent = None
+        self._audio_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"google-live-audio-{id(self):x}",
+        )
+        self._audio_executor_closed = False
         # Rolling buffer of recently-transcribed model speech, used to detect
         # speaker echo that Gemini STT mis-attributes to the user and would
         # otherwise fire a transcript_barge_in mid-sentence.
@@ -106,7 +118,9 @@ class GoogleLiveAudioBridge:
         self._recent_model_transcript_segments = []
 
     async def forward_input_audio(self, audio_bytes):
-        await self.forward_decoded_input_audio(self.decode_input_audio(audio_bytes))
+        await self.forward_decoded_input_audio(
+            await self.decode_input_audio_async(audio_bytes)
+        )
 
     async def forward_decoded_input_audio(self, pcm_bytes):
         if not self._is_valid_pcm16(pcm_bytes):
@@ -134,6 +148,9 @@ class GoogleLiveAudioBridge:
     def decode_input_audio(self, audio_bytes):
         return self._decode_input_audio(audio_bytes)
 
+    async def decode_input_audio_async(self, audio_bytes):
+        return await self._run_audio_cpu(self._decode_input_audio, audio_bytes)
+
     def input_rms(self, pcm_bytes):
         if not pcm_bytes:
             return 0
@@ -154,9 +171,14 @@ class GoogleLiveAudioBridge:
                 len(transcript_text),
             )
             if event.get("source") == "user":
+                if await self._maybe_handle_user_transcript_intent(transcript_text):
+                    return True
                 await self._maybe_trigger_transcript_barge_in(transcript_text)
             if event.get("source") == "model":
                 self._record_model_transcript(transcript_text)
+                if self._is_unsafe_model_output(transcript_text):
+                    await self._block_unsafe_model_output(transcript_text)
+                    return True
                 if (
                     self._should_drop_blocked_model_event(event_type)
                     or self._is_stale_response_event()
@@ -171,6 +193,10 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_start":
+            if self._moderation_block_active:
+                self._active_response_id = self._response_id_getter()
+                self._mark_active_response_cancelled()
+                return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._block_model_output_until_user_ack:
@@ -222,6 +248,8 @@ class GoogleLiveAudioBridge:
             audio_bytes = event.get("audio")
             if audio_bytes is None:
                 return False
+            if self._moderation_block_active:
+                return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._is_stale_response_event():
@@ -234,6 +262,7 @@ class GoogleLiveAudioBridge:
             self._output_chunk_count += 1
             self._output_byte_count += len(audio_bytes)
             self._log_first_audio_out_latency()
+            self._record_turn_first_audio_latency()
             await self._send_binary_audio_message(
                 audio_bytes,
                 audio_format=event.get("audio_format"),
@@ -242,6 +271,11 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_end":
+            if self._moderation_block_active:
+                self._moderation_block_active = False
+                self._reset_output_encoder()
+                self._active_response_id = None
+                return True
             if self._block_model_output_until_user_ack:
                 self._reset_output_encoder()
                 self._active_response_id = None
@@ -370,6 +404,18 @@ class GoogleLiveAudioBridge:
 
     async def close(self):
         self._cancel_unblock_timer()
+        if not self._audio_executor_closed:
+            self._audio_executor_closed = True
+            self._audio_executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _run_audio_cpu(self, func, *args, **kwargs):
+        if self._audio_executor_closed:
+            return func(*args, **kwargs)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._audio_executor,
+            partial(func, *args, **kwargs),
+        )
 
     def _schedule_unblock_timeout(self):
         timeout = self._get_unblock_timeout_sec()
@@ -465,6 +511,18 @@ class GoogleLiveAudioBridge:
             )
         except Exception:
             pass
+
+    async def _maybe_handle_user_transcript_intent(self, transcript_text):
+        if self._user_transcript_handler is None:
+            return False
+        try:
+            return bool(await self._user_transcript_handler(transcript_text))
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live user_transcript handler failed: {}",
+                exc,
+            )
+            return False
 
     async def _maybe_trigger_transcript_barge_in(self, transcript_text):
         """Fire a barge-in when Live API recognises real user words during model output.
@@ -637,6 +695,171 @@ class GoogleLiveAudioBridge:
             )
         )
 
+    def _is_unsafe_model_output(self, text):
+        return bool(screen_model_output(text).get("blocked"))
+
+    async def _block_unsafe_model_output(self, text):
+        self._moderation_block_active = True
+        self._active_response_id = self._response_id_getter()
+        self._mark_active_response_cancelled()
+        self.conn.client_abort = True
+        self.conn.google_live_audio_out_started_at = None
+        self._block_model_output_until_user_ack = True
+        self._waiting_for_interrupted_audio_end = True
+        self._accepted_user_turn_after_block = False
+        self._output_chunk_count = 0
+        self._output_byte_count = 0
+        self._reset_output_encoder()
+        self._clear_conn_queues()
+        self._schedule_unblock_timeout()
+        self.logger.bind(tag="GoogleLive").warning(
+            "Google Live output_moderation_blocked source=model_output"
+        )
+        await self._send_tts_stop_now()
+        self.conn.client_abort = False
+        await self._send_safe_deflection()
+        await self._enqueue_safety_block(text)
+
+    async def _send_safe_deflection(self):
+        if self.conn.websocket is None:
+            return
+        from core.handle.sendAudioHandle import send_tts_message
+
+        await send_tts_message(
+            self.conn,
+            "sentence_start",
+            SAFE_DEFLECTION_LINE,
+        )
+        self._queue_safe_deflection_tts()
+
+    def _queue_safe_deflection_tts(self):
+        tts = getattr(self.conn, "tts", None)
+        queue_obj = getattr(tts, "tts_text_queue", None)
+        if queue_obj is None:
+            return
+        try:
+            from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+
+            sentence_id = str(uuid.uuid4().hex)
+            self.conn.sentence_id = sentence_id
+            queue_obj.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.FIRST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+            queue_obj.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.MIDDLE,
+                    content_type=ContentType.TEXT,
+                    content_detail=SAFE_DEFLECTION_LINE,
+                )
+            )
+            queue_obj.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.TEXT,
+                )
+            )
+            if hasattr(tts, "store_tts_text"):
+                tts.store_tts_text(sentence_id, SAFE_DEFLECTION_LINE)
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live safe_deflection_tts_queue failed: {}",
+                exc,
+            )
+
+    async def _enqueue_safety_block(self, text):
+        forwarder = await self._resolve_safety_event_forwarder()
+        if forwarder is None:
+            return
+        forwarder.enqueue(
+            {
+                "eventType": "safety_block",
+                "detail": {
+                    "source": "model_output",
+                    "text": self._redact_safety_text(text),
+                },
+            }
+        )
+
+    async def _resolve_safety_event_forwarder(self):
+        for candidate in (
+            getattr(self.conn, "safety_event_forwarder", None),
+            getattr(getattr(self.conn, "lesson_runtime", None), "forwarder", None),
+        ):
+            if candidate is not None and hasattr(candidate, "enqueue"):
+                return candidate
+        return await self._create_connection_safety_forwarder()
+
+    async def _create_connection_safety_forwarder(self):
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = config.get("lesson", {}) or {}
+        server_cfg = config.get("server", {}) or {}
+        base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
+        device_id = getattr(self.conn, "device_id", None)
+        if not base_url or not device_id:
+            return None
+        try:
+            import httpx
+            from config.device_token_client import resolve_device_identity
+            from core.lesson.forwarder import LessonEventForwarder
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live safety forwarder unavailable: {}",
+                exc,
+            )
+            return None
+
+        token = lesson_cfg.get("device_token")
+        backend_device_id = device_id
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0),
+                limits=httpx.Limits(max_keepalive_connections=0),
+                follow_redirects=True,
+            ) as client:
+                minted_uuid, minted_token = await resolve_device_identity(
+                    client, base_url, device_id, logger=self.logger
+                )
+            if minted_uuid and minted_token:
+                backend_device_id = minted_uuid
+                token = minted_token
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live safety forwarder token mint failed: {}",
+                exc,
+            )
+
+        if not token:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live safety_block event dropped: no device token"
+            )
+            return None
+        forwarder = LessonEventForwarder(
+            device_id=backend_device_id,
+            base_url=base_url,
+            token=token,
+            logger=self.logger,
+        )
+        setattr(self.conn, "safety_event_forwarder", forwarder)
+        return forwarder
+
+    def _redact_safety_text(self, text):
+        redacted = str(text or "")
+        for phrase in (
+            "home address",
+            "phone number",
+            "so we can meet",
+            "tell me where you live",
+        ):
+            redacted = redacted.replace(phrase, "[redacted]")
+            redacted = redacted.replace(phrase.title(), "[redacted]")
+        return redacted
+
     def _decode_input_audio(self, audio_bytes):
         if not audio_bytes:
             return audio_bytes
@@ -674,7 +897,9 @@ class GoogleLiveAudioBridge:
         from core.handle.sendAudioHandle import sendAudio
 
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
-            packets = self._encode_output_audio(audio_bytes, mime_type)
+            packets = await self._run_audio_cpu(
+                self._encode_output_audio, audio_bytes, mime_type
+            )
             if packets:
                 await sendAudio(self.conn, packets)
             return
@@ -705,15 +930,19 @@ class GoogleLiveAudioBridge:
             return 0
         from core.handle.sendAudioHandle import sendAudio
 
+        packets = await self._run_audio_cpu(self._flush_output_audio_sync)
+        if packets:
+            await sendAudio(self.conn, packets)
+        return len(packets)
+
+    def _flush_output_audio_sync(self):
         packets = []
         self._output_encoder.encode_pcm_to_opus_stream(
             b"",
             end_of_stream=True,
             callback=packets.append,
         )
-        if packets:
-            await sendAudio(self.conn, packets)
-        return len(packets)
+        return packets
 
     def _extract_sample_rate_from_mime(self, mime_type):
         if mime_type and "rate=" in mime_type:
@@ -737,6 +966,45 @@ class GoogleLiveAudioBridge:
             "Google Live first_audio_out_latency_ms={:.1f}",
             (time.monotonic() - session_started_at) * 1000,
         )
+
+    def _record_turn_first_audio_latency(self):
+        turn_started_at = getattr(self.conn, "google_live_turn_started_at", None)
+        if turn_started_at is None:
+            return
+        try:
+            latency_ms = max(0.0, (time.monotonic() - float(turn_started_at)) * 1000)
+        except (TypeError, ValueError):
+            self.conn.google_live_turn_started_at = None
+            return
+        self.conn.google_live_turn_started_at = None
+        self.logger.bind(tag="GoogleLive").info(
+            "Google Live turn_latency_ms={:.1f} phase=first_audio_out",
+            latency_ms,
+        )
+        self._note_voice_round_trip(latency_ms)
+        self._record_turn_latency_metric(latency_ms)
+
+    def _note_voice_round_trip(self, latency_ms):
+        note_voice_round_trip = getattr(self.conn, "note_voice_round_trip", None)
+        if not callable(note_voice_round_trip):
+            return
+        try:
+            note_voice_round_trip(latency_ms)
+        except Exception:
+            pass
+
+    def _record_turn_latency_metric(self, latency_ms):
+        record_voice_metric = getattr(self.conn, "record_voice_metric", None)
+        if not callable(record_voice_metric):
+            return
+        try:
+            record_voice_metric(
+                "turn_latency_ms",
+                latency_ms,
+                {"source": "google_live", "phase": "first_audio_out"},
+            )
+        except Exception:
+            pass
 
     def _should_send_llm_state(self, event):
         if event.get("source") != "model":

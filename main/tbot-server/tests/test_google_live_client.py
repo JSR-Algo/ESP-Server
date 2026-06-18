@@ -2,10 +2,38 @@ import asyncio
 import os
 import unittest
 from contextlib import suppress
+from pathlib import Path
 from types import SimpleNamespace
 
 from config.config_loader import GOOGLE_LIVE_DEFAULTS
 from core.voice.google_live.client import GoogleLiveClient
+from plugins_func.functions.start_lesson import start_lesson_function_desc
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _extract_fenced_block(markdown, section, language):
+    start = markdown.index(section)
+    fence = f"```{language}\n"
+    block_start = markdown.index(fence, start) + len(fence)
+    block_end = markdown.index("\n```", block_start)
+    return markdown[block_start:block_end]
+
+
+def _master_prompt_section_a():
+    markdown = (ROOT / "docs" / "lesson-master-prompts.md").read_text(encoding="utf-8")
+    return _extract_fenced_block(
+        markdown,
+        "## A. CONVERSATION-MODE MASTER SYSTEM PROMPT",
+        "text",
+    )
+
+
+def _config_prompt_text():
+    import yaml
+
+    config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    return config["prompt"].rstrip("\n")
 
 
 class _DummyLogger:
@@ -257,6 +285,61 @@ class GoogleLiveClientTest(unittest.TestCase):
                 },
             },
         )
+
+    def test_build_connect_config_omits_sdk_forbidden_safety_settings(self):
+        client = GoogleLiveClient(
+            {
+                "enable_audio_output": True,
+                "send_transcript_events": True,
+                "system_prompt": "You are a friendly English tutor.",
+            },
+            _DummyLogger(),
+        )
+
+        config = client._build_connect_config()
+
+        self.assertNotIn("safety_settings", config)
+        self.assertIn("<child_safety>", config["system_instruction"]["parts"][0]["text"])
+
+        from google.genai import types
+
+        types.LiveConnectConfig(**config)
+
+    def test_build_connect_config_injects_child_safety_into_system_instruction(self):
+        client = GoogleLiveClient(
+            {"system_prompt": "You are a friendly English tutor."},
+            _DummyLogger(),
+        )
+
+        config = client._build_connect_config()
+        text = config["system_instruction"]["parts"][0]["text"]
+
+        self.assertIn("<child_safety>", text)
+        self.assertIn("Vietnamese child", text)
+        self.assertIn("luyen tieng Anh", text)
+        self.assertIn("You are a friendly English tutor.", text)
+
+    def test_config_prompt_matches_lesson_master_prompt_without_inline_child_safety(self):
+        prompt = _config_prompt_text()
+
+        self.assertEqual(prompt, _master_prompt_section_a())
+        self.assertNotIn("<child_safety>", prompt)
+
+    def test_build_connect_config_attaches_prompt_and_admitted_start_lesson_tool(self):
+        prompt = "Lesson system prompt."
+        client = GoogleLiveClient(
+            {"prompt": prompt, "functions": [start_lesson_function_desc]},
+            _DummyLogger(),
+        )
+
+        config = client._build_connect_config()
+        text = config["system_instruction"]["parts"][0]["text"]
+        declarations = config["tools"][0]["function_declarations"]
+
+        self.assertIn("<child_safety>", text)
+        self.assertIn(prompt, text)
+        self.assertTrue(text.endswith(prompt))
+        self.assertIn("start_lesson", [declaration["name"] for declaration in declarations])
 
     def test_build_connect_config_allows_language_without_voice_name(self):
         client = GoogleLiveClient(

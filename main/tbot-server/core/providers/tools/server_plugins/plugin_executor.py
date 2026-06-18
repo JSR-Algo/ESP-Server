@@ -7,6 +7,7 @@ from typing import Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from ..base import ToolType, ToolDefinition, ToolExecutor
+from ..product_toolset import product_tool_names
 from plugins_func.register import all_function_registry, Action, ActionResponse
 
 
@@ -58,43 +59,7 @@ class ServerPluginExecutor(ToolExecutor):
         """Get all registered server-side plugin tools"""
         tools = {}
 
-        # Get required functions
-        necessary_functions = [
-            "handle_exit_intent",
-            "get_lunar",
-            "raise_left_arm",
-            "raise_right_arm",
-            "lower_left_arm",
-            "lower_right_arm",
-            "raise_both_arms",
-            "lower_both_arms",
-            "set_left_arm_percent",
-            "set_right_arm_percent",
-            "set_both_arms_percent",
-            "turn_head_left",
-            "turn_head_right",
-            "center_head",
-            "set_head_angle",
-            "set_head_percent",
-            "turn_head_left_then_right_max",
-        ]
-
-        # Get function in config
-        config_functions = self.config["Intent"][
-            self.config["selected_module"]["Intent"]
-        ].get("functions", [])
-
-        # Convert to list
-        if not isinstance(config_functions, list):
-            try:
-                config_functions = list(config_functions)
-            except TypeError:
-                config_functions = []
-
-        # Merge all required functions
-        all_required_functions = list(set(necessary_functions + config_functions))
-
-        for func_name in all_required_functions:
+        for func_name in product_tool_names(self.conn):
             func_item = all_function_registry.get(func_name)
             if func_item:
                 # From functionRegisterGet inDescription

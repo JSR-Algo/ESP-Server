@@ -2,9 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from config.config_loader import normalize_voice_config
-from config.config_loader import get_config_from_api_async
-from config.config_loader import load_config
+from config.config_loader import get_config_from_api_async, load_config, normalize_voice_config
 from core.voice.session_provider.factory import create_voice_session_provider
 
 
@@ -75,6 +73,175 @@ class VoiceProviderFactoryTest(unittest.TestCase):
         self.assertEqual(config["voice_mode"]["type"], "classic_pipeline")
         self.assertTrue(config["voice_mode"]["fallback_to_classic_on_error"])
         self.assertEqual(config["google_live"], {})
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("config.config_loader.ensure_directories")
+    @patch(
+        "config.config_loader.read_config",
+        side_effect=[{"lesson": {"runtime_enabled": True}}, {}],
+    )
+    @patch("core.utils.cache.manager.cache_manager.set")
+    @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
+    def test_load_config_rejects_enabled_lesson_runtime_without_boot_prereqs(
+        self,
+        _cache_get,
+        _cache_set,
+        _read_config,
+        _ensure_directories,
+    ):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "lesson.runtime_enabled=true.*TBOT_DEVICE_MINT_SECRET.*LESSON_ASSET_ORIGIN_BASE",
+        ):
+            load_config()
+
+    @patch.dict(
+        "os.environ",
+        {
+            "LESSON_RUNTIME_ENABLED": "true",
+            "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+            "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com/lesson-assets/",
+        },
+        clear=True,
+    )
+    @patch("config.config_loader.ensure_directories")
+    @patch(
+        "config.config_loader.read_config",
+        side_effect=[{"lesson": {"runtime_enabled": False}}, {}],
+    )
+    @patch("core.utils.cache.manager.cache_manager.set")
+    @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
+    def test_lesson_runtime_env_override_enables_runtime_with_boot_prereqs(
+        self,
+        _cache_get,
+        _cache_set,
+        _read_config,
+        _ensure_directories,
+    ):
+        config = load_config()
+
+        self.assertIs(config["lesson"]["runtime_enabled"], True)
+        self.assertEqual(
+            config["lesson"]["asset_origin_base"],
+            "https://cdn.example.com/lesson-assets",
+        )
+
+    @patch.dict("os.environ", {"TBOT_CLOSE_CONNECTION_NO_VOICE_TIME": "3600"}, clear=True)
+    @patch("config.config_loader.ensure_directories")
+    @patch(
+        "config.config_loader.read_config",
+        side_effect=[{"close_connection_no_voice_time": 120}, {}],
+    )
+    @patch("core.utils.cache.manager.cache_manager.set")
+    @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
+    def test_connection_idle_timeout_can_be_overridden_by_env(
+        self,
+        _cache_get,
+        _cache_set,
+        _read_config,
+        _ensure_directories,
+    ):
+        config = load_config()
+
+        self.assertEqual(config["close_connection_no_voice_time"], 3600)
+
+    def _assert_prod_config_rejected(self, config, env, expected):
+        with patch.dict("os.environ", env, clear=True), \
+            patch("config.config_loader.ensure_directories"), \
+            patch("config.config_loader.read_config", side_effect=[config, {}]), \
+            patch("core.utils.cache.manager.cache_manager.set"), \
+            patch("core.utils.cache.manager.cache_manager.get", return_value=None), \
+            self.assertRaisesRegex(RuntimeError, expected):
+            load_config()
+
+    def _safe_prod_env(self):
+        return {
+            "NODE_ENV": "production",
+            "TBOT_REQUIRE_DEVICE_TOKEN": "true",
+            "JWT_PUBLIC_KEY": "public-key",
+            "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+            "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com",
+        }
+
+    def test_production_posture_rejects_disabled_ws_auth(self):
+        for auth_config in ({"enabled": False}, {}):
+            with self.subTest(auth_config=auth_config):
+                self._assert_prod_config_rejected(
+                    {"server": {"auth": auth_config}},
+                    self._safe_prod_env(),
+                    "server.auth.enabled=true",
+                )
+
+    def test_production_posture_rejects_each_missing_or_false_required_env(self):
+        cases = [
+            ("TBOT_REQUIRE_DEVICE_TOKEN", None, "TBOT_REQUIRE_DEVICE_TOKEN=true"),
+            ("TBOT_REQUIRE_DEVICE_TOKEN", "false", "TBOT_REQUIRE_DEVICE_TOKEN=true"),
+            ("JWT_PUBLIC_KEY", None, "JWT_PUBLIC_KEY"),
+            ("TBOT_DEVICE_MINT_SECRET", None, "TBOT_DEVICE_MINT_SECRET"),
+            ("LESSON_ASSET_ORIGIN_BASE", None, "LESSON_ASSET_ORIGIN_BASE"),
+        ]
+        for name, value, expected in cases:
+            env = self._safe_prod_env()
+            if value is None:
+                del env[name]
+            else:
+                env[name] = value
+
+            with self.subTest(name=name, value=value):
+                self._assert_prod_config_rejected(
+                    {"server": {"auth": {"enabled": True}}},
+                    env,
+                    expected,
+                )
+
+    def test_production_posture_rejects_admin_auth_disabled(self):
+        env = self._safe_prod_env()
+        env["ADMIN_AUTH_DISABLED"] = "true"
+        self._assert_prod_config_rejected(
+            {"server": {"auth": {"enabled": True}}},
+            env,
+            "ADMIN_AUTH_DISABLED must not be true",
+        )
+
+    def test_production_google_live_rejects_bypassed_aec(self):
+        with patch("core.voice.aec.aec_processor.AEC_AVAILABLE", False):
+            self._assert_prod_config_rejected(
+                {
+                    "server": {"auth": {"enabled": True}},
+                    "voice_mode": {"type": "google_live"},
+                    "google_live": {"aec_enabled": True},
+                },
+                self._safe_prod_env(),
+                "production boot requires active AEC",
+            )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "NODE_ENV": "production",
+            "TBOT_REQUIRE_DEVICE_TOKEN": "true",
+            "JWT_PUBLIC_KEY": "public-key",
+            "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+            "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com",
+        },
+        clear=True,
+    )
+    @patch("config.config_loader.ensure_directories")
+    @patch(
+        "config.config_loader.read_config",
+        side_effect=[{"server": {"auth": {"enabled": True}}}, {}],
+    )
+    @patch("core.utils.cache.manager.cache_manager.set")
+    @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
+    def test_production_posture_allows_safe_boot(
+        self,
+        _cache_get,
+        _cache_set,
+        _read_config,
+        _ensure_directories,
+    ):
+        config = load_config()
+        self.assertTrue(config["server"]["auth"]["enabled"])
 
     @patch("config.config_loader.read_config", side_effect=[{}, {"manager-api": {"url": "http://manager"}}])
     @patch("core.utils.cache.manager.cache_manager.get", return_value=None)

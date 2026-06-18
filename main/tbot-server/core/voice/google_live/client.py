@@ -5,6 +5,8 @@ import warnings
 from contextlib import suppress
 from collections.abc import Iterable, Mapping
 
+from core.voice.child_safety import ensure_child_safety_block
+
 # Eager import of google.genai at module load (server startup).
 # First-time import of this SDK costs 80-100 seconds (protobuf + grpc + auth
 # transitive imports). Doing it at startup hides the cost from device-side
@@ -309,7 +311,7 @@ class GoogleLiveClient:
         prompt = self.config.get("system_prompt") or self.config.get("prompt")
         if not prompt:
             return None
-        text = str(prompt).strip()
+        text = ensure_child_safety_block(prompt).strip()
         if not text:
             return None
         # Live API accepts either a Content object or a plain dict. We use the

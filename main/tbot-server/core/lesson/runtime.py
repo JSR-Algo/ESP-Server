@@ -17,6 +17,7 @@ touches the voice path.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -30,8 +31,18 @@ from core.lesson.errors import (
     lesson_capability_ok,
     device_renderer_capabilities,
 )
+from core.utils.util import get_vision_url
 
 TAG = "LessonRuntime"
+
+NO_CURRENT_ASSIGNMENT_MESSAGE = "Robot chưa có bài học nào được giao."
+
+
+def _set_lesson_start_status(conn: Any, code: str, message: str = "") -> None:
+    try:
+        conn.lesson_start_status = {"code": code, "message": message}
+    except Exception:
+        pass
 
 # Runtime states (a slice subset of the assignment state machine).
 S_IDLE = "IDLE"
@@ -134,6 +145,23 @@ def parse_manifest_checksum(etag: Optional[str]) -> str:
         return ""
     parts = etag.strip().strip('"').split("-")
     return parts[3] if len(parts) >= 4 else ""
+
+def lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
+    lesson_cfg = config.get("lesson", {}) or {}
+    server_cfg = config.get("server", {}) or {}
+    explicit = (
+        lesson_cfg.get("asset_public_base_url")
+        or lesson_cfg.get("asset_public_base")
+        or server_cfg.get("asset_public_base_url")
+    )
+    if explicit:
+        return str(explicit).rstrip("/")
+    if "server" not in config:
+        return ""
+    vision_url = get_vision_url(config)
+    if vision_url and "/mcp/vision/explain" in vision_url:
+        return vision_url.replace("/mcp/vision/explain", "").rstrip("/")
+    return ""
 
 
 class LessonRuntime:
@@ -274,6 +302,12 @@ class LessonRuntime:
         if self.asset_cache is not None:
             await self.asset_cache.aclose()
 
+    async def replay_pending_terminal_event(self) -> bool:
+        replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
+        if not callable(replay):
+            return False
+        return bool(await replay())
+
     # ── inbound handlers (called by lessonMessageHandler via conn.lesson_runtime) ─
 
     async def on_lesson_ack(self, msg_json: Dict[str, Any]) -> None:
@@ -353,6 +387,7 @@ class LessonRuntime:
         if self.state in (S_RUNNING, S_PRELOADING):
             self.state = S_FAILED
             self._cancel_step_timeout()
+            await self._notify_lesson_terminal("lesson_error")
 
     # ── state machine ──────────────────────────────────────────────────────────
 
@@ -386,6 +421,16 @@ class LessonRuntime:
                     "summary": {"stepsCompleted": self._steps_completed},
                 }
             )
+            await self._notify_lesson_terminal("lesson_completed")
+
+    async def _notify_lesson_terminal(self, reason: str) -> None:
+        release = getattr(self.conn, "release_lesson_mode", None)
+        if not callable(release):
+            return
+        try:
+            await release(reason=reason)
+        except Exception as exc:  # pragma: no cover - orchestrator release is best-effort
+            self._log("warning", f"lesson terminal mode release failed: {type(exc).__name__}")
 
     def _alarm_preload(self, active: bool) -> None:
         """Best-effort bracket of the preload window for the S13 voice-latency alarm.
@@ -411,12 +456,14 @@ class LessonRuntime:
             self.state = S_FAILED
             self._log("error", f"preload failed: {err.code}")
             await self._emit_error(err)
+            await self._notify_lesson_terminal("preload_failed")
             return
         except asyncio.CancelledError:  # pragma: no cover - teardown
             raise
         except Exception as exc:  # pragma: no cover - unexpected
             self._log("error", f"preload crashed: {type(exc).__name__}")
             self.state = S_FAILED
+            await self._notify_lesson_terminal("preload_crashed")
             return
         finally:
             self._alarm_preload(False)
@@ -636,13 +683,14 @@ class LessonRuntime:
     def _step_body(self, step: Dict[str, Any]) -> Dict[str, Any]:
         # Byte-consistent with the fixture lesson_step.body: the scene IS the frozen
         # 3-layer projection from the manifest step (back->front, no lessonUi).
+        scene = self._scene_with_cached_asset_urls(step.get("scene"))
         body = {
             "assignmentVersion": self.assignment_version,
             "stepType": step.get("type"),
             "profile": self.profile,
             "timeoutSec": step.get("timeoutSec"),
             "audio": step.get("audio"),
-            "scene": step.get("scene"),
+            "scene": scene,
         }
         # Renderer-v1 additive field (NO protocol-version bump): forward the AUTHOR's
         # explicit ``completionClass`` ('passive'|'interactive') so the firmware uses
@@ -655,6 +703,28 @@ class LessonRuntime:
         if completion_class is not None:
             body["completionClass"] = completion_class
         return body
+
+    def _scene_with_cached_asset_urls(self, scene: Any) -> Any:
+        if scene is None:
+            return None
+        rewritten = copy.deepcopy(scene)
+        self._rewrite_cached_asset_sources(rewritten)
+        return rewritten
+
+    def _rewrite_cached_asset_sources(self, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key == "src" and isinstance(child, str):
+                    resolver = getattr(self.asset_cache, "public_url_for_source", None)
+                    if callable(resolver):
+                        cached = resolver(child)
+                        if cached:
+                            value[key] = cached
+                            continue
+                self._rewrite_cached_asset_sources(child)
+        elif isinstance(value, list):
+            for child in value:
+                self._rewrite_cached_asset_sources(child)
 
     # ── progress forward (own dispatch path) ────────────────────────────────────
 
@@ -704,6 +774,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     layer must NEVER break the connection or the voice path.
     """
     config = getattr(conn, "config", {}) or {}
+    _set_lesson_start_status(conn, "CHECKING_ASSIGNMENT")
     lesson_cfg = config.get("lesson", {}) or {}
     server_cfg = config.get("server", {}) or {}
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
@@ -719,6 +790,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             pass
 
     if not base_url or not device_id:
+        _set_lesson_start_status(conn, "LESSON_CONFIG_MISSING", "Robot chưa kết nối được máy chủ bài học.")
         _log("info", "lesson pull-on-connect skipped: no api_base or device_id")
         return None
 
@@ -742,6 +814,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             break
         await asyncio.sleep(0.1)
     if not _cap_ok(getattr(conn, "features", None)):
+        _set_lesson_start_status(conn, "LESSON_CAPABILITY_MISSING", "Robot chưa sẵn sàng hiển thị bài học.")
         _log("info", "device lacks lesson capability; pull-on-connect no-op")
         return None
 
@@ -758,8 +831,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     ) as client:
         # D-RUNTOKEN bridge: resolve the robot's Wi-Fi MAC -> backend device UUID
         # + a short-lived device-scoped JWT so the assignment pull authenticates as
-        # the device. Any failure falls back to the legacy (MAC, no-token) path
-        # (a harmless 401) and the voice path is never affected.
+        # the device. A mint failure is surfaced locally and the pull is skipped;
+        # a legacy MAC/no-token request only creates a swallowed backend 401.
         backend_device_id = device_id
         try:
             from config.device_token_client import resolve_device_identity
@@ -770,15 +843,41 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             if minted_uuid and minted_token:
                 backend_device_id = minted_uuid
                 token = minted_token
+            else:
+                _set_lesson_start_status(conn, "DEVICE_TOKEN_UNAVAILABLE", "Robot chưa xác thực được với máy chủ bài học.")
+                _log("warning", "device token required for lesson pull; skipping tokenless request")
+                return None
         except Exception as exc:  # pragma: no cover - bridge is best-effort
             _log("warning", f"device-token mint unavailable: {type(exc).__name__}: {exc}")
+            return None
         assignment = await backend_api.get_current_assignment(client, base_url, backend_device_id, token=token)
         if not assignment:
+            _set_lesson_start_status(conn, "NO_CURRENT_ASSIGNMENT", NO_CURRENT_ASSIGNMENT_MESSAGE)
             _log("info", "no current assignment for device; nothing to preload")
             return None
         if assignment.get("state") in ("COMPLETED", "CANCELLED", "FAILED"):
+            _set_lesson_start_status(conn, "ASSIGNMENT_TERMINAL", "Bài học này đã kết thúc.")
             _log("info", f"assignment in terminal state {assignment.get('state')}; skipping")
             return None
+        assignment_id = assignment.get("assignmentId")
+        if isinstance(assignment_id, str) and assignment_id:
+            try:
+                from core.lesson.forwarder import replay_stored_terminal_event
+
+                replayed_terminal = await replay_stored_terminal_event(
+                    device_id=backend_device_id,
+                    assignment_id=assignment_id,
+                    base_url=base_url,
+                    token=token,
+                    client=client,
+                    logger=logger,
+                )
+            except Exception as exc:  # pragma: no cover - replay is best-effort
+                _log("warning", f"stored terminal lesson event replay failed: {type(exc).__name__}")
+                replayed_terminal = False
+            if replayed_terminal:
+                _log("info", "replayed pending terminal lesson event; skipping lesson restart")
+                return None
         profile = assignment.get("profile", "espTft")
         manifest, etag = await backend_api.get_lesson_manifest(
             client,
@@ -790,6 +889,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         )
 
     if not manifest:
+        _set_lesson_start_status(conn, "MANIFEST_EMPTY", "Robot chưa tải được nội dung bài học.")
         _log("warning", "manifest fetch returned empty; aborting lesson start")
         return None
 
@@ -809,6 +909,12 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             and existing.assignment_version == new_assignment_version
         )
         if unchanged:
+            replay = getattr(existing, "replay_pending_terminal_event", None)
+            if getattr(existing, "state", None) in (S_COMPLETED, S_FAILED) and callable(replay):
+                try:
+                    await replay()
+                except Exception as exc:  # pragma: no cover - replay is best-effort
+                    _log("warning", f"terminal lesson event replay failed: {type(exc).__name__}")
             _log("info", "lesson republish-on-connect: version unchanged; keeping session")
             return existing
         busy_check = getattr(conn, "is_realtime_busy", None)
@@ -854,6 +960,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         ],
         profile=profile,
         asset_origin_base=lesson_cfg.get("asset_origin_base"),
+        public_base_url=lesson_asset_public_base_url(config),
         lesson_key=str(assignment.get("lessonId") or "lesson"),
         lesson_version=int(assignment.get("lessonVersion", 1)),
         manifest_checksum=parse_manifest_checksum(etag),
@@ -903,7 +1010,15 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
     conn.lesson_runtime = runtime
     try:
+        enter_lesson = getattr(conn, "enter_lesson_mode", None)
+        if callable(enter_lesson):
+            await enter_lesson(reason="lesson_start")
         await runtime.start()
+        _set_lesson_start_status(conn, "STARTED")
     except LessonError as err:
+        _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson start refused: {err.code}")
+        release_lesson = getattr(conn, "release_lesson_mode", None)
+        if callable(release_lesson):
+            await release_lesson(reason="lesson_start_refused")
     return runtime

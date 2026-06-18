@@ -3,16 +3,23 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.vision_handler import VisionHandler
+from core.api.lesson_nudge_handler import LessonNudgeHandler
+from core.api.lesson_asset_handler import LessonAssetHandler
 
 TAG = __name__
 
 
 class SimpleHttpServer:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, lesson_connections=None):
         self.config = config
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.lesson_asset_handler = LessonAssetHandler(config)
+        self.lesson_nudge_handler = LessonNudgeHandler(
+            config,
+            lesson_connections if lesson_connections is not None else {},
+        )
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """GetwebsocketAddress
@@ -71,6 +78,18 @@ class SimpleHttpServer:
                         ),
                         web.options(
                             "/mcp/vision/explain", self.vision_handler.handle_options
+                        ),
+                    ]
+                )
+                app.add_routes(
+                    [
+                        web.post(
+                            "/internal/devices/{deviceId}/lesson-nudge",
+                            self.lesson_nudge_handler.handle_post,
+                        ),
+                        web.get(
+                            "/tbot/lesson-assets/{cacheToken}/{assetKey}",
+                            self.lesson_asset_handler.handle_get,
                         ),
                     ]
                 )

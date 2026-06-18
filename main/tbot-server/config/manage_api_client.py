@@ -286,9 +286,10 @@ def manage_api_http_safe_close():
 # only and does NOT serve them. So these legs take their OWN caller-owned httpx
 # client/base_url. ``result -> outcome`` is renamed HERE as the single translation point.
 #
-# D-RUNTOKEN (ADR 0013 §F): no device-token minting path on the ESP yet, so
-# ``token`` is injectable and OPTIONAL — cross-device authz is enforced backend-side
-# on the ``device_id`` claim. Ops/backend follow-up; surfaced, not invented here.
+# D-RUNTOKEN (ADR 0013 §F): callers must resolve MAC -> backend device UUID and
+# present a device-scoped JWT before hitting lesson device routes. The function
+# signatures keep ``token`` optional only for tests/older call sites; production
+# runtime skips tokenless pulls instead of creating a swallowed backend 401.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _LESSON_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}

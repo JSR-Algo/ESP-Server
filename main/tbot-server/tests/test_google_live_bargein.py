@@ -2,8 +2,10 @@
 unblock-timer lifecycle, and auto-unblock timeout."""
 
 import asyncio
+import json
 import time
 import unittest
+from unittest.mock import patch
 
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
 from core.voice.session_provider.google_live import GoogleLiveProvider
@@ -34,6 +36,11 @@ class _WebSocket:
         self.sent.append(payload)
 
 
+class _VoiceConsentClient:
+    async def ensure_voice_allowed(self, _conn):
+        return True
+
+
 class _Conn:
     def __init__(self):
         self.config = {
@@ -44,6 +51,7 @@ class _Conn:
             "google_live": {
                 "api_key": "test",
                 "model": "gemini-live-test",
+                "aec_enabled": False,
                 "interrupt_debounce_sec": 0.2,
                 "model_output_unblock_timeout_sec": 0.05,
             },
@@ -56,9 +64,12 @@ class _Conn:
         self.client_abort = False
         self.client_is_speaking = False
         self.google_live_audio_out_started_at = None
+        self.google_live_turn_started_at = None
+        self.clear_queue_calls = 0
+        self.voice_consent_client = _VoiceConsentClient()
 
     def clear_queues(self):
-        pass
+        self.clear_queue_calls += 1
 
     def clearSpeakStatus(self):
         self.client_is_speaking = False
@@ -116,6 +127,17 @@ class _Controller:
 
 
 class InterruptDebounceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_clean_user_turn_records_latency_start_timestamp(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+
+        provider._mark_clean_user_turn_opened("audio_input")
+        first_started_at = conn.google_live_turn_started_at
+        provider._mark_clean_user_turn_opened("audio_input")
+
+        self.assertIsNotNone(first_started_at)
+        self.assertEqual(conn.google_live_turn_started_at, first_started_at)
+
     async def test_rapid_audio_input_interrupts_are_debounced(self):
         conn = _Conn()
         client = _Client()
@@ -263,6 +285,71 @@ class EndAudioStreamGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.connect_calls, 1)
 
 
+class AecLiveAdmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_live_start_refuses_required_aec_when_processor_is_bypassed(self):
+        conn = _Conn()
+        conn.config["voice_mode"]["fallback_to_classic_on_error"] = False
+        conn.config["google_live"]["aec_enabled"] = True
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+
+        with patch("core.voice.aec.aec_processor.AEC_AVAILABLE", False):
+            with self.assertRaisesRegex(RuntimeError, "AEC required.*bypassed"):
+                await provider.start_session()
+
+        self.assertEqual(client.connect_calls, 0)
+
+
+class LocalStopWordTest(unittest.IsolatedAsyncioTestCase):
+    async def test_local_stop_word_interrupts_output_without_forwarding_to_gemini(self):
+        conn = _Conn()
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        handled = await provider.handle_text_message(
+            json.dumps({"type": "listen", "state": "detect", "text": "dừng lại"})
+        )
+        await provider.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(client.sent_text, [])
+        self.assertEqual(client.interrupt_calls, 1)
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertTrue(
+            any(
+                json.loads(payload).get("state") == "stop"
+                and json.loads(payload).get("reason") == "interrupt"
+                for payload in conn.websocket.sent
+            )
+        )
+
+    async def test_local_stop_word_matches_english_stop(self):
+        provider = GoogleLiveProvider(_Conn(), client_factory=lambda *_: _Client())
+
+        self.assertTrue(provider._is_local_stop_word("stop"))
+
+    async def test_local_stop_word_clears_output_without_live_or_aec_bridge(self):
+        conn = _Conn()
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = None
+
+        handled = await provider.handle_text_message(
+            json.dumps({"type": "listen", "state": "detect", "text": "stop"})
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertFalse(conn.client_is_speaking)
+        self.assertEqual(client.interrupt_calls, 1)
+
+
 class UnblockTimerLifecycleTest(unittest.IsolatedAsyncioTestCase):
     def _bridge(self, conn):
         return GoogleLiveAudioBridge(conn, _Client(), _Logger())
@@ -360,6 +447,9 @@ class _CapturingBridge(GoogleLiveAudioBridge):
 
 class _RawInputCapturingBridge(_CapturingBridge):
     def decode_input_audio(self, audio_bytes):
+        return audio_bytes
+
+    async def decode_input_audio_async(self, audio_bytes):
         return audio_bytes
 
 

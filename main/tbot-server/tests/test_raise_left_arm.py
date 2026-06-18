@@ -1,7 +1,7 @@
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
+from core.providers.tools.product_toolset import ALWAYS_INCLUDE
 from plugins_func.functions import raise_left_arm as raise_left_arm_module
 from plugins_func.register import Action
 
@@ -132,8 +132,5 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dơ cả hai tay", descriptions[2])
 
     def test_server_plugin_exposes_robot_arm_functions_by_default(self):
-        source = Path(raise_left_arm_module.__file__).parents[2] / "core/providers/tools/server_plugins/plugin_executor.py"
-        text = source.read_text(encoding="utf-8")
-
         for function_name in raise_left_arm_module.ARM_TOOL_BY_FUNCTION:
-            self.assertIn(function_name, text)
+            self.assertIn(function_name, ALWAYS_INCLUDE)

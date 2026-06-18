@@ -20,11 +20,13 @@ Firmware never downloads or checksums anything; the ESP synthesizes
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
 import shutil
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 try:  # httpx is a hard runtime dep (==0.28.1); guarded so unit tests can inject a fake.
     import httpx
@@ -111,6 +113,7 @@ class AssetCache:
         assets: List[Dict[str, Any]],
         profile: str,
         asset_origin_base: Optional[str] = None,
+        public_base_url: Optional[str] = None,
         cache_root: str = "data/lesson_assets",
         lesson_key: str = "lesson",
         lesson_version: int = 0,
@@ -127,6 +130,7 @@ class AssetCache:
     ) -> None:
         self.profile = profile
         self.asset_origin_base = (asset_origin_base or "").rstrip("/")
+        self.public_base_url = (public_base_url or "").rstrip("/")
         # P5 version-aware cache key: (lessonId, lessonVersion, manifest_checksum).
         # Two authored versions of the same lesson — or the same version republished
         # with different bytes (new checksum) — land in DISJOINT directories so their
@@ -168,6 +172,10 @@ class AssetCache:
                 continue
             self.assets.append(AssetState(a))
         self._by_key: Dict[str, AssetState] = {a.key: a for a in self.assets}
+        self._by_source: Dict[str, AssetState] = {}
+        for asset in self.assets:
+            for source in self._source_aliases(asset):
+                self._by_source.setdefault(source, asset)
 
     @staticmethod
     def _describe_keyless(asset: Dict[str, Any]) -> str:
@@ -218,6 +226,38 @@ class AssetCache:
             "criticalReady": critical_ready,
             "assets": [a.as_status() for a in self.assets],
         }
+
+    def public_url_for_source(self, source: str) -> Optional[str]:
+        if not self.public_base_url or not source:
+            return None
+        asset = self._asset_for_source(source)
+        if asset is None or asset.state != READY or not asset.checksum_ok:
+            return None
+        token = base64.urlsafe_b64encode(self.cache_key.encode("utf-8")).decode("ascii")
+        token = token.rstrip("=")
+        return f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='')}"
+
+    def _asset_for_source(self, source: str) -> Optional[AssetState]:
+        if source in self._by_source:
+            return self._by_source[source]
+        clean = source.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        if clean in self._by_source:
+            return self._by_source[clean]
+        for asset in self.assets:
+            if asset.path and clean.endswith("/" + asset.path.lstrip("/")):
+                return asset
+        return None
+
+    def _source_aliases(self, asset: AssetState) -> List[str]:
+        aliases = []
+        if asset.path:
+            aliases.append(asset.path)
+            aliases.append(os.path.basename(asset.path))
+            if self.asset_origin_base:
+                aliases.append(f"{self.asset_origin_base}/{asset.path.lstrip('/')}")
+        if asset.url:
+            aliases.append(asset.url)
+        return [a for a in aliases if a]
 
     def assert_profile_renderable(self) -> None:
         """Profile reject (plan §5.4/§6.2.4): on espTft, NEVER enter PRELOADING for a

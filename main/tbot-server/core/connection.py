@@ -45,6 +45,8 @@ from core.utils.voiceprint_provider import VoiceprintProvider
 from core.voice.session_provider.factory import create_voice_session_provider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
+from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
+from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 
 
 TAG = __name__
@@ -134,6 +136,8 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
         self.google_live_audio_out_started_at = None
+        self.google_live_turn_started_at = None
+        self.voice_metric_samples = deque(maxlen=100)
 
         # Thread task related
         self.loop = None  # in handle_connection Get running fromEventLoop
@@ -161,11 +165,19 @@ class ConnectionHandler:
         self.voiceprint_provider = None
         self.voice_provider = None
         self.voice_provider_task = None
+        self.session_mode = SessionMode.DORMANT
+        self.audio_channel_owner = SessionMode.DORMANT
+        self.last_live_activity_at = None
+        self.google_live_session_resumption_handle = None
+        self.live_state_store = create_live_state_store(self.config)
+        self.live_resumption_store = self.live_state_store
+        self.live_admission_gate = LiveAdmissionGate.from_config(self.config, self.live_state_store)
 
         # US-006 lesson runtime (additive; dark unless lesson.runtime_enabled).
         # Holds the per-device lesson session state when a lesson is in flight.
         self.lesson_runtime = None
         self.lesson_pull_task = None
+        self.safety_event_forwarder = None
         # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
         # lazily created on the first lesson pull. None until a lesson runs.
         self.lesson_voice_alarm = None
@@ -403,10 +415,9 @@ class ConnectionHandler:
                     return
             await handleTextMessage(self, message)
         elif isinstance(message, bytes):
-            if self.voice_provider is not None:
-                handled = await self.voice_provider.handle_audio_bytes(message)
-                if handled:
-                    return
+            handled = await self._route_audio_message(message)
+            if handled:
+                return
 
             if self.vad is None or self.asr is None:
                 return
@@ -419,6 +430,102 @@ class ConnectionHandler:
 
             # When no header processing needed or no header, process raw directlyMessage
             self.asr_audio_queue.put(message)
+
+    async def _route_audio_message(self, message: bytes) -> bool:
+        """Route one inbound audio frame through the single audio-channel owner.
+
+        `LESSON` owns the channel exclusively, so Live/classic voice does not see
+        raw mic audio while scripted lesson audio is running. `DORMANT` lazily
+        enters conversation mode before the selected voice provider handles audio.
+        """
+        if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
+            return False
+        if self.voice_provider is None:
+            return False
+        if normalize_session_mode(self.session_mode) == SessionMode.DORMANT:
+            await self.enter_conversation_mode(reason="inbound_audio")
+        handled = await self.voice_provider.handle_audio_bytes(message)
+        if handled:
+            self.last_live_activity_at = time.monotonic()
+        return bool(handled)
+
+    def _set_session_mode(self, mode, *, reason: str = "") -> SessionMode:
+        mode = normalize_session_mode(mode)
+        self.session_mode = mode
+        self.audio_channel_owner = mode
+        try:
+            self.logger.bind(tag=TAG).info(
+                "session_mode_changed mode={} reason={}",
+                mode.value,
+                reason,
+            )
+        except Exception:
+            pass
+        return mode
+
+    async def enter_conversation_mode(self, *, reason: str = "conversation") -> bool:
+        if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
+            return False
+        self._set_session_mode(SessionMode.CONVERSATION, reason=reason)
+        provider = self.voice_provider
+        if provider is not None and getattr(provider, "_client", None) is None:
+            start_session = getattr(provider, "start_session", None)
+            if callable(start_session):
+                await start_session()
+        self.last_live_activity_at = time.monotonic()
+        return True
+
+    async def enter_dormant_mode(self, *, reason: str = "dormant") -> None:
+        self._set_session_mode(SessionMode.DORMANT, reason=reason)
+
+    async def enter_lesson_mode(self, *, reason: str = "lesson_start") -> None:
+        await self._suspend_live_for_lesson()
+        self._set_session_mode(SessionMode.LESSON, reason=reason)
+
+    async def release_lesson_mode(self, *, reason: str = "lesson_terminal") -> None:
+        if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
+            await self.enter_dormant_mode(reason=reason)
+
+    async def _suspend_live_for_lesson(self) -> None:
+        await self._persist_live_resumption_handle()
+        provider = self.voice_provider
+        close_live = getattr(provider, "_close_live_resources", None)
+        if callable(close_live):
+            await close_live()
+            return
+        close_provider = getattr(provider, "close", None)
+        if callable(close_provider):
+            await close_provider()
+
+    async def _persist_live_resumption_handle(self) -> None:
+        handle = getattr(self, "google_live_session_resumption_handle", None)
+        if not handle:
+            return
+        store = getattr(self, "live_resumption_store", None)
+        save = getattr(store, "save", None)
+        if callable(save):
+            await save(getattr(self, "device_id", None), handle)
+
+    async def close_live_if_idle(self, *, now=None) -> bool:
+        if normalize_session_mode(self.session_mode) != SessionMode.CONVERSATION:
+            return False
+        cfg = self.config.get("live_admission", {}) if isinstance(self.config, dict) else {}
+        timeout = cfg.get("idle_timeout_sec")
+        if timeout is None:
+            timeout = (self.config.get("google_live", {}) or {}).get("idle_timeout_sec", 45)
+        timeout = float(timeout)
+        now = time.monotonic() if now is None else float(now)
+        last_activity = self.last_live_activity_at
+        if last_activity is None:
+            last_activity = getattr(self, "google_live_session_started_at", None)
+        if last_activity is None:
+            return False
+        last_activity = float(last_activity)
+        if now - last_activity < timeout:
+            return False
+        await self._suspend_live_for_lesson()
+        await self.enter_dormant_mode(reason="idle_timeout")
+        return True
 
     def _is_hello_message(self, message):
         try:
@@ -914,14 +1021,6 @@ class ConnectionHandler:
                     plugin_from_server[plugin] = json.loads(config_str)
                 self.config["plugins"] = plugin_from_server
                 functions = list(plugin_from_server.keys())
-                # The conversational "switch to lesson / chuyển sang bài học" trigger
-                # (plugins_func/functions/start_lesson.py) is declared in config.yaml's
-                # function_call.functions, but this agent-config plugin list REPLACES
-                # that list wholesale -- silently dropping start_lesson so the child can
-                # never voice-switch into lesson mode. Re-add it whenever the lesson
-                # runtime is enabled; the call is still gated by _lesson_runtime_enabled().
-                if self._lesson_runtime_enabled() and "start_lesson" not in functions:
-                    functions.append("start_lesson")
                 self.config["Intent"][self.config["selected_module"]["Intent"]][
                     "functions"
                 ] = functions
@@ -1638,6 +1737,28 @@ class ConnectionHandler:
         except Exception:  # pragma: no cover - alarm is observability-only, never fatal
             pass
 
+    def record_voice_metric(self, name: str, value: float, labels=None) -> None:
+        """Best-effort bounded voice metric sink until MP-14's exporter lands."""
+        try:
+            sample = {
+                "name": str(name),
+                "value": float(value),
+                "labels": dict(labels or {}),
+                "timestamp": time.time(),
+            }
+        except Exception:
+            return
+        self.voice_metric_samples.append(sample)
+        try:
+            self.logger.bind(tag=TAG).info(
+                "voice_metric name={} value_ms={:.1f} labels={}",
+                sample["name"],
+                sample["value"],
+                sample["labels"],
+            )
+        except Exception:
+            pass
+
     def _realtime_interaction_state(self):
         """Provider-agnostic read of the realtime interaction state.
 
@@ -1755,6 +1876,13 @@ class ConnectionHandler:
                 except Exception as lesson_cleanup_error:
                     self.logger.bind(tag=TAG).error(
                         f"Error cleaning lesson runtime: {lesson_cleanup_error}"
+                    )
+            if self.safety_event_forwarder is not None:
+                try:
+                    await self.safety_event_forwarder.aclose()
+                except Exception as safety_cleanup_error:
+                    self.logger.bind(tag=TAG).error(
+                        f"Error cleaning safety event forwarder: {safety_cleanup_error}"
                     )
 
             # Clear task queue

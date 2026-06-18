@@ -3,6 +3,7 @@
 numpy==1.26.4
 speexdsp==0.1.1
 websockets==14.2
+uvloop==0.22.1
 pyyml==0.0.2
 opuslib_next==1.1.5
 pydub==0.25.1

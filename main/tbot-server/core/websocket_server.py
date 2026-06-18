@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import os
 import warnings
 
 warnings.filterwarnings(
@@ -101,70 +103,126 @@ class WebSocketServer:
         secret_key = self.config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds", None)
         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+        self.lesson_connections = {}
+        self.accept_cap = self._resolve_accept_cap()
+        self._active_device_connections = 0
+        self.is_draining = False
+        self._connection_tasks = set()
+        self._server = None
+        self._stop_event = None
 
     async def start(self):
         server_config = self.config["server"]
         host = server_config.get("ip", "0.0.0.0")
         port = int(server_config.get("port", 8000))
 
+        self._stop_event = asyncio.Event()
         async with websockets.serve(
             self._handle_connection, host, port, process_request=self._http_response
-        ):
-            await asyncio.Future()
+        ) as server:
+            self._server = server
+            await self._stop_event.wait()
+
+    def begin_drain(self):
+        self.is_draining = True
+
+    async def drain(self, *, timeout=30.0):
+        self.begin_drain()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+        if self._stop_event is not None:
+            self._stop_event.set()
+        pending = [task for task in self._connection_tasks if not task.done()]
+        if pending:
+            done, still_pending = await asyncio.wait(pending, timeout=timeout)
+            for task in still_pending:
+                task.cancel()
+            if still_pending:
+                await asyncio.gather(*still_pending, return_exceptions=True)
+            for task in done:
+                try:
+                    task.result()
+                except Exception:
+                    pass
 
     async def _handle_connection(self, websocket: websockets.ServerConnection):
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._connection_tasks.add(current_task)
         self._copy_query_identity_headers(websocket)
         headers = dict(websocket.request.headers)
-        if headers.get("device-id", None) is None:
-            if not getattr(websocket.request, "path", ""):
-                self.logger.bind(tag=TAG).error("Cannot get request path")
+        try:
+            if headers.get("device-id", None) is None:
+                if not getattr(websocket.request, "path", ""):
+                    self.logger.bind(tag=TAG).error("Cannot get request path")
+                    await websocket.close()
+                    return
+                await websocket.send(
+                    "Port normal. To test connection, start digital-human test."
+                )
                 await websocket.close()
                 return
-            await websocket.send(
-                "Port normal. To test connection, start digital-human test."
-            )
-            await websocket.close()
-            return
 
-        """Handle new connection, create independent ConnectionHandler each time"""
-        # Authenticate first, then connect
-        try:
-            await self._handle_auth(websocket)
-        except AuthenticationError:
-            await websocket.send("Authentication failed")
-            await websocket.close()
-            return
-        # CreateConnectionHandlerPass current whenserverInstance
-        from core.connection import ConnectionHandler
+            if self.is_draining:
+                await self._reject_draining(websocket)
+                return
 
-        handler = ConnectionHandler(
-            self.config,
-            self._vad,
-            self._asr,
-            self._llm,
-            self._memory,
-            self._intent,
-            self,  # Pass inserverInstance
-        )
-        try:
-            await handler.handle_connection(websocket)
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"Error handling connection: {e}")
-        finally:
-            # Force close connection (if not closed yet)
+            """Handle new connection, create independent ConnectionHandler each time"""
+            # Authenticate first, then connect
             try:
-                # Safely checkWebSocketStatusAnd close
-                if hasattr(websocket, "closed") and not websocket.closed:
-                    await websocket.close()
-                elif hasattr(websocket, "state") and websocket.state.name != "CLOSED":
-                    await websocket.close()
-                else:
-                    # If noneclosedAttribute, try close directly
-                    await websocket.close()
-            except Exception as close_error:
-                self.logger.bind(tag=TAG).error(
-                    f"Error when server forcibly closed connection: {close_error}"
+                await self._handle_auth(websocket)
+            except AuthenticationError:
+                await websocket.send("Authentication failed")
+                await websocket.close()
+                return
+            if self._is_over_accept_cap():
+                await self._reject_accept_cap(websocket)
+                return
+            # CreateConnectionHandlerPass current whenserverInstance
+            from core.connection import ConnectionHandler
+
+            device_id = headers.get("device-id")
+            handler = ConnectionHandler(
+                self.config,
+                self._vad,
+                self._asr,
+                self._llm,
+                self._memory,
+                self._intent,
+                self,  # Pass inserverInstance
+            )
+            if device_id:
+                handler.device_id = device_id
+                self.lesson_connections[device_id] = handler
+            self._active_device_connections += 1
+            try:
+                await handler.handle_connection(websocket)
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"Error handling connection: {e}")
+            finally:
+                self._active_device_connections = max(
+                    0, self._active_device_connections - 1
                 )
+                if device_id and self.lesson_connections.get(device_id) is handler:
+                    self.lesson_connections.pop(device_id, None)
+                # Force close connection (if not closed yet)
+                try:
+                    # Safely checkWebSocketStatusAnd close
+                    if hasattr(websocket, "closed") and not websocket.closed:
+                        await websocket.close()
+                    elif hasattr(websocket, "state") and websocket.state.name != "CLOSED":
+                        await websocket.close()
+                    else:
+                        # If noneclosedAttribute, try close directly
+                        await websocket.close()
+                except Exception as close_error:
+                    self.logger.bind(tag=TAG).error(
+                        f"Error when server forcibly closed connection: {close_error}"
+                    )
+        finally:
+            if current_task is not None:
+                self._connection_tasks.discard(current_task)
 
     @staticmethod
     def _copy_query_identity_headers(websocket):
@@ -263,3 +321,71 @@ class WebSocketServer:
                 )
                 if not auth_success:
                     raise AuthenticationError("Invalid token")
+
+    def _resolve_accept_cap(self):
+        server_config = self.config.get("server", {})
+        admission = server_config.get("audio_admission", {})
+        if not isinstance(admission, dict) or not admission.get("enabled", False):
+            return None
+        explicit_cap = admission.get("hard_accept_cap")
+        if explicit_cap is not None:
+            try:
+                return max(1, int(explicit_cap))
+            except (TypeError, ValueError):
+                self.logger.bind(tag=TAG).warning(
+                    "Invalid audio_admission.hard_accept_cap={!r}; deriving from benchmark",
+                    explicit_cap,
+                )
+        try:
+            cost = float(admission.get("measured_cost_per_stream_core_fraction"))
+        except (TypeError, ValueError):
+            cost = 0.0
+        if cost <= 0:
+            self.logger.bind(tag=TAG).warning(
+                "Audio admission enabled without measured cost; WS accept cap disabled"
+            )
+            return None
+        try:
+            headroom = float(admission.get("headroom_fraction", 0.70))
+        except (TypeError, ValueError):
+            headroom = 0.70
+        headroom = min(1.0, max(0.1, headroom))
+        try:
+            cores = int(admission.get("cpu_cores") or os.cpu_count() or 1)
+        except (TypeError, ValueError):
+            cores = os.cpu_count() or 1
+        return max(1, int((max(1, cores) * headroom) / cost))
+
+    def _is_over_accept_cap(self):
+        return self.accept_cap is not None and self._active_device_connections >= self.accept_cap
+
+    async def _reject_accept_cap(self, websocket):
+        admission = self.config.get("server", {}).get("audio_admission", {})
+        retry_after_ms = int(admission.get("retry_after_ms", 1000)) if isinstance(admission, dict) else 1000
+        payload = {
+            "type": "server_busy",
+            "reason": "active_stream_cap",
+            "active": self._active_device_connections,
+            "cap": self.accept_cap,
+            "retry_after_ms": retry_after_ms,
+        }
+        self.logger.bind(tag=TAG).warning(
+            "Rejecting websocket over audio admission cap active={} cap={}",
+            self._active_device_connections,
+            self.accept_cap,
+        )
+        try:
+            await websocket.send(json.dumps(payload))
+        finally:
+            await websocket.close(code=1013, reason="active stream cap reached")
+
+    async def _reject_draining(self, websocket):
+        payload = {
+            "type": "server_draining",
+            "reason": "server_draining",
+            "retry_after_ms": 1000,
+        }
+        try:
+            await websocket.send(json.dumps(payload))
+        finally:
+            await websocket.close(code=1012, reason="server draining")

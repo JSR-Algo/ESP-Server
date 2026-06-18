@@ -38,6 +38,12 @@ PLACEHOLDER_MARKERS = ("your-", "your ", "You", "Your")
 AUTH_KEY_FILE = "data/.auth_key"
 
 
+def install_uvloop_policy() -> None:
+    import uvloop
+
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
 def _contains_placeholder(value) -> bool:
     if not isinstance(value, str):
         return False
@@ -128,7 +134,7 @@ async def main():
     ws_server = WebSocketServer(config)
     ws_task = asyncio.create_task(ws_server.start())
     # Start simple HTTP server.
-    ota_server = SimpleHttpServer(config)
+    ota_server = SimpleHttpServer(config, ws_server.lesson_connections)
     ota_task = asyncio.create_task(ota_server.start())
 
     read_config_from_api = config.get("read_config_from_api", False)
@@ -188,6 +194,18 @@ async def main():
     except asyncio.CancelledError:
         print("Task canceled, cleaning resources...")
     finally:
+        # Stop accepting new device sockets and let active sessions drain before
+        # task cancellation. This keeps rolling deploys from dropping every child
+        # session at once.
+        try:
+            await ws_server.drain(
+                timeout=float(
+                    config.get("server", {}).get("graceful_drain_timeout_sec", 30)
+                )
+            )
+        except Exception as exc:
+            logger.bind(tag=TAG).warning("WebSocket drain failed: {}", exc)
+
         # Stop global GC manager.
         await gc_manager.stop()
 
@@ -208,6 +226,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        install_uvloop_policy()
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Manually interrupted, program terminated.")

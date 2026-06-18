@@ -59,6 +59,7 @@ class _Conn:
             "google_live": {
                 "api_key": "test",
                 "model": "gemini-live-test",
+                "aec_enabled": False,
                 "reconnect_buffer_ms": 2000,
                 "input_frame_duration_ms": 60,
                 "reconnect": {
@@ -76,6 +77,14 @@ class _Conn:
         self.session_id = "s-1"
         self.google_live_audio_out_started_at = None
         self.client_is_speaking = False
+
+        async def _allow_voice(_conn):
+            return True
+
+        self.voice_consent_client = SimpleNamespace(
+            has_active_ai_voice_consent=lambda _conn: True,
+            ensure_voice_allowed=_allow_voice,
+        )
 
     def clear_queues(self):
         pass
@@ -223,6 +232,40 @@ class ProactiveReconnectTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         self.assertEqual(len(invocations), 1)
+
+
+class ReconnectAdmissionAccountingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnect_attempt_records_against_admission_gate_before_live_open(self):
+        conn = _Conn()
+        records = []
+
+        class _Gate:
+            def record_reconnect(self, device_id):
+                records.append(device_id)
+
+        conn.device_id = "device-1"
+        conn.live_admission_gate = _Gate()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _AlwaysFailClient())
+        opened = {"count": 0}
+
+        async def close_live_resources():
+            return None
+
+        async def open_live_session():
+            opened["count"] += 1
+
+        async def forward_pending_reconnect_audio():
+            return None
+
+        provider._close_live_resources = close_live_resources
+        provider._open_live_session = open_live_session
+        provider._forward_pending_reconnect_audio = forward_pending_reconnect_audio
+
+        reconnected = await provider._try_reconnect(RuntimeError("stream closed"))
+
+        self.assertTrue(reconnected)
+        self.assertEqual(opened["count"], 1)
+        self.assertEqual(records, ["device-1"])
 
 
 class ReconnectBufferCapacityTest(unittest.TestCase):

@@ -10,14 +10,16 @@ ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libopus0 ffmpeg curl ca-certificates && \
+        libopus0 ffmpeg curl ca-certificates \
+        libspeexdsp-dev libspeexdsp1 swig build-essential pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/tbot-esp32-server
 
 COPY main/tbot-server/requirements.txt requirements.txt
-# Strip local-ML deps not used by google_live mode.
-RUN sed -E '/^(torch|torchaudio|silero_vad|funasr|sherpa_onnx|vosk|modelscope|speexdsp|mem0ai|powermem)([=;> ].*)?$/d' requirements.txt > requirements.slim.txt && \
+# Strip local-ML deps not used by google_live mode; keep speexdsp because AEC is
+# a production boot invariant for Live.
+RUN sed -E '/^(torch|torchaudio|silero_vad|funasr|sherpa_onnx|vosk|modelscope|mem0ai|powermem)([=;> ].*)?$/d' requirements.txt > requirements.slim.txt && \
     pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.slim.txt && \
     rm -f requirements.slim.txt

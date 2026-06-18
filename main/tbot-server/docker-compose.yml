@@ -10,6 +10,10 @@ services:
       - seccomp:unconfined
     environment:
       - TZ=Asia/Shanghai
+      - LESSON_RUNTIME_ENABLED=${LESSON_RUNTIME_ENABLED:-false}
+      - COURSE_BACKEND_URL=${COURSE_BACKEND_URL:-}
+      - LESSON_ASSET_ORIGIN_BASE=${LESSON_ASSET_ORIGIN_BASE:-}
+      - TBOT_DEVICE_MINT_SECRET=${TBOT_DEVICE_MINT_SECRET:-}
     ports:
       # ws服务端
       - "8000:8000"

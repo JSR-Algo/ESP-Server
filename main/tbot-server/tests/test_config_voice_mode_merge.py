@@ -1,6 +1,6 @@
+import pathlib
 import unittest
 
-import pathlib
 import yaml
 
 from config.config_loader import GOOGLE_LIVE_DEFAULTS, merge_configs, normalize_voice_config
@@ -101,10 +101,17 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(google_live["input_flush_delay_sec"], 1.0)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["raw_audio_barge_in_enabled"])
 
+    def test_config_yaml_keeps_lesson_runtime_dark_by_default(self):
+        config_path = pathlib.Path(__file__).resolve().parents[1] / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        self.assertIs(config["lesson"]["runtime_enabled"], False)
+
     def test_google_live_missing_section_gets_production_defaults(self):
         merged = normalize_voice_config({"voice_mode": {"type": "google_live"}})
 
         self.assertEqual(merged["google_live"]["language_code"], "vi-VN")
+        self.assertTrue(merged["google_live"]["aec_enabled"])
         self.assertEqual(merged["google_live"]["interrupt_rms_threshold"], 5000)
         # PR4 P4.5: tuned defaults.
         self.assertEqual(merged["google_live"]["barge_in_min_input_duration_sec"], 0.30)

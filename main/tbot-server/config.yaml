@@ -43,6 +43,17 @@ server:
     # Devices in whitelist bypass token verification, allowed directly
     allowed_devices:
       - "11:22:33:44:55:66"
+  # Admission cap for active device WebSockets. The default cap is derived from
+  # scripts/benchmark_google_live_audio_runtime.py full-path audio cost
+  # (Opus decode + resample + AEC + output Opus encode):
+  # floor(cpu_cores * headroom / measured_cost_per_stream).
+  audio_admission:
+    enabled: true
+    cpu_cores: 1
+    headroom_fraction: 0.70
+    measured_cost_per_stream_core_fraction: 0.0293
+    hard_accept_cap: null
+    retry_after_ms: 1000
  # MQTTGateway configuration for OTA delivery to devices. Configured via mqtt_gateway .env file, format: host:port
   mqtt_gateway: null
   # MQTTSignature key for generating MQTT connection password, configured in the .env file of mqtt_gateway
@@ -258,13 +269,13 @@ plugins:
     provider: "metaso"
     description: "Search the web when the user explicitly needs current online information."
     max_results: 5
-    api_key: "mk-xxx"
+    api_key: ${TBOT_PLUGINS_WEB_SEARCH_API_KEY:}
   home_assistant:
     devices:
       - Living room,Toy light,switch.cuco_cn_460494544_cp1_on_p_2_1
       - Bedroom,Desk lamp,switch.iot_cn_831898993_socn1_on_p_2_1
     base_url: http://homeassistant.local:8123
-    api_key: your-home-assistant-api-token
+    api_key: ${TBOT_PLUGINS_HOME_ASSISTANT_API_KEY:}
   play_music:
     music_dir: "./music"  # Music file storage path, will search for music files in this directory and subdirectories
     music_ext: # Music file type, mp3 format is most efficient
@@ -278,7 +289,7 @@ plugins:
     # ragflowAPI config
     base_url: "http://192.168.0.8"
     # ragflow apiAccess token
-    api_key: "ragflow-xxx"
+    api_key: ${TBOT_PLUGINS_SEARCH_FROM_RAGFLOW_API_KEY:}
     # ragflowKnowledge base ID
     dataset_ids: ["123456789"]
 # Voiceprint recognition config
@@ -298,15 +309,30 @@ voiceprint:
 # ################################Below is the character model configuration######################################
 
 prompt: |
-  You are TBot, a concise, friendly AI assistant for a voice robot.
-  [Core traits]
-  - Keep responses practical and easy to understand.
-  - Ask a short clarification when the user's request is ambiguous.
-  - For technical topics, explain the key idea first, then provide steps only when useful.
-  [Interaction guide]
-  - Match the user's language when possible.
-  - Avoid long monologues unless the user asks for depth.
-  - Never pretend to have access to private data or real-world actions you cannot perform.
+  Bạn là TBot — người bạn robot biết nói, ấm áp và vui vẻ, đồng hành cùng một em nhỏ 4–8 tuổi đang học tiếng Anh. Bạn nói qua loa của robot; em bé nghe bằng tai, không đọc chữ.
+
+  [Tính cách & giọng điệu]
+  - Nói tiếng Việt là chính, chèn từ/câu tiếng Anh NGẮN, đơn giản để bé luyện. Mỗi lượt chỉ 1–2 câu ngắn, không độc thoại dài.
+  - Giọng dịu dàng, kiên nhẫn, khích lệ. Khen cụ thể ("Con nói 'cat' rõ ghê!") thay vì khen chung chung.
+  - Khi bé im lặng hoặc bối rối, gợi ý nhẹ một lựa chọn, đừng dồn dập.
+  - Tự xưng "mình", gọi bé là "con". Không bao giờ giả vờ làm được việc ngoài khả năng (gọi điện, mở app, mua đồ...).
+
+  [An toàn trẻ em — luật cứng, tuân thủ tuyệt đối]
+  - Phạm vi cho phép: học tiếng Anh thân thiện, truyện/bài hát/từ vựng hợp lứa tuổi, chủ đề đời thường an toàn.
+  - TỪ CHỐI ngay (ngắn gọn, bằng tiếng Việt, KHÔNG giải thích chi tiết nội dung xấu) với: chuyện người lớn, bạo lực, tự làm hại bản thân, thù ghét, chửi thề, việc phạm pháp, hướng dẫn nguy hiểm.
+  - TUYỆT ĐỐI KHÔNG hỏi và KHÔNG nhận: tên thật đầy đủ, địa chỉ nhà, tên trường, số điện thoại, vị trí chính xác, mật khẩu, ảnh, chi tiết riêng tư của gia đình.
+  - Chống dụ dỗ (anti-grooming): không bao giờ rủ bé qua app khác, gặp ngoài đời, giấu cuộc trò chuyện, chia sẻ thông tin liên lạc, hay giữ bí mật với bố mẹ/người lớn tin cậy.
+  - Nếu có chuyện gì làm con buồn, sợ, hoặc không thoải mái, hãy nhẹ nhàng khuyên con kể với bố mẹ hoặc người lớn con tin tưởng.
+  - Khi cần từ chối: nói ngắn bằng tiếng Việt rồi chuyển hướng về một câu luyện tiếng Anh an toàn. Ví dụ: "Mình không nói về chuyện đó được. Mình cùng tập câu 'I like apples' nhé?"
+
+  [Khi nào GỌI tool start_lesson — và khi nào KHÔNG]
+  - CHỈ gọi start_lesson khi bé muốn VÀO ĐÚNG BÀI HỌC ĐÃ ĐƯỢC GIAO cho bé (bài học/tiết học/khoá học của con), KHÔNG phải khi bé chỉ muốn được dạy/chơi học ngay trong lúc trò chuyện.
+    • GỌI khi bé nói (tiếng Việt): "học bài thôi", "con muốn học bài", "vào bài học", "mở bài học của con", "bắt đầu bài học", "chuyển sang bài học", "học tiếp bài", "mình vào học nhé".
+    • GỌI khi bé nói (English): "start the lesson", "let's do the lesson", "open my lesson", "begin the class", "switch to lesson", "continue the lesson".
+  - KHÔNG gọi start_lesson khi bé chỉ muốn được DẠY/CHƠI HỌC NGAY trong hội thoại — đó là trò chuyện thường, bạn tự dạy luôn: "dạy con đi", "cho con học chữ", "con muốn học số", "con muốn hát", "đố con đi", "kể chuyện cho con".
+  - KHÔNG gọi start_lesson cho hỏi đáp linh tinh, hỏi giờ/thời tiết, chơi game, hay bất kỳ câu trò chuyện thường nào.
+  - Nếu mơ hồ (bé chỉ nói "con chán" / "chơi gì đi" / "học gì đó đi"), HỎI LẠI một câu ngắn ("Con muốn vào bài học của con, hay mình học vài từ ngay tại đây?") thay vì tự đoán mà gọi tool.
+  - Sau khi gọi start_lesson xong, BẠN DỪNG dẫn dắt — phần bài học do hệ thống bài học (lesson runtime) tự điều khiển robot; bạn KHÔNG tự kể nội dung bài.
 
 # Default system prompt template file
 prompt_template: agent-base-prompt.txt
@@ -347,10 +373,10 @@ selected_module:
 # bài học" trigger (plugins_func/functions/start_lesson.py -> core.lesson.runtime
 # .maybe_start_lesson_on_connect). api_base is the live NestJS course backend /v1
 # base used to fetch the device's assignment + manifest; falls back to
-# server.api_url. Can also be supplied by env (LESSON_RUNTIME_ENABLED /
-# COURSE_BACKEND_URL) where config/config_loader.py applies env overrides.
+# server.api_url. Dark default; prod enablement is env-only
+# (LESSON_RUNTIME_ENABLED) via config/config_loader.py env overrides.
 lesson:
-  runtime_enabled: true
+  runtime_enabled: false
   api_base: "https://tbot-backend-8wmh.onrender.com/v1"
   # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim
   # Device-renderer profile gate: profiles this firmware can actually render. Current
@@ -414,7 +440,7 @@ Memory:
     type: mem0ai
     # https://app.mem0.ai/dashboard/api-keys
     # 1000 free calls per month
-    api_key: Your mem0ai API key
+    api_key: ${TBOT_MEMORY_MEM0AI_API_KEY:}
   powermem:
     # PowerMemOceanBase open-source agent memory component, summarizes memory via local LLM
     # Pricing: PowerMem is free; actual costs depend on the chosen LLM and database
@@ -435,14 +461,14 @@ Memory:
     llm:
       provider: openai  # Optional: qwen, openai, zhipu etc.
       config:
-        api_key: Your LLM API key
+        api_key: ${TBOT_MEMORY_POWERMEM_LLM_CONFIG_API_KEY:}
         model: qwen-plus
         # openai_base_url: https://api.openai.com/v1  # Optional, custom service URL
     # ========== Embedding Configuration ==========
     embedder:
       provider: openai  # Optional: qwen, openai etc.
       config:
-        api_key: Your embedding model API key
+        api_key: ${TBOT_MEMORY_POWERMEM_EMBEDDER_CONFIG_API_KEY:}
         model: text-embedding-v4
         openai_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
         # embedding_dims: 1024  # Vector dimension (configure if not 1536)
@@ -515,7 +541,7 @@ ASR:
     # Generally, pay-per-request is cheaper, but DoubaoStreamASR uses LLM technology for better results
     type: doubao
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS access_token
+    access_token: ${TBOT_ASR_DOUBAOASR_ACCESS_TOKEN:}
     cluster: volcengine_input_common
     # Hotword/replacement usage workflow: https://www.volcengine.com/docs/6561/155738
     boosting_table_name: （(Optional) Your hotword file name
@@ -529,7 +555,7 @@ ASR:
     # Generally, pay-per-request is cheaper, but DoubaoStreamASR uses LLM technology for better results
     type: doubao_stream
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS service access_token
+    access_token: ${TBOT_ASR_DOUBAOSTREAMASR_ACCESS_TOKEN:}
     # Resource ID: Hourly version volc.bigasr.sauc.duration, Concurrent version volc.bigasr.sauc.concurrent
     resource_id: volc.bigasr.sauc.duration
     # Hotword/replacement usage workflow: https://www.volcengine.com/docs/6561/155738
@@ -549,7 +575,7 @@ ASR:
     # Cheaper, recommended for high-concurrency scenarios
     type: doubao_stream
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS service access_token
+    access_token: ${TBOT_ASR_DOUBAOSTREAMASRV2_ACCESS_TOKEN:}
     # Resource ID: Hourly version volc.seedasr.sauc.duration, Concurrent version volc.seedasr.sauc.concurrent
     resource_id: volc.seedasr.sauc.duration
     # Hotword/replacement usage workflow: https://www.volcengine.com/docs/6561/155738
@@ -568,8 +594,8 @@ ASR:
     # Claim free resources: https://console.cloud.tencent.com/asr/resourcebundle
     type: tencent
     appid: Your Tencent TTS AppID
-    secret_id: Your Tencent TTS secret_id
-    secret_key: Your Tencent TTS secret_key
+    secret_id: ${TBOT_ASR_TENCENTASR_SECRET_ID:}
+    secret_key: ${TBOT_ASR_TENCENTASR_SECRET_KEY:}
     output_dir: tmp/
   AliyunASR:
     # Alibaba Cloud Intelligent Speech Interaction service. Enable the service on Alibaba Cloud first, then obtain credentials.
@@ -583,9 +609,9 @@ ASR:
     # Define ASR API type
     type: aliyun
     appkey: Your Alibaba Cloud Intelligent Speech Interaction project Appkey
-    token: Your Alibaba Cloud Intelligent Speech Interaction AccessToken (temporary for 24h). For long-term use, use access_key_id and access_key_secret below
+    token: ${TBOT_ASR_ALIYUNASR_TOKEN:}
     access_key_id: Your Alibaba Cloud account access_key_id
-    access_key_secret: Your Alibaba Cloud account access_key_secret
+    access_key_secret: ${TBOT_ASR_ALIYUNASR_ACCESS_KEY_SECRET:}
     output_dir: tmp/
   AliyunStreamASR:
     # Alibaba Cloud Intelligent Speech Interaction - Real-time Streaming ASR
@@ -599,9 +625,9 @@ ASR:
     # Define ASR API type
     type: aliyun_stream
     appkey: Your Alibaba Cloud Intelligent Speech Interaction project Appkey
-    token: Your Alibaba Cloud Intelligent Speech Interaction AccessToken (temporary for 24h). For long-term use, use access_key_id and access_key_secret below
+    token: ${TBOT_ASR_ALIYUNSTREAMASR_TOKEN:}
     access_key_id: Your Alibaba Cloud account access_key_id
-    access_key_secret: Your Alibaba Cloud account access_key_secret
+    access_key_secret: ${TBOT_ASR_ALIYUNSTREAMASR_ACCESS_KEY_SECRET:}
     # Server region selection. Choose a closer server to reduce latency, e.g., nls-gateway-cn-hangzhou.aliyuncs.com(Hangzhou)etc.
     host: nls-gateway-cn-shanghai.aliyuncs.com
     # Sentence detection duration(Milliseconds)，Silence duration before sentence splitting, default 800ms
@@ -612,8 +638,8 @@ ASR:
     # Check resource quota: https://console.bce.baidu.com/ai-engine/old/#/ai/speech/overview/resource/list
     type: baidu
     app_id: Your Baidu Speech Tech AppID
-    api_key: Your Baidu Speech API Key
-    secret_key: Your Baidu Speech SecretKey
+    api_key: ${TBOT_ASR_BAIDUASR_API_KEY:}
+    secret_key: ${TBOT_ASR_BAIDUASR_SECRET_KEY:}
     # Language parameter, 1537 for Mandarin, details: https://ai.baidu.com/ai-doc/SPEECH/0lbxfnc9b
     dev_pid: 1537
     output_dir: tmp/
@@ -626,7 +652,7 @@ ASR:
     # 2.Create api-key  https://platform.openai.com/settings/organization/api-keys
     # 3.Model can be gpt-4o-transcribe or GPT-4o mini Transcribe
     type: openai
-    api_key: Your OpenAI API key
+    api_key: ${TBOT_ASR_OPENAIASR_API_KEY:}
     base_url: https://api.openai.com/v1/audio/transcriptions
     model_name: gpt-4o-mini-transcribe
     output_dir: tmp/
@@ -637,7 +663,7 @@ ASR:
     # 2.Create api-key  https://console.groq.com/keys
     # 3.Models available: whisper-large-v3-turbo or whisper-large-v3 (distil-whisper-large-v3-en only supports English transcription)
     type: openai
-    api_key: Your Groq API key
+    api_key: ${TBOT_ASR_GROQASR_API_KEY:}
     base_url: https://api.groq.com/openai/v1/audio/transcriptions
     model_name: whisper-large-v3-turbo
     output_dir: tmp/
@@ -664,7 +690,7 @@ ASR:
     # 2.Create API-KEY  https://bailian.console.aliyun.com/#/api-key
     # 3.Qwen3-ASR-FlashBased on Qwen multimodal foundation, supports multilingual recognition, singing recognition, noise rejection, etc.
     type: qwen3_asr_flash
-    api_key: Your Alibaba Cloud Bailian API key
+    api_key: ${TBOT_ASR_QWEN3ASRFLASH_API_KEY:}
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     model_name: qwen3-asr-flash
     output_dir: tmp/
@@ -684,8 +710,8 @@ ASR:
     type: xunfei_stream
     # Required parameter - iFlytek Open Platform app info
     app_id: Your APPID
-    api_key: Your APIKey
-    api_secret: Your APISecret
+    api_key: ${TBOT_ASR_XUNFEISTREAMASR_API_KEY:}
+    api_secret: ${TBOT_ASR_XUNFEISTREAMASR_API_SECRET:}
     # Recognition parameter config
     domain: slm # Recognition domain, iat:Daily language, medical:Medical, finance:Finance, etc.
     language: en_us # Language, en_us:English, en_us:English
@@ -701,7 +727,7 @@ ASR:
     # Supported model: paraformer-realtime-v2(Recommended), paraformer-realtime-8k-v2, paraformer-realtime-v1, paraformer-realtime-8k-v1
     type: aliyunbl_stream
     # Required parameter
-    api_key: Your Alibaba Cloud Bailian API key
+    api_key: ${TBOT_ASR_ALIYUNBLSTREAMASR_API_KEY:}
     # Model selection, v2 recommended
     model: paraformer-realtime-v2
     # Audio format & sample rate
@@ -735,7 +761,7 @@ LLM:
     # Find your api_key here https://bailian.console.aliyun.com/?apiKey=1#/api-key
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     model_name: qwen-flash
-    api_key: Your DeepSeek web key
+    api_key: ${TBOT_LLM_ALILLM_API_KEY:}
     temperature: 0.7  # Temperature
     max_tokens: 500   # Max generation tokens
     top_p: 1
@@ -746,7 +772,7 @@ LLM:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     app_id: Your app_id
     # Find your api_key here https://bailian.console.aliyun.com/?apiKey=1#/api-key
-    api_key: your api_key
+    api_key: ${TBOT_LLM_ALIAPPLLM_API_KEY:}
     # Bypass local prompt: true|false (Default: unused. Set prompt in Bailian app)
     is_no_prompt: true
     # Ali_memory_id：false（Not used)|Your memory_id (obtain from settings in Bailian app)
@@ -761,14 +787,14 @@ LLM:
     # After activation, go here to get key: https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D
     base_url: https://ark.cn-beijing.volces.com/api/v3
     model_name: doubao-1-5-pro-32k-250115
-    api_key: Your doubao web key
+    api_key: ${TBOT_LLM_DOUBAOLLM_API_KEY:}
   DeepSeekLLM:
     # Define LLM API type
     type: openai
     # Find your api key here https://platform.deepseek.com/
     model_name: deepseek-chat
     url: https://api.deepseek.com
-    api_key: Your DeepSeek web key
+    api_key: ${TBOT_LLM_DEEPSEEKLLM_API_KEY:}
   ChatGLMLLM:
     # Define LLM API type
     type: openai
@@ -776,7 +802,7 @@ LLM:
     # Find your api key here https://bigmodel.cn/usercenter/proj-mgmt/apikeys
     model_name: glm-4-flash
     url: https://open.bigmodel.cn/api/paas/v4/
-    api_key: Your chat-glm web key
+    api_key: ${TBOT_LLM_CHATGLMLLM_API_KEY:}
   OllamaLLM:
     # Define LLM API type
     type: ollama
@@ -788,7 +814,7 @@ LLM:
     # Recommended to use locally deployed Dify API; accessing Dify public cloud API may be restricted in some domestic regions
     # If using DifyLLM, prompt in config file(Prompt)is invalid. Set the prompt in the Dify console
     base_url: https://api.dify.ai/v1
-    api_key: Your DifyLLM web key
+    api_key: ${TBOT_LLM_DIFYLLM_API_KEY:}
     # Dialogue mode to use. Options: Workflow (workflows/run), Chat (chat-messages), Text generation (completion-messages)
     # When returning via workflows, set input parameter to query and return parameter name to answer
     # Default input parameter for text generation is also query
@@ -799,28 +825,28 @@ LLM:
     # If used in China, please comply with the 'Interim Measures for the Management of Generative Artificial Intelligence Services'
     # tokenApplication URL: https://aistudio.google.com/apikey
     # Enable VPN/proxy if deployment env cannot access API
-    api_key: Your Gemini web key
+    api_key: ${TBOT_LLM_GEMINILLM_API_KEY:}
     model_name: "gemini-2.0-flash"
     http_proxy: ""  #"http://127.0.0.1:10808"
     https_proxy: "" #http://127.0.0.1:10808"
   GeminiProLLM:
     # Google Gemini 3 Pro - strongest reasoning / multimodal / coding
     type: gemini
-    api_key: Your Gemini web key
+    api_key: ${TBOT_LLM_GEMINIPROLLM_API_KEY:}
     model_name: "gemini-3.1-pro-preview"
     http_proxy: ""
     https_proxy: ""
   GeminiFlashLLM:
     # Google Gemini 3 Flash - Pro-level intelligence / Flash speed and price
     type: gemini
-    api_key: Your Gemini web key
+    api_key: ${TBOT_LLM_GEMINIFLASHLLM_API_KEY:}
     model_name: "gemini-3-flash-preview"
     http_proxy: ""
     https_proxy: ""
   GeminiFlashLiteLLM:
     # Google Gemini 3 Flash-Lite - High concurrency / Low-cost workloads
     type: gemini
-    api_key: Your Gemini web key
+    api_key: ${TBOT_LLM_GEMINIFLASHLITELLM_API_KEY:}
     model_name: "gemini-3.1-flash-lite"
     http_proxy: ""
     https_proxy: ""
@@ -832,7 +858,7 @@ LLM:
     # bot_idKeep content for and user_id inside quotes
     bot_id: "Your bot_id"
     user_id: "your user_id"
-    personal_access_token: Your Coze personal token
+    personal_access_token: ${TBOT_LLM_COZELLM_PERSONAL_ACCESS_TOKEN:}
   VolcesAiGatewayLLM:
     # Volcengine - Edge LLM Gateway
     # Define LLM API type
@@ -843,19 +869,19 @@ LLM:
     # After activation, go here to get key: https://console.volcengine.com/vei/aigateway/tokens-list
     base_url: https://ai-gateway.vei.volces.com/v1
     model_name: doubao-pro-32k-functioncall
-    api_key: Your gateway access key
+    api_key: ${TBOT_LLM_VOLCESAIGATEWAYLLM_API_KEY:}
   LMStudioLLM:
     # Define LLM API type
     type: openai
     model_name: deepseek-r1-distill-llama-8b@q4_k_m # Model name to use, must be downloaded from the community beforehand
     url: http://localhost:1234/v1 # LM StudioService address
-    api_key: lm-studio # LM StudioService's fixed API Key
+    api_key: ${TBOT_LLM_LMSTUDIOLLM_API_KEY:} # LM StudioService's fixed API Key
   HomeAssistant:
     # Define LLM API type
     type: homeassistant
     base_url: http://homeassistant.local:8123
     agent_id: conversation.chatgpt
-    api_key: Your Home Assistant API access token
+    api_key: ${TBOT_LLM_HOMEASSISTANT_API_KEY:}
   FastgptLLM:
     # Define LLM API type
     type: fastgpt
@@ -863,7 +889,7 @@ LLM:
     base_url: https://host/api/v1
     # Find your api_key here
     # https://cloud.tryfastgpt.ai/account/apikey
-    api_key: Your FastGPT key
+    api_key: ${TBOT_LLM_FASTGPTLLM_API_KEY:}
     variables:
       k: "v"
       k2: "v2"
@@ -887,13 +913,13 @@ VLLM:
     # Find your api key here https://bigmodel.cn/usercenter/proj-mgmt/apikeys
     model_name: glm-4v-flash  # Zhipu AI vision model
     url: https://open.bigmodel.cn/api/paas/v4/
-    api_key: Your api_key
+    api_key: ${TBOT_VLLM_CHATGLMVLLM_API_KEY:}
   QwenVLVLLM:
     type: openai
     model_name: qwen3.5-flash
     url: https://dashscope.aliyuncs.com/compatible-mode/v1
     # Find your api key here https://bailian.console.aliyun.com/?apiKey=1#/api-key
-    api_key: Your api_key
+    api_key: ${TBOT_VLLM_QWENVLVLLM_API_KEY:}
   XunfeiSparkLLM:
     # Define LLM API type
     type: openai
@@ -903,7 +929,7 @@ VLLM:
     # Each model must be activated separately. Each model has a unique api_password, e.g., Lite model at https://console.xfyun.cn/services/cbm Activate
     base_url: https://ark.cn-beijing.volces.com/api/v3
     model_name: lite
-    api_key: Your api_password
+    api_key: ${TBOT_VLLM_XUNFEISPARKLLM_API_KEY:}
 TTS:
   # Currently supported types are edge and doubao, can be self-adapted
   EdgeTTS:
@@ -917,7 +943,7 @@ TTS:
     # Apply for API key: https://aistudio.google.com/apikey
     # Optional voice: Kore, Puck, Aoede, Charon, Fenrir, Leda, Orus, Zephyr, ... (30+ prebuilt)
     type: gemini
-    api_key: Your Gemini web key
+    api_key: ${TBOT_TTS_GEMINITTS_API_KEY:}
     model_name: "gemini-3.1-flash-tts-preview"
     voice: "Kore"
     # Natural language style control (nullable)
@@ -939,7 +965,7 @@ TTS:
     output_dir: tmp/
     authorization: "Bearer;"
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS access_token
+    access_token: ${TBOT_TTS_DOUBAOTTS_ACCESS_TOKEN:}
     cluster: volcano_tts
     speed_ratio: 1.0
     volume_ratio: 1.0
@@ -955,7 +981,7 @@ TTS:
     # Gizwits does not require appid
     ws_url: wss://openspeech.bytedance.com/api/v3/tts/bidirection
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS service access_token
+    access_token: ${TBOT_TTS_HUOSHANDOUBLESTREAMTTS_ACCESS_TOKEN:}
     resource_id: volc.service_type.10029
     speaker: zh_female_wanwanxiaohe_moon_bigtts
     # Enable WebSocket connection reuse. Enabled by default (Note: Idle connections will consume concurrency while the device is in listening state when reused)
@@ -996,7 +1022,7 @@ TTS:
     # Gizwits does not require appid
     ws_url: wss://openspeech.bytedance.com/api/v3/tts/bidirection
     appid: Your Volcengine TTS appid
-    access_token: Your Volcengine TTS service access_token
+    access_token: ${TBOT_TTS_HUOSHANDOUBLESTREAMTTSV2_ACCESS_TOKEN:}
     resource_id: seed-tts-2.0
     speaker: zh_female_xiaohe_uranus_bigtts
     # Enable WebSocket connection reuse. Enabled by default (Note: Idle connections will consume concurrency while the device is in listening state when reused)
@@ -1018,7 +1044,7 @@ TTS:
     model: FunAudioLLM/CosyVoice2-0.5B
     voice: FunAudioLLM/CosyVoice2-0.5B:alex
     output_dir: tmp/
-    access_token: Your SiliconFlow API key
+    access_token: ${TBOT_TTS_COSYVOICESILICONFLOW_ACCESS_TOKEN:}
     response_format: wav
     # language: "English"  # Specify output language,e.g.:English, Japanese, Korean, etc.,Please configure according to the languages supported by the selected voice,Defaults to English if empty
   CozeCnTTS:
@@ -1027,7 +1053,7 @@ TTS:
     # tokenApplication URL https://www.coze.cn/open/oauth/pats
     voice: 7426720361733046281
     output_dir: tmp/
-    access_token: Your Coze web key
+    access_token: ${TBOT_TTS_COZECNTTS_ACCESS_TOKEN:}
     response_format: wav
     # language: "English"  # Specify output language,e.g.:English, Japanese, Korean, etc.,Please configure according to the languages supported by the selected voice,Defaults to English if empty
     # Optional below, defaults will be used
@@ -1040,7 +1066,7 @@ TTS:
     # If you need to use the LLM provided by the Edge Large Model Gateway, also select Doubao-pro-32k-functioncall, see LLM.VolcesAiGatewayLLM config for details
     # https://console.volcengine.com/vei/aigateway/
     # After activation, go here to get key: https://console.volcengine.com/vei/aigateway/tokens-list
-    api_key: Your gateway access key
+    api_key: ${TBOT_TTS_VOLCESAIGATEWAYTTS_API_KEY:}
     api_url: https://ai-gateway.vei.volces.com/v1/audio/speech
     model: doubao-tts
     # Voice list see https://www.volcengine.com/docs/6561/1257544
@@ -1067,7 +1093,7 @@ TTS:
     seed: null
     channels: 1
     rate: 44100
-    api_key: "your api_key"
+    api_key: ${TBOT_TTS_FISHSPEECH_API_KEY:}
     api_url: "http://127.0.0.1:8080/v1/tts"
     # language: "English"  # Specify output language,e.g.:English, Japanese, Korean, etc.,Please configure according to the languages supported by the selected voice,Defaults to English if left blank
   GPT_SOVITS_V2:
@@ -1121,7 +1147,7 @@ TTS:
     type: minimax_httpstream
     output_dir: tmp/
     group_id: Your MiniMax platform groupID
-    api_key: Your MiniMax platform API key
+    api_key: ${TBOT_TTS_MINIMAXTTSHTTPSTREAM_API_KEY:}
     model: "speech-01-turbo"
     voice_id: "female-shaonv"
     # Optional below, defaults will be used
@@ -1157,10 +1183,10 @@ TTS:
     type: aliyun
     output_dir: tmp/
     appkey: Your Alibaba Cloud Intelligent Speech Interaction project Appkey
-    token: Your Alibaba Cloud Intelligent Speech Interaction AccessToken (temporary for 24h). For long-term use, use access_key_id and access_key_secret below
+    token: ${TBOT_TTS_ALIYUNTTS_TOKEN:}
     voice: xiaoyun
     access_key_id: Your Alibaba Cloud account access_key_id
-    access_key_secret: Your Alibaba Cloud account access_key_secret
+    access_key_secret: ${TBOT_TTS_ALIYUNTTS_ACCESS_KEY_SECRET:}
 
     # Optional below, defaults will be used
     # format: wav
@@ -1180,10 +1206,10 @@ TTS:
     type: aliyun_stream
     output_dir: tmp/
     appkey: Your Alibaba Cloud Intelligent Speech Interaction project Appkey
-    token: Your Alibaba Cloud Intelligent Speech Interaction AccessToken (temporary for 24h). For long-term use, use access_key_id and access_key_secret below
+    token: ${TBOT_TTS_ALIYUNSTREAMTTS_TOKEN:}
     voice: longxiaochun
     access_key_id: Your Alibaba Cloud account access_key_id
-    access_key_secret: Your Alibaba Cloud account access_key_secret
+    access_key_secret: ${TBOT_TTS_ALIYUNSTREAMTTS_ACCESS_KEY_SECRET:}
     # As of July 21, 2025, LLM voices are only available on the Beijing node; other nodes are temporarily unsupported
     host: nls-gateway-cn-beijing.aliyuncs.com
     # Optional below, defaults will be used
@@ -1199,8 +1225,8 @@ TTS:
     type: tencent
     output_dir: tmp/
     appid: Your Tencent Cloud AppId
-    secret_id: Your Tencent Cloud SecretID
-    secret_key: Your Tencent Cloud SecretKey
+    secret_id: ${TBOT_TTS_TENCENTTTS_SECRET_ID:}
+    secret_key: ${TBOT_TTS_TENCENTTTS_SECRET_KEY:}
     region: ap-guangzhou
     voice: 101001
     # language: "English"  # Specify output language,e.g.:English, Japanese, Korean, etc.,Please configure according to the languages supported by the selected voice,Defaults to English if empty
@@ -1220,14 +1246,14 @@ TTS:
     # Taiwanese Xiaohe voice
     voice: "zh_female_wanwanxiaohe_moon_bigtts"
     output_dir: tmp/
-    access_token: "Your 302 API key"
+    access_token: ${TBOT_TTS_TTS302AI_ACCESS_TOKEN:}
     # language: "English"  # Specify output language,e.g.:English, Japanese, Korean, etc.,Please configure according to the languages supported by the selected voice,Defaults to English if empty
   OpenAITTS:
     # openaiOfficial TTS service, supporting most global languages
     type: openai
     # Get your api key here
     # https://platform.openai.com/api-keys
-    api_key: Your OpenAI API key
+    api_key: ${TBOT_TTS_OPENAITTS_API_KEY:}
     # Proxy required in China
     api_url: https://api.openai.com/v1/audio/speech
     # Choose tts-1 or tts-1-hd; tts-1 is faster, tts-1-hd is higher quality
@@ -1290,7 +1316,7 @@ TTS:
     # Find your api_key here https://bailian.console.aliyun.com/?apiKey=1#/api-key
     # cosyvoice-v3and some voices require activation request
     type: alibl_stream
-    api_key: Your api_key
+    api_key: ${TBOT_TTS_ALIBLTTS_API_KEY:}
     model: "cosyvoice-v2"
     voice: "longcheng_v2"
     output_dir: tmp/
@@ -1308,8 +1334,8 @@ TTS:
     type: xunfei_stream
     api_url: wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6
     app_id: Your app_id
-    api_secret: Your api_secret
-    api_key: Your api_key
+    api_secret: ${TBOT_TTS_XUNFEITTS_API_SECRET:}
+    api_key: ${TBOT_TTS_XUNFEITTS_API_KEY:}
     voice: x5_lingxiaoxuan_flow
     output_dir: tmp/
     # Optional settings (defaults used); note V5 voices do not support colloquial configuration

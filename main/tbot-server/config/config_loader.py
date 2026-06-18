@@ -1,14 +1,16 @@
-import os
 import asyncio
-import yaml
+import os
 from collections.abc import Mapping
+
+import yaml
+
 from config.manage_api_client import (
-    init_service,
-    get_server_config,
+    DeviceBindException,
+    DeviceNotFoundException,
     get_agent_models,
     get_correct_words,
-    DeviceNotFoundException,
-    DeviceBindException,
+    get_server_config,
+    init_service,
 )
 
 GOOGLE_LIVE_DEFAULTS = {
@@ -65,6 +67,9 @@ GOOGLE_LIVE_DEFAULTS = {
     "context_window_compression_enabled": True,
     "context_window_trigger_tokens": 24000,
     "context_window_target_tokens": 12000,
+    "aec_enabled": True,
+    "aec_filter_length_ms": 200,
+    "aec_frame_ms": 10,
     "tool_timeout_sec": 10.0,
     "dangerous_tool_names": [],
     "reconnect": {
@@ -82,7 +87,7 @@ def get_project_dir():
 
 
 def read_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as file:
+    with open(config_path, encoding="utf-8") as file:
         config = yaml.safe_load(file)
     return config
 
@@ -132,20 +137,21 @@ def _parse_bool_env(name):
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 def _apply_lesson_env_overrides(config):
-    """LESSON_RUNTIME_ENABLED dark-rollout flag + COURSE_BACKEND_URL endpoint, so an
-    operator can enable/point the lesson runtime via env without editing config
-    volumes. RESTORED 2026-06-12 (deep-audit): the unify checkout-subtree-replace
-    dropped main's apply_env_overrides, silently disabling these documented knobs.
+    """LESSON_RUNTIME_ENABLED dark-rollout flag + lesson endpoints, so an operator
+    can enable/point the lesson runtime via env without editing config volumes.
+    RESTORED 2026-06-12 (deep-audit): the unify checkout-subtree-replace dropped
+    main's apply_env_overrides, silently disabling these documented knobs.
     Additive + null-safe; never overwrites an author-provided lesson.api_base.
     LESSON_RUNTIME_ENABLED -> lesson.runtime_enabled (bool parsed). COURSE_BACKEND_URL
     -> server.api_url AND, as a fallback, lesson.api_base (runtime reads lesson.api_base
-    first, else server.api_url)."""
+    first, else server.api_url). LESSON_ASSET_ORIGIN_BASE -> lesson.asset_origin_base."""
     if not isinstance(config, Mapping):
         return config
 
     flag = _parse_bool_env("LESSON_RUNTIME_ENABLED")
     course_url = _clean_env("COURSE_BACKEND_URL")
-    if flag is None and not course_url:
+    asset_origin = _clean_env("LESSON_ASSET_ORIGIN_BASE")
+    if flag is None and not course_url and not asset_origin:
         return config
 
     lesson_cfg = config.get("lesson")
@@ -154,6 +160,8 @@ def _apply_lesson_env_overrides(config):
         config["lesson"] = lesson_cfg
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
+    if asset_origin:
+        lesson_cfg["asset_origin_base"] = asset_origin.rstrip("/")
 
     if course_url:
         normalized = course_url.rstrip("/")
@@ -166,6 +174,89 @@ def _apply_lesson_env_overrides(config):
             lesson_cfg["api_base"] = normalized
     return config
 
+def _apply_connection_env_overrides(config):
+    if not isinstance(config, Mapping):
+        return config
+    timeout = _clean_env("TBOT_CLOSE_CONNECTION_NO_VOICE_TIME")
+    if timeout:
+        try:
+            config["close_connection_no_voice_time"] = max(1, int(timeout))
+        except ValueError:
+            pass
+    return config
+
+def _assert_lesson_runtime_boot_safe(config):
+    if not isinstance(config, Mapping):
+        return
+
+    lesson_cfg = config.get("lesson")
+    if not isinstance(lesson_cfg, Mapping) or not lesson_cfg.get("runtime_enabled"):
+        return
+
+    missing = [
+        name
+        for name in ("TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE")
+        if not _clean_env(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "lesson.runtime_enabled=true requires boot env prerequisites; "
+            f"missing: {', '.join(missing)}"
+        )
+
+def _assert_production_boot_safe(config):
+    if _clean_env("NODE_ENV") != "production":
+        return
+    if not isinstance(config, Mapping):
+        config = {}
+
+    server_cfg = config.get("server")
+    auth_cfg = server_cfg.get("auth") if isinstance(server_cfg, Mapping) else None
+    auth_enabled = auth_cfg.get("enabled") if isinstance(auth_cfg, Mapping) else None
+    if auth_enabled is not True:
+        raise RuntimeError("production boot requires server.auth.enabled=true")
+
+    missing = [
+        name
+        for name in (
+            "TBOT_REQUIRE_DEVICE_TOKEN",
+            "JWT_PUBLIC_KEY",
+            "TBOT_DEVICE_MINT_SECRET",
+            "LESSON_ASSET_ORIGIN_BASE",
+        )
+        if not _clean_env(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "production boot requires TBOT_REQUIRE_DEVICE_TOKEN=true and env "
+            f"prerequisites; missing: {', '.join(missing)}"
+        )
+    if _parse_bool_env("TBOT_REQUIRE_DEVICE_TOKEN") is not True:
+        raise RuntimeError("production boot requires TBOT_REQUIRE_DEVICE_TOKEN=true")
+    if _parse_bool_env("ADMIN_AUTH_DISABLED") is True:
+        raise RuntimeError("ADMIN_AUTH_DISABLED must not be true in production")
+    _assert_production_google_live_aec_ready(config)
+
+
+def _assert_production_google_live_aec_ready(config):
+    voice_mode = config.get("voice_mode") if isinstance(config, Mapping) else None
+    if not isinstance(voice_mode, Mapping) or voice_mode.get("type") != "google_live":
+        return
+    google_live = config.get("google_live") if isinstance(config, Mapping) else None
+    if not isinstance(google_live, Mapping):
+        google_live = {}
+    from core.voice.aec.aec_processor import AecProcessor
+
+    processor = AecProcessor(
+        sample_rate=int(google_live.get("input_sample_rate", 16000)),
+        frame_ms=int(google_live.get("aec_frame_ms", 10)),
+        filter_ms=int(google_live.get("aec_filter_length_ms", 200)),
+        enabled=bool(google_live.get("aec_enabled", False)),
+    )
+    if processor.bypassed:
+        reason = processor.reason or "unknown"
+        raise RuntimeError(f"production boot requires active AEC; bypassed={reason}")
+
 def _apply_server_endpoint_env_overrides(config):
     """Let Docker/.env repair public OTA endpoints without editing volumes."""
     if not isinstance(config, Mapping):
@@ -173,6 +264,7 @@ def _apply_server_endpoint_env_overrides(config):
 
     # Restored lesson env knobs (runs even when no OTA-endpoint env is set).
     config = _apply_lesson_env_overrides(config)
+    config = _apply_connection_env_overrides(config)
 
     websocket_url = _clean_env("TBOT_PUBLIC_WEBSOCKET_URL")
     api_url = _clean_env("TBOT_BACKEND_API_URL")
@@ -207,7 +299,7 @@ def _apply_server_endpoint_env_overrides(config):
 
 def load_config():
     """Load config file"""
-    from core.utils.cache.manager import cache_manager, CacheType
+    from core.utils.cache.manager import CacheType, cache_manager
 
     # Check Cache
     cached_config = cache_manager.get(CacheType.CONFIG, "main_config")
@@ -240,6 +332,8 @@ def load_config():
         config = merge_configs(default_config, custom_config)
     config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
+    _assert_production_boot_safe(config)
+    _assert_lesson_runtime_boot_safe(config)
     # Initialize directory
     ensure_directories(config)
 
@@ -250,7 +344,7 @@ def load_config():
 
 async def load_config_async():
     """Load config file from async context without blocking the running loop."""
-    from core.utils.cache.manager import cache_manager, CacheType
+    from core.utils.cache.manager import CacheType, cache_manager
 
     cached_config = cache_manager.get(CacheType.CONFIG, "main_config")
     if cached_config is not None:
@@ -272,6 +366,8 @@ async def load_config_async():
         config = merge_configs(default_config, custom_config)
     config = _apply_server_endpoint_env_overrides(config)
     config = normalize_voice_config(config)
+    _assert_production_boot_safe(config)
+    _assert_lesson_runtime_boot_safe(config)
     ensure_directories(config)
     cache_manager.set(CacheType.CONFIG, "main_config", config)
     return config
@@ -309,7 +405,10 @@ async def get_config_from_api_async(config):
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
     config_data = _apply_server_endpoint_env_overrides(config_data)
-    return normalize_voice_config(config_data)
+    config_data = normalize_voice_config(config_data)
+    _assert_production_boot_safe(config_data)
+    _assert_lesson_runtime_boot_safe(config_data)
+    return config_data
 
 
 async def get_private_config_from_api(config, device_id, client_id):
