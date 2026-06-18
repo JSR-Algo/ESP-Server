@@ -29,9 +29,9 @@ export default {
   'login.requiredCaptcha': '驗證碼不能為空',
   'login.requiredMobile': '請輸入正確的手機號碼',
   'login.captchaError': '圖形驗證碼錯誤',
-    'login.forgotPassword': '忘記密碼',
-    'login.userAgreement': '用戶協議',
-    'login.privacyPolicy': '隱私政策',
+  'login.forgotPassword': '忘記密碼',
+  'login.userAgreement': '用戶協議',
+  'login.privacyPolicy': '隱私政策',
 
   // 忘記密碼頁面
   'retrievePassword.title': '重置密碼',

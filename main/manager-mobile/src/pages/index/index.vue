@@ -125,7 +125,7 @@ function openCreateDialog() {
       msg: '',
       inputPlaceholder: t('home.inputPlaceholder'),
       inputValue: '',
-      inputPattern: /^.{1,64}$/i,
+      inputPattern: /^.{1,64}$/,
       inputError: t('home.createError'),
       confirmButtonText: t('home.createNow'),
       cancelButtonText: t('common.cancel'),

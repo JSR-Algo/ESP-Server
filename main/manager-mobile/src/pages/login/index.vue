@@ -353,10 +353,10 @@ onMounted(async () => {
             <wd-input
               v-model="formData.password"
               custom-class="styled-input"
-              no-border
+
               :placeholder="t('login.enterPassword')"
-              clearable
-              show-password
+
+              no-border show-password clearable
               :maxlength="20"
             />
           </view>
@@ -401,7 +401,9 @@ onMounted(async () => {
           <text class="policy-link" @click="goToUserAgreement">
             {{ t('login.userAgreement') }}
           </text>
-          <text class="policy-divider">|</text>
+          <text class="policy-divider">
+            |
+          </text>
           <text class="policy-link" @click="goToPrivacyPolicy">
             {{ t('login.privacyPolicy') }}
           </text>

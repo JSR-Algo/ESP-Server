@@ -29,9 +29,9 @@ export default {
   'login.requiredCaptcha': 'O código de verificação não pode estar vazio',
   'login.requiredMobile': 'Por favor, insira um número de telefone válido',
   'login.captchaError': 'Erro no código de verificação gráfico',
-    'login.forgotPassword': 'Esqueceu a Senha',
-    'login.userAgreement': 'Termos de Uso',
-    'login.privacyPolicy': 'Política de Privacidade',
+  'login.forgotPassword': 'Esqueceu a Senha',
+  'login.userAgreement': 'Termos de Uso',
+  'login.privacyPolicy': 'Política de Privacidade',
 
   // Register page
   'register.pageTitle': 'Cadastro',
