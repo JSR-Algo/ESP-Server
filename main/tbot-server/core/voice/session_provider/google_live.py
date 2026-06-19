@@ -1702,6 +1702,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         return await self._send_live_text_ack(text)
 
+    async def speak_lesson_step_prompt(self, text):
+        text = str(text or "").strip()
+        if not text:
+            return False
+        if await self._queue_local_tts_ack(text):
+            return True
+        return await self._send_live_text_ack(text)
+
     def _lesson_start_ack_text(self, action_response):
         fallback = "Bắt đầu bài học nhé."
         if action_response is None:

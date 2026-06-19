@@ -2,6 +2,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from config import device_token_client
 from config.voice_consent_client import VoiceConsentClient
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
@@ -37,6 +38,9 @@ class _Conn:
 
 
 class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        device_token_client._cache.clear()
+
     async def test_env_bypass_allows_voice_without_backend_consent(self):
         conn = _Conn(allowed=False)
         conn.voice_consent_client = VoiceConsentClient(client=types.SimpleNamespace())
@@ -45,6 +49,50 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
             allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
 
         self.assertTrue(allowed)
+
+    async def test_backend_consent_check_resolves_mac_to_uuid_and_sends_bearer_secret(self):
+        class _Response:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _Client:
+            def __init__(self):
+                self.calls = []
+
+            async def post(self, url, *, json, headers):
+                self.calls.append(("POST", url, json, headers))
+                return _Response({"data": {"deviceUuid": "device-uuid-1", "token": "jwt-1"}})
+
+            async def get(self, url, *, headers):
+                self.calls.append(("GET", url, None, headers))
+                return _Response({"data": {"active": True}})
+
+        conn = _Conn(allowed=False)
+        conn.device_id = "14:c1:9f:d1:a8:48"
+        client = _Client()
+        consent = VoiceConsentClient(client=client)
+
+        with patch.dict("os.environ", {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}):
+            allowed = await consent.ensure_voice_allowed(conn)
+
+        self.assertTrue(allowed)
+        self.assertEqual(client.calls[0][0], "POST")
+        self.assertEqual(client.calls[0][1], "https://backend.test/v1/internal/devices/mint-token")
+        self.assertEqual(client.calls[0][2], {"mac": "14:c1:9f:d1:a8:48"})
+        self.assertEqual(client.calls[0][3]["Authorization"], "Bearer mint-secret")
+        self.assertEqual(client.calls[1][0], "GET")
+        self.assertEqual(
+            client.calls[1][1],
+            "https://backend.test/v1/internal/devices/device-uuid-1/ai-voice-consent",
+        )
+        self.assertEqual(client.calls[1][3]["X-Mint-Secret"], "mint-secret")
+        self.assertEqual(client.calls[1][3]["Authorization"], "Bearer mint-secret")
 
     async def test_start_session_denies_before_opening_live_without_consent(self):
         conn = _Conn(allowed=False)

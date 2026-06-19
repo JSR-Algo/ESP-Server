@@ -3,6 +3,8 @@ from typing import Optional
 
 import httpx
 
+from config.device_token_client import resolve_device_identity
+
 
 class VoiceConsentClient:
     """Backend-backed parental consent gate for AI voice.
@@ -26,14 +28,27 @@ class VoiceConsentClient:
             self._log(conn, "warning", "voice consent denied: missing device/backend/secret")
             return False
 
-        url = f"{base_url}/internal/devices/{device_id}/ai-voice-consent"
         close_client = False
         client = self._client
         if client is None:
             client = httpx.AsyncClient(timeout=5.0)
             close_client = True
         try:
-            response = await client.get(url, headers={"X-Mint-Secret": secret})
+            backend_device_id, _token = await resolve_device_identity(
+                client,
+                base_url,
+                device_id,
+                logger=getattr(conn, "logger", None),
+            )
+            if not backend_device_id:
+                self._log(conn, "warning", "voice consent denied: device identity mint unavailable")
+                return False
+
+            url = f"{base_url}/internal/devices/{backend_device_id}/ai-voice-consent"
+            response = await client.get(
+                url,
+                headers={"X-Mint-Secret": secret, "Authorization": f"Bearer {secret}"},
+            )
             response.raise_for_status()
             payload = response.json() or {}
             data = payload.get("data") if isinstance(payload, dict) else None

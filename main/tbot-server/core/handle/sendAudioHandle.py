@@ -274,6 +274,11 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
+    if state == "sentence_start":
+        child_name = _child_name_for_tts_state(conn)
+        if child_name:
+            message["child_name"] = child_name
+            message["childName"] = child_name
 
     # TTSPlayback End
     if state == "stop":
@@ -306,6 +311,19 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     if state == "start":
         conn.client_is_speaking = True
 
+
+def _child_name_for_tts_state(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    if not isinstance(config, dict):
+        return None
+    child_profile = config.get("child_profile") or {}
+    if not isinstance(child_profile, dict):
+        return None
+    raw_name = child_profile.get("child_name") or child_profile.get("childName")
+    if not isinstance(raw_name, str):
+        return None
+    child_name = raw_name.strip()
+    return child_name or None
 
 async def send_stt_message(conn: "ConnectionHandler", text):
     """Send STT status message"""

@@ -500,10 +500,24 @@ class LessonRuntime:
         self._step_acked = False
         self._step_completed = False
         timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
+        await self._speak_step_prompt(step)
         self._step_seq = await self._emit(
             "lesson_step", step_id=self._step_id, body=self._step_body(step)
         )
         self._start_step_timeout(self._step_seq, self._step_id, float(timeout_sec))
+
+    async def _speak_step_prompt(self, step: Dict[str, Any]) -> None:
+        prompt = step.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return
+        provider = getattr(self.conn, "voice_provider", None)
+        speaker = getattr(provider, "speak_lesson_step_prompt", None)
+        if not callable(speaker):
+            return
+        try:
+            await speaker(prompt.strip())
+        except Exception as exc:  # pragma: no cover - voice prompt is best-effort
+            self._log("warning", f"lesson step prompt voice handoff failed: {type(exc).__name__}")
 
     async def _maybe_finish_step(self) -> None:
         if not (self.state == S_RUNNING and self._step_acked and self._step_completed):

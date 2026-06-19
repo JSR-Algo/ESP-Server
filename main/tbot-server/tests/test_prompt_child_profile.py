@@ -30,7 +30,10 @@ def test_enhanced_prompt_renders_child_profile_from_private_config(tmp_path: Pat
         "{{base_prompt}}\n"
         "Child name: {{ child_profile.child_name }}\n"
         "Child age: {{ child_profile.child_age }}\n"
-        "Device: {{ child_profile.device_alias }}\n",
+        "Device: {{ child_profile.device_alias }}\n"
+        "Interests: {{ child_profile.interests | join(', ') }}\n"
+        "Learning style: {{ child_profile.learning_style }}\n"
+        "Parent career: {{ child_profile.parent_career }}\n",
         encoding="utf-8",
     )
     config = {
@@ -41,6 +44,9 @@ def test_enhanced_prompt_renders_child_profile_from_private_config(tmp_path: Pat
             "child_name": "Bong",
             "child_age": 6,
             "device_alias": "Robot phong ngu",
+            "interests": ["animals", "space"],
+            "learning_style": "visual",
+            "parent_career": "teacher",
         },
     }
 
@@ -57,3 +63,6 @@ def test_enhanced_prompt_renders_child_profile_from_private_config(tmp_path: Pat
     assert "Child name: Bong" in prompt
     assert "Child age: 6" in prompt
     assert "Device: Robot phong ngu" in prompt
+    assert "Interests: animals, space" in prompt
+    assert "Learning style: visual" in prompt
+    assert "Parent career: teacher" in prompt

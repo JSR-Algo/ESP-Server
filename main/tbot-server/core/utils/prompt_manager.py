@@ -306,9 +306,16 @@ class PromptManager:
             ("device_alias", "device_alias"),
             ("child_name", "child_name"),
             ("child_age", "child_age"),
+            ("interests", "interests"),
+            ("learning_style", "learning_style"),
+            ("vocabulary_level", "vocabulary_level"),
+            ("parent_career", "parent_career"),
             ("childName", "child_name"),
             ("childAge", "child_age"),
             ("deviceAlias", "device_alias"),
+            ("learningStyle", "learning_style"),
+            ("vocabularyLevel", "vocabulary_level"),
+            ("parentCareer", "parent_career"),
         ):
             value = child_profile.get(source_key)
             if value not in (None, ""):

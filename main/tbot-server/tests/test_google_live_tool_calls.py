@@ -732,6 +732,9 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             connected = True
             sent_texts = []
 
+            async def close(self):
+                return None
+
             async def interrupt(self):
                 return None
 
@@ -771,6 +774,51 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             provider.conn.tts.stored_texts[-1][1],
             "Bắt đầu bài học nhé.",
+        )
+        self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
+
+    async def test_text_message_start_lesson_uses_local_tool_not_chat_forwarding(self):
+        provider, handler = self._make_provider()
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+        provider._client.sent_texts = []
+
+        handled = await provider.handle_text_message(
+            json.dumps({"type": "text", "text": "bắt đầu bài học"})
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
+        self.assertNotIn("bắt đầu bài học", provider._client.sent_texts)
+        self.assertEqual(
+            provider._client.sent_texts,
+            ["Nói đúng một câu này, không thêm gì: Bắt đầu bài học nhé."],
+        )
+
+    async def test_lesson_step_prompt_uses_same_local_tts_path(self):
+        provider, _handler = self._make_provider()
+        provider.conn.websocket = _RecordingWebSocket()
+        provider.conn.tts = _RecordingTts()
+        provider.conn.sentence_id = None
+        provider.conn.config["child_profile"] = {"child_name": "Bong"}
+
+        spoken = await provider.speak_lesson_step_prompt("Welcome to the barn story.")
+
+        self.assertTrue(spoken)
+        self.assertGreaterEqual(len(provider.conn.websocket.sent), 1)
+        tts_message = json.loads(provider.conn.websocket.sent[0])
+        self.assertEqual(tts_message["type"], "tts")
+        self.assertEqual(tts_message["state"], "sentence_start")
+        self.assertEqual(tts_message["text"], "Welcome to the barn story.")
+        self.assertEqual(tts_message["child_name"], "Bong")
+        self.assertEqual(tts_message["childName"], "Bong")
+        self.assertEqual(
+            provider.conn.tts.stored_texts[-1][1],
+            "Welcome to the barn story.",
         )
         self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
 

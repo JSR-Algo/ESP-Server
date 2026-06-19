@@ -90,6 +90,44 @@ class SendTtsStopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(conn.websocket.sent[1])["state"], "sentence_start")
         self.assertEqual(conn.websocket.sent[2], b"opus-frame")
 
+    async def test_sentence_start_includes_child_name_from_private_profile(self):
+        conn = _Conn()
+        conn.config["child_profile"] = {"child_name": "Bong"}
+
+        await sendAudioHandle.send_tts_message(conn, "sentence_start", "Welcome to the barn story.")
+
+        self.assertEqual(
+            [json.loads(payload) for payload in conn.websocket.sent],
+            [
+                {
+                    "type": "tts",
+                    "state": "sentence_start",
+                    "session_id": "session-1",
+                    "text": "Welcome to the barn story.",
+                    "child_name": "Bong",
+                    "childName": "Bong",
+                }
+            ],
+        )
+
+    async def test_sentence_start_omits_child_name_when_profile_has_no_name(self):
+        conn = _Conn()
+        conn.config["child_profile"] = {"child_name": "  "}
+
+        await sendAudioHandle.send_tts_message(conn, "sentence_start", "Welcome to the barn story.")
+
+        self.assertEqual(
+            [json.loads(payload) for payload in conn.websocket.sent],
+            [
+                {
+                    "type": "tts",
+                    "state": "sentence_start",
+                    "session_id": "session-1",
+                    "text": "Welcome to the barn story.",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

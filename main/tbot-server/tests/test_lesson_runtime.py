@@ -96,6 +96,14 @@ class _FakeConn:
     def is_realtime_busy(self):
         return False
 
+class _RecordingLessonVoiceProvider:
+    def __init__(self):
+        self.prompts = []
+
+    async def speak_lesson_step_prompt(self, text):
+        self.prompts.append(text)
+        return True
+
 
 class _FakeAssetCache:
     """Injectable preload outcome; never touches the network or disk."""
@@ -435,6 +443,28 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             manifest["steps"][0]["scene"]["backgroundScene"]["poster"]["src"],
             source,
+        )
+
+    async def test_each_lesson_step_sends_prompt_to_voice_provider(self):
+        conn = _FakeConn()
+        conn.voice_provider = _RecordingLessonVoiceProvider()
+        manifest = _build_steps_manifest([("s1", "greeting"), ("s4", "model")])
+        manifest["steps"][0]["prompt"] = "Welcome to the barn story."
+        manifest["steps"][1]["prompt"] = "Now say barn with TeeBot."
+        rt = self._runtime(conn=conn, manifest=manifest)
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+
+        self.assertEqual(conn.voice_provider.prompts, ["Welcome to the barn story."])
+
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s1"))
+
+        self.assertEqual(
+            conn.voice_provider.prompts,
+            ["Welcome to the barn story.", "Now say barn with TeeBot."],
         )
 
     # 2) ack correlation uses body.acks, never envelope.sequence / ackFor --------
@@ -2054,6 +2084,214 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             ),
             "lesson_completed event must be forwarded after stop ack",
         )
+
+    async def test_spoken_start_loads_assigned_course_and_plays_all_layered_prompt_steps(self):
+        import asyncio
+        import plugins_func.functions.start_lesson as start_lesson_module
+        from plugins_func.register import Action
+
+        prep = FIX["frames"]["lesson_prepare"]
+        assignment = {
+            "assignmentId": prep["assignmentId"],
+            "assignmentVersion": prep["body"]["assignmentVersion"],
+            "lessonId": prep["lessonId"],
+            "lessonVersion": prep["lessonVersion"],
+            "profile": "espTft",
+            "state": "ASSIGNED",
+        }
+        manifest = _build_class_steps_manifest(
+            [
+                ("welcome", "greeting", "passive"),
+                ("s4", "model", "interactive"),
+                ("celebrate", "celebrate", "passive"),
+            ]
+        )
+        prompts = [
+            "Welcome to the barn story.",
+            "Now say barn with TeeBot.",
+            "Great talking. The barn is in the field.",
+        ]
+        for step, prompt in zip(manifest["steps"], prompts):
+            step["prompt"] = prompt
+
+        conn = _RepublishConn()
+        conn.loop = asyncio.get_running_loop()
+        conn.voice_provider = _RecordingLessonVoiceProvider()
+        undo = self._patch_backend(assignment, manifest)
+        try:
+            response = start_lesson_module.start_lesson(conn)
+            rt = await conn.lesson_pull_task
+        finally:
+            undo()
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertIsNotNone(rt)
+        self.assertIs(conn.lesson_runtime, rt)
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+        self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
+
+        rt.asset_cache = _FakeAssetCache(ready=True)
+        forwarder = _FakeForwarder()
+        rt.forwarder = forwarder
+        sent = lambda: [json.loads(p) for p in conn.websocket.sent]
+
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+
+        await rt.on_lesson_ack(_ack(3, 3, step_id="welcome"))
+        await rt.on_lesson_ack(_ack(4, 4, step_id="s4"))
+        await rt.on_lesson_progress(
+            _progress(
+                5,
+                {
+                    "event": "step_completed",
+                    "stepType": "model",
+                    "result": "success",
+                    "detail": {"utterance": "barn"},
+                },
+                step_id="s4",
+            )
+        )
+        await rt.on_lesson_ack(_ack(5, 6, step_id="celebrate"))
+        await rt.on_lesson_ack(_ack(6, 7))
+
+        step_frames = [f for f in sent() if f["type"] == "lesson_step"]
+        self.assertEqual([f["stepId"] for f in step_frames], ["welcome", "s4", "celebrate"])
+        self.assertEqual([f["body"]["completionClass"] for f in step_frames], ["passive", "interactive", "passive"])
+        self.assertEqual(conn.voice_provider.prompts, prompts)
+
+        for frame in step_frames:
+            scene = frame["body"]["scene"]
+            self.assertEqual(set(scene), {"backgroundScene", "teachingObject", "robotOverlay"})
+            self.assertTrue(scene["backgroundScene"]["poster"]["src"])
+            self.assertTrue(scene["teachingObject"]["asset"]["src"])
+            self.assertEqual(scene["robotOverlay"]["atlas"]["image"], "bright-teach.png")
+
+        self.assertEqual(
+            [f["type"] for f in sent()],
+            ["lesson_prepare", "lesson_start", "lesson_step", "lesson_step", "lesson_step", "lesson_stop"],
+        )
+        self.assertEqual(rt.state, "COMPLETED")
+        completed = [
+            batch["events"][0]
+            for batch in forwarder.batches
+            if batch["events"] and batch["events"][0].get("type") == "lesson_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["summary"]["stepsCompleted"], 3)
+
+    async def test_spoken_start_plays_all_nine_barn_lesson_steps_with_layers_and_story_prompts(self):
+        import asyncio
+        import plugins_func.functions.start_lesson as start_lesson_module
+        from plugins_func.register import Action
+
+        prep = FIX["frames"]["lesson_prepare"]
+        assignment = {
+            "assignmentId": prep["assignmentId"],
+            "assignmentVersion": prep["body"]["assignmentVersion"],
+            "lessonId": prep["lessonId"],
+            "lessonVersion": prep["lessonVersion"],
+            "profile": "espTft",
+            "state": "ASSIGNED",
+        }
+        specs = [
+            ("s1", "greeting", "passive"),
+            ("s2", "review", "passive"),
+            ("s3", "focus", "passive"),
+            ("s4", "model", "interactive"),
+            ("s5", "listen", "interactive"),
+            ("s6", "repeat", "interactive"),
+            ("s7", "fillBlank", "interactive"),
+            ("s8", "feedback", "passive"),
+            ("s9", "celebrate", "passive"),
+        ]
+        prompts = [
+            "Hey there! TeeBot is ready for the barn story.",
+            "Do you remember how to say hello?",
+            "Today we are visiting a barn with farm animals.",
+            "This is a barn. Watch my mouth: barn.",
+            "Listen to barn one more time.",
+            "Now you say it: barn.",
+            "At the blank, I see animals.",
+            "Wonderful, you kept the ending sound.",
+            "You found the barn with TeeBot!",
+        ]
+        manifest = _build_class_steps_manifest(specs)
+        for step, prompt in zip(manifest["steps"], prompts):
+            step["prompt"] = prompt
+
+        conn = _RepublishConn()
+        conn.loop = asyncio.get_running_loop()
+        conn.voice_provider = _RecordingLessonVoiceProvider()
+        undo = self._patch_backend(assignment, manifest)
+        try:
+            response = start_lesson_module.start_lesson(conn)
+            rt = await conn.lesson_pull_task
+        finally:
+            undo()
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertIsNotNone(rt)
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+        rt.asset_cache = _FakeAssetCache(ready=True)
+        forwarder = _FakeForwarder()
+        rt.forwarder = forwarder
+
+        sent = lambda: [json.loads(p) for p in conn.websocket.sent]
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+
+        inbound_seq = 3
+        interactive = {sid for sid, _stype, klass in specs if klass == "interactive"}
+        for sid, stype, _klass in specs:
+            frame = [f for f in sent() if f["type"] == "lesson_step"][-1]
+            self.assertEqual(frame["stepId"], sid)
+            self.assertEqual(frame["body"]["stepType"], stype)
+            self.assertEqual(frame["body"]["audio"], {"via": "tts"})
+            self.assertEqual(frame["body"]["timeoutSec"], FIX["frames"]["lesson_step"]["body"]["timeoutSec"])
+            scene = frame["body"]["scene"]
+            self.assertEqual(set(scene), {"backgroundScene", "teachingObject", "robotOverlay"})
+            self.assertTrue(scene["backgroundScene"]["poster"]["src"])
+            self.assertTrue(scene["teachingObject"]["asset"]["src"])
+            self.assertEqual(scene["robotOverlay"]["atlas"]["image"], "bright-teach.png")
+
+            await rt.on_lesson_ack(_ack(frame["sequence"], inbound_seq, step_id=sid))
+            if sid in interactive:
+                inbound_seq += 1
+                await rt.on_lesson_progress(
+                    _progress(
+                        inbound_seq,
+                        {
+                            "event": "step_completed",
+                            "stepType": stype,
+                            "result": "success",
+                            "detail": {"utterance": "barn"},
+                        },
+                        step_id=sid,
+                    )
+                )
+            inbound_seq += 1
+
+        stop = [f for f in sent() if f["type"] == "lesson_stop"][-1]
+        await rt.on_lesson_ack(_ack(stop["sequence"], inbound_seq))
+
+        step_frames = [f for f in sent() if f["type"] == "lesson_step"]
+        self.assertEqual([f["stepId"] for f in step_frames], [sid for sid, _stype, _klass in specs])
+        self.assertEqual(conn.voice_provider.prompts, prompts)
+        self.assertEqual(
+            [f["type"] for f in sent()],
+            ["lesson_prepare", "lesson_start", *(["lesson_step"] * 9), "lesson_stop"],
+        )
+        self.assertEqual(rt.state, "COMPLETED")
+        completed = [
+            batch["events"][0]
+            for batch in forwarder.batches
+            if batch["events"] and batch["events"][0].get("type") == "lesson_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["summary"]["stepsCompleted"], 9)
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.vision_handler import VisionHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
+from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 
 TAG = __name__
 
@@ -16,6 +17,10 @@ class SimpleHttpServer:
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
         self.lesson_asset_handler = LessonAssetHandler(config)
+        self.lesson_assignment_console_handler = LessonAssignmentConsoleHandler(
+            config,
+            lesson_connections if lesson_connections is not None else {},
+        )
         self.lesson_nudge_handler = LessonNudgeHandler(
             config,
             lesson_connections if lesson_connections is not None else {},
@@ -90,6 +95,10 @@ class SimpleHttpServer:
                         web.get(
                             "/tbot/lesson-assets/{cacheToken}/{assetKey}",
                             self.lesson_asset_handler.handle_get,
+                        ),
+                        web.get(
+                            "/tbot/assign/",
+                            self.lesson_assignment_console_handler.handle_get,
                         ),
                     ]
                 )
