@@ -1,9 +1,25 @@
 /* eslint-disable no-console */
 
+let controllerReloaded = false;
+
+function activateWaitingWorker(registration) {
+  if (registration && registration.waiting) {
+    registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+  }
+}
+
 export const register = () => {
   if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       const swUrl = `${process.env.BASE_URL}service-worker.js`;
+
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (controllerReloaded) {
+          return;
+        }
+        controllerReloaded = true;
+        window.location.reload();
+      });
       
       console.info(`[TBOT] Trying to register Service Worker, URL: ${swUrl}`);
       
@@ -15,9 +31,14 @@ export const register = () => {
         
         // ContinueRegisterService Worker
         navigator.serviceWorker
-          .register(swUrl)
+          .register(swUrl, { updateViaCache: 'none' })
           .then(registration => {
             console.info('[TBOT] Service Worker registered successfully');
+
+            activateWaitingWorker(registration);
+            registration.update().catch(error => {
+              console.warn('[TBOT] Service Worker update check failed:', error);
+            });
             
             // Update handling
             registration.onupdatefound = () => {
@@ -28,31 +49,8 @@ export const register = () => {
               installingWorker.onstatechange = () => {
                 if (installingWorker.state === 'installed') {
                   if (navigator.serviceWorker.controller) {
-                    // ContentCachedUpdate, notify user refresh
-                    console.log('[TBOT] New content available, refresh page');
-                    // Can show update herePrompt
-                    const updateNotification = document.createElement('div');
-                    updateNotification.style.cssText = `
-                      position: fixed;
-                      bottom: 20px;
-                      right: 20px;
-                      background: #409EFF;
-                      color: white;
-                      padding: 12px 20px;
-                      border-radius: 4px;
-                      box-shadow: 0 2px 12px 0 rgba(0,0,0,.1);
-                      z-index: 9999;
-                    `;
-                    updateNotification.innerHTML = `
-                      <div style="display: flex; align-items: center;">
-                        <span style="margin-right: 10px;">New version found, click refresh app</span>
-                        <button style="background: white; color: #409EFF; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">Refresh</button>
-                      </div>
-                    `;
-                    document.body.appendChild(updateNotification);
-                    updateNotification.querySelector('button').addEventListener('click', () => {
-                      window.location.reload();
-                    });
+                    console.log('[TBOT] New content available, activating Service Worker');
+                    installingWorker.postMessage({ type: 'SKIP_WAITING' });
                   } else {
                     // All normal,Service WorkerSuccessfully installed
                     console.log('[TBOT] Content cached for offline use');
@@ -110,4 +108,4 @@ export const unregister = () => {
         console.error(error.message);
       });
   }
-}; 
+};
