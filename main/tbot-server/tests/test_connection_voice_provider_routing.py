@@ -777,6 +777,55 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.config["google_live"]["api_key"], "bot-key")
         self.assertEqual(handler.config["google_live"]["model"], "live-model")
 
+    async def test_private_config_child_profile_is_available_to_prompt_manager(self):
+        handler = self._build_handler()
+        handler.read_config_from_api = True
+        handler.config.update(
+            {
+                "read_config_from_api": True,
+                "voice_mode": {"type": "classic_pipeline"},
+                "google_live": {"api_key": "default-key"},
+                "selected_module": {"VAD": "VAD_Base", "ASR": "ASR_Base"},
+            }
+        )
+        handler.headers = {
+            "device-id": "device-1",
+            "client-id": "client-1",
+        }
+        handler.common_config = dict(handler.config)
+        handler.loop = asyncio.get_running_loop()
+        original_get_private_config = connection_module.get_private_config_from_api
+        original_check_vad_update = connection_module.check_vad_update
+        original_check_asr_update = connection_module.check_asr_update
+
+        private_config = {
+            "voice_mode": {"type": "google_live"},
+            "google_live": {"api_key": "bot-key", "model": "live-model"},
+            "selected_module": {"VAD": "VAD_Base", "ASR": "ASR_Base"},
+            "child_profile": {
+                "device_id": "device-1",
+                "device_alias": "Robot phong ngu",
+                "child_name": "Bong",
+                "child_age": 6,
+            },
+        }
+
+        async def fake_get_private_config(*args, **kwargs):
+            return private_config
+
+        try:
+            connection_module.get_private_config_from_api = fake_get_private_config
+            connection_module.check_vad_update = lambda *args, **kwargs: False
+            connection_module.check_asr_update = lambda *args, **kwargs: False
+
+            await handler._initialize_private_config_async()
+        finally:
+            connection_module.get_private_config_from_api = original_get_private_config
+            connection_module.check_vad_update = original_check_vad_update
+            connection_module.check_asr_update = original_check_asr_update
+
+        self.assertEqual(handler.config["child_profile"], private_config["child_profile"])
+
     async def test_private_config_can_swap_classic_bootstrap_to_google_live_provider(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "classic_pipeline"}

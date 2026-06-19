@@ -1,4 +1,4 @@
-import type { Device, FirmwareType } from './types'
+import type { Device, DeviceProfileUpdate, FirmwareType } from './types'
 import { http } from '@/http/request/alova'
 
 /**
@@ -58,6 +58,15 @@ export function updateDeviceAutoUpdate(deviceId: string, autoUpdate: number) {
   return http.Put(`/device/update/${deviceId}`, {
     autoUpdate,
   })
+}
+
+/**
+ * 更新设备和儿童资料
+ * @param deviceId 设备ID
+ * @param data 设备别名和儿童资料
+ */
+export function updateDeviceProfile(deviceId: string, data: DeviceProfileUpdate) {
+  return http.Put(`/device/update/${deviceId}`, data)
 }
 
 /**

@@ -25,5 +25,18 @@ public class DeviceUpdateDTO implements Serializable {
     @Size(max = 64)
     private String alias;
 
+    /**
+    * 儿童称呼，用于个性化对话
+    */
+    @Size(max = 64)
+    private String childName;
+
+    /**
+    * 儿童年龄，用于年龄适配对话
+    */
+    @Max(18)
+    @Min(1)
+    private Integer childAge;
+
     private static final long serialVersionUID = 1L;
 }

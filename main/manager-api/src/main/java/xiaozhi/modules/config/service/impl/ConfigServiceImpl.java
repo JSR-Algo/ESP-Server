@@ -170,6 +170,7 @@ public class ConfigServiceImpl implements ConfigService {
         // 获取单台设备每天最多输出字数
         String deviceMaxOutputSize = sysParamsService.getValue("device_max_output_size", true);
         result.put("device_max_output_size", deviceMaxOutputSize);
+        result.put("child_profile", buildChildProfile(device));
 
         // 获取聊天记录配置
         Integer chatHistoryConf = agent.getChatHistoryConf();
@@ -245,6 +246,15 @@ public class ConfigServiceImpl implements ConfigService {
                 true);
 
         return result;
+    }
+
+    private Map<String, Object> buildChildProfile(DeviceEntity device) {
+        Map<String, Object> childProfile = new HashMap<>();
+        childProfile.put("device_id", device.getId());
+        childProfile.put("device_alias", device.getAlias());
+        childProfile.put("child_name", device.getChildName());
+        childProfile.put("child_age", device.getChildAge());
+        return childProfile;
     }
 
     @Override

@@ -40,6 +40,12 @@ public class DeviceEntity {
     @Schema(description = "设备别名")
     private String alias;
 
+    @Schema(description = "儿童称呼，用于个性化对话")
+    private String childName;
+
+    @Schema(description = "儿童年龄，用于年龄适配对话")
+    private Integer childAge;
+
     @Schema(description = "智能体ID")
     private String agentId;
 

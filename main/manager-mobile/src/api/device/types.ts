@@ -11,6 +11,8 @@ export interface Device {
   autoUpdate: number
   board: string
   alias?: string
+  childName?: string
+  childAge?: number
   agentId: string
   appVersion: string
   sort: number
@@ -18,4 +20,10 @@ export interface Device {
   updateDate: string
   creator: string
   createDate: string
+}
+
+export interface DeviceProfileUpdate {
+  alias?: string
+  childName?: string
+  childAge?: number
 }

@@ -1026,6 +1026,8 @@ class ConnectionHandler:
                 ] = functions
         if private_config.get("prompt", None) is not None:
             self.config["prompt"] = private_config["prompt"]
+        if private_config.get("child_profile", None) is not None:
+            self.config["child_profile"] = private_config["child_profile"]
         # Get VoiceprintInfo
         if private_config.get("voiceprint", None) is not None:
             self.config["voiceprint"] = private_config["voiceprint"]

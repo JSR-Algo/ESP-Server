@@ -15,7 +15,6 @@
       "@dcloudio/types",
       "@uni-helper/uni-types",
       "@types/wechat-miniprogram",
-      "./src/types/wot-design-uni-shim.d.ts",
       "z-paging/types",
       "./src/typings.d.ts"
     ],
