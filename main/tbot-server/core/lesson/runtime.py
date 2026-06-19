@@ -414,6 +414,7 @@ class LessonRuntime:
             await self._maybe_finish_step()
         elif ftype == "lesson_stop":
             self.state = S_COMPLETED
+            self._log("info", f"lesson_completed stepsCompleted={self._steps_completed}")
             self._forward(
                 {
                     "type": "lesson_completed",
@@ -615,6 +616,20 @@ class LessonRuntime:
     async def _emit(self, frame_type: str, *, step_id: Optional[str] = None, body: Optional[Dict[str, Any]] = None) -> int:
         seq = self._next_seq()
         frame = self._envelope(frame_type, step_id=step_id, sequence=seq, body=body or {})
+        if frame_type == "lesson_step":
+            scene = frame["body"].get("scene") or {}
+            self._log(
+                "info",
+                "emit lesson_step "
+                f"stepId={step_id} "
+                f"stepType={frame['body'].get('stepType')} "
+                f"backgroundScene={int(bool(scene.get('backgroundScene')))} "
+                f"teachingObject={int(bool(scene.get('teachingObject')))} "
+                f"robotOverlay={int(bool(scene.get('robotOverlay')))} "
+                f"prompt={int(bool(frame['body'].get('audio')))}",
+            )
+        elif frame_type in ("lesson_prepare", "lesson_start", "lesson_stop"):
+            self._log("info", f"emit {frame_type} stepId={step_id or ''}")
         # Outstanding S->F frames are correlated by THIS sequence vs inbound body.acks.
         self._outstanding[seq] = {"type": frame_type, "stepId": step_id}
         await self._send(json.dumps(frame, ensure_ascii=False))
