@@ -17,6 +17,7 @@ jobs:
           distribution: 'temurin'
       - run: cd main/manager-api && mvn test
       - uses: actions/upload-artifact@v7
+        if: hashFiles('main/manager-api/target/site/jacoco/**') != ''
         with:
           name: jacoco-report
           path: main/manager-api/target/site/jacoco/
