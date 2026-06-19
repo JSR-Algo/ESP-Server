@@ -35,6 +35,14 @@ expectContains('src/views/LessonMonitoring.vue', 'filters.keyword', 'lesson moni
 expectContains('src/views/LessonMonitoring.vue', 'this.$route.query.keyword', 'lesson monitoring deep links should hydrate keyword filtering');
 expectContains('src/apis/module/monitoring.js', 'keyword=', 'monitoring API must send keyword to backend');
 
+expectContains('src/views/DeviceManagement.vue', 'device.childProfile', 'device admin must show the child profile column');
+expectContains('src/views/DeviceManagement.vue', 'childName: device.childName', 'device admin must map childName from ESP server API');
+expectContains('src/views/DeviceManagement.vue', 'childAge: device.childAge', 'device admin must map childAge from ESP server API');
+expectContains('src/views/DeviceManagement.vue', 'updateChildProfile(row)', 'device admin must allow direct child profile edits');
+expectRegex('src/views/DeviceManagement.vue', /\{\s*alias:\s*child\.childName,\s*childName:\s*child\.childName,\s*childAge:\s*child\.age\s*\}/m, 'use-child action must persist alias + child profile together');
+expectContains('src/i18n/vi.js', "'device.childProfile'", 'Vietnamese device admin copy must include child profile');
+expectContains('src/i18n/en.js', "'device.childProfile'", 'English device admin copy must include child profile');
+
 expectContains('src/i18n/vi.js', "'course.openLearners'", 'Vietnamese course-management copy must include learner filter CTA');
 expectContains('src/i18n/en.js', "'course.openLearners'", 'English course-management copy must include learner filter CTA');
 expectRegex('src/views/CourseManagement.vue', /grid-template-columns:\s*repeat\(auto-fit,/m, 'stat cards should use responsive grid tracks');

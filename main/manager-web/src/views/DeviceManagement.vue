@@ -6,7 +6,7 @@
       <h2 class="page-title">{{ $t('device.management') }}</h2>
       <div class="right-operations">
         <el-select
-          v-model="selectedChildName"
+          v-model="selectedChildId"
           filterable
           remote
           reserve-keyword
@@ -20,10 +20,12 @@
             v-for="child in childOptions"
             :key="child.childId"
             :label="child.childName"
-            :value="child.childName"
+            :value="child.childId"
           >
             <span>{{ child.childName }}</span>
-            <span class="child-option-meta">{{ child.parentEmail || child.parentId }}</span>
+            <span class="child-option-meta">
+              {{ child.age ? `${child.age} ${$t('device.yearsOld')}` : (child.parentEmail || child.parentId) }}
+            </span>
           </el-option>
         </el-select>
         <el-input :placeholder="$t('device.searchPlaceholder')" v-model="searchKeyword" class="search-input"
@@ -74,6 +76,43 @@
                   </span>
                 </template>
               </el-table-column>
+              <el-table-column :label="$t('device.childProfile')" align="center" min-width="190">
+                <template #default="{ row }">
+                  <div v-if="row.isChildEdit" class="child-profile-edit">
+                    <el-input
+                      v-model="row.childName"
+                      size="mini"
+                      maxlength="64"
+                      show-word-limit
+                      :placeholder="$t('device.childName')"
+                    />
+                    <el-input-number
+                      v-model="row.childAge"
+                      size="mini"
+                      :min="1"
+                      :max="18"
+                      controls-position="right"
+                      :placeholder="$t('device.childAge')"
+                      class="child-age-input"
+                    />
+                    <div class="child-profile-actions">
+                      <el-button size="mini" type="primary" :loading="row._childSubmitting" @click="updateChildProfile(row)">
+                        {{ $t('button.save') }}
+                      </el-button>
+                      <el-button size="mini" @click="cancelChildProfileEdit(row)">
+                        {{ $t('button.cancel') }}
+                      </el-button>
+                    </div>
+                  </div>
+                  <div v-else class="child-profile-view">
+                    <i class="el-icon-edit" @click="row.isChildEdit = true" style="cursor: pointer;"></i>
+                    <span class="child-profile-name" @click="row.isChildEdit = true">{{ row.childName || '-' }}</span>
+                    <span v-if="row.childAge" class="child-profile-age">
+                      {{ row.childAge }} {{ $t('device.yearsOld') }}
+                    </span>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column :label="$t('device.autoUpdate')" align="center">
                 <template slot-scope="scope">
                   <el-switch v-model="scope.row.otaSwitch" size="mini" active-color="#13ce66" inactive-color="#ff4949"
@@ -85,8 +124,8 @@
                   <el-button size="mini" type="text" @click="handleUnbind(scope.row.device_id)">
                     {{ $t('device.unbind') }}
                   </el-button>
-                  <el-button size="mini" type="text" :disabled="!selectedChildName" @click="applyChildNameToDevice(scope.row)">
-                    {{ $t('device.useChildName') }}
+                  <el-button size="mini" type="text" :disabled="!selectedChild" @click="applyChildNameToDevice(scope.row)">
+                    {{ $t('device.applyChildProfile') }}
                   </el-button>
                   <el-button v-if="isGenerate(scope.row)" size="mini" type="text" @click="handleGenertor(scope.row)">
                     {{ $t('device.deviceThemeGeneration') }}
@@ -175,7 +214,7 @@ export default {
       pageSize: 10,
       pageSizeOptions: [10, 20, 50, 100],
       deviceList: [],
-      selectedChildName: '',
+      selectedChildId: '',
       childOptions: [],
       childLoading: false,
       loading: false,
@@ -191,8 +230,14 @@ export default {
       return this.deviceList.filter(device =>
         (device.model && device.model.toLowerCase().includes(keyword)) ||
         (device.macAddress && device.macAddress.toLowerCase().includes(keyword)) ||
-        (device.remark && device.remark.toLowerCase().includes(keyword))
+        (device.remark && device.remark.toLowerCase().includes(keyword)) ||
+        (device.childName && device.childName.toLowerCase().includes(keyword)) ||
+        (device.childAge && String(device.childAge).includes(keyword))
       );
+    },
+
+    selectedChild() {
+      return this.childOptions.find(child => child.childId === this.selectedChildId) || null;
     },
 
     paginatedDeviceList() {
@@ -354,20 +399,59 @@ export default {
       });
     },
     applyChildNameToDevice(row) {
-      const childName = (this.selectedChildName || '').trim();
-      if (!childName) {
+      const child = this.selectedChild;
+      if (!child || !child.childName) {
         this.$message.warning(this.$t('device.selectChildNameFirst'));
         return;
       }
-      this.updateDeviceInfo(row.device_id, { alias: childName }, (ok, resp) => {
+      this.updateDeviceInfo(row.device_id, { alias: child.childName, childName: child.childName, childAge: child.age }, (ok, resp) => {
         if (ok) {
-          row.remark = childName;
-          row._originalRemark = childName;
-          this.$message.success(this.$t('device.childNameApplied'));
+          row.remark = child.childName;
+          row._originalRemark = child.childName;
+          row.childName = child.childName;
+          row.childAge = child.age;
+          row._originalChildName = child.childName;
+          row._originalChildAge = child.age;
+          this.$message.success(this.$t('device.childProfileApplied'));
         } else {
           this.$message.error(resp.msg || this.$t('device.remarkSaveFailed'));
         }
       });
+    },
+    updateChildProfile(row) {
+      if (row._childSubmitting) return;
+      const childName = (row.childName || '').trim();
+      const childAge = row.childAge === '' || row.childAge === undefined ? null : Number(row.childAge);
+      if (childName.length > 64) {
+        this.$message.warning(this.$t('device.childNameTooLong'));
+        return;
+      }
+      if (childAge !== null && (!Number.isFinite(childAge) || childAge < 1 || childAge > 18)) {
+        this.$message.warning(this.$t('device.childAgeInvalid'));
+        return;
+      }
+      row._childSubmitting = true;
+      const payload = { childName, childAge };
+      this.updateDeviceInfo(row.device_id, payload, (ok, resp) => {
+        if (ok) {
+          row.childName = childName;
+          row.childAge = childAge;
+          row._originalChildName = childName;
+          row._originalChildAge = childAge;
+          row.isChildEdit = false;
+          this.$message.success(this.$t('device.childProfileSaved'));
+        } else {
+          row.childName = row._originalChildName;
+          row.childAge = row._originalChildAge;
+          this.$message.error(resp.msg || this.$t('device.childProfileSaveFailed'));
+        }
+        row._childSubmitting = false;
+      });
+    },
+    cancelChildProfileEdit(row) {
+      row.childName = row._originalChildName;
+      row.childAge = row._originalChildAge;
+      row.isChildEdit = false;
     },
     // Remark input: submit on blur
     onRemarkBlur(row) {
@@ -438,8 +522,14 @@ export default {
               lastConversation: device.lastConnectedAt,
               remark: device.alias,
               _originalRemark: device.alias,
+              childName: device.childName,
+              childAge: device.childAge,
+              _originalChildName: device.childName,
+              _originalChildAge: device.childAge,
               isEdit: false,
+              isChildEdit: false,
               _submitting: false,
+              _childSubmitting: false,
               otaSwitch: device.autoUpdate === 1,
               rawBindTime: new Date(device.createDate).getTime(),
               selected: false,
@@ -611,6 +701,45 @@ export default {
   color: #909399;
   font-size: 12px;
   margin-left: 12px;
+}
+
+.child-profile-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-height: 42px;
+  justify-content: center;
+}
+
+.child-profile-name {
+  color: #2c3e50;
+  font-weight: 600;
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.child-profile-age {
+  color: #909399;
+  font-size: 12px;
+}
+
+.child-profile-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.child-age-input {
+  width: 100%;
+}
+
+.child-profile-actions {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .search-input {
