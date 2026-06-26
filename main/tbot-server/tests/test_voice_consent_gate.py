@@ -2,17 +2,22 @@ import types
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from config import device_token_client
 from config.voice_consent_client import VoiceConsentClient
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
 
 class _Logger:
+    def __init__(self):
+        self.messages = []
+
     def bind(self, **_kwargs):
         return self
 
-    def info(self, *_args, **_kwargs):
-        return None
+    def info(self, *args, **_kwargs):
+        self.messages.append(("info", args))
 
     warning = error = debug = info
 
@@ -49,6 +54,45 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
             allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
 
         self.assertTrue(allowed)
+
+    async def test_factory_test_claimed_device_allows_voice_without_backend_consent(self):
+        conn = _Conn(allowed=False)
+        conn.device_id = "14:c1:9f:d1:a8:48"
+        conn.config["server"]["factory_test_claimed_devices"] = ["14:C1:9F:D1:A8:48"]
+        conn.voice_consent_client = VoiceConsentClient(client=types.SimpleNamespace())
+
+        allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
+
+        self.assertTrue(allowed)
+
+    async def test_global_factory_test_claimed_allows_voice_without_backend_consent(self):
+        conn = _Conn(allowed=False)
+        conn.device_id = "cc:dd:ee:ff:00:11"  # in no allowlist
+        conn.config["server"]["factory_test_claimed_all"] = True
+        conn.voice_consent_client = VoiceConsentClient(client=types.SimpleNamespace())
+
+        allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
+
+        self.assertTrue(allowed)
+
+    async def test_factory_test_claimed_device_bypass_is_cached_to_avoid_audio_frame_log_spam(self):
+        conn = _Conn(allowed=False)
+        conn.device_id = "14:c1:9f:d1:a8:48"
+        conn.config["server"]["factory_test_claimed_devices"] = ["14:C1:9F:D1:A8:48"]
+        conn.voice_consent_client = VoiceConsentClient(client=types.SimpleNamespace())
+
+        self.assertTrue(await conn.voice_consent_client.ensure_voice_allowed(conn))
+        self.assertTrue(await conn.voice_consent_client.ensure_voice_allowed(conn))
+
+        warnings = [
+            args[0]
+            for level, args in conn.logger.messages
+            if level == "info" and args
+        ]
+        self.assertEqual(
+            warnings.count("voice consent bypass enabled for factory test claimed device"),
+            1,
+        )
 
     async def test_backend_consent_check_resolves_mac_to_uuid_and_sends_bearer_secret(self):
         class _Response:
@@ -93,6 +137,87 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.calls[1][3]["X-Mint-Secret"], "mint-secret")
         self.assertEqual(client.calls[1][3]["Authorization"], "Bearer mint-secret")
+
+    async def test_active_consent_is_cached_to_avoid_stream_rate_limit_spam(self):
+        class _Response:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _Client:
+            def __init__(self):
+                self.get_calls = 0
+
+            async def post(self, *_args, **_kwargs):
+                return _Response({"data": {"deviceUuid": "device-uuid-1", "token": "jwt-1"}})
+
+            async def get(self, *_args, **_kwargs):
+                self.get_calls += 1
+                return _Response({"data": {"active": True}})
+
+        conn = _Conn(allowed=False)
+        client = _Client()
+        consent = VoiceConsentClient(client=client)
+
+        with patch.dict("os.environ", {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}):
+            self.assertTrue(await consent.ensure_voice_allowed(conn))
+            self.assertTrue(await consent.ensure_voice_allowed(conn))
+
+        self.assertEqual(client.get_calls, 1)
+
+    async def test_recent_active_consent_survives_backend_429(self):
+        class _OkResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _RateLimitedResponse:
+            status_code = 429
+
+            def raise_for_status(self):
+                request = httpx.Request("GET", "https://backend.test/v1/internal/devices/device-uuid-1/ai-voice-consent")
+                response = httpx.Response(429, request=request)
+                raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+        class _Client:
+            def __init__(self):
+                self.get_calls = 0
+
+            async def post(self, *_args, **_kwargs):
+                return _OkResponse({"data": {"deviceUuid": "device-uuid-1", "token": "jwt-1"}})
+
+            async def get(self, *_args, **_kwargs):
+                self.get_calls += 1
+                if self.get_calls == 1:
+                    return _OkResponse({"data": {"active": True}})
+                return _RateLimitedResponse()
+
+        conn = _Conn(allowed=False)
+        client = _Client()
+        consent = VoiceConsentClient(client=client)
+
+        env = {
+            "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+            "TBOT_VOICE_CONSENT_CACHE_TTL_SECONDS": "0",
+            "TBOT_VOICE_CONSENT_STALE_ON_429_TTL_SECONDS": "60",
+        }
+        with patch.dict("os.environ", env):
+            self.assertTrue(await consent.ensure_voice_allowed(conn))
+            self.assertTrue(await consent.ensure_voice_allowed(conn))
+
+        self.assertEqual(client.get_calls, 2)
 
     async def test_start_session_denies_before_opening_live_without_consent(self):
         conn = _Conn(allowed=False)

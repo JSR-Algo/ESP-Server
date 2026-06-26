@@ -170,6 +170,18 @@ def _install_connection_import_stubs():
         real_text_utils = importlib.import_module("core.utils.textUtils")
     except Exception:
         real_text_utils = types.ModuleType("core.utils.textUtils")
+    # Prefer the REAL config.manage_api_client so we never strip the lesson
+    # backend legs (get_current_assignment / get_lesson_manifest /
+    # post_lesson_event) out of sys.modules. This stub installer runs at import
+    # time and is never torn down, so clobbering the real module here leaks a
+    # bare stub into every test that runs afterward in the same process (e.g.
+    # test_lesson_republish_on_connect patches those symbols by source and would
+    # otherwise fail with AttributeError). The connection test only reads three
+    # attrs from this module, and the real one already provides all three.
+    try:
+        real_manage_api_client = importlib.import_module("config.manage_api_client")
+    except Exception:
+        real_manage_api_client = types.ModuleType("config.manage_api_client")
 
     modules = {
         "core.utils.util": real_util,
@@ -190,7 +202,7 @@ def _install_connection_import_stubs():
         "config.config_loader": real_config_loader,
         "core.providers.tts.dto.dto": real_tts_dto,
         "config.logger": types.ModuleType("config.logger"),
-        "config.manage_api_client": types.ModuleType("config.manage_api_client"),
+        "config.manage_api_client": real_manage_api_client,
         "core.utils.prompt_manager": types.ModuleType("core.utils.prompt_manager"),
         "core.utils.voiceprint_provider": types.ModuleType(
             "core.utils.voiceprint_provider"
@@ -214,6 +226,21 @@ def _install_connection_import_stubs():
     modules["core.utils.modules_initialize"].initialize_asr = (
         lambda *args, **kwargs: object()
     )
+    # Carry over the REAL module's other symbols (e.g. the `_selected_module` helper that
+    # tests/test_modules_initialize_tts imports directly) onto this bare stub, so the
+    # sys.modules.update below does not strip names later test modules rely on — leaving
+    # the three initialize_* lambdas above as the only overrides. Read from the already
+    # imported module in sys.modules (do NOT freshly import: modules_initialize pulls the
+    # heavy tts/llm/asr providers this stub exists to avoid).
+    _real_mi = sys.modules.get("core.utils.modules_initialize")
+    _stub_mi = modules["core.utils.modules_initialize"]
+    if _real_mi is not None and _real_mi is not _stub_mi:
+        for _name in dir(_real_mi):
+            if not hasattr(_stub_mi, _name):
+                try:
+                    setattr(_stub_mi, _name, getattr(_real_mi, _name))
+                except Exception:
+                    pass
 
     modules["core.handle.reportHandle"].report = _noop_async
     modules["core.handle.reportHandle"].enqueue_tool_report = lambda *args, **kwargs: None
@@ -235,11 +262,16 @@ def _install_connection_import_stubs():
     modules["config.logger"].setup_logging = lambda: DummyLogger()
     modules["config.logger"].build_module_string = lambda *args, **kwargs: "stub"
     modules["config.logger"].create_connection_logger = lambda *args, **kwargs: DummyLogger()
-    modules["config.manage_api_client"].DeviceNotFoundException = (
-        DummyDeviceNotFoundException
-    )
-    modules["config.manage_api_client"].DeviceBindException = DummyDeviceBindException
-    modules["config.manage_api_client"].generate_and_save_chat_title = _noop_async
+    # Only fill these in if the module in sys.modules is a bare fallback stub;
+    # when the REAL config.manage_api_client is present it already provides them,
+    # and overwriting real symbols with dummies would leak into later tests.
+    _mac = modules["config.manage_api_client"]
+    if not hasattr(_mac, "DeviceNotFoundException"):
+        _mac.DeviceNotFoundException = DummyDeviceNotFoundException
+    if not hasattr(_mac, "DeviceBindException"):
+        _mac.DeviceBindException = DummyDeviceBindException
+    if not hasattr(_mac, "generate_and_save_chat_title"):
+        _mac.generate_and_save_chat_title = _noop_async
     modules["core.utils.prompt_manager"].PromptManager = DummyPromptManager
     modules["core.utils.voiceprint_provider"].VoiceprintProvider = (
         DummyVoiceprintProvider
@@ -253,6 +285,26 @@ _install_connection_import_stubs()
 from core.connection import ConnectionHandler
 from core.voice.session_provider.classic_pipeline import ClassicPipelineProvider
 import core.connection as connection_module
+
+
+def test_connection_header_log_summary_redacts_authorization_tokens():
+    headers = {
+        "authorization": "Bearer live-token-value",
+        "Authorization": "Bearer upper-token-value",
+        "x-api-key": "api-key-value",
+        "device-id": "robot-1",
+        "client-id": "client-1",
+        "user-agent": "probe",
+    }
+
+    summary = connection_module._sanitize_headers_for_log(headers)
+
+    assert summary["authorization"] == "<redacted>"
+    assert summary["Authorization"] == "<redacted>"
+    assert summary["x-api-key"] == "<redacted>"
+    assert summary["device-id"] == "robot-1"
+    assert summary["client-id"] == "client-1"
+    assert "live-token-value" not in repr(summary)
 
 
 class _FakeRequest:
@@ -286,6 +338,14 @@ class _RecordingVoiceProvider:
 
     async def handle_text_message(self, message):
         return False
+
+class _LessonRuntimeStub:
+    def __init__(self, *, passive=False, completed=False):
+        self.state = "RUNNING"
+        self._step = {"type": "model"}
+        self._step_id = "s4"
+        self._step_passive = passive
+        self._step_completed = completed
 
 
 class _ClassicLifecycleVoiceProvider:
@@ -544,6 +604,28 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(route_task, timeout=0.5)
 
         self.assertEqual(handler.voice_provider.audio_calls, [b"opus-frame"])
+
+    async def test_lesson_interactive_voice_input_routes_to_provider(self):
+        handler = self._build_handler()
+        handler.bind_completed_event.set()
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.session_mode = connection_module.SessionMode.LESSON
+        handler.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+
+        await handler._route_message(b"child-opus-frame")
+
+        self.assertEqual(handler.voice_provider.audio_calls, [b"child-opus-frame"])
+
+    async def test_lesson_passive_voice_input_does_not_route_to_provider(self):
+        handler = self._build_handler()
+        handler.bind_completed_event.set()
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.session_mode = connection_module.SessionMode.LESSON
+        handler.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
+
+        await handler._route_message(b"narration-opus-frame")
+
+        self.assertEqual(handler.voice_provider.audio_calls, [])
 
     async def test_route_message_waits_for_manager_voice_provider_before_classic_text_path(self):
         handler = self._build_handler()
@@ -901,6 +983,11 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.headers = {"device-id": "device-1", "client-id": "client-1"}
         handler.config["voice_mode"] = {"type": "classic_pipeline"}
         handler.config["google_live"] = {}
+        handler.config["lesson"] = {
+            "runtime_enabled": False,
+            "api_base": "https://base.example/v1",
+            "asset_delivery_mode": "internet",
+        }
         private_config = {
             "voice_mode": {
                 "type": "google_live",
@@ -909,6 +996,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "google_live": {
                 "model": "gemini-live",
                 "voice_name": "Aoede",
+            },
+            "lesson": {
+                "runtime_enabled": True,
+                "asset_origin_base": "https://assets.example",
             },
             "selected_module": {},
         }
@@ -931,6 +1022,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(handler.config["voice_mode"]["fallback_to_classic_on_error"])
         self.assertEqual(handler.config["google_live"]["model"], "gemini-live")
         self.assertEqual(handler.config["google_live"]["voice_name"], "Aoede")
+        self.assertIs(handler.config["lesson"]["runtime_enabled"], True)
+        self.assertEqual(handler.config["lesson"]["api_base"], "https://base.example/v1")
+        self.assertEqual(handler.config["lesson"]["asset_delivery_mode"], "internet")
+        self.assertEqual(handler.config["lesson"]["asset_origin_base"], "https://assets.example")
 
     async def test_private_config_init_stops_before_component_init_when_connection_closes(self):
         handler = self._build_handler()

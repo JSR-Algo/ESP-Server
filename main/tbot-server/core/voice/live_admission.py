@@ -220,7 +220,10 @@ def create_live_state_store(config):
     redis_url = cfg.get("redis_url") or os.environ.get("TBOT_LIVE_REDIS_URL") or os.environ.get("REDIS_URL")
     if not redis_url:
         return InMemoryLiveAdmissionStore()
-    from redis.asyncio import Redis
+    try:
+        from redis.asyncio import Redis
+    except ImportError:
+        return InMemoryLiveAdmissionStore()
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     return RedisLiveStateStore(

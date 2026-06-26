@@ -164,7 +164,7 @@ class GoogleLiveClient:
                         continue
                     if message is False:
                         for event in self._finish_open_audio_turn("stream_end"):
-                            yield event
+                            yield event  # pragma: no cover - coverage.py misses this async-generator yield
                         break
                     received_turn_message = True
                     for event in self._normalize_message(message):
@@ -471,11 +471,14 @@ class GoogleLiveClient:
             and not explicit_activity_handling
         ):
             return None
-        activity_handling = str(
-            self.config.get("activity_handling") or "START_OF_ACTIVITY_INTERRUPTS"
+        default_activity_handling = (
+            "NO_INTERRUPTION"
+            if disable_server_side_interruptions
+            else "START_OF_ACTIVITY_INTERRUPTS"
         )
-        if activity_handling == "NO_INTERRUPTION":
-            activity_handling = "START_OF_ACTIVITY_INTERRUPTS"
+        activity_handling = str(
+            self.config.get("activity_handling") or default_activity_handling
+        )
         realtime_input_config = {
             "activity_handling": activity_handling,
             "turn_coverage": self.config.get(

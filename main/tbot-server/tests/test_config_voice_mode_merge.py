@@ -1,9 +1,49 @@
+import os
 import pathlib
 import unittest
+from unittest import mock
 
 import yaml
 
 from config.config_loader import GOOGLE_LIVE_DEFAULTS, merge_configs, normalize_voice_config
+
+
+def _tts_base_cfg():
+    return {
+        "selected_module": {"TTS": "EdgeTTS"},
+        "TTS": {
+            "EdgeTTS": {"type": "edge"},
+            "GeminiTTS": {
+                "type": "gemini",
+                "model_name": "gemini-3.1-flash-tts-preview",
+                "voice": "Kore",
+                "api_key": "${PLACEHOLDER}",
+            },
+        },
+        "voice_mode": {"type": "google_live"},
+    }
+
+
+class TtsProviderSelectionTest(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"TBOT_TTS_PROVIDER": "google", "GEMINI_API_KEY": "AIzaTESTKEY1234567890abcd"}, clear=False)
+    def test_google_provider_selects_gemini_tts_with_real_key(self):
+        out = normalize_voice_config(_tts_base_cfg())
+        self.assertEqual(out["selected_module"]["TTS"], "GeminiTTS")
+        gemini = out["TTS"]["GeminiTTS"]
+        # Real Gemini key injected (NOT the Live ephemeral token / placeholder).
+        self.assertEqual(gemini["api_key"], "AIzaTESTKEY1234567890abcd")
+        # EdgeTTS kept only as the fallback safety net.
+        self.assertEqual((gemini.get("fallback_tts") or {}).get("type"), "edge")
+
+    @mock.patch.dict(os.environ, {"TBOT_FORCE_EDGE_TTS": "true", "TBOT_TTS_PROVIDER": "google"}, clear=False)
+    def test_force_edge_still_wins_over_google(self):
+        out = normalize_voice_config(_tts_base_cfg())
+        self.assertEqual(out["selected_module"]["TTS"], "EdgeTTS")
+
+    @mock.patch.dict(os.environ, {"TBOT_TTS_PROVIDER": "", "GEMINI_API_KEY": ""}, clear=False)
+    def test_no_provider_leaves_selection_untouched(self):
+        out = normalize_voice_config(_tts_base_cfg())
+        self.assertEqual(out["selected_module"]["TTS"], "EdgeTTS")
 
 
 class ConfigVoiceModeMergeTest(unittest.TestCase):
@@ -68,10 +108,10 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
             0.30,
         )
         self.assertEqual(merged["google_live"]["barge_in_min_output_age_sec"], 0.25)
-        self.assertFalse(merged["google_live"]["disable_server_side_interruptions"])
+        self.assertTrue(merged["google_live"]["disable_server_side_interruptions"])
         self.assertEqual(
             merged["google_live"]["activity_handling"],
-            "START_OF_ACTIVITY_INTERRUPTS",
+            "NO_INTERRUPTION",
         )
         self.assertTrue(merged["google_live"]["server_side_vad_enabled"])
         # Reconnect defaults track config.yaml (PR2 P2.6: 6 retries, 250ms base).
@@ -92,14 +132,17 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
 
         self.assertEqual(google_live["interrupt_policy"], "wake_or_transcript")
         self.assertFalse(google_live["raw_audio_barge_in_enabled"])
-        self.assertFalse(google_live["disable_server_side_interruptions"])
-        self.assertEqual(google_live["activity_handling"], "START_OF_ACTIVITY_INTERRUPTS")
+        self.assertTrue(google_live["disable_server_side_interruptions"])
+        self.assertEqual(google_live["activity_handling"], "NO_INTERRUPTION")
         self.assertFalse(google_live["barge_in"])
         self.assertFalse(google_live["interrupt_on_input_while_speaking"])
         self.assertTrue(google_live["music_auto_pause_on_user_speech"])
         self.assertEqual(google_live["echo_tail_suppression_ms"], 400)
-        self.assertEqual(google_live["input_flush_delay_sec"], 1.0)
+        # Tuned up from the 1.0 code default (child-speech capture fix); must stay
+        # >= input_speech_tail_ms so the idle safety-net doesn't re-cut a paused child.
+        self.assertEqual(google_live["input_flush_delay_sec"], 1.4)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["raw_audio_barge_in_enabled"])
+        self.assertTrue(GOOGLE_LIVE_DEFAULTS["disable_server_side_interruptions"])
 
     def test_config_yaml_keeps_lesson_runtime_dark_by_default(self):
         config_path = pathlib.Path(__file__).resolve().parents[1] / "config.yaml"
@@ -134,9 +177,9 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertFalse(merged["google_live"]["barge_in"])
         self.assertFalse(merged["google_live"]["raw_audio_barge_in_enabled"])
         self.assertFalse(merged["google_live"]["interrupt_on_input_while_speaking"])
-        self.assertFalse(merged["google_live"]["disable_server_side_interruptions"])
+        self.assertTrue(merged["google_live"]["disable_server_side_interruptions"])
         self.assertEqual(
             merged["google_live"]["activity_handling"],
-            "START_OF_ACTIVITY_INTERRUPTS",
+            "NO_INTERRUPTION",
         )
         self.assertTrue(merged["google_live"]["server_side_vad_enabled"])

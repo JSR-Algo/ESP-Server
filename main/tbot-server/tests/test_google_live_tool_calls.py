@@ -1,15 +1,19 @@
 import asyncio
 import json
+import time
 import unittest
 from types import SimpleNamespace
 
 from core.voice.google_live.client import GoogleLiveClient
+from core.voice.live_admission import AdmissionDecision, LiveAdmissionResult
+from core.voice.session_orchestrator import SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 from plugins_func.register import Action, ActionResponse
 # Importing change_volume registers it in all_function_registry so
 # always-included live tools can be resolved during these tests.
 import plugins_func.functions.change_volume  # noqa: F401
 import plugins_func.functions.start_lesson as start_lesson_module
+import core.voice.session_provider.google_live as google_live_module
 
 
 class _DummyLogger:
@@ -218,11 +222,23 @@ class _ProviderConn:
         self.sample_rate = 24000
         self.google_live_audio_out_started_at = None
 
+    def _set_session_mode(self, mode, *, reason=""):
+        self.session_mode = mode
+        return mode
+
     def clear_queues(self):
         pass
 
     def clearSpeakStatus(self):
         self.client_is_speaking = False
+
+class _LessonRuntimeStub:
+    def __init__(self, *, passive=False, completed=False):
+        self.state = "RUNNING"
+        self._step = {"type": "model"}
+        self._step_id = "s4"
+        self._step_passive = passive
+        self._step_completed = completed
 
 
 class _FakeFuncHandler:
@@ -283,6 +299,24 @@ class _RecordingTts:
 
     def store_tts_text(self, sentence_id, text):
         self.stored_texts.append((sentence_id, text))
+
+class _RecordingLessonRuntime:
+    def __init__(self, handled=True):
+        self.handled = handled
+        self.responses = []
+
+    async def on_child_response(self, text, *, source="voice_transcript"):
+        self.responses.append((text, source))
+        return self.handled
+
+class _InteractiveRecordingLessonRuntime(_RecordingLessonRuntime):
+    def __init__(self, handled=True):
+        super().__init__(handled=handled)
+        self.state = "RUNNING"
+        self._step = {"type": "model"}
+        self._step_id = "s4"
+        self._step_passive = False
+        self._step_completed = False
 
 
 class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
@@ -756,6 +790,54 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls[-1]["name"], "start_lesson")
         self.assertEqual(handler.calls[-1]["arguments"], {})
 
+    async def test_start_lesson_transcript_marker_is_noop_when_tool_not_admitted(self):
+        provider, handler = self._make_provider()
+        provider.conn._lesson_runtime_enabled = lambda: False
+        provider._client.sent_texts = []
+
+        handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+
+        self.assertFalse(handled)
+        self.assertEqual(handler.calls, [])
+        self.assertEqual(provider._client.sent_texts, [])
+
+    async def test_start_lesson_command_accepts_common_stt_variants(self):
+        variants = [
+            "BẮT ĐẦU BÀI HỌC!",
+            "  bắt   đầu   bài   học  ",
+            "bat dau bai hoc",
+            "bắt đầu học bài",
+            "TeeBot, bắt đầu bài học nhé",
+            "bắt đầu bài học đi",
+            "vào bài học của con",
+            "vào học bài",
+            "vô bài học",
+            "vo bai hoc",
+            "bắt đầu khoá học",
+            "bắt đầu khóa học",
+            "vào khóa học",
+            "vào khoá học",
+            "vao khoa hoc",
+            "mở khóa học",
+            "mở khoá học",
+            "mở khóa học của con",
+            "mo khoa hoc",
+            "học bài thôi",
+            "học bài đi",
+            "tiếp tục bài học",
+            "tiếp tục khóa học",
+            "tiep tuc khoa hoc",
+        ]
+
+        for variant in variants:
+            with self.subTest(variant=variant):
+                provider, handler = self._make_provider()
+
+                handled = await provider._dispatch_lesson_start_intent(variant)
+
+                self.assertTrue(handled)
+                self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
+
     async def test_start_lesson_command_enqueues_audible_ack(self):
         provider, handler = self._make_provider()
         provider.conn.websocket = _RecordingWebSocket()
@@ -800,6 +882,8 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_lesson_step_prompt_uses_same_local_tts_path(self):
+        from core.providers.tts.dto.dto import ContentType
+
         provider, _handler = self._make_provider()
         provider.conn.websocket = _RecordingWebSocket()
         provider.conn.tts = _RecordingTts()
@@ -821,6 +905,371 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             "Welcome to the barn story.",
         )
         self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
+        self.assertIsNot(provider.conn.tts.tts_text_queue.items[-1].content_type, ContentType.TEXT)
+
+    async def test_lesson_step_prompt_initializes_tts_when_google_live_is_dormant(self):
+        from core.providers.tts.dto.dto import ContentType
+
+        provider, _handler = self._make_provider()
+        provider.conn.websocket = _RecordingWebSocket()
+        provider.conn.tts = None
+        provider.conn.sentence_id = None
+        calls = []
+
+        async def _ensure_lesson_tts():
+            calls.append("ensure")
+            provider.conn.tts = _RecordingTts()
+            return True
+
+        provider.conn.ensure_lesson_tts = _ensure_lesson_tts
+
+        spoken = await provider.speak_lesson_step_prompt("Say barn.")
+
+        self.assertTrue(spoken)
+        self.assertEqual(calls, ["ensure"])
+        self.assertEqual(provider.conn.tts.stored_texts[-1][1], "Say barn.")
+        self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
+        self.assertIsNot(provider.conn.tts.tts_text_queue.items[-1].content_type, ContentType.TEXT)
+
+    async def test_lesson_child_response_window_waits_for_prompt_guard(self):
+        provider, _handler = self._make_provider()
+        provider.conn.websocket = _RecordingWebSocket()
+        provider.conn.tts = _RecordingTts()
+        provider.conn.sentence_id = None
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 2.0,
+                "lesson_prompt_tts_chars_per_sec": 10.0,
+                "lesson_child_response_max_open_delay_sec": 20.0,
+            }
+        )
+        sleeps = []
+
+        async def _fake_sleep(delay):
+            sleeps.append(delay)
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertTrue(await provider.speak_lesson_step_prompt("Say barn now."))
+            self.assertEqual(provider._user_audio_allowed_until, 0.0)
+
+            self.assertTrue(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreaterEqual(sleeps[0], 3.0)
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+
+    async def test_lesson_child_response_window_uses_lesson_duration_without_session_mode(self):
+        provider, _handler = self._make_provider()
+        provider.conn.config["google_live"]["lesson_child_response_window_sec"] = 25.0
+
+        await provider.open_lesson_child_response_window()
+
+        remaining = provider._user_audio_allowed_until - time.monotonic()
+        self.assertGreater(remaining, 20.0)
+
+    async def test_user_transcript_completes_active_lesson_step_before_chat_intents(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+        provider._client.sent_texts = []
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("con thấy barn")
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            provider.conn.lesson_runtime.responses,
+            [("con thấy barn", "voice_transcript")],
+        )
+        self.assertEqual(handler.calls, [])
+        self.assertEqual(provider._client.sent_texts, [])
+
+    async def test_lesson_child_response_blocks_live_model_output_for_same_turn(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+
+        class _BlockingBridge:
+            def __init__(self):
+                self.stop_calls = 0
+                self.blocked = False
+
+            async def stop_output(self):
+                self.stop_calls += 1
+                self.blocked = True
+
+            def is_model_output_blocked(self):
+                return self.blocked
+
+        bridge = _BlockingBridge()
+        provider._bridge = bridge
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("barn")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("barn", "voice_transcript")])
+        self.assertEqual(bridge.stop_calls, 1)
+        self.assertTrue(bridge.is_model_output_blocked())
+        self.assertEqual(handler.calls, [])
+
+    async def test_lesson_child_response_blocks_model_output_before_runtime_advance(self):
+        provider, handler = self._make_provider()
+
+        class _BlockingBridge:
+            def __init__(self):
+                self.blocked = False
+
+            async def stop_output(self):
+                self.blocked = True
+
+            def is_model_output_blocked(self):
+                return self.blocked
+
+        bridge = _BlockingBridge()
+
+        class _Runtime:
+            def __init__(self):
+                self.responses = []
+
+            async def on_child_response(self, text, *, source="voice_transcript"):
+                self.responses.append((text, source, bridge.is_model_output_blocked()))
+                return True
+
+        provider._bridge = bridge
+        provider.conn.lesson_runtime = _Runtime()
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("barn")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("barn", "voice_transcript", True)])
+        self.assertEqual(handler.calls, [])
+
+    async def test_lesson_child_response_closes_waiting_model_turn_for_next_step_audio(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            def is_model_output_blocked(self):
+                return False
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 1000
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+        provider._bridge = _AudioBridge()
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("barn")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("barn", "voice_transcript")])
+        self.assertEqual(provider._interaction.state, google_live_module.InteractionState.LISTENING)
+
+        self.assertTrue(await provider.handle_audio_bytes(b"next-step"))
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:next-step"])
+        self.assertEqual(handler.calls, [])
+
+    async def test_waiting_model_does_not_drop_audio_during_open_lesson_response_window(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+        provider._user_stream_response_id = provider._response_generation
+        provider._user_stream_started_at = time.monotonic() - 10
+        provider._user_stream_last_speech_at = time.monotonic() - 10
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            def is_model_output_blocked(self):
+                return False
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 1000
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+        provider._bridge = _AudioBridge()
+        await provider.open_lesson_child_response_window()
+
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
+
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertNotEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.WAITING_MODEL,
+        )
+        self.assertEqual(handler.calls, [])
+
+    async def test_text_message_completes_active_lesson_step_before_chat_model(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _TextClient:
+            connected = True
+
+            def __init__(self):
+                self.sent_texts = []
+
+            async def send_text(self, text):
+                self.sent_texts.append(text)
+
+            async def close(self):
+                self.connected = False
+
+        provider._client = _TextClient()
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider.handle_text_message('{"type":"text","text":"con thấy barn"}')
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            provider.conn.lesson_runtime.responses,
+            [("con thấy barn", "voice_transcript")],
+        )
+        self.assertEqual(handler.calls, [])
+        self.assertEqual(provider._client.sent_texts, [])
+
+    async def test_user_transcript_outside_lesson_response_window_is_not_child_answer(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+        provider._user_audio_allowed_until = time.monotonic() - 1
+
+        handled = await provider._on_user_transcript("barn")
+
+        self.assertFalse(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [])
+        self.assertEqual(handler.calls, [])
+
+    async def test_user_transcript_barge_in_does_not_interrupt_when_lesson_accepts_response(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
+        interrupts = []
+
+        async def _begin_user_interrupt(reason):
+            interrupts.append(reason)
+
+        provider._begin_user_interrupt = _begin_user_interrupt
+        await provider.open_lesson_child_response_window()
+
+        await provider._on_user_transcript_barge_in("barn")
+
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("barn", "voice_transcript")])
+        self.assertEqual(interrupts, [])
+        self.assertEqual(handler.calls, [])
+
+    async def test_blank_lesson_transcript_is_not_treated_as_child_response_or_command(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=False)
+        provider._client.sent_texts = []
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("   ")
+
+        self.assertFalse(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("   ", "voice_transcript")])
+        self.assertEqual(handler.calls, [])
+        self.assertEqual(provider._client.sent_texts, [])
+
+    async def test_unhandled_lesson_transcript_can_still_dispatch_start_lesson_command(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=False)
+        await provider.open_lesson_child_response_window()
+
+        handled = await provider._on_user_transcript("bắt đầu bài học")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider.conn.lesson_runtime.responses, [("bắt đầu bài học", "voice_transcript")])
+        self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
+
+    async def test_lesson_interactive_audio_can_open_live_for_transcript(self):
+        provider, _handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        provider._bridge = None
+        opened = []
+
+        async def _admit_live_open():
+            return LiveAdmissionResult(AdmissionDecision.ALLOW_LIVE)
+
+        async def _open_live_session():
+            opened.append("open")
+            provider._client = SimpleNamespace(connected=True)
+            provider._bridge = object()
+
+        provider._admit_live_open = _admit_live_open
+        provider._open_live_session = _open_live_session
+
+        allowed = await provider._ensure_live_open_for_audio()
+
+        self.assertTrue(allowed)
+        self.assertEqual(opened, ["open"])
+
+    async def test_lesson_listen_start_uses_child_response_window(self):
+        provider, _handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        provider.conn.config["google_live"]["wake_audio_allow_window_sec"] = 5
+        provider.conn.config["google_live"]["lesson_child_response_window_sec"] = 25
+
+        await provider._open_user_audio_window("listen_start")
+
+        remaining = provider._user_audio_allowed_until - time.monotonic()
+        self.assertGreater(remaining, 20)
+
+    async def test_lesson_passive_audio_does_not_open_live(self):
+        provider, _handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
+        opened = []
+
+        async def _open_live_session():
+            opened.append("open")
+
+        provider._open_live_session = _open_live_session
+
+        allowed = await provider._ensure_live_open_for_audio()
+
+        self.assertFalse(allowed)
+        self.assertEqual(opened, [])
 
     async def test_teach_me_now_command_is_not_lesson_start(self):
         provider, handler = self._make_provider()

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -24,9 +25,30 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-POSTER = b"poster-bytes-xyz"
+POSTER = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQ"
+    "FxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMK"
+    "ChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoK"
+    "CgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBg"
+    "cICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0"
+    "KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZn"
+    "aGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8"
+    "jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAA"
+    "AAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcR"
+    "MiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RV"
+    "VldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tb"
+    "a3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAx"
+    "EAPwDoKKKK+XPFP//Z"
+)
 BARN = b"barn-bytes-abc"
 BASE = "http://assets.test"
+
+# Runtime identity the _FakeConn / assignment below establish. Inbound F->S frames
+# MUST carry the matching assignmentId+sessionId or LessonRuntime._matches_runtime_identity
+# ignores them as stale (see test_lesson_runtime.py::
+# test_stale_assignment_or_session_frames_cannot_ack_or_complete_current_runtime).
+RUNTIME_ASSIGNMENT_ID = "a"
+RUNTIME_SESSION_ID = "sess_x"
 
 
 class _FakeStreamResponse:
@@ -201,18 +223,25 @@ def _manifest(step_timeout=0.05):
              "mediaType": "image/jpeg", "path": "p.jpg", "url": "u", "sha256": "a", "critical": True},
         ],
         "steps": [
-            {"id": "s4", "type": "model", "scene": {"backgroundScene": {}, "teachingObject": {}, "robotOverlay": {}},
+            {"id": "s4", "type": "model", "scene": {
+                "backgroundScene": {"poster": {"src": "p.jpg"}},
+                "teachingObject": {"asset": {"src": "barn.png"}},
+                "robotOverlay": {"asset": {"src": "robot.png"}},
+            },
              "audio": {"via": "tts"}, "timeoutSec": step_timeout},
         ],
     }
 
 
 def _ack(seq, acks, step_id=None):
-    return {"type": "lesson_ack", "sequence": seq, "stepId": step_id, "body": {"acks": acks, "rendered": True}}
+    return {"type": "lesson_ack", "sequence": seq, "stepId": step_id,
+            "assignmentId": RUNTIME_ASSIGNMENT_ID, "sessionId": RUNTIME_SESSION_ID,
+            "body": {"acks": acks, "rendered": True}}
 
 
 def _progress(seq, event="step_completed"):
     return {"type": "lesson_progress", "sequence": seq, "stepId": "s4",
+            "assignmentId": RUNTIME_ASSIGNMENT_ID, "sessionId": RUNTIME_SESSION_ID,
             "body": {"event": event, "stepType": "model", "result": "success"}}
 
 
@@ -258,9 +287,25 @@ class RuntimeTerminalGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.state, "FAILED")
         self.assertEqual(rt.last_error.code, "STEP_TIMEOUT")
 
+    async def test_step_timeout_releases_lesson_mode(self):
+        conn, rt = await self._running_runtime(step_timeout=0.05)
+        released = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        conn.release_lesson_mode = release_lesson_mode
+
+        await asyncio.sleep(0.15)
+
+        self.assertEqual(rt.state, "FAILED")
+        self.assertEqual(rt.last_error.code, "STEP_TIMEOUT")
+        self.assertEqual(released, ["step_timeout"])
+
     async def test_inbound_lesson_error_is_terminal_and_absorbs_following_frames(self):
         conn, rt = await self._running_runtime(step_timeout=5.0)  # long timeout: not the trigger
         await rt.on_lesson_error({"type": "lesson_error", "sequence": 3,
+                                  "assignmentId": RUNTIME_ASSIGNMENT_ID, "sessionId": RUNTIME_SESSION_ID,
                                   "body": {"code": "RENDER_FAILED", "message": "x", "retryable": False}})
         self.assertEqual(rt.state, "FAILED")
         # Following frames are absorbed; no spurious PROTOCOL_SEQUENCE_ERROR emitted.

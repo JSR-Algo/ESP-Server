@@ -667,7 +667,13 @@ class GoogleLiveAudioBridge:
             return
         from core.handle.sendAudioHandle import send_tts_message
 
-        await send_tts_message(self.conn, state)
+        extra_fields = None
+        if state == "stop":
+            extra_fields = {
+                "continue_listening": True,
+                "listen_mode": "realtime",
+            }
+        await send_tts_message(self.conn, state, extra_fields=extra_fields)
         if state == "start":
             self.conn.client_is_speaking = True
         elif state == "stop":
@@ -761,7 +767,7 @@ class GoogleLiveAudioBridge:
                 TTSMessageDTO(
                     sentence_id=sentence_id,
                     sentence_type=SentenceType.LAST,
-                    content_type=ContentType.TEXT,
+                    content_type=ContentType.ACTION,
                 )
             )
             if hasattr(tts, "store_tts_text"):
@@ -1033,7 +1039,15 @@ class GoogleLiveAudioBridge:
         return max(0.0, value)
 
     def _server_side_interruptions_disabled(self):
-        return False
+        config = getattr(self.client, "config", None) or self.conn.config.get(
+            "google_live", {}
+        )
+        # Explicit operator override: ignore_server_interruptions=True forces live
+        # interruptions to be HONORED (subject only to the output-age guard), so it can
+        # never silently block a real barge-in regardless of the disable default.
+        if config.get("ignore_server_interruptions"):
+            return False
+        return bool(config.get("disable_server_side_interruptions", True))
 
     def _get_transcript_echo_window_sec(self):
         config = getattr(self.client, "config", None) or self.conn.config.get(

@@ -6,7 +6,7 @@ device telemetry (stream 3). Lesson progress is stream 2.
 
 It batches events per ``(assignmentId, sessionId)`` and POSTs them to
 ``/v1/devices/:deviceId/lesson-events`` via ``config.manage_api_client``, which
-owns the single ``result -> outcome`` rename + the ``detail.utterance`` strip.
+owns the single ``result -> outcome`` rename + COPPA child-speech stripping.
 """
 
 from __future__ import annotations
@@ -165,7 +165,8 @@ class LessonEventForwarder:
             return False
         return any(
             isinstance(event, dict)
-            and event.get("type") in {"lesson_completed", "lesson_failed", "lesson_cancelled"}
+            and event.get("type")
+            in {"lesson_completed", "lesson_failed", "lesson_cancelled", "lesson_abandoned"}
             for event in events
         )
 

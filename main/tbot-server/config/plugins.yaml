@@ -1,5 +1,6 @@
 plugins:
   get_weather:
-    provider: qweather
-    api_key: dummy-local-dev
+    # Open-Meteo backend is keyless — no api_key required. default_location is
+    # used only when no city is named and the device IP cannot be geolocated.
+    default_location: "Ho Chi Minh City"
   # Add other plugin configs here

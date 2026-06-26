@@ -1,3 +1,4 @@
+import json
 import time
 import unittest
 
@@ -51,6 +52,14 @@ class _VoiceProvider:
 
     async def handle_text_message(self, message):
         return False
+
+
+class _RecordingWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
 
 
 class _ConsentClient:
@@ -261,6 +270,55 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(conn.session_mode, SessionMode.DORMANT)
         self.assertEqual(conn.audio_channel_owner, SessionMode.DORMANT)
+
+    async def test_finish_lesson_shows_happy_face_and_returns_to_conversation(self):
+        conn = _conn()
+        conn.voice_provider = _VoiceProvider()
+        conn.websocket = _RecordingWS()
+        conn.session_mode = SessionMode.LESSON
+        conn.audio_channel_owner = SessionMode.LESSON
+
+        await conn.finish_lesson_mode(reason="lesson_completed")
+
+        # A single happy-face emotion frame is pushed to the device over the WS,
+        # in the proven get_emotion wire shape the firmware already renders.
+        emotions = [json.loads(p) for p in conn.websocket.sent]
+        self.assertEqual(len(emotions), 1)
+        self.assertEqual(emotions[0]["type"], "llm")
+        self.assertEqual(emotions[0]["emotion"], "happy")
+        self.assertEqual(emotions[0]["text"], "🙂")
+        self.assertEqual(emotions[0]["session_id"], conn.session_id)
+        # ...then the robot returns to NORMAL CONVERSATION (Live reopened).
+        self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
+        self.assertEqual(conn.voice_provider.started, 1)
+
+    async def test_finish_lesson_can_stay_dormant_when_return_to_conversation_off(self):
+        conn = _conn()
+        conn.voice_provider = _VoiceProvider()
+        conn.websocket = _RecordingWS()
+        conn.config["lesson"] = {"return_to_conversation": False}
+        conn.session_mode = SessionMode.LESSON
+        conn.audio_channel_owner = SessionMode.LESSON
+
+        await conn.finish_lesson_mode(reason="lesson_completed")
+
+        # Happy face still shown regardless of the destination mode...
+        emotions = [json.loads(p) for p in conn.websocket.sent]
+        self.assertEqual([e["emotion"] for e in emotions], ["happy"])
+        # ...but the audio channel idles to dormant (no Live reopen / no extra cost).
+        self.assertEqual(conn.session_mode, SessionMode.DORMANT)
+        self.assertEqual(conn.voice_provider.started, 0)
+
+    async def test_finish_lesson_noop_when_not_in_lesson_mode(self):
+        conn = _conn()
+        conn.voice_provider = _VoiceProvider()
+        conn.websocket = _RecordingWS()
+        conn.session_mode = SessionMode.CONVERSATION
+
+        await conn.finish_lesson_mode(reason="lesson_completed")
+
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
 
 
 class LiveAdmissionGateTest(unittest.TestCase):

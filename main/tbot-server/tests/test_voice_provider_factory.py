@@ -101,6 +101,44 @@ class VoiceProviderFactoryTest(unittest.TestCase):
             "LESSON_RUNTIME_ENABLED": "true",
             "TBOT_DEVICE_MINT_SECRET": "mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com/lesson-assets/",
+            "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
+            "LESSON_ASSET_PACK_LOCAL_ROOT": "sd://sdcard/tbot/lesson-assets/",
+        },
+        clear=True,
+    )
+    @patch("config.config_loader.ensure_directories")
+    @patch(
+        "config.config_loader.read_config",
+        side_effect=[{"lesson": {"runtime_enabled": False}}, {}],
+    )
+    @patch("core.utils.cache.manager.cache_manager.set")
+    @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
+    def test_load_config_rejects_sd_pack_without_mount_root(
+        self,
+        _cache_get,
+        _cache_set,
+        _read_config,
+        _ensure_directories,
+    ):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "sd_pack.*LESSON_ASSET_PACK_MOUNT_ROOT",
+        ):
+            load_config()
+
+    @patch.dict(
+        "os.environ",
+        {
+            "LESSON_RUNTIME_ENABLED": "true",
+            "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+            "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com/lesson-assets/",
+            "LESSON_ASSET_PUBLIC_BASE_URL": "https://ota.example.com/",
+            "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
+            "LESSON_ASSET_PACK_LOCAL_ROOT": "sd://sdcard/tbot/lesson-assets/",
+            "LESSON_ASSET_PACK_MOUNT_ROOT": "/sdcard/tbot/lesson-assets/",
+            "LESSON_STEP_TIMEOUT_FLOOR_SEC": "45",
+            "LESSON_MAX_ASSET_BYTES": "1048576",
+            "LESSON_MAX_TOTAL_ASSET_BYTES": "8388608",
         },
         clear=True,
     )
@@ -125,6 +163,22 @@ class VoiceProviderFactoryTest(unittest.TestCase):
             config["lesson"]["asset_origin_base"],
             "https://cdn.example.com/lesson-assets",
         )
+        self.assertEqual(
+            config["lesson"]["asset_public_base_url"],
+            "https://ota.example.com",
+        )
+        self.assertEqual(config["lesson"]["asset_delivery_mode"], "sd_pack")
+        self.assertEqual(
+            config["lesson"]["asset_pack_local_root"],
+            "sd://sdcard/tbot/lesson-assets",
+        )
+        self.assertEqual(
+            config["lesson"]["asset_pack_mount_root"],
+            "/sdcard/tbot/lesson-assets",
+        )
+        self.assertEqual(config["lesson"]["step_timeout_floor_sec"], 45.0)
+        self.assertEqual(config["lesson"]["max_asset_bytes"], 1048576)
+        self.assertEqual(config["lesson"]["max_total_asset_bytes"], 8388608)
 
     @patch.dict("os.environ", {"TBOT_CLOSE_CONNECTION_NO_VOICE_TIME": "3600"}, clear=True)
     @patch("config.config_loader.ensure_directories")

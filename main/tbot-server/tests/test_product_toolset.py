@@ -103,6 +103,21 @@ class ProductToolsetContractTest(unittest.TestCase):
             {"type": "object", "properties": {}, "required": []},
         )
 
+    def test_start_lesson_trigger_description_covers_course_and_study_variants(self):
+        description = all_function_registry["start_lesson"].description["function"]["description"]
+
+        for phrase in (
+            "bắt đầu học bài",
+            "mở khóa học của con",
+            "vào khóa học của con",
+            "tiếp tục khóa học",
+            "continue the course",
+            "resume course",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, description)
+                self.assertIn(phrase, _master_start_lesson_desc())
+
     def test_live_and_classic_share_child_product_toolset_modulo_music(self):
         conn = _ToolsetConn(runtime_enabled=True)
 

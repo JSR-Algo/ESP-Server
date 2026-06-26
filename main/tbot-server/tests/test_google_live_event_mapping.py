@@ -134,7 +134,18 @@ class _FailingDecoder:
 
 
 class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
+    def _restore_send_audio_module(self, previous_module, had_previous_module):
+        if had_previous_module:
+            sys.modules["core.handle.sendAudioHandle"] = previous_module
+        else:
+            sys.modules.pop("core.handle.sendAudioHandle", None)
+
     def _build_bridge(self, conn, **kwargs):
+        module_name = "core.handle.sendAudioHandle"
+        had_previous_module = module_name in sys.modules
+        previous_module = sys.modules.get(module_name)
+        self.addCleanup(self._restore_send_audio_module, previous_module, had_previous_module)
+
         stub_module = types.ModuleType("core.handle.sendAudioHandle")
 
         async def send_display_message(stub_conn, text):
@@ -148,7 +159,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        async def send_tts_message(stub_conn, state, text=None):
+        async def send_tts_message(stub_conn, state, text=None, extra_fields=None):
             message = {
                 "type": "tts",
                 "state": state,
@@ -156,6 +167,8 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
             }
             if text is not None:
                 message["text"] = text
+            if extra_fields:
+                message.update(extra_fields)
             if state == "stop":
                 stub_conn.clearSpeakStatus()
             await stub_conn.websocket.send(json.dumps(message))
@@ -177,13 +190,14 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         stub_module.send_display_message = send_display_message
         stub_module.send_tts_message = send_tts_message
         stub_module.sendAudio = sendAudio
-        sys.modules["core.handle.sendAudioHandle"] = stub_module
+        sys.modules[module_name] = stub_module
 
         bridge_module = importlib.import_module("core.voice.google_live.audio_bridge")
         bridge_module = importlib.reload(bridge_module)
+        client_config = conn.config.get("google_live", {})
         return bridge_module.GoogleLiveAudioBridge(
             conn,
-            _DummyClient(),
+            _DummyClient(client_config),
             conn.logger,
             **kwargs,
         )
@@ -211,7 +225,13 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent_messages[3], b"chunk-2")
         self.assertEqual(
             json.loads(conn.websocket.sent_messages[4]),
-            {"type": "tts", "state": "stop", "session_id": "session-1"},
+            {
+                "type": "tts",
+                "state": "stop",
+                "session_id": "session-1",
+                "continue_listening": True,
+                "listen_mode": "realtime",
+            },
         )
         self.assertFalse(conn.client_is_speaking)
 
@@ -381,7 +401,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_interruption_sets_client_abort(self):
-        conn = _DummyConn()
+        conn = _DummyConn({"disable_server_side_interruptions": False})
         bridge = self._build_bridge(conn)
         conn.client_is_speaking = True
 
@@ -397,7 +417,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.clear_queue_calls, 1)
 
     async def test_interruption_clears_queue_before_tts_stop_send_finishes(self):
-        conn = _DummyConn()
+        conn = _DummyConn({"disable_server_side_interruptions": False})
         conn.websocket = _BlockingWebSocket()
         bridge = self._build_bridge(conn)
 
@@ -412,7 +432,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await task)
 
     async def test_interruption_handler_clears_playback_under_150ms(self):
-        conn = _DummyConn()
+        conn = _DummyConn({"disable_server_side_interruptions": False})
         bridge = self._build_bridge(conn)
 
         started_at = time.monotonic()
@@ -426,7 +446,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.client_is_speaking)
 
     async def test_interruption_logs_output_queue_lengths_before_clear(self):
-        conn = _DummyConn()
+        conn = _DummyConn({"disable_server_side_interruptions": False})
         conn.tts = types.SimpleNamespace(
             tts_text_queue=["pending text"],
             tts_audio_queue=[b"audio-1", b"audio-2"],
@@ -451,7 +471,12 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clear_logs[0][1:], ("response-7", 1, 2, 3, 4))
 
     async def test_server_interruption_stops_audio_even_with_explicit_ignore_config(self):
-        conn = _DummyConn({"ignore_server_interruptions": True})
+        conn = _DummyConn(
+            {
+                "ignore_server_interruptions": True,
+                "disable_server_side_interruptions": False,
+            }
+        )
         bridge = self._build_bridge(conn)
         conn.client_is_speaking = True
 
@@ -720,7 +745,13 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent_messages[0], b"opus-tail")
         self.assertEqual(
             json.loads(conn.websocket.sent_messages[1]),
-            {"type": "tts", "state": "stop", "session_id": "session-1"},
+            {
+                "type": "tts",
+                "state": "stop",
+                "session_id": "session-1",
+                "continue_listening": True,
+                "listen_mode": "realtime",
+            },
         )
         self.assertEqual(
             fake_encoder.calls,

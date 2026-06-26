@@ -1,15 +1,22 @@
 import asyncio
+import builtins
+import importlib.util
 import os
 import unittest
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from config.config_loader import GOOGLE_LIVE_DEFAULTS
 from core.voice.google_live.client import GoogleLiveClient
 from plugins_func.functions.start_lesson import start_lesson_function_desc
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+async def _anext(async_iter):
+    return await async_iter.__anext__()
 
 
 def _extract_fenced_block(markdown, section, language):
@@ -54,6 +61,18 @@ class _DummyLogger:
     def error(self, *args, **kwargs):
         self.messages.append(("error", args, kwargs))
         return None
+
+    def debug(self, *args, **kwargs):
+        self.messages.append(("debug", args, kwargs))
+        return None
+
+class _RaisingInfoLogger(_DummyLogger):
+    def info(self, *args, **kwargs):
+        raise RuntimeError("log failed")
+
+class _RaisingDebugLogger(_DummyLogger):
+    def debug(self, *args, **kwargs):
+        raise RuntimeError("debug failed")
 
 class _FakeLiveContext:
     def __init__(self, enter_delay=0, session=None):
@@ -166,6 +185,82 @@ class _FakeGenaiModule:
         self.api_key = api_key
         return self._sdk_client
 
+class _TypedPart:
+    def __init__(self, text=None):
+        self.text = text
+
+class _TypedContent:
+    def __init__(self, role=None, parts=None):
+        self.role = role
+        self.parts = parts or []
+
+class _TypedTool:
+    def __init__(self, function_declarations=None):
+        self.function_declarations = function_declarations or []
+
+class _TypedFunctionDeclaration:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+class _TypedFunctionResponse:
+    calls = []
+
+    def __init__(self, **kwargs):
+        type(self).calls.append(kwargs)
+        if "id" in kwargs and kwargs["id"] == "bad-id":
+            raise TypeError("id not supported")
+        self.__dict__.update(kwargs)
+
+class _TypedBlob:
+    def __init__(self, data, mime_type):
+        self.data = data
+        self.mime_type = mime_type
+
+class _FakeTypes:
+    Content = _TypedContent
+    Part = _TypedPart
+    Tool = _TypedTool
+    FunctionDeclaration = _TypedFunctionDeclaration
+    FunctionResponse = _TypedFunctionResponse
+    Blob = _TypedBlob
+
+class _RejectingTypes(_FakeTypes):
+    class Content:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("content failed")
+
+class _NoTextSession:
+    pass
+
+class _ToolResponseSession(_FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.tool_responses = []
+
+    async def send_tool_response(self, **kwargs):
+        self.tool_responses.append(kwargs)
+
+class _StopAfterMessagesIterator:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        return self.messages.pop(0)
+
+class _StopAfterMessagesSession:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    def receive(self):
+        messages = self.messages
+        self.messages = []
+        return _StopAfterMessagesIterator(messages)
+
 class _TestableGoogleLiveClient(GoogleLiveClient):
     def __init__(self, config, logger, genai_module):
         super().__init__(config, logger)
@@ -183,10 +278,17 @@ class _MessageWithNoisyTextProperty:
     def text(self):
         raise AssertionError("top-level text property should not be read for server_content messages")
 
+class _ExplodingParts:
+    @property
+    def parts(self):
+        raise RuntimeError("parts failed")
+
 
 class GoogleLiveClientTest(unittest.TestCase):
+    @patch.dict(os.environ, {"GOOGLE_API_KEY": " env-key\n"})
     def test_resolve_api_key_from_environment_placeholder(self):
-        os.environ["GOOGLE_API_KEY"] = " env-key\n"
+        # Scope GOOGLE_API_KEY to this test (patch.dict restores it) so the env key does
+        # not leak into later tests' load_config and pollute google_live.api_key.
         client = GoogleLiveClient({"api_key": "${GOOGLE_API_KEY}"}, _DummyLogger())
 
         self.assertEqual(client._resolve_api_key(), "env-key")
@@ -434,7 +536,7 @@ class GoogleLiveClientTest(unittest.TestCase):
         self.assertEqual(
             config["realtime_input_config"],
             {
-                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+                "activity_handling": "NO_INTERRUPTION",
                 "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
             },
         )
@@ -458,11 +560,12 @@ class GoogleLiveClientTest(unittest.TestCase):
             {"trigger_tokens": 24000, "sliding_window": {"target_tokens": 12000}},
         )
 
-    def test_build_connect_config_never_uses_forbidden_no_interruption(self):
+    def test_build_connect_config_uses_no_interruption_when_server_interruptions_are_disabled(self):
         client = GoogleLiveClient(
             {
                 "enable_audio_output": True,
                 "disable_server_side_interruptions": True,
+                "activity_handling": "NO_INTERRUPTION",
             },
             _DummyLogger(),
         )
@@ -470,7 +573,7 @@ class GoogleLiveClientTest(unittest.TestCase):
         config = client._build_connect_config()
 
         self.assertEqual(config["response_modalities"], ["AUDIO"])
-        self.assertNotEqual(
+        self.assertEqual(
             config["realtime_input_config"].get("activity_handling"),
             "NO_INTERRUPTION",
         )
@@ -500,7 +603,7 @@ class GoogleLiveClientTest(unittest.TestCase):
         )
 
     def test_normalize_message_yields_session_resumption_update(self):
-        client = GoogleLiveClient({}, _DummyLogger())
+        client = GoogleLiveClient({"child_safety": {"enabled": False}}, _DummyLogger())
         message = SimpleNamespace(
             session_resumption_update=SimpleNamespace(
                 resumable=True,
@@ -537,7 +640,366 @@ class GoogleLiveClientTest(unittest.TestCase):
             "START_OF_ACTIVITY_INTERRUPTS",
         )
 
+    def test_sdk_import_fallback_reports_missing_google_genai(self):
+        original_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "google" and "genai" in (fromlist or ()):  # module eager import path
+                raise ImportError("missing google genai")
+            return original_import(name, globals, locals, fromlist, level)
+
+        module_path = ROOT / "core" / "voice" / "google_live" / "client.py"
+        spec = importlib.util.spec_from_file_location("tests.google_live_client_no_sdk", module_path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            builtins.__import__ = fake_import
+            spec.loader.exec_module(module)
+            self.assertIsNone(module._GENAI_MODULE_EAGER)
+            with self.assertRaisesRegex(RuntimeError, "google-genai package"):
+                module.GoogleLiveClient({}, _DummyLogger())._import_genai_module()
+        finally:
+            builtins.__import__ = original_import
+
+    def test_build_config_and_helpers_cover_typed_and_defensive_edges(self):
+        logger = _DummyLogger()
+        client = GoogleLiveClient(
+            {
+                "system_prompt": "hello",
+                "functions": [
+                    {"function": {"name": "ok", "description": "desc", "parameters": {"title": "drop", "properties": {"x": {"default": 1, "type": "string"}}}}},
+                    {"function": {"name": "", "parameters": {}}},
+                    {"not_function": True},
+                    "bad",
+                ],
+                "disable_server_side_interruptions": True,
+                "activity_handling": "NO_INTERRUPTION",
+                "start_of_speech_sensitivity": "HIGH",
+                "prefix_padding_ms": "bad",
+                "silence_duration_ms": 250,
+                "session_resumption_enabled": False,
+                "context_window_compression_enabled": False,
+                "native_voice": False,
+            },
+            logger,
+        )
+        client._types = _FakeTypes
+
+        config = client._build_connect_config()
+
+        self.assertNotIn("speech_config", config)
+        self.assertNotIn("session_resumption", config)
+        self.assertNotIn("context_window_compression", config)
+        self.assertIsInstance(config["system_instruction"], _TypedContent)
+        self.assertEqual(config["system_instruction"].role, "user")
+        self.assertIsInstance(config["tools"][0], _TypedTool)
+        declaration = config["tools"][0].function_declarations[0]
+        self.assertIsInstance(declaration, _TypedFunctionDeclaration)
+        self.assertEqual(declaration.parameters, {"properties": {"x": {"type": "string"}}})
+        self.assertEqual(
+            config["realtime_input_config"],
+            {
+                "activity_handling": "NO_INTERRUPTION",
+                "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
+                "automatic_activity_detection": {
+                    "start_of_speech_sensitivity": "HIGH",
+                    "silence_duration_ms": 250,
+                },
+            },
+        )
+        self.assertEqual(client._summarize_tool_names(config["tools"]), ["ok"])
+        self.assertEqual(client._system_instruction_length(config["system_instruction"]), len(config["system_instruction"].parts[0].text))
+        self.assertEqual(client._normalize_positive_int("bad"), None)
+        self.assertEqual(client._normalize_timeout("bad"), None)
+        self.assertEqual(client._normalize_timeout(0), None)
+
+    def test_builder_fallbacks_and_event_normalizers_cover_mapping_edges(self):
+        client = GoogleLiveClient({"child_safety": {"enabled": False}}, _DummyLogger())
+        client._types = _RejectingTypes
+        self.assertIsInstance(client._build_system_instruction(), type(None))
+        client.config["system_prompt"] = ""
+        self.assertIsNone(client._build_system_instruction())
+
+        client.config["system_prompt"] = "typed fallback"
+        instruction = client._build_system_instruction()
+        self.assertIsInstance(instruction, dict)
+        self.assertEqual(client._system_instruction_length(object()), 0)
+        self.assertEqual(client._system_instruction_length({"parts": [object()]}), 0)
+
+        client._types = _FakeTypes
+        self.assertIsInstance(client._build_blob(b"ab", "audio/pcm"), _TypedBlob)
+        self.assertIsInstance(client._build_text_turn("hello"), _TypedContent)
+
+        with self.assertRaises(TypeError):
+            client._build_function_response("bad")
+        with self.assertRaises(ValueError):
+            client._build_function_response({"response": {}})
+        _TypedFunctionResponse.calls = []
+        response = client._build_function_response({"id": "bad-id", "name": "tool", "response": None})
+        self.assertIsInstance(response, _TypedFunctionResponse)
+        self.assertEqual(response.response, {"result": ""})
+        self.assertEqual(_TypedFunctionResponse.calls[0]["id"], "bad-id")
+        self.assertNotIn("id", _TypedFunctionResponse.calls[-1])
+
+        self.assertEqual(client._message_has_audio_chunk({"server_content": {"model_turn": {"parts": [{"inline_data": None}, {"inline_data": {"data": b"x"}}]}}}), True)
+        self.assertEqual(client._message_has_audio_chunk({"server_content": {"model_turn": {"parts": [{"inline_data": {}}]}}}), False)
+        events = client._normalize_message(
+            {
+                "go_away": {"time_left": {"seconds": "2", "nanos": 500_000_000}},
+                "session_resumption_update": {"handle": "h1", "resumable": False},
+                "tool_call": {"function_calls": [{"id": "1", "name": "do", "args": {"x": 1}}, {"id": "2"}]},
+                "tool_call_cancellation": {"ids": ["1", None, 2]},
+            }
+        )
+        self.assertIn({"type": "session_expiring", "time_left_ms": 2500}, events)
+        self.assertIn({"type": "session_resumption_update", "handle": "h1", "resumable": False}, events)
+        self.assertIn({"type": "tool_call", "calls": [{"id": "1", "name": "do", "args": {"x": 1}}]}, events)
+        self.assertIn({"type": "tool_call_cancellation", "ids": ["1", "2"]}, events)
+        self.assertIsNone(client._normalize_tool_call({"function_calls": [{"id": "missing-name"}]}))
+        self.assertIsNone(client._normalize_tool_call_cancellation({"ids": [None]}))
+        self.assertEqual(client._extract_time_left_ms({"time_left": 1.25}), 1250)
+        self.assertEqual(client._extract_time_left_ms({"time_left": "3.5s"}), 3500)
+        self.assertIsNone(client._extract_time_left_ms({"time_left": "bad"}))
+        self.assertIsNone(client._extract_time_left_ms({"nanos": 1}))
+        self.assertIsNone(client._extract_time_left_ms({"seconds": "bad"}))
+        self.assertEqual(client._normalize_server_content({"interrupted": True}), [{"type": "interruption"}])
+        self.assertEqual(client._extract_field({"x": 1}, "x"), 1)
+
+    def test_untyped_and_exception_edges_cover_defensive_branches(self):
+        import core.voice.google_live.client as client_module
+
+        logger = _DummyLogger()
+        client = GoogleLiveClient(
+            {
+                "enable_audio_output": False,
+                "send_transcript_events": False,
+                "send_llm_state_events": False,
+                "disable_server_side_interruptions": False,
+                "session_resumption_enabled": False,
+                "context_window_compression_enabled": False,
+                "functions": [{"function": {"name": "plain", "parameters": {}}}],
+            },
+            logger,
+        )
+
+        config = client._build_connect_config()
+        self.assertEqual(config["response_modalities"], ["AUDIO"])
+        self.assertNotIn("realtime_input_config", config)
+        self.assertEqual(config["tools"], [{"function_declarations": [{"name": "plain", "description": ""}]}])
+        self.assertEqual(client._build_blob(b"x", "audio/test"), {"data": b"x", "mime_type": "audio/test"})
+        self.assertEqual(client._build_text_turn("hello"), {"role": "user", "parts": [{"text": "hello"}]})
+        self.assertEqual(
+            client._build_function_response({"id": "call-1", "name": "plain", "response": {"ok": True}}),
+            {"id": "call-1", "name": "plain", "response": {"ok": True}},
+        )
+        self.assertEqual(client._system_instruction_length(_ExplodingParts()), -1)
+        self.assertIsNone(client._extract_time_left_ms({"time_left": {"seconds": None}}))
+        self.assertIsNone(client._extract_time_left_ms({"time_left": {"seconds": "bad", "nanos": object()}}))
+
+        logging_client = GoogleLiveClient(
+            {"functions": [{"function": {"name": "logged", "parameters": {}}}]},
+            _RaisingInfoLogger(),
+        )
+        self.assertIn("tools", logging_client._build_connect_config())
+
+        debug_client = GoogleLiveClient({}, _RaisingDebugLogger())
+        debug_client._log_recv_timer_reset(
+            {"server_content": {"model_turn": {"parts": [{"inline_data": {"data": b"x"}}]}}}
+        )
+
+        original_safety = client_module.ensure_child_safety_block
+        original_eager = client_module._GENAI_MODULE_EAGER
+        original_import = client_module._import_google_genai_with_known_warning_filters
+        try:
+            client_module.ensure_child_safety_block = lambda _prompt: ""
+            self.assertIsNone(GoogleLiveClient({"system_prompt": "prompt"}, logger)._build_system_instruction())
+
+            eager_module = object()
+            client_module._GENAI_MODULE_EAGER = eager_module
+            self.assertIs(GoogleLiveClient({}, logger)._import_genai_module(), eager_module)
+
+            fallback_module = object()
+            client_module._GENAI_MODULE_EAGER = None
+            client_module._import_google_genai_with_known_warning_filters = lambda: fallback_module
+            self.assertIs(GoogleLiveClient({}, logger)._import_genai_module(), fallback_module)
+        finally:
+            client_module.ensure_child_safety_block = original_safety
+            client_module._GENAI_MODULE_EAGER = original_eager
+            client_module._import_google_genai_with_known_warning_filters = original_import
+
+    def test_factory_creates_google_live_client(self):
+        from core.voice.google_live.client import GoogleLiveClientFactory
+
+        self.assertIsInstance(GoogleLiveClientFactory.create({}, _DummyLogger()), GoogleLiveClient)
+
 class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_validation_and_close_paths(self):
+        logger = _DummyLogger()
+        genai_module = _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext()))
+
+        with self.assertRaisesRegex(RuntimeError, "API key"):
+            await _TestableGoogleLiveClient({"model": "m"}, logger, genai_module).connect()
+        with self.assertRaisesRegex(RuntimeError, "model"):
+            await _TestableGoogleLiveClient({"api_key": "k"}, logger, genai_module).connect()
+
+        context = _FakeLiveContext(session=_FakeSession())
+        client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(context)),
+        )
+        await client.connect()
+        self.assertTrue(client.connected)
+        await client.close()
+        self.assertFalse(client.connected)
+        self.assertIsNone(client._session)
+
+    async def test_send_audio_text_tool_and_interrupt_edges(self):
+        logger = _DummyLogger()
+
+        disconnected = GoogleLiveClient({}, logger)
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            await disconnected.send_audio(b"ab")
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            await disconnected.end_audio_stream()
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            await disconnected.send_text("hello")
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            await disconnected.send_tool_response([{"name": "x"}])
+
+        session = _ToolResponseSession()
+        context = _FakeLiveContext(session=session)
+        client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m", "input_sample_rate": 8000},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(context)),
+        )
+        client._types = _FakeTypes
+        await client.connect()
+        client._types = _FakeTypes
+
+        self.assertIsNone(await client.send_audio(b""))
+        await client.send_audio(b"ab")
+        self.assertIsInstance(session.realtime_inputs[-1]["audio"], _TypedBlob)
+        self.assertEqual(session.realtime_inputs[-1]["audio"].mime_type, "audio/pcm;rate=8000")
+        self.assertIsNone(await client.send_text(""))
+        await client.send_tool_response([{"id": "ok", "name": "tool", "response": "done"}])
+        self.assertEqual(session.tool_responses[-1]["function_responses"][0].response, {"result": "done"})
+        await client.interrupt()
+        await client.close()
+        self.assertIsNone(await client.interrupt())
+
+        no_text = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=_NoTextSession()))),
+        )
+        await no_text.connect()
+        with self.assertRaisesRegex(RuntimeError, "text input"):
+            await no_text.send_text("hello")
+        with self.assertRaisesRegex(RuntimeError, "tool responses"):
+            await no_text.send_tool_response([{"name": "tool"}])
+
+    async def test_tool_interrupt_and_stream_end_edges(self):
+        logger = _DummyLogger()
+        session = _FakeClientContentSession()
+        client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=session))),
+        )
+        await client.connect()
+
+        self.assertIsNone(await client.send_tool_response([]))
+        await client.interrupt()
+        self.assertEqual(session.client_content_inputs[-1], {"turns": [], "turn_complete": False})
+
+        audio_message = SimpleNamespace(
+            server_content=SimpleNamespace(
+                interrupted=False,
+                turn_complete=False,
+                model_turn=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"pcm-audio",
+                                mime_type="audio/pcm;rate=24000",
+                            )
+                        )
+                    ]
+                ),
+            )
+        )
+        stream_client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(
+                _FakeSdkClient(_FakeLiveContext(session=_StopAfterMessagesSession([audio_message])))
+            ),
+        )
+        await stream_client.connect()
+
+        events = [event async for event in stream_client.receive_events()]
+
+        self.assertEqual([event["type"] for event in events], ["audio_start", "audio_chunk", "audio_end"])
+
+        open_turn_client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=_StopAfterMessagesSession([])))),
+        )
+        await open_turn_client.connect()
+        open_turn_client._audio_started = True
+        open_turn_client._audio_chunk_count = 1
+        open_turn_client._audio_byte_count = 3
+
+        open_turn_events = open_turn_client.receive_events()
+        self.assertEqual(await _anext(open_turn_events), {"type": "audio_end"})
+        with self.assertRaises(StopAsyncIteration):
+            await _anext(open_turn_events)
+
+    async def test_receive_events_disconnected_empty_and_cancel_paths(self):
+        logger = _DummyLogger()
+        client = GoogleLiveClient({}, logger)
+        events = [event async for event in client.receive_events()]
+        self.assertEqual(events, [])
+
+        empty_session = _SequencedReceiveSession(turns=[[]])
+        empty_client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=empty_session))),
+        )
+        await empty_client.connect()
+        self.assertEqual([event async for event in empty_client.receive_events()], [])
+
+        class _NeverIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.Event().wait()
+
+        class _NeverSession:
+            def receive(self):
+                return _NeverIterator()
+
+        cancel_client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m", "recv_timeout_sec": 10},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=_NeverSession()))),
+        )
+        await cancel_client.connect()
+
+        async def drain():
+            async for _event in cancel_client.receive_events():
+                pass
+
+        task = asyncio.create_task(drain())
+        await asyncio.sleep(0)
+        await cancel_client.close()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     async def test_connect_honors_configured_timeout(self):
         logger = _DummyLogger()
         context = _FakeLiveContext(enter_delay=0.05)

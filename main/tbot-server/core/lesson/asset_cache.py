@@ -1,20 +1,23 @@
 """S7 — ESP asset preload cache (D-PRELOAD-OWNER OWNER, ADR 0013 §C).
 
-The ESP Server is the SOLE downloader + sha256 verifier. It:
+The ESP Server is the authoritative sha256 verifier and READY gate. It:
 
 * fetches each manifest-declared asset over a DEDICATED ``httpx`` client that
   carries NO ``Authorization: Bearer`` (the manager-api secret must never leak to
   the asset origin) and is bound to one ``assetOriginBase`` (D-ASSET-HOST waiver),
 * streams ``hashlib.sha256`` over the response so hashing never blocks the WS loop,
-* reports READY **only** when every ``critical`` asset exists locally AND every
-  sha256 passes (binary rule); a critical mismatch raises ``ASSET_CHECKSUM_MISMATCH``
-  and blocks READY permanently (no auto-retry), and
-* PAUSES all downloads during any realtime voice turn (the realtime path always
-  wins) — resuming on the next IDLE boundary, with ``PRELOAD_TIMEOUT`` bounding
-  starvation.
+* reports READY **only** when every manifest-declared asset exists locally AND every
+  sha256 passes (binary rule); a checksum mismatch blocks READY permanently (no
+  auto-retry), and
+* PAUSES all ESP-side asset downloads during any realtime voice turn (the realtime
+  path always wins) — resuming on the next IDLE boundary, with ``PRELOAD_TIMEOUT``
+  bounding starvation, and
+* materializes a verified SD asset pack when configured, so firmware can read local
+  ``sd://`` bytes during render without owning checksum verification.
 
-Firmware never downloads or checksums anything; the ESP synthesizes
-``lesson_preload_status`` from this cache.
+Firmware may fetch/read the ESP-verified URLs or SD pack paths at render time, but
+does not compute sha256 or emit ``lesson_preload_status``. The ESP synthesizes that
+status from this cache and owns the start READY gate.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import os
 import shutil
 import time
@@ -50,14 +54,31 @@ EVICTED = "EVICTED"
 
 _DEFAULT_CHUNK = 64 * 1024
 _DEFAULT_POLL_INTERVAL = 0.2
+_DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_TOTAL_ASSET_BYTES = 64 * 1024 * 1024
+_ESPTFT_BACKGROUND_MAX_SIZE = (320, 240)
 
 
 def _sha_prefix(value: Optional[str]) -> str:
     return (value or "")[:8]
 
+def _normalize_esptft_background_jpeg(content: bytes) -> bytes:
+    """Return a small baseline JPEG that firmware can decode inside its SRAM budget."""
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - environment/dependency failure
+        raise RuntimeError("Pillow is required to normalize espTft lesson posters") from exc
+
+    with Image.open(io.BytesIO(content)) as image:
+        image = image.convert("RGB")
+        image.thumbnail(_ESPTFT_BACKGROUND_MAX_SIZE)
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=82, optimize=False, progressive=False)
+        return out.getvalue()
+
 
 class AssetState:
-    """Mutable per-asset record. ``critical`` gates READY; optional assets do not."""
+    """Mutable per-asset record. All manifest assets gate READY for SD-safe lessons."""
 
     __slots__ = ("key", "path", "sha256", "critical", "layer", "role", "media_type", "url", "state", "checksum_ok", "reason")
 
@@ -114,6 +135,8 @@ class AssetCache:
         profile: str,
         asset_origin_base: Optional[str] = None,
         public_base_url: Optional[str] = None,
+        asset_pack_local_root: Optional[str] = None,
+        asset_pack_mount_root: Optional[str] = None,
         cache_root: str = "data/lesson_assets",
         lesson_key: str = "lesson",
         lesson_version: int = 0,
@@ -125,12 +148,17 @@ class AssetCache:
         clock: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], Awaitable[None]]] = None,
         logger: Any = None,
+        image_normalizer: Optional[Callable[[bytes], bytes]] = None,
         chunk_size: int = _DEFAULT_CHUNK,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        max_asset_bytes: int = _DEFAULT_MAX_ASSET_BYTES,
+        max_total_asset_bytes: int = _DEFAULT_MAX_TOTAL_ASSET_BYTES,
     ) -> None:
         self.profile = profile
         self.asset_origin_base = (asset_origin_base or "").rstrip("/")
         self.public_base_url = (public_base_url or "").rstrip("/")
+        self.asset_pack_local_root = (asset_pack_local_root or "sd://tbot/lesson-assets").rstrip("/")
+        self.asset_pack_mount_root = os.path.realpath(asset_pack_mount_root) if asset_pack_mount_root else ""
         # P5 version-aware cache key: (lessonId, lessonVersion, manifest_checksum).
         # Two authored versions of the same lesson — or the same version republished
         # with different bytes (new checksum) — land in DISJOINT directories so their
@@ -151,19 +179,23 @@ class AssetCache:
         self._now = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
         self._logger = logger
+        self._image_normalizer = image_normalizer or _normalize_esptft_background_jpeg
         self._chunk = chunk_size
         self._poll_interval = poll_interval
+        self._max_asset_bytes = int(max_asset_bytes or _DEFAULT_MAX_ASSET_BYTES)
+        self._max_total_asset_bytes = int(max_total_asset_bytes or _DEFAULT_MAX_TOTAL_ASSET_BYTES)
+        self._downloaded_total_bytes = 0
         self._deadline: Optional[float] = None
 
         # Skip manifest assets with a falsy key (no id/assetId): they would crash
         # _final_path (None.replace) and collide in _by_key (every None overwrites
-        # the prior). We drop + log them rather than abort the whole preload — one
-        # malformed asset must not block an otherwise-renderable lesson. A DROPPED
-        # *critical* asset cannot reach READY, so is_ready() naturally stays false
-        # via criticalReady < criticalTotal (no silent ready:true).
+        # the prior). Track every dropped asset so malformed manifests can never
+        # report READY after the keyed subset downloads successfully.
         self.assets: List[AssetState] = []
+        self._dropped_asset_count = 0
         for a in assets:
             if not a.get("key"):
+                self._dropped_asset_count += 1
                 self._log(
                     "warning",
                     "skipping manifest asset with empty key "
@@ -184,7 +216,7 @@ class AssetCache:
 
     @staticmethod
     def _compose_cache_key(lesson_key: str, lesson_version: int, manifest_checksum: str) -> str:
-        """Filesystem-safe ``<lesson>/v<version>-<checksum8>`` cache-dir suffix.
+        """Filesystem-safe ``<lesson>/v<version>-<manifest-checksum>`` cache-dir suffix.
 
         ``lesson_version``/``manifest_checksum`` are appended only when present, so a
         slice caller that constructs an AssetCache with neither keeps the legacy
@@ -195,7 +227,11 @@ class AssetCache:
         if lesson_version:
             suffix += f"v{lesson_version}"
         if manifest_checksum:
-            suffix += ("-" if suffix else "") + manifest_checksum[:8]
+            safe_checksum = "".join(
+                ch if ch.isalnum() or ch in "._-" else "_"
+                for ch in manifest_checksum.strip()
+            ).replace("..", "_")
+            suffix += ("-" if suffix else "") + safe_checksum
         if suffix:
             parts.append(suffix)
         return os.path.join(*parts)
@@ -206,13 +242,28 @@ class AssetCache:
     def critical_assets(self) -> List[AssetState]:
         return [a for a in self.assets if a.critical]
 
+    @property
+    def required_assets(self) -> List[AssetState]:
+        return self.assets
+
     def is_ready(self) -> bool:
-        """Binary READY rule (plan §5.5/§6.2.3): every critical asset present AND
-        every sha256 verified. ANY critical not-READY / checksum-unverified -> False."""
-        criticals = self.critical_assets
-        if not criticals:
+        """Binary READY rule: every manifest asset is present and sha256 verified.
+
+        Backend and firmware now require all three visual layer image sources for a
+        lesson_step, so SD/cache READY cannot ignore a non-critical robotOverlay pose.
+        """
+        if self._dropped_asset_count > 0:
             return False
-        return all(a.state == READY and a.checksum_ok for a in criticals)
+        required = self.required_assets
+        if not required:
+            return False
+        return all(
+            a.state == READY
+            and a.checksum_ok
+            and self._asset_cache_materialized(a)
+            and self._asset_pack_materialized(a)
+            for a in required
+        ) and self._materialized_total_bytes(required) <= self._max_total_asset_bytes
 
     def synthesize_preload_status(self, assignment_version: int) -> Dict[str, Any]:
         """ESP-SYNTHESIZED ``lesson_preload_status.body`` (D-PRELOAD-OWNER) — firmware
@@ -233,9 +284,111 @@ class AssetCache:
         asset = self._asset_for_source(source)
         if asset is None or asset.state != READY or not asset.checksum_ok:
             return None
+        if not self._asset_cache_materialized(asset):
+            return None
         token = base64.urlsafe_b64encode(self.cache_key.encode("utf-8")).decode("ascii")
         token = token.rstrip("=")
         return f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='')}"
+
+    def local_pack_url_for_source(self, source: str) -> Optional[str]:
+        if not source:
+            return None
+        asset = self._asset_for_source(source)
+        if asset is None or asset.state != READY or not asset.checksum_ok:
+            return None
+        if not self._asset_cache_materialized(asset):
+            return None
+        if not self._asset_pack_materialized(asset):
+            return None
+        return self._local_pack_path(asset)
+
+    def asset_pack_manifest(
+        self,
+        *,
+        assignment_version: int,
+        lesson_id: str,
+        lesson_version: int,
+        manifest_checksum: str,
+    ) -> Dict[str, Any]:
+        return {
+            "assignmentVersion": assignment_version,
+            "lessonId": lesson_id,
+            "lessonVersion": lesson_version,
+            "manifestChecksum": manifest_checksum,
+            "cacheKey": self.cache_key,
+            "localRoot": f"{self.asset_pack_local_root}/{self.cache_key}",
+            "ready": self.is_ready(),
+            "assets": [
+                self._asset_pack_record(asset)
+                for asset in self.assets
+                if asset.state == READY
+                and asset.checksum_ok
+                and self._asset_cache_materialized(asset)
+                and self._asset_pack_materialized(asset)
+            ],
+        }
+
+    def _asset_pack_record(self, asset: AssetState) -> Dict[str, Any]:
+        pack_path = self._asset_pack_path(asset)
+        materialized_path = pack_path if pack_path and os.path.exists(pack_path) else self._asset_pack_source_path(asset)
+        size = os.path.getsize(materialized_path) if os.path.exists(materialized_path) else None
+        sha256 = self._hash_file(materialized_path) if os.path.exists(materialized_path) else asset.sha256
+        record = {
+            "key": asset.key,
+            "path": asset.path,
+            "url": self._resolve_url(asset),
+            "sha256": sha256,
+            "sourceSha256": asset.sha256 if sha256 != asset.sha256 else None,
+            "size": size,
+            "mediaType": asset.media_type,
+            "critical": asset.critical,
+            "layer": asset.layer,
+            "role": asset.role,
+            "state": asset.state,
+            "checksumOk": asset.checksum_ok,
+            "localPath": self._local_pack_path(asset),
+        }
+        return {k: v for k, v in record.items() if v is not None}
+
+    def _local_pack_path(self, asset: AssetState) -> str:
+        return f"{self.asset_pack_local_root}/{self.cache_key}/{quote(asset.key, safe='')}"
+
+    def _asset_cache_materialized(self, asset: AssetState) -> bool:
+        try:
+            path = self._final_path(asset)
+            if not os.path.exists(path) or self._hash_file(path) != asset.sha256:
+                return False
+            if self._requires_render_safe_derivative(asset):
+                render_path = self._render_safe_path(asset)
+                return os.path.exists(render_path) and os.path.getsize(render_path) > 0
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _asset_pack_materialized(self, asset: AssetState) -> bool:
+        if not self.asset_pack_mount_root:
+            return True
+        try:
+            path = self._asset_pack_path(asset)
+            source = self._asset_pack_source_path(asset)
+            return (
+                os.path.exists(path)
+                and os.path.exists(source)
+                and self._hash_file(path) == self._hash_file(source)
+            )
+        except (OSError, ValueError):
+            return False
+
+    def _materialized_total_bytes(self, assets: List[AssetState]) -> int:
+        total = 0
+        for asset in assets:
+            try:
+                path = self._final_path(asset)
+                if os.path.exists(path):
+                    total += os.path.getsize(path)
+            except (OSError, ValueError):
+                return self._max_total_asset_bytes + 1
+        return total
 
     def _asset_for_source(self, source: str) -> Optional[AssetState]:
         if source in self._by_source:
@@ -295,9 +448,8 @@ class AssetCache:
             async with sem:
                 await self._download_one(asset)
 
-        # Only fetch what re-attest did not already verify. Criticals first so READY
-        # (and the start gate) opens ASAP; optional assets continue best-effort even
-        # after ready:true (plan §5.5).
+        # Only fetch what re-attest did not already verify. Criticals first to keep
+        # first useful pixels fast, but READY waits for every manifest asset.
         pending = [a for a in self.assets if a.state != READY]
         ordered = sorted(pending, key=lambda a: 0 if a.critical else 1)
         # Wrap each per-asset coroutine as a Task so we can CANCEL still-running
@@ -358,8 +510,9 @@ class AssetCache:
 
     async def reattest(self) -> bool:
         """Restart re-attest (plan §6.3.5 / ADR 0013 §C): re-run sha256 over cached
-        critical assets BEFORE re-reporting READY. Presence on disk is never trusted."""
-        for asset in self.critical_assets:
+        assets BEFORE re-reporting READY. Presence on disk is never trusted."""
+        total_bytes = 0
+        for asset in self.required_assets:
             final_path = self._final_path(asset)
             if not os.path.exists(final_path):
                 asset.state = PENDING
@@ -367,14 +520,27 @@ class AssetCache:
                 continue
             digest = await asyncio.to_thread(self._hash_file, final_path)
             if digest == asset.sha256:
-                asset.state = READY
-                asset.checksum_ok = True
+                if self._ensure_render_safe_derivative(asset):
+                    asset.state = READY
+                    asset.checksum_ok = True
+                    self._materialize_asset_pack_file(asset)
+                    total_bytes += os.path.getsize(final_path)
+                else:
+                    asset.state = FAILED
+                    asset.checksum_ok = False
+                    asset.reason = "render_derivative_failed"
             else:
                 # Cached bytes are stale/corrupt — discard, do NOT serve unverified.
                 asset.state = FAILED
                 asset.checksum_ok = False
                 asset.reason = "checksum_mismatch"
                 self._safe_remove(final_path)
+        if total_bytes > self._max_total_asset_bytes:
+            for asset in self.required_assets:
+                if asset.state == READY:
+                    asset.state = FAILED
+                    asset.checksum_ok = False
+                    asset.reason = "lesson_assets_too_large"
         return self.is_ready()
 
     async def aclose(self) -> None:
@@ -397,6 +563,9 @@ class AssetCache:
         try:
             if os.path.isdir(self.cache_dir):
                 shutil.rmtree(self.cache_dir, ignore_errors=True)
+            pack_dir = self._asset_pack_dir()
+            if pack_dir and os.path.isdir(pack_dir):
+                shutil.rmtree(pack_dir, ignore_errors=True)
         except OSError:  # pragma: no cover - best-effort teardown
             pass
 
@@ -412,6 +581,7 @@ class AssetCache:
         url = self._resolve_url(asset)
         tmp_path = self._tmp_path(asset)
         hasher = hashlib.sha256()
+        downloaded = 0
         try:
             async with self._client.stream("GET", url) as resp:
                 resp.raise_for_status()
@@ -422,6 +592,28 @@ class AssetCache:
                         await self._wait_while_busy()
                         if not chunk:
                             continue
+                        downloaded += len(chunk)
+                        if downloaded > self._max_asset_bytes:
+                            self._safe_remove(tmp_path)
+                            asset.state = FAILED
+                            asset.checksum_ok = False
+                            asset.reason = "asset_too_large"
+                            self._log(
+                                "warning",
+                                f"asset {asset.key} exceeds max size {self._max_asset_bytes} bytes",
+                            )
+                            return
+                        if self._downloaded_total_bytes + len(chunk) > self._max_total_asset_bytes:
+                            self._safe_remove(tmp_path)
+                            asset.state = FAILED
+                            asset.checksum_ok = False
+                            asset.reason = "lesson_assets_too_large"
+                            self._log(
+                                "warning",
+                                f"lesson assets exceed max total size {self._max_total_asset_bytes} bytes",
+                            )
+                            return
+                        self._downloaded_total_bytes += len(chunk)
                         hasher.update(chunk)
                         fh.write(chunk)
         except PreloadTimeout:
@@ -435,7 +627,7 @@ class AssetCache:
             asset.checksum_ok = False
             asset.reason = "network_error"
             self._log("warning", f"asset {asset.key} download failed: {type(exc).__name__}")
-            # A critical network failure leaves READY false (PRELOAD_TIMEOUT bounds it);
+            # Any network failure leaves READY false (PRELOAD_TIMEOUT bounds it);
             # we do NOT raise a checksum mismatch for a transport error.
             return
 
@@ -454,9 +646,21 @@ class AssetCache:
                 raise AssetChecksumMismatch(asset.key)
             return
 
-        os.replace(tmp_path, self._final_path(asset))
+        final_path = self._final_path(asset)
+        os.replace(tmp_path, final_path)
+        if not self._ensure_render_safe_derivative(asset):
+            asset.state = FAILED
+            asset.checksum_ok = False
+            asset.reason = "render_derivative_failed"
+            if asset.critical:
+                raise AssetProfileUnavailable(
+                    "espTft background poster could not be normalized for firmware decode",
+                    context={"assetKey": asset.key},
+                )
+            return
         asset.state = READY
         asset.checksum_ok = True
+        self._materialize_asset_pack_file(asset)
         self._log("info", f"asset {asset.key} READY sha={_sha_prefix(asset.sha256)}")
 
     async def _wait_while_busy(self) -> None:
@@ -497,6 +701,77 @@ class AssetCache:
             raise ValueError("cannot resolve a cache path for an asset with an empty key")
         safe = asset.key.replace("/", "_").replace("..", "_")
         return os.path.join(self.cache_dir, safe)
+
+    def _render_safe_path(self, asset: AssetState) -> str:
+        return f"{self._final_path(asset)}.render.jpg"
+
+    def _requires_render_safe_derivative(self, asset: AssetState) -> bool:
+        media_type = (asset.media_type or "").lower()
+        return (
+            self.profile == "espTft"
+            and asset.layer == "backgroundScene"
+            and asset.role == "poster"
+            and (media_type == "image/jpeg" or media_type == "image/jpg")
+        )
+
+    def _ensure_render_safe_derivative(self, asset: AssetState) -> bool:
+        if not self._requires_render_safe_derivative(asset):
+            return True
+        try:
+            final_path = self._final_path(asset)
+            with open(final_path, "rb") as fh:
+                original = fh.read()
+            normalized = self._image_normalizer(original)
+            if not isinstance(normalized, (bytes, bytearray)) or not normalized:
+                raise ValueError("empty normalized image")
+            tmp_path = f"{self._render_safe_path(asset)}.{os.getpid()}.{id(self):x}.part"
+            with open(tmp_path, "wb") as fh:
+                fh.write(bytes(normalized))
+            os.replace(tmp_path, self._render_safe_path(asset))
+            return True
+        except Exception as exc:
+            self._safe_remove(self._render_safe_path(asset))
+            self._log("warning", f"asset {asset.key} render-safe derivative failed: {type(exc).__name__}")
+            return False
+
+    def _asset_pack_dir(self) -> str:
+        if not self.asset_pack_mount_root:
+            return ""
+        pack_dir = os.path.realpath(os.path.join(self.asset_pack_mount_root, self.cache_key))
+        if pack_dir != self.asset_pack_mount_root and not pack_dir.startswith(self.asset_pack_mount_root + os.sep):
+            raise ValueError("asset pack path escapes mount root")
+        return pack_dir
+
+    def _asset_pack_path(self, asset: AssetState) -> str:
+        pack_dir = self._asset_pack_dir()
+        if not pack_dir:
+            return ""
+        if not asset.key:
+            raise ValueError("cannot resolve an asset pack path for an empty key")
+        safe = quote(asset.key, safe="")
+        path = os.path.realpath(os.path.join(pack_dir, safe))
+        if path == pack_dir or not path.startswith(pack_dir + os.sep):
+            raise ValueError("asset pack file path escapes pack dir")
+        return path
+
+    def _materialize_asset_pack_file(self, asset: AssetState) -> None:
+        dest = self._asset_pack_path(asset)
+        if not dest:
+            return
+        src = self._asset_pack_source_path(asset)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.realpath(src) == os.path.realpath(dest):
+            return
+        tmp = f"{dest}.part"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+
+    def _asset_pack_source_path(self, asset: AssetState) -> str:
+        if self._requires_render_safe_derivative(asset):
+            render_path = self._render_safe_path(asset)
+            if os.path.exists(render_path):
+                return render_path
+        return self._final_path(asset)
 
     def _hash_file(self, path: str) -> str:
         hasher = hashlib.sha256()

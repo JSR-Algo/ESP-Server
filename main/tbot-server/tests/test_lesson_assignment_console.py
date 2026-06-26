@@ -23,5 +23,13 @@ class LessonAssignmentConsoleHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("localStorage", body)
 
 
+    async def test_console_uses_default_backend_when_config_has_no_api_url(self):
+        from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
+
+        response = await LessonAssignmentConsoleHandler({}, {}).handle_get(object())
+
+        self.assertIn("https://tbot-backend-8wmh.onrender.com/v1", response.text)
+
+
 if __name__ == "__main__":
     unittest.main()
