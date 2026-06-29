@@ -1118,6 +1118,97 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(fake_key, safe_message)
         self.assertIn("AIza***", safe_message)
 
+    async def test_quota_failure_sends_child_notice_before_provider_swap(self):
+        # FIX B: a non-retriable quota (429) failure mid-conversation must TELL the child
+        # why the robot went quiet — a {type:"alert"} child notice — BEFORE/at the
+        # provider swap, instead of dead air.
+        events = []
+        conn = _DummyConn()
+
+        original_send = conn.websocket.send
+
+        async def _recording_send(payload):
+            events.append(("notice", payload))
+            await original_send(payload)
+
+        conn.websocket.send = _recording_send
+
+        provider = GoogleLiveProvider(conn)
+
+        original_factory = provider._classic_provider_factory
+
+        def _recording_factory(c):
+            events.append(("swap", None))
+            return original_factory(c)
+
+        provider._classic_provider_factory = _recording_factory
+
+        await provider._activate_classic_fallback(RuntimeError("quota exceeded 429"))
+
+        # The notice was emitted, and it came BEFORE the provider swap.
+        kinds = [kind for kind, _ in events]
+        self.assertIn("notice", kinds)
+        self.assertIn("swap", kinds)
+        self.assertLess(kinds.index("notice"), kinds.index("swap"))
+
+        import json as _json
+
+        notice = _json.loads(events[kinds.index("notice")][1])
+        self.assertEqual(notice["type"], "alert")
+        self.assertEqual(notice["status"], "live_unavailable")
+        self.assertEqual(notice["reason"], "quota")
+        self.assertEqual(notice["session_id"], conn.session_id)
+        self.assertEqual(notice["emotion"], "neutral")
+        self.assertTrue(notice["message"])
+
+        # Fallback mechanics still ran.
+        self.assertEqual(conn.classic_start_calls, 1)
+        self.assertEqual(conn.voice_provider.__class__.__name__, "ClassicPipelineProvider")
+
+    async def test_quota_failure_notice_never_contains_raw_api_key(self):
+        # FIX B: the alert payload must never carry the raw exception (which can contain
+        # an API key) — it uses a fixed child-friendly message.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+        fake_key = "AIza" + "SyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao"
+
+        await provider._send_fallback_notice(
+            RuntimeError(f"quota 429 for key {fake_key}")
+        )
+
+        self.assertTrue(conn.websocket.sent_messages)
+        self.assertFalse(
+            any(fake_key in payload for payload in conn.websocket.sent_messages)
+        )
+
+    async def test_benign_stream_closed_failure_emits_no_child_notice(self):
+        # FIX B: a benign normal close (stream_closed / unknown) must NOT narrate a
+        # spurious "robot needs a break" alert to the child.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+
+        await provider._activate_classic_fallback(
+            RuntimeError("Google Live receive loop ended")  # -> stream_closed
+        )
+
+        alerts = [
+            payload for payload in conn.websocket.sent_messages
+            if '"type": "alert"' in payload or '"type":"alert"' in payload
+        ]
+        self.assertEqual(alerts, [])
+        # but the fallback itself still happened
+        self.assertEqual(conn.classic_start_calls, 1)
+
+    async def test_unknown_failure_emits_no_child_notice(self):
+        # FIX B control: the "boom"/unknown init failure path must stay silent (no notice)
+        # so we never narrate over a benign close.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+
+        await provider._send_fallback_notice(RuntimeError("boom"))  # -> unknown
+
+        self.assertEqual(conn.websocket.sent_messages, [])
+
     async def test_fallback_trigger_log_masks_google_api_keys(self):
         conn = _DummyConn()
         conn.config["voice_mode"]["fallback_to_classic_on_error"] = True

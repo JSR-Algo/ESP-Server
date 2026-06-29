@@ -94,6 +94,95 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(sample_calls[0], conn)
         self.assertEqual(conn.pull_calls, 0)  # assignment pull never invoked
 
+    async def test_runtime_admitted_with_sample_on_runs_real_assignment_not_sample(self):
+        # FIX A: the sample lesson is a FALLBACK, not an unconditional winner. When the
+        # runtime is ADMITTED and the real pull returns a real assignment, that lesson
+        # ALWAYS wins — the sample demo must NEVER run, even with sample_lesson on.
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=True, sample=True)
+        sample_calls = []
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        with patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            self.assertEqual(response.action, Action.RECORD)
+            self.assertIsNotNone(conn.lesson_pull_task)
+            await conn.lesson_pull_task
+            # let any (incorrectly) scheduled fallback task run
+            await asyncio.sleep(0)
+
+        self.assertEqual(conn.pull_calls, 1)  # the REAL assignment pull ran
+        self.assertEqual(sample_calls, [])    # the sample demo did NOT run
+
+    async def test_runtime_admitted_no_assignment_falls_back_to_sample(self):
+        # FIX A: runtime ADMITTED + sample on, but the real pull finds NO assignment
+        # (NO_CURRENT_ASSIGNMENT) -> the sample lesson runs as a FALLBACK, scheduled from
+        # the done-callback and re-tracked on conn.lesson_pull_task. No audible
+        # "no assignment" failure feedback is emitted in this branch.
+        sample_calls = []
+
+        async def _pull_without_assignment():
+            conn.lesson_start_status = {
+                "code": "NO_CURRENT_ASSIGNMENT",
+                "message": "Robot chưa có bài học nào được giao.",
+            }
+            return None
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        conn = _Conn(
+            loop=asyncio.get_running_loop(),
+            enabled=True,
+            sample=True,
+            pull=_pull_without_assignment,
+        )
+        conn.voice_provider = _VoiceProvider()
+
+        with patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            # drain the real pull, then the scheduled sample-fallback task
+            await asyncio.sleep(0)
+            for _ in range(10):
+                if conn.lesson_pull_task is not None and conn.lesson_pull_task.done() and sample_calls:
+                    break
+                if conn.lesson_pull_task is not None:
+                    try:
+                        await conn.lesson_pull_task
+                    except Exception:
+                        pass
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(conn.pull_calls, 1)        # real pull ran first
+        self.assertEqual(sample_calls, [conn])      # sample ran as fallback
+        # conn.lesson_pull_task was re-pointed at the fallback task
+        self.assertTrue(conn.lesson_pull_task.done())
+        # the audible NO_CURRENT_ASSIGNMENT failure feedback was suppressed (sample took over)
+        self.assertEqual(conn.voice_provider.acks, [])
+
+    async def test_runtime_disabled_with_sample_on_runs_sample_directly(self):
+        # FIX A: runtime DISABLED + sample on -> the assignment pull is gated dark, so the
+        # sample is the ONLY admitted lesson path and runs directly (no real pull).
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)
+        sample_calls = []
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        with patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            self.assertEqual(response.action, Action.RECORD)
+            self.assertIsNotNone(conn.lesson_pull_task)
+            await conn.lesson_pull_task
+
+        self.assertEqual(sample_calls, [conn])
+        self.assertEqual(conn.pull_calls, 0)  # the assignment pull never ran
+
     async def test_sample_flag_alone_satisfies_the_enabled_gate(self):
         # Even with runtime_enabled OFF, the sample flag alone admits the lesson layer.
         conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)

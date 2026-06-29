@@ -146,18 +146,21 @@ def start_lesson(conn: "ConnectionHandler"):
                 response="Please try again in a moment.",
             )
 
-        # DEMO branch: when the sample flag is on, load the built-in sample lesson and
-        # IGNORE any backend assignment ("không quan tâm assign trước"). The sample flag
-        # is an explicit operator opt-in, so it takes precedence over the assignment pull
-        # — warn if it preempts an already-pinned real assignment so the footgun is
-        # visible. Otherwise reuse the connection's wrapped assignment-pull entry point
-        # (it already swallows exceptions so a lesson failure can never crash the
-        # connection or touch the voice path).
-        if sample_on:
-            if runtime_admitted and getattr(conn, "lesson_runtime", None) is not None:
-                conn.logger.bind(tag=TAG).warning(
-                    "start_lesson: sample lesson demo flag is preempting an assigned lesson"
-                )
+        # DISPATCH. The sample lesson is a FALLBACK, never an unconditional winner.
+        #
+        #   - runtime DISABLED + sample_on  -> pure demo: the only admitted path is the
+        #     built-in sample, so load it directly (smoke-test path, unchanged).
+        #   - runtime ADMITTED (the normal case), regardless of sample_on -> run the REAL
+        #     assignment pull first. The parent's backend assignment ALWAYS wins. Only if
+        #     that pull finds NO real assignment (NO_CURRENT_ASSIGNMENT) AND sample_on do
+        #     we fall back to the canned demo, scheduled from the done-callback below.
+        #
+        # The wrapped assignment-pull entry point already swallows exceptions so a lesson
+        # failure can never crash the connection or touch the voice path.
+        sample_fallback_enabled = bool(sample_on) and runtime_admitted
+        if runtime_disabled and sample_on:
+            # runtime OFF -> the assignment pull is gated dark; the sample is the ONLY
+            # admitted lesson path, so it runs directly (no real assignment to prefer).
             from core.lesson.sample import start_sample_lesson
 
             task = loop.create_task(start_sample_lesson(conn))
@@ -185,6 +188,21 @@ def start_lesson(conn: "ConnectionHandler"):
                 runtime = fut.result()
                 status = _lesson_start_status(conn)
                 code = status.get("code")
+                if runtime is None and code == "NO_CURRENT_ASSIGNMENT" and sample_fallback_enabled:
+                    # The real pull found NO backend assignment but the sample demo flag
+                    # is on -> fall back to the built-in sample lesson. Schedule it as a
+                    # new task and re-track it on the connection so close() can cancel it
+                    # and a later spoken trigger can supersede it. Do NOT emit the audible
+                    # "no assignment" feedback in this branch — the sample takes over.
+                    from core.lesson.sample import start_sample_lesson
+
+                    conn.logger.bind(tag=TAG).info(
+                        "start_lesson: no backend assignment, falling back to sample lesson"
+                    )
+                    fallback_task = loop.create_task(start_sample_lesson(conn))
+                    conn.lesson_pull_task = fallback_task
+                    fallback_task.add_done_callback(_handle_sample_done)
+                    return
                 if runtime is None and code in _FAILURE_STATUS_CODES:
                     _schedule_lesson_start_feedback(conn, status.get("message") or "Robot chưa bắt đầu bài học được.")
                 conn.logger.bind(tag=TAG).info("start_lesson: lesson pull task finished")
@@ -193,6 +211,17 @@ def start_lesson(conn: "ConnectionHandler"):
             except Exception as exc:  # pragma: no cover - already logged inside pull
                 conn.logger.bind(tag=TAG).warning(
                     f"start_lesson: lesson pull task error: {type(exc).__name__}: {exc}"
+                )
+
+        def _handle_sample_done(fut):
+            try:
+                fut.result()
+                conn.logger.bind(tag=TAG).info("start_lesson: sample fallback task finished")
+            except asyncio.CancelledError:
+                conn.logger.bind(tag=TAG).info("start_lesson: sample fallback task cancelled")
+            except Exception as exc:  # pragma: no cover - already logged inside sample
+                conn.logger.bind(tag=TAG).warning(
+                    f"start_lesson: sample fallback task error: {type(exc).__name__}: {exc}"
                 )
 
         task.add_done_callback(_handle_done)
