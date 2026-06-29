@@ -48,7 +48,7 @@ class _DummyLogger:
 
 
 class _ToolsetConn:
-    def __init__(self, runtime_enabled=True):
+    def __init__(self, runtime_enabled=True, sample_enabled=False):
         functions = [
             "change_role",
             "start_lesson",
@@ -68,7 +68,10 @@ class _ToolsetConn:
                 }
             },
             "google_live": {"api_key": "key", "model": "gemini-live"},
-            "lesson": {"runtime_enabled": runtime_enabled},
+            "lesson": {
+                "runtime_enabled": runtime_enabled,
+                "sample_lesson": sample_enabled,
+            },
             "plugins": {},
             "voice_mode": {"type": "google_live"},
         }
@@ -77,6 +80,9 @@ class _ToolsetConn:
 
     def _lesson_runtime_enabled(self):
         return bool(self.config["lesson"]["runtime_enabled"])
+
+    def _sample_lesson_enabled(self):
+        return bool(self.config["lesson"].get("sample_lesson", False))
 
 
 def _live_names(conn):
@@ -129,20 +135,38 @@ class ProductToolsetContractTest(unittest.TestCase):
         self.assertIn("start_lesson", classic)
         self.assertIn("start_lesson", live)
 
-    def test_child_product_toolset_excludes_adult_and_danger_tools(self):
+    def test_child_product_toolset_allows_safe_realtime_tools_but_excludes_danger_tools(self):
         conn = _ToolsetConn(runtime_enabled=True)
         child_names = _classic_names(conn)
-        adult_tools = {"web_search", "get_weather", "get_news_from_newsnow"}
+        blocked_tools = {"get_news_from_chinanews"}
         danger_regex = re.compile(
             r"(^|_)(delete|erase|format|factory|reset|reboot|shutdown|ota|firmware|flash|shell|exec|command)($|_)",
             re.IGNORECASE,
         )
 
-        self.assertTrue(adult_tools.isdisjoint(child_names))
+        self.assertIn("get_weather", child_names)
+        self.assertIn("web_search", child_names)
+        self.assertIn("get_news_from_newsnow", child_names)
+        self.assertTrue(blocked_tools.isdisjoint(child_names))
         self.assertEqual([], sorted(name for name in child_names if danger_regex.search(name)))
+
+    def test_realtime_tool_descriptions_are_child_safe(self):
+        web_desc = all_function_registry["web_search"].description["function"]["description"]
+        news_desc = all_function_registry["get_news_from_newsnow"].description["function"]["description"]
+
+        for desc in (web_desc, news_desc):
+            self.assertIn("child-safe", desc.lower())
+            self.assertIn("adult", desc.lower())
+            self.assertIn("violent", desc.lower())
 
     def test_start_lesson_is_omitted_when_lesson_runtime_disabled(self):
         conn = _ToolsetConn(runtime_enabled=False)
 
         self.assertNotIn("start_lesson", _classic_names(conn))
         self.assertNotIn("start_lesson", _live_names(conn))
+
+    def test_start_lesson_is_included_when_sample_lesson_enabled(self):
+        conn = _ToolsetConn(runtime_enabled=False, sample_enabled=True)
+
+        self.assertIn("start_lesson", _classic_names(conn))
+        self.assertIn("start_lesson", _live_names(conn))

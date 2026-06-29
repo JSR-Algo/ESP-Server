@@ -17,13 +17,16 @@ Three coupled pieces are wired and pass their in-env gates:
 - Dual admission topology: real runtime (`lesson.runtime_enabled`, env `LESSON_RUNTIME_ENABLED`)
   and built-in sample demo (`lesson.sample_lesson`, env `LESSON_SAMPLE_ENABLED`) are **deliberately
   decoupled** (`config/config_loader.py:266-268`, `core/connection.py:1836-1849`).
-- `start_lesson` tool refuses when **both** runtime disabled AND sample off, keeping the lesson layer
-  dark by default (`plugins_func/functions/start_lesson.py:128-136`).
+- Default `config.yaml` enables the interactive sample demo (`lesson.sample_lesson: true`,
+  `lesson.sample_mode: interactive`), so spoken `start_lesson` enters the sample lesson even when
+  assignment runtime is off. `start_lesson` still refuses when **both** runtime disabled AND sample
+  off (`plugins_func/functions/start_lesson.py`).
 
 ### 1b. Interactive sample (self-contained demo)
-- `LESSON_SAMPLE_MODE=interactive` selects `build_interactive_sample_manifest` with a
-  `completionClass=='interactive'` SAY-IT step that opens a child-response window over Google Live
-  (`core/lesson/sample.py:176-225, 320-327, 383-389`).
+- `LESSON_SAMPLE_MODE=interactive` selects `build_interactive_sample_manifest` with two
+  `completionClass=='interactive'` vocabulary turns: repeat the target word, then recall it from
+  the picture. Each turn opens a child-response window over Google Live and waits for recognized
+  child speech before advancing (`core/lesson/sample.py`).
 - Fully self-contained: `SampleAssetCache` (passthrough, no download/sha256, `sample.py:258-265`),
   `NoOpLessonForwarder` (`sample.py:288`), manifest `assets:[]` (`sample.py:221`) — needs **no**
   `COURSE_BACKEND_URL`, **no** `LESSON_ASSET_ORIGIN_BASE`, **no** `TBOT_DEVICE_MINT_SECRET`.
@@ -96,8 +99,8 @@ Do **not** reuse `vps-20260525144756` — it predates the lesson code.
 #### HARD — interactive sample demo (self-contained, no backend)
 | Env | Value | Why |
 |---|---|---|
-| `LESSON_SAMPLE_ENABLED` | `true` | Enables the self-contained sample admission path; without it `start_lesson` refuses (`start_lesson.py:128-136`, `connection.py:1843-1849`). |
-| `LESSON_SAMPLE_MODE` | `interactive` | Default is `passive` (no mic window). Selects the `completionClass=interactive` SAY-IT manifest (`config_loader.py:273,325-326`; `sample.py:201-207,383-389`). |
+| `LESSON_SAMPLE_ENABLED` | `true` | Pins the self-contained sample admission path when deploy overlays differ from default `config.yaml`; `start_lesson` refuses only when both sample and assignment runtime are off (`start_lesson.py`, `connection.py`). |
+| `LESSON_SAMPLE_MODE` | `interactive` | Default is `interactive`. Selects the vocabulary sample with repeat + recall child-response turns (`config_loader.py`; `sample.py`). |
 | `GOOGLE_API_KEY` | `<real Live AUDIO key w/ quota>` | Resolves `google_live.api_key` (`client.py:573-578`) / injected (`config_loader.py:390-397`). Must be a real Live key, **NOT** a Live ephemeral token. |
 | `LESSON_RUNTIME_ENABLED` | `false` | Pin explicitly: keeps real runtime dark AND **overrides** `data/.config.yaml`'s `true` to prevent the boot crash above (`config_loader.py:295-296, 419-436`). |
 
@@ -231,10 +234,10 @@ config confirmed.
    the GIF), and the lesson's 3 visual layers render.
 4. **Gemini narration.** Confirm the robot narrates the step over the Live session (narration rides
    Live; no separate TTS needed).
-5. **Say the word.** At the `completionClass=interactive` SAY-IT step, say the target word (e.g.
-   **"barn"**). The child-response window forwards your audio to Live and routes the recognized
-   transcript to the lesson runtime.
-6. **Advances.** Confirm the lesson advances past the SAY-IT step on recognition.
+5. **Child response turns.** At the `completionClass=interactive` repeat step, say the target word
+   (e.g. **"barn"**). At the recall step, answer what you see in the picture. Each child-response
+   window forwards your audio to Live and routes the recognized transcript to the lesson runtime.
+6. **Advances.** Confirm the lesson advances only after each child response is recognized.
 7. **Happy + back to conversation.** Confirm the lesson completes with the happy state and the idle
    emoji face **returns** on `lesson_stop` (`lesson_handler.cc:758` → `SetLessonMode(false)`), with the
    robot returning to normal conversation. (Verify the error path too: `lesson_error` →

@@ -7,19 +7,22 @@
 server:
   ip: 0.0.0.0
   port: 8000
-  # Public WebSocket URL advertised to firmware. Override in deployment or
-  # Admin Parameter Management; never commit ephemeral trycloudflare URLs.
-  websocket: ws://your-ip-or-domain:port/tbot/v1/
+  # Public WebSocket URL advertised to firmware.
+  websocket: wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/
   # Firmware-facing NestJS backend base. Keep the /v1 prefix so firmware can
   # append device config, claim, and lesson-runtime routes.
   api_url: https://tbot-backend-8wmh.onrender.com/v1
   # HTTP service port used by the vision analysis API.
   http_port: 8003
   # Vision analysis URL sent to devices. Use a LAN URL for Docker/LAN deploys or a public URL for public deploys.
-  vision_explain: http://your-ip-or-domain:port/mcp/vision/explain
+  vision_explain: https://carefully-freelance-improving-numerical.trycloudflare.com/mcp/vision/explain
+  # Optional firmware binary URL scheme override. Leave empty to reuse the
+  # vision_explain scheme; set to http for legacy ESP OTA stacks that cannot
+  # download a Cloudflare HTTPS firmware binary reliably.
+  firmware_download_scheme: ""
 manager-api:
   # manager-api URL. Prefer a LAN address. In Docker, use http://tbot-esp32-server-web:8002/tbot.
-  url: http://127.0.0.1:8002/tbot
+  url: http://tbot-esp32-server-web:8002/tbot
   # manager-api token. Use the server.secret value copied from Parameter Management.
   secret: your-server-secret
 # Default system prompt template file.

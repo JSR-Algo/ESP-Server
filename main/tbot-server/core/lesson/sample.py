@@ -2,19 +2,16 @@
 backend assignment ("không quan tâm assign trước").
 
 This is a DEMO path, gated by ``lesson.sample_lesson`` (env ``LESSON_SAMPLE_ENABLED``),
-default OFF. When ON, the ``start_lesson`` tool loads THIS canned lesson instead of
+default ON in the robot config. When ON, the ``start_lesson`` tool loads THIS canned lesson instead of
 pulling the device's assigned lesson — so a robot with no assignment (or no backend at
-all) can still demo the full lesson flow: background + 3 layers, several steps, then the
-happy face + return to conversation owned by ``ConnectionHandler.finish_lesson_mode``.
+all) can still demo the full lesson flow: background + 3 layers, Google Live
+child-response, several steps, then the happy face + return to conversation owned by
+``ConnectionHandler.finish_lesson_mode``.
 
-WHY ALL STEPS ARE PASSIVE (load-bearing, verified against the runtime + firmware):
-during LESSON mode the live STT/transcript path is suspended, so an INTERACTIVE step
-(model/listen/repeat/fillBlank) would open a child-response window that nothing can
-satisfy → the runtime reprompts, then PAUSES and forwards ``lesson_abandoned`` instead
-of completing. Completion (and therefore the happy ending) is only reached when every
-renderable step AUTO-ADVANCES on its render ack — i.e. every step is PASSIVE
-(``completionClass == "passive"``; see runtime.py ``_is_passive_step`` /
-``_on_frame_acked``). So the sample is authored as a short all-passive narration.
+DEFAULT INTERACTION MODE: the spoken demo defaults to ``interactive`` so the child
+practises repeat + recall turns through Google Live's lesson child-response window
+before the lesson completes. ``lesson.sample_mode: passive`` remains available for
+no-mic smoke tests and auto-advances every step on render ack.
 
 SELF-CONTAINED ASSET DELIVERY: a ``SampleAssetCache`` passthrough skips the sha256
 download/verify gate the real ``AssetCache`` enforces — the sample manifest has no
@@ -99,11 +96,17 @@ def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word:
 
 
 DEFAULT_SAMPLE_STEP_DWELL_SEC = 5.0
+DEFAULT_SAMPLE_STEP_TIMEOUT_SEC = 75.0
 
 
 def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
-          timeout_sec: float = 12.0, dwell_sec: float = DEFAULT_SAMPLE_STEP_DWELL_SEC,
-          completion_class: str = "passive") -> Dict[str, Any]:
+          timeout_sec: float = DEFAULT_SAMPLE_STEP_TIMEOUT_SEC,
+          dwell_sec: float = DEFAULT_SAMPLE_STEP_DWELL_SEC,
+          completion_class: str = "passive",
+          expected_responses: Optional[List[str]] = None,
+          retry_prompt: Optional[str] = None,
+          response_timeout_sec: Optional[float] = None,
+          max_no_answer_attempts: Optional[int] = None) -> Dict[str, Any]:
     # completionClass is the AUTHORITATIVE classifier. A PASSIVE step auto-advances on
     # its render ack (no child interaction). An INTERACTIVE step instead opens a
     # child-response window (provider.open_lesson_child_response_window) and waits for the
@@ -121,6 +124,22 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
     }
     if completion_class == "passive" and dwell_sec and dwell_sec > 0:
         step["dwellSec"] = float(dwell_sec)
+    if expected_responses:
+        step["expectedResponses"] = [str(item).strip() for item in expected_responses if str(item).strip()]
+    if retry_prompt and retry_prompt.strip():
+        step["retryPrompt"] = retry_prompt.strip()
+    if response_timeout_sec is not None:
+        try:
+            if float(response_timeout_sec) > 0:
+                step["responseTimeoutSec"] = float(response_timeout_sec)
+        except (TypeError, ValueError):
+            pass
+    if max_no_answer_attempts is not None:
+        try:
+            if int(max_no_answer_attempts) > 0:
+                step["maxNoAnswerAttempts"] = int(max_no_answer_attempts)
+        except (TypeError, ValueError):
+            pass
     return step
 
 
@@ -175,14 +194,15 @@ INTERACTIVE_SAMPLE_LESSON_ID = "sample-barn-say-it-interactive"
 
 def build_interactive_sample_manifest(asset_base: str = "",
                                       dwell_sec: float = DEFAULT_SAMPLE_STEP_DWELL_SEC) -> Dict[str, Any]:
-    """A short SPEAKING-practice demo: greeting → focus → SAY-IT (interactive) → celebrate.
+    """A short SPEAKING-practice demo: greeting → focus → SAY-IT (interactive)
+    → recall (interactive) → celebrate.
 
-    The ``say-it`` step is ``completionClass == "interactive"``: the runtime narrates the
-    question, opens a child-response window over Google Live (the provider waits for the
-    narration TTS to finish, then opens the mic), and only advances once the child SPEAKS
-    (``runtime.on_child_response`` via the recognised Live transcript). The robot does not
-    grade pronunciation — any spoken attempt advances — so a child with no backend
-    assignment can still practise saying the word and reach the happy ending."""
+    The interactive steps narrate the question, open a child-response window over Google
+    Live (the provider waits for narration TTS to finish, then opens the mic), and only
+    advance once the child says the target word (``runtime.on_child_response`` via the
+    recognised Live transcript). Wrong attempts stay on the same step and get a retry
+    prompt so a child with no backend assignment can still practise vocabulary and reach
+    the happy ending after saying the word."""
     steps: List[Dict[str, Any]] = [
         _step(
             "s1", "greeting",
@@ -204,10 +224,25 @@ def build_interactive_sample_manifest(asset_base: str = "",
             _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🗣️"),
             completion_class="interactive",
+            expected_responses=["barn"],
+            retry_prompt="Con thử nói lại nhé: barn.",
+            response_timeout_sec=30.0,
+            max_no_answer_attempts=3,
         ),
         _step(
-            "s4", "celebrate",
-            "Tuyệt vời! Con vừa nói được từ barn. Hoan hô con!",
+            "s4", "recall",
+            "Giỏi lắm. Con thấy gì trong hình? Con thử nói: barn.",
+            _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_TEACH_FILE,
+                   primary_word="barn", glyph="🏠"),
+            completion_class="interactive",
+            expected_responses=["barn"],
+            retry_prompt="Con thử nói lại nhé: barn.",
+            response_timeout_sec=30.0,
+            max_no_answer_attempts=3,
+        ),
+        _step(
+            "s5", "celebrate",
+            "Tuyệt vời! Con vừa nói được từ barn và đã hoàn thành bài học mẫu. Hoan hô con!",
             _scene(asset_base, expression="celebrating", overlay_file=_OVERLAY_CELEBRATE_FILE,
                    primary_word="barn", glyph="🎉"),
             dwell_sec=dwell_sec,
@@ -318,13 +353,12 @@ def _sample_step_dwell_sec(conn: Any) -> float:
 
 
 def _sample_mode(conn: Any) -> str:
-    """``passive`` (default, all-passive narration demo) or ``interactive`` (the speaking
-    drill with a SAY-IT step that waits for the child's spoken answer over Google Live).
+    """``interactive`` (default speaking drill) or ``passive`` (all-passive narration demo).
     Sourced from ``lesson.sample_mode`` (env ``LESSON_SAMPLE_MODE``)."""
     config = getattr(conn, "config", {}) or {}
     lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
-    mode = str(lesson_cfg.get("sample_mode") or "passive").strip().lower()
-    return "interactive" if mode == "interactive" else "passive"
+    mode = str(lesson_cfg.get("sample_mode") or "interactive").strip().lower()
+    return "passive" if mode == "passive" else "interactive"
 
 
 def _sd_pack_enabled(conn: Any) -> bool:
@@ -339,6 +373,15 @@ def _set_status(conn: Any, code: str, message: str = "") -> None:
         conn.lesson_start_status = {"code": code, "message": message}
     except Exception:
         pass
+
+def _is_active_sample_runtime(runtime: Any, lesson_id: str) -> bool:
+    if runtime is None:
+        return False
+    if getattr(runtime, "assignment_id", None) != SAMPLE_ASSIGNMENT_ID:
+        return False
+    if getattr(runtime, "lesson_id", None) != lesson_id:
+        return False
+    return getattr(runtime, "state", None) not in {"FAILED", "PAUSED", "COMPLETED"}
 
 
 async def start_sample_lesson(conn: Any) -> Optional[Any]:
@@ -388,6 +431,13 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
         manifest = build_sample_manifest(asset_base, dwell_sec=_sample_step_dwell_sec(conn))
         lesson_id = SAMPLE_LESSON_ID
     _log("info", f"sample lesson mode={'interactive' if interactive else 'passive'} lessonId={lesson_id}")
+
+    existing = getattr(conn, "lesson_runtime", None)
+    if _is_active_sample_runtime(existing, lesson_id):
+        _set_status(conn, "STARTED")
+        _log("info", f"sample lesson already active; reusing lessonId={lesson_id}")
+        return existing
+
     assignment = {
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
         "assignmentVersion": 1,
@@ -424,8 +474,12 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
     try:
         enter_lesson = getattr(conn, "enter_lesson_mode", None)
         if callable(enter_lesson):
+            _log("info", "sample lesson entering lesson mode")
             await enter_lesson(reason="sample_lesson_start")
+            _log("info", "sample lesson entered lesson mode")
+        _log("info", "sample lesson runtime start begin")
         await runtime.start()
+        _log("info", "sample lesson runtime start returned")
         if getattr(runtime, "state", None) == "FAILED":
             _set_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học mẫu.")
             if getattr(conn, "lesson_runtime", None) is runtime:

@@ -7,7 +7,7 @@ TAG=""
 SERVER_IMAGE="local/tbot-server"
 WEB_IMAGE="local/tbot-server-web"
 SERVER_BASE_IMAGE="local/tbot-server-base"
-REMOTE_SERVER_BASE_REF="ghcr.io/xinnan-tech/tbot-esp32-server:server-base"
+REMOTE_SERVER_BASE_REF="dinhmanh11/tbot-server-base:vps-20260525144756"
 SERVER_REQUIREMENTS_FILE="main/tbot-server/requirements.txt"
 NO_LATEST=0
 PLATFORM=""
@@ -186,10 +186,17 @@ if [[ -n "${PLATFORM}" ]]; then
   printf 'Platform: %s\n' "${PLATFORM}"
 fi
 
+docker_build() {
+  if [[ "${#BUILD_ARGS[@]}" -gt 0 ]]; then
+    docker build "${BUILD_ARGS[@]}" "$@"
+  else
+    docker build "$@"
+  fi
+}
+
 if [[ "${ONLY}" == "all" || "${ONLY}" == "server" ]]; then
   if [[ "${BUILD_BASE}" -eq 1 ]]; then
-    docker build \
-      "${BUILD_ARGS[@]}" \
+    docker_build \
       --pull \
       -f "${PROJECT_DIR}/Dockerfile-server-base" \
       --build-arg "REQUIREMENTS_FILE=${SERVER_REQUIREMENTS_FILE}" \
@@ -201,8 +208,7 @@ if [[ "${ONLY}" == "all" || "${ONLY}" == "server" ]]; then
     SERVER_BASE_REF="${REMOTE_SERVER_BASE_REF}"
   fi
 
-  docker build \
-    "${BUILD_ARGS[@]}" \
+  docker_build \
     -f "${PROJECT_DIR}/Dockerfile-server" \
     --build-arg "TBOT_SERVER_BASE_IMAGE=${SERVER_BASE_REF}" \
     -t "${SERVER_IMAGE}:${TAG}" \
@@ -216,16 +222,14 @@ if [[ "${FAST_WEB}" -eq 1 ]]; then
   run_manager_api_build
   [[ -d "${PROJECT_DIR}/main/manager-web/dist" ]] || die "missing web dist"
   [[ -f "${PROJECT_DIR}/main/manager-api/target/tbot-esp32-api.jar" ]] || die "missing manager API jar"
-  docker build \
-    "${BUILD_ARGS[@]}" \
+  docker_build \
     --pull \
     -f "${PROJECT_DIR}/Dockerfile-web-runtime" \
     -t "${WEB_IMAGE}:${TAG}" \
     -t "${WEB_IMAGE}:${SHA}" \
     "${PROJECT_DIR}"
 else
-  docker build \
-    "${BUILD_ARGS[@]}" \
+  docker_build \
     --pull \
     -f "${PROJECT_DIR}/Dockerfile-web" \
     -t "${WEB_IMAGE}:${TAG}" \

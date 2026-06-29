@@ -26,6 +26,9 @@ ALWAYS_INCLUDE = (
     "set_head_angle",
     "set_head_percent",
     "turn_head_left_then_right_max",
+    "get_weather",
+    "web_search",
+    "get_news_from_newsnow",
 )
 
 ALWAYS_INCLUDE_WHEN_LESSON_ENABLED = ("start_lesson",)
@@ -45,9 +48,6 @@ CONFIGURABLE_CHILD_TOOLS = frozenset(
 
 ADULT_CHILD_DENYLIST = frozenset(
     {
-        "web_search",
-        "get_weather",
-        "get_news_from_newsnow",
         "get_news_from_chinanews",
     }
 )
@@ -62,9 +62,13 @@ def product_tool_names(conn: Any) -> List[str]:
     """Return the canonical child-product tool names for this connection."""
     names: list[str] = list(ALWAYS_INCLUDE)
     names.extend(_configured_child_tools(conn))
-    if lesson_runtime_enabled(conn):
+    if lesson_start_enabled(conn):
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
     return _dedupe(name for name in names if _is_child_allowed(name))
+
+
+def lesson_start_enabled(conn: Any) -> bool:
+    return lesson_runtime_enabled(conn) or sample_lesson_enabled(conn)
 
 
 def lesson_runtime_enabled(conn: Any) -> bool:
@@ -77,6 +81,18 @@ def lesson_runtime_enabled(conn: Any) -> bool:
     config = getattr(conn, "config", None)
     lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
     return bool(lesson_cfg.get("runtime_enabled", False))
+
+
+def sample_lesson_enabled(conn: Any) -> bool:
+    checker = getattr(conn, "_sample_lesson_enabled", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    config = getattr(conn, "config", None)
+    lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    return bool(lesson_cfg.get("sample_lesson", False))
 
 
 def _configured_child_tools(conn: Any) -> list[str]:

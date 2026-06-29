@@ -254,10 +254,12 @@ class _FakeConn:
 class _RecordingLessonVoiceProvider:
     def __init__(self):
         self.prompts = []
+        self.prompt_continue_listening = []
         self.child_response_windows = []
 
-    async def speak_lesson_step_prompt(self, text):
+    async def speak_lesson_step_prompt(self, text, *, continue_listening=False):
         self.prompts.append(text)
+        self.prompt_continue_listening.append(bool(continue_listening))
         return True
 
     async def open_lesson_child_response_window(self):
@@ -3883,6 +3885,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         provider = _RecordingLessonVoiceProvider()
         conn.voice_provider = provider
         manifest = _build_class_steps_manifest([("s4", "repeat", "interactive")])
+        manifest["steps"][0]["prompt"] = "Say barn."
         rt = self._runtime(conn=conn, manifest=manifest)
         await rt.start()
         await rt.on_lesson_ack(_ack(1, 1))
@@ -3892,6 +3895,27 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
 
         self.assertEqual(provider.child_response_windows, [True])
+        self.assertEqual(provider.prompt_continue_listening, [True])
+
+    async def test_wrong_child_response_retry_prompt_keeps_listening_after_tts(self):
+        conn = _FakeConn()
+        provider = _RecordingLessonVoiceProvider()
+        conn.voice_provider = provider
+        manifest = _build_class_steps_manifest([("s4", "repeat", "interactive")])
+        manifest["steps"][0]["prompt"] = "Say barn."
+        manifest["steps"][0]["expectedResponses"] = ["barn"]
+        rt = self._runtime(conn=conn, manifest=manifest)
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        handled = await rt.on_child_response("cat")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider.child_response_windows, [True, True])
+        self.assertEqual(provider.prompt_continue_listening[-1], True)
 
     async def test_storybeat_wait_for_child_guided_turn_waits_for_child_response(self):
         conn = _FakeConn()
@@ -6113,7 +6137,10 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
     async def test_voice_transcript_start_lesson_loads_backend_manifest_and_waits_on_guided_story_step(self):
         import asyncio
 
-        from core.voice.session_provider.google_live import GoogleLiveProvider
+        from core.voice.session_provider.google_live import (
+            GoogleLiveProvider,
+            LESSON_LIVE_TEXT_INSTRUCTION,
+        )
 
         prep = FIX["frames"]["lesson_prepare"]
         assignment = {
@@ -6153,7 +6180,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("bắt đầu bài học")
+            handled = await provider._on_user_transcript("bắt đầu khoá học")
             rt = await conn.lesson_pull_task
         finally:
             undo()
@@ -6166,7 +6193,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
         self.assertEqual(
             provider._client.sent_texts,
-            ["Nói đúng một câu này, không thêm gì: Bắt đầu bài học nhé."],
+            [LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé."],
         )
 
         rt.asset_cache = _FakeAssetCache(ready=True)
@@ -6222,7 +6249,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(lesson_prompt_texts), 9)
         self.assertEqual(
             lesson_prompt_texts[0],
-            "Nói đúng một câu này, không thêm gì: What animal do you see?",
+            LESSON_LIVE_TEXT_INSTRUCTION + "What animal do you see?",
         )
         self.assertNotIn("Look at the picture on the screen.", lesson_prompt_texts[0])
         for prompt in lesson_prompt_texts:

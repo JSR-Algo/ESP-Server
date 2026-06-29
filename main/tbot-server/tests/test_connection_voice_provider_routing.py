@@ -498,6 +498,27 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(handle_task, timeout=0.5)
 
+    async def test_voice_provider_audio_refreshes_connection_timeout_activity(self):
+        handler = self._build_handler()
+        handler.session_mode = connection_module.SessionMode.CONVERSATION
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.last_activity_time = 1000.0
+
+        original_time = connection_module.time.time
+        original_monotonic = connection_module.time.monotonic
+        try:
+            connection_module.time.time = lambda: 12.5
+            connection_module.time.monotonic = lambda: 99.0
+
+            handled = await handler._route_audio_message(b"opus-frame")
+        finally:
+            connection_module.time.time = original_time
+            connection_module.time.monotonic = original_monotonic
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.last_activity_time, 12500.0)
+        self.assertEqual(handler.last_live_activity_at, 99.0)
+
     async def test_handle_connection_schedules_lesson_pull_on_boot_without_blocking_voice_route(self):
         handler = self._build_handler()
         handler.config["lesson"] = {"runtime_enabled": True}

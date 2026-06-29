@@ -102,6 +102,11 @@ public interface Constant {
     String SERVER_WEBSOCKET = "server.websocket";
 
     /**
+     * 固件访问后端 API 的基础地址
+     */
+    String SERVER_API_URL = "server.api_url";
+
+    /**
      * mqtt gateway 配置
      */
     String SERVER_MQTT_GATEWAY = "server.mqtt_gateway";

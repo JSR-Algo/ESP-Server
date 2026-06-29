@@ -19,9 +19,16 @@ Pure-function level: no network, no event loop. The function reads
 variable so an ambient shell/CI value cannot leak into an assertion.
 """
 
+from pathlib import Path
+
 import pytest
 
-from config.config_loader import _apply_lesson_env_overrides
+from config.config_loader import (
+    _apply_lesson_env_overrides,
+    _parse_bool_env,
+    get_project_dir,
+    read_config,
+)
 
 _LESSON_ENV = (
     "LESSON_RUNTIME_ENABLED",
@@ -36,6 +43,7 @@ _LESSON_ENV = (
     "LESSON_MAX_TOTAL_ASSET_BYTES",
     "LESSON_SAMPLE_ENABLED",
     "LESSON_SAMPLE_ASSET_BASE",
+    "LESSON_SAMPLE_MODE",
     "TBOT_DEVICE_MINT_SECRET",
 )
 
@@ -89,6 +97,33 @@ def test_asset_pack_mount_root_override_strips_trailing_slash(monkeypatch):
 # ── built-in sample-lesson demo flags ────────────────────────────────────────────
 
 
+def test_default_config_starts_interactive_sample_lesson():
+    """Default robot config maps spoken start_lesson to the interactive sample demo."""
+    config = read_config(f"{get_project_dir()}config.yaml")
+
+    assert config["lesson"]["sample_lesson"] is True
+    assert config["lesson"]["sample_mode"] == "interactive"
+
+
+def test_empty_boolean_env_is_absent_not_false(monkeypatch):
+    """Compose forwards unset env as empty strings; empty must not override config."""
+    monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "")
+
+    assert _parse_bool_env("LESSON_SAMPLE_ENABLED") is None
+
+
+def test_docker_compose_defaults_do_not_disable_interactive_sample():
+    """Docker defaults must preserve the config.yaml interactive sample start_lesson path."""
+    project_dir = Path(get_project_dir())
+    local_compose = (project_dir / "docker-compose.yml").read_text()
+    prod_compose = (project_dir.parents[1] / "deploy" / "docker-compose.prod.yml").read_text()
+
+    assert "LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}" not in local_compose
+    assert "LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-passive}" not in local_compose
+    assert "LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}" not in prod_compose
+    assert "LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-passive}" not in prod_compose
+
+
 def test_sample_enabled_override_sets_sample_lesson_bool(monkeypatch):
     """LESSON_SAMPLE_ENABLED -> lesson.sample_lesson (bool); NOT coupled to runtime_enabled."""
     monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "true")
@@ -107,6 +142,15 @@ def test_sample_asset_base_override_strips_trailing_slash(monkeypatch):
     config = _apply_lesson_env_overrides({"lesson": {}})
 
     assert config["lesson"]["sample_asset_base_url"] == "https://cdn.example/sample"
+
+
+def test_sample_mode_override_works_without_other_lesson_env(monkeypatch):
+    """LESSON_SAMPLE_MODE alone selects the sample lesson interaction mode."""
+    monkeypatch.setenv("LESSON_SAMPLE_MODE", "passive")
+
+    config = _apply_lesson_env_overrides({"lesson": {}})
+
+    assert config["lesson"]["sample_mode"] == "passive"
 
 
 def test_sample_flags_absent_is_a_noop(monkeypatch):

@@ -87,7 +87,13 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(merged["google_live"]["language_code"], "vi-VN")
         self.assertEqual(merged["google_live"]["interrupt_policy"], "wake_or_transcript")
         self.assertFalse(merged["google_live"]["raw_audio_barge_in_enabled"])
-        self.assertEqual(merged["google_live"]["input_flush_delay_sec"], 1.0)
+        self.assertEqual(merged["google_live"]["input_flush_delay_sec"], 1.4)
+        self.assertEqual(merged["google_live"]["input_speech_tail_ms"], 1300)
+        self.assertEqual(merged["google_live"]["input_min_capture_ms"], 400)
+        self.assertEqual(merged["google_live"]["input_max_capture_ms"], 8000)
+        self.assertEqual(merged["google_live"]["input_speech_rms_threshold"], 500)
+        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 2.5)
+        self.assertEqual(merged["google_live"]["waiting_model_retry_prompt_after_sec"], 4.0)
         self.assertEqual(merged["google_live"]["interrupt_rms_threshold"], 5000)
         self.assertEqual(
             merged["google_live"]["interrupt_min_input_duration_sec"],
@@ -141,6 +147,12 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         # Tuned up from the 1.0 code default (child-speech capture fix); must stay
         # >= input_speech_tail_ms so the idle safety-net doesn't re-cut a paused child.
         self.assertEqual(google_live["input_flush_delay_sec"], 1.4)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_flush_delay_sec"], 1.4)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_tail_ms"], 1300)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_min_capture_ms"], 400)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_max_capture_ms"], 8000)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_rms_threshold"], 500)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 2.5)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["raw_audio_barge_in_enabled"])
         self.assertTrue(GOOGLE_LIVE_DEFAULTS["disable_server_side_interruptions"])
 

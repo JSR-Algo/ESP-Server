@@ -38,5 +38,29 @@ public class DeviceUpdateDTO implements Serializable {
     @Min(1)
     private Integer childAge;
 
+    /**
+    * 儿童兴趣标签，用于课程个性化
+    */
+    @Size(max = 255)
+    private String childInterests;
+
+    /**
+    * 学习风格，用于课程个性化
+    */
+    @Size(max = 32)
+    private String learningStyle;
+
+    /**
+    * 词汇水平，用于课程个性化
+    */
+    @Size(max = 32)
+    private String vocabularyLevel;
+
+    /**
+    * 家长职业主题，用于课程个性化
+    */
+    @Size(max = 64)
+    private String parentCareer;
+
     private static final long serialVersionUID = 1L;
 }

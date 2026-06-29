@@ -377,5 +377,5 @@ class ASRProviderBase(ABC):
             if decoder is not None:
                 try:
                     del decoder
-                except Exception as e:
+                except Exception as e:  # pragma: no cover - del local decoder does not raise catchably
                     logger.bind(tag=TAG).debug(f"Error releasing decoder resources: {e}")

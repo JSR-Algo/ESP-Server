@@ -234,8 +234,9 @@ async function generateAndPlay() {
     const dataStr = `${props.selectedNetwork.ssid}\n${props.password}`
     const textBytes = stringToBytes(dataStr)
     const fullBytes = [...START_BYTES, ...textBytes, checksum(textBytes), ...END_BYTES]
+    const passwordLength = props.password.length
 
-    console.log(`${t('deviceConfig.configData')}:`, { ssid: props.selectedNetwork.ssid, password: props.password })
+    console.log(`${t('deviceConfig.configData')}:`, { ssid: props.selectedNetwork.ssid, passwordLength })
     console.log(`${t('deviceConfig.dataBytesLength')}:`, textBytes.length)
 
     // 转换为比特流

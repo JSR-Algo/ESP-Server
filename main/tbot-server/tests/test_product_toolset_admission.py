@@ -7,8 +7,8 @@ apply their own filtering on top of the list builder, so a regression that drops
 allowed to call) could still be masked there.
 
 This module exercises ``product_tool_names`` directly: the canonical admission list
-must OMIT ``start_lesson`` when LESSON_RUNTIME_ENABLED is OFF and INCLUDE it when ON,
-for both the connection-method flag source and the config-based fallback.
+must OMIT ``start_lesson`` when both lesson gates are OFF and INCLUDE it when either
+the production runtime or the built-in sample lesson is ON.
 """
 
 import unittest
@@ -24,21 +24,29 @@ class _MethodFlagConn:
     """Connection whose lesson-runtime flag is exposed via a ``_lesson_runtime_enabled``
     callable -- the path real Live/classic connections use."""
 
-    def __init__(self, runtime_enabled):
+    def __init__(self, runtime_enabled, sample_enabled=False):
         self._enabled = runtime_enabled
+        self._sample_enabled = sample_enabled
         # No Intent profile configured -> only ALWAYS_INCLUDE (+ lesson when on).
         self.config = {}
 
     def _lesson_runtime_enabled(self):
         return self._enabled
 
+    def _sample_lesson_enabled(self):
+        return self._sample_enabled
+
 
 class _ConfigFlagConn:
-    """Connection with no flag method; the flag lives in config['lesson']['runtime_enabled']
-    (the fallback branch of lesson_runtime_enabled)."""
+    """Connection with no flag method; flags live in config['lesson']."""
 
-    def __init__(self, runtime_enabled):
-        self.config = {"lesson": {"runtime_enabled": runtime_enabled}}
+    def __init__(self, runtime_enabled, sample_enabled=False):
+        self.config = {
+            "lesson": {
+                "runtime_enabled": runtime_enabled,
+                "sample_lesson": sample_enabled,
+            }
+        }
 
 
 class StartLessonAdmissionListTest(unittest.TestCase):
@@ -58,7 +66,7 @@ class StartLessonAdmissionListTest(unittest.TestCase):
         for base_tool in ALWAYS_INCLUDE:
             self.assertIn(base_tool, names)
 
-    def test_flag_is_the_only_difference_between_off_and_on_admission_lists(self):
+    def test_runtime_flag_is_the_only_difference_between_off_and_on_admission_lists(self):
         off_names = product_tool_names(_MethodFlagConn(runtime_enabled=False))
         on_names = product_tool_names(_MethodFlagConn(runtime_enabled=True))
 
@@ -70,6 +78,13 @@ class StartLessonAdmissionListTest(unittest.TestCase):
         )
         self.assertEqual(set(off_names) - set(on_names), set())
         self.assertIn("start_lesson", ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
+
+    def test_start_lesson_included_when_sample_lesson_enabled_without_runtime(self):
+        names = product_tool_names(
+            _MethodFlagConn(runtime_enabled=False, sample_enabled=True)
+        )
+
+        self.assertIn("start_lesson", names)
 
     def test_admission_list_has_no_duplicate_start_lesson_when_enabled(self):
         names = product_tool_names(_MethodFlagConn(runtime_enabled=True))
@@ -84,6 +99,13 @@ class StartLessonAdmissionListTest(unittest.TestCase):
 
     def test_config_fallback_flag_on_includes_start_lesson(self):
         names = product_tool_names(_ConfigFlagConn(runtime_enabled=True))
+
+        self.assertIn("start_lesson", names)
+
+    def test_config_fallback_sample_on_includes_start_lesson_without_runtime(self):
+        names = product_tool_names(
+            _ConfigFlagConn(runtime_enabled=False, sample_enabled=True)
+        )
 
         self.assertIn("start_lesson", names)
 

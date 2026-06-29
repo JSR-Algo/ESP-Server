@@ -109,5 +109,71 @@ class GeminiASRProviderTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Vietnamese", captured["json"]["contents"][0]["parts"][1]["text"])
 
 
+    async def test_gemini_asr_handles_no_artifact_custom_prompt_proxy_and_http_failures(self):
+        import tempfile
+        from pathlib import Path
+        _reset_asr_imports()
+        from core.utils.asr import create_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = create_instance(
+                "gemini_asr",
+                {
+                    "api_key": "test-key",
+                    "api_url": "https://custom.example/api/",
+                    "model_name": "gemini-test",
+                    "language": "xx",
+                    "prompt": "Custom prompt",
+                    "http_proxy": "http://proxy",
+                    "https_proxy": "https://proxy",
+                    "timeout": 3,
+                    "output_dir": tmp,
+                },
+                False,
+            )
+
+            self.assertTrue(provider.requires_file())
+            self.assertEqual(provider.prompt, "Custom prompt")
+            self.assertEqual(provider.proxies, {"http": "http://proxy", "https": "https://proxy"})
+            self.assertEqual(await provider.speech_to_text([], "session-id"), ("", None))
+
+            audio_path = Path(tmp) / "speech.wav"
+            audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+            class _ErrorResponse:
+                status_code = 500
+                text = "bad"
+
+                def json(self):
+                    return {}
+
+            import core.providers.asr.gemini_asr as gemini_asr
+
+            calls = []
+
+            def fake_post(url, json, timeout, proxies, headers):
+                calls.append((url, timeout, proxies, headers))
+                return _ErrorResponse()
+
+            original_post = gemini_asr.requests.post
+            gemini_asr.requests.post = fake_post
+            try:
+                result = await provider.speech_to_text(
+                    [],
+                    "session-id",
+                    artifacts=SimpleNamespace(file_path=str(audio_path)),
+                )
+            finally:
+                gemini_asr.requests.post = original_post
+
+            self.assertEqual(result, ("", None))
+            self.assertIn("https://custom.example/api/models/gemini-test:generateContent", calls[0][0])
+            self.assertEqual(calls[0][1], 3)
+            self.assertEqual(calls[0][2], provider.proxies)
+
+            fallback = gemini_asr.ASRProvider({"language": "xx", "output_dir": tmp}, False)
+            self.assertIn("xx", fallback._default_prompt())
+
+
 if __name__ == "__main__":
     unittest.main()

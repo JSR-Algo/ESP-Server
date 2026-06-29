@@ -70,9 +70,12 @@ services:
       - seccomp:unconfined
     environment:
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      TBOT_PUBLIC_WEBSOCKET_URL: ${TBOT_PUBLIC_WEBSOCKET_URL:-}
+      TBOT_BACKEND_API_URL: ${TBOT_BACKEND_API_URL:-}
+      TBOT_FACTORY_TEST_CLAIMED_DEVICES: ${TBOT_FACTORY_TEST_CLAIMED_DEVICES:-}
     volumes:
-      - /opt/tbot/data:/opt/tbot-esp32-server/data
-      - /opt/tbot/models/SenseVoiceSmall/model.pt:/opt/tbot-esp32-server/models/SenseVoiceSmall/model.pt
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/models:/opt/tbot-esp32-server/models
 
   tbot-esp32-server-web:
     image: ${TBOT_WEB_IMAGE}
@@ -94,7 +97,7 @@ services:
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       SPRING_DATA_REDIS_PORT: 6379
     volumes:
-      - /opt/tbot/uploadfile:/uploadfile
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
 
   tbot-esp32-server-db:
     image: mysql:8
@@ -113,7 +116,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-tbot_esp32_server}
       MYSQL_INITDB_ARGS: "--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
     volumes:
-      - /opt/tbot/mysql/data:/var/lib/mysql
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/mysql/data:/var/lib/mysql
 
   tbot-esp32-server-redis:
     image: redis:8.0
@@ -126,6 +129,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    volumes:
+      - ${TBOT_REMOTE_ROOT:-/opt/tbot}/redis/data:/data
 YAML
 }
 
@@ -143,6 +148,10 @@ write_env_example() {
   cat >"${path}" <<EOF
 TBOT_SERVER_IMAGE=${SERVER_IMAGE}:${TAG}
 TBOT_WEB_IMAGE=${WEB_IMAGE}:${TAG}
+TBOT_REMOTE_ROOT=/opt/tbot
+TBOT_PUBLIC_WEBSOCKET_URL=wss://your-public-domain/tbot/v1/
+TBOT_BACKEND_API_URL=https://your-backend-api-domain/v1
+TBOT_FACTORY_TEST_CLAIMED_DEVICES=
 TZ=Asia/Ho_Chi_Minh
 MYSQL_ROOT_PASSWORD=change-me
 MYSQL_USER=root

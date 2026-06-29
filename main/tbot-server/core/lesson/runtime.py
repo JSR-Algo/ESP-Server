@@ -20,7 +20,9 @@ import asyncio
 import copy
 import json
 import math
+import re
 import time
+import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from core.lesson.errors import (
@@ -164,6 +166,13 @@ CHILD_RESPONSE_DETAIL_KEYS = (
 CHILD_RESPONSE_FLAG_KEYS = ("accepted", "handled", "recognized")
 CHILD_RESPONSE_CONFIDENCE_KEYS = ("confidence", "asrConfidence", "asr_confidence")
 STEP_METADATA_KEYS = ("story", "storyText", "storyBeat", "vocab")
+EXPECTED_CHILD_RESPONSE_KEYS = (
+    "expectedResponses",
+    "acceptedResponses",
+    "expectedResponse",
+    "expectedText",
+    "targetWord",
+)
 IMMEDIATE_SCORING_DETAIL_KEYS = frozenset(
     {
         "score",
@@ -207,6 +216,94 @@ def _has_observable_child_response_value(value: Any) -> bool:
         return False
     normalized = _normalized_child_response_value(value)
     return normalized not in EMPTY_CHILD_RESPONSE_VALUES and any(char.isalnum() for char in normalized)
+
+def _matching_tokens(value: Any) -> List[str]:
+    normalized = unicodedata.normalize("NFKD", str(value or "").lower())
+    tokens: List[str] = []
+    current: List[str] = []
+    for char in normalized:
+        if unicodedata.combining(char):
+            continue
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+def _contains_token_sequence(tokens: List[str], expected: List[str]) -> bool:
+    if not expected or len(expected) > len(tokens):
+        return False
+    for index in range(0, len(tokens) - len(expected) + 1):
+        if tokens[index:index + len(expected)] == expected:
+            return True
+    return False
+
+def _coerce_expected_child_responses(step: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(step, dict):
+        return []
+    values: List[Any] = []
+    for key in EXPECTED_CHILD_RESPONSE_KEYS:
+        raw = step.get(key)
+        if isinstance(raw, list):
+            values.extend(raw)
+        elif raw not in (None, ""):
+            values.append(raw)
+    vocab = step.get("vocab")
+    if isinstance(vocab, dict):
+        raw_word = vocab.get("expectedResponse") or vocab.get("targetWord")
+        if raw_word not in (None, ""):
+            values.append(raw_word)
+    expected: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = " ".join(_matching_tokens(text))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        expected.append(text)
+    return expected
+
+def _child_response_matches_expected(response: Any, expected_responses: List[str]) -> bool:
+    if not expected_responses:
+        return True
+    response_tokens = _matching_tokens(response)
+    if not response_tokens:
+        return False
+    for expected in expected_responses:
+        expected_tokens = _matching_tokens(expected)
+        if _contains_token_sequence(response_tokens, expected_tokens):
+            return True
+    return False
+
+def _child_response_preview(response: Any) -> str:
+    text = re.sub(r"\s+", " ", str(response or "").strip())
+    text = text.strip(" .,!?:;")
+    if len(text) > 40:
+        text = text[:37].rstrip() + "..."
+    return text
+
+def _child_response_retry_prompt(
+    step: Dict[str, Any],
+    expected_responses: List[str],
+    response: Any = None,
+) -> str:
+    retry = step.get("retryPrompt")
+    if isinstance(retry, str) and retry.strip():
+        base = retry.strip()
+    elif expected_responses:
+        base = f"Con thử nói lại nhé: {expected_responses[0]}."
+    else:
+        base = "Con thử nói lại nhé."
+    wrong = _child_response_preview(response)
+    if not wrong:
+        return base
+    return f"Con vừa nói {wrong}. Chưa đúng rồi. {base}"
 
 def _is_false_child_response_flag_value(value: Any) -> bool:
     if isinstance(value, bool):
@@ -655,6 +752,25 @@ class LessonRuntime:
         if not self._child_response_window_open:
             return False
 
+        expected_responses = _coerce_expected_child_responses(self._step)
+        if not _child_response_matches_expected(response, expected_responses):
+            self._cancel_child_response_timeout()
+            retry_prompt = _child_response_retry_prompt(
+                self._step, expected_responses, response
+            )
+            self._log(
+                "info",
+                f"interactive child response retry stepId={self._step_id} expected={expected_responses}",
+            )
+            await self._speak_lesson_prompt_text(
+                retry_prompt,
+                step_id=self._step_id,
+                continue_listening=True,
+            )
+            await self._open_child_response_window()
+            self._start_child_response_timeout()
+            return True
+
         self._cancel_child_response_timeout()
         detail = {"recognizedText": response, "source": str(source or "voice_transcript")}
         step_type = self._step.get("type")
@@ -948,15 +1064,32 @@ class LessonRuntime:
         prompt = _spoken_step_prompt(step)
         if prompt is None:
             return
-        await self._speak_lesson_prompt_text(prompt, step_id=self._step_id)
+        await self._speak_lesson_prompt_text(
+            prompt,
+            step_id=self._step_id,
+            continue_listening=not self._step_passive,
+        )
 
-    async def _speak_lesson_prompt_text(self, prompt: str, *, step_id: Optional[str] = None) -> None:
+    async def _speak_lesson_prompt_text(
+        self,
+        prompt: str,
+        *,
+        step_id: Optional[str] = None,
+        continue_listening: bool = False,
+    ) -> None:
         provider = getattr(self.conn, "voice_provider", None)
         speaker = getattr(provider, "speak_lesson_step_prompt", None)
         if not callable(speaker):
             return
         try:
-            handed_off = bool(await speaker(prompt))
+            try:
+                handed_off = bool(
+                    await speaker(prompt, continue_listening=continue_listening)
+                )
+            except TypeError as exc:
+                if "continue_listening" not in str(exc):
+                    raise
+                handed_off = bool(await speaker(prompt))
             self._log(
                 "info" if handed_off else "warning",
                 f"lesson step prompt handoff stepId={step_id or self._step_id or ''} handoff={int(handed_off)}",

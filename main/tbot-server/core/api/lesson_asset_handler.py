@@ -28,6 +28,9 @@ class LessonAssetHandler(BaseHandler):
         file_path = os.path.realpath(os.path.join(self.cache_root, cache_key, safe_key))
         if not file_path.startswith(self.cache_root + os.sep):
             return web.Response(text="bad lesson asset path", status=400)
+        render_safe_path = f"{file_path}.render.jpg"
+        if os.path.isfile(render_safe_path):
+            file_path = render_safe_path
         if not os.path.isfile(file_path):
             return web.Response(text="lesson asset not found", status=404)
 

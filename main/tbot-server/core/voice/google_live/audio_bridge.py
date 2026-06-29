@@ -17,6 +17,7 @@ import uuid
 
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
+from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 
 
 EMOTION_EMOJI = {
@@ -166,15 +167,18 @@ class GoogleLiveAudioBridge:
             if transcript_text is None:
                 return False
             self.logger.bind(tag="GoogleLive").info(
-                "Google Live transcript source={} chars={}",
+                "Google Live transcript source={} chars={} text={!r}",
                 event.get("source") or "unknown",
                 len(transcript_text),
+                transcript_text[:80],
             )
             if event.get("source") == "user":
                 if await self._maybe_handle_user_transcript_intent(transcript_text):
                     return True
                 await self._maybe_trigger_transcript_barge_in(transcript_text)
             if event.get("source") == "model":
+                if self._should_drop_lesson_model_output(event_type):
+                    return True
                 self._record_model_transcript(transcript_text)
                 if self._is_unsafe_model_output(transcript_text):
                     await self._block_unsafe_model_output(transcript_text)
@@ -193,6 +197,10 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_start":
+            if self._should_drop_lesson_model_output(event_type):
+                self._active_response_id = self._response_id_getter()
+                self._mark_active_response_cancelled()
+                return True
             if self._moderation_block_active:
                 self._active_response_id = self._response_id_getter()
                 self._mark_active_response_cancelled()
@@ -248,6 +256,8 @@ class GoogleLiveAudioBridge:
             audio_bytes = event.get("audio")
             if audio_bytes is None:
                 return False
+            if self._should_drop_lesson_model_output(event_type):
+                return True
             if self._moderation_block_active:
                 return True
             if self._should_drop_blocked_model_event(event_type):
@@ -271,6 +281,11 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_end":
+            if self._should_drop_lesson_model_output(event_type):
+                self._reset_output_encoder()
+                self._active_response_id = None
+                self.conn.google_live_audio_out_started_at = None
+                return True
             if self._moderation_block_active:
                 self._moderation_block_active = False
                 self._reset_output_encoder()
@@ -303,9 +318,12 @@ class GoogleLiveAudioBridge:
             self.conn.google_live_audio_out_started_at = None
             self._active_response_id = None
             await self._send_tts_message("stop")
+            self._clear_lesson_prompt_output_gate()
             return True
 
         if event_type == "tool_call":
+            if self._should_drop_lesson_model_output(event_type):
+                return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._tool_call_handler is not None:
@@ -322,6 +340,8 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "tool_call_cancellation":
+            if self._should_drop_lesson_model_output(event_type):
+                return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._tool_call_cancellation_handler is not None:
@@ -499,6 +519,34 @@ class GoogleLiveAudioBridge:
             return False
         self._log_stale_model_event_drop(event_type, "blocked_until_user_turn")
         return True
+
+    def _should_drop_lesson_model_output(self, event_type):
+        try:
+            in_lesson = normalize_session_mode(
+                getattr(self.conn, "session_mode", None)
+            ) == SessionMode.LESSON
+        except Exception:
+            in_lesson = False
+        if not in_lesson:
+            return False
+        if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+            return False
+        if event_type not in {
+            "transcript",
+            "audio_start",
+            "audio",
+            "audio_chunk",
+            "audio_end",
+            "tool_call",
+            "tool_call_cancellation",
+        }:
+            return False
+        self._log_stale_model_event_drop(event_type, "lesson_mode_model_output")
+        return True
+
+    def _clear_lesson_prompt_output_gate(self):
+        if hasattr(self.conn, "google_live_lesson_prompt_output_allowed"):
+            self.conn.google_live_lesson_prompt_output_allowed = False
 
     def _log_stale_model_event_drop(self, event_type, reason):
         try:
@@ -869,7 +917,7 @@ class GoogleLiveAudioBridge:
     def _decode_input_audio(self, audio_bytes):
         if not audio_bytes:
             return audio_bytes
-        input_rate = int(getattr(self.conn, "sample_rate", 24000))
+        input_rate = self._client_input_sample_rate()
         client_config = getattr(self.client, "config", None) or self.conn.config.get(
             "google_live", {}
         )
@@ -1133,7 +1181,7 @@ class GoogleLiveAudioBridge:
         source_rate = getattr(
             self,
             "_last_input_source_rate",
-            int(getattr(self.conn, "sample_rate", 24000)),
+            self._client_input_sample_rate(),
         )
         target_rate = getattr(
             self,
@@ -1154,13 +1202,33 @@ class GoogleLiveAudioBridge:
         if self._input_decoder is None:
             import opuslib_next
 
-            sample_rate = int(getattr(self.conn, "sample_rate", 24000))
+            sample_rate = self._client_input_sample_rate()
             self._input_decoder = opuslib_next.Decoder(sample_rate, 1)
+            self._input_decoder_sample_rate = sample_rate
+        elif getattr(self, "_input_decoder_sample_rate", None) != self._client_input_sample_rate():
+            import opuslib_next
+
+            sample_rate = self._client_input_sample_rate()
+            self._input_decoder = opuslib_next.Decoder(sample_rate, 1)
+            self._input_decoder_sample_rate = sample_rate
         return self._input_decoder
 
     def _get_input_frame_size(self):
-        sample_rate = int(getattr(self.conn, "sample_rate", 24000))
+        sample_rate = self._client_input_sample_rate()
         return int(sample_rate * 60 / 1000)
+
+    def _client_input_sample_rate(self):
+        try:
+            return int(
+                getattr(
+                    self.conn,
+                    "input_sample_rate",
+                    None,
+                )
+                or getattr(self.conn, "sample_rate", 24000)
+            )
+        except (TypeError, ValueError):
+            return 24000
 
     def _get_live_input_chunk_bytes(self):
         client_config = getattr(self.client, "config", None) or self.conn.config.get(

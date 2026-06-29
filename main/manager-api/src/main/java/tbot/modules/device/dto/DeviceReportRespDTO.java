@@ -23,6 +23,9 @@ public class DeviceReportRespDTO {
     @Schema(description = "WebSocket config")
     private Websocket websocket;
 
+    @Schema(description = "Firmware-facing backend API base URL")
+    private String apiUrl;
+
     @Schema(description = "MQTT Gateway config")
     private MQTT mqtt;
 

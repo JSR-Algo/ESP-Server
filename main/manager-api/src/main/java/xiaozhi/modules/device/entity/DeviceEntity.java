@@ -46,6 +46,18 @@ public class DeviceEntity {
     @Schema(description = "儿童年龄，用于年龄适配对话")
     private Integer childAge;
 
+    @Schema(description = "儿童兴趣标签，用于课程个性化")
+    private String childInterests;
+
+    @Schema(description = "学习风格，用于课程个性化")
+    private String learningStyle;
+
+    @Schema(description = "词汇水平，用于课程个性化")
+    private String vocabularyLevel;
+
+    @Schema(description = "家长职业主题，用于课程个性化")
+    private String parentCareer;
+
     @Schema(description = "智能体ID")
     private String agentId;
 

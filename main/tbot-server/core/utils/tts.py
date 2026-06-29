@@ -131,6 +131,8 @@ class MarkdownCleaner:
         Main entry method: run all regexes in order, remove or replace Markdown elements
         """
         for regex, replacement in MarkdownCleaner.REGEXES:
+            if isinstance(replacement, staticmethod):
+                replacement = replacement.__func__
             text = regex.sub(replacement, text)
 
         # RemoveemojiEmoji

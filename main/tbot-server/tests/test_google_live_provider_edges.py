@@ -612,6 +612,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.config["google_live"].update(
             {
                 "waiting_model_timeout_sec": 0.01,
+                "waiting_model_retry_prompt_after_sec": 0,
                 "waiting_model_retry_prompt_cooldown_sec": 60,
             }
         )
@@ -634,6 +635,35 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._waiting_model_since = time.monotonic() - 1
         self.assertTrue(await provider.handle_audio_bytes(b"retry-two"))
 
+        self.assertEqual(
+            prompts,
+            [("Robot chưa nghe rõ, con nói lại nhé.", "waiting_model_timeout")],
+        )
+
+    async def test_waiting_model_timeout_fires_without_next_audio_frame(self):
+        conn = _Conn()
+        conn.config["google_live"].update(
+            {
+                "waiting_model_timeout_sec": 0.01,
+                "waiting_model_retry_prompt_after_sec": 0,
+            }
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        prompts = []
+
+        async def _queue_prompt(text, *, log_label="lesson_start_ack"):
+            prompts.append((text, log_label))
+            return True
+
+        provider._queue_local_tts_ack = _queue_prompt
+
+        await provider._finalize_user_audio_input("listen_stop")
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(provider._interaction.state, google_live_module.InteractionState.LISTENING)
+        self.assertIsNone(provider._waiting_model_since)
         self.assertEqual(
             prompts,
             [("Robot chưa nghe rõ, con nói lại nhé.", "waiting_model_timeout")],
@@ -787,6 +817,15 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.google_live_session_resumption_handle = "saved-handle"
         await provider._close_live_resources()
         self.assertTrue(conn.live_resumption_store.saved)
+
+        class _ConcurrentCloseClient(_Client):
+            async def close(self):
+                self.closed += 1
+                raise RuntimeError("anext(): asynchronous generator is already running")
+
+        provider._client = _ConcurrentCloseClient()
+        await provider._close_live_resources()
+        self.assertIsNone(provider._client)
 
         conn.live_admission_gate = _Gate(SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=AdmissionReason.OK))
         conn.google_live_session_started_at = time.monotonic() - 1
@@ -1444,8 +1483,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await provider._dispatch_lesson_start_intent("start"))
 
         provider._client = None
+        conn.voice_consent_client = _Consent(False)
         self.assertFalse(await provider._send_lesson_start_ack(SimpleNamespace(action=Action.ERROR, response="", result="")))
         self.assertFalse(await provider.speak_lesson_step_prompt("hello"))
+        conn.voice_consent_client = _Consent(True)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
 
         conn.websocket = _WebSocket()
         conn.ensure_lesson_tts = lambda: (_ for _ in ()).throw(RuntimeError("tts init failed"))
@@ -1969,6 +2012,15 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             await live_provider._open_live_session()
             self.assertEqual(mode_changes[-1], (SessionMode.CONVERSATION, "live_open"))
             await live_provider.close()
+
+            conn.session_mode = SessionMode.LESSON
+            mode_changes.clear()
+            lesson_provider = self.make_provider(conn)
+            lesson_provider._ensure_required_aec_ready = lambda: None
+            await lesson_provider._open_live_session()
+            self.assertEqual(mode_changes, [])
+            self.assertEqual(conn.session_mode, SessionMode.LESSON)
+            await lesson_provider.close()
         finally:
             google_live_module.GoogleLiveAudioBridge = original_bridge
 

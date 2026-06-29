@@ -16,7 +16,7 @@ Bốn điểm dưới đây trong brief gốc **sai hoặc thiếu so với code
 
 3. **Tên bước (stepType) thật là 9 loại có tên, không phải chỉ 'passive'/'interactive'.** `core/lesson/runtime.py:633` liệt kê đúng: `greeting, review, focus, model, listen, repeat, fillBlank, feedback, celebrate`. Trường `completionClass` ('passive'|'interactive') là **classifier ưu tiên** (runtime.py:`_is_passive_step`, ~`:87–102`), nếu vắng thì fallback theo `PASSIVE_STEP_TYPES = {greeting, review, focus, feedback, celebrate}` (runtime.py:`:79–85`). Fixture freeze cả hai class end-to-end: step `model` (interactive, `timeoutSec:12`, fixture `:147–150`) **và** step `review` (passive, `timeoutSec:10`, fixture `:299–302`) — xác nhận multi-step playback (P5) + split passive/interactive.
 
-4. **Cải chính lớn nhất — gate bật/tắt bài học là gate ADMISSION CỦA TOOL, không phải nhánh runtime nói-được.** Tool `start_lesson` **chỉ được gắn vào phiên Live khi `lesson.runtime_enabled == true`**: `core/providers/tools/product_toolset.py:31` `ALWAYS_INCLUDE_WHEN_LESSON_ENABLED = ("start_lesson",)` chỉ được `.extend` vào danh sách tool **bên trong** `if lesson_runtime_enabled(conn):` (`product_toolset.py:65–66`), và `_resolve_functions_for_live()` (`core/voice/session_provider/google_live.py:848–860`) dựng tool list từ `product_tool_names()` đó. **Hệ quả: khi `LESSON_RUNTIME_ENABLED` TẮT, model KHÔNG hề có tool `start_lesson` trong `connect_config.tools` → trẻ có nói "học bài thôi" thì cũng KHÔNG có tool nào để gọi.** Nhánh gate-OFF trong `start_lesson.py:75–79` (trả `"Lesson mode is not available right now."`) là **DEAD trên đường google_live** — nó chỉ đạt được qua đường KHÔNG-Live (vd intent-dispatch của classic pipeline), không qua Gemini Live. Brief gốc trình bày nhánh OFF như một nhánh runtime nói-được — đã sửa ở phần A và D.
+4. **Cải chính lớn nhất — gate bật/tắt bài học là gate ADMISSION CỦA TOOL, không phải nhánh runtime nói-được.** Tool `start_lesson` **chỉ được gắn vào phiên Live khi `lesson.runtime_enabled == true`**: `core/providers/tools/product_toolset.py:31` `ALWAYS_INCLUDE_WHEN_LESSON_ENABLED = ("start_lesson",)` chỉ được `.extend` vào danh sách tool **bên trong** `if lesson_runtime_enabled(conn):` (`product_toolset.py:65–66`), và `_resolve_functions_for_live()` (`core/voice/session_provider/google_live.py:848–860`) dựng tool list từ `product_tool_names()` đó. **Hệ quả: khi `LESSON_RUNTIME_ENABLED` TẮT, model KHÔNG hề có tool `start_lesson` trong `connect_config.tools` → trẻ có nói "học bài thôi" thì cũng KHÔNG có tool nào để gọi.** Nhánh gate-OFF trong `start_lesson.py:75–79` (trả `"Robot chưa sẵn sàng vào bài học lúc này."`) là **DEAD trên đường google_live** — nó chỉ đạt được qua đường KHÔNG-Live (vd intent-dispatch của classic pipeline), không qua Gemini Live. Brief gốc trình bày nhánh OFF như một nhánh runtime nói-được — đã sửa ở phần A và D.
 
 ---
 
@@ -26,11 +26,11 @@ Bốn điểm dưới đây trong brief gốc **sai hoặc thiếu so với code
 
 **HAI điều phải biết về lớp an toàn (đã verify):**
 
-- **Block an toàn force-prepend là TIẾNG ANH.** `ensure_child_safety_block` (`child_safety.py:36–41`) **strip mọi `<child_safety>…</child_safety>` cũ rồi prepend lại `CHILD_SAFETY_BLOCK`** — và block chuẩn đó **viết bằng tiếng Anh** (`child_safety.py:9–17`, nội dung: `"User: Vietnamese child, age band 4-8 … Hard refusals: … Anti-grooming: …"`). Đây là rủi ro robustness cho sản phẩm VI 4–8 tuổi: luật cấm cốt lõi tới model bằng ngôn ngữ KHÁC ngôn ngữ hội thoại. **Khuyến nghị team: localize `CHILD_SAFETY_BLOCK` sang tiếng Việt** (hoặc song ngữ) trong `child_safety.py`. Cho tới khi đó, **đoạn `[An toàn trẻ em]` tiếng Việt trong prompt dưới là lớp luật VẬN HÀNH chính** (belt-and-suspenders có chủ đích).
+- **Block an toàn force-prepend là SONG NGỮ.** `ensure_child_safety_block` (`child_safety.py:38–43`) **strip mọi `<child_safety>…</child_safety>` cũ rồi prepend lại `CHILD_SAFETY_BLOCK`**. Block chuẩn giữ các dòng EN cũ để tương thích provider/test (`"User: Vietnamese child…"`) và thêm luật VI trực tiếp (`"Người dùng: trẻ em Việt Nam…"`, `"Chống dụ dỗ…"`, `"Chuyển hướng an toàn…"`). Đoạn `[An toàn trẻ em]` tiếng Việt trong prompt dưới vẫn là lớp luật vận hành bổ sung, không thay thế block chuẩn.
 
-- **Đoạn an toàn VI trong prompt dưới sẽ KHÔNG bị de-dup.** Regex de-dup `_CHILD_SAFETY_RE` (`child_safety.py:25–28`) chỉ strip đúng literal cặp thẻ `<child_safety>…</child_safety>`. Đoạn `[An toàn trẻ em]` dưới đây **không có thẻ** → nó **đồng tồn tại** với block EN injected; không cái nào ghi đè cái nào — hai bộ luật chồng nhau theo thiết kế. Vì vậy **đừng tự nhúng `<child_safety>` vào prompt** (sẽ bị strip), nhưng **giữ đoạn VI dạng văn xuôi** thì an toàn và là điều ta muốn.
+- **Đoạn an toàn VI trong prompt dưới sẽ KHÔNG bị de-dup.** Regex de-dup `_CHILD_SAFETY_RE` (`child_safety.py:27–30`) chỉ strip đúng literal cặp thẻ `<child_safety>…</child_safety>`. Đoạn `[An toàn trẻ em]` dưới đây **không có thẻ** → nó **đồng tồn tại** với block chuẩn injected; không cái nào ghi đè cái nào — hai bộ luật chồng nhau theo thiết kế. Vì vậy **đừng tự nhúng `<child_safety>` vào prompt** (sẽ bị strip), nhưng **giữ đoạn VI dạng văn xuôi** thì an toàn và là điều ta muốn.
 
-> Lưu ý shipped-config: `config.yaml:312–320` HIỆN đã nhúng sẵn một block `<child_safety>` — block đó **bị `ensure_child_safety_block` strip rồi thay bằng bản chuẩn EN** lúc runtime nên vô hại nhưng thừa. Khi cập nhật, nên gỡ block `<child_safety>` thừa trong `config.yaml` và chỉ giữ đoạn VI văn xuôi.
+> Lưu ý shipped-config: nếu `config.yaml` nhúng sẵn block `<child_safety>`, block đó **bị `ensure_child_safety_block` strip rồi thay bằng bản chuẩn song ngữ** lúc runtime nên vô hại nhưng thừa. Khi cập nhật, nên gỡ block `<child_safety>` thừa và chỉ giữ đoạn VI văn xuôi.
 
 ```text
 Bạn là TBot — người bạn robot biết nói, ấm áp và vui vẻ, đồng hành cùng một em nhỏ 4–8 tuổi đang học tiếng Anh. Bạn nói qua loa của robot; em bé nghe bằng tai, không đọc chữ.
@@ -51,8 +51,8 @@ Bạn là TBot — người bạn robot biết nói, ấm áp và vui vẻ, đ�
 
 [Khi nào GỌI tool start_lesson — và khi nào KHÔNG]
 - CHỈ gọi start_lesson khi bé muốn VÀO ĐÚNG BÀI HỌC ĐÃ ĐƯỢC GIAO cho bé (bài học/tiết học/khoá học của con), KHÔNG phải khi bé chỉ muốn được dạy/chơi học ngay trong lúc trò chuyện.
-  • GỌI khi bé nói (tiếng Việt): "học bài thôi", "con muốn học bài", "vào bài học", "mở bài học của con", "bắt đầu bài học", "chuyển sang bài học", "học tiếp bài", "mình vào học nhé".
-  • GỌI khi bé nói (English): "start the lesson", "let's do the lesson", "open my lesson", "begin the class", "switch to lesson", "continue the lesson".
+  • GỌI khi bé nói (tiếng Việt): "học bài thôi", "con muốn học bài", "vào bài học", "mở bài học của con", "bắt đầu bài học", "bắt đầu học bài", "mở khóa học của con", "vào khóa học của con", "chuyển sang bài học", "học tiếp bài", "tiếp tục khóa học", "mình vào học nhé".
+  • GỌI khi bé nói (English): "start the lesson", "let's do the lesson", "open my lesson", "begin the class", "switch to lesson", "continue the lesson", "continue the course", "resume course".
 - KHÔNG gọi start_lesson khi bé chỉ muốn được DẠY/CHƠI HỌC NGAY trong hội thoại — đó là trò chuyện thường, bạn tự dạy luôn: "dạy con đi", "cho con học chữ", "con muốn học số", "con muốn hát", "đố con đi", "kể chuyện cho con".
 - KHÔNG gọi start_lesson cho hỏi đáp linh tinh, hỏi giờ/thời tiết, chơi game, hay bất kỳ câu trò chuyện thường nào.
 - Nếu mơ hồ (bé chỉ nói "con chán" / "chơi gì đi" / "học gì đó đi"), HỎI LẠI một câu ngắn ("Con muốn vào bài học của con, hay mình học vài từ ngay tại đây?") thay vì tự đoán mà gọi tool.
@@ -64,7 +64,7 @@ Vì sao prompt này hợp với code:
 - **Ranh giới "bài học đã giao" vs "dạy con ngay"** là ranh giới NGỮ NGHĨA thật mà runtime cưỡng chế: `maybe_start_lesson_on_connect` chỉ tải **assignment hiện hành của thiết bị** từ backend (`runtime.py:798` `get_current_assignment(...)`), không tải nội dung tuỳ ý. Cho nên các câu kiểu "dạy con đi / cho con học chữ" phải để model tự dạy trong hội thoại, KHÔNG hard-switch trẻ ra khỏi Live vào một runtime có thể trống — đây là phòng vệ false-fire chính cho tiếng Việt 4–8 tuổi.
 - **KHÔNG có dòng nào bảo model "xin lỗi sau khi gọi tool thất bại".** Lý do: trên đường Live, nếu lesson tắt thì tool `start_lesson` **không tồn tại** trong session (xem cải chính #4), nên không có "tool run thất bại" để model phản hồi. Việc đó được xử lý ở tầng admission, không phải tầng prompt.
 
-> Defect cần báo team (không sửa trong tài liệu này): khi đường KHÔNG-Live chạm nhánh gate-OFF, handler trả chuỗi cứng tiếng Anh `"Lesson mode is not available right now."` qua `Action.RESPONSE` (`start_lesson.py:75–79`) — short-circuit model. Với sản phẩm VI 4–8 tuổi, chuỗi tiếng Anh hardcoded này là lỗi UX/localization; nên đổi sang câu VI ấm áp.
+> Ghi chú: khi đường KHÔNG-Live chạm nhánh gate-OFF, handler trả trực tiếp câu VI `"Robot chưa sẵn sàng vào bài học lúc này."` qua `Action.RESPONSE` (`start_lesson.py:75–79`). Nhánh này vẫn không đạt được trên đường Google Live khi runtime tắt, vì tool không được đưa vào session.
 
 ---
 
@@ -90,10 +90,13 @@ start_lesson_function_desc = {
             "begin, enter, open, switch to, or resume their lesson / class / course. "
             "Triggers (Tiếng Việt): 'học bài thôi', 'con muốn học bài', "
             "'vào bài học', 'mở bài học của con', 'bắt đầu bài học', "
-            "'chuyển sang bài học', 'học tiếp bài', 'bài học của con đâu'. "
+            "'bắt đầu học bài', 'mở khóa học của con', 'vào khóa học của con', "
+            "'chuyển sang bài học', 'học tiếp bài', 'tiếp tục khóa học', "
+            "'bài học của con đâu'. "
             "Triggers (English): 'start the lesson', \"let's do the lesson\", "
             "'open my lesson', 'begin the class', 'switch to lesson', "
-            "'continue the lesson', 'resume my class'. "
+            "'continue the lesson', 'continue the course', 'resume course', "
+            "'resume my class'. "
             "KHÔNG gọi / Do NOT call khi trẻ chỉ muốn được DẠY hoặc CHƠI HỌC NGAY "
             "trong lúc trò chuyện — đó là hội thoại thường, hãy tự dạy luôn, đừng "
             "vào lesson runtime: 'dạy con đi', 'cho con học chữ', 'con muốn học số', "
@@ -193,23 +196,23 @@ Vì sao nhánh passive/interactive là phần DUY NHẤT của C được code b
 | Voice = Google Live | `config.yaml:119` `voice_mode.type` | `google_live` | `config.yaml:119–120` |
 | Live API key | env `GOOGLE_API_KEY` (config ref `${GOOGLE_API_KEY}`) | key thật | `google_live.api_key`; `client._resolve_api_key()` |
 | Live model | `google_live.model` | `gemini-3.1-flash-live-preview` | `config.yaml:124` |
-| **Bật lesson runtime (cũng là gate đưa tool start_lesson vào Live)** | env `LESSON_RUNTIME_ENABLED=true` (→ `lesson.runtime_enabled`) | `true` | `config_loader.py:151`; gate đọc `connection._lesson_runtime_enabled` → `product_toolset.py:65–66` quyết tool có vào Live không |
+| **Bật lesson runtime (cũng là gate đưa tool start_lesson vào Live)** | tự bật khi đủ `COURSE_BACKEND_URL` + `LESSON_ASSET_ORIGIN_BASE` + `TBOT_DEVICE_MINT_SECRET`; hoặc env `LESSON_RUNTIME_ENABLED=true`; env `LESSON_RUNTIME_ENABLED=false` tắt rõ ràng | `true` | `config_loader.py:_apply_lesson_env_overrides`; gate đọc `connection._lesson_runtime_enabled` → `product_toolset.py:65–66` quyết tool có vào Live không |
 | Course backend URL | env `COURSE_BACKEND_URL` (→ `lesson.api_base`, fallback `server.api_url`) | base của NestJS backend | `config_loader.py:145–147,152`; runtime đọc `lesson.api_base` rồi `server.api_url` (`runtime.py:728`) |
 | Asset origin (BẮT BUỘC khi bật lesson) | env `LESSON_ASSET_ORIGIN_BASE` | origin chứa asset | `config_loader.py:153`; boot guard `:177–194` |
 | Device mint secret (BẮT BUỘC khi bật lesson) | env `TBOT_DEVICE_MINT_SECRET` | secret mint token | boot guard `config_loader.py:177–194`; runtime mint identity (`runtime.py:787`) |
 | Profile thiết bị render được | `lesson.supported_profiles` | `['espTft']` | `config.yaml` lesson block; gate profile trong runtime |
 | Manifest fetch (runtime tự gọi) | — | `get_lesson_manifest(client, base_url, lessonId, profile, …)` → đường có dạng `GET /v1/lessons/{lessonId}/manifest?profile={profile}` | **fetch thật ở `runtime.py:825`** từ `base_url` (`runtime.py:728`); chuỗi `runtime.py:600` CHỈ là `manifestRef.url` thông tin trong body `lesson_prepare`, KHÔNG phải nơi gọi |
 
-**Cảnh báo cứng (boot-safe guard):** nếu đặt `LESSON_RUNTIME_ENABLED=true` mà **thiếu** `TBOT_DEVICE_MINT_SECRET` hoặc `LESSON_ASSET_ORIGIN_BASE`, server **raise RuntimeError lúc boot** (`config_loader.py:_assert_lesson_runtime_boot_safe`, `:177–194`, raise tại `:191`) — không boot được. Phải set đủ cả ba env (`LESSON_RUNTIME_ENABLED` + `TBOT_DEVICE_MINT_SECRET` + `LESSON_ASSET_ORIGIN_BASE`) cùng lúc.
+**Cảnh báo cứng (boot-safe guard):** nếu lesson runtime bật mà **thiếu** `TBOT_DEVICE_MINT_SECRET` hoặc `LESSON_ASSET_ORIGIN_BASE`, server **raise RuntimeError lúc boot** (`config_loader.py:_assert_lesson_runtime_boot_safe`) — không boot được. Với production, set đủ `COURSE_BACKEND_URL`, `TBOT_DEVICE_MINT_SECRET`, `LESSON_ASSET_ORIGIN_BASE`, `GOOGLE_API_KEY`; `LESSON_RUNTIME_ENABLED=true` không còn bắt buộc nếu các prerequisite đó đã có, nhưng vẫn có thể dùng để bật rõ ràng.
 
 ### D.2 Thứ tự thao tác (cold robot → lesson đang chạy)
 
 1. **Gán bài cho trẻ ở backend course (NestJS).** Phải có assignment "current" cho `device_id` của robot, state KHÁC `COMPLETED/CANCELLED/FAILED` (nếu terminal, runtime bỏ qua). Manifest đã publish ở `manifestVersion: "teebot-lesson-renderer.v1"` (v1 device chỉ nhận v1).
-2. **Set env trên server image** (đủ 5): `LESSON_RUNTIME_ENABLED=true`, `COURSE_BACKEND_URL=<base>`, `LESSON_ASSET_ORIGIN_BASE=<origin>`, `TBOT_DEVICE_MINT_SECRET=<secret>`, `GOOGLE_API_KEY=<key>`. (Robot lesson-flow: image hiện cần rebuild + bật `LESSON_RUNTIME_ENABLED` — chưa deploy.)
+2. **Set env trên server image**: `COURSE_BACKEND_URL=<base>`, `LESSON_ASSET_ORIGIN_BASE=<origin>`, `TBOT_DEVICE_MINT_SECRET=<secret>`, `GOOGLE_API_KEY=<key>`. `LESSON_RUNTIME_ENABLED=true` là optional explicit enable; `LESSON_RUNTIME_ENABLED=false` là explicit kill switch.
 3. **Khởi động server.** `_import_google_genai_with_known_warning_filters()` nạp SDK eager lúc startup (`client.py:39–42`) để né cost import ~80–100s ở kết nối đầu. Boot-safe guard chạy ở bước này — thiếu env sẽ fail nhanh.
 4. **Robot kết nối WebSocket + gửi hello/features.** Runtime chờ `conn.features` rồi kiểm tra `lesson_capability_ok`; thiếu cap → no-op (firmware chưa hỗ trợ lesson thì im lặng bỏ qua, không vỡ voice).
-5. **Phiên Live mở.** `_resolve_functions_for_live()` (`google_live.py:848–860`) dựng tool list từ `product_tool_names(conn)`. **Vì `LESSON_RUNTIME_ENABLED=true`, `product_toolset.py:65–66` đẩy `start_lesson` vào danh sách → tool có mặt trong `connect_config.tools`.** `_build_connect_config` (`client.py:252–309`) đặt `system_instruction` = persona phần A đã bọc child-safety (`client.py:302–304,327`), `tools` = `[start_lesson, …]`, `safety_settings` = BLOCK_LOW_AND_ABOVE (`client.py:285,311–321`). Trẻ trò chuyện bình thường.
-   - **Nếu `LESSON_RUNTIME_ENABLED` TẮT:** `product_tool_names` KHÔNG thêm `start_lesson` → tool **vắng mặt** khỏi session. Trẻ nói "học bài thôi" cũng KHÔNG có tool để gọi; nhánh `"Lesson mode is not available right now."` (`start_lesson.py:78`) **không đạt được trên đường Live** (chỉ đạt qua đường KHÔNG-Live như intent-dispatch classic). Đây là gate ADMISSION, không phải nhánh runtime nói-được.
+5. **Phiên Live mở.** `_resolve_functions_for_live()` (`google_live.py:848–860`) dựng tool list từ `product_tool_names(conn)`. **Vì lesson runtime đã bật qua auto-enable hoặc `LESSON_RUNTIME_ENABLED=true`, `product_toolset.py:65–66` đẩy `start_lesson` vào danh sách → tool có mặt trong `connect_config.tools`.** `_build_connect_config` (`client.py:252–309`) đặt `system_instruction` = persona phần A đã bọc child-safety (`client.py:302–304,327`), `tools` = `[start_lesson, …]`, `safety_settings` = BLOCK_LOW_AND_ABOVE (`client.py:285,311–321`). Trẻ trò chuyện bình thường.
+   - **Nếu `LESSON_RUNTIME_ENABLED` TẮT:** `product_tool_names` KHÔNG thêm `start_lesson` → tool **vắng mặt** khỏi session. Trẻ nói "học bài thôi" cũng KHÔNG có tool để gọi; nhánh `"Robot chưa sẵn sàng vào bài học lúc này."` (`start_lesson.py:78`) **không đạt được trên đường Live** (chỉ đạt qua đường KHÔNG-Live như intent-dispatch classic). Đây là gate ADMISSION, không phải nhánh runtime nói-được.
 6. **Trẻ nói "học bài thôi" (khi tool có mặt).** Live khớp `description` của `start_lesson` (phần B) → phát `tool_call` → handler `start_lesson(conn)`:
    - re-check gate `conn._lesson_runtime_enabled()` như belt-and-suspenders (`start_lesson.py:70–79`) — nhưng vì tool chỉ tồn tại khi flag ON, nhánh OFF ở đây thực tế không reachable trên Live;
    - lên lịch `conn._lesson_pull_on_connect()` qua `loop.create_task`, gắn vào `conn.lesson_pull_task` để `close()` huỷ được, supersede pull cũ đang chạy (`start_lesson.py:96–112`);
@@ -231,8 +234,8 @@ Vì sao nhánh passive/interactive là phần DUY NHẤT của C được code b
 - `core/providers/tools/product_toolset.py:31` (`ALWAYS_INCLUDE_WHEN_LESSON_ENABLED=("start_lesson",)`), `:61` (`product_tool_names`), `:65–66` (extend CHỈ trong `if lesson_runtime_enabled(conn):`), `:70–71` (`lesson_runtime_enabled`).
 - `core/voice/session_provider/google_live.py:17,756,848–860` (`_resolve_functions_for_live` dựng tool list từ `product_tool_names`).
 - `core/voice/google_live/client.py:285,311–321` (safety_settings BLOCK_LOW_AND_ABOVE x4); `:324,327,302–304` (`_build_system_instruction` đọc `prompt`/`system_prompt`, bọc `ensure_child_safety_block`, gắn làm `system_instruction`); `:370–412` (`_build_tools`/`_sanitize_schema`); `:656–674` (`_normalize_tool_call`).
-- `core/voice/child_safety.py:9–17` (`CHILD_SAFETY_BLOCK` — TIẾNG ANH), `:25–28` (`_CHILD_SAFETY_RE` chỉ strip literal tag), `:36–41` (`ensure_child_safety_block` strip+prepend), `:44–63` (`screen_model_output`).
-- `plugins_func/functions/start_lesson.py:70–79` (gate-OFF `Action.RESPONSE` chuỗi EN cứng), `:96–112` (fire-and-forget + task tracking), `:124–133` (RECORD response).
+- `core/voice/child_safety.py:9–24` (`CHILD_SAFETY_BLOCK` song ngữ), `:27–30` (`_CHILD_SAFETY_RE` chỉ strip literal tag), `:38–43` (`ensure_child_safety_block` strip+prepend), `:46–65` (`screen_model_output`).
+- `plugins_func/functions/start_lesson.py:70–79` (gate-OFF `Action.RESPONSE` tiếng Việt cho đường KHÔNG-Live), `:96–112` (fire-and-forget + task tracking), `:124–133` (RECORD response).
 - `core/lesson/runtime.py:79–85` (`PASSIVE_STEP_TYPES`), `:87–102` (`_is_passive_step`), `:594–606` (`_prepare_body`), `:600` (CHỈ chuỗi `manifestRef.url` thông tin), `:626–646` (`_select_steps`), `:633` (9 stepType), `:655–673` (`_step_body` forward `audio`/`scene`/`completionClass`), `:702–705` (serialize pulls), `:728` (`base_url = api_base or api_url`), `:740–741` (skip nếu thiếu), `:787` (mint identity), `:798` (`get_current_assignment`), `:825` (`get_lesson_manifest` — fetch THẬT).
 - `config/config_loader.py:140–153` (env→config: `LESSON_RUNTIME_ENABLED`/`COURSE_BACKEND_URL`/`LESSON_ASSET_ORIGIN_BASE`), `:177–194` (`_assert_lesson_runtime_boot_safe`, raise `:191`).
 - `config.yaml:119–124` (voice_mode/google_live), `:311` (`prompt: |`), `:312–320` (block `<child_safety>` thừa — bị strip lúc runtime).
@@ -240,7 +243,5 @@ Vì sao nhánh passive/interactive là phần DUY NHẤT của C được code b
 
 ### Việc cần team xử lý (phát hiện kèm, ngoài phạm vi tài liệu)
 
-1. **Localize `CHILD_SAFETY_BLOCK` sang tiếng Việt** (`child_safety.py:9–17`) — hiện luật an toàn tới model bằng tiếng Anh trong khi hội thoại là tiếng Việt.
-2. **Đổi chuỗi gate-OFF cứng `"Lesson mode is not available right now."`** (`start_lesson.py:78`) sang câu VI ấm áp (chỉ ảnh hưởng đường KHÔNG-Live, nhưng vẫn là lỗi localization).
 3. **Định vị nguồn TEXT lời thoại lesson** (không có trong `core/lesson/` hay fixture) trước khi ship phần C như hợp đồng authoring — nhiều khả năng ở repo course backend / lớp pre-synth TTS.
-4. **Gỡ block `<child_safety>` thừa trong `config.yaml:312–320`** (vô hại nhưng gây hiểu nhầm vì bị strip lúc runtime).
+4. **Gỡ block `<child_safety>` thừa nếu còn trong config triển khai** (vô hại nhưng gây hiểu nhầm vì bị strip lúc runtime).

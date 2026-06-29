@@ -28,7 +28,10 @@ pytest-asyncio markers), mirroring the neighboring lesson suites.
 import json
 import unittest
 
-from core.voice.session_provider.google_live import GoogleLiveProvider
+from core.voice.session_provider.google_live import (
+    GoogleLiveProvider,
+    LESSON_LIVE_TEXT_INSTRUCTION,
+)
 
 # Reuse the byte-frozen runtime harness *fixtures* (free symbols only — we do NOT
 # import the LessonRuntimeTest TestCase, which pytest's unittest collector would
@@ -136,7 +139,7 @@ def _conn_with_real_provider(*, tts=None, live_text_client=None):
 
 
 # The exact production wrapper the provider prepends in ``_send_live_text_ack``.
-LIVE_TEXT_INSTRUCTION = "Nói đúng một câu này, không thêm gì: "
+LIVE_TEXT_INSTRUCTION = LESSON_LIVE_TEXT_INSTRUCTION
 
 
 def _single_step_manifest_with_prompt(prompt, *, story_beat=None, story_text=None):

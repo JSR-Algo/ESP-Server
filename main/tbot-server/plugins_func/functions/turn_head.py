@@ -175,6 +175,16 @@ def _tool_result_is_true(result) -> bool:
             return _tool_result_is_true(result["result"])
     return False
 
+def _motion_response(result, response: str) -> ActionResponse:
+    if _tool_result_is_true(result):
+        return ActionResponse(Action.RESPONSE, result="ok", response=response)
+
+    return ActionResponse(
+        Action.RESPONSE,
+        result="sent_unconfirmed",
+        response=response,
+    )
+
 
 def _clamp_head_angle(angle) -> int:
     try:
@@ -249,17 +259,9 @@ async def _call_head_tool(
 
     result = await call_mcp_tool(conn, mcp_client, tool_name, args_str)
     if not _tool_result_is_true(result):
-        logger.bind(tag=TAG).warning(f"head tool failed result={result!r}")
-        return ActionResponse(
-            Action.ERROR,
-            response="Main đã gọi lệnh nhưng servant không xác nhận UART.",
-        )
+        logger.bind(tag=TAG).warning(f"head tool unconfirmed result={result!r}")
 
-    return ActionResponse(
-        Action.RESPONSE,
-        result="ok",
-        response=success_response,
-    )
+    return _motion_response(result, success_response)
 
 
 @register_function("turn_head_left", turn_head_left_function_desc, ToolType.SYSTEM_CTL)
@@ -327,8 +329,13 @@ async def turn_head_left_then_right_max(conn: "ConnectionHandler"):
     if right_result.action != Action.RESPONSE:
         return right_result
 
+    result_status = "sent_unconfirmed" if (
+        left_result.result == "sent_unconfirmed" or
+        right_result.result == "sent_unconfirmed"
+    ) else "ok"
+
     return ActionResponse(
         Action.RESPONSE,
-        result="ok",
+        result=result_status,
         response="Đã quay đầu sang trái rồi sang phải tối đa.",
     )

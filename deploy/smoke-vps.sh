@@ -7,6 +7,8 @@ HTTP_PORT="8002"
 OTA_PORT="8003"
 TIMEOUT="5"
 SCHEME="http"
+PUBLIC_OTA_URL=""
+EXPECTED_WS_HOST=""
 
 usage() {
   cat <<'USAGE'
@@ -24,6 +26,8 @@ Options:
   --ota-port <port>        OTA HTTP port (default: 8003).
   --timeout <seconds>      Per-check timeout (default: 5).
   --scheme <http|https>    HTTP scheme (default: http).
+  --ota-url <url>          Public OTA URL to fetch and validate.
+  --expected-ws-host <h>   Expected host in the OTA websocket.url payload.
   -h, --help               Show help.
 USAGE
 }
@@ -52,6 +56,60 @@ check_tcp() {
   else
     bash -c ":</dev/tcp/${host}/${port}" >/dev/null 2>&1
   fi
+}
+
+url_host() {
+  local url="$1"
+  local rest="${url#*://}"
+  printf '%s' "${rest%%/*}"
+}
+
+is_quick_tunnel_host() {
+  local host="$1"
+  [[ "${host}" == "trycloudflare.com" || "${host}" == *.trycloudflare.com ]]
+}
+
+check_public_ota_payload() {
+  local output
+  output="$(mktemp)"
+  trap 'rm -f "${output}"' RETURN
+
+  local ota_host
+  ota_host="$(url_host "${PUBLIC_OTA_URL}")"
+  if is_quick_tunnel_host "${ota_host}" || is_quick_tunnel_host "${EXPECTED_WS_HOST}"; then
+    die "public OTA/WebSocket endpoint must not use a trycloudflare quick tunnel"
+  fi
+
+  printf 'Checking public OTA payload %s\n' "${PUBLIC_OTA_URL}"
+  curl --fail --silent --show-error --location --max-time "${TIMEOUT}" --output "${output}" "${PUBLIC_OTA_URL}"
+  python3 - "${output}" "${EXPECTED_WS_HOST}" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+path, expected_host = sys.argv[1], sys.argv[2]
+with open(path, 'r', encoding='utf-8') as fh:
+    payload = json.load(fh)
+
+api_url = payload.get('api_url')
+if not isinstance(api_url, str) or not api_url.strip():
+    print('OTA response missing api_url', file=sys.stderr)
+    sys.exit(1)
+
+websocket = payload.get('websocket') or {}
+ws_url = websocket.get('url')
+if not isinstance(ws_url, str) or not ws_url.strip():
+    print('OTA response missing websocket.url', file=sys.stderr)
+    sys.exit(1)
+
+parsed = urlparse(ws_url)
+if parsed.hostname != expected_host:
+    print(f'OTA websocket host {parsed.hostname or ""} does not match expected host {expected_host}', file=sys.stderr)
+    sys.exit(1)
+if parsed.path != '/tbot/v1/':
+    print('OTA websocket.url must use /tbot/v1/', file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 while (($#)); do
@@ -86,6 +144,16 @@ while (($#)); do
       SCHEME="$2"
       shift 2
       ;;
+    --ota-url)
+      [[ $# -ge 2 ]] || die "--ota-url requires a value"
+      PUBLIC_OTA_URL="$2"
+      shift 2
+      ;;
+    --expected-ws-host)
+      [[ $# -ge 2 ]] || die "--expected-ws-host requires a value"
+      EXPECTED_WS_HOST="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -98,9 +166,17 @@ done
 
 [[ -n "${HOST}" ]] || die "--host is required"
 need_cmd curl
+if [[ -n "${PUBLIC_OTA_URL}" || -n "${EXPECTED_WS_HOST}" ]]; then
+  [[ -n "${PUBLIC_OTA_URL}" ]] || die "--ota-url is required when --expected-ws-host is set"
+  [[ -n "${EXPECTED_WS_HOST}" ]] || die "--expected-ws-host is required when --ota-url is set"
+  need_cmd python3
+fi
 
 check_http "${SCHEME}://${HOST}:${HTTP_PORT}/"
 check_http "${SCHEME}://${HOST}:${OTA_PORT}/tbot/ota/"
 check_tcp "${HOST}" "${TCP_PORT}"
+if [[ -n "${PUBLIC_OTA_URL}" ]]; then
+  check_public_ota_payload
+fi
 
 printf 'Smoke checks passed for %s\n' "${HOST}"

@@ -95,6 +95,29 @@
                       :placeholder="$t('device.childAge')"
                       class="child-age-input"
                     />
+                    <el-input
+                      v-model="row.childInterests"
+                      size="mini"
+                      maxlength="255"
+                      :placeholder="$t('device.childInterests')"
+                    />
+                    <el-select v-model="row.learningStyle" size="mini" clearable :placeholder="$t('device.learningStyle')">
+                      <el-option label="Visual" value="visual" />
+                      <el-option label="Audio" value="audio" />
+                      <el-option label="Interactive" value="interactive" />
+                    </el-select>
+                    <el-select v-model="row.vocabularyLevel" size="mini" clearable :placeholder="$t('device.vocabularyLevel')">
+                      <el-option label="Beginner" value="beginner" />
+                      <el-option label="Basic" value="basic" />
+                      <el-option label="Intermediate" value="intermediate" />
+                      <el-option label="Advanced" value="advanced" />
+                    </el-select>
+                    <el-input
+                      v-model="row.parentCareer"
+                      size="mini"
+                      maxlength="64"
+                      :placeholder="$t('device.parentCareer')"
+                    />
                     <div class="child-profile-actions">
                       <el-button size="mini" type="primary" :loading="row._childSubmitting" @click="updateChildProfile(row)">
                         {{ $t('button.save') }}
@@ -109,6 +132,9 @@
                     <span class="child-profile-name" @click="row.isChildEdit = true">{{ row.childName || '-' }}</span>
                     <span v-if="row.childAge" class="child-profile-age">
                       {{ row.childAge }} {{ $t('device.yearsOld') }}
+                    </span>
+                    <span v-if="row.childInterests" class="child-profile-age">
+                      {{ row.childInterests }}
                     </span>
                   </div>
                 </template>
@@ -232,7 +258,11 @@ export default {
         (device.macAddress && device.macAddress.toLowerCase().includes(keyword)) ||
         (device.remark && device.remark.toLowerCase().includes(keyword)) ||
         (device.childName && device.childName.toLowerCase().includes(keyword)) ||
-        (device.childAge && String(device.childAge).includes(keyword))
+        (device.childAge && String(device.childAge).includes(keyword)) ||
+        (device.childInterests && device.childInterests.toLowerCase().includes(keyword)) ||
+        (device.learningStyle && device.learningStyle.toLowerCase().includes(keyword)) ||
+        (device.vocabularyLevel && device.vocabularyLevel.toLowerCase().includes(keyword)) ||
+        (device.parentCareer && device.parentCareer.toLowerCase().includes(keyword))
       );
     },
 
@@ -404,14 +434,32 @@ export default {
         this.$message.warning(this.$t('device.selectChildNameFirst'));
         return;
       }
-      this.updateDeviceInfo(row.device_id, { alias: child.childName, childName: child.childName, childAge: child.age }, (ok, resp) => {
+      const personality = child.personality || {};
+      const childInterests = Array.isArray(personality.interests) ? personality.interests.join(', ') : '';
+      this.updateDeviceInfo(row.device_id, {
+        alias: child.childName,
+        childName: child.childName,
+        childAge: child.age,
+        childInterests,
+        learningStyle: personality.learningStyle || '',
+        vocabularyLevel: personality.vocabularyLevel || '',
+        parentCareer: personality.parentCareer || '',
+      }, (ok, resp) => {
         if (ok) {
           row.remark = child.childName;
           row._originalRemark = child.childName;
           row.childName = child.childName;
           row.childAge = child.age;
+          row.childInterests = childInterests;
+          row.learningStyle = personality.learningStyle || '';
+          row.vocabularyLevel = personality.vocabularyLevel || '';
+          row.parentCareer = personality.parentCareer || '';
           row._originalChildName = child.childName;
           row._originalChildAge = child.age;
+          row._originalChildInterests = childInterests;
+          row._originalLearningStyle = personality.learningStyle || '';
+          row._originalVocabularyLevel = personality.vocabularyLevel || '';
+          row._originalParentCareer = personality.parentCareer || '';
           this.$message.success(this.$t('device.childProfileApplied'));
         } else {
           this.$message.error(resp.msg || this.$t('device.remarkSaveFailed'));
@@ -430,19 +478,35 @@ export default {
         this.$message.warning(this.$t('device.childAgeInvalid'));
         return;
       }
+      const childInterests = (row.childInterests || '').trim();
+      const learningStyle = row.learningStyle || '';
+      const vocabularyLevel = row.vocabularyLevel || '';
+      const parentCareer = (row.parentCareer || '').trim();
       row._childSubmitting = true;
-      const payload = { childName, childAge };
+      const payload = { childName, childAge, childInterests, learningStyle, vocabularyLevel, parentCareer };
       this.updateDeviceInfo(row.device_id, payload, (ok, resp) => {
         if (ok) {
           row.childName = childName;
           row.childAge = childAge;
+          row.childInterests = childInterests;
+          row.learningStyle = learningStyle;
+          row.vocabularyLevel = vocabularyLevel;
+          row.parentCareer = parentCareer;
           row._originalChildName = childName;
           row._originalChildAge = childAge;
+          row._originalChildInterests = childInterests;
+          row._originalLearningStyle = learningStyle;
+          row._originalVocabularyLevel = vocabularyLevel;
+          row._originalParentCareer = parentCareer;
           row.isChildEdit = false;
           this.$message.success(this.$t('device.childProfileSaved'));
         } else {
           row.childName = row._originalChildName;
           row.childAge = row._originalChildAge;
+          row.childInterests = row._originalChildInterests;
+          row.learningStyle = row._originalLearningStyle;
+          row.vocabularyLevel = row._originalVocabularyLevel;
+          row.parentCareer = row._originalParentCareer;
           this.$message.error(resp.msg || this.$t('device.childProfileSaveFailed'));
         }
         row._childSubmitting = false;
@@ -451,6 +515,10 @@ export default {
     cancelChildProfileEdit(row) {
       row.childName = row._originalChildName;
       row.childAge = row._originalChildAge;
+      row.childInterests = row._originalChildInterests;
+      row.learningStyle = row._originalLearningStyle;
+      row.vocabularyLevel = row._originalVocabularyLevel;
+      row.parentCareer = row._originalParentCareer;
       row.isChildEdit = false;
     },
     // Remark input: submit on blur
@@ -524,8 +592,16 @@ export default {
               _originalRemark: device.alias,
               childName: device.childName,
               childAge: device.childAge,
+              childInterests: device.childInterests,
+              learningStyle: device.learningStyle,
+              vocabularyLevel: device.vocabularyLevel,
+              parentCareer: device.parentCareer,
               _originalChildName: device.childName,
               _originalChildAge: device.childAge,
+              _originalChildInterests: device.childInterests,
+              _originalLearningStyle: device.learningStyle,
+              _originalVocabularyLevel: device.vocabularyLevel,
+              _originalParentCareer: device.parentCareer,
               isEdit: false,
               isChildEdit: false,
               _submitting: false,

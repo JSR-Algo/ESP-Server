@@ -35,9 +35,39 @@ WAKEUP_CONFIG = {
 # Create global wake word config manager
 wakeup_words_config = WakeupWordsConfig()
 
-# Used to prevent concurrent callswakeupWordsResponseLock of
-_wakeup_response_lock = asyncio.Lock()
+def _new_asyncio_lock():
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    return asyncio.Lock()
 
+# Used to prevent concurrent callswakeupWordsResponseLock of
+_wakeup_response_lock = _new_asyncio_lock()
+
+def _to_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _is_google_live_connection(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", None)
+    if not isinstance(config, dict):
+        return False
+    voice_mode = config.get("voice_mode")
+    return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
+
+def _google_live_output_sample_rate(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", None)
+    if isinstance(config, dict):
+        google_live = config.get("google_live")
+        if isinstance(google_live, dict):
+            sample_rate = _to_int(google_live.get("output_sample_rate"))
+            if sample_rate:
+                return sample_rate
+    welcome_audio = getattr(conn, "welcome_msg", {}).get("audio_params", {})
+    return _to_int(welcome_audio.get("sample_rate"), getattr(conn, "sample_rate", 24000))
 
 async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
@@ -46,13 +76,24 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         format = audio_params.get("format")
         conn.logger.bind(tag=TAG).debug(f"Client audio format: {format}")
         conn.audio_format = format
-        conn.welcome_msg["audio_params"] = audio_params
         sample_rate = audio_params.get("sample_rate")
+        server_audio_params = dict(audio_params)
         if sample_rate:
-            conn.sample_rate = int(sample_rate)
-            conn.logger.bind(tag=TAG).info(
-                f"Set output audio sample rate from client hello to: {conn.sample_rate}"
-            )
+            client_sample_rate = int(sample_rate)
+            conn.input_sample_rate = client_sample_rate
+            if _is_google_live_connection(conn):
+                conn.sample_rate = _google_live_output_sample_rate(conn)
+                server_audio_params["sample_rate"] = conn.sample_rate
+                conn.logger.bind(tag=TAG).info(
+                    "Set Google Live audio sample rates from client hello: "
+                    f"input={client_sample_rate} output={conn.sample_rate}"
+                )
+            else:
+                conn.sample_rate = client_sample_rate
+                conn.logger.bind(tag=TAG).info(
+                    f"Set output audio sample rate from client hello to: {conn.sample_rate}"
+                )
+        conn.welcome_msg["audio_params"] = server_audio_params
     features = msg_json.get("features")
     if features:
         conn.logger.bind(tag=TAG).debug(f"Client features: {features}")

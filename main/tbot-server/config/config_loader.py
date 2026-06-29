@@ -26,7 +26,13 @@ GOOGLE_LIVE_DEFAULTS = {
     "input_live_chunk_ms": 20,
     "interrupt_policy": "wake_or_transcript",
     "raw_audio_barge_in_enabled": False,
-    "input_flush_delay_sec": 1.0,
+    "input_flush_delay_sec": 1.4,
+    "input_speech_tail_ms": 1300,
+    "input_min_capture_ms": 400,
+    "input_max_capture_ms": 8000,
+    "input_speech_rms_threshold": 500,
+    "waiting_model_timeout_sec": 2.5,
+    "waiting_model_retry_prompt_after_sec": 4.0,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
     "interrupt_speech_tail_ms": 240,
@@ -80,6 +86,7 @@ GOOGLE_LIVE_DEFAULTS = {
         "backoff_multiplier": 2,
     },
 }
+DEFAULT_EDGE_TTS_VOICE = "vi-VN-HoaiMyNeural"
 
 
 def get_project_dir():
@@ -140,7 +147,7 @@ def _apply_tts_runtime_overrides(config):
         edge_config = {}
     edge_config = dict(edge_config)
     edge_config.setdefault("type", "edge")
-    edge_config["voice"] = _clean_env("TBOT_EDGE_TTS_VOICE") or edge_config.get("voice") or "en-US-JennyNeural"
+    edge_config["voice"] = _clean_env("TBOT_EDGE_TTS_VOICE") or edge_config.get("voice") or DEFAULT_EDGE_TTS_VOICE
     edge_config.setdefault("output_dir", "tmp/")
     tts_configs["EdgeTTS"] = edge_config
 
@@ -217,7 +224,7 @@ def _clean_env(name):
 
 def _parse_bool_env(name):
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return None
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
@@ -269,7 +276,7 @@ def _apply_lesson_env_overrides(config):
     sample_flag = _parse_bool_env("LESSON_SAMPLE_ENABLED")
     sample_asset_base = _clean_env("LESSON_SAMPLE_ASSET_BASE")
     sample_step_dwell = _clean_env("LESSON_SAMPLE_STEP_DWELL_SEC")
-    # LESSON_SAMPLE_MODE -> lesson.sample_mode ('passive' default | 'interactive' speaking drill).
+    # LESSON_SAMPLE_MODE -> lesson.sample_mode ('interactive' default | 'passive' fallback).
     sample_mode = _clean_env("LESSON_SAMPLE_MODE")
     if (
         flag is None
@@ -285,6 +292,7 @@ def _apply_lesson_env_overrides(config):
         and sample_flag is None
         and not sample_asset_base
         and not sample_step_dwell
+        and not sample_mode
     ):
         return config
 
@@ -401,6 +409,9 @@ def _apply_voice_env_overrides(config):
     language_code = _clean_env("TBOT_GOOGLE_LIVE_LANGUAGE_CODE")
     if language_code:
         google_live["language_code"] = language_code
+    voice_name = _clean_env("TBOT_GOOGLE_LIVE_VOICE_NAME") or _clean_env("GOOGLE_LIVE_VOICE_NAME")
+    if voice_name:
+        google_live["voice_name"] = voice_name
 
     extra_wake_words = _split_csv_env("TBOT_WAKEUP_WORDS")
     if extra_wake_words:

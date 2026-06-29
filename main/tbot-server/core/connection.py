@@ -475,6 +475,7 @@ class ConnectionHandler:
                 return False
             handled = await self.voice_provider.handle_audio_bytes(message)
             if handled:
+                self.last_activity_time = time.time() * 1000
                 self.last_live_activity_at = time.monotonic()
             return bool(handled)
         if self.voice_provider is None:
@@ -483,6 +484,7 @@ class ConnectionHandler:
             await self.enter_conversation_mode(reason="inbound_audio")
         handled = await self.voice_provider.handle_audio_bytes(message)
         if handled:
+            self.last_activity_time = time.time() * 1000
             self.last_live_activity_at = time.monotonic()
         return bool(handled)
 
@@ -529,7 +531,10 @@ class ConnectionHandler:
         self._set_session_mode(SessionMode.DORMANT, reason=reason)
 
     async def enter_lesson_mode(self, *, reason: str = "lesson_start") -> None:
-        await self._suspend_live_for_lesson()
+        # Keep the Google Live session open while lesson mode owns the audio
+        # channel. Closing it here races with in-flight mic frames and forces a
+        # reconnect flicker just as the device starts rendering the lesson.
+        await self._persist_live_resumption_handle()
         self._set_session_mode(SessionMode.LESSON, reason=reason)
 
     async def release_lesson_mode(self, *, reason: str = "lesson_terminal") -> None:
@@ -543,14 +548,13 @@ class ConnectionHandler:
         every failure/timeout/abandon terminal to the idle/dormant state).
 
         The firmware's own lesson_stop handler already cleared the 3 lesson layers and
-        set a NEUTRAL face; the happy llm-emotion frame below arrives AFTER that ack
-        (the server only completes once the stop-ack is in) and overrides neutral, so
-        no firmware change is needed. Gated by lesson.return_to_conversation (default
-        True): set false to keep the cost-conscious dormant fallback while still showing
-        the happy face. Best-effort — never raises into the lesson terminal path."""
+        set a NEUTRAL face; leave LESSON mode before sending the happy llm-emotion
+        frame so the realtime face is visible again when the frame arrives. Gated by
+        lesson.return_to_conversation (default True): set false to keep the
+        cost-conscious dormant fallback while still showing the happy face. Best-effort
+        — never raises into the lesson terminal path."""
         if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
             return
-        await self._send_lesson_emotion("happy")
         lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
         if lesson_cfg.get("return_to_conversation", True):
             # enter_conversation_mode refuses while still in LESSON, so step out of
@@ -559,6 +563,7 @@ class ConnectionHandler:
             await self.enter_conversation_mode(reason=reason)
         else:
             await self.enter_dormant_mode(reason=reason)
+        await self._send_lesson_emotion("happy")
 
     async def _send_lesson_emotion(self, emotion: str) -> None:
         """Push a single emotion face to the device over the realtime WS, reusing the
@@ -1843,7 +1848,7 @@ class ConnectionHandler:
     def _sample_lesson_enabled(self) -> bool:
         """DEMO gate: when lesson.sample_lesson (env LESSON_SAMPLE_ENABLED) is on, the
         spoken start_lesson trigger loads the built-in sample lesson IGNORING any backend
-        assignment. Default OFF; never auto-enabled, and never consulted at connect-time
+        assignment. Default ON in robot config; never consulted at connect-time
         (only the explicit start_lesson tool path) so production behavior is unchanged."""
         lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
         return bool(lesson_cfg.get("sample_lesson", False))
@@ -1964,11 +1969,12 @@ class ConnectionHandler:
         try:
             from core.lesson.runtime import maybe_start_lesson_on_connect
 
-            await maybe_start_lesson_on_connect(self)
+            return await maybe_start_lesson_on_connect(self)
         except Exception as exc:  # pragma: no cover - lesson runtime must never break voice connect
             self.logger.bind(tag=TAG).warning(
                 f"lesson pull-on-connect failed: {type(exc).__name__}: {exc}"
             )
+            return None
 
     async def close(self, ws=None):
         """Resource cleanup method"""

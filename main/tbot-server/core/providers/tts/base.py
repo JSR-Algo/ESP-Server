@@ -3,20 +3,27 @@ import re
 import uuid
 import queue
 import asyncio
+import importlib
 import threading
 import traceback
 import concurrent.futures
+import time
 
 from core.utils import p3
 from datetime import datetime
 from core.utils import textUtils
 from typing import Callable, Any
+from collections.abc import Mapping
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
 from core.utils import opus_encoder_utils
 from core.utils.tts import MarkdownCleaner, convert_percentage_to_range
 from core.utils.output_counter import add_device_output
-from core.handle.reportHandle import enqueue_tts_report
+try:
+    from core.handle.reportHandle import enqueue_tts_report
+except (ImportError, AttributeError):  # pragma: no cover - test stubs / optional reporting
+    def enqueue_tts_report(*_args, **_kwargs):
+        return None
 from core.handle.sendAudioHandle import sendAudioMessage
 from core.utils.util import audio_bytes_to_data_stream, audio_to_data_stream
 from core.providers.tts.dto.dto import (
@@ -29,6 +36,15 @@ from core.providers.tts.dto.dto import (
 TAG = __name__
 logger = setup_logging()
 
+_TRAILING_SEGMENT_CLOSERS = set('"\')]}》】」』）')
+_TTS_SEGMENT_EDGE_CHARS = " \t\r\n\"'）)]}》】」』.!?;:,"
+_MIN_TTS_SEGMENT_CHARS = 18
+
+
+def _is_normal_audio_send_close(exc) -> bool:
+    text = str(exc or "")
+    return "received 1000" in text and "sent 1000" in text
+
 
 class TTSProviderBase(ABC):
     def __init__(self, config, delete_audio_file):
@@ -36,6 +52,13 @@ class TTSProviderBase(ABC):
         self.conn = None
         self.delete_audio_file = delete_audio_file
         self.audio_file_type = "wav"
+        self._fallback_tts_config = config.get("fallback_tts") if isinstance(config, Mapping) else None
+        self._fallback_after_primary_error_until = 0.0
+        self._fallback_after_primary_error_cooldown_sec = self._config_float(
+            config,
+            "fallback_after_primary_error_cooldown_sec",
+            300.0,
+        )
         self.output_file = config.get("output_dir", "tmp/")
         self.tts_timeout = int(config.get("tts_timeout", 15))
         self.tts_text_queue = queue.Queue()
@@ -107,6 +130,40 @@ class TTSProviderBase(ABC):
         self.processed_chars = 0
         self.is_first_sentence = True
 
+    def _config_float(self, config, key, fallback):
+        try:
+            return max(0.0, float(config.get(key, fallback)))
+        except (TypeError, ValueError, AttributeError):
+            return fallback
+
+    def _primary_tts_fast_fallback_active(self):
+        return time.monotonic() < self._fallback_after_primary_error_until
+
+    def _is_fast_fallback_tts_error(self, exc):
+        message = str(exc or "").casefold()
+        return any(
+            marker in message
+            for marker in (
+                "429",
+                "quota",
+                "rate limit",
+                "rate-limit",
+                "resource exhausted",
+                "too many requests",
+                "generate_requests_per_model_per_day",
+            )
+        )
+
+    def _activate_primary_tts_fast_fallback(self, original_text, exc):
+        if self._fallback_after_primary_error_cooldown_sec <= 0:
+            return
+        self._fallback_after_primary_error_until = (
+            time.monotonic() + self._fallback_after_primary_error_cooldown_sec
+        )
+        logger.bind(tag=TAG).warning(
+            f"Primary TTS quota/rate failure; using fallback TTS for cooldown: {original_text}, error: {exc}"
+        )
+
     def generate_filename(self, extension=".wav"):
         return os.path.join(
             self.output_file,
@@ -130,6 +187,8 @@ class TTSProviderBase(ABC):
         max_repeat_time = 5
         if self.delete_audio_file:
             # NeedDeleteFile directly converted to audio data
+            if self._primary_tts_fast_fallback_active():
+                max_repeat_time = 0
             while max_repeat_time > 0:
                 try:
                     audio_bytes = asyncio.run(self.text_to_speak(text, None))
@@ -151,12 +210,18 @@ class TTSProviderBase(ABC):
                     logger.bind(tag=TAG).warning(
                         f"Speech generation failed {5 - max_repeat_time + 1} times: {original_text}, error: {e}"
                     )
+                    if self._is_fast_fallback_tts_error(e):
+                        self._activate_primary_tts_fast_fallback(original_text, e)
+                        max_repeat_time = 0
+                        break
                     max_repeat_time -= 1
             if max_repeat_time > 0:
                 logger.bind(tag=TAG).info(
                     f"Speech generation succeeded: {original_text}, retried {5 - max_repeat_time} times"
                 )
             else:
+                if self._stream_fallback_audio(text, original_text, opus_handler=opus_handler):
+                    return None
                 logger.bind(tag=TAG).error(
                     f"Voice generation failed: {original_text}, check network or service status"
                 )
@@ -164,6 +229,8 @@ class TTSProviderBase(ABC):
         else:
             tmp_file = self.generate_filename()
             try:
+                if self._primary_tts_fast_fallback_active():
+                    max_repeat_time = 0
                 while not os.path.exists(tmp_file) and max_repeat_time > 0:
                     try:
                         asyncio.run(self.text_to_speak(text, tmp_file))
@@ -174,6 +241,10 @@ class TTSProviderBase(ABC):
                         # Not executed successfully,DeleteFile
                         if os.path.exists(tmp_file):
                             os.remove(tmp_file)
+                        if self._is_fast_fallback_tts_error(e):
+                            self._activate_primary_tts_fast_fallback(original_text, e)
+                            max_repeat_time = 0
+                            break
                         max_repeat_time -= 1
 
                 if max_repeat_time > 0:
@@ -181,6 +252,8 @@ class TTSProviderBase(ABC):
                         f"Speech generated successfully: {original_text}:{tmp_file}, retried {5 - max_repeat_time} times"
                     )
                 else:
+                    if self._stream_fallback_audio(text, original_text, opus_handler=opus_handler):
+                        return None
                     logger.bind(tag=TAG).error(
                         f"Voice generation failed: {original_text}, check network or service status"
                     )
@@ -199,6 +272,8 @@ class TTSProviderBase(ABC):
         max_repeat_time = 5
         if self.delete_audio_file:
             # NeedDeleteFile directly converted to audio data
+            if self._primary_tts_fast_fallback_active():
+                max_repeat_time = 0
             while max_repeat_time > 0:
                 try:
                     audio_bytes = asyncio.run(self.text_to_speak(text, None))
@@ -218,12 +293,28 @@ class TTSProviderBase(ABC):
                     logger.bind(tag=TAG).warning(
                         f"Speech generation failed {5 - max_repeat_time + 1} times: {original_text}, error: {e}"
                     )
+                    if self._is_fast_fallback_tts_error(e):
+                        self._activate_primary_tts_fast_fallback(original_text, e)
+                        max_repeat_time = 0
+                        break
                     max_repeat_time -= 1
             if max_repeat_time > 0:
                 logger.bind(tag=TAG).info(
                     f"Speech generation succeeded: {original_text}, retried {5 - max_repeat_time} times"
                 )
             else:
+                fallback = asyncio.run(self._fallback_text_to_speak(text, original_text))
+                if fallback:
+                    audio_bytes, file_type = fallback
+                    audio_datas = []
+                    audio_bytes_to_data_stream(
+                        audio_bytes,
+                        file_type=file_type,
+                        is_opus=True,
+                        callback=lambda data: audio_datas.append(data),
+                        sample_rate=self.conn.sample_rate,
+                    )
+                    return audio_datas
                 logger.bind(tag=TAG).error(
                     f"Voice generation failed: {original_text}, check network or service status"
                 )
@@ -231,6 +322,8 @@ class TTSProviderBase(ABC):
         else:
             tmp_file = self.generate_filename()
             try:
+                if self._primary_tts_fast_fallback_active():
+                    max_repeat_time = 0
                 while not os.path.exists(tmp_file) and max_repeat_time > 0:
                     try:
                         asyncio.run(self.text_to_speak(text, tmp_file))
@@ -241,6 +334,10 @@ class TTSProviderBase(ABC):
                         # Not executed successfully,DeleteFile
                         if os.path.exists(tmp_file):
                             os.remove(tmp_file)
+                        if self._is_fast_fallback_tts_error(e):
+                            self._activate_primary_tts_fast_fallback(original_text, e)
+                            max_repeat_time = 0
+                            break
                         max_repeat_time -= 1
 
                 if max_repeat_time > 0:
@@ -260,6 +357,58 @@ class TTSProviderBase(ABC):
     @abstractmethod
     async def text_to_speak(self, text, output_file):
         pass
+
+    def _create_fallback_tts_provider(self):
+        config = self._fallback_tts_config
+        if not isinstance(config, Mapping):
+            return None
+        provider_type = str(config.get("type") or "").strip()
+        if not provider_type:
+            return None
+        module = importlib.import_module(f"core.providers.tts.{provider_type}")
+        provider = module.TTSProvider(dict(config), True)
+        provider.conn = self.conn
+        if hasattr(self, "opus_encoder"):
+            provider.opus_encoder = self.opus_encoder
+        return provider
+
+    async def _fallback_text_to_speak(self, text, original_text):
+        provider = self._create_fallback_tts_provider()
+        if provider is None:
+            return None
+        fallback_type = getattr(provider, "audio_file_type", "mp3")
+        try:
+            audio_bytes = await provider.text_to_speak(text, None)
+        except Exception as exc:
+            logger.bind(tag=TAG).error(
+                f"Fallback TTS failed: {original_text}, error: {exc}"
+            )
+            return None
+        if not audio_bytes:
+            logger.bind(tag=TAG).error(
+                f"Fallback TTS returned empty audio: {original_text}"
+            )
+            return None
+        logger.bind(tag=TAG).warning(
+            f"Primary TTS exhausted; using fallback TTS: {original_text}"
+        )
+        return audio_bytes, fallback_type
+
+    def _stream_fallback_audio(self, text, original_text, opus_handler=None):
+        fallback = asyncio.run(self._fallback_text_to_speak(text, original_text))
+        if not fallback:
+            return False
+        audio_bytes, file_type = fallback
+        self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
+        audio_bytes_to_data_stream(
+            audio_bytes,
+            file_type=file_type,
+            is_opus=True,
+            callback=opus_handler,
+            sample_rate=self.conn.sample_rate,
+            opus_encoder=self.opus_encoder,
+        )
+        return True
 
     def audio_to_pcm_data_stream(
         self, audio_file_path, callback: Callable[[Any], Any] = None
@@ -466,7 +615,10 @@ class TTSProviderBase(ABC):
                     add_device_output(self.conn.headers.get("device-id"), len(text))
 
             except Exception as e:
-                logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
+                if _is_normal_audio_send_close(e):
+                    logger.bind(tag=TAG).debug(f"audio_play_priority_thread closed normally: {text} {e}")
+                else:
+                    logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
 
     async def start_session(self, session_id):
         pass
@@ -484,7 +636,6 @@ class TTSProviderBase(ABC):
         # Merge all current text and process unsplit part
         full_text = "".join(self.tts_text_buff)
         current_text = full_text[self.processed_chars :]  # Start from unprocessed position
-        last_punct_pos = -1
 
         # Choose different punctuation set based on whether first sentence
         punctuations_to_use = (
@@ -493,18 +644,21 @@ class TTSProviderBase(ABC):
             else self.punctuations
         )
 
+        punct_positions = []
         for punct in punctuations_to_use:
-            pos = current_text.rfind(punct)
-            if (pos != -1 and last_punct_pos == -1) or (
-                pos != -1 and pos < last_punct_pos
-            ):
-                last_punct_pos = pos
+            punct_positions.extend(match.start() for match in re.finditer(re.escape(punct), current_text))
+        punct_positions = sorted(set(punct_positions))
 
-        if last_punct_pos != -1:
-            segment_text_raw = current_text[: last_punct_pos + 1]
+        if punct_positions:
+            last_punct_pos = self._choose_segment_punctuation(current_text, punct_positions)
+            segment_end_pos = self._extend_segment_end_after_punctuation(
+                current_text, last_punct_pos
+            )
+            segment_text_raw = current_text[:segment_end_pos]
             segment_text = textUtils.get_string_no_punctuation_or_emoji(
                 segment_text_raw
             )
+            segment_text = self._clean_segment_text_for_tts(segment_text)
             self.processed_chars += len(segment_text_raw)  # Update processed character position
 
             # If first sentence, after finding first comma, set flag toFalse
@@ -514,10 +668,35 @@ class TTSProviderBase(ABC):
             return segment_text
         elif self.tts_stop_request and current_text:
             segment_text = current_text
+            segment_text = self._clean_segment_text_for_tts(segment_text)
             self.is_first_sentence = True  # Reset Flag
             return segment_text
         else:
             return None
+
+    def _choose_segment_punctuation(self, current_text, punct_positions):
+        for index, punct_pos in enumerate(punct_positions):
+            segment_end_pos = self._extend_segment_end_after_punctuation(current_text, punct_pos)
+            segment_text = textUtils.get_string_no_punctuation_or_emoji(
+                current_text[:segment_end_pos]
+            )
+            segment_text = self._clean_segment_text_for_tts(segment_text)
+            if len(segment_text) >= _MIN_TTS_SEGMENT_CHARS or index == len(punct_positions) - 1:
+                return punct_pos
+        return punct_positions[0]
+
+    def _clean_segment_text_for_tts(self, segment_text):
+        if not segment_text:
+            return segment_text
+        segment_text = segment_text.strip(_TTS_SEGMENT_EDGE_CHARS)
+        segment_text = segment_text.replace('"', "").replace("“", "").replace("”", "")
+        return segment_text.strip()
+
+    def _extend_segment_end_after_punctuation(self, current_text, punct_pos):
+        end_pos = punct_pos + 1
+        while end_pos < len(current_text) and current_text[end_pos] in _TRAILING_SEGMENT_CLOSERS:
+            end_pos += 1
+        return end_pos
 
     def _process_audio_file_stream(
         self, tts_file, callback: Callable[[Any], Any]
@@ -561,6 +740,7 @@ class TTSProviderBase(ABC):
         remaining_text = full_text[self.processed_chars :]
         if remaining_text:
             segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
+            segment_text = self._clean_segment_text_for_tts(segment_text)
             if segment_text:
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
                 self.processed_chars += len(full_text)

@@ -15,7 +15,10 @@ TAG = __name__
 logger = setup_logging()
 
 _DEFAULT_DESCRIPTION = (
-    "联网搜索工具。当用户明确需要联网搜索问题时使用此工具。"
+    "Child-safe web search. Use only when the child explicitly asks for current "
+    "online information or learning facts. Do not search adult, violent, graphic, "
+    "self-harm, illegal, medical, legal, financial, extremist, hateful, or private "
+    "personal data content. Prefer short, age-appropriate summaries."
 )
 
 WEB_SEARCH_FUNCTION_DESC = {
@@ -35,6 +38,34 @@ WEB_SEARCH_FUNCTION_DESC = {
         },
     },
 }
+
+CHILD_UNSAFE_QUERY_KEYWORDS = (
+    "adult",
+    "porn",
+    "sex",
+    "nude",
+    "violent",
+    "violence",
+    "gore",
+    "blood",
+    "crime",
+    "murder",
+    "suicide",
+    "self harm",
+    "self-harm",
+    "kill",
+    "weapon",
+    "drug",
+    "gambling",
+    "terror",
+    "extremist",
+    "hate",
+)
+
+
+def _is_child_unsafe_query(query: str) -> bool:
+    lowered = str(query or "").lower()
+    return any(keyword in lowered for keyword in CHILD_UNSAFE_QUERY_KEYWORDS)
 
 
 def _search_metaso(api_key: str, query: str, max_results: int) -> str:
@@ -117,6 +148,13 @@ def web_search(conn: "ConnectionHandler", query: str = None):
     logger.bind(tag=TAG).info(f"web_search 被调用 | query={query}")
     if not query:
         return ActionResponse(Action.REQLLM, "请提供搜索关键词。", None)
+    if _is_child_unsafe_query(query):
+        return ActionResponse(
+            Action.REQLLM,
+            "Child-safe search cannot search adult, violent, illegal, self-harm, "
+            "or graphic content. Please ask a safer learning question.",
+            None,
+        )
 
     web_search_config = conn.config.get("plugins", {}).get("web_search", {})
     provider = web_search_config.get("provider", "").lower()

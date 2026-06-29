@@ -127,6 +127,18 @@ public class DeviceController {
         if (deviceUpdateDTO.getChildAge() != null) {
             entity.setChildAge(deviceUpdateDTO.getChildAge());
         }
+        if (deviceUpdateDTO.getChildInterests() != null) {
+            entity.setChildInterests(StringUtils.trimToNull(deviceUpdateDTO.getChildInterests()));
+        }
+        if (deviceUpdateDTO.getLearningStyle() != null) {
+            entity.setLearningStyle(StringUtils.trimToNull(deviceUpdateDTO.getLearningStyle()));
+        }
+        if (deviceUpdateDTO.getVocabularyLevel() != null) {
+            entity.setVocabularyLevel(StringUtils.trimToNull(deviceUpdateDTO.getVocabularyLevel()));
+        }
+        if (deviceUpdateDTO.getParentCareer() != null) {
+            entity.setParentCareer(StringUtils.trimToNull(deviceUpdateDTO.getParentCareer()));
+        }
         deviceService.updateById(entity);
         return new Result<Void>();
     }

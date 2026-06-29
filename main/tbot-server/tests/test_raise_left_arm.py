@@ -97,7 +97,7 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.action, Action.ERROR)
         self.assertEqual(capturing.calls, [])
 
-    async def test_returns_error_when_main_reports_uart_failure(self):
+    async def test_returns_success_when_motion_dispatch_is_unconfirmed(self):
         conn = _FakeConn(mcp_client=_FakeMCPClient())
         capturing = _CapturingCallMcp(
             result={"content": [{"type": "text", "text": "false"}], "isError": False}
@@ -106,7 +106,9 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         with _patched_call_mcp_tool(capturing):
             result = await raise_left_arm_module.raise_left_arm(conn)
 
-        self.assertEqual(result.action, Action.ERROR)
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, "sent_unconfirmed")
+        self.assertEqual(result.response, "Đã nâng tay trái.")
         self.assertEqual(
             capturing.calls,
             [{"tool": raise_left_arm_module.LEFT_ARM_TOOL, "args": "{}"}],
@@ -119,6 +121,21 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raise_left_arm_module.RIGHT_ARM_LOWER_TOOL, "self_robot_right_arm_lower")
         self.assertEqual(raise_left_arm_module.BOTH_ARMS_RAISE_TOOL, "self_robot_both_arms_raise")
         self.assertEqual(raise_left_arm_module.BOTH_ARMS_LOWER_TOOL, "self_robot_both_arms_lower")
+
+    def test_available_tools_ignores_non_dict_tool_containers(self):
+        mcp_client = _FakeMCPClient()
+        mcp_client.tools = [raise_left_arm_module.LEFT_ARM_TOOL]
+
+        self.assertEqual(raise_left_arm_module._available_tools(mcp_client), [])
+
+    def test_tool_result_accepts_true_string_and_nested_result(self):
+        self.assertTrue(raise_left_arm_module._tool_result_is_true(True))
+        self.assertTrue(raise_left_arm_module._tool_result_is_true(" TRUE "))
+        self.assertTrue(
+            raise_left_arm_module._tool_result_is_true(
+                {"result": {"content": [{"type": "text", "text": "true"}]}}
+            )
+        )
 
     def test_raise_descriptions_include_vietnamese_do_tay_phrase(self):
         descriptions = [

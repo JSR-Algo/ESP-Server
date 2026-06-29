@@ -69,6 +69,10 @@ class ConfigServiceChildProfileTest {
         device.setAlias("Robot phong ngu");
         device.setChildName("Bong");
         device.setChildAge(6);
+        device.setChildInterests("animals, space");
+        device.setLearningStyle("visual");
+        device.setVocabularyLevel("beginner");
+        device.setParentCareer("teacher");
         device.setAgentId("agent-1");
 
         AgentInfoVO agent = new AgentInfoVO();
@@ -89,5 +93,9 @@ class ConfigServiceChildProfileTest {
         assertEquals("Robot phong ngu", childProfile.get("device_alias"));
         assertEquals("Bong", childProfile.get("child_name"));
         assertEquals(6, childProfile.get("child_age"));
+        assertEquals(java.util.List.of("animals", "space"), childProfile.get("interests"));
+        assertEquals("visual", childProfile.get("learning_style"));
+        assertEquals("beginner", childProfile.get("vocabulary_level"));
+        assertEquals("teacher", childProfile.get("parent_career"));
     }
 }

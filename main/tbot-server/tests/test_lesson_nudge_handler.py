@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, patch
 
 
 class _FakeRequest:
-    def __init__(self, *, device_id="device-1", secret="secret"):
+    def __init__(self, *, device_id="device-1", secret="secret", body=None):
         self.match_info = {"deviceId": device_id}
         self.headers = {"X-Mint-Secret": secret}
+        self._body = body if body is not None else {"assignmentId": "assignment-1"}
 
     async def json(self):
-        return {"assignmentId": "assignment-1"}
+        return self._body
 
 
 class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +33,29 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         response = await handler.handle_post(_FakeRequest(secret="wrong"))
 
         self.assertEqual(response.status, 401)
+
+    async def test_child_response_endpoint_routes_text_to_active_runtime(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+
+        class _Runtime:
+            def __init__(self):
+                self.calls = []
+
+            async def on_child_response(self, text, *, source="voice_transcript"):
+                self.calls.append((text, source))
+                return text == "barn"
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        runtime = _Runtime()
+        conn = SimpleNamespace(lesson_runtime=runtime)
+        handler = LessonNudgeHandler({}, {"device-1": conn})
+
+        response = await handler.handle_child_response_post(
+            _FakeRequest(body={"text": "barn"})
+        )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(runtime.calls, [("barn", "internal_dev_endpoint")])
 
     async def test_triggers_existing_pull_path_for_live_handler(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler

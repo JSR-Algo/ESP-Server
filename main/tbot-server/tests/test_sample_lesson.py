@@ -12,7 +12,10 @@ from core.lesson.sample import (
     start_sample_lesson,
 )
 from core.lesson.runtime import LessonRuntime
-from core.voice.session_provider.google_live import GoogleLiveProvider
+from core.voice.session_provider.google_live import (
+    GoogleLiveProvider,
+    LESSON_LIVE_TEXT_INSTRUCTION,
+)
 
 
 class _DummyLogger:
@@ -112,6 +115,29 @@ class SampleManifestTest(unittest.TestCase):
         self.assertIsNone(cache.assert_profile_renderable())
         self.assertTrue(isinstance(cache.preload_timeout_sec, float))
 
+    def test_interactive_sample_finishes_with_lesson_completion_announcement(self):
+        manifest = build_interactive_sample_manifest()
+
+        self.assertIn("hoàn thành bài học mẫu", manifest["steps"][-1]["prompt"])
+
+    def test_interactive_sample_teaches_vocabulary_through_multiple_child_turns(self):
+        manifest = build_interactive_sample_manifest()
+        interactive_steps = [
+            step for step in manifest["steps"]
+            if step.get("completionClass") == "interactive"
+        ]
+
+        self.assertGreaterEqual(len(interactive_steps), 2)
+        prompts = " ".join(step["prompt"] for step in interactive_steps).lower()
+        self.assertIn("nói theo", prompts)
+        self.assertIn("barn", prompts)
+        self.assertIn("con thấy", prompts)
+
+        for step in interactive_steps:
+            self.assertEqual(step.get("expectedResponses"), ["barn"], step["id"])
+            self.assertGreaterEqual(step.get("responseTimeoutSec", 0), 30.0, step["id"])
+            self.assertGreaterEqual(step.get("maxNoAnswerAttempts", 0), 3, step["id"])
+
 
 class SampleManifestTestAsync(unittest.IsolatedAsyncioTestCase):
     async def test_passthrough_cache_preload_ready(self):
@@ -174,6 +200,12 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lesson_start", sent_types)
         self.assertEqual(sent_types.count("lesson_step"), len(step_ids))
         self.assertEqual(sent_types[-1], "lesson_stop")
+
+    async def test_sample_step_timeout_covers_real_https_asset_fetch_latency(self):
+        manifest = build_sample_manifest(dwell_sec=0)
+        timeouts = [step["timeoutSec"] for step in manifest["steps"]]
+        self.assertTrue(timeouts)
+        self.assertGreaterEqual(min(timeouts), 75.0)
 
     async def test_passive_dwell_delays_auto_advance_then_completes(self):
         import asyncio
@@ -238,6 +270,34 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
         self.assertEqual(sent_types[0], "lesson_prepare")
+
+    async def test_start_sample_lesson_defaults_to_interactive_google_live_sample(self):
+        conn = _FakeConn()
+
+        runtime = await start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.lesson_id, INTERACTIVE_SAMPLE_LESSON_ID)
+        interactive_steps = [
+            step for step in runtime.manifest["steps"]
+            if step.get("completionClass") == "interactive"
+        ]
+        self.assertTrue(interactive_steps)
+
+    async def test_start_sample_lesson_reuses_active_sample_runtime(self):
+        conn = _FakeConn()
+
+        first = await start_sample_lesson(conn)
+        sent_before = list(conn.websocket.sent)
+        entered_before = list(conn.entered)
+
+        second = await start_sample_lesson(conn)
+
+        self.assertIs(second, first)
+        self.assertIs(conn.lesson_runtime, first)
+        self.assertEqual(conn.entered, entered_before)
+        self.assertEqual(conn.websocket.sent, sent_before)
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
 
     async def test_start_sample_lesson_serializes_on_shared_lesson_pull_lock(self):
         # The sample must acquire the SAME per-connection _lesson_pull_lock the
@@ -387,7 +447,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         for i, sid in enumerate(step_ids):
             await rt.on_lesson_ack(_iack(conn, 3 + i, 3 + i, step_id=sid))
             if sid in interactive_ids:
-                # The runtime narrated the prompt (local-TTS) and opened the child window;
+                # The runtime narrated the prompt through Google Live and opened the child window;
                 # the interactive step must NOT auto-advance.
                 self.assertFalse(rt._step_completed, f"{sid} auto-advanced (should wait)")
                 self.assertGreater(
@@ -396,14 +456,16 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
                     "child-response window did not open",
                 )
                 self.assertGreaterEqual(
-                    len(conn.tts.tts_text_queue.items), 3,
+                    len(provider._client.sent_texts),
+                    3,
                     "interactive prompt was not narrated to the child",
                 )
+                prompt_messages_before_answer = list(provider._client.sent_texts)
                 # The child SPEAKS -> Live transcript -> real provider routes it to the
                 # runtime, which completes the step. No chat/model forwarding.
                 handled = await provider._on_user_transcript("barn")
                 self.assertTrue(handled, f"child answer for {sid} was not routed")
-                self.assertEqual(provider._client.sent_texts, [])
+                self.assertEqual(provider._client.sent_texts, prompt_messages_before_answer)
                 child_routed.append(sid)
 
         # last step's ack -> lesson_stop; its ack -> COMPLETED
@@ -419,13 +481,74 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
 
         # The child actually heard the SAY-IT prompt verbatim, and only the interactive
         # step waited on a spoken answer.
-        spoken = [text for (_sid, text) in conn.tts.stored_texts]
-        self.assertIn("Bây giờ con hãy nói theo mình nào: barn!", spoken)
+        self.assertIn(
+            LESSON_LIVE_TEXT_INSTRUCTION + "Bây giờ con hãy nói theo mình nào: barn!",
+            provider._client.sent_texts,
+        )
 
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
         self.assertEqual(sent_types[0], "lesson_prepare")
         self.assertEqual(sent_types.count("lesson_step"), len(step_ids))
         self.assertEqual(sent_types[-1], "lesson_stop")
+
+    async def test_wrong_child_answer_does_not_advance_and_prompts_retry(self):
+        conn = _RealProviderConn()
+        provider = GoogleLiveProvider(conn)
+        provider._client = _FakeLiveClient()
+        conn.voice_provider = provider
+
+        rt = await start_sample_lesson(conn)
+        self.assertIsNotNone(rt)
+
+        await rt.on_lesson_ack(_iack(conn, 1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_iack(conn, 2, 2))
+
+        step_ids = [s["id"] for s in build_interactive_sample_manifest()["steps"]]
+        for i, sid in enumerate(step_ids):
+            await rt.on_lesson_ack(_iack(conn, 3 + i, 3 + i, step_id=sid))
+            if sid == "s3":
+                lesson_steps_before = [
+                    json.loads(payload)["stepId"]
+                    for payload in conn.websocket.sent
+                    if json.loads(payload)["type"] == "lesson_step"
+                ]
+
+                handled_wrong = await provider._on_user_transcript("cat")
+
+                self.assertTrue(handled_wrong)
+                self.assertEqual(rt._step_id, "s3")
+                self.assertFalse(rt._step_completed)
+                self.assertEqual(rt._steps_completed, 2)
+                lesson_steps_after_wrong = [
+                    json.loads(payload)["stepId"]
+                    for payload in conn.websocket.sent
+                    if json.loads(payload)["type"] == "lesson_step"
+                ]
+                self.assertEqual(lesson_steps_after_wrong, lesson_steps_before)
+                self.assertTrue(
+                    any("nói lại" in text.lower() and "barn" in text.lower() for text in provider._client.sent_texts),
+                    provider._client.sent_texts,
+                )
+                self.assertTrue(
+                    any("cat" in text.lower() and "chưa đúng" in text.lower() for text in provider._client.sent_texts),
+                    provider._client.sent_texts,
+                )
+
+                handled_correct = await provider._on_user_transcript("barn")
+
+                self.assertTrue(handled_correct)
+                self.assertEqual(rt._step_id, "s4")
+                self.assertFalse(rt._step_completed)
+                lesson_steps_after_correct = [
+                    json.loads(payload)["stepId"]
+                    for payload in conn.websocket.sent
+                    if json.loads(payload)["type"] == "lesson_step"
+                ]
+                self.assertEqual(lesson_steps_after_correct[-1], "s4")
+                break
+        else:
+            self.fail("interactive repeat step s3 was not reached")
 
     async def test_passive_sample_does_not_wait_for_child(self):
         """Control: the DEFAULT (passive) sample completes with NO child-response window

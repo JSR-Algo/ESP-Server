@@ -244,7 +244,15 @@ class GoogleLiveClient:
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         if self._live_context is not None:
-            await self._live_context.__aexit__(None, None, None)
+            try:
+                await self._live_context.__aexit__(None, None, None)
+            except RuntimeError as exc:
+                if "asynchronous generator is already running" not in str(exc):
+                    raise
+                self.logger.bind(tag="GoogleLive").warning(
+                    "Google Live context close already in progress: {}",
+                    exc,
+                )
         self._sdk_client = None
         self._live_context = None
         self._session = None

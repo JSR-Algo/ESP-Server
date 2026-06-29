@@ -1,5 +1,5 @@
 {
-  "name": "TBOT",
+  "name": "小智",
   "appid": "__UNI__36A515E",
   "description": "",
   "versionName": "1.0.0",
@@ -97,7 +97,7 @@
     },
     "permission": {
       "scope.userLocation": {
-        "desc": "WiFi provisioning requires location permission"
+        "desc": "WiFi配网功能需要获取位置权限"
       }
     },
     "requiredPrivateInfos": [

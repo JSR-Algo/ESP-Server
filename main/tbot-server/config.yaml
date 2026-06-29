@@ -17,14 +17,14 @@ server:
   # When deploying via Docker or public network(Use SSL, domain name)may not be accurate when
   # When deploying via Docker, set the WebSocket to a LAN address
   # If using public deployment, set websocket to public address
-  websocket: ws://your-ip-or-domain:port/tbot/v1/
+  websocket: wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/
   # Backend API base URL sent to firmware for /device/config and /claim routes.
   # OWNERSHIP (locked 2026-06-04): NestJS /v1/claim is the SOLE consumer-claim
   # authority; the Java manager-api device-bind flow is admin/legacy only.
   # Point this at the Nest backend origin and keep the /v1 suffix — firmware
   # appends /device/config and /claim/confirm. Default is the current onrender
   # Nest backend; override per deployment (env / Admin Parameter Management /
-  # data/.config.yaml) when moving to *.skylabs.vn.
+  # data/.config.yaml) when moving to a managed public endpoint.
   api_url: https://tbot-backend-8wmh.onrender.com/v1
   # Vision API URL
   # Endpoint for visual analysis sent to device
@@ -32,7 +32,22 @@ server:
   # When deploying via Docker or public network(Use SSL, domain name)may not be accurate when
   # So if you deploy using Docker, set vision_explain to a LAN address
   # If deploying publicly, set vision_explain to the public address
-  vision_explain: http://your-ip-or-domain:port/mcp/vision/explain
+  vision_explain: https://carefully-freelance-improving-numerical.trycloudflare.com/mcp/vision/explain
+  # Optional firmware binary URL scheme override. Leave empty to reuse the
+  # vision_explain scheme; set to http for legacy ESP OTA stacks that cannot
+  # download a Cloudflare HTTPS firmware binary reliably.
+  firmware_download_scheme: ""
+  # Bench/dev "WiFi-only" mode. Devices that should self-claim WITHOUT the
+  # backend claim / household / child-assignment flow. Two switches:
+  #   factory_test_claimed_devices: per-MAC allowlist (lowercase, colon MAC)
+  #   factory_test_claimed_all:     global — EVERY device self-claims (no list)
+  # Requires auth.enabled: true (the firmware factory path needs a non-empty
+  # ws token, which OTA only mints when auth is on and the device is NOT in
+  # allowed_devices) and firmware >= 2.2.31. Removes the parental/COPPA claim
+  # binding, so keep BOTH off for any robot shipped to a child.
+  # factory_test_claimed_devices:
+  #   - "14:c1:9f:d1:ac:20"
+  factory_test_claimed_all: false
   # OTATimezone offset for returned information
   timezone_offset: +8
   # Authentication config
@@ -66,7 +81,7 @@ log:
   # Set log file output format: time, log level, tag, message
   log_format_file: "{time:YYYY-MM-DD HH:mm:ss} - {version}_{selected_module} - {name} - {level} - {extra[tag]} - {message}"
   # Set log level: INFO, DEBUG
-  log_level: INFO
+  log_level: DEBUG
   # Set log path
   log_dir: tmp
   # Set log file
@@ -132,10 +147,11 @@ google_live:
   output_audio_format: pcm16
   output_sample_rate: 24000
   input_live_chunk_ms: 20
-  # Keep Live automatic VAD active. Robot speaker echo is filtered locally by
-  # AEC/echo gates; serverContent.interrupted stops playback immediately.
-  disable_server_side_interruptions: false
-  activity_handling: START_OF_ACTIVITY_INTERRUPTS
+  # Stable robot half-duplex path: ignore Google Live server-side interruption
+  # events so speaker echo/noise cannot cut the robot's own response before
+  # audio reaches the ESP. User barge-in still goes through wake/transcript gates.
+  disable_server_side_interruptions: true
+  activity_handling: NO_INTERRUPTION
   turn_coverage: TURN_INCLUDES_ALL_INPUT
   # Giảm độ nhạy VAD để echo loa không kích hoạt ngắt nhầm.
   start_of_speech_sensitivity: START_SENSITIVITY_LOW
@@ -147,7 +163,26 @@ google_live:
   recv_timeout_sec: 60
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
-  input_flush_delay_sec: 1.0
+  # ── Child-speech capture tuning ("robot can't hear the child / con nói lại") ──
+  # Previously absent → ran on code defaults (tail 900ms, min 360, max 8000,
+  # waiting_model 6.0s). The 900ms tail finalized a still-talking child on any
+  # mid-sentence pause ≥0.9s, then the WAITING_MODEL branch hard-dropped the
+  # continuation → child unheard. Starting values below; TUNE ON-DEVICE using
+  # log_audio_diagnostics (measure mid-utterance pause distribution + model
+  # first-audio p95). COUPLING (must hold): input_speech_tail_ms >=
+  # silence_duration_ms (1200) and input_flush_delay_sec >= input_speech_tail_ms,
+  # so the local + Gemini server-side turn-enders don't compete and the idle
+  # safety-net doesn't re-introduce the early cut.
+  input_flush_delay_sec: 1.4
+  input_speech_tail_ms: 1300
+  input_min_capture_ms: 400
+  input_max_capture_ms: 8000
+  input_speech_rms_threshold: 500
+  # Re-hear the child fast after a model stall (was a 6.0s dead mic). The spoken
+  # "con nói lại" nudge stays on the longer retry-after grace (FIX C) so the lower
+  # release timeout does not nag on merely-slow turns. Keep retry-after >= timeout.
+  waiting_model_timeout_sec: 2.5
+  waiting_model_retry_prompt_after_sec: 4.0
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
   # risk of clipping the trailing syllable; higher = safer transcript
@@ -244,14 +279,12 @@ context_providers:
 
 # Basic plugin config
 plugins:
-  # Get weather plugin config, enter your api_key here
-  # Shared project key; heavy usage may lead to rate limiting
-  # For better stability, apply for your own key; includes 1000 free calls daily
-  # Application URL: https://console.qweather.com/#/apps/create-key/over
-  # After applying, find your apihost via this link: https://console.qweather.com/setting?lang=zh
+  # Weather plugin (plugins_func/functions/get_weather.py).
+  # Backed by Open-Meteo (https://open-meteo.com) — FREE and KEYLESS, global
+  # coverage including Vietnam. No API key/secret to provision. The only setting
+  # is default_location, used when the user does not name a city and the device
+  # IP cannot be geolocated.
   get_weather:
-    api_host: "mj7p3y7naa.re.qweatherapi.com"
-    api_key: ${QWEATHER_API_KEY:}
     default_location: "Ho Chi Minh City"
   # Get news plugin configuration. Pass URL for required news type. Default supports social, tech, and financial news.
   # More news list types: https://www.chinanews.com.cn/rss/
@@ -327,8 +360,8 @@ prompt: |
 
   [Khi nào GỌI tool start_lesson — và khi nào KHÔNG]
   - CHỈ gọi start_lesson khi bé muốn VÀO ĐÚNG BÀI HỌC ĐÃ ĐƯỢC GIAO cho bé (bài học/tiết học/khoá học của con), KHÔNG phải khi bé chỉ muốn được dạy/chơi học ngay trong lúc trò chuyện.
-    • GỌI khi bé nói (tiếng Việt): "học bài thôi", "con muốn học bài", "vào bài học", "mở bài học của con", "bắt đầu bài học", "chuyển sang bài học", "học tiếp bài", "mình vào học nhé".
-    • GỌI khi bé nói (English): "start the lesson", "let's do the lesson", "open my lesson", "begin the class", "switch to lesson", "continue the lesson".
+    • GỌI khi bé nói (tiếng Việt): "học bài thôi", "con muốn học bài", "vào bài học", "mở bài học của con", "bắt đầu bài học", "bắt đầu học bài", "mở khóa học của con", "vào khóa học của con", "chuyển sang bài học", "học tiếp bài", "tiếp tục khóa học", "mình vào học nhé".
+    • GỌI khi bé nói (English): "start the lesson", "let's do the lesson", "open my lesson", "begin the class", "switch to lesson", "continue the lesson", "continue the course", "resume course".
   - KHÔNG gọi start_lesson khi bé chỉ muốn được DẠY/CHƠI HỌC NGAY trong hội thoại — đó là trò chuyện thường, bạn tự dạy luôn: "dạy con đi", "cho con học chữ", "con muốn học số", "con muốn hát", "đố con đi", "kể chuyện cho con".
   - KHÔNG gọi start_lesson cho hỏi đáp linh tinh, hỏi giờ/thời tiết, chơi game, hay bất kỳ câu trò chuyện thường nào.
   - Nếu mơ hồ (bé chỉ nói "con chán" / "chơi gì đi" / "học gì đó đi"), HỎI LẠI một câu ngắn ("Con muốn vào bài học của con, hay mình học vài từ ngay tại đây?") thay vì tự đoán mà gọi tool.
@@ -373,10 +406,17 @@ selected_module:
 # bài học" trigger (plugins_func/functions/start_lesson.py -> core.lesson.runtime
 # .maybe_start_lesson_on_connect). api_base is the live NestJS course backend /v1
 # base used to fetch the device's assignment + manifest; falls back to
-# server.api_url. Dark default; prod enablement is env-only
-# (LESSON_RUNTIME_ENABLED) via config/config_loader.py env overrides.
+# server.api_url. Default stays OFF for local dev, but config_loader auto-enables
+# when production lesson prerequisites are present (course backend URL +
+# TBOT_DEVICE_MINT_SECRET + LESSON_ASSET_ORIGIN_BASE). Explicit
+# LESSON_RUNTIME_ENABLED=false still wins.
 lesson:
   runtime_enabled: false
+  # Spoken start_lesson demo path: when true, start_lesson ignores backend assignment
+  # and starts the built-in sample lesson. Interactive mode waits for child speech
+  # through Google Live child-response windows.
+  sample_lesson: true
+  sample_mode: interactive
   api_base: "https://tbot-backend-8wmh.onrender.com/v1"
   # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim
   # Device-renderer profile gate: profiles this firmware can actually render. Current
@@ -385,6 +425,12 @@ lesson:
   # not listed here (LESSON_VERSION_UNSUPPORTED, no frame on the wire). Add 'piTft' /
   # 'mobile' here ONLY when that firmware ships.
   supported_profiles: ['espTft']
+  # Asset delivery defaults to verified HTTP URLs. For SD-pack mode, set both via env:
+  # LESSON_ASSET_DELIVERY_MODE=sd_pack
+  # LESSON_ASSET_PACK_LOCAL_ROOT=sd://sdcard/tbot/lesson-assets
+  # LESSON_ASSET_PACK_MOUNT_ROOT=/sdcard/tbot/lesson-assets
+  # The ESP server writes verified bytes under the mount root; firmware reads the
+  # matching sd:// localPath and refuses start until those files exist.
 
 # Intent recognition, a module used to understand user intent, e.g., play music
 Intent:

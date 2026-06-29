@@ -108,6 +108,7 @@ def test_voice_env_overrides_force_google_live_and_wake_words(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     monkeypatch.setenv("TBOT_GOOGLE_LIVE_MODEL", "gemini-live-test")
     monkeypatch.setenv("TBOT_GOOGLE_LIVE_LANGUAGE_CODE", "vi-VN")
+    monkeypatch.setenv("TBOT_GOOGLE_LIVE_VOICE_NAME", "Kore")
     monkeypatch.setenv("TBOT_WAKEUP_WORDS", "Hi Tâm,Hi ESP,TBOT")
     config = {
         "voice_mode": {"type": "classic_pipeline"},
@@ -123,6 +124,7 @@ def test_voice_env_overrides_force_google_live_and_wake_words(monkeypatch):
     assert result["google_live"]["api_key"] == "google-key"
     assert result["google_live"]["model"] == "gemini-live-test"
     assert result["google_live"]["language_code"] == "vi-VN"
+    assert result["google_live"]["voice_name"] == "Kore"
     assert result["wakeup_words"] == ["TBOT", "Hi Tâm", "Hi ESP"]
 
 
@@ -207,6 +209,29 @@ def test_gemini_tts_gets_edge_fallback_by_default(monkeypatch):
         "output_dir": "tmp/",
     }
 
+
+def test_gemini_tts_edge_fallback_defaults_to_vietnamese_voice(monkeypatch):
+    monkeypatch.delenv("TBOT_EDGE_TTS_VOICE", raising=False)
+    config = {
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"api_key": "live-key-from-agent"},
+        "selected_module": {"TTS": "GeminiTTS"},
+        "TTS": {
+            "GeminiTTS": {
+                "type": "gemini",
+                "api_key": "test-key",
+                "model_name": "gemini-3.1-flash-tts",
+            }
+        },
+    }
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["TTS"]["GeminiTTS"]["fallback_tts"] == {
+        "type": "edge",
+        "voice": "vi-VN-HoaiMyNeural",
+        "output_dir": "tmp/",
+    }
 
 def test_tts_provider_env_can_force_edge_tts(monkeypatch):
     monkeypatch.setenv("TBOT_TTS_PROVIDER", "edge")

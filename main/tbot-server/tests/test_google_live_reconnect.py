@@ -268,6 +268,115 @@ class ReconnectAdmissionAccountingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records, ["device-1"])
 
 
+class LiveOpenReceiveTaskRaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_open_live_session_cancels_stale_receive_task_before_new_loop(self):
+        conn = _Conn()
+
+        class _CloseRecordingClient:
+            def __init__(self):
+                self.connected = False
+                self.closed = False
+
+            async def connect(self):
+                self.connected = True
+
+            async def close(self):
+                self.closed = True
+                self.connected = False
+
+            async def receive_events(self):
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+
+        class _CloseRecordingBridge:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        stale_client = _CloseRecordingClient()
+        stale_bridge = _CloseRecordingBridge()
+        new_client = _CloseRecordingClient()
+        provider = GoogleLiveProvider(
+            conn,
+            client_factory=lambda *_: new_client,
+        )
+        stale_cancelled = asyncio.Event()
+
+        async def stale_receive_loop():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                stale_cancelled.set()
+                raise
+
+        stale_task = asyncio.create_task(stale_receive_loop())
+        await asyncio.sleep(0)
+        provider._receive_task = stale_task
+        provider._client = stale_client
+        provider._bridge = stale_bridge
+
+        await provider._open_live_session()
+        await asyncio.sleep(0)
+        new_receive_task = provider._receive_task
+        await provider.close()
+
+        self.assertTrue(stale_cancelled.is_set())
+        self.assertTrue(stale_task.cancelled())
+        self.assertTrue(stale_client.closed)
+        self.assertTrue(stale_bridge.closed)
+        self.assertIsNot(new_receive_task, stale_task)
+
+    async def test_concurrent_open_live_session_is_serialized(self):
+        conn = _Conn()
+        first_connect_started = asyncio.Event()
+        release_first_connect = asyncio.Event()
+        clients = []
+
+        class _BlockingFirstClient:
+            def __init__(self, block_connect=False):
+                self.block_connect = block_connect
+                self.connected = False
+                self.closed = False
+
+            async def connect(self):
+                if self.block_connect:
+                    first_connect_started.set()
+                    await release_first_connect.wait()
+                self.connected = True
+
+            async def close(self):
+                self.closed = True
+                self.connected = False
+
+            async def receive_events(self):
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+
+        def factory(*_):
+            client = _BlockingFirstClient(block_connect=not clients)
+            clients.append(client)
+            return client
+
+        provider = GoogleLiveProvider(conn, client_factory=factory)
+        first_open = asyncio.create_task(provider._open_live_session())
+        await first_connect_started.wait()
+        second_open = asyncio.create_task(provider._open_live_session())
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(clients), 1)
+
+        release_first_connect.set()
+        await asyncio.gather(first_open, second_open)
+        await provider.close()
+
+        self.assertEqual(len(clients), 2)
+        self.assertTrue(clients[0].closed)
+
+
 class ReconnectBufferCapacityTest(unittest.TestCase):
     def test_capacity_is_derived_from_budget_and_frame_size(self):
         conn = _Conn()

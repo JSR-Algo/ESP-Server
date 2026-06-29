@@ -1,5 +1,18 @@
+"""Weather lookup tool backed by Open-Meteo (https://open-meteo.com).
+
+Open-Meteo is free and requires **no API key**, so this tool works out of the
+box without any secret to provision. It also ships a companion geocoding API,
+so we resolve a place name -> lat/lon -> forecast with two keyless JSON calls
+(no HTML scraping, global coverage including Vietnam).
+
+The tool keeps the historical contract intact:
+  - registered as ``get_weather`` with ``ToolType.SYSTEM_CTL``
+  - signature ``get_weather(conn, location=None, lang="vi", city=None)``
+  - returns ``ActionResponse(Action.REQLLM, <report>, None)`` so the model
+    narrates the result back to the child in their language.
+"""
+
 import requests
-from bs4 import BeautifulSoup
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.utils.util import get_ip_info
@@ -16,213 +29,293 @@ GET_WEATHER_FUNCTION_DESC = {
     "function": {
         "name": "get_weather",
         "description": (
-            "Get weather for location. User should provide location, e.g. if user says Hangzhou weather, parameter is: Hangzhou."
-            "If user says province, default to provincial capital. If user says neither province nor city but place name, default to provincial capital of province where place is located."
-            "Important: Local 7-day weather is already provided in context. Never call this tool unless user specifies another city."
+            "Get the current weather and a 7-day forecast for a place. "
+            "Call this whenever the user asks about weather, temperature, rain, "
+            "wind or the forecast — both for the local/current location and for "
+            "any city the user names (e.g. 'thời tiết hôm nay', 'thời tiết Hà Nội', "
+            "'Đà Nẵng có mưa không'). "
+            "If no location is given, leave 'location' empty to use the device's "
+            "own location. If the user names a province, use its capital city."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Place name, e.g. Hangzhou. Optional parameter, not passed if not provided",
+                    "description": (
+                        "Place name to look up, e.g. 'Hà Nội', 'Da Nang', 'Tokyo'. "
+                        "Optional — omit it to use the device's current location."
+                    ),
+                },
+                "city": {
+                    "type": "string",
+                    "description": (
+                        "Backward-compatible alias for location. Prefer location "
+                        "for new calls."
+                    ),
                 },
                 "lang": {
                     "type": "string",
-                    "description": "Return language code used by user, e.g. zh_CN/zh_HK/en_US/ja_JP, default zh_CN",
+                    "description": (
+                        "Language code for place names, e.g. vi / en / zh / ja. "
+                        "Optional, defaults to Vietnamese."
+                    ),
                 },
             },
-            "required": ["lang"],
         },
     },
 }
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
-    )
+    "User-Agent": "tbot-server/get_weather (+https://github.com)",
 }
 
-# Weather Code https://dev.qweather.com/docs/resource/icons/#weather-icons
-WEATHER_CODE_MAP = {
-    "100": "Clear",
-    "101": "Cloudy",
-    "102": "Partly cloudy",
-    "103": "Clear to cloudy",
-    "104": "Overcast",
-    "150": "Clear",
-    "151": "Cloudy",
-    "152": "Partly cloudy",
-    "153": "Clear to cloudy",
-    "300": "Shower",
-    "301": "Heavy shower",
-    "302": "Thunder shower",
-    "303": "Severe thunderstorm",
-    "304": "Thunderstorm with hail",
-    "305": "Light rain",
-    "306": "Moderate rain",
-    "307": "Heavy rain",
-    "308": "Extreme rainfall",
-    "309": "Drizzle/light rain",
-    "310": "Torrential rain",
-    "311": "Torrential rain",
-    "312": "Exceptional rainstorm",
-    "313": "Freezing rain",
-    "314": "Light to moderate rain",
-    "315": "Moderate to heavy rain",
-    "316": "Heavy to torrential rain",
-    "317": "Heavy rain to torrential rain",
-    "318": "Heavy rainstorm to extremely heavy rainstorm",
-    "350": "Shower",
-    "351": "Heavy shower",
-    "399": "Rain",
-    "400": "Light snow",
-    "401": "Moderate snow",
-    "402": "Heavy snow",
-    "403": "Blizzard",
-    "404": "Sleet",
-    "405": "Rain and snow",
-    "406": "Showers with snow",
-    "407": "Snow shower",
-    "408": "Light to moderate snow",
-    "409": "Moderate to heavy snow",
-    "410": "Heavy to blizzard",
-    "456": "Showers with snow",
-    "457": "Snow shower",
-    "499": "Snow",
-    "500": "Mist",
-    "501": "Fog",
-    "502": "Haze",
-    "503": "Blowing sand",
-    "504": "Dust",
-    "507": "Sandstorm",
-    "508": "Severe sandstorm",
-    "509": "Dense fog",
-    "510": "Dense fog",
-    "511": "Moderate haze",
-    "512": "Heavy haze",
-    "513": "Severe haze",
-    "514": "Fog",
-    "515": "Extremely dense fog",
-    "900": "Hot",
-    "901": "Cold",
-    "999": "Unknown",
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+REQUEST_TIMEOUT_SEC = 3
+
+# WMO weather interpretation codes -> human text.
+# https://open-meteo.com/en/docs (see "WMO Weather interpretation codes")
+WEATHER_CODE_MAP_EN = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    56: "Light freezing drizzle",
+    57: "Dense freezing drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    66: "Light freezing rain",
+    67: "Heavy freezing rain",
+    71: "Slight snow fall",
+    73: "Moderate snow fall",
+    75: "Heavy snow fall",
+    77: "Snow grains",
+    80: "Slight rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    85: "Slight snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
+
+WEATHER_CODE_MAP_VI = {
+    0: "Trời quang",
+    1: "Phần lớn quang đãng",
+    2: "Có mây rải rác",
+    3: "Nhiều mây",
+    45: "Sương mù",
+    48: "Sương mù đóng băng",
+    51: "Mưa phùn nhẹ",
+    53: "Mưa phùn vừa",
+    55: "Mưa phùn dày",
+    56: "Mưa phùn băng nhẹ",
+    57: "Mưa phùn băng dày",
+    61: "Mưa nhỏ",
+    63: "Mưa vừa",
+    65: "Mưa to",
+    66: "Mưa băng nhẹ",
+    67: "Mưa băng to",
+    71: "Tuyết rơi nhẹ",
+    73: "Tuyết rơi vừa",
+    75: "Tuyết rơi dày",
+    77: "Hạt tuyết",
+    80: "Mưa rào nhẹ",
+    81: "Mưa rào vừa",
+    82: "Mưa rào dữ dội",
+    85: "Mưa tuyết nhẹ",
+    86: "Mưa tuyết dày",
+    95: "Dông",
+    96: "Dông kèm mưa đá nhẹ",
+    99: "Dông kèm mưa đá to",
 }
 
 
-def fetch_city_info(location, api_key, api_host):
-    url = f"https://{api_host}/geo/v2/city/lookup?key={api_key}&location={location}&lang=zh"
-    response = requests.get(url, headers=HEADERS).json()
-    if response.get("error") is not None:
-        logger.bind(tag=TAG).error(
-            f"Failed to get weather, reason:{response.get('error', {}).get('detail')}"
-        )
-        return None
-    return response.get("location", [])[0] if response.get("location") else None
+def _short_lang(lang: str) -> str:
+    """Normalise codes like ``zh_CN`` / ``vi-VN`` -> ``zh`` / ``vi``."""
+    if not lang:
+        return "vi"
+    code = lang.replace("-", "_").split("_")[0].strip().lower()
+    return code or "vi"
 
 
-def fetch_weather_page(url):
-    response = requests.get(url, headers=HEADERS)
-    return BeautifulSoup(response.text, "html.parser") if response.ok else None
+def _describe_code(code, lang_short: str) -> str:
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        return "Unknown"
+    table = WEATHER_CODE_MAP_VI if lang_short == "vi" else WEATHER_CODE_MAP_EN
+    return table.get(code_int, "Unknown")
 
 
-def parse_weather_info(soup):
-    city_name = soup.select_one("h1.c-submenu__location").get_text(strip=True)
+def _http_get_json(url: str, params: dict):
+    response = requests.get(
+        url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT_SEC
+    )
+    response.raise_for_status()
+    return response.json()
 
-    current_abstract = soup.select_one(".c-city-weather-current .current-abstract")
-    current_abstract = (
-        current_abstract.get_text(strip=True) if current_abstract else "Unknown"
+
+def fetch_city_info(location: str, lang_short: str):
+    """Resolve a place name to a geocoding record via Open-Meteo (keyless)."""
+    data = _http_get_json(
+        GEOCODE_URL,
+        {"name": location, "count": 1, "language": lang_short, "format": "json"},
+    )
+    results = data.get("results") or []
+    return results[0] if results else None
+
+
+def fetch_forecast(latitude: float, longitude: float):
+    """Fetch current conditions + 7-day daily forecast (keyless)."""
+    return _http_get_json(
+        FORECAST_URL,
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": (
+                "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                "weather_code,wind_speed_10m"
+            ),
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+            "timezone": "auto",
+            "forecast_days": 7,
+            "temperature_unit": "celsius",
+            "wind_speed_unit": "kmh",
+        },
     )
 
-    current_basic = {}
-    for item in soup.select(
-        ".c-city-weather-current .current-basic .current-basic___item"
-    ):
-        parts = item.get_text(strip=True, separator=" ").split(" ")
-        if len(parts) == 2:
-            key, value = parts[1], parts[0]
-            current_basic[key] = value
 
-    temps_list = []
-    for row in soup.select(".city-forecast-tabs__row")[:7]:  # Take data for first 7 days
-        date = row.select_one(".date-bg .date").get_text(strip=True)
-        weather_code = (
-            row.select_one(".date-bg .icon")["src"].split("/")[-1].split(".")[0]
-        )
-        weather = WEATHER_CODE_MAP.get(weather_code, "Unknown")
-        temps = [span.get_text(strip=True) for span in row.select(".tmp-cont .temp")]
-        high_temp, low_temp = (temps[0], temps[-1]) if len(temps) >= 2 else (None, None)
-        temps_list.append((date, weather, high_temp, low_temp))
+def _format_place(city_info: dict) -> str:
+    name = city_info.get("name") or ""
+    parts = [name]
+    admin1 = city_info.get("admin1")
+    country = city_info.get("country")
+    if admin1 and admin1 != name:
+        parts.append(admin1)
+    if country:
+        parts.append(country)
+    return ", ".join(p for p in parts if p)
 
-    return city_name, current_abstract, current_basic, temps_list
+
+def build_weather_report(city_info: dict, forecast: dict, lang_short: str) -> str:
+    place = _format_place(city_info)
+    current = forecast.get("current") or {}
+    daily = forecast.get("daily") or {}
+
+    cur_code = _describe_code(current.get("weather_code"), lang_short)
+    temp = current.get("temperature_2m")
+    feels = current.get("apparent_temperature")
+    humidity = current.get("relative_humidity_2m")
+    wind = current.get("wind_speed_10m")
+
+    if lang_short == "vi":
+        report = f"Thời tiết tại {place}.\n"
+        now_bits = [f"Hiện tại: {cur_code}"]
+        if temp is not None:
+            now_bits.append(f"{temp}°C")
+        if feels is not None:
+            now_bits.append(f"cảm giác như {feels}°C")
+        if humidity is not None:
+            now_bits.append(f"độ ẩm {humidity}%")
+        if wind is not None:
+            now_bits.append(f"gió {wind} km/h")
+        report += ", ".join(now_bits) + ".\n\nDự báo 7 ngày:\n"
+    else:
+        report = f"Weather for {place}.\n"
+        now_bits = [f"Now: {cur_code}"]
+        if temp is not None:
+            now_bits.append(f"{temp}°C")
+        if feels is not None:
+            now_bits.append(f"feels like {feels}°C")
+        if humidity is not None:
+            now_bits.append(f"humidity {humidity}%")
+        if wind is not None:
+            now_bits.append(f"wind {wind} km/h")
+        report += ", ".join(now_bits) + ".\n\n7-day forecast:\n"
+
+    days = daily.get("time") or []
+    codes = daily.get("weather_code") or []
+    highs = daily.get("temperature_2m_max") or []
+    lows = daily.get("temperature_2m_min") or []
+    for idx, day in enumerate(days[:7]):
+        code_text = _describe_code(codes[idx] if idx < len(codes) else None, lang_short)
+        high = highs[idx] if idx < len(highs) else None
+        low = lows[idx] if idx < len(lows) else None
+        if low is not None and high is not None:
+            report += f"- {day}: {code_text}, {low}~{high}°C\n"
+        else:
+            report += f"- {day}: {code_text}\n"
+
+    return report
 
 
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
-def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh_CN"):
+def get_weather(
+    conn: "ConnectionHandler",
+    location: str = None,
+    lang: str = "vi",
+    city: str = None,
+):
     from core.utils.cache.manager import cache_manager, CacheType
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
-    api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
-    api_key = weather_config.get("api_key", "")
-    default_location = weather_config.get("default_location", "Guangzhou")
+    default_location = weather_config.get("default_location", "Ho Chi Minh City")
     client_ip = conn.client_ip
+    lang_short = _short_lang(lang)
 
-    # Prefer user-providedlocationParameter
+    if city and not location:
+        location = city
+
+    # Prefer the user-provided location; otherwise resolve from client IP, then
+    # fall back to the configured default city.
     if not location:
-        # Through clientIPParse City
         if client_ip:
-            # Get from cache firstIPcorresponding cityInfo
             cached_ip_info = cache_manager.get(CacheType.IP_INFO, client_ip)
             if cached_ip_info:
                 location = cached_ip_info.get("city")
             else:
-                # Cache miss, callAPIGet
                 ip_info = get_ip_info(client_ip, logger)
                 if ip_info:
                     cache_manager.set(CacheType.IP_INFO, client_ip, ip_info)
                     location = ip_info.get("city")
-
-            if not location:
-                location = default_location
-        else:
-            # If noneIPUse default location
+        if not location:
             location = default_location
-    # Try get full weather report from cache
-    weather_cache_key = f"full_weather_{location}_{lang}"
+
+    # Serve a cached full report when available.
+    weather_cache_key = f"full_weather_om_{location}_{lang_short}"
     cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
     if cached_weather_report:
         return ActionResponse(Action.REQLLM, cached_weather_report, None)
 
-    # Cache miss, get real-time weather data
-    city_info = fetch_city_info(location, api_key, api_host)
-    if not city_info:
-        return ActionResponse(
-            Action.REQLLM, f"No related city found: {location}please confirm location is correct", None
+    try:
+        city_info = fetch_city_info(location, lang_short)
+        if not city_info:
+            msg = (
+                f"Không tìm thấy địa điểm: {location}. Hãy xác nhận lại tên thành phố."
+                if lang_short == "vi"
+                else f"No matching place found: {location}. Please confirm the city name."
+            )
+            return ActionResponse(Action.REQLLM, msg, None)
+
+        forecast = fetch_forecast(city_info["latitude"], city_info["longitude"])
+        weather_report = build_weather_report(city_info, forecast, lang_short)
+    except Exception as e:  # network / API / parse failures -> graceful message
+        logger.bind(tag=TAG).error(f"get_weather failed for {location!r}: {e}")
+        msg = (
+            "Xin lỗi, hiện không lấy được thông tin thời tiết. Bé thử lại sau nhé."
+            if lang_short == "vi"
+            else "Sorry, weather information is unavailable right now. Please try again later."
         )
-    soup = fetch_weather_page(city_info["fxLink"])
-    if not soup:
-        return ActionResponse(Action.REQLLM, None, "Request Failed")
-    city_name, current_abstract, current_basic, temps_list = parse_weather_info(soup)
+        return ActionResponse(Action.REQLLM, msg, None)
 
-    weather_report = f"Location you queried is:{city_name}\n\nCurrent Weather: {current_abstract}\n"
-
-    # Add valid current weather parameters
-    if current_basic:
-        weather_report += "Detailed parameters:\n"
-        for key, value in current_basic.items():
-            if value != "0":  # Filter invalid values
-                weather_report += f"  · {key}: {value}\n"
-
-    # Add 7-day forecast
-    weather_report += "\nFuture7day forecast:\n"
-    for date, weather, high, low in temps_list:
-        weather_report += f"{date}: {weather}, temperature {low}~{high}\n"
-
-    # Promptlanguage
-    weather_report += "\n(If need specific day's weather, tell me date)"
-
-    # Cache full weather report
     cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
-
     return ActionResponse(Action.REQLLM, weather_report, None)

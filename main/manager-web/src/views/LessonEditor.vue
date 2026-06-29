@@ -452,7 +452,7 @@ export default {
       if (bg) {
         scene.backgroundScene = {
           mode: 'poster',
-          poster: { key: bg.assetKey, src: bg.url, fit: s.fit || 'cover', sha256: bg.sha256 },
+          poster: { key: bg.assetKey, src: bg.path || bg.url, fit: s.fit || 'cover', sha256: bg.sha256 },
           video: null,
           altCaption: (s.altCaption || '').trim(),
         };
@@ -463,7 +463,7 @@ export default {
           primaryWord: (s.primaryWord || subject || '').trim(),
           supportWords: Array.isArray(s.supportWords) ? s.supportWords.filter(Boolean) : [],
           placement: { anchor: s.placementAnchor || 'center', paddingTopPercent: 8 },
-          asset: { key: obj.assetKey, src: obj.url, sha256: obj.sha256 },
+          asset: { key: obj.assetKey, src: obj.path || obj.url, sha256: obj.sha256 },
         };
         // focusTarget: model step only; clamp [0,1] + enforce tStart<tEnd here so a
         // bad window cannot 400 the lesson at publish.

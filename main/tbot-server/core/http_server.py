@@ -6,6 +6,7 @@ from core.api.vision_handler import VisionHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
+from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 
 TAG = __name__
 
@@ -22,6 +23,10 @@ class SimpleHttpServer:
             lesson_connections if lesson_connections is not None else {},
         )
         self.lesson_nudge_handler = LessonNudgeHandler(
+            config,
+            lesson_connections if lesson_connections is not None else {},
+        )
+        self.device_mcp_admin_handler = DeviceMCPAdminHandler(
             config,
             lesson_connections if lesson_connections is not None else {},
         )
@@ -91,6 +96,14 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/devices/{deviceId}/lesson-nudge",
                             self.lesson_nudge_handler.handle_post,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/lesson-child-response",
+                            self.lesson_nudge_handler.handle_child_response_post,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/mcp-call",
+                            self.device_mcp_admin_handler.handle_post,
                         ),
                         web.get(
                             "/tbot/lesson-assets/{cacheToken}/{assetKey}",

@@ -1,3 +1,5 @@
+import asyncio
+
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from config.logger import setup_logging
 from typing import TYPE_CHECKING
@@ -14,8 +16,13 @@ _FAILURE_STATUS_CODES = {
     "LESSON_CAPABILITY_MISSING",
     "DEVICE_TOKEN_UNAVAILABLE",
     "ASSIGNMENT_TERMINAL",
+    "ASSIGNMENT_INVALID",
     "MANIFEST_EMPTY",
+    "MANIFEST_IDENTITY_MISMATCH",
+    "MANIFEST_CHECKSUM_MISSING",
+    "MANIFEST_CHECKSUM_MISMATCH",
     "START_REFUSED",
+    "SAMPLE_SD_PACK_UNSUPPORTED",
 }
 
 
@@ -71,10 +78,13 @@ start_lesson_function_desc = {
             "begin, enter, open, switch to, or resume their lesson / class / course. "
             "Triggers (Tiếng Việt): 'học bài thôi', 'con muốn học bài', "
             "'vào bài học', 'mở bài học của con', 'bắt đầu bài học', "
-            "'chuyển sang bài học', 'học tiếp bài', 'bài học của con đâu'. "
+            "'bắt đầu học bài', 'mở khóa học của con', 'vào khóa học của con', "
+            "'chuyển sang bài học', 'học tiếp bài', 'tiếp tục khóa học', "
+            "'bài học của con đâu'. "
             "Triggers (English): 'start the lesson', \"let's do the lesson\", "
             "'open my lesson', 'begin the class', 'switch to lesson', "
-            "'continue the lesson', 'resume my class'. "
+            "'continue the lesson', 'continue the course', 'resume course', "
+            "'resume my class'. "
             "KHÔNG gọi / Do NOT call khi trẻ chỉ muốn được DẠY hoặc CHƠI HỌC NGAY "
             "trong lúc trò chuyện — đó là hội thoại thường, hãy tự dạy luôn, đừng "
             "vào lesson runtime: 'dạy con đi', 'cho con học chữ', 'con muốn học số', "
@@ -103,17 +113,26 @@ def start_lesson(conn: "ConnectionHandler"):
     try:
         # Respect the same dark-rollout gate the connect-time pull honors. If an
         # operator has not enabled the lesson runtime (LESSON_RUNTIME_ENABLED /
-        # config["lesson"]["runtime_enabled"]), the voice trigger must NOT bypass
-        # it — keep the lesson layer fully dark when disabled.
-        enabled_check = getattr(conn, "_lesson_runtime_enabled", None)
-        if callable(enabled_check) and not enabled_check():
+        # config["lesson"]["runtime_enabled"]) NOR the built-in sample demo
+        # (LESSON_SAMPLE_ENABLED / config["lesson"]["sample_lesson"]), the voice
+        # trigger must NOT bypass it — keep the lesson layer fully dark when disabled.
+        # BACKWARD-COMPAT: an ABSENT _lesson_runtime_enabled means "proceed" (the
+        # original gate only refused when the method was PRESENT and returned False);
+        # preserve that so callers without the method keep working. The sample demo
+        # flag adds an INDEPENDENT admission path.
+        runtime_check = getattr(conn, "_lesson_runtime_enabled", None)
+        sample_check = getattr(conn, "_sample_lesson_enabled", None)
+        runtime_disabled = callable(runtime_check) and not runtime_check()
+        runtime_admitted = not runtime_disabled
+        sample_on = callable(sample_check) and bool(sample_check())
+        if runtime_disabled and not sample_on:
             conn.logger.bind(tag=TAG).info(
                 "start_lesson requested but lesson runtime is disabled (flag OFF)"
             )
             return ActionResponse(
                 action=Action.RESPONSE,
                 result="Lesson runtime disabled",
-                response="Lesson mode is not available right now.",
+                response="Robot chưa sẵn sàng vào bài học lúc này.",
             )
 
         loop = getattr(conn, "loop", None)
@@ -127,17 +146,29 @@ def start_lesson(conn: "ConnectionHandler"):
                 response="Please try again in a moment.",
             )
 
-        # Reuse the connection's own wrapped entry point when present — it already
-        # swallows exceptions so a lesson failure can never crash the connection
-        # or touch the voice path. Fall back to the runtime entry point directly
-        # if that wrapper is unavailable.
-        pull = getattr(conn, "_lesson_pull_on_connect", None)
-        if callable(pull):
-            task = loop.create_task(pull())
-        else:
-            from core.lesson.runtime import maybe_start_lesson_on_connect
+        # DEMO branch: when the sample flag is on, load the built-in sample lesson and
+        # IGNORE any backend assignment ("không quan tâm assign trước"). The sample flag
+        # is an explicit operator opt-in, so it takes precedence over the assignment pull
+        # — warn if it preempts an already-pinned real assignment so the footgun is
+        # visible. Otherwise reuse the connection's wrapped assignment-pull entry point
+        # (it already swallows exceptions so a lesson failure can never crash the
+        # connection or touch the voice path).
+        if sample_on:
+            if runtime_admitted and getattr(conn, "lesson_runtime", None) is not None:
+                conn.logger.bind(tag=TAG).warning(
+                    "start_lesson: sample lesson demo flag is preempting an assigned lesson"
+                )
+            from core.lesson.sample import start_sample_lesson
 
-            task = loop.create_task(maybe_start_lesson_on_connect(conn))
+            task = loop.create_task(start_sample_lesson(conn))
+        else:
+            pull = getattr(conn, "_lesson_pull_on_connect", None)
+            if callable(pull):
+                task = loop.create_task(pull())
+            else:
+                from core.lesson.runtime import maybe_start_lesson_on_connect
+
+                task = loop.create_task(maybe_start_lesson_on_connect(conn))
 
         # Track the task on the connection so close() cancels it (deep-audit #9: it
         # was a local var, so a disconnect mid-pull left it running -> leak / use-
@@ -157,6 +188,8 @@ def start_lesson(conn: "ConnectionHandler"):
                 if runtime is None and code in _FAILURE_STATUS_CODES:
                     _schedule_lesson_start_feedback(conn, status.get("message") or "Robot chưa bắt đầu bài học được.")
                 conn.logger.bind(tag=TAG).info("start_lesson: lesson pull task finished")
+            except asyncio.CancelledError:
+                conn.logger.bind(tag=TAG).info("start_lesson: lesson pull task cancelled")
             except Exception as exc:  # pragma: no cover - already logged inside pull
                 conn.logger.bind(tag=TAG).warning(
                     f"start_lesson: lesson pull task error: {type(exc).__name__}: {exc}"

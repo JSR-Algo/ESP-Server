@@ -67,6 +67,7 @@ class _DummyConn:
         self.google_live_session_started_at = None
         self.google_live_turn_started_at = None
         self.google_live_audio_out_started_at = None
+        self.google_live_lesson_prompt_output_allowed = False
         self.clear_queue_calls = 0
         self.voice_round_trips = []
         self.voice_metrics = []
@@ -757,6 +758,50 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
             fake_encoder.calls,
             [(200, False), (200, False), (0, True)],
         )
+
+    async def test_lesson_prompt_live_output_is_allowed_once_and_closes_on_audio_end(self):
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        bridge = self._build_bridge(conn)
+        fake_encoder = _FakeStreamingEncoder(sample_rate=24000)
+        bridge._output_encoder = fake_encoder
+        bridge._get_output_encoder = lambda sample_rate: fake_encoder
+
+        self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
+        self.assertTrue(
+            await bridge.handle_event(
+                {
+                    "type": "audio_chunk",
+                    "audio": b"\x01\x00" * 100,
+                    "mime_type": "audio/pcm;rate=24000",
+                }
+            )
+        )
+        self.assertTrue(await bridge.handle_event({"type": "audio_end"}))
+
+        sent_json = [
+            json.loads(payload)
+            for payload in conn.websocket.sent_messages
+            if isinstance(payload, str)
+        ]
+        self.assertEqual(sent_json[0]["state"], "start")
+        self.assertEqual(sent_json[-1]["state"], "stop")
+        self.assertTrue(sent_json[-1]["continue_listening"])
+        self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
+
+        self.assertTrue(
+            await bridge.handle_event(
+                {
+                    "type": "audio_chunk",
+                    "audio": b"\x02\x00" * 100,
+                    "mime_type": "audio/pcm;rate=24000",
+                }
+            )
+        )
+        self.assertEqual(conn.websocket.sent_messages.count(b"opus-tail"), 1)
 
     async def test_pcm_audio_encoding_offloads_resample_aec_reference_and_opus_encode_to_connection_worker(self):
         conn = _DummyConn()

@@ -257,6 +257,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
         response.setWebsocket(websocket);
 
+        String apiUrl = sysParamsService.getValue(Constant.SERVER_API_URL, true);
+        if (StringUtils.isNotBlank(apiUrl) && !"null".equals(apiUrl)) {
+            response.setApiUrl(apiUrl);
+        }
+
         // 添加MQTT UDP配置
         // 从系统参数获取MQTT Gateway地址，仅在配置有效时使用
         String mqttUdpConfig = sysParamsService.getValue(Constant.SERVER_MQTT_GATEWAY, true);

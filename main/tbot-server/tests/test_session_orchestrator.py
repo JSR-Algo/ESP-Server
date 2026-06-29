@@ -57,9 +57,13 @@ class _VoiceProvider:
 class _RecordingWS:
     def __init__(self):
         self.sent = []
+        self.modes_at_send = []
+        self.mode_getter = None
 
     async def send(self, payload):
         self.sent.append(payload)
+        if self.mode_getter is not None:
+            self.modes_at_send.append(self.mode_getter())
 
 
 class _ConsentClient:
@@ -244,7 +248,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.session_mode, SessionMode.DORMANT)
         self.assertEqual(conn.voice_provider.closed_live, 1)
 
-    async def test_enter_lesson_suspends_live_and_owns_audio_channel(self):
+    async def test_enter_lesson_keeps_live_session_open_and_owns_audio_channel(self):
         conn = _conn()
         conn.voice_provider = _VoiceProvider()
         conn.session_mode = SessionMode.CONVERSATION
@@ -253,7 +257,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         await conn.enter_lesson_mode()
 
         self.assertEqual(conn.session_mode, SessionMode.LESSON)
-        self.assertEqual(conn.voice_provider.closed_live, 1)
+        self.assertEqual(conn.voice_provider.closed_live, 0)
         self.assertEqual(conn.live_resumption_store.saved, [(conn.device_id, "resume-1")])
 
         handled = await conn._route_audio_message(b"lesson-audio")
@@ -275,6 +279,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         conn = _conn()
         conn.voice_provider = _VoiceProvider()
         conn.websocket = _RecordingWS()
+        conn.websocket.mode_getter = lambda: conn.session_mode
         conn.session_mode = SessionMode.LESSON
         conn.audio_channel_owner = SessionMode.LESSON
 
@@ -288,6 +293,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(emotions[0]["emotion"], "happy")
         self.assertEqual(emotions[0]["text"], "🙂")
         self.assertEqual(emotions[0]["session_id"], conn.session_id)
+        self.assertEqual(conn.websocket.modes_at_send, [SessionMode.CONVERSATION])
         # ...then the robot returns to NORMAL CONVERSATION (Live reopened).
         self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
         self.assertEqual(conn.voice_provider.started, 1)
@@ -296,6 +302,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         conn = _conn()
         conn.voice_provider = _VoiceProvider()
         conn.websocket = _RecordingWS()
+        conn.websocket.mode_getter = lambda: conn.session_mode
         conn.config["lesson"] = {"return_to_conversation": False}
         conn.session_mode = SessionMode.LESSON
         conn.audio_channel_owner = SessionMode.LESSON
@@ -305,6 +312,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         # Happy face still shown regardless of the destination mode...
         emotions = [json.loads(p) for p in conn.websocket.sent]
         self.assertEqual([e["emotion"] for e in emotions], ["happy"])
+        self.assertEqual(conn.websocket.modes_at_send, [SessionMode.DORMANT])
         # ...but the audio channel idles to dormant (no Live reopen / no extra cost).
         self.assertEqual(conn.session_mode, SessionMode.DORMANT)
         self.assertEqual(conn.voice_provider.started, 0)
