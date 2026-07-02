@@ -8,6 +8,7 @@ from collections.abc import Mapping
 
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
 from core.voice.child_safety import ensure_child_safety_block
+from core.voice.output_safety_judge import judge_output_unsafe
 from core.voice.google_live.interaction_controller import (
     GoogleLiveInteractionController,
     InteractionState,
@@ -378,6 +379,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         child). Returns True when the frame was handled here."""
         if not self._lesson_child_response_window_active():
             return False
+        self._force_lesson_session_mode("lesson_child_audio")
         bridge = self._bridge
         if bridge is None or not hasattr(bridge, "forward_decoded_input_audio"):
             return False
@@ -542,6 +544,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
     _FALLBACK_NOTICE_ERROR_CLASSES = frozenset(
         {"quota", "auth", "invalid_config", "network"}
     )
+    _FALLBACK_NOTICE_MESSAGE = "Robot cần nghỉ một chút xíu thôi, con thử lại nhé!"
 
     async def _send_fallback_notice(self, exc):
         """Best-effort child-facing alert when a non-retriable runtime failure forces a
@@ -557,7 +560,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "status": "live_unavailable",
                 "reason": error_class,
                 "session_id": getattr(self.conn, "session_id", None),
-                "message": "Robot cần nghỉ một chút xíu thôi, con thử lại nhé!",
+                "message": self._FALLBACK_NOTICE_MESSAGE,
                 "emotion": "neutral",
             }
             sent = getattr(self.conn, "sent", None)
@@ -907,6 +910,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
             # Call asyncio.sleep through the module-level asyncio so the test's
             # google_live_module.asyncio.sleep monkeypatch is honoured.
             await asyncio.sleep(delay)
+            if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+                self.conn.google_live_lesson_prompt_output_allowed = False
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_output_gate_cleared_after_estimated_delay delay_sec={:.2f}",
+                    delay,
+                )
         await self._wait_for_lesson_prompt_output_idle(config)
         if runtime is not None:
             current_runtime = getattr(self.conn, "lesson_runtime", None)
@@ -921,6 +930,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._user_audio_allowed_until,
             time.monotonic() + max(0.1, window_sec),
         )
+        self._force_lesson_session_mode("lesson_child_response_window")
         self.conn.logger.bind(tag="GoogleLive").info(
             "Google Live lesson_child_response_window_open delay_sec={:.2f} window_sec={:.1f}",
             delay,
@@ -1009,6 +1019,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         return True
 
+    def _force_lesson_session_mode(self, reason):
+        """Keep Live model output muted while lesson runtime owns child input."""
+        if not self._lesson_runtime_active():
+            return
+        current = normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        )
+        if current == SessionMode.LESSON:
+            return
+        setter = getattr(self.conn, "_set_session_mode", None)
+        if callable(setter):
+            setter(SessionMode.LESSON, reason=reason)
+        else:
+            self.conn.session_mode = SessionMode.LESSON
+
     async def _route_lesson_child_response(self, transcript_text):
         """Route a child answer to the lesson runtime, blocking Live model
         output for the turn first.
@@ -1022,6 +1047,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not self._lesson_child_response_window_active():
             return None
         runtime = self.conn.lesson_runtime
+        self._force_lesson_session_mode("lesson_child_response")
         # Block model output BEFORE advancing the runtime so the runtime never
         # races the model's audio for this turn.
         if self._bridge is not None and hasattr(self._bridge, "stop_output"):
@@ -1185,6 +1211,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception as exc:
             if allow_lesson_output:
                 self.conn.google_live_lesson_prompt_output_allowed = False
+            await self._close_live_resources()
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live {} live text failed: {}",
                 log_label,
@@ -1429,6 +1456,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._fallback_provider = self._classic_provider_factory(self.conn)
         self.conn.voice_provider = self._fallback_provider
         await self._fallback_provider.start_session()
+        await self._speak_fallback_notice_if_available(exc)
+
+    async def _speak_fallback_notice_if_available(self, exc):
+        try:
+            if self._classify_error(exc) not in self._FALLBACK_NOTICE_ERROR_CLASSES:
+                return
+            speaker = getattr(self._fallback_provider, "speak_child_notice", None)
+            if callable(speaker):
+                await speaker(self._FALLBACK_NOTICE_MESSAGE)
+        except Exception as notice_exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live fallback notice speech failed: {}",
+                self._safe_error_message(notice_exc),
+            )
 
     async def _handle_runtime_failure(self, exc):
         await self._stop_live_output_for_transport_change()
@@ -1582,6 +1623,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             tool_call_handler=self._handle_tool_call_event,
             tool_call_cancellation_handler=self._handle_tool_call_cancellation_event,
             model_output_unblocked_handler=self._on_model_output_unblocked,
+            output_judge=self._build_output_judge(),
         )
         self._ensure_required_aec_ready()
         await self._client.connect()
@@ -1599,6 +1641,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._receive_task = asyncio.create_task(
             self._receive_events_loop(generation)
         )
+
+    def _build_output_judge(self):
+        """Build the optional async LLM-judge callable for model-output moderation.
+
+        Returns None (judge disabled, regex-only) unless a usable LLM provider is
+        on the connection. The judge runs the sync `response_no_stream` off the
+        event loop via asyncio.to_thread so it never blocks the realtime path; the
+        judge helper itself is timeout-bounded and fail-open."""
+        llm = getattr(self.conn, "llm", None)
+        if llm is None or not hasattr(llm, "response_no_stream"):
+            return None
+
+        async def _judge(text):
+            async def _call(system, user):
+                return await asyncio.to_thread(llm.response_no_stream, system, user)
+
+            return await judge_output_unsafe(text, _call)
+
+        return _judge
 
     def _augment_prompt_with_child_name(self, prompt):
         """Append a <child_profile> addressing block to the system prompt when a

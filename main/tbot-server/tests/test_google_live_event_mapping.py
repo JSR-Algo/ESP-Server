@@ -341,6 +341,49 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarder.batches[0]["eventType"], "safety_block")
         self.assertEqual(forwarder.batches[0]["detail"]["source"], "model_output")
 
+    async def test_llm_judge_escalates_block_on_regex_passing_unsafe_output(self):
+        # Content the fast regex screen does NOT match, but the judge flags. This
+        # is the live-incident class: subtle "unhealthy" phrasing regex misses.
+        conn = _DummyConn({"send_llm_state_events": True})
+        forwarder = _FakeForwarder()
+        conn.lesson_runtime = types.SimpleNamespace(forwarder=forwarder)
+
+        async def judge(_text):
+            return True  # judge says UNSAFE
+
+        bridge = self._build_bridge(conn, output_judge=judge)
+
+        await bridge.handle_event(
+            {"type": "transcript", "source": "model", "text": "some subtly unhealthy story"}
+        )
+        await bridge.handle_event({"type": "audio_start"})
+        await bridge.handle_event({"type": "audio_chunk", "audio": b"unsafe-audio"})
+
+        self.assertNotIn(b"unsafe-audio", conn.websocket.sent_messages)
+        self.assertEqual(len(forwarder.batches), 1)
+        self.assertEqual(forwarder.batches[0]["eventType"], "safety_block")
+
+    async def test_llm_judge_failure_fails_open_and_audio_flows(self):
+        conn = _DummyConn({"send_llm_state_events": True})
+        forwarder = _FakeForwarder()
+        conn.lesson_runtime = types.SimpleNamespace(forwarder=forwarder)
+
+        async def judge(_text):
+            raise RuntimeError("judge provider down")
+
+        bridge = self._build_bridge(conn, output_judge=judge)
+
+        # Safe content + a failing judge must NOT emit a safety block, and audio
+        # must still play through (fail open — never block on judge infra fault).
+        await bridge.handle_event(
+            {"type": "transcript", "source": "model", "text": "let's say the word apple"}
+        )
+        await bridge.handle_event({"type": "audio_start"})
+        await bridge.handle_event({"type": "audio_chunk", "audio": b"safe-audio"})
+
+        self.assertEqual(len(forwarder.batches), 0)  # no block emitted
+        self.assertIn(b"safe-audio", conn.websocket.sent_messages)  # audio flowed
+
     async def test_audio_start_marks_client_as_speaking(self):
         conn = _DummyConn()
         conn.client_is_speaking = False

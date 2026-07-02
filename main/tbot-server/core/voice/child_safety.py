@@ -36,6 +36,13 @@ _MODEL_OUTPUT_BLOCK_PATTERNS = (
     ("sexual", re.compile(r"\b(sex|sexual|nude|porn|khiêu\s+dâm|tình\s+dục)\b", re.I)),
     ("self_harm", re.compile(r"\b(kill\s+yourself|suicide|self\s*harm|tu\s+tu|tự\s+tử)\b", re.I)),
     ("violence", re.compile(r"\b(kill|stab|shoot|bomb|weapon|giết|dao|súng|bom)\b", re.I)),
+    # Categories the CHILD_SAFETY_BLOCK contract already declares as hard refusals
+    # but the screen historically did not enforce — added after a live hardware
+    # incident where unhealthy ("khong lanh manh") audio reached a child.
+    ("profanity", re.compile(r"(?:\b(fuck|shit|bitch|idiot|stupid|dumb|shut\s+up|damn|moron|fool)\b|đồ\s+ngu|do\s+ngu|\bdm\b|đm|ngu\s+ngốc|chửi|chui\s+tuc|chửi\s+tục)", re.I)),
+    ("adult_substance", re.compile(r"(?:\b(beer|wine|alcohol|drunk|cigarette|smoke|smoking|drugs?|weed|marijuana|heroin|cocaine|gambl\w*|casino)\b|rượu|ruou|bia|say\s+xỉn|hút\s+thuốc|hut\s+thuoc|thuốc\s+lá|ma\s+túy|ma\s+tuy|cờ\s+bạc|co\s+bac)", re.I)),
+    ("hate", re.compile(r"(?:\bi\s+hate\s+you\b|\bhate\s+(?:you|your|them|their)\b|because\s+of\s+(?:their|your)\s+(?:race|religion|skin)|kỳ\s+thị|ky\s+thi|thù\s+ghét|thu\s+ghet)", re.I)),
+    ("dangerous_instruction", re.compile(r"(?:how\s+to\s+make\s+(?:a\s+)?(?:fire|bomb|weapon)|play\s+with\s+(?:the\s+|a\s+)?(?:knife|fire|matches?)|climb\s+out\s+(?:the\s+)?window|chơi\s+với\s+dao|choi\s+voi\s+dao|nghịch\s+lửa|nghich\s+lua|trèo\s+ra\s+ngoài|leo\s+ra\s+cửa\s+sổ)", re.I)),
 )
 
 

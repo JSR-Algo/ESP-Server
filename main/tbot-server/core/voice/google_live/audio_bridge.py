@@ -70,10 +70,15 @@ class GoogleLiveAudioBridge:
         tool_call_handler=None,
         tool_call_cancellation_handler=None,
         model_output_unblocked_handler=None,
+        output_judge=None,
     ):
         self.conn = conn
         self.client = client
         self.logger = logger
+        # Optional async LLM-judge second line: output_judge(text) -> bool(unsafe).
+        # Fail-open by contract; only escalates a block for content the fast regex
+        # screen missed. None => judge disabled (regex-only, unchanged behavior).
+        self._output_judge = output_judge
         self._response_id_getter = response_id_getter or (lambda: None)
         self._response_cancelled_checker = response_cancelled_checker or (
             lambda response_id: False
@@ -181,6 +186,9 @@ class GoogleLiveAudioBridge:
                     return True
                 self._record_model_transcript(transcript_text)
                 if self._is_unsafe_model_output(transcript_text):
+                    await self._block_unsafe_model_output(transcript_text)
+                    return True
+                if await self._judge_flags_unsafe_output(transcript_text):
                     await self._block_unsafe_model_output(transcript_text)
                     return True
                 if (
@@ -418,6 +426,12 @@ class GoogleLiveAudioBridge:
                     "model_output_unblock_trigger source=user_ack"
                 )
                 self._schedule_model_output_unblocked_notification()
+
+    def force_allow_model_output(self):
+        if self._unblock_model_output():
+            self.logger.bind(tag="GoogleLive").info(
+                "model_output_unblock_trigger source=lesson_prompt_force"
+            )
 
     def is_model_output_blocked(self):
         return self._block_model_output_until_user_ack
@@ -751,6 +765,19 @@ class GoogleLiveAudioBridge:
 
     def _is_unsafe_model_output(self, text):
         return bool(screen_model_output(text).get("blocked"))
+
+    async def _judge_flags_unsafe_output(self, text):
+        """Optional LLM-judge second line. Fail-safe: any error => do not block
+        (the fast regex screen already ran and is authoritative for its categories;
+        the judge only ADDS blocks for subtle content it is confident is unsafe)."""
+        judge = self._output_judge
+        if judge is None:
+            return False
+        try:
+            return bool(await judge(text))
+        except Exception:  # noqa: BLE001 - never let the judge break the voice path
+            self.logger.bind(tag="GoogleLive").warning("output judge errored; failing open")
+            return False
 
     async def _block_unsafe_model_output(self, text):
         self._moderation_block_active = True
