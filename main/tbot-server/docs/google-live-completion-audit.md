@@ -146,6 +146,9 @@ Current server-side proof:
 - direct legacy `ConnectionHandler.chat()` calls are no-ops when
   `voice_mode.type=google_live`, so bypass callers cannot queue classic TTS for
   a Google Live session
+- direct legacy `startToChat()` calls are no-ops when
+  `voice_mode.type=google_live`, so bypass callers cannot run classic intent,
+  STT echo, or executor-submitted chat for a Google Live session
 - exceptions from parsed Google Live text commands are also consumed after
   runtime-failure handling, so a failed local stop-word/command branch cannot
   fall through to the classic text handler
@@ -184,6 +187,8 @@ Current server-side proof:
   `72 passed`; provider-absent Google Live routing suite `107 passed`
 - focused direct-chat guard proof from 2026-07-03:
   connection edge/routing suite `61 passed`
+- focused direct-startToChat guard proof from 2026-07-03:
+  receive-audio/direct-chat suite `14 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
