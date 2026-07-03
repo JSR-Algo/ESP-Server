@@ -762,6 +762,14 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "Google Live tool timeout",
             ),
             (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live runtime failure type=timeout: receive loop stopped",
+                "Google Live runtime failure type=",
+            ),
+            (
+                "260518 20:10:00[GoogleLive]-ERROR-Google Live unavailable type=auth: bad api key",
+                "Google Live unavailable type=",
+            ),
+            (
                 "260518 20:10:00[lesson]-ERROR-STEP_TIMEOUT step=s1 seq=1",
                 "STEP_TIMEOUT",
             ),

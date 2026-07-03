@@ -38,6 +38,8 @@ FATAL_PATTERNS = (
     "Google Live AEC push_reference failed",
     "Google Live receive timed out",
     "Google Live waiting_model_timeout",
+    "Google Live runtime failure type=",
+    "Google Live unavailable type=",
     "Google Live lesson_prompt_output_guard_timeout",
     "Google Live lesson_prompt_playback_guard_timeout",
     "Google Live reconnect attempt",

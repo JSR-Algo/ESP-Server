@@ -96,6 +96,7 @@ Current server-side proof:
   `Google Live transcript_barge_in suppressed_for_age`, `Google Live
   transcript_barge_in suppressed_as_model_echo`, and `Google Live server
   interruption ignored by config`, Google Live receive/waiting-model timeouts,
+  Google Live runtime/unavailable failures,
   lesson prompt output/playback guard timeouts, reconnect attempts,
   `reconnect_started`, `Google Live tool timeout`, `STEP_TIMEOUT`, and direct
   user transcripts that exactly match or contain a long substring from earlier
