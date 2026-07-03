@@ -250,6 +250,7 @@ def _apply_google_live_runtime_safety_policy(google_live):
     google_live["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
     google_live["barge_in"] = False
     google_live["interrupt_on_input_while_speaking"] = False
+    google_live["drop_input_while_speaking"] = False
     google_live["interruption_min_output_age_sec"] = 0.0
     google_live["barge_in_transcript_min_output_age_sec"] = 0.0
     google_live["waiting_model_timeout_sec"] = 2.0

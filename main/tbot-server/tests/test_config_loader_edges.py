@@ -591,13 +591,17 @@ async def test_get_private_config_from_api_exceptions_and_fallbacks(monkeypatch)
         raise RuntimeError("words failed")
 
     async def agent_ok(*_args):
-        return {"voice_mode": {"type": "google_live"}, "google_live": {"barge_in": True}}
+        return {
+            "voice_mode": {"type": "google_live"},
+            "google_live": {"barge_in": True, "drop_input_while_speaking": True},
+        }
 
     monkeypatch.setattr(config_loader, "get_correct_words", words_error)
     monkeypatch.setattr(config_loader, "get_agent_models", agent_ok)
     result = await config_loader.get_private_config_from_api({"selected_module": {"LLM": "x"}}, "dev", "client")
     assert "correct_words" not in result
     assert result["google_live"]["barge_in"] is False
+    assert result["google_live"]["drop_input_while_speaking"] is False
 
     assert missing_device is not None
 
