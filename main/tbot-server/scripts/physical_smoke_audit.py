@@ -28,6 +28,8 @@ FATAL_PATTERNS = (
     "'state': 'sentence_start'",
     "state=sentence_start",
     "audio_decision decision=suppress_echo reason=robot_speaking",
+    "audio_decision decision=drop_input reason=output_active",
+    "audio_decision decision=hold_interrupt_audio reason=blocked_output",
     "Google Live echo_bypass",
     "Google Live echo_suppressed reason=robot_speaking",
     "Google Live AEC import failed",

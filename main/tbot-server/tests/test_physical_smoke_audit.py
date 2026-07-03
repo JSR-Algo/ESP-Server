@@ -2951,6 +2951,37 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         )
         self.assertIn("no_fatal_patterns", result["missing"])
 
+    def test_audit_rejects_robot_speaking_audio_decision_drop_or_hold(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:03[GoogleLive]-INFO-audio_decision decision=drop_input reason=output_active state=MODEL_SPEAKING turn_id=0 response_id=0 audio_seq=275 bytes=1920 rms=2600
+260518 20:10:04[GoogleLive]-INFO-audio_decision decision=hold_interrupt_audio reason=blocked_output state=MODEL_SPEAKING turn_id=0 response_id=0 audio_seq=276 bytes=1920 rms=2600
+""" + "\n".join(
+            "260518 20:10:{:02d}[GoogleLive]-INFO-Google Live user_interrupted reason=audio_input cancelled_response_id={} next_response_id={}".format(i, i, i + 1)
+            for i in range(10)
+        )
+
+        result = audit.audit_log(
+            log_text,
+            device_id="3c:0f:02:de:c2:e0",
+            client_id="d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            min_interrupts=10,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "audio_decision decision=drop_input reason=output_active",
+            result["fatal_hits"],
+        )
+        self.assertIn(
+            "audio_decision decision=hold_interrupt_audio reason=blocked_output",
+            result["fatal_hits"],
+        )
+        self.assertIn("no_fatal_patterns", result["missing"])
+
     def test_audit_rejects_child_response_without_observable_input(self):
         audit = importlib.import_module("scripts.physical_smoke_audit")
         log_text = """

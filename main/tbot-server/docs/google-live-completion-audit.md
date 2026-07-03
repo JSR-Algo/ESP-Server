@@ -82,9 +82,11 @@ Current server-side proof:
   `Send first voice segment:`,
   `Send audio message:`,
   `tts` `sentence_start` frames,
-  `audio_decision decision=suppress_echo reason=robot_speaking`, `Google Live
-  echo_bypass`, `Google Live echo_suppressed reason=robot_speaking`, `Google
-  Live AEC import failed`, `Google Live AEC initialised ... bypassed=True`,
+  `audio_decision decision=suppress_echo reason=robot_speaking`,
+  `audio_decision decision=drop_input reason=output_active`,
+  `audio_decision decision=hold_interrupt_audio reason=blocked_output`, `Google
+  Live echo_bypass`, `Google Live echo_suppressed reason=robot_speaking`,
+  `Google Live AEC import failed`, `Google Live AEC initialised ... bypassed=True`,
   `Google Live AEC process_mic failed while output active`,
   `live_identity_mismatch`, `Google Live
   interruption suppressed_for_age`, `interrupt_started reason=loud_input`,
@@ -209,6 +211,8 @@ Current server-side proof:
 - focused direct intent/listen guard proof from 2026-07-03:
   intent/listen/receive-audio/connection-routing suite `101 passed`; Google
   Live send-audio/wake/provider/fallback suite `127 passed`
+- focused physical-audit mic-forwarding proof from 2026-07-03:
+  robot-speaking suppress/drop/hold audit tests `3 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
