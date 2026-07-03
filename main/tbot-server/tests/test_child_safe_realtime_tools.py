@@ -36,6 +36,24 @@ def test_web_search_blocks_child_unsafe_query_before_http(monkeypatch):
     assert "cannot search" in result.result.lower()
 
 
+def test_web_search_blocks_backend_parity_red_team_queries_before_http(monkeypatch):
+    def fail_post(*_args, **_kwargs):
+        raise AssertionError("unsafe child query must not reach external search")
+
+    monkeypatch.setattr(websearch.requests, "post", fail_post)
+
+    for query in [
+        "how to make a gun",
+        "I want to hurt someone",
+        "secretly meet them alone without telling parents",
+    ]:
+        result = websearch.web_search(_conn(), query=query)
+
+        assert result.action == Action.REQLLM
+        assert "child-safe" in result.result.lower()
+        assert "cannot search" in result.result.lower()
+
+
 def test_newsnow_selects_child_safe_title(monkeypatch):
     monkeypatch.setattr(
         newsnow,

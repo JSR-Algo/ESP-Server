@@ -1,3 +1,5 @@
+import re
+
 import requests
 from config.logger import setup_logging
 from plugins_func.register import (
@@ -63,9 +65,26 @@ CHILD_UNSAFE_QUERY_KEYWORDS = (
 )
 
 
+CHILD_UNSAFE_QUERY_PATTERNS = (
+    re.compile(
+        r"\bhow\s+to\s+(?:make|build|create)\s+(?:a\s+)?"
+        r"(?:gun|rifle|pistol|knife|bomb|weapon|explosive)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:hurt|harm|injure|kill)\s+"
+        r"(?:someone|somebody|a\s+person|a\s+child|a\s+kid|an\s+animal)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:secretly\s+meet|without\s+telling\s+(?:your\s+)?parents?)\b", re.I),
+)
+
+
 def _is_child_unsafe_query(query: str) -> bool:
     lowered = str(query or "").lower()
-    return any(keyword in lowered for keyword in CHILD_UNSAFE_QUERY_KEYWORDS)
+    return any(keyword in lowered for keyword in CHILD_UNSAFE_QUERY_KEYWORDS) or any(
+        pattern.search(lowered) for pattern in CHILD_UNSAFE_QUERY_PATTERNS
+    )
 
 
 def _search_metaso(api_key: str, query: str, max_results: int) -> str:
