@@ -132,6 +132,9 @@ def _is_google_live_connection(conn: "ConnectionHandler"):
     return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
 
 async def max_out_size(conn: "ConnectionHandler"):
+    if _is_google_live_connection(conn):
+        return
+
     # Play prompt for exceeding maximum output word count
     conn.client_abort = False
     text = "Sorry, I have something to do now. Let’s chat tomorrow at this time. Deal! See you tomorrow,Bye!"
@@ -143,6 +146,9 @@ async def max_out_size(conn: "ConnectionHandler"):
 
 
 async def check_bind_device(conn: "ConnectionHandler"):
+    if _is_google_live_connection(conn):
+        return
+
     if conn.bind_code:
         # Ensurebind_codeis6Digits
         if len(conn.bind_code) != 6:

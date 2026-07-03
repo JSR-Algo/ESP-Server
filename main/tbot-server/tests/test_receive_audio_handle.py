@@ -230,7 +230,32 @@ class IdleAndPromptTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.client_abort)
 
 
+    async def test_google_live_max_out_size_does_not_queue_classic_prompt_audio(self):
+        conn = _conn(config={"voice_mode": {"type": "google_live"}})
+
+        with patch.object(receiveAudioHandle, "send_stt_message", new=AsyncMock()) as send, patch.object(
+            receiveAudioHandle, "audio_to_data", new=AsyncMock(return_value=[b"opus"])
+        ) as audio_to_data:
+            await receiveAudioHandle.max_out_size(conn)
+
+        send.assert_not_awaited()
+        audio_to_data.assert_not_awaited()
+        self.assertEqual(conn.tts.tts_audio_queue.items, [])
+        self.assertFalse(conn.close_after_chat)
+
 class BindDeviceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_google_live_check_bind_device_does_not_queue_classic_prompt_audio(self):
+        conn = _conn(config={"voice_mode": {"type": "google_live"}}, bind_code="123456")
+
+        with patch.object(receiveAudioHandle, "send_stt_message", new=AsyncMock()) as send, patch.object(
+            receiveAudioHandle, "audio_to_data", new=AsyncMock(return_value=[b"opus"])
+        ) as audio_to_data:
+            await receiveAudioHandle.check_bind_device(conn)
+
+        send.assert_not_awaited()
+        audio_to_data.assert_not_awaited()
+        self.assertEqual(conn.tts.tts_audio_queue.items, [])
+
     async def test_check_bind_device_rejects_invalid_code(self):
         conn = _conn(bind_code="123")
         sent = []
