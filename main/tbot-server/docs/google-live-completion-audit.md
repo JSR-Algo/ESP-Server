@@ -146,6 +146,10 @@ Current server-side proof:
 - Google Live audio frames are also consumed when the Live audio bridge is
   absent, so stripped provider seams without a session orchestrator cannot mark
   the mic frame unhandled and let connection routing enqueue it to classic ASR
+- lesson-owned audio frames are consumed while the lesson runtime is active but
+  not accepting a child response, and also when the lesson voice provider is
+  unavailable or reports unhandled, so prompt narration cannot leak robot/mic
+  audio into the classic ASR queue
 - runtime safety policy forces `waiting_model_timeout_sec=2.0` after
   manager/private config merge, so old agent configs cannot leave the robot in a
   long `WAITING_MODEL` state
@@ -166,7 +170,8 @@ Current server-side proof:
   wake-word suite `9 passed`; wake/listen/send-audio suite `43 passed`; Google
   Live barge-in/fallback suite `109 passed`; provider/tool/audio/event suite
   `167 passed`; barge-in/fallback/connection-routing suite `135 passed`; bridge
-  guard provider/fallback/connection-routing suite `119 passed`
+  guard provider/fallback/connection-routing suite `119 passed`; lesson-owned
+  audio routing suite `59 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
