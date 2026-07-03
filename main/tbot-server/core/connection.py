@@ -1403,6 +1403,9 @@ class ConnectionHandler:
         if query is not None:
             self.logger.bind(tag=TAG).info(f"LLM received user message: {query}")
 
+        if self._google_live_mode_configured():
+            return None
+
         # Create new when topmostSession IDAnd sendFIRSTRequest
         if depth == 0:
             current_sentence_id = str(uuid.uuid4().hex)

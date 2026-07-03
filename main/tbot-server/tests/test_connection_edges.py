@@ -1327,6 +1327,14 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         with patch("core.lesson.runtime.maybe_start_lesson_on_connect", _start):
             self.assertIs(await handler._lesson_pull_on_connect(), runtime)
 
+    def test_google_live_chat_direct_call_does_not_queue_classic_tts(self):
+        handler = _build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+
+        self.assertIsNone(handler.chat("xin chao"))
+
+        self.assertTrue(handler.tts.tts_text_queue.empty())
+
     def test_chat_plain_text_llm_streams_tts_and_records_dialogue(self):
         handler = _build_handler()
         handler.loop = asyncio.get_event_loop()
