@@ -681,6 +681,18 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "260518 20:10:00[GoogleLive]-WARNING-Google Live AEC push_reference failed: buffer error",
                 "Google Live AEC push_reference failed",
             ),
+            (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live AEC process_mic failed, dropping AEC for this chunk: aec failed",
+                "Google Live AEC process_mic failed, dropping AEC for this chunk",
+            ),
+            (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live dropped invalid input audio bytes=1",
+                "Google Live dropped invalid input audio",
+            ),
+            (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live dropped corrupt input opus encoded_bytes=80 source_rate=16000 target_rate=16000 error_type=OpusError",
+                "Google Live dropped corrupt input opus",
+            ),
         ):
             with self.subTest(fatal_hit=fatal_hit):
                 log_text = f"""
