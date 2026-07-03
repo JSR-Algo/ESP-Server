@@ -155,6 +155,13 @@ Current server-side proof:
 - direct legacy max-output and bind-device prompt helpers are also no-ops when
   `voice_mode.type=google_live`, so bypass callers cannot queue local prompt
   audio into the Google Live speaker/mic path
+- direct legacy intent handlers are also consumed when
+  `voice_mode.type=google_live`, so bypass callers cannot run classic intent
+  analysis, function-call executor work, STT echo, or `tts_text_queue` output
+  for a Google Live session
+- direct legacy listen-detect text handling is consumed when
+  `voice_mode.type=google_live`, so bypass callers cannot route wake/no-greeting
+  text through classic STT/TTS stop prompts or `startToChat`
 - exceptions from parsed Google Live text commands are also consumed after
   runtime-failure handling, so a failed local stop-word/command branch cannot
   fall through to the classic text handler
@@ -199,6 +206,9 @@ Current server-side proof:
   connection edge/routing suite `61 passed`
 - focused direct max-output/bind-device prompt guard proof from 2026-07-03:
   receive-audio/connection-routing suite `76 passed`
+- focused direct intent/listen guard proof from 2026-07-03:
+  intent/listen/receive-audio/connection-routing suite `101 passed`; Google
+  Live send-audio/wake/provider/fallback suite `127 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
