@@ -20,7 +20,7 @@ INSERT INTO `ai_tts_voice` VALUES
 -- 增加是否允许用户注册参数
 delete from `sys_params` where  id in (103,104);
 INSERT INTO `sys_params` (id, param_code, param_value, value_type, param_type, remark) VALUES (103, 'server.allow_user_register', 'false', 'boolean', 1, '是否运行管理员以外的人注册');
-INSERT INTO `sys_params` (id, param_code, param_value, value_type, param_type, remark) VALUES (104, 'server.fronted_url', 'http://xiaozhi.server.com', 'string', 1, '下发六位验证码时显示的控制面板地址');
+INSERT INTO `sys_params` (id, param_code, param_value, value_type, param_type, remark) VALUES (104, 'server.fronted_url', 'https://admin.tjbot.vn', 'string', 1, '下发六位验证码时显示的控制面板地址');
 
 -- 修正CosyVoiceSiliconflow音色
 delete from `ai_tts_voice` where tts_model_id = 'TTS_CosyVoiceSiliconflow';

@@ -1,0 +1,8 @@
+FROM haproxy:3.0-alpine
+
+COPY deploy/render-haproxy.cfg /usr/local/etc/haproxy/render-haproxy.cfg.template
+COPY deploy/start-render-haproxy.sh /usr/local/bin/start-render-haproxy.sh
+
+RUN chmod +x /usr/local/bin/start-render-haproxy.sh
+
+CMD ["/usr/local/bin/start-render-haproxy.sh"]

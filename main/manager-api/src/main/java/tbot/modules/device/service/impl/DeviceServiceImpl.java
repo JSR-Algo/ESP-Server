@@ -261,7 +261,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
 
         if (StringUtils.isBlank(wsUrl) || wsUrl.equals("null")) {
             log.error("WebSocket address not configured. Log in to Smart Control Panel, find [server.websocket] config in Parameter Management");
-            wsUrl = "ws://tbot.server.com:8000/tbot/v1/";
+            wsUrl = "wss://esp.tjbot.vn/tbot/v1/";
             websocket.setUrl(wsUrl);
         } else {
             String[] wsUrls = wsUrl.split("\\;");
@@ -270,7 +270,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
                 websocket.setUrl(wsUrls[RandomUtil.randomInt(0, wsUrls.length)]);
             } else {
                 log.error("WebSocket address not configured. Log in to Smart Control Panel, find [server.websocket] config in Parameter Management");
-                websocket.setUrl("ws://tbot.server.com:8000/tbot/v1/");
+                websocket.setUrl("wss://esp.tjbot.vn/tbot/v1/");
             }
         }
 

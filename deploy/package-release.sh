@@ -70,8 +70,14 @@ services:
       - seccomp:unconfined
     environment:
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      NODE_ENV: ${NODE_ENV:-production}
       TBOT_PUBLIC_WEBSOCKET_URL: ${TBOT_PUBLIC_WEBSOCKET_URL:-}
       TBOT_BACKEND_API_URL: ${TBOT_BACKEND_API_URL:-}
+      TBOT_REQUIRE_DEVICE_TOKEN: ${TBOT_REQUIRE_DEVICE_TOKEN:-true}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?set JWT_PUBLIC_KEY}
+      TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?set TBOT_DEVICE_MINT_SECRET}
+      TBOT_SERVER_AUTH_KEY: ${TBOT_SERVER_AUTH_KEY:?set TBOT_SERVER_AUTH_KEY}
+      LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE}
       TBOT_FACTORY_TEST_CLAIMED_DEVICES: ${TBOT_FACTORY_TEST_CLAIMED_DEVICES:-}
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
@@ -149,8 +155,14 @@ write_env_example() {
 TBOT_SERVER_IMAGE=${SERVER_IMAGE}:${TAG}
 TBOT_WEB_IMAGE=${WEB_IMAGE}:${TAG}
 TBOT_REMOTE_ROOT=/opt/tbot
-TBOT_PUBLIC_WEBSOCKET_URL=wss://your-public-domain/tbot/v1/
-TBOT_BACKEND_API_URL=https://your-backend-api-domain/v1
+TBOT_PUBLIC_WEBSOCKET_URL=wss://esp.tjbot.vn/tbot/v1/
+TBOT_BACKEND_API_URL=https://tbot-backend-8wmh.onrender.com/v1
+NODE_ENV=production
+TBOT_REQUIRE_DEVICE_TOKEN=true
+JWT_PUBLIC_KEY=REPLACE_WITH_BACKEND_JWT_PUBLIC_KEY
+TBOT_DEVICE_MINT_SECRET=REPLACE_WITH_SHARED_DEVICE_MINT_SECRET
+TBOT_SERVER_AUTH_KEY=REPLACE_WITH_SHARED_WS_HMAC_SECRET
+LESSON_ASSET_ORIGIN_BASE=REPLACE_WITH_STABLE_LESSON_ASSET_ORIGIN
 TBOT_FACTORY_TEST_CLAIMED_DEVICES=
 TZ=Asia/Ho_Chi_Minh
 MYSQL_ROOT_PASSWORD=change-me
@@ -158,6 +170,17 @@ MYSQL_USER=root
 MYSQL_DATABASE=tbot_esp32_server
 REDIS_PASSWORD=
 EOF
+}
+
+copy_support_artifacts() {
+  local nginx_confs=("${SCRIPT_DIR}/nginx/"*.conf)
+  if [[ -e "${nginx_confs[0]}" ]]; then
+    mkdir -p "${RELEASE_DIR}/nginx"
+    cp "${nginx_confs[@]}" "${RELEASE_DIR}/nginx/"
+  fi
+  if [[ -f "${SCRIPT_DIR}/tjbot-prod-sys-params.sql" ]]; then
+    cp "${SCRIPT_DIR}/tjbot-prod-sys-params.sql" "${RELEASE_DIR}/tjbot-prod-sys-params.sql"
+  fi
 }
 
 while (($#)); do
@@ -214,6 +237,7 @@ else
   write_compose "${RELEASE_DIR}/docker-compose.prod.yml"
 fi
 write_env_example "${RELEASE_DIR}/.env.example"
+copy_support_artifacts
 
 SERVER_SHA="$(checksum_file "${RELEASE_DIR}/${SERVER_TAR}")"
 WEB_SHA="$(checksum_file "${RELEASE_DIR}/${WEB_TAR}")"

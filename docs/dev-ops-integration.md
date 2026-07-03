@@ -2,7 +2,7 @@
 
 本教程是方便全模块源码部署的爱好者，如何通过自动命令，自动拉取源码，自动编译，自动启动端口运行。实现最高效率的升级系统。
 
-本项目的测试平台`https://2662r3426b.vicp.fun`，从开放以来就使用了该方法，效果良好。
+本项目的生产平台 `https://admin.tjbot.vn`，从开放以来就使用了该方法，效果良好。
 
 教程可参考B站博主`毕乐labs`发布的视频教程：[《开源小智服务器tbot-server自动更新以及最新版本MCP接入点配置保姆教程》](https://www.bilibili.com/video/BV15H37zHE7Q)
 
@@ -171,7 +171,7 @@ tail -f /home/system/tbot/tbot-esp32-server/main/tbot-server/tmp/server.log
 ```
 
 # 注意事项
-测试平台`https://2662r3426b.vicp.fun`，是使用nginx做了反向代理。nginx.conf详细配置可以[参考这里](https://github.com/xinnan-tech/tbot-esp32-server/issues/791)
+生产平台 `https://admin.tjbot.vn`，当前使用 Cloudflare Tunnel 做公网入口；如使用直连 Nginx 反向代理，nginx.conf 详细配置可以[参考这里](https://github.com/xinnan-tech/tbot-esp32-server/issues/791)
 
 ## 常见问题
 

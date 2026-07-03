@@ -80,7 +80,7 @@ python mcp_pipe.py calculator.py
 如果你是单模块部署，当设备连接后，会输出类似的日志，说明成功了
 
 ```
-250705 -INFO-正在初始化MCP接入点: wss://2662r3426b.vicp.fun/mcp_e 
+250705 -INFO-正在初始化MCP接入点: wss://esp.tjbot.vn/mcp_e
 250705 -INFO-发送MCP接入点初始化消息
 250705 -INFO-MCP接入点连接成功
 250705 -INFO-MCP接入点初始化成功

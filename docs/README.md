@@ -226,7 +226,7 @@ tbot-esp32-server
         *   数据库的表结构、索引、初始数据等变更，都通过Liquibase的 `changelog` 文件（通常是XML格式）进行定义和版本化管理。当应用启动时，Liquibase会自动检查并应用必要的数据库结构更新，确保开发、测试和生产环境数据库结构的一致性。
 
     6.  **API文档:**
-        *   完整的API接口文档可通过以下地址访问: https://2662r3426b.vicp.fun/tbot/doc.html
+        *   完整的API接口文档可通过以下地址访问: https://admin.tjbot.vn/tbot/doc.html
         *   该文档使用Knife4j生成,提供了所有RESTful API端点的详细说明、请求/响应示例以及在线测试功能。
 
 `manager-api` 通过这些精心选择的技术和设计模式，构建了一个功能全面、结构清晰、安全可靠且易于维护和扩展的Java后端服务。其模块化的设计特别适合处理具有多种管理功能需求的复杂系统。

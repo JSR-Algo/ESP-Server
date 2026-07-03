@@ -1,0 +1,98 @@
+services:
+  - type: web
+    name: tbot-esp32-edge
+    runtime: docker
+    plan: standard
+    region: singapore
+    dockerfilePath: ./Dockerfile-render-edge
+    dockerContext: .
+    autoDeploy: false
+    envVars:
+      - key: TBOT_SERVER_HOST
+        fromService:
+          type: pserv
+          name: tbot-esp32-server
+          property: host
+
+  - type: pserv
+    name: tbot-esp32-server
+    runtime: docker
+    plan: standard
+    region: singapore
+    dockerfilePath: ./Dockerfile-server
+    dockerContext: .
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TZ
+        value: Asia/Ho_Chi_Minh
+      - key: LESSON_RUNTIME_ENABLED
+        value: "true"
+      - key: LESSON_SAMPLE_ENABLED
+        value: "false"
+      - key: TBOT_REQUIRE_DEVICE_TOKEN
+        value: "true"
+      - key: TBOT_SERVER_AUTH_ENABLED
+        value: "true"
+      - key: TBOT_LIVE_REDIS_NAMESPACE
+        value: prod
+      - key: LESSON_VOICE_RT_P95_DISABLE_MS
+        value: "1500"
+      - key: COURSE_BACKEND_URL
+        sync: false
+      - key: TBOT_BACKEND_API_URL
+        sync: false
+      - key: TBOT_PUBLIC_WEBSOCKET_URL
+        sync: false
+      - key: TBOT_SERVER_AUTH_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: TBOT_DEVICE_MINT_SECRET
+        sync: false
+      - key: LESSON_ASSET_ORIGIN_BASE
+        sync: false
+      - key: LESSON_ASSET_PUBLIC_BASE_URL
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: tbot-esp32-server-redis
+          property: connectionString
+
+  - type: web
+    name: tbot-esp32-server-web
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile-web-runtime
+    dockerContext: .
+    autoDeploy: false
+    envVars:
+      - key: TZ
+        value: Asia/Ho_Chi_Minh
+      - key: NESTJS_UPSTREAM_HOST
+        sync: false
+      - key: NESTJS_TOKEN
+        sync: false
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        sync: false
+      - key: MYSQL_DATABASE
+        sync: false
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: SPRING_DATA_REDIS_PASSWORD
+        sync: false
+
+  - type: keyvalue
+    name: tbot-esp32-server-redis
+    plan: starter
+    region: singapore
+    ipAllowList: []

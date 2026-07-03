@@ -151,6 +151,46 @@ is_quick_tunnel_host() {
   [[ "${host}" == "trycloudflare.com" || "${host}" == *.trycloudflare.com ]]
 }
 
+is_ephemeral_endpoint_host() {
+  local host="$1"
+  [[ "${host}" == "trycloudflare.com" || "${host}" == *.trycloudflare.com || \
+     "${host}" == "ngrok-free.app" || "${host}" == *.ngrok-free.app || \
+     "${host}" == "ngrok.io" || "${host}" == *.ngrok.io || \
+     "${host}" == "loca.lt" || "${host}" == *.loca.lt || \
+     "${host}" == "serveo.net" || "${host}" == *.serveo.net ]]
+}
+
+is_placeholder_value() {
+  local value="$1"
+  [[ -z "${value}" || "${value}" == *REPLACE_WITH* || "${value}" == *your-public-domain* || "${value}" == *your-backend-api-domain* ]]
+}
+
+validate_production_boot_env() {
+  [[ -n "${ENV_FILE}" ]] || return 0
+
+  local failed key value
+  failed=0
+
+  for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE; do
+    value="$(env_value "${key}" "")"
+    if is_placeholder_value "${value}"; then
+      printf 'error: %s is required in env file for production boot\n' "${key}" >&2
+      failed=1
+    fi
+  done
+
+  if [[ "$(env_value NODE_ENV "")" != "production" ]]; then
+    printf 'error: NODE_ENV must be production in env file\n' >&2
+    failed=1
+  fi
+  if [[ "$(env_value TBOT_REQUIRE_DEVICE_TOKEN "")" != "true" ]]; then
+    printf 'error: TBOT_REQUIRE_DEVICE_TOKEN must be true in env file\n' >&2
+    failed=1
+  fi
+
+  [[ "${failed}" -eq 0 ]] || exit 1
+}
+
 validate_public_endpoint_env() {
   [[ -n "${ENV_FILE}" ]] || return 0
 
@@ -196,6 +236,8 @@ validate_public_endpoint_env() {
   ws_host="$(url_host "${websocket_url}")"
   if is_quick_tunnel_host "${ws_host}"; then
     printf 'error: TBOT_PUBLIC_WEBSOCKET_URL must not use a trycloudflare quick tunnel\n' >&2
+  elif is_ephemeral_endpoint_host "${ws_host}"; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL must not use an ephemeral endpoint host: %s\n' "${ws_host}" >&2
   fi
 
   if [[ "${backend_url}" != http://* && "${backend_url}" != https://* ]]; then
@@ -208,7 +250,7 @@ validate_public_endpoint_env() {
 
   if [[ "${websocket_url}" != ws://* && "${websocket_url}" != wss://* ]] || \
      [[ "$(url_path "${websocket_url}")" != "/tbot/v1/" ]] || \
-     is_quick_tunnel_host "${ws_host}" || \
+     is_ephemeral_endpoint_host "${ws_host}" || \
      [[ "${backend_url}" != http://* && "${backend_url}" != https://* ]] || \
      [[ "${backend_path}" != "/v1" && "${backend_path}" != "/v1/" && "${backend_path}" != /v1/* ]]; then
     exit 1
@@ -292,6 +334,7 @@ if [[ "${HOST}" == "160.187.240.56" && -z "${ENV_FILE}" ]]; then
 fi
 
 validate_public_endpoint_env
+validate_production_boot_env
 
 if [[ -n "${SSH_PASSWORD:-}" && -z "${KEY_FILE}" ]] && ! command -v sshpass >/dev/null 2>&1 && ! command -v expect >/dev/null 2>&1; then
   printf 'warning: SSH_PASSWORD set but neither sshpass nor expect was found; falling back to interactive SSH auth\n' >&2

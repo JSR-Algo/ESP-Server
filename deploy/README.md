@@ -14,14 +14,14 @@ Current VPS deploys use DockerHub images instead of image tar upload when possib
 Production device endpoints must use stable public domains. Temporary
 `trycloudflare.com` quick tunnels are rejected by preflight and smoke checks.
 
-- Admin: `https://admin.example.com`
-- OTA: `https://esp.example.com/tbot/ota/`
-- WebSocket: `wss://esp.example.com/tbot/v1/`
+- Admin: `https://admin.tjbot.vn`
+- OTA: `https://esp.tjbot.vn/tbot/ota/`
+- WebSocket: `wss://esp.tjbot.vn/tbot/v1/`
 
 For Google Live mode, the Google API key must be saved in the Admin role config page, not in server env:
 
 ```text
-https://admin.example.com/#/role-config?agentId=dd81bae707804544ac7404d4e389d280
+https://admin.tjbot.vn/#/role-config?agentId=dd81bae707804544ac7404d4e389d280
 ```
 
 The device MAC currently bound to that agent is:
@@ -58,6 +58,13 @@ Keep `GOOGLE_API_KEY` empty in `.env` for this manager-driven setup. The Python 
    esp32-server/deploy/smoke-vps.sh --host <ip>
    curl http://<ip>:8003/tbot/ota/
    curl http://<ip>:8002/
+   ```
+   After DNS and Nginx are live:
+   ```sh
+   esp32-server/deploy/smoke-vps.sh \
+     --admin-url https://admin.tjbot.vn/ \
+     --ota-url https://esp.tjbot.vn/tbot/ota/ \
+     --expected-ws-host esp.tjbot.vn
    ```
 6. Roll back without rebuilding:
    ```sh
@@ -100,8 +107,10 @@ On the VPS, set `/opt/tbot/.env`:
 TBOT_SERVER_IMAGE=dinhmanh11/tbot-server:<tag>
 TBOT_WEB_IMAGE=dinhmanh11/tbot-server-web:<tag>
 TBOT_REMOTE_ROOT=/opt/tbot
-TBOT_PUBLIC_WEBSOCKET_URL=wss://esp.example.com/tbot/v1/
+TBOT_PUBLIC_WEBSOCKET_URL=wss://esp.tjbot.vn/tbot/v1/
 TBOT_BACKEND_API_URL=https://tbot-backend-8wmh.onrender.com/v1
+TBOT_DEVICE_MINT_SECRET=<shared-device-mint-secret>
+TBOT_SERVER_AUTH_KEY=<shared-ws-hmac-secret>
 TZ=Asia/Ho_Chi_Minh
 MYSQL_DATABASE=tbot_esp32_server
 MYSQL_ROOT_PASSWORD=<existing-db-password>
@@ -111,6 +120,120 @@ TBOT_WS_PORT=8000
 TBOT_HTTP_PORT=8003
 TBOT_ADMIN_PORT=8002
 GOOGLE_API_KEY=
+```
+
+## Host Nginx for tjbot.vn
+
+The Docker stack keeps the same local/public ports from `docker-compose.prod.yml`:
+
+```text
+admin web/API: 127.0.0.1:8002
+OTA/HTTP:      127.0.0.1:8003
+WebSocket:     127.0.0.1:8000
+```
+
+### Current production ingress: Cloudflare Tunnel
+
+The current VPS provider blocks public `80/443` before traffic reaches host
+Nginx, so production uses Cloudflare Tunnel instead of direct public Nginx TLS.
+
+Cloudflare DNS for `tjbot.vn` is delegated to:
+
+```text
+johnny.ns.cloudflare.com
+reza.ns.cloudflare.com
+```
+
+Tunnel details on the VPS:
+
+```text
+name: tjbot-prod
+id:   389630b4-fc56-4d7a-97e2-cd5430641b89
+config: /etc/cloudflared/config.yml
+service: cloudflared.service
+```
+
+Expected tunnel ingress config:
+
+```yaml
+tunnel: 389630b4-fc56-4d7a-97e2-cd5430641b89
+credentials-file: /root/.cloudflared/389630b4-fc56-4d7a-97e2-cd5430641b89.json
+
+ingress:
+  - hostname: admin.tjbot.vn
+    service: http://127.0.0.1:8002
+  - hostname: esp.tjbot.vn
+    path: /tbot/ota/*
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: /internal/*
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: /mcp/vision/*
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: /tbot/v1/*
+    service: http://127.0.0.1:8000
+  - hostname: esp.tjbot.vn
+    service: http://127.0.0.1:8003
+  - service: http_status:404
+```
+
+Cloudflare security must not serve a browser challenge to robots or WebSocket
+clients. Keep an active custom security rule:
+
+```text
+name: bypass challenge for tjbot public subdomains
+expression: (http.host eq "esp.tjbot.vn") or (http.host eq "admin.tjbot.vn")
+action: Skip
+skip components: remaining custom rules, managed rules, Super Bot Fight Mode,
+Browser Integrity Check, Security Level
+```
+
+Verify the tunnel and public endpoints:
+
+```sh
+ssh -i ~/.ssh/tbot_vps_ed25519 -p 22701 root@160.187.240.56 \
+  'systemctl is-enabled cloudflared && systemctl is-active cloudflared && cloudflared tunnel info tjbot-prod'
+
+curl -I https://admin.tjbot.vn/
+curl -sS https://esp.tjbot.vn/tbot/ota/
+curl --http1.1 -I https://esp.tjbot.vn/tbot/v1/ \
+  -H 'Connection: Upgrade' \
+  -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  -H 'Sec-WebSocket-Version: 13'
+```
+
+### Direct Nginx TLS fallback
+
+Use this only if the VPS provider opens public `80/443`. Point DNS `A` records
+for `admin.tjbot.vn` and `esp.tjbot.vn` to the VPS public IP, then install the
+checked-in Nginx vhost:
+
+```sh
+sudo install -m 644 /opt/tbot/current/nginx/tjbot.vn.conf /etc/nginx/conf.d/tjbot.vn.conf
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d admin.tjbot.vn -d esp.tjbot.vn
+```
+
+Apply production manager params:
+
+```sh
+docker exec -i tbot-esp32-server-db sh -lc 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" tbot_esp32_server' \
+  < /opt/tbot/current/tjbot-prod-sys-params.sql
+```
+
+Verify:
+
+```sh
+curl -I https://admin.tjbot.vn
+curl -I https://esp.tjbot.vn/tbot/ota/
+deploy/smoke-vps.sh \
+  --admin-url https://admin.tjbot.vn/ \
+  --ota-url https://esp.tjbot.vn/tbot/ota/ \
+  --expected-ws-host esp.tjbot.vn
 ```
 
 Then pull and recreate with Docker Compose v2:
@@ -171,8 +294,14 @@ set -a; . "$ENV_FILE"; set +a            # load .env so the knobs below are popu
 : "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in $ENV_FILE}"
 : "${TBOT_PUBLIC_WEBSOCKET_URL:?set TBOT_PUBLIC_WEBSOCKET_URL in $ENV_FILE}"
 : "${TBOT_BACKEND_API_URL:?set TBOT_BACKEND_API_URL in $ENV_FILE}"
+: "${TBOT_DEVICE_MINT_SECRET:?set TBOT_DEVICE_MINT_SECRET in $ENV_FILE}"
+: "${TBOT_SERVER_AUTH_KEY:?set TBOT_SERVER_AUTH_KEY in $ENV_FILE}"
+: "${JWT_PUBLIC_KEY:?set JWT_PUBLIC_KEY in $ENV_FILE}"
+: "${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE in $ENV_FILE}"
 
 # Resolve the same defaults compose uses so the manual run matches it exactly.
+NODE_ENV="${NODE_ENV:-production}"
+TBOT_REQUIRE_DEVICE_TOKEN="${TBOT_REQUIRE_DEVICE_TOKEN:-true}"
 TZ="${TZ:-Asia/Ho_Chi_Minh}"
 MYSQL_HOST="${MYSQL_HOST:-tbot-esp32-server-db}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
@@ -200,9 +329,14 @@ docker run -d --name tbot-esp32-server-redis --restart unless-stopped \
 docker rm -f tbot-esp32-server 2>/dev/null || true
 docker run -d --name tbot-esp32-server --restart unless-stopped \
   --network tbot --security-opt seccomp:unconfined \
-  -e "TZ=$TZ" -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}" \
+  -e "TZ=$TZ" -e "NODE_ENV=$NODE_ENV" -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}" \
   -e "TBOT_PUBLIC_WEBSOCKET_URL=$TBOT_PUBLIC_WEBSOCKET_URL" \
   -e "TBOT_BACKEND_API_URL=$TBOT_BACKEND_API_URL" \
+  -e "TBOT_REQUIRE_DEVICE_TOKEN=$TBOT_REQUIRE_DEVICE_TOKEN" \
+  -e "JWT_PUBLIC_KEY=$JWT_PUBLIC_KEY" \
+  -e "TBOT_DEVICE_MINT_SECRET=$TBOT_DEVICE_MINT_SECRET" \
+  -e "TBOT_SERVER_AUTH_KEY=$TBOT_SERVER_AUTH_KEY" \
+  -e "LESSON_ASSET_ORIGIN_BASE=$LESSON_ASSET_ORIGIN_BASE" \
   -p "${TBOT_WS_PORT:-8000}:8000" -p "${TBOT_HTTP_PORT:-8003}:8003" \
   -v "$TBOT_REMOTE_ROOT/data":/opt/tbot-esp32-server/data \
   -v "$TBOT_REMOTE_ROOT/models":/opt/tbot-esp32-server/models \
@@ -304,9 +438,9 @@ After the ESP VPS has a stable public host, update the backend Render service
 with these env values before asking a robot to use the production URL:
 
 ```text
-TBOT_ESP_SERVER_URL=https://esp.example.com
-TBOT_OTA_URL=https://esp.example.com/tbot/ota/
-TBOT_WS_URL=wss://esp.example.com/tbot/v1/
+TBOT_ESP_SERVER_URL=https://esp.tjbot.vn
+TBOT_OTA_URL=https://esp.tjbot.vn/tbot/ota/
+TBOT_WS_URL=wss://esp.tjbot.vn/tbot/v1/
 ```
 
 Do not use a `trycloudflare.com` quick tunnel for any of those values. The
@@ -319,7 +453,7 @@ From the local TBOT workspace root, verify the public backend after deploy:
 ```sh
 python3 robot/scripts/tbot_connect_live_probe.py \
   --backend-url https://tbot-backend-8wmh.onrender.com \
-  --expected-ws-host esp.example.com \
+  --expected-ws-host esp.tjbot.vn \
   --timeout 20
 ```
 
@@ -338,7 +472,7 @@ python3 robot/scripts/tbot_connect_deploy_preflight.py \
 
 ```sh
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep tbot-esp32-server
-curl -k -sS 'https://esp.example.com/tbot/ota/'
+curl -k -sS 'https://esp.tjbot.vn/tbot/ota/'
 curl -sS -i http://127.0.0.1:8002/ | head
 docker exec tbot-esp32-server sh -lc 'cd /opt/tbot-esp32-server && python scripts/google_live_smoke.py --manager-device-id 3c:0f:02:de:c2:e0 --manager-client-id 2e820403-2eb5-45d9-9694-c9d6635af87e'
 docker logs --since=3m tbot-esp32-server 2>&1 | grep -Ei 'Google Live API key is missing|manager-api config error|Device not found|Traceback|Exception|ERROR' || true
@@ -346,7 +480,7 @@ docker logs --since=3m tbot-esp32-server 2>&1 | grep -Ei 'Google Live API key is
 
 Expected results:
 
-- OTA response includes `wss://esp.example.com/tbot/v1/`.
+- OTA response includes `wss://esp.tjbot.vn/tbot/v1/`.
 - Admin health returns HTTP 200 with `401 Unauthorized` for unauthenticated root path.
 - Google Live smoke prints `SMOKE_CONNECT_OK` and `SMOKE_CLOSE_OK`.
 - Error grep has no active Google key, manager API, device binding, or traceback errors.
@@ -355,6 +489,7 @@ Expected results:
 
 - Do not commit `/opt/tbot/.env` or real secrets.
 - Prefer SSH keys over password login.
-- Restrict inbound firewall access to `8000`, `8002`, and `8003`; keep MySQL `3306` and Redis `6379` unexposed.
-- Put TLS and admin access controls in front of public `8002` deployments.
+- Keep public inbound traffic on `80` and `443`; restrict direct access to `8000`, `8002`, and `8003` to trusted operators while Nginx fronts production traffic.
+- Keep MySQL `3306` and Redis `6379` unexposed.
+- Put TLS and admin access controls in front of public admin deployments.
 - Rotate `MYSQL_ROOT_PASSWORD` and `REDIS_PASSWORD` before first public use.
