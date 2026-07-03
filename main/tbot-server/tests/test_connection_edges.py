@@ -437,6 +437,20 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
             connection_module.asyncio.create_task = original_create_task
         self.assertEqual(prompted, [handler, "scheduled"])
 
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.last_bind_prompt_time = 0
+        prompted.clear()
+        try:
+            receive_audio.check_bind_device = lambda conn: asyncio.sleep(0, result=prompted.append(conn))
+            connection_module.time.time = lambda: 20
+            connection_module.asyncio.create_task = lambda coro: (coro.close(), prompted.append("scheduled"))[1]
+            await handler._discard_message_with_bind_prompt()
+        finally:
+            receive_audio.check_bind_device = original_check
+            connection_module.time.time = original_time
+            connection_module.asyncio.create_task = original_create_task
+        self.assertEqual(prompted, [])
+
     async def test_restart_success_and_error_paths_do_not_execute_restart(self):
         handler = _build_handler()
         ws = _SendWebSocket()
