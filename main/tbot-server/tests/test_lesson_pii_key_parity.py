@@ -3,13 +3,19 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
-ROBOT_MANAGE_API_CLIENT = (
-    REPO_ROOT / "robot/esp32-server/main/tbot-server/config/manage_api_client.py"
-)
-BACKEND_INGEST_LOGIC = (
-    REPO_ROOT / "tbot-backend/src/lessons/lesson-event-ingest.logic.ts"
-)
+import pytest
+
+
+TBOT_SERVER_ROOT = Path(__file__).resolve().parents[1]
+ROBOT_MANAGE_API_CLIENT = TBOT_SERVER_ROOT / "config/manage_api_client.py"
+
+
+def _backend_ingest_logic() -> Path:
+    for root in Path(__file__).resolve().parents:
+        candidate = root / "tbot-backend/src/lessons/lesson-event-ingest.logic.ts"
+        if candidate.exists():
+            return candidate
+    pytest.skip("tbot-backend checkout not available")
 
 
 def _robot_sensitive_keys() -> set[str]:
@@ -29,7 +35,7 @@ def _robot_sensitive_keys() -> set[str]:
 
 
 def _backend_sensitive_keys() -> set[str]:
-    source = BACKEND_INGEST_LOGIC.read_text()
+    source = _backend_ingest_logic().read_text()
     match = re.search(
         r"const SENSITIVE_PROGRESS_PAYLOAD_KEYS = new Set\(\[(.*?)\]\);",
         source,
