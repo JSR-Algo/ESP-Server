@@ -300,7 +300,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
             return True
         if self._bridge is None:
-            return False
+            return True
         if await self._forward_lesson_child_audio(audio_bytes):
             return True
         # Conversation-side WAITING_MODEL handling. While waiting for the model to
