@@ -702,8 +702,6 @@ class ConnectionHandler:
         """In manager mode, keep early user input on the selected voice provider path."""
         if not self.read_config_from_api:
             return
-        if self.voice_provider is not None:
-            return
         provider_task = self.voice_provider_task
         if provider_task is None or provider_task.done():
             return
@@ -770,8 +768,15 @@ class ConnectionHandler:
                 return
 
             old_provider = self.voice_provider
+            switching_to_google_live = (
+                old_provider is not None
+                and type(resolved_provider) is not type(old_provider)
+                and self._google_live_mode_configured()
+            )
+            if switching_to_google_live:
+                self.voice_provider = None
             await resolved_provider.start_session()
-            if self.voice_provider is old_provider:
+            if self.voice_provider is old_provider or self.voice_provider is None:
                 self.voice_provider = resolved_provider
             if old_provider is not None and old_provider is not self.voice_provider:
                 await old_provider.close()

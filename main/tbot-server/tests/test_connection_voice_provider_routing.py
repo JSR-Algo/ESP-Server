@@ -1141,8 +1141,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(google_live_provider.started)
         self.assertEqual(google_live_provider.audio_calls, [b"opus-frame"])
 
-    async def test_private_config_keeps_classic_provider_until_google_live_started(self):
+    async def test_private_config_does_not_route_audio_to_classic_while_google_live_starts(self):
         handler = self._build_handler()
+        handler.read_config_from_api = True
+        handler.config["read_config_from_api"] = True
         handler.config["voice_mode"] = {"type": "classic_pipeline"}
         handler.bind_completed_event.set()
 
@@ -1162,22 +1164,27 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             handler._initialize_private_config_async = fake_initialize_private_config_async
 
             init_task = asyncio.create_task(handler._initialize_voice_session_async())
+            handler.voice_provider_task = init_task
             await asyncio.wait_for(google_live_provider.start_entered.wait(), timeout=0.5)
 
-            await handler._route_message(b"early-opus-frame")
-            self.assertIs(handler.voice_provider, classic_provider)
-            self.assertEqual(classic_provider.audio_calls, [b"early-opus-frame"])
-            self.assertFalse(classic_provider.closed)
+            route_task = asyncio.create_task(handler._route_message(b"early-opus-frame"))
+            await asyncio.sleep(0.05)
+            self.assertEqual(classic_provider.audio_calls, [])
+            self.assertFalse(route_task.done())
 
             google_live_provider.release_start.set()
             await asyncio.wait_for(init_task, timeout=0.5)
+            await asyncio.wait_for(route_task, timeout=0.5)
             await handler._route_message(b"ready-opus-frame")
         finally:
             connection_module.create_voice_session_provider = original_factory
 
         self.assertTrue(classic_provider.closed)
         self.assertIs(handler.voice_provider, google_live_provider)
-        self.assertEqual(google_live_provider.audio_calls, [b"ready-opus-frame"])
+        self.assertEqual(
+            google_live_provider.audio_calls,
+            [b"early-opus-frame", b"ready-opus-frame"],
+        )
 
     async def test_private_config_copies_google_live_voice_config(self):
         handler = self._build_handler()

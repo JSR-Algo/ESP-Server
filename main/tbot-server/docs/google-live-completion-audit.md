@@ -116,6 +116,9 @@ Current server-side proof:
   config merge, so manager/private config or bypass callers cannot open a
   session with a different Google Live identity or disable the AEC boundary that
   keeps robot speaker audio out of user input
+- manager/private-config bootstrap removes a stale classic provider from the
+  active audio route while Google Live starts, so early mic frames wait for the
+  Live provider instead of entering the legacy pipeline
 - runtime provider policy also clamps direct slow timing overrides:
   `waiting_model_timeout_sec<=2.0`,
   `interruption_min_output_age_sec=0.0`, and
