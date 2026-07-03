@@ -118,6 +118,7 @@ class AecRequiredRaisesTest(unittest.TestCase):
         """No processor at all (e.g. build returned None) also hard-fails."""
         conn = _Conn(aec_enabled=True)
         provider = _make_provider(conn)
+        provider._client = SimpleNamespace(config={"aec_enabled": True})
         provider._bridge = SimpleNamespace(_aec_processor=None)
 
         with self.assertRaises(RuntimeError) as ctx:
@@ -147,16 +148,17 @@ class AecRequiredRaisesTest(unittest.TestCase):
         # Must not raise — required AEC is satisfied.
         self.assertIsNone(provider._ensure_required_aec_ready())
 
-    def test_no_raise_when_aec_not_required_even_if_bypassed(self):
-        """aec_enabled:false -> degrade is allowed; bypassed processor is fine."""
+    def test_runtime_policy_forces_aec_even_if_config_disables_it(self):
+        """Production policy forces AEC on; a disabled config cannot allow degrade."""
         conn = _Conn(aec_enabled=False)
         provider = _make_provider(conn)
         provider._bridge = SimpleNamespace(
             _aec_processor=_build_real_aec_processor(lib_available=False)
         )
 
-        # Guard short-circuits before inspecting the processor; no raise.
-        self.assertIsNone(provider._ensure_required_aec_ready())
+        with self.assertRaises(RuntimeError) as ctx:
+            provider._ensure_required_aec_ready()
+        self.assertIn("library_unavailable", str(ctx.exception))
 
 
 if __name__ == "__main__":  # pragma: no cover

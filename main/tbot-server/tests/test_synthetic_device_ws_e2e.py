@@ -173,7 +173,7 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
             self._server_conn = conn
             conn.func_handler = _RealPluginStartLessonHandler()
             provider = GoogleLiveProvider(conn)
-            provider._client = L._LiveClientStub()
+            provider._client = L._LiveClientStub(provider)
             return provider
 
         self._server_conn = None

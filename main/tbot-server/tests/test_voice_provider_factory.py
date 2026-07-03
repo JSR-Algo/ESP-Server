@@ -1,4 +1,5 @@
 import asyncio
+import types
 import unittest
 from unittest.mock import patch
 
@@ -285,7 +286,18 @@ class VoiceProviderFactoryTest(unittest.TestCase):
     @patch("config.config_loader.ensure_directories")
     @patch(
         "config.config_loader.read_config",
-        side_effect=[{"server": {"auth": {"enabled": True}, "auth_key": "local-auth"}}, {}],
+        side_effect=[
+            {
+                "server": {"auth": {"enabled": True}, "auth_key": "local-auth"},
+                "voice_mode": {"type": "google_live"},
+                "google_live": {"aec_enabled": True},
+            },
+            {},
+        ],
+    )
+    @patch(
+        "core.voice.aec.aec_processor.AecProcessor",
+        return_value=types.SimpleNamespace(bypassed=False, reason=None),
     )
     @patch("core.utils.cache.manager.cache_manager.set")
     @patch("core.utils.cache.manager.cache_manager.get", return_value=None)
@@ -293,6 +305,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
         self,
         _cache_get,
         _cache_set,
+        _aec_processor,
         _read_config,
         _ensure_directories,
     ):
