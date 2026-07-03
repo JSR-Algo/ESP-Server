@@ -31,8 +31,8 @@ _MODEL_OUTPUT_BLOCK_PATTERNS = (
     ("pii_address", re.compile(r"\b(home\s+address|address|dia\s+chi|địa\s+chỉ)\b", re.I)),
     ("pii_phone", re.compile(r"\b(phone\s+number|telephone|so\s+dien\s+thoai|số\s+điện\s+thoại)\b", re.I)),
     ("pii_school", re.compile(r"\b(school\s+name|your\s+school|truong\s+hoc|trường\s+học)\b", re.I)),
-    ("meet_child", re.compile(r"\b(meet\s+me|meet\s+up|come\s+meet|gap\s+minh|gặp\s+mình)\b", re.I)),
-    ("secret_from_parent", re.compile(r"\b(don't\s+tell|do\s+not\s+tell|keep\s+.*secret|giu\s+bi\s+mat|giữ\s+bí\s+mật)\b", re.I)),
+    ("meet_child", re.compile(r"\b(meet\s+me|meet\s+up|come\s+meet|secretly\s+meet|meet\s+(?:them|him|her)\s+alone|gap\s+minh|gặp\s+mình)\b", re.I)),
+    ("secret_from_parent", re.compile(r"\b(don't\s+tell|do\s+not\s+tell|without\s+telling\s+(?:your\s+)?(?:parents?|mom|dad|mother|father)|keep\s+.*secret|giu\s+bi\s+mat|giữ\s+bí\s+mật)\b", re.I)),
     ("sexual", re.compile(r"\b(sex|sexual|nude|porn|khiêu\s+dâm|tình\s+dục)\b", re.I)),
     ("self_harm", re.compile(r"\b(kill\s+yourself|suicide|self\s*harm|tu\s+tu|tự\s+tử)\b", re.I)),
     ("violence", re.compile(r"\b(kill|stab|shoot|bomb|weapon|giết|dao|súng|bom)\b", re.I)),
@@ -42,7 +42,8 @@ _MODEL_OUTPUT_BLOCK_PATTERNS = (
     ("profanity", re.compile(r"(?:\b(fuck|shit|bitch|idiot|stupid|dumb|shut\s+up|damn|moron|fool)\b|đồ\s+ngu|do\s+ngu|\bdm\b|đm|ngu\s+ngốc|chửi|chui\s+tuc|chửi\s+tục)", re.I)),
     ("adult_substance", re.compile(r"(?:\b(beer|wine|alcohol|drunk|cigarette|smoke|smoking|drugs?|weed|marijuana|heroin|cocaine|gambl\w*|casino)\b|rượu|ruou|bia|say\s+xỉn|hút\s+thuốc|hut\s+thuoc|thuốc\s+lá|ma\s+túy|ma\s+tuy|cờ\s+bạc|co\s+bac)", re.I)),
     ("hate", re.compile(r"(?:\bi\s+hate\s+you\b|\bhate\s+(?:you|your|them|their)\b|because\s+of\s+(?:their|your)\s+(?:race|religion|skin)|kỳ\s+thị|ky\s+thi|thù\s+ghét|thu\s+ghet)", re.I)),
-    ("dangerous_instruction", re.compile(r"(?:how\s+to\s+make\s+(?:a\s+)?(?:fire|bomb|weapon)|play\s+with\s+(?:the\s+|a\s+)?(?:knife|fire|matches?)|climb\s+out\s+(?:the\s+)?window|chơi\s+với\s+dao|choi\s+voi\s+dao|nghịch\s+lửa|nghich\s+lua|trèo\s+ra\s+ngoài|leo\s+ra\s+cửa\s+sổ)", re.I)),
+    ("dangerous_instruction", re.compile(r"(?:how\s+to\s+make\s+(?:a\s+)?(?:fire|bomb|weapon|gun|rifle|pistol|knife|explosive)|(?:instructions|guide|steps)\s+(?:for|to)\s+(?:build|make|create)\s+(?:a\s+)?(?:gun|rifle|pistol|knife|bomb|explosive|weapon)|play\s+with\s+(?:the\s+|a\s+)?(?:knife|fire|matches?)|climb\s+out\s+(?:the\s+)?window|chơi\s+với\s+dao|choi\s+voi\s+dao|nghịch\s+lửa|nghich\s+lua|trèo\s+ra\s+ngoài|leo\s+ra\s+cửa\s+sổ)", re.I)),
+    ("harm_assistance", re.compile(r"\b(?:help|teach|show|tell)\s+(?:you\s+)?(?:to\s+)?(?:hurt|harm|injure|kill)\s+(?:someone|somebody|a\s+person|a\s+child|a\s+kid|an\s+animal)\b", re.I)),
 )
 
 
