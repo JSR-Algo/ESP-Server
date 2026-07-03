@@ -188,7 +188,7 @@ Current server-side proof:
 - focused direct-chat guard proof from 2026-07-03:
   connection edge/routing suite `61 passed`
 - focused direct-startToChat guard proof from 2026-07-03:
-  receive-audio/direct-chat suite `14 passed`
+  receive-audio/direct-chat suite `13 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
