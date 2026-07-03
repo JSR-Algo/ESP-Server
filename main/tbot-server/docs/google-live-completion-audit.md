@@ -175,7 +175,7 @@ Current server-side proof:
   `167 passed`; barge-in/fallback/connection-routing suite `135 passed`; bridge
   guard provider/fallback/connection-routing suite `119 passed`; lesson-owned
   audio routing suite `59 passed`; blank listen-detect provider/routing suite
-  `82 passed`
+  `72 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
