@@ -846,6 +846,29 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider_text_calls, ['{"type":"listen","state":"detect","text":"xin chao"}'])
         self.assertEqual(classic_text_calls, [])
 
+    async def test_google_live_without_provider_consumes_text_and_audio(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.bind_completed_event.set()
+        handler.voice_provider = None
+        handler.vad = object()
+        handler.asr = object()
+        classic_text_calls = []
+        original_handle_text = connection_module.handleTextMessage
+
+        async def fake_classic_text(conn, message):
+            classic_text_calls.append(message)
+
+        try:
+            connection_module.handleTextMessage = fake_classic_text
+            await handler._route_message('{"type":"listen","state":"detect","text":"xin chao"}')
+            await handler._route_message(b"raw-opus-frame")
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+
+        self.assertEqual(classic_text_calls, [])
+        self.assertTrue(handler.asr_audio_queue.empty())
+
     async def test_hello_message_routes_before_manager_bind_ready(self):
         handler = self._build_handler()
         handler.read_config_from_api = True

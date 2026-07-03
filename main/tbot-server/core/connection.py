@@ -447,6 +447,8 @@ class ConnectionHandler:
                 handled = await self.voice_provider.handle_text_message(message)
                 if handled:
                     return
+            if self._google_live_mode_configured():
+                return
             await handleTextMessage(self, message)
         elif isinstance(message, bytes):
             handled = await self._route_audio_message(message)
@@ -497,6 +499,8 @@ class ConnectionHandler:
                 self.last_live_activity_at = time.monotonic()
             return True
         if self.voice_provider is None:
+            if self._google_live_mode_configured():
+                return True
             return False
         if normalize_session_mode(self.session_mode) == SessionMode.DORMANT:
             await self.enter_conversation_mode(reason="inbound_audio")
@@ -512,6 +516,10 @@ class ConnectionHandler:
             return False
         runtime_state = str(getattr(runtime, "state", "")).upper()
         return runtime_state in {"PRELOADING", "RUNNING"}
+
+    def _google_live_mode_configured(self) -> bool:
+        voice_mode = (self.config or {}).get("voice_mode") or {}
+        return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
 
     def _lesson_runtime_accepts_voice_input(self) -> bool:
         runtime = getattr(self, "lesson_runtime", None)
