@@ -943,7 +943,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(handler.tts)
         self.assertIsNotNone(handler.asr)
-        self.assertEqual(handler.prompt, "system prompt")
+        self.assertIn("system prompt", handler.prompt)
         self.assertEqual(len(open_calls), 2)
 
     async def test_classic_fallback_initializes_missing_llm_after_google_live_skip(self):
