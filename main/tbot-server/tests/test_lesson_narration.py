@@ -160,40 +160,28 @@ def _single_step_manifest_with_prompt(prompt, *, story_beat=None, story_text=Non
 class TestLessonNarrationDelivery(unittest.IsolatedAsyncioTestCase):
     """Renderer↔voice seam: the per-step prompt is actually SPOKEN to the child."""
 
-    async def test_step_prompt_is_spoken_via_real_local_tts_channel(self):
-        """After firmware ACKs the rendered step, the EXACT step prompt is enqueued
-        as a real TTSMessageDTO stream through the real provider."""
-        from core.providers.tts.dto.dto import ContentType, SentenceType
+    async def test_step_prompt_is_spoken_via_real_live_text_channel_even_when_tts_exists(self):
+        """After firmware ACKs the rendered step, narration stays on Google Live.
 
+        Local TTS may exist on the connection, but production AI speech must not
+        queue it for lesson narration.
+        """
         prompt = "Hãy nói theo robot nhé: barn."
+        client = _RecordingLiveTextClient()
         tts = _RecordingTts()
-        conn, _provider = _conn_with_real_provider(tts=tts)
+        conn, _provider = _conn_with_real_provider(tts=tts, live_text_client=client)
         rt = _runtime(conn, _single_step_manifest_with_prompt(prompt))
 
         await _drive_to_first_step_acked(rt)
 
-        # The real provider enqueued a FIRST(action)/MIDDLE(text)/LAST(action) stream.
-        items = tts.tts_text_queue.items
-        self.assertEqual(len(items), 3)
-        self.assertEqual(items[0].sentence_type, SentenceType.FIRST)
-        self.assertEqual(items[1].sentence_type, SentenceType.MIDDLE)
-        self.assertEqual(items[2].sentence_type, SentenceType.LAST)
-
-        # The child HEARS exactly the authored step prompt — verbatim, unwrapped.
-        spoken = items[1]
-        self.assertEqual(spoken.content_type, ContentType.TEXT)
-        self.assertEqual(spoken.content_detail, prompt)
-
-        # …the TTS text is stored, and a tts/sentence_start carrying the prompt was
-        # pushed to the device websocket (shared with the lesson frame emitter, so
-        # we filter for the tts frame rather than assume an index).
-        self.assertEqual(tts.stored_texts[-1][1], prompt)
+        self.assertEqual(client.sent_texts, [LIVE_TEXT_INSTRUCTION + prompt])
+        self.assertEqual(tts.tts_text_queue.items, [])
+        self.assertEqual(tts.stored_texts, [])
         tts_frames = [
             f for f in _sent_frames(conn)
             if f.get("type") == "tts" and f.get("state") == "sentence_start"
         ]
-        self.assertEqual(len(tts_frames), 1)
-        self.assertEqual(tts_frames[0]["text"], prompt)
+        self.assertEqual(tts_frames, [])
 
     async def test_step_prompt_is_spoken_via_real_live_text_channel(self):
         """When no local TTS exists, the real provider forwards the EXACT step

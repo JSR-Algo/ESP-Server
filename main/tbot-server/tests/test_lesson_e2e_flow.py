@@ -358,7 +358,7 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         conn.loop = asyncio.get_running_loop()
         conn.func_handler = L._RegistryStartLessonHandler()
         provider = GoogleLiveProvider(conn)
-        provider._client = L._LiveClientStub()
+        provider._client = L._LiveClientStub(provider)
         conn.voice_provider = provider
 
         # keep the asset preload + event POST entirely in-memory
@@ -441,7 +441,7 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         conn.loop = asyncio.get_running_loop()
         conn.func_handler = L._RegistryStartLessonHandler()
         provider = GoogleLiveProvider(conn)
-        provider._client = L._LiveClientStub()
+        provider._client = L._LiveClientStub(provider)
         conn.voice_provider = provider
 
         try:
