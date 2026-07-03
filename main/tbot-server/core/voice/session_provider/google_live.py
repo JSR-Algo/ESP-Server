@@ -244,6 +244,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await self._finalize_user_audio_input("listen_stop")
             return True
         text = self._extract_user_text_message(message)
+        if text is None and listen_state == "detect":
+            return True
         if text is None:
             return False
         try:

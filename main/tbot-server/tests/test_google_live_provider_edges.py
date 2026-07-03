@@ -520,6 +520,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await provider.handle_text_message('{"type":"text","text":"hello"}'))
         provider._client = _Client()
         self.assertTrue(await provider.handle_text_message('{"type":"listen","state":"detect","text":"TeeBot"}'))
+        self.assertTrue(await provider.handle_text_message('{"type":"listen","state":"detect","text":"   "}'))
         self.assertTrue(await provider.handle_text_message('{"type":"text","text":"dung lai"}'))
 
         self.assertFalse(provider._is_wake_word_only("not teebot"))
