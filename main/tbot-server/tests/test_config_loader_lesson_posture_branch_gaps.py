@@ -97,13 +97,15 @@ def test_course_url_sets_server_api_url_and_lesson_api_base_fallback(monkeypatch
     assert out["lesson"]["api_base"] == "https://courses.example/api"
 
 
-def test_course_url_does_not_overwrite_author_provided_api_base(monkeypatch):
+def test_course_url_overrides_stale_api_base(monkeypatch):
+    """An explicit COURSE_BACKEND_URL is the production backend and overrides any
+    shipped/stale lesson.api_base so the runtime never pulls from a stale endpoint."""
     monkeypatch.setenv("COURSE_BACKEND_URL", "https://courses.example/api/")
     out = _apply_lesson_env_overrides(
-        {"lesson": {"api_base": "https://author.example/keep"}}
+        {"lesson": {"api_base": "https://stale.example/keep"}}
     )
     assert out["server"]["api_url"] == "https://courses.example/api"
-    assert out["lesson"]["api_base"] == "https://author.example/keep"
+    assert out["lesson"]["api_base"] == "https://courses.example/api"
 
 
 def test_auto_enable_predicate_arms_runtime_when_full_prereqs_present(monkeypatch):
@@ -116,9 +118,12 @@ def test_auto_enable_predicate_arms_runtime_when_full_prereqs_present(monkeypatc
 
 
 def test_auto_enable_uses_server_api_url_when_lesson_api_base_missing(monkeypatch):
-    """The auto-enable api_base resolution falls back to server.api_url."""
+    """With an explicit backend URL env present, the auto-enable api_base resolution
+    falls back to server.api_url when lesson.api_base is absent. The explicit backend
+    URL is required — the shipped server.api_url default alone never arms the runtime."""
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "s3cr3t")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://cdn.example/origin")
+    monkeypatch.setenv("TBOT_BACKEND_API_URL", "https://server.example/api")
     out = _apply_lesson_env_overrides(
         {"server": {"api_url": "https://server.example/api"}, "lesson": {}}
     )

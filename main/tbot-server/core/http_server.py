@@ -1,4 +1,5 @@
 import asyncio
+import json
 from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
@@ -22,13 +23,14 @@ class SimpleHttpServer:
             config,
             lesson_connections if lesson_connections is not None else {},
         )
+        self.lesson_connections = lesson_connections if lesson_connections is not None else {}
         self.lesson_nudge_handler = LessonNudgeHandler(
             config,
-            lesson_connections if lesson_connections is not None else {},
+            self.lesson_connections,
         )
         self.device_mcp_admin_handler = DeviceMCPAdminHandler(
             config,
-            lesson_connections if lesson_connections is not None else {},
+            self.lesson_connections,
         )
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
@@ -106,6 +108,18 @@ class SimpleHttpServer:
                             self.device_mcp_admin_handler.handle_post,
                         ),
                         web.get(
+                            "/internal/lesson-runtime/preload-voice-alarm",
+                            self.handle_preload_voice_alarm_snapshot,
+                        ),
+                        web.post(
+                            "/internal/lesson-runtime/preload-voice-alarm/reset",
+                            self.handle_preload_voice_alarm_reset,
+                        ),
+                        web.get(
+                            "/internal/lesson-runtime/metrics",
+                            self.handle_lesson_runtime_metrics,
+                        ),
+                        web.get(
                             "/tbot/lesson-assets/{cacheToken}/{assetKey}",
                             self.lesson_asset_handler.handle_get,
                         ),
@@ -131,3 +145,109 @@ class SimpleHttpServer:
 
             self.logger.bind(tag=TAG).error(f"Error stack: {traceback.format_exc()}")
             raise
+
+    def _preload_voice_alarm_snapshots(self):
+        devices = []
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+            connection = self.lesson_connections.get(device_id)
+            alarm = getattr(connection, "lesson_voice_alarm", None)
+            if alarm is None or not hasattr(alarm, "snapshot"):
+                continue
+            snapshot = alarm.snapshot()
+            if isinstance(snapshot, dict):
+                devices.append({"deviceId": device_id, **snapshot})
+        return devices
+
+    async def handle_preload_voice_alarm_snapshot(self, _request):
+        devices = self._preload_voice_alarm_snapshots()
+        payload = {
+            "connections": len(self.lesson_connections),
+            "alarms": len(devices),
+            "devices": devices,
+        }
+        return web.Response(
+            status=200,
+            text=json.dumps(payload, sort_keys=True),
+            content_type="application/json",
+        )
+
+    async def handle_preload_voice_alarm_reset(self, _request):
+        reset_count = 0
+        for connection in self.lesson_connections.values():
+            alarm = getattr(connection, "lesson_voice_alarm", None)
+            reset = getattr(alarm, "reset", None)
+            if not callable(reset):
+                continue
+            reset()
+            reset_count += 1
+        payload = {
+            "connections": len(self.lesson_connections),
+            "reset": reset_count,
+        }
+        return web.Response(
+            status=200,
+            text=json.dumps(payload, sort_keys=True),
+            content_type="application/json",
+        )
+
+    @staticmethod
+    def _counter_value(value):
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, numeric)
+
+    def _runtime_forwarder_metrics(self):
+        devices = []
+        forwarder_dropped_total = 0
+        safety_forwarder_dropped_total = 0
+        alarms = 0
+
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+            connection = self.lesson_connections.get(device_id)
+            runtime = getattr(connection, "lesson_runtime", None)
+            forwarder = getattr(runtime, "forwarder", None)
+            safety_forwarder = getattr(connection, "safety_event_forwarder", None)
+            forwarder_dropped = self._counter_value(
+                getattr(forwarder, "dropped_events_total", 0)
+            )
+            safety_dropped = self._counter_value(
+                getattr(safety_forwarder, "dropped_events_total", 0)
+            )
+            alarm_payload = None
+            alarm = getattr(connection, "lesson_voice_alarm", None)
+            snapshot = getattr(alarm, "snapshot", None)
+            if callable(snapshot):
+                candidate = snapshot()
+                if isinstance(candidate, dict):
+                    alarm_payload = candidate
+                    alarms += 1
+
+            forwarder_dropped_total += forwarder_dropped
+            safety_forwarder_dropped_total += safety_dropped
+            devices.append(
+                {
+                    "deviceId": device_id,
+                    "forwarderDroppedEventsTotal": forwarder_dropped,
+                    "safetyForwarderDroppedEventsTotal": safety_dropped,
+                    "alarm": alarm_payload,
+                }
+            )
+
+        return {
+            "connections": len(self.lesson_connections),
+            "alarms": alarms,
+            "counters": {
+                "forwarder.dropped_events_total": forwarder_dropped_total,
+                "safety_forwarder.dropped_events_total": safety_forwarder_dropped_total,
+            },
+            "devices": devices,
+        }
+
+    async def handle_lesson_runtime_metrics(self, _request):
+        return web.Response(
+            status=200,
+            text=json.dumps(self._runtime_forwarder_metrics(), sort_keys=True),
+            content_type="application/json",
+        )

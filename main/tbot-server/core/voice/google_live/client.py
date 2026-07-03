@@ -83,6 +83,12 @@ class GoogleLiveClient:
             raise RuntimeError("Google Live connect timed out") from exc
         self.connected = True
         self.logger.bind(tag="GoogleLive").info(
+            "Google Live session identity model={} voice={} language={}",
+            model,
+            self.config.get("voice_name") or "none",
+            self.config.get("language_code") or "none",
+        )
+        self.logger.bind(tag="GoogleLive").info(
             "Google Live session connected in {:.1f} ms",
             (time.monotonic() - connect_started_at) * 1000,
         )
@@ -470,15 +476,8 @@ class GoogleLiveClient:
             except (TypeError, ValueError):
                 continue
         disable_server_side_interruptions = bool(
-            self.config.get("disable_server_side_interruptions", True)
+            self.config.get("disable_server_side_interruptions", False)
         )
-        explicit_activity_handling = "activity_handling" in self.config
-        if (
-            not disable_server_side_interruptions
-            and not aad
-            and not explicit_activity_handling
-        ):
-            return None
         default_activity_handling = (
             "NO_INTERRUPTION"
             if disable_server_side_interruptions

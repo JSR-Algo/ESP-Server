@@ -7,15 +7,16 @@
 server:
   ip: 0.0.0.0
   port: 8000
-  # Public WebSocket URL advertised to firmware.
-  websocket: wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/
+  # Public WebSocket URL advertised to firmware. Set via data/.config.yaml or
+  # TBOT_PUBLIC_WEBSOCKET_URL in production; do not commit quick-tunnel hosts.
+  websocket: ""
   # Firmware-facing NestJS backend base. Keep the /v1 prefix so firmware can
   # append device config, claim, and lesson-runtime routes.
   api_url: https://tbot-backend-8wmh.onrender.com/v1
   # HTTP service port used by the vision analysis API.
   http_port: 8003
-  # Vision analysis URL sent to devices. Use a LAN URL for Docker/LAN deploys or a public URL for public deploys.
-  vision_explain: https://carefully-freelance-improving-numerical.trycloudflare.com/mcp/vision/explain
+  # Vision analysis URL sent to devices. Set via deployment config for public deploys.
+  vision_explain: ""
   # Optional firmware binary URL scheme override. Leave empty to reuse the
   # vision_explain scheme; set to http for legacy ESP OTA stacks that cannot
   # download a Cloudflare HTTPS firmware binary reliably.
@@ -27,3 +28,14 @@ manager-api:
   secret: your-server-secret
 # Default system prompt template file.
 prompt_template: agent-base-prompt.txt
+
+# Robot voice policy used when manager-api config is stale or incomplete.
+voice_mode:
+  type: google_live
+  fallback_to_classic_on_error: false
+google_live:
+  api_key: ${GOOGLE_API_KEY}
+  model: gemini-3.1-flash-live-preview
+  native_voice: true
+  voice_name: Kore
+  language_code: vi-VN

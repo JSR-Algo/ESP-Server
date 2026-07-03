@@ -13,11 +13,14 @@ from config.manage_api_client import (
     init_service,
 )
 
+DEFAULT_GOOGLE_LIVE_VOICE_NAME = "Kore"
+
 GOOGLE_LIVE_DEFAULTS = {
     "model": "gemini-3.1-flash-live-preview",
     "enable_audio_input": True,
     "enable_audio_output": True,
     "native_voice": True,
+    "voice_name": DEFAULT_GOOGLE_LIVE_VOICE_NAME,
     "language_code": "vi-VN",
     "input_audio_format": "pcm16",
     "input_sample_rate": 16000,
@@ -27,12 +30,17 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_policy": "wake_or_transcript",
     "raw_audio_barge_in_enabled": False,
     "input_flush_delay_sec": 1.4,
+    "conversation_input_flush_delay_sec": 0.7,
     "input_speech_tail_ms": 1300,
+    "conversation_input_speech_tail_ms": 650,
     "input_min_capture_ms": 400,
     "input_max_capture_ms": 8000,
     "input_speech_rms_threshold": 500,
-    "waiting_model_timeout_sec": 2.5,
-    "waiting_model_retry_prompt_after_sec": 4.0,
+    "input_gain": 6.0,
+    "waiting_model_timeout_sec": 2.0,
+    "waiting_model_retry_prompt_after_sec": 12.0,
+    "lesson_prompt_output_guard_timeout_sec": 15.0,
+    "lesson_prompt_playback_guard_timeout_sec": 12.0,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
     "interrupt_speech_tail_ms": 240,
@@ -41,7 +49,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "reconnect_buffer_ms": 2000,
     "echo_tail_suppression_ms": 400,
     "music_auto_pause_on_user_speech": True,
-    "disable_server_side_interruptions": True,
+    "disable_server_side_interruptions": False,
     "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
     "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
     "log_audio_diagnostics": True,
@@ -49,6 +57,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_rms_threshold": 5000,
     "interrupt_min_input_duration_sec": 0.42,
     "interrupt_min_output_age_sec": 0.25,
+    "interruption_min_output_age_sec": 0.0,
     "interrupt_suppress_audio_sec": 0.25,
     "suppress_robot_output_echo": True,
     "wake_audio_allow_window_sec": 5.0,
@@ -62,6 +71,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "barge_in_rms_threshold": 4500,
     "barge_in_min_input_duration_sec": 0.30,
     "barge_in_min_output_age_sec": 0.25,
+    "barge_in_transcript_min_output_age_sec": 0.0,
     # When False, RMS-based loud-input bypass of the echo gate cannot fire a
     # mid-sentence interrupt — for hardware where speaker echo crosses the
     # bypass threshold and would otherwise cut the model off.
@@ -111,6 +121,8 @@ def normalize_voice_config(config):
         config["voice_mode"] = voice_mode
     voice_mode.setdefault("type", "classic_pipeline")
     voice_mode.setdefault("fallback_to_classic_on_error", True)
+    if voice_mode.get("type") == "google_live":
+        voice_mode["fallback_to_classic_on_error"] = False
 
     google_live = config.get("google_live")
     if voice_mode.get("type") == "google_live":
@@ -122,6 +134,29 @@ def normalize_voice_config(config):
         config["google_live"] = {}
     _apply_tts_runtime_overrides(config)
     _inherit_google_live_api_key_for_gemini_tts(config)
+    return config
+
+def _apply_base_google_live_policy(config, base_config):
+    if not isinstance(config, Mapping):
+        config = {}
+    if not isinstance(base_config, Mapping):
+        return config
+
+    base_voice_mode = base_config.get("voice_mode")
+    if not isinstance(base_voice_mode, Mapping) or base_voice_mode.get("type") != "google_live":
+        return config
+
+    current_voice_mode = config.get("voice_mode")
+    current_voice_mode = current_voice_mode if isinstance(current_voice_mode, Mapping) else {}
+    merged_voice_mode = merge_configs(base_voice_mode, current_voice_mode)
+    merged_voice_mode["type"] = "google_live"
+    config["voice_mode"] = merged_voice_mode
+
+    base_google_live = base_config.get("google_live")
+    base_google_live = base_google_live if isinstance(base_google_live, Mapping) else {}
+    current_google_live = config.get("google_live")
+    current_google_live = current_google_live if isinstance(current_google_live, Mapping) else {}
+    config["google_live"] = merge_configs(base_google_live, current_google_live)
     return config
 
 def _apply_tts_runtime_overrides(config):
@@ -208,14 +243,20 @@ def _inherit_google_live_api_key_for_gemini_tts(config):
 
 def _apply_google_live_runtime_safety_policy(google_live):
     """Keep manager/private configs from re-enabling unsafe Live interrupts."""
+    google_live["voice_name"] = DEFAULT_GOOGLE_LIVE_VOICE_NAME
     google_live["interrupt_policy"] = "wake_or_transcript"
     google_live["raw_audio_barge_in_enabled"] = False
-    google_live["disable_server_side_interruptions"] = True
-    google_live["activity_handling"] = "NO_INTERRUPTION"
+    google_live["disable_server_side_interruptions"] = False
+    google_live["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
     google_live["barge_in"] = False
     google_live["interrupt_on_input_while_speaking"] = False
+    google_live["interruption_min_output_age_sec"] = 0.0
+    google_live["barge_in_transcript_min_output_age_sec"] = 0.0
+    google_live["waiting_model_timeout_sec"] = 2.0
+    google_live["echo_bypass_interrupt_enabled"] = False
     google_live["server_side_vad_enabled"] = True
-    google_live["session_resumption_enabled"] = True
+    google_live["aec_enabled"] = True
+    google_live.setdefault("session_resumption_enabled", True)
     google_live["context_window_compression_enabled"] = True
 
 def _clean_env(name):
@@ -247,27 +288,31 @@ def _apply_lesson_env_overrides(config):
     LESSON_RUNTIME_ENABLED -> lesson.runtime_enabled (bool parsed). If the explicit
     flag is absent, a production-ready lesson env (course backend URL + mint secret +
     asset origin) auto-enables the runtime so a deployed server does not hide the
-    start_lesson tool because one boolean was omitted. COURSE_BACKEND_URL ->
-    server.api_url AND, as a fallback, lesson.api_base (runtime reads lesson.api_base
-    first, else server.api_url). LESSON_ASSET_ORIGIN_BASE -> lesson.asset_origin_base.
+    start_lesson tool because one boolean was omitted. COURSE_BACKEND_URL (or
+    TBOT_BACKEND_API_URL) -> server.api_url AND, as a fallback, lesson.api_base
+    (runtime reads lesson.api_base first, else server.api_url). The shipped
+    lesson.api_base default is never enough to auto-enable production lessons.
+    LESSON_ASSET_ORIGIN_BASE -> lesson.asset_origin_base.
     LESSON_ASSET_PUBLIC_BASE_URL -> lesson.asset_public_base_url.
     LESSON_ASSET_DELIVERY_MODE -> lesson.asset_delivery_mode.
     LESSON_ASSET_PACK_LOCAL_ROOT -> lesson.asset_pack_local_root.
     LESSON_ASSET_PACK_MOUNT_ROOT -> lesson.asset_pack_mount_root.
     LESSON_STEP_TIMEOUT_FLOOR_SEC -> lesson.step_timeout_floor_sec.
+    LESSON_VOICE_RT_P95_DISABLE_MS -> lesson.voice_rt_p95_disable_ms.
     LESSON_MAX_ASSET_BYTES -> lesson.max_asset_bytes.
     LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes."""
     if not isinstance(config, Mapping):
         return config
 
     flag = _parse_bool_env("LESSON_RUNTIME_ENABLED")
-    course_url = _clean_env("COURSE_BACKEND_URL")
+    course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
     asset_origin = _clean_env("LESSON_ASSET_ORIGIN_BASE")
     asset_public_base = _clean_env("LESSON_ASSET_PUBLIC_BASE_URL")
     asset_delivery_mode = _clean_env("LESSON_ASSET_DELIVERY_MODE")
     asset_pack_local_root = _clean_env("LESSON_ASSET_PACK_LOCAL_ROOT")
     asset_pack_mount_root = _clean_env("LESSON_ASSET_PACK_MOUNT_ROOT")
     step_timeout_floor = _clean_env("LESSON_STEP_TIMEOUT_FLOOR_SEC")
+    voice_rt_p95_disable_ms = _clean_env("LESSON_VOICE_RT_P95_DISABLE_MS")
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
     max_total_asset_bytes = _parse_positive_int_env("LESSON_MAX_TOTAL_ASSET_BYTES")
     # Built-in sample-lesson DEMO flag (independent of runtime_enabled; NEVER coupled to
@@ -287,6 +332,7 @@ def _apply_lesson_env_overrides(config):
         and not asset_pack_local_root
         and not asset_pack_mount_root
         and not step_timeout_floor
+        and not voice_rt_p95_disable_ms
         and max_asset_bytes is None
         and max_total_asset_bytes is None
         and sample_flag is None
@@ -317,6 +363,11 @@ def _apply_lesson_env_overrides(config):
             lesson_cfg["step_timeout_floor_sec"] = max(0.0, float(step_timeout_floor))
         except ValueError:
             pass
+    if voice_rt_p95_disable_ms:
+        try:
+            lesson_cfg["voice_rt_p95_disable_ms"] = max(0.0, float(voice_rt_p95_disable_ms))
+        except ValueError:
+            pass
     if max_asset_bytes is not None:
         lesson_cfg["max_asset_bytes"] = max_asset_bytes
     if max_total_asset_bytes is not None:
@@ -340,9 +391,14 @@ def _apply_lesson_env_overrides(config):
             server_cfg = {}
             config["server"] = server_cfg
         server_cfg["api_url"] = normalized
-        if not lesson_cfg.get("api_base"):
-            lesson_cfg["api_base"] = normalized
-    if flag is None and not lesson_cfg.get("runtime_enabled"):
+        # An EXPLICIT COURSE_BACKEND_URL/TBOT_BACKEND_API_URL is the operator's
+        # production backend and MUST win over any shipped/stale committed
+        # lesson.api_base default, so the runtime never pulls from a stale endpoint.
+        lesson_cfg["api_base"] = normalized
+    # Auto-enable ONLY when an EXPLICIT backend URL env (course_url) is present — the
+    # shipped lesson.api_base / server.api_url default is deliberately never enough to
+    # arm production lessons (dark-by-default; see docstring + boot-guard).
+    if flag is None and not lesson_cfg.get("runtime_enabled") and course_url:
         server_cfg = config.get("server")
         api_base = lesson_cfg.get("api_base")
         if not api_base and isinstance(server_cfg, Mapping):
@@ -387,7 +443,7 @@ def _apply_voice_env_overrides(config):
         if not isinstance(current_voice_mode, Mapping):
             current_voice_mode = {}
         current_voice_mode["type"] = "google_live"
-        current_voice_mode.setdefault("fallback_to_classic_on_error", True)
+        current_voice_mode["fallback_to_classic_on_error"] = False
         config["voice_mode"] = current_voice_mode
 
     google_live = config.get("google_live")
@@ -412,6 +468,9 @@ def _apply_voice_env_overrides(config):
     voice_name = _clean_env("TBOT_GOOGLE_LIVE_VOICE_NAME") or _clean_env("GOOGLE_LIVE_VOICE_NAME")
     if voice_name:
         google_live["voice_name"] = voice_name
+    session_resumption_enabled = _parse_bool_env("TBOT_GOOGLE_LIVE_SESSION_RESUMPTION_ENABLED")
+    if session_resumption_enabled is not None:
+        google_live["session_resumption_enabled"] = session_resumption_enabled
 
     extra_wake_words = _split_csv_env("TBOT_WAKEUP_WORDS")
     if extra_wake_words:
@@ -440,6 +499,8 @@ def _assert_lesson_runtime_boot_safe(config):
         for name in ("TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE")
         if not _clean_env(name)
     ]
+    if not (_clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")):
+        missing.append("COURSE_BACKEND_URL or TBOT_BACKEND_API_URL")
     if missing:
         raise RuntimeError(
             "lesson.runtime_enabled=true requires boot env prerequisites; "
@@ -465,6 +526,9 @@ def _assert_production_boot_safe(config):
     auth_enabled = auth_cfg.get("enabled") if isinstance(auth_cfg, Mapping) else None
     if auth_enabled is not True:
         raise RuntimeError("production boot requires server.auth.enabled=true")
+    auth_key = server_cfg.get("auth_key") if isinstance(server_cfg, Mapping) else None
+    if not isinstance(auth_key, str) or not auth_key.strip():
+        raise RuntimeError("production boot requires non-empty server.auth.auth_key")
 
     missing = [
         name
@@ -485,6 +549,38 @@ def _assert_production_boot_safe(config):
         raise RuntimeError("production boot requires TBOT_REQUIRE_DEVICE_TOKEN=true")
     if _parse_bool_env("ADMIN_AUTH_DISABLED") is True:
         raise RuntimeError("ADMIN_AUTH_DISABLED must not be true in production")
+    if _parse_bool_env("TBOT_BYPASS_VOICE_CONSENT") is True:
+        raise RuntimeError("production boot forbids voice consent bypass: TBOT_BYPASS_VOICE_CONSENT")
+    if isinstance(server_cfg, Mapping):
+        if server_cfg.get("factory_test_claimed_all") is True:
+            raise RuntimeError("production boot forbids server.factory_test_claimed_all=true")
+        factory_claimed_devices = server_cfg.get("factory_test_claimed_devices") or []
+        if isinstance(factory_claimed_devices, str):
+            factory_claimed_devices = [factory_claimed_devices]
+        if any(str(device).strip() for device in factory_claimed_devices):
+            raise RuntimeError("production boot forbids server.factory_test_claimed_devices in production")
+    voice_mode = config.get("voice_mode")
+    if not isinstance(voice_mode, Mapping) or voice_mode.get("type") != "google_live":
+        raise RuntimeError("production boot requires voice_mode.type=google_live")
+    google_live = config.get("google_live")
+    google_live = google_live if isinstance(google_live, Mapping) else {}
+    live_model = str(google_live.get("model") or "").strip()
+    production_model = GOOGLE_LIVE_DEFAULTS["model"]
+    if live_model and live_model != production_model:
+        raise RuntimeError(
+            f"production boot requires google_live.model={production_model}"
+        )
+    for key in ("enable_audio_input", "enable_audio_output", "native_voice"):
+        if google_live.get(key, True) is not True:
+            raise RuntimeError(f"production boot requires google_live.{key}=true")
+    language_code = str(
+        google_live.get("language_code") or GOOGLE_LIVE_DEFAULTS["language_code"]
+    ).strip()
+    if language_code != GOOGLE_LIVE_DEFAULTS["language_code"]:
+        raise RuntimeError(
+            "production boot requires "
+            f"google_live.language_code={GOOGLE_LIVE_DEFAULTS['language_code']}"
+        )
     _assert_production_google_live_aec_ready(config)
 
 
@@ -519,7 +615,9 @@ def _apply_server_endpoint_env_overrides(config):
 
     websocket_url = _clean_env("TBOT_PUBLIC_WEBSOCKET_URL")
     api_url = _clean_env("TBOT_BACKEND_API_URL")
-    if not websocket_url and not api_url:
+    auth_key = _clean_env("TBOT_SERVER_AUTH_KEY")
+    auth_enabled = _parse_bool_env("TBOT_SERVER_AUTH_ENABLED")
+    if not websocket_url and not api_url and not auth_key and auth_enabled is None:
         return config
 
     server_config = config.get("server")
@@ -545,6 +643,14 @@ def _apply_server_endpoint_env_overrides(config):
             lesson_api_base = lesson_config.get("api_base")
             if not lesson_api_base or lesson_api_base == prior_api_url:
                 lesson_config["api_base"] = normalized_api_url
+    if auth_key:
+        server_config["auth_key"] = auth_key
+    if auth_enabled is not None:
+        auth_config = server_config.get("auth")
+        if not isinstance(auth_config, Mapping):
+            auth_config = {}
+            server_config["auth"] = auth_config
+        auth_config["enabled"] = auth_enabled
     return config
 
 
@@ -665,6 +771,7 @@ async def get_config_from_api_async(config):
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    config_data = _apply_base_google_live_policy(config_data, config)
     config_data = _apply_server_endpoint_env_overrides(config_data)
     config_data = normalize_voice_config(config_data)
     _assert_production_boot_safe(config_data)
@@ -691,6 +798,8 @@ async def get_private_config_from_api(config, device_id, client_id):
     private_config = agent_result if not isinstance(agent_result, Exception) else {}
     if correct_words:
         private_config["correct_words"] = correct_words
+    private_config = _apply_base_google_live_policy(private_config, config)
+    private_config = _apply_voice_env_overrides(private_config)
     return normalize_voice_config(private_config)
 
 

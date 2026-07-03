@@ -99,6 +99,29 @@ class WakeupWordsReplyTest(unittest.IsolatedAsyncioTestCase):
         conn.config["enable_wakeup_words_response_cache"] = True
         self.assertFalse(await helloHandle.checkWakeupWords(conn, "hello"))
 
+    async def test_google_live_wakeup_word_does_not_use_cached_local_audio(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+
+        with patch.object(helloHandle, "audio_to_data", new=AsyncMock(return_value=[b"opus"])) as audio_to_data, patch.object(
+            helloHandle, "sendAudioMessage", new=AsyncMock()
+        ) as send_audio, patch.object(helloHandle, "send_tts_message", new=AsyncMock()) as send_tts, patch.object(
+            helloHandle.wakeup_words_config,
+            "get_wakeup_response",
+            return_value={
+                "file_path": "config/assets/wakeup_words_short.wav",
+                "text": "I'm here!",
+                "time": 10**12,
+            },
+        ):
+            handled = await helloHandle.checkWakeupWords(conn, "hiesp")
+
+        self.assertFalse(handled)
+        audio_to_data.assert_not_awaited()
+        send_audio.assert_not_awaited()
+        send_tts.assert_not_awaited()
+        self.assertFalse(getattr(conn, "just_woken_up", False))
+
     async def test_wakeup_reply_uses_fallback_audio_and_refreshes_stale_cache(self):
         conn = _Conn()
         conn.tts.voice = ""

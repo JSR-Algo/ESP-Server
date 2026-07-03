@@ -20,7 +20,6 @@ import asyncio
 import copy
 import json
 import math
-import re
 import time
 import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -50,9 +49,12 @@ MAX_LESSON_FRAME_BYTES = 16 * 1024
 NO_CURRENT_ASSIGNMENT_MESSAGE = "Robot chưa có bài học nào được giao."
 
 
-def _set_lesson_start_status(conn: Any, code: str, message: str = "") -> None:
+def _set_lesson_start_status(conn: Any, code: str, message: str = "", *, reason: str = "") -> None:
     try:
-        conn.lesson_start_status = {"code": code, "message": message}
+        status = {"code": code, "message": message}
+        if reason:
+            status["reason"] = reason
+        conn.lesson_start_status = status
     except Exception:
         pass
 
@@ -61,6 +63,17 @@ def _compact_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception:
         return "{}"
+
+def _lesson_trace_context_from_headers(headers: Any) -> Dict[str, str]:
+    if not isinstance(headers, dict):
+        return {}
+    normalized = {str(key).lower(): value for key, value in headers.items()}
+    out: Dict[str, str] = {}
+    for key in ("traceparent", "tracestate"):
+        value = normalized.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
 
 def _manifest_story_log_summary(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     summary: List[Dict[str, Any]] = []
@@ -194,6 +207,13 @@ IMMEDIATE_SCORING_DETAIL_KEYS = frozenset(
     }
 )
 
+CHILD_RESPONSE_INTENT_CORRECT = "correct"
+CHILD_RESPONSE_INTENT_WRONG = "wrong"
+CHILD_RESPONSE_INTENT_HELP_OR_REPEAT = "help_or_repeat"
+CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED = "unknown_or_frustrated"
+CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT = "vietnamese_object"
+CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON = "already_in_lesson"
+
 def _normalized_detail_key(key: Any) -> str:
     return str(key).replace("-", "_").lower()
 
@@ -241,6 +261,81 @@ def _contains_token_sequence(tokens: List[str], expected: List[str]) -> bool:
             return True
     return False
 
+def _contains_any_token_sequence(tokens: List[str], expected_values: List[str]) -> bool:
+    return any(_contains_token_sequence(tokens, _matching_tokens(value)) for value in expected_values)
+
+def _child_response_interaction_prompt(step: Dict[str, Any], key: str) -> Optional[str]:
+    prompts = step.get("interactionPrompts")
+    if not isinstance(prompts, dict):
+        return None
+    prompt = prompts.get(key)
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    return None
+
+def _classify_child_response_intent(
+    response: Any,
+    expected_responses: List[str],
+) -> str:
+    if _child_response_matches_expected(response, expected_responses):
+        return CHILD_RESPONSE_INTENT_CORRECT
+    tokens = _matching_tokens(response)
+    if not tokens:
+        return CHILD_RESPONSE_INTENT_WRONG
+    if _contains_any_token_sequence(
+        tokens,
+        [
+            "bắt đầu bài học",
+            "bắt đầu khóa học",
+            "mở bài học",
+            "mở khóa học",
+            "vào bài học",
+            "vào khóa học",
+            "start lesson",
+            "start the lesson",
+        ],
+    ):
+        return CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON
+    if _contains_any_token_sequence(
+        tokens,
+        [
+            "nói lại",
+            "nhắc lại",
+            "lặp lại",
+            "đọc lại",
+            "chưa nghe",
+            "nghe lại",
+            "giúp con",
+            "giúp",
+            "repeat",
+            "help",
+        ],
+    ):
+        return CHILD_RESPONSE_INTENT_HELP_OR_REPEAT
+    if (
+        _contains_any_token_sequence(tokens, ["cái kho", "nhà kho"])
+        or (
+            "kho" in tokens
+            and not _contains_any_token_sequence(tokens, ["khó quá", "kho qua"])
+        )
+    ):
+        return CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT
+    if _contains_any_token_sequence(
+        tokens,
+        [
+            "không biết",
+            "con không biết",
+            "khó quá",
+            "kho qua",
+            "không làm được",
+            "con không làm được",
+            "chịu",
+            "con chịu",
+        ],
+    ):
+        return CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED
+    return CHILD_RESPONSE_INTENT_WRONG
+
 def _coerce_expected_child_responses(step: Optional[Dict[str, Any]]) -> List[str]:
     if not isinstance(step, dict):
         return []
@@ -281,13 +376,6 @@ def _child_response_matches_expected(response: Any, expected_responses: List[str
             return True
     return False
 
-def _child_response_preview(response: Any) -> str:
-    text = re.sub(r"\s+", " ", str(response or "").strip())
-    text = text.strip(" .,!?:;")
-    if len(text) > 40:
-        text = text[:37].rstrip() + "..."
-    return text
-
 def _child_response_retry_prompt(
     step: Dict[str, Any],
     expected_responses: List[str],
@@ -300,10 +388,42 @@ def _child_response_retry_prompt(
         base = f"Con thử nói lại nhé: {expected_responses[0]}."
     else:
         base = "Con thử nói lại nhé."
-    wrong = _child_response_preview(response)
-    if not wrong:
-        return base
-    return f"Con vừa nói {wrong}. Chưa đúng rồi. {base}"
+    return base
+
+def _child_response_coaching_prompt(
+    step: Dict[str, Any],
+    expected_responses: List[str],
+    response: Any,
+    intent: str,
+) -> str:
+    target = expected_responses[0] if expected_responses else "từ này"
+    if intent == CHILD_RESPONSE_INTENT_HELP_OR_REPEAT:
+        return (
+            _child_response_interaction_prompt(step, "helpOrRepeat")
+            or f"Mình nhắc lại nhé. Con nhìn hình và nói theo mình: {target}."
+        )
+    if intent == CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED:
+        return (
+            _child_response_interaction_prompt(step, "unknownOrFrustrated")
+            or f"Không sao. Con nhìn hình cái kho màu đỏ nhé. Tiếng Anh là {target}. Con thử nói: {target}."
+        )
+    if intent == CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT:
+        return (
+            _child_response_interaction_prompt(step, "vietnameseObject")
+            or f"Đúng rồi, đó là cái kho. Bây giờ mình nói tên tiếng Anh của cái kho: {target}."
+        )
+    if intent == CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON:
+        return (
+            _child_response_interaction_prompt(step, "alreadyInLesson")
+            or f"Mình đang học bài này rồi. Con nhìn hình và nói từ {target} nhé."
+        )
+    return _child_response_retry_prompt(step, expected_responses, response)
+
+def _child_response_success_prompt(step: Dict[str, Any]) -> Optional[str]:
+    success = step.get("successPrompt")
+    if isinstance(success, str) and success.strip():
+        return success.strip()
+    return None
 
 def _is_false_child_response_flag_value(value: Any) -> bool:
     if isinstance(value, bool):
@@ -487,8 +607,14 @@ class LessonRuntime:
         default_step_timeout_sec: float = 12.0,
         min_step_timeout_sec: float = 0.0,
         alarm: Any = None,
+        preload_status_reporter: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
+        graceful_inactivity_finish: bool = False,
     ) -> None:
         self.conn = conn
+        # Demo-only: when a child stays silent through an interactive step, model the
+        # answer aloud and advance instead of abandoning with a sad face. Real assigned
+        # lessons leave this False so the backend still learns the child disengaged.
+        self._graceful_inactivity_finish = bool(graceful_inactivity_finish)
         self.logger = getattr(conn, "logger", None)
         self.assignment_id = assignment.get("assignmentId")
         self.assignment_version = int(assignment.get("assignmentVersion", 1))
@@ -499,6 +625,7 @@ class LessonRuntime:
         # mints a fresh session_id, which cleanly resumes the (assignmentId,sessionId)
         # sequence namespace on ESP restart (plan §6.3.5 — "fresh sessionId" option).
         self.session_id = assignment.get("sessionId") or getattr(conn, "session_id", None)
+        self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
         self.manifest = manifest
         self.manifest_checksum = manifest_checksum
         # L3 P3 — the device's advertised renderer-capability SET (forward-modelled
@@ -515,6 +642,7 @@ class LessonRuntime:
         self.negotiated_version = manifest.get("manifestVersion") or PROTOCOL_VERSION
         self.asset_cache = asset_cache
         self.forwarder = forwarder
+        self.preload_status_reporter = preload_status_reporter
         self._send = send or self._default_send
         self._sleep = sleep or asyncio.sleep
         self._default_step_timeout_sec = default_step_timeout_sec
@@ -534,6 +662,7 @@ class LessonRuntime:
         self.last_error: Optional[LessonError] = None
 
         self._preload_task: Optional[asyncio.Task] = None
+        self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
         self._step_timeout_task: Optional[asyncio.Task] = None
         self._passive_dwell_task: Optional[asyncio.Task] = None
@@ -552,6 +681,7 @@ class LessonRuntime:
         # transitions (e.g. a late lesson_error after an earlier timeout) cannot
         # enqueue a second terminal event for the same run.
         self._failure_forwarded = False
+        self._completion_stop_sent = False
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -625,10 +755,22 @@ class LessonRuntime:
         self._cancel_child_response_timeout()
         if self._preload_task is not None and not self._preload_task.done():
             self._preload_task.cancel()
+        for task in list(self._preload_status_report_tasks):
+            if not task.done():
+                task.cancel()
+        if self._preload_status_report_tasks:
+            await asyncio.gather(*self._preload_status_report_tasks, return_exceptions=True)
+            self._preload_status_report_tasks.clear()
         if self.forwarder is not None:
             await self.forwarder.aclose()
         if self.asset_cache is not None:
             await self.asset_cache.aclose()
+
+    def _is_active_runtime(self) -> bool:
+        if self._closed:
+            return False
+        current = getattr(self.conn, "lesson_runtime", None)
+        return current is None or current is self
 
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
@@ -649,14 +791,16 @@ class LessonRuntime:
         return True
 
     async def on_lesson_ack(self, msg_json: Dict[str, Any]) -> None:
+        if not self._is_active_runtime():
+            return
         if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
             return  # terminal is absorbing — no late frame can resurrect/override it
-        if not self._matches_runtime_identity(msg_json):
-            return
         body = msg_json.get("body") or {}
-        if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+        legacy_acked = self._legacy_empty_ack_outstanding_seq(msg_json, body)
+        if legacy_acked is None and not self._matches_runtime_identity(msg_json):
             return
-        acked = body.get("acks")  # P0: correlate on body.acks, NOT envelope.sequence.
+        acked = legacy_acked if legacy_acked is not None else body.get("acks")
+        # P0: correlate on body.acks, NOT envelope.sequence.
         # DEFENSIVE COERCE: body.acks MUST be the int S->F sequence of the outstanding
         # frame. A malformed firmware/replay frame could send a list (e.g. [3]) or a
         # str — an unhashable/wrong-typed key would raise TypeError on the dict .pop()
@@ -664,14 +808,37 @@ class LessonRuntime:
         # anything that is not a hashable int (None, list, dict, non-numeric str) is a
         # malformed ack -> idempotent no-op, identical to a stale/unknown ack.
         acked = _coerce_ack_seq(acked)
-        frame = self._outstanding.pop(acked, None) if acked is not None else None
+        frame = self._outstanding.get(acked) if acked is not None else None
         if frame is None:
+            if acked is None:
+                await self._accept_inbound(msg_json.get("sequence"))
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).
             return
+        if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+            return
+        self._outstanding.pop(acked, None)
         self._cancel_frame_ack_timeout()
         await self._on_frame_acked(frame, body)
 
+    def _legacy_empty_ack_outstanding_seq(self, msg_json: Dict[str, Any], body: Dict[str, Any]) -> Optional[int]:
+        if msg_json.get("type") != "lesson_ack":
+            return None
+        if body:
+            return None
+        if any(
+            key in msg_json
+            for key in ("assignmentId", "sessionId", "lessonId", "lessonVersion", "stepId", "sequence")
+        ):
+            return None
+        if len(self._outstanding) != 1:
+            return None
+        seq = next(iter(self._outstanding))
+        self._log("info", f"legacy empty lesson_ack correlated seq={seq}")
+        return seq
+
     async def on_lesson_progress(self, msg_json: Dict[str, Any]) -> None:
+        if not self._is_active_runtime():
+            return
         if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
             return  # terminal is absorbing (e.g. no PROTOCOL_SEQUENCE_ERROR after STEP_TIMEOUT)
         if not self._matches_runtime_identity(msg_json):
@@ -741,6 +908,8 @@ class LessonRuntime:
         response = str(text or "").strip()
         if not _has_observable_child_response_value(response):
             return False
+        if not self._is_active_runtime():
+            return False
         if self.state != S_RUNNING or self._step is None or self._step_id is None:
             return False
         if self._step_passive:
@@ -749,18 +918,24 @@ class LessonRuntime:
             return False
         if self._step_completed:
             return False
-        if not self._child_response_window_open:
+        internal_probe = str(source or "") == "internal_dev_endpoint"
+        if not self._child_response_window_open and not internal_probe:
             return False
 
         expected_responses = _coerce_expected_child_responses(self._step)
-        if not _child_response_matches_expected(response, expected_responses):
+        response_intent = _classify_child_response_intent(response, expected_responses)
+        if response_intent != CHILD_RESPONSE_INTENT_CORRECT:
             self._cancel_child_response_timeout()
-            retry_prompt = _child_response_retry_prompt(
-                self._step, expected_responses, response
+            self._close_child_response_window()
+            retry_prompt = _child_response_coaching_prompt(
+                self._step, expected_responses, response, response_intent
             )
             self._log(
                 "info",
-                f"interactive child response retry stepId={self._step_id} expected={expected_responses}",
+                (
+                    "interactive child response retry "
+                    f"stepId={self._step_id} intent={response_intent} expected={expected_responses}"
+                ),
             )
             await self._speak_lesson_prompt_text(
                 retry_prompt,
@@ -768,7 +943,8 @@ class LessonRuntime:
                 continue_listening=True,
             )
             await self._open_child_response_window()
-            self._start_child_response_timeout()
+            if self._child_response_window_still_current(self._step_id, self._step_seq):
+                self._start_child_response_timeout()
             return True
 
         self._cancel_child_response_timeout()
@@ -791,11 +967,21 @@ class LessonRuntime:
             }
         )
         self._log("info", f"interactive child response accepted stepId={self._step_id}")
+        self._close_child_response_window()
         self._step_completed = True
+        success_prompt = _child_response_success_prompt(self._step)
+        if success_prompt is not None:
+            await self._speak_lesson_prompt_text(
+                success_prompt,
+                step_id=self._step_id,
+                continue_listening=False,
+            )
         await self._maybe_finish_step()
         return True
 
     async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
+        if not self._is_active_runtime():
+            return
         if not self._matches_runtime_identity(msg_json):
             return
         # lesson_error rides the same F->S sequence stream but is a status report (not
@@ -822,6 +1008,8 @@ class LessonRuntime:
     # ── state machine ──────────────────────────────────────────────────────────
 
     async def _on_frame_acked(self, frame: Dict[str, Any], ack_body: Dict[str, Any]) -> None:
+        if not self._is_active_runtime():
+            return
         ftype = frame.get("type")
         if ftype == "lesson_prepare":
             if self._sd_asset_pack_enabled() and not self._ack_reports_asset_pack_ready(ack_body):
@@ -855,6 +1043,8 @@ class LessonRuntime:
             # TeeBot starts teaching or listening for the child's reply.
             if self._step is not None:
                 await self._speak_step_prompt(self._step)
+            if not self._is_active_runtime():
+                return
             if self._step_passive:
                 # PASSIVE narration (greeting/review/focus/feedback/celebrate): the
                 # firmware NEVER sends step_completed, so the ack IS the completion
@@ -875,7 +1065,8 @@ class LessonRuntime:
                 self._step_completed = True
             else:
                 await self._open_child_response_window()
-                self._start_child_response_timeout()
+                if self._child_response_window_still_current(self._step_id, self._step_seq):
+                    self._start_child_response_timeout()
             await self._maybe_finish_step()
         elif ftype == "lesson_stop":
             self.state = S_COMPLETED
@@ -908,20 +1099,17 @@ class LessonRuntime:
                     "failedAt": _wire_timestamp(),
                 }
             )
-        # SUCCESSFUL completion (state COMPLETED, reached only via the lesson_stop ack)
-        # returns the robot to a HAPPY face + normal CONVERSATION via finish_lesson_mode.
-        # Every other terminal (FAILED/PAUSED — timeout/abandon/error) falls through to
-        # release_lesson_mode, which idles the audio channel (dormant). finish_lesson_mode
-        # is best-effort: if the connection lacks it (older conn) or it raises, fall back
-        # to release so a terminal never strands the lesson layer in LESSON mode.
-        if self.state == S_COMPLETED:
-            finish = getattr(self.conn, "finish_lesson_mode", None)
-            if callable(finish):
-                try:
-                    await finish(reason=reason)
-                    return
-                except Exception as exc:  # pragma: no cover - finish is best-effort
-                    self._log("warning", f"lesson finish mode transition failed: {type(exc).__name__}")
+        # Terminal states should never strand the lesson layer in LESSON mode or drop
+        # the child silently into DORMANT. Prefer the newer finish hook for every
+        # terminal so the connection can show a visible face cue and restore Live
+        # conversation; fall back to the legacy dormant release hook on older conns.
+        finish = getattr(self.conn, "finish_lesson_mode", None)
+        if callable(finish):
+            try:
+                await finish(reason=reason)
+                return
+            except Exception as exc:  # pragma: no cover - finish is best-effort
+                self._log("warning", f"lesson finish mode transition failed: {type(exc).__name__}")
         release = getattr(self.conn, "release_lesson_mode", None)
         if not callable(release):
             return
@@ -939,6 +1127,42 @@ class LessonRuntime:
             self._alarm.set_preload_active(active)
         except Exception:  # pragma: no cover - alarm is best-effort
             pass
+
+    def _start_preload_status_reports(self, status: Dict[str, Any]) -> None:
+        reporter = self.preload_status_reporter
+        if not callable(reporter):
+            return
+        for asset in status.get("assets", []) or []:
+            if not isinstance(asset, dict) or asset.get("critical") is not True:
+                continue
+            state = asset.get("state")
+            if state not in ("READY", "FAILED"):
+                continue
+            asset_id = asset.get("assetId") or asset.get("key") or asset.get("id")
+            if not asset_id:
+                continue
+            report: Dict[str, Any] = {
+                "assignmentId": self.assignment_id,
+                "assetId": asset_id,
+                "state": state,
+            }
+            if asset.get("checksumOk") is not None:
+                report["checksumOk"] = bool(asset.get("checksumOk"))
+            task = asyncio.create_task(self._send_preload_status_report(reporter, report))
+            self._preload_status_report_tasks.add(task)
+            task.add_done_callback(self._preload_status_report_tasks.discard)
+
+    async def _send_preload_status_report(
+        self,
+        reporter: Callable[[Dict[str, Any]], Awaitable[Any]],
+        report: Dict[str, Any],
+    ) -> None:
+        try:
+            await reporter(report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - telemetry must not gate lesson flow
+            self._log("warning", f"preload status report failed: {type(exc).__name__}")
 
     async def _run_preload(self) -> None:
         # The "active preload window" the S13 alarm measures against is exactly the
@@ -966,8 +1190,13 @@ class LessonRuntime:
         finally:
             self._alarm_preload(False)
 
+        if not self._is_active_runtime():
+            return
         # ESP synthesizes lesson_preload_status from its OWN cache; ready is THE gate.
         status = self.asset_cache.synthesize_preload_status(self.assignment_version)
+        self._start_preload_status_reports(status)
+        if self._preload_status_report_tasks:
+            await asyncio.sleep(0)
         if not ready or not status.get("ready"):
             # A non-mismatch shortfall (e.g. critical network failure) leaves it not
             # ready; lesson_start is gated below and will not fire.
@@ -1008,6 +1237,9 @@ class LessonRuntime:
             self._alarm_preload(False)
 
         status = self.asset_cache.synthesize_preload_status(self.assignment_version)
+        self._start_preload_status_reports(status)
+        if self._preload_status_report_tasks:
+            await asyncio.sleep(0)
         if not ready or not status.get("ready"):
             self.last_error = LessonError(
                 ASSET_PACK_NOT_READY,
@@ -1021,6 +1253,8 @@ class LessonRuntime:
         return True
 
     async def _emit_step(self) -> None:
+        if not self._is_active_runtime():
+            return
         # P5: advance the cursor and emit the NEXT renderable step. The first call
         # (from lesson_start ack) moves -1 -> 0; subsequent calls (from a completed
         # step) move 0 -> 1 -> ... Each emission resets the per-step ack/completed
@@ -1077,6 +1311,8 @@ class LessonRuntime:
         step_id: Optional[str] = None,
         continue_listening: bool = False,
     ) -> None:
+        if not self._is_active_runtime():
+            return
         provider = getattr(self.conn, "voice_provider", None)
         speaker = getattr(provider, "speak_lesson_step_prompt", None)
         if not callable(speaker):
@@ -1101,7 +1337,12 @@ class LessonRuntime:
             )
 
     async def _maybe_finish_step(self) -> None:
+        if not self._is_active_runtime():
+            return
         if not (self.state == S_RUNNING and self._step_acked and self._step_completed):
+            return
+        last_step = self._step_index + 1 >= len(self._steps)
+        if last_step and self._completion_stop_sent:
             return
         self._cancel_child_response_timeout()
         # A step is done once it is acked AND its step_completed progress arrived
@@ -1110,9 +1351,10 @@ class LessonRuntime:
         self._steps_completed += 1
         if isinstance(self._step_id, str):
             self._completed_step_ids.add(self._step_id)
-        if self._step_index + 1 < len(self._steps):
+        if not last_step:
             await self._emit_step()  # next step in manifest order
         else:
+            self._completion_stop_sent = True
             await self._emit("lesson_stop", body={"reason": "COMPLETED"})
 
     def _interactive_progress_has_response(self, body: Dict[str, Any]) -> bool:
@@ -1197,7 +1439,8 @@ class LessonRuntime:
             # Latch guard: only complete THIS still-current, still-running step. A
             # republish/failure/next-step transition makes the dwell a no-op.
             if (
-                self.state != S_RUNNING
+                not self._is_active_runtime()
+                or self.state != S_RUNNING
                 or self._step_seq != step_seq
                 or self._step_id != step_id
                 or self._step_completed
@@ -1228,6 +1471,19 @@ class LessonRuntime:
             parsed = 12.0
         return max(0.0, parsed)
 
+    def _frame_ack_max_retries(self) -> int:
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = config.get("lesson", {}) or {}
+        raw = lesson_cfg.get(
+            "frame_ack_max_retries",
+            lesson_cfg.get("lifecycle_frame_ack_max_retries", 1),
+        )
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 1
+        return max(0, parsed)
+
     def _start_frame_ack_timeout(self, frame_type: str, seq: int, step_id: Optional[str]) -> None:
         timeout_sec = self._frame_ack_timeout_sec()
         if timeout_sec <= 0:
@@ -1241,7 +1497,25 @@ class LessonRuntime:
                 return
             if seq not in self._outstanding or self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
                 return
-            self._outstanding.pop(seq, None)
+            frame = self._outstanding.pop(seq, None) or {}
+            retry_count = int(frame.get("retryCount") or 0)
+            if retry_count < self._frame_ack_max_retries():
+                self._log(
+                    "warning",
+                    (
+                        "FRAME_ACK_TIMEOUT_RETRY "
+                        f"type={frame_type} seq={seq} "
+                        f"retry={retry_count + 1}/{self._frame_ack_max_retries()} "
+                        f"stepId={step_id or ''}"
+                    ),
+                )
+                await self._emit(
+                    frame_type,
+                    step_id=step_id,
+                    body=copy.deepcopy(frame.get("body") or {}),
+                    frame_ack_retry_count=retry_count + 1,
+                )
+                return
             self.last_error = LessonError(
                 LESSON_FRAME_ACK_TIMEOUT,
                 f"no lesson_ack for {frame_type} within timeout",
@@ -1271,7 +1545,8 @@ class LessonRuntime:
             except asyncio.CancelledError:
                 return
             if (
-                self.state != S_RUNNING
+                not self._is_active_runtime()
+                or self.state != S_RUNNING
                 or self._step_id != step_id
                 or self._step_passive
                 or not self._step_acked
@@ -1321,12 +1596,25 @@ class LessonRuntime:
         return max(1, parsed)
 
     async def _handle_child_response_timeout(self, step_id: Optional[str]) -> None:
+        if not self._is_active_runtime():
+            return
         self._child_response_timeout_count += 1
+        self._close_child_response_window()
         if self._child_response_timeout_count < self._max_child_response_timeouts():
             self._log("info", f"child response inactive; reprompt stepId={step_id}")
             await self._speak_lesson_prompt_text("Con thử nói lại nhé.", step_id=step_id)
+            if not self._is_active_runtime():
+                return
             await self._open_child_response_window()
-            self._start_child_response_timeout()
+            if self._child_response_window_still_current(self._step_id, self._step_seq):
+                self._start_child_response_timeout()
+            return
+
+        if self._graceful_inactivity_finish:
+            # Demo path: a silent spectator child must not make TeeBot end sad. Model
+            # the answer aloud, then advance this step to keep walking toward the happy
+            # lesson_completed ending. Reuses on_child_response's success wiring.
+            await self._graceful_advance_on_inactivity(step_id)
             return
 
         self._log("info", f"child response inactive; pausing lesson stepId={step_id}")
@@ -1344,19 +1632,93 @@ class LessonRuntime:
         )
         await self._notify_lesson_terminal("child_inactive")
 
-    async def _open_child_response_window(self) -> None:
+    async def _graceful_advance_on_inactivity(self, step_id: Optional[str]) -> None:
+        """Demo-only inactivity recovery: TeeBot says the target word for the child,
+        marks the step complete, and advances so a no-mic showcase still reaches the
+        happy ending. Mirrors on_child_response's success tail (step_completed forward +
+        success prompt + _maybe_finish_step) without requiring a real transcript."""
+        if not self._is_active_runtime() or self.state != S_RUNNING:
+            return
+        self._cancel_child_response_timeout()
+        self._child_response_window_open = False
+        expected = _coerce_expected_child_responses(self._step)
+        model_word = expected[0] if expected else ""
+        model_prompt = (
+            f"Để mình nói giúp con nhé: {model_word}." if model_word
+            else "Để mình nói giúp con nhé."
+        )
+        self._log("info", f"child response inactive; demo graceful advance stepId={step_id}")
+        await self._speak_lesson_prompt_text(
+            model_prompt, step_id=step_id, continue_listening=False
+        )
+        if not self._is_active_runtime() or self.state != S_RUNNING:
+            return
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": step_id,
+                "stepType": (self._step or {}).get("type"),
+                "result": "modeled",
+                "detail": {"reason": "child_inactive_demo_advance", "modeledText": model_word},
+            }
+        )
+        self._step_completed = True
+        success_prompt = _child_response_success_prompt(self._step)
+        if success_prompt is not None:
+            await self._speak_lesson_prompt_text(
+                success_prompt, step_id=step_id, continue_listening=False
+            )
+        await self._maybe_finish_step()
+
+    def _child_response_window_still_current(
+        self,
+        step_id: Optional[str],
+        step_seq: Optional[int],
+    ) -> bool:
+        return (
+            self._is_active_runtime()
+            and self.state == S_RUNNING
+            and self._step_id == step_id
+            and self._step_seq == step_seq
+            and not self._step_passive
+            and self._step_acked
+            and not self._step_completed
+        )
+
+    async def _open_child_response_window(self) -> bool:
+        step_id = self._step_id
+        step_seq = self._step_seq
+        if not self._child_response_window_still_current(step_id, step_seq):
+            return False
         provider = getattr(self.conn, "voice_provider", None)
         opener = getattr(provider, "open_lesson_child_response_window", None)
         if not callable(opener):
             self._child_response_window_open = True
-            return
+            return True
         try:
-            await opener()
+            opened = await opener()
+            if opened is False or not self._child_response_window_still_current(step_id, step_seq):
+                self._child_response_window_open = False
+                return False
             self._child_response_window_open = True
             self._log("info", f"child response window opened stepId={self._step_id or ''} listening=1")
+            return True
         except Exception as exc:
             self._child_response_window_open = False
             self._log("warning", f"lesson_child_response_window failed: {exc}")
+            return False
+
+    def _close_child_response_window(self) -> None:
+        self._child_response_window_open = False
+        provider = getattr(self.conn, "voice_provider", None)
+        closer = getattr(provider, "close_lesson_child_response_window", None)
+        if not callable(closer):
+            return
+        try:
+            closer()
+        except Exception as exc:
+            self._log("warning", f"lesson_child_response_window close failed: {exc}")
 
     # ── inbound sequence guard ──────────────────────────────────────────────────
 
@@ -1406,9 +1768,17 @@ class LessonRuntime:
             "body": body,
         }
 
-    async def _emit(self, frame_type: str, *, step_id: Optional[str] = None, body: Optional[Dict[str, Any]] = None) -> int:
+    async def _emit(
+        self,
+        frame_type: str,
+        *,
+        step_id: Optional[str] = None,
+        body: Optional[Dict[str, Any]] = None,
+        frame_ack_retry_count: int = 0,
+    ) -> int:
         seq = self._next_seq()
-        frame = self._envelope(frame_type, step_id=step_id, sequence=seq, body=body or {})
+        frame_body = body or {}
+        frame = self._envelope(frame_type, step_id=step_id, sequence=seq, body=frame_body)
         if frame_type == "lesson_step":
             scene = frame["body"].get("scene") or {}
             story_beat = frame["body"].get("storyBeat")
@@ -1431,7 +1801,12 @@ class LessonRuntime:
             await self._fail_oversized_frame(frame_type, step_id)
             return seq
         # Outstanding S->F frames are correlated by THIS sequence vs inbound body.acks.
-        self._outstanding[seq] = {"type": frame_type, "stepId": step_id}
+        self._outstanding[seq] = {
+            "type": frame_type,
+            "stepId": step_id,
+            "body": copy.deepcopy(frame_body),
+            "retryCount": max(0, int(frame_ack_retry_count or 0)),
+        }
         if frame_type in {"lesson_prepare", "lesson_start", "lesson_stop"}:
             self._start_frame_ack_timeout(frame_type, seq, step_id)
         await self._send(payload)
@@ -1739,15 +2114,24 @@ class LessonRuntime:
             "sessionId": self.session_id,
             "events": [clean],
         }
+        batch.update(self._trace_context)
         self.forwarder.enqueue(batch)
 
     def _log(self, level: str, message: str) -> None:
         if self.logger is None:
             return
         try:
-            getattr(self.logger.bind(tag=TAG), level)(message)
+            getattr(self.logger.bind(tag=TAG), level)(self._with_log_context(message))
         except Exception:
             pass
+
+    def _with_log_context(self, message: str) -> str:
+        fields = []
+        if self.assignment_id and "assignment_id=" not in message:
+            fields.append(f"assignment_id={self.assignment_id}")
+        if self.session_id and "session_id=" not in message:
+            fields.append(f"session_id={self.session_id}")
+        return f"{message} {' '.join(fields)}" if fields else message
 
 
 async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
@@ -1780,14 +2164,33 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
     device_id = getattr(conn, "device_id", None)
     logger = getattr(conn, "logger", None)
+    _log_context: Dict[str, Any] = {}
 
     def _log(level: str, message: str) -> None:
         if logger is None:
             return
+        fields = []
+        assignment_for_log = _log_context.get("assignment")
+        if isinstance(assignment_for_log, dict) and "assignment_id=" not in message:
+            assignment_id_for_log = assignment_for_log.get("assignmentId")
+            if isinstance(assignment_id_for_log, str) and assignment_id_for_log:
+                fields.append(f"assignment_id={assignment_id_for_log}")
+        session_id_for_log = getattr(conn, "session_id", None)
+        if isinstance(session_id_for_log, str) and session_id_for_log and "session_id=" not in message:
+            fields.append(f"session_id={session_id_for_log}")
+        contextual_message = f"{message} {' '.join(fields)}" if fields else message
         try:
-            getattr(logger.bind(tag=TAG), level)(message)
+            getattr(logger.bind(tag=TAG), level)(contextual_message)
         except Exception:
             pass
+
+    def _backend_unavailable(phase: str, exc: Exception) -> None:
+        _set_lesson_start_status(
+            conn,
+            "BACKEND_UNAVAILABLE",
+            "Robot chưa kết nối được máy chủ bài học. Con thử lại sau nhé.",
+        )
+        _log("warning", f"lesson backend {phase} unavailable: {type(exc).__name__}")
 
     if not base_url or not device_id:
         _set_lesson_start_status(conn, "LESSON_CONFIG_MISSING", "Robot chưa kết nối được máy chủ bài học.")
@@ -1844,10 +2247,21 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 backend_device_id = minted_uuid
                 token = minted_token
             else:
-                _set_lesson_start_status(conn, "DEVICE_TOKEN_UNAVAILABLE", "Robot chưa xác thực được với máy chủ bài học.")
+                _set_lesson_start_status(
+                    conn,
+                    "DEVICE_TOKEN_UNAVAILABLE",
+                    "Robot chưa xác thực được với máy chủ bài học.",
+                    reason="missing_identity",
+                )
                 _log("warning", "device token required for lesson pull; skipping tokenless request")
                 return None
         except Exception as exc:  # pragma: no cover - bridge is best-effort
+            _set_lesson_start_status(
+                conn,
+                "DEVICE_TOKEN_UNAVAILABLE",
+                "Robot chưa xác thực được với máy chủ bài học.",
+                reason="missing_identity",
+            )
             _log("warning", f"device-token mint unavailable: {type(exc).__name__}: {exc}")
             return None
         # Best-effort: address the child by name in plain CONVERSATION. The name
@@ -1877,7 +2291,13 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         except Exception as exc:  # pragma: no cover - best-effort enrichment
             _log("warning", f"child-name enrichment skipped: {type(exc).__name__}: {exc}")
 
-        assignment = await backend_api.get_current_assignment(client, base_url, backend_device_id, token=token)
+        try:
+            assignment = await backend_api.get_current_assignment(client, base_url, backend_device_id, token=token)
+        except Exception as exc:
+            _backend_unavailable("assignment", exc)
+            return None
+        if assignment:
+            _log_context["assignment"] = assignment
         if not assignment:
             _set_lesson_start_status(conn, "NO_CURRENT_ASSIGNMENT", NO_CURRENT_ASSIGNMENT_MESSAGE)
             _log("info", "no current assignment for device; nothing to preload")
@@ -1928,15 +2348,19 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 _log("info", "replayed pending terminal lesson event; skipping lesson restart")
                 return None
         profile = assignment.get("profile", "espTft")
-        manifest, etag = await backend_api.get_lesson_manifest(
-            client,
-            base_url,
-            assignment.get("lessonId"),
-            profile,
-            token=token,
-            renderer_capabilities=renderer_capabilities,
-            lesson_version=assignment.get("lessonVersion"),
-        )
+        try:
+            manifest, etag = await backend_api.get_lesson_manifest(
+                client,
+                base_url,
+                assignment.get("lessonId"),
+                profile,
+                token=token,
+                renderer_capabilities=renderer_capabilities,
+                lesson_version=assignment.get("lessonVersion"),
+            )
+        except Exception as exc:
+            _backend_unavailable("manifest", exc)
+            return None
 
     if not manifest:
         _set_lesson_start_status(conn, "MANIFEST_EMPTY", "Robot chưa tải được nội dung bài học.")
@@ -2028,12 +2452,18 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                     await replay()
                 except Exception as exc:  # pragma: no cover - replay is best-effort
                     _log("warning", f"terminal lesson event replay failed: {type(exc).__name__}")
-            if getattr(existing, "state", None) == S_PAUSED:
-                _log("info", "lesson restart requested from PAUSED state; rebuilding runtime")
+            if getattr(existing, "state", None) in (S_PAUSED, S_FAILED):
+                _log(
+                    "info",
+                    (
+                        "lesson restart requested from "
+                        f"{getattr(existing, 'state', None)} state; rebuilding runtime"
+                    ),
+                )
                 try:
                     await existing.close()
                 except Exception as exc:  # pragma: no cover - teardown is best-effort
-                    _log("warning", f"paused lesson runtime teardown failed: {type(exc).__name__}")
+                    _log("warning", f"terminal lesson runtime teardown failed: {type(exc).__name__}")
                 conn.lesson_runtime = None
             else:
                 _log("info", "lesson republish-on-connect: version unchanged; keeping session")
@@ -2098,6 +2528,26 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     forwarder = LessonEventForwarder(
         device_id=backend_device_id, base_url=base_url, token=token, logger=logger
     )
+
+    async def _report_preload_status(report: Dict[str, Any]) -> None:
+        timeout_sec = float(lesson_cfg.get("preload_status_timeout_sec", 5.0))
+        retry_delay = float(lesson_cfg.get("preload_status_retry_delay_sec", 1.0))
+        max_retries = int(lesson_cfg.get("preload_status_max_retries", 2))
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_sec),
+            limits=httpx.Limits(max_keepalive_connections=0),
+            follow_redirects=True,
+        ) as report_client:
+            await backend_api.post_preload_status(
+                report_client,
+                base_url,
+                backend_device_id,
+                report,
+                token=token,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+            )
+
     # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8). One
     # alarm per connection, reused across runtimes so its sample window survives a
     # re-pull. The disable callback flips the ESP LESSON_RUNTIME_ENABLED flag off.
@@ -2124,6 +2574,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         manifest_checksum=new_manifest_checksum,
         min_step_timeout_sec=lesson_cfg.get("step_timeout_floor_sec", 0),
         alarm=alarm,
+        preload_status_reporter=_report_preload_status,
     )
     # Close any prior runtime for a DIFFERENT assignment before replacing it, so its
     # forwarder worker task + asset httpx client are not leaked (deep-audit #7). The

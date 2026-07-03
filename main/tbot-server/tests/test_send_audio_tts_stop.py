@@ -139,6 +139,36 @@ class SendTtsStopTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_google_live_stop_does_not_play_local_stop_notify_audio(self):
+        conn = _Conn()
+        conn.config.update(
+            {
+                "voice_mode": {"type": "google_live"},
+                "enable_stop_tts_notify": True,
+                "stop_tts_notify_voice": "notify.mp3",
+            }
+        )
+
+        with patch.object(sendAudioHandle, "audio_to_data", new=AsyncMock(return_value=[b"notify"])) as audio_to_data, patch.object(
+            sendAudioHandle, "sendAudio", new=AsyncMock()
+        ) as send_audio:
+            await sendAudioHandle.send_tts_message(conn, "stop")
+
+        audio_to_data.assert_not_awaited()
+        send_audio.assert_not_awaited()
+        self.assertEqual(
+            [json.loads(payload) for payload in conn.websocket.sent],
+            [
+                {
+                    "type": "tts",
+                    "state": "stop",
+                    "session_id": "session-1",
+                    "continue_listening": True,
+                    "listen_mode": "realtime",
+                }
+            ],
+        )
+
     async def test_google_live_stop_does_not_open_generic_mic_during_lesson(self):
         conn = _Conn()
         conn.config["voice_mode"] = {"type": "google_live"}
@@ -224,6 +254,24 @@ class SendTtsStopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(conn.websocket.sent[0])["state"], "start")
         self.assertEqual(json.loads(conn.websocket.sent[1])["state"], "sentence_start")
         self.assertEqual(conn.websocket.sent[2], b"opus-frame")
+
+    async def test_google_live_audio_message_drops_classic_audio_frames(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.client_is_speaking = False
+
+        await sendAudioHandle.sendAudioMessage(
+            conn,
+            sendAudioHandle.SentenceType.FIRST,
+            [b"classic-opus"],
+            "Local fallback",
+        )
+
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertFalse(conn.client_is_speaking)
+        self.assertFalse(
+            any("Send audio message:" in message for message in conn.logger.infos)
+        )
 
     async def test_streaming_middle_audio_starts_tts_after_text_only_first(self):
         conn = _Conn()

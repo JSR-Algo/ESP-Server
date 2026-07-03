@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import time
 import unittest
@@ -366,6 +367,29 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(completion_logs[0][3], 0)
         self.assertTrue(completion_logs[0][4])
         self.assertEqual(completion_logs[0][5], "")
+
+    async def test_lesson_mode_blocks_live_model_tool_calls_without_executing_handler(self):
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="centered"),
+        )
+        provider.conn.session_mode = SessionMode.LESSON
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "lesson-tool-1", "name": "center_head", "args": {}}],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        sent = provider._client.sent_responses
+        self.assertEqual(len(sent), 1)
+        response = sent[0][0]
+        self.assertEqual(response["id"], "lesson-tool-1")
+        self.assertEqual(response["name"], "center_head")
+        self.assertEqual(response["response"]["ok"], False)
+        self.assertEqual(response["response"]["errorCode"], "LESSON_MODE_TOOL_BLOCKED")
+        self.assertIn("lesson", response["response"]["message"].lower())
 
     async def test_tool_call_event_maps_error_action_to_error_payload(self):
         provider, _handler = self._make_provider(
@@ -1002,10 +1026,55 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.conn.tts.stored_texts, [])
         self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 0)
         self.assertTrue(provider.conn.google_live_lesson_prompt_output_allowed)
+        prompt_hash = hashlib.sha256(
+            "Welcome to the barn story.".encode("utf-8")
+        ).hexdigest()
+        self.assertTrue(
+            any(
+                len(args) >= 4
+                and args[0] == "Google Live {} sent via live text chars={} sha256={}"
+                and args[1] == "lesson_step_prompt"
+                and args[2] == 26
+                and args[3] == prompt_hash
+                for _level, args, _kwargs in provider.conn.logger.messages
+            )
+        )
 
-    async def test_lesson_step_prompt_falls_back_to_local_tts_when_live_text_unavailable(self):
-        from core.providers.tts.dto.dto import ContentType
+    async def test_lesson_retry_prompt_preserves_vietnamese_and_english_in_live_voice(self):
+        provider, _handler = self._make_provider()
+        provider.conn.websocket = _RecordingWebSocket()
+        provider.conn.tts = _RecordingTts()
+        prompt = "Đúng rồi, đó là cái kho. Bây giờ nói tiếng Anh: barn."
 
+        spoken = await provider.speak_lesson_step_prompt(prompt, continue_listening=True)
+
+        self.assertTrue(spoken)
+        self.assertEqual(
+            provider._client.sent_texts,
+            [LESSON_LIVE_TEXT_INSTRUCTION + prompt],
+        )
+        sent = provider._client.sent_texts[0]
+        self.assertIn("tiếng Việt đọc tiếng Việt", sent)
+        self.assertIn("đọc tiếng Anh", sent)
+        self.assertIn("cái kho", sent)
+        self.assertIn("barn", sent)
+        self.assertEqual(provider.conn.websocket.sent, [])
+        self.assertEqual(provider.conn.tts.stored_texts, [])
+
+    async def test_lesson_live_voice_instruction_requires_full_verbatim_prompt(self):
+        provider, _handler = self._make_provider()
+        prompt = "Câu một. Câu hai có từ barn. Câu ba kết thúc."
+
+        spoken = await provider.speak_lesson_step_prompt(prompt)
+
+        self.assertTrue(spoken)
+        sent = provider._client.sent_texts[0]
+        self.assertIn("Đọc nguyên văn", sent)
+        self.assertIn("không bỏ sót", sent)
+        self.assertIn("không rút gọn", sent)
+        self.assertTrue(sent.endswith(prompt))
+
+    async def test_lesson_step_prompt_does_not_fallback_to_local_tts_when_live_text_unavailable(self):
         provider, _handler = self._make_provider()
         provider._client = None
         provider.conn.websocket = _RecordingWebSocket()
@@ -1014,11 +1083,10 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         spoken = await provider.speak_lesson_step_prompt("Say barn.", continue_listening=True)
 
-        self.assertTrue(spoken)
-        self.assertTrue(provider.conn.lesson_continue_listening_after_tts_stop)
-        self.assertEqual(provider.conn.tts.stored_texts[-1][1], "Say barn.")
-        self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 3)
-        self.assertIsNot(provider.conn.tts.tts_text_queue.items[-1].content_type, ContentType.TEXT)
+        self.assertFalse(spoken)
+        self.assertFalse(getattr(provider.conn, "lesson_continue_listening_after_tts_stop", False))
+        self.assertEqual(provider.conn.tts.stored_texts, [])
+        self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 0)
 
     async def test_lesson_step_prompt_initializes_tts_when_google_live_is_dormant(self):
         from core.providers.tts.dto.dto import ContentType
@@ -1102,8 +1170,16 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         class _Bridge:
             def __init__(self):
                 self.blocked = True
+                self.waiting_for_interrupted_audio_end = True
+                self.force_calls = 0
 
             def allow_model_output(self):
+                if not self.waiting_for_interrupted_audio_end:
+                    self.blocked = False
+
+            def force_allow_model_output(self):
+                self.force_calls += 1
+                self.waiting_for_interrupted_audio_end = False
                 self.blocked = False
 
         bridge = _Bridge()
@@ -1114,6 +1190,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(sent)
         self.assertEqual(blocked_at_send, [False])
+        self.assertEqual(bridge.force_calls, 1)
 
     async def test_lesson_child_response_window_waits_for_prompt_guard(self):
         provider, _handler = self._make_provider()
@@ -1131,6 +1208,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         async def _fake_sleep(delay):
             sleeps.append(delay)
+            provider.conn.google_live_lesson_prompt_output_allowed = False
 
         original_sleep = google_live_module.asyncio.sleep
         google_live_module.asyncio.sleep = _fake_sleep
@@ -1152,6 +1230,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         async def _fake_sleep(delay):
             sleeps.append(delay)
+            provider.conn.google_live_lesson_prompt_output_allowed = False
 
         original_sleep = google_live_module.asyncio.sleep
         google_live_module.asyncio.sleep = _fake_sleep
@@ -1164,6 +1243,95 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sleeps), 1)
         self.assertGreater(sleeps[0], 2.0)
 
+    async def test_lesson_child_response_window_waits_for_live_prompt_output_end(self):
+        provider, _handler = self._make_provider()
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 0.0,
+                "lesson_prompt_tts_chars_per_sec": 0.0,
+                "lesson_child_response_max_open_delay_sec": 0.0,
+                "lesson_prompt_output_poll_sec": 0.1,
+                "lesson_prompt_output_guard_timeout_sec": 1.0,
+            }
+        )
+        provider._last_lesson_prompt_len = 0
+        provider.conn.google_live_lesson_prompt_output_allowed = True
+        sleeps = []
+
+        async def _fake_sleep(delay):
+            sleeps.append(delay)
+            provider.conn.google_live_lesson_prompt_output_allowed = False
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertTrue(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(sleeps, [0.1])
+        self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+
+    async def test_lesson_child_response_window_waits_past_estimate_for_live_audio_end(self):
+        provider, _handler = self._make_provider()
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 0.0,
+                "lesson_prompt_tts_chars_per_sec": 10.0,
+                "lesson_child_response_max_open_delay_sec": 8.0,
+                "lesson_prompt_output_poll_sec": 0.1,
+                "lesson_prompt_output_guard_timeout_sec": 6.0,
+            }
+        )
+        provider._last_lesson_prompt_len = 30
+        provider.conn.google_live_lesson_prompt_output_allowed = True
+        sleeps = []
+
+        async def _fake_sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) == 2:
+                provider.conn.google_live_lesson_prompt_output_allowed = False
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertTrue(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(sleeps, [3.0, 0.1])
+        self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+
+    async def test_lesson_child_response_window_stays_closed_on_output_timeout(self):
+        provider, _handler = self._make_provider()
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 0.0,
+                "lesson_prompt_tts_chars_per_sec": 0.0,
+                "lesson_child_response_max_open_delay_sec": 0.0,
+                "lesson_prompt_output_poll_sec": 0.1,
+                "lesson_prompt_output_guard_timeout_sec": 0.2,
+            }
+        )
+        provider.conn.google_live_lesson_prompt_output_allowed = True
+        sleeps = []
+
+        async def _fake_sleep(delay):
+            sleeps.append(delay)
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertFalse(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(sleeps, [0.1, 0.1])
+        self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
+        self.assertEqual(provider._user_audio_allowed_until, 0.0)
+
     async def test_lesson_child_response_window_uses_lesson_duration_without_session_mode(self):
         provider, _handler = self._make_provider()
         provider.conn.config["google_live"]["lesson_child_response_window_sec"] = 25.0
@@ -1172,6 +1340,27 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         remaining = provider._user_audio_allowed_until - time.monotonic()
         self.assertGreater(remaining, 20.0)
+
+    async def test_close_lesson_child_response_window_clears_stale_audio_window(self):
+        provider, _handler = self._make_provider()
+        provider._user_audio_allowed_until = time.monotonic() + 25.0
+        provider._user_stream_response_id = 7
+        provider._user_stream_started_at = time.monotonic()
+        provider._user_stream_last_speech_at = time.monotonic()
+        provider._user_stream_frames = 3
+        provider._interaction.transition(google_live_module.InteractionState.USER_STREAMING)
+
+        provider.close_lesson_child_response_window()
+
+        self.assertEqual(provider._user_audio_allowed_until, 0.0)
+        self.assertIsNone(provider._user_stream_response_id)
+        self.assertIsNone(provider._user_stream_started_at)
+        self.assertIsNone(provider._user_stream_last_speech_at)
+        self.assertEqual(provider._user_stream_frames, 0)
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
 
     async def test_user_transcript_completes_active_lesson_step_before_chat_intents(self):
         provider, handler = self._make_provider()
@@ -1334,6 +1523,37 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(handler.calls, [])
 
+    async def test_lesson_child_response_window_forces_lesson_mode_before_audio_forwarding(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+        provider._bridge = _AudioBridge()
+        self.assertIsNone(getattr(provider.conn, "session_mode", None))
+
+        self.assertTrue(await provider.open_lesson_child_response_window())
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
+
+        self.assertEqual(provider.conn.session_mode, SessionMode.LESSON)
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertEqual(handler.calls, [])
+
     async def test_text_message_completes_active_lesson_step_before_chat_model(self):
         provider, handler = self._make_provider()
         provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=True)
@@ -1398,6 +1618,24 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interrupts, [])
         self.assertEqual(handler.calls, [])
 
+    async def test_lesson_mode_ignores_transcript_barge_in_when_child_window_closed(self):
+        provider, handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=False)
+        provider.conn.lesson_runtime._child_response_window_open = False
+        provider._user_audio_allowed_until = time.monotonic() + 20
+        interrupts = []
+
+        async def _begin_user_interrupt(reason):
+            interrupts.append(reason)
+
+        provider._begin_user_interrupt = _begin_user_interrupt
+
+        await provider._on_user_transcript_barge_in("Con vừa nói")
+
+        self.assertEqual(interrupts, [])
+        self.assertEqual(handler.calls, [])
+
     async def test_blank_lesson_transcript_is_not_treated_as_child_response_or_command(self):
         provider, handler = self._make_provider()
         provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=False)
@@ -1411,7 +1649,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls, [])
         self.assertEqual(provider._client.sent_texts, [])
 
-    async def test_unhandled_lesson_transcript_can_still_dispatch_start_lesson_command(self):
+    async def test_unhandled_lesson_transcript_in_child_window_does_not_dispatch_start_lesson_command(self):
         provider, handler = self._make_provider()
         provider.conn.lesson_runtime = _RecordingLessonRuntime(handled=False)
         await provider.open_lesson_child_response_window()
@@ -1420,7 +1658,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(provider.conn.lesson_runtime.responses, [("bắt đầu bài học", "voice_transcript")])
-        self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
+        self.assertEqual(handler.calls, [])
 
     async def test_lesson_interactive_audio_can_open_live_for_transcript(self):
         provider, _handler = self._make_provider()

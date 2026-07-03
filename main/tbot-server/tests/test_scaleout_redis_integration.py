@@ -14,6 +14,11 @@ from core.voice.live_admission import (
     LiveAdmissionGate,
     RedisLiveStateStore,
 )
+from core.lesson.forwarder import (
+    RedisTerminalReplayStore,
+    _PENDING_TERMINAL_BATCHES,
+    replay_stored_terminal_event,
+)
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
 
@@ -42,6 +47,10 @@ class _RedisCliAsyncClient:
     async def get(self, key):
         output = await self._run("GET", key)
         return output if output else None
+
+    async def delete(self, key):
+        output = await self._run("DEL", key)
+        return int(output or 0)
 
     async def incrbyfloat(self, key, amount):
         output = await self._run("INCRBYFLOAT", key, str(float(amount)))
@@ -185,3 +194,48 @@ class ScaleoutRedisIntegrationTest(unittest.IsolatedAsyncioTestCase):
         decision = await gate_b.admit_async("device-1", "house-1")
 
         self.assertEqual(decision, AdmissionDecision.DEGRADE_TTS_ONLY)
+
+    async def test_terminal_replay_survives_replica_restart_through_redis_store(self):
+        redis = _RedisCliAsyncClient(self.port)
+        terminal = {
+            "assignmentId": "assignment-1",
+            "sessionId": "session-1",
+            "events": [
+                {"type": "lesson_started", "startedAt": 1_700_000_000_000},
+                {"type": "lesson_completed", "completedAt": 1_700_000_010_000},
+            ],
+        }
+        replica_a = RedisTerminalReplayStore(
+            url=f"redis://127.0.0.1:{self.port}/0",
+            namespace="integration",
+            client=redis,
+        )
+        await replica_a.store("device-1", terminal)
+
+        _PENDING_TERMINAL_BATCHES.clear()
+        replayed = []
+
+        async def _post(_client, base_url, device_id, batch, *, token=None):
+            replayed.append((base_url, device_id, batch, token))
+
+        replica_b = RedisTerminalReplayStore(
+            url=f"redis://127.0.0.1:{self.port}/0",
+            namespace="integration",
+            client=redis,
+        )
+        self.assertTrue(
+            await replay_stored_terminal_event(
+                device_id="device-1",
+                assignment_id="assignment-1",
+                base_url="http://backend.test/v1",
+                token="device-token",
+                post_fn=_post,
+                terminal_store=replica_b,
+            )
+        )
+
+        self.assertEqual(
+            replayed,
+            [("http://backend.test/v1", "device-1", terminal, "device-token")],
+        )
+        self.assertIsNone(await replica_b.load("device-1", "assignment-1"))

@@ -5,7 +5,13 @@ import time
 import unittest
 from types import SimpleNamespace
 
+from core.voice.child_safety import SAFE_DEFLECTION_LINE
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+
+SAFE_DEFLECTION_LIVE_TEXT_INSTRUCTION = (
+    "Đọc nguyên văn câu sau bằng giọng Google Live đã cấu hình. "
+    "Không dịch, không thêm nội dung, không bỏ sót, không rút gọn: "
+)
 
 
 class _Logger:
@@ -36,6 +42,10 @@ class _WebSocket:
 class _Client:
     def __init__(self, config=None):
         self.config = config or {}
+        self.sent_text = []
+
+    async def send_text(self, text):
+        self.sent_text.append(text)
 
 
 class _Conn:
@@ -112,6 +122,10 @@ class _TtsStoreRaises:
 class _Decoder:
     def decode(self, _audio_bytes, _frame_size):
         return b"\x00\x00" * 20
+
+class _LowPcmDecoder:
+    def decode(self, _audio_bytes, _frame_size):
+        return (100).to_bytes(2, "little", signed=True) * 20
 
 
 class _LenRaises:
@@ -269,6 +283,19 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent, [])
         self.assertIsNone(conn.google_live_audio_out_started_at)
 
+    async def test_interruption_enabled_by_default_honors_live_interrupt_event(self):
+        conn = _Conn(websocket=_WebSocket())
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        bridge = self.make_bridge(conn=conn, client=_Client({}))
+
+        self.assertTrue(await bridge.handle_event({"type": "interruption"}))
+
+        self.assertTrue(conn.client_abort)
+        self.assertEqual(conn.cleared, 1)
+        self.assertIsNone(conn.google_live_audio_out_started_at)
+        self.assertEqual(len(conn.websocket.sent), 1)
+        self.assertIn('"reason": "interrupt"', conn.websocket.sent[0])
+
     async def test_send_helpers_noop_and_emotion_dedup_edges(self):
         bridge = self.make_bridge(conn=_Conn(websocket=None))
 
@@ -288,6 +315,21 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ws.sent), 1)
         self.assertEqual(json.loads(ws.sent[0])["emotion"], "happy")
 
+    async def test_safe_deflection_uses_google_live_text_only(self):
+        conn = _Conn(websocket=_WebSocket())
+        conn.tts = SimpleNamespace(tts_text_queue=_TtsQueue())
+        client = _Client()
+        bridge = self.make_bridge(conn=conn, client=client)
+
+        await bridge._send_safe_deflection()
+
+        self.assertEqual(
+            client.sent_text,
+            [SAFE_DEFLECTION_LIVE_TEXT_INSTRUCTION + SAFE_DEFLECTION_LINE],
+        )
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.tts.tts_text_queue.items, [])
+
     async def test_audio_cpu_and_codec_helper_edges(self):
         conn = _FailingMetricConn(websocket=None)
         bridge = self.make_bridge(conn=conn, client=_Client({"input_sample_rate": "bad", "output_sample_rate": 24000}))
@@ -304,7 +346,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(conn.google_live_turn_started_at)
         bridge._note_voice_round_trip(123)
         bridge._record_turn_latency_metric(123)
-        self.assertEqual(bridge._get_interruption_min_output_age_sec(), 0.2)
+        self.assertEqual(bridge._get_interruption_min_output_age_sec(), 0.0)
         self.assertEqual(bridge._get_transcript_echo_window_sec(), 15.0)
         self.assertEqual(bridge._normalize_transcript_for_echo(None), "")
         self.assertFalse(bridge._looks_like_model_echo("hi"))
@@ -325,7 +367,13 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         bridge._aec_processor = _FailingAec()
         self.assertEqual(bridge._apply_aec(b"\x00\x00", 24000), b"\x00\x00")
-        self.assertEqual(bridge._apply_aec(b"\x00\x00", 16000), b"\x00\x00")
+        self.assertEqual(bridge._apply_aec(b"\x00\x00", 16000), b"")
+        idle_bridge = self.make_bridge()
+        idle_bridge._aec_processor = _FailingAec()
+        self.assertEqual(idle_bridge._apply_aec(b"\x00\x00", 16000), b"\x00\x00")
+        bridge.conn.client_is_speaking = True
+        bridge.conn.google_live_audio_out_started_at = time.monotonic()
+        self.assertEqual(bridge._apply_aec(b"\x00\x00", 16000), b"")
         bridge._push_aec_reference(b"\x00\x00", 16000)
         self.assertEqual(bridge._aec_processor.references, [b"\x00\x00"])
 
@@ -398,9 +446,6 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         bridge = self.make_bridge(conn=_Conn(websocket=None))
         bridge.conn._music_session = SimpleNamespace(stop_event=_StopEventRaises())
         self.assertTrue(bridge._has_music_session())
-        bridge.conn.tts = _TtsStoreRaises()
-        bridge._queue_safe_deflection_tts()
-        self.assertTrue(bridge.conn.tts.tts_text_queue.items)
 
         conn = _Conn(config={"lesson": {"api_base": "http://backend"}})
         import_fail_bridge = self.make_bridge(conn=conn)
@@ -440,6 +485,26 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._apply_aec(b"\x00\x00", 16000), b"\x00\x00")
         bridge._push_aec_reference(b"\x00\x00" * 40, 24000)
         self.assertEqual(bridge._aec_processor.references, [])
+
+    async def test_decode_applies_configured_input_gain_before_live_forwarding(self):
+        conn = _Conn()
+        conn.sample_rate = 16000
+        bridge = self.make_bridge(
+            conn=conn,
+            client=_Client(
+                {
+                    "input_sample_rate": 16000,
+                    "input_gain": 6.0,
+                    "log_audio_diagnostics": False,
+                }
+            )
+        )
+        bridge._input_decoder = _LowPcmDecoder()
+        bridge._input_decoder_sample_rate = 16000
+
+        decoded = bridge._decode_input_audio(b"encoded")
+
+        self.assertEqual(bridge.input_rms(decoded), 600)
 
     async def test_aec_build_import_and_invalid_numeric_edges(self):
         original_import = builtins.__import__
@@ -491,7 +556,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         bridge._note_voice_round_trip(1.0)
         bridge._record_turn_latency_metric(1.0)
         bridge.client.config = {"interruption_min_output_age_sec": "bad", "transcript_echo_window_sec": "bad"}
-        self.assertEqual(bridge._get_interruption_min_output_age_sec(), 0.2)
+        self.assertEqual(bridge._get_interruption_min_output_age_sec(), 0.0)
         self.assertEqual(bridge._get_transcript_echo_window_sec(), 15.0)
         bridge._record_model_transcript("")
 

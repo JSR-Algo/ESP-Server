@@ -17,7 +17,7 @@ server:
   # When deploying via Docker or public network(Use SSL, domain name)may not be accurate when
   # When deploying via Docker, set the WebSocket to a LAN address
   # If using public deployment, set websocket to public address
-  websocket: wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/
+  websocket: ""
   # Backend API base URL sent to firmware for /device/config and /claim routes.
   # OWNERSHIP (locked 2026-06-04): NestJS /v1/claim is the SOLE consumer-claim
   # authority; the Java manager-api device-bind flow is admin/legacy only.
@@ -32,7 +32,7 @@ server:
   # When deploying via Docker or public network(Use SSL, domain name)may not be accurate when
   # So if you deploy using Docker, set vision_explain to a LAN address
   # If deploying publicly, set vision_explain to the public address
-  vision_explain: https://carefully-freelance-improving-numerical.trycloudflare.com/mcp/vision/explain
+  vision_explain: ""
   # Optional firmware binary URL scheme override. Leave empty to reuse the
   # vision_explain scheme; set to http for legacy ESP OTA stacks that cannot
   # download a Cloudflare HTTPS firmware binary reliably.
@@ -53,11 +53,10 @@ server:
   # Authentication config
   auth:
     # Enable auth
-    enabled: false
+    enabled: true
     # Whitelisted device ID list
     # Devices in whitelist bypass token verification, allowed directly
-    allowed_devices:
-      - "11:22:33:44:55:66"
+    allowed_devices: []
   # Admission cap for active device WebSockets. The default cap is derived from
   # scripts/benchmark_google_live_audio_runtime.py full-path audio cost
   # (Opus decode + resample + AEC + output Opus encode):
@@ -106,7 +105,7 @@ enable_stop_tts_notify: false
 # Enable prompt tone after speaking, sound effect URL
 stop_tts_notify_voice: "config/assets/tts_notify.mp3"
 # Whether to enable WebSocket heartbeat keep-alive mechanism
-enable_websocket_ping: false
+enable_websocket_ping: true
 
 
 # TTSAudio send delay config
@@ -133,7 +132,7 @@ tbot:
 
 voice_mode:
   type: google_live
-  fallback_to_classic_on_error: true
+  fallback_to_classic_on_error: false
 
 google_live:
   api_key: ${GOOGLE_API_KEY}
@@ -141,17 +140,18 @@ google_live:
   enable_audio_input: true
   enable_audio_output: true
   native_voice: true
+  voice_name: Kore
   language_code: vi-VN
   input_audio_format: pcm16
   input_sample_rate: 16000
   output_audio_format: pcm16
   output_sample_rate: 24000
   input_live_chunk_ms: 20
-  # Stable robot half-duplex path: ignore Google Live server-side interruption
-  # events so speaker echo/noise cannot cut the robot's own response before
-  # audio reaches the ESP. User barge-in still goes through wake/transcript gates.
-  disable_server_side_interruptions: true
-  activity_handling: NO_INTERRUPTION
+  # Production robot path: Google Live owns fast user interruption through its
+  # server-side VAD. Local raw/RMS interrupt gates stay off below so robot
+  # speaker echo does not cut or score the robot's own response.
+  disable_server_side_interruptions: false
+  activity_handling: START_OF_ACTIVITY_INTERRUPTS
   turn_coverage: TURN_INCLUDES_ALL_INPUT
   # Giảm độ nhạy VAD để echo loa không kích hoạt ngắt nhầm.
   start_of_speech_sensitivity: START_SENSITIVITY_LOW
@@ -174,15 +174,18 @@ google_live:
   # so the local + Gemini server-side turn-enders don't compete and the idle
   # safety-net doesn't re-introduce the early cut.
   input_flush_delay_sec: 1.4
+  # Faster normal conversation turn-close. Lesson mode keeps the longer values
+  # above so a child pause does not cut the answer early.
+  conversation_input_flush_delay_sec: 0.7
   input_speech_tail_ms: 1300
+  conversation_input_speech_tail_ms: 650
   input_min_capture_ms: 400
   input_max_capture_ms: 8000
   input_speech_rms_threshold: 500
-  # Re-hear the child fast after a model stall (was a 6.0s dead mic). The spoken
-  # "con nói lại" nudge stays on the longer retry-after grace (FIX C) so the lower
-  # release timeout does not nag on merely-slow turns. Keep retry-after >= timeout.
-  waiting_model_timeout_sec: 2.5
-  waiting_model_retry_prompt_after_sec: 4.0
+  input_gain: 6.0
+  # Reopen listening quickly if Live returns no model audio.
+  waiting_model_timeout_sec: 2.0
+  waiting_model_retry_prompt_after_sec: 12.0
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
   # risk of clipping the trailing syllable; higher = safer transcript
@@ -210,8 +213,10 @@ google_live:
   # Transcript barge-in stays enabled as the safe Live-recognized speech gate.
   barge_in_via_transcript: true
   barge_in_transcript_min_chars: 4
+  barge_in_transcript_min_output_age_sec: 0.0
   drop_input_while_speaking: false
   interrupt_min_output_age_sec: 0.25
+  interruption_min_output_age_sec: 0.0
   interrupt_suppress_audio_sec: 0.25
   echo_tail_suppression_ms: 400
   suppress_robot_output_echo: true

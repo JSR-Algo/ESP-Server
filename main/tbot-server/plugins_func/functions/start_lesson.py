@@ -24,11 +24,18 @@ _FAILURE_STATUS_CODES = {
     "START_REFUSED",
     "SAMPLE_SD_PACK_UNSUPPORTED",
 }
+_SAMPLE_FALLBACK_STATUS_CODES = {"NO_CURRENT_ASSIGNMENT"}
 
 
 def _lesson_start_status(conn: "ConnectionHandler"):
     status = getattr(conn, "lesson_start_status", None)
     return status if isinstance(status, dict) else {}
+
+def _sample_fallback_allowed(status: dict) -> bool:
+    code = status.get("code")
+    return code in _SAMPLE_FALLBACK_STATUS_CODES or (
+        code == "DEVICE_TOKEN_UNAVAILABLE" and status.get("reason") == "missing_identity"
+    )
 
 
 def _schedule_lesson_start_feedback(conn: "ConnectionHandler", message: str) -> None:
@@ -188,12 +195,12 @@ def start_lesson(conn: "ConnectionHandler"):
                 runtime = fut.result()
                 status = _lesson_start_status(conn)
                 code = status.get("code")
-                if runtime is None and code == "NO_CURRENT_ASSIGNMENT" and sample_fallback_enabled:
-                    # The real pull found NO backend assignment but the sample demo flag
-                    # is on -> fall back to the built-in sample lesson. Schedule it as a
-                    # new task and re-track it on the connection so close() can cancel it
-                    # and a later spoken trigger can supersede it. Do NOT emit the audible
-                    # "no assignment" feedback in this branch — the sample takes over.
+                if runtime is None and _sample_fallback_allowed(status) and sample_fallback_enabled:
+                    # The real pull found no usable backend lesson path, but the sample
+                    # demo flag is on -> fall back to the built-in sample lesson. Schedule
+                    # it as a new task and re-track it on the connection so close() can
+                    # cancel it and a later spoken trigger can supersede it. Do NOT emit
+                    # the audible setup/no-assignment feedback here — the sample takes over.
                     from core.lesson.sample import start_sample_lesson
 
                     conn.logger.bind(tag=TAG).info(

@@ -17,13 +17,14 @@ no event loop, no manage-api):
        ``TBOT_DEVICE_MINT_SECRET`` / ``LESSON_ASSET_ORIGIN_BASE`` are all present;
      * ``TBOT_REQUIRE_DEVICE_TOKEN`` parses truthy;
      * ``ADMIN_AUTH_DISABLED`` is not truthy.
-   The happy path uses a non-``google_live`` voice_mode so the AEC sub-assertion
-   (``_assert_production_google_live_aec_ready``) is reached and returns early —
-   keeping this file off any audio/AEC dependency.
+   The happy path uses ``google_live`` and monkeypatches an active AEC processor
+   so this file stays independent of the host's native Speex installation.
 
 Env hygiene: every variable the guards read is cleared by the autouse fixture so
 ambient shell/CI values cannot leak in and falsely pass/skip an assertion.
 """
+
+import types
 
 import pytest
 
@@ -40,6 +41,7 @@ _PROD_BOOT_ENV = (
     "TBOT_DEVICE_MINT_SECRET",
     "LESSON_ASSET_ORIGIN_BASE",
     "ADMIN_AUTH_DISABLED",
+    "TBOT_BYPASS_VOICE_CONSENT",
 )
 
 
@@ -60,8 +62,12 @@ def _full_prod_env(monkeypatch):
 
 
 def _auth_on_config():
-    """A config whose server.auth.enabled is True (the only non-env precondition)."""
-    return {"server": {"auth": {"enabled": True}}, "voice_mode": {"type": "edge"}}
+    """A config whose server/auth and production voice-mode preconditions are set."""
+    return {
+        "server": {"auth": {"enabled": True}, "auth_key": "auth-key"},
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"aec_enabled": True},
+    }
 
 
 # ── 1. lesson boot-safe: non-Mapping early return (line 252) ──────────────────────
@@ -107,6 +113,14 @@ def test_prod_boot_safe_rejects_auth_disabled(monkeypatch):
     with pytest.raises(RuntimeError, match="server.auth.enabled=true"):
         _assert_production_boot_safe(config)
 
+def test_prod_boot_safe_rejects_empty_auth_key(monkeypatch):
+    """Realtime auth with an empty HMAC key is forgeable and must not boot."""
+    _full_prod_env(monkeypatch)
+    config = {"server": {"auth": {"enabled": True}, "auth_key": ""}, "voice_mode": {"type": "google_live"}}
+
+    with pytest.raises(RuntimeError, match="server.auth.auth_key"):
+        _assert_production_boot_safe(config)
+
 
 def test_prod_boot_safe_rejects_missing_env_prereqs(monkeypatch):
     """auth on, but env prerequisites missing => names the missing vars (289-303)."""
@@ -145,12 +159,68 @@ def test_prod_boot_safe_rejects_admin_auth_disabled(monkeypatch):
         _assert_production_boot_safe(config)
 
 
-def test_prod_boot_safe_passes_with_all_prereqs(monkeypatch):
-    """Fully satisfied production posture passes through to line 308 and returns.
-
-    voice_mode.type != "google_live" so the AEC sub-assertion is reached and
-    returns early — covering the call site (308) without any audio dependency.
-    """
+def test_prod_boot_safe_rejects_voice_consent_env_bypass(monkeypatch):
     _full_prod_env(monkeypatch)
-    config = _auth_on_config()  # voice_mode.type == "edge" -> AEC check no-ops
+    monkeypatch.setenv("TBOT_BYPASS_VOICE_CONSENT", "true")
+    config = _auth_on_config()
+
+    with pytest.raises(RuntimeError, match="voice consent bypass"):
+        _assert_production_boot_safe(config)
+
+def test_prod_boot_safe_rejects_factory_test_claimed_all(monkeypatch):
+    _full_prod_env(monkeypatch)
+    config = _auth_on_config()
+    config["server"]["factory_test_claimed_all"] = True
+
+    with pytest.raises(RuntimeError, match="factory_test_claimed_all"):
+        _assert_production_boot_safe(config)
+
+def test_prod_boot_safe_rejects_factory_test_claimed_devices(monkeypatch):
+    _full_prod_env(monkeypatch)
+    config = _auth_on_config()
+    config["server"]["factory_test_claimed_devices"] = ["14:c1:9f:d1:a8:48"]
+
+    with pytest.raises(RuntimeError, match="factory_test_claimed_devices"):
+        _assert_production_boot_safe(config)
+
+def test_prod_boot_safe_rejects_non_default_google_live_model(monkeypatch):
+    _full_prod_env(monkeypatch)
+    config = _auth_on_config()
+    config["google_live"]["model"] = "gemini-live-test"
+
+    with pytest.raises(RuntimeError, match="google_live.model"):
+        _assert_production_boot_safe(config)
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("enable_audio_input", False),
+        ("enable_audio_output", False),
+        ("native_voice", False),
+        ("language_code", "en-US"),
+    ],
+)
+def test_prod_boot_safe_rejects_non_production_google_live_audio_policy(
+    monkeypatch,
+    key,
+    value,
+):
+    _full_prod_env(monkeypatch)
+    config = _auth_on_config()
+    config["google_live"][key] = value
+
+    with pytest.raises(RuntimeError, match=f"google_live.{key}"):
+        _assert_production_boot_safe(config)
+
+def test_prod_boot_safe_passes_with_all_prereqs(monkeypatch):
+    """Fully satisfied production posture reaches the active-AEC check and returns."""
+    _full_prod_env(monkeypatch)
+    import core.voice.aec.aec_processor as aec_processor
+
+    monkeypatch.setattr(
+        aec_processor,
+        "AecProcessor",
+        lambda **_kwargs: types.SimpleNamespace(bypassed=False, reason=None),
+    )
+    config = _auth_on_config()
     assert _assert_production_boot_safe(config) is None

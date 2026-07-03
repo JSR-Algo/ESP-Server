@@ -312,6 +312,16 @@ def _lesson_auth_headers(token: Optional[str]) -> Dict[str, str]:
         headers["Authorization"] = "Bearer " + token
     return headers
 
+def _lesson_trace_headers(batch: Optional[Dict]) -> Dict[str, str]:
+    if not isinstance(batch, dict):
+        return {}
+    headers: Dict[str, str] = {}
+    for key in ("traceparent", "tracestate"):
+        value = batch.get(key)
+        if isinstance(value, str) and value.strip():
+            headers[key] = value.strip()
+    return headers
+
 
 LESSON_EVENT_SENSITIVE_DETAIL_KEYS = {
     "utterance",
@@ -324,6 +334,8 @@ LESSON_EVENT_SENSITIVE_DETAIL_KEYS = {
     "voicetext",
     "recognizedtext",
     "childresponse",
+    "usertranscript",
+    "userutterance",
     "score",
     "pronunciation",
     "pronunciationscore",
@@ -548,8 +560,49 @@ async def post_lesson_event(
     url = f"{_lesson_base(base_url)}/devices/{device_id}/lesson-events"
     body = dict(batch)
     body["events"] = [_normalize_lesson_event(e) for e in batch.get("events", [])]
+    headers = _lesson_auth_headers(token)
+    headers.update(_lesson_trace_headers(batch))
     payload = await _lesson_request_with_retry(
-        client, "POST", url, json=body, headers=_lesson_auth_headers(token)
+        client, "POST", url, json=body, headers=headers
+    )
+    if isinstance(payload, dict):
+        return payload.get("data") or payload
+    return None
+
+def _normalize_preload_status_report(report: Dict) -> Dict:
+    body = {
+        "assignmentId": report.get("assignmentId"),
+        "assetId": report.get("assetId"),
+        "state": report.get("state"),
+    }
+    if report.get("checksumOk") is not None:
+        body["checksumOk"] = bool(report.get("checksumOk"))
+    return body
+
+async def post_preload_status(
+    client,
+    base_url: str,
+    device_id: str,
+    report: Dict,
+    *,
+    token: Optional[str] = None,
+    max_retries: int = 2,
+    retry_delay: float = 1.0,
+) -> Optional[Dict]:
+    """POST /v1/devices/:deviceId/preload-status for one asset preload outcome.
+
+    Caller owns the httpx client so runtime code can use a short-lived client from
+    a fire-and-forget task after the assignment/manifest pull client has closed.
+    """
+    url = f"{_lesson_base(base_url)}/devices/{device_id}/preload-status"
+    payload = await _lesson_request_with_retry(
+        client,
+        "POST",
+        url,
+        json=_normalize_preload_status_report(report),
+        headers=_lesson_auth_headers(token),
+        max_retries=max_retries,
+        retry_delay=retry_delay,
     )
     if isinstance(payload, dict):
         return payload.get("data") or payload

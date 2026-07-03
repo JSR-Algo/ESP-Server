@@ -536,7 +536,7 @@ class GoogleLiveClientTest(unittest.TestCase):
         self.assertEqual(
             config["realtime_input_config"],
             {
-                "activity_handling": "NO_INTERRUPTION",
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
                 "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
             },
         )
@@ -783,7 +783,13 @@ class GoogleLiveClientTest(unittest.TestCase):
 
         config = client._build_connect_config()
         self.assertEqual(config["response_modalities"], ["AUDIO"])
-        self.assertNotIn("realtime_input_config", config)
+        self.assertEqual(
+            config["realtime_input_config"],
+            {
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+                "turn_coverage": "TURN_INCLUDES_ALL_INPUT",
+            },
+        )
         self.assertEqual(config["tools"], [{"function_declarations": [{"name": "plain", "description": ""}]}])
         self.assertEqual(client._build_blob(b"x", "audio/test"), {"data": b"x", "mime_type": "audio/test"})
         self.assertEqual(client._build_text_turn("hello"), {"role": "user", "parts": [{"text": "hello"}]})
@@ -843,12 +849,30 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         context = _FakeLiveContext(session=_FakeSession())
         client = _TestableGoogleLiveClient(
-            {"api_key": "k", "model": "m"},
+            {
+                "api_key": "k",
+                "model": "gemini-3.1-flash-live-preview",
+                "voice_name": "Kore",
+                "language_code": "vi-VN",
+            },
             logger,
             _FakeGenaiModule(_FakeSdkClient(context)),
         )
         await client.connect()
         self.assertTrue(client.connected)
+        self.assertTrue(
+            any(
+                args
+                and args[0] == "Google Live session identity model={} voice={} language={}"
+                and args[1:] == (
+                    "gemini-3.1-flash-live-preview",
+                    "Kore",
+                    "vi-VN",
+                )
+                for level, args, _kwargs in logger.messages
+                if level == "info"
+            )
+        )
         await client.close()
         self.assertFalse(client.connected)
         self.assertIsNone(client._session)

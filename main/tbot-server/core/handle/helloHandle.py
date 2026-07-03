@@ -108,6 +108,9 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
 
 
 async def checkWakeupWords(conn: "ConnectionHandler", text):
+    if _is_google_live_connection(conn):
+        return False
+
     enable_wakeup_words_response_cache = conn.config[
         "enable_wakeup_words_response_cache"
     ]

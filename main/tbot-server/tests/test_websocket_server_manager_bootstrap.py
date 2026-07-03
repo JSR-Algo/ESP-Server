@@ -166,23 +166,19 @@ class WebSocketServerManagerBootstrapTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    def test_query_authorization_is_used_when_device_headers_exist(self):
+    def test_query_identity_headers_are_copied_but_authorization_query_is_ignored(self):
         websocket = SimpleNamespace(
             request=SimpleNamespace(
-                path="/tbot/v1/?authorization=Bearer%20token-from-query",
-                headers={
-                    "device-id": "3c:0f:02:de:c2:e0",
-                    "client-id": "agent-1",
-                },
+                path="/tbot/v1/?device-id=3c%3A0f%3A02%3Ade%3Ac2%3Ae0&client-id=agent-1&authorization=Bearer%20token-from-query",
+                headers={},
             )
         )
 
         websocket_server.WebSocketServer._copy_query_identity_headers(websocket)
 
-        self.assertEqual(
-            websocket.request.headers["authorization"],
-            "Bearer token-from-query",
-        )
+        self.assertEqual(websocket.request.headers["device-id"], "3c:0f:02:de:c2:e0")
+        self.assertEqual(websocket.request.headers["client-id"], "agent-1")
+        self.assertNotIn("authorization", websocket.request.headers)
 
     def test_query_authorization_does_not_override_header(self):
         websocket = SimpleNamespace(

@@ -14,15 +14,12 @@ before the lesson completes. ``lesson.sample_mode: passive`` remains available f
 no-mic smoke tests and auto-advances every step on render ack.
 
 SELF-CONTAINED ASSET DELIVERY: a ``SampleAssetCache`` passthrough skips the sha256
-download/verify gate the real ``AssetCache`` enforces — the sample manifest has no
-hosted, checksummed asset pack. The three layer image ``src`` values are passed to the
-firmware verbatim (optionally prefixed with ``lesson.sample_asset_base_url``). The
-runtime's blank-src guard (``_invalid_lesson_step_scene_reason``) STILL runs on every
-step; it passes only because the passthrough returns each ``src`` unchanged (non-blank),
-so every step MUST carry non-blank layer srcs (validated at module load). If the bytes
-are unreachable the firmware degrades each layer to its caption-only fallback and STILL
-renders + acks + advances, so the lesson always completes. HTTP delivery only — the
-sample refuses to start under ``asset_delivery_mode == "sd_pack"``.
+download/verify gate the real ``AssetCache`` enforces. In normal mode the three layer
+image ``src`` values are passed to the firmware as canonical seed paths, optionally
+prefixed with ``lesson.sample_asset_base_url`` or ``lesson.asset_origin_base``. In
+``asset_delivery_mode == "sd_pack"`` those source paths are rewritten to the fixed
+sample SD directory populated by
+``self.lesson_assets.sync_sample_to_sd``, so lesson rendering is local and stable.
 """
 
 from __future__ import annotations
@@ -35,13 +32,80 @@ TAG = "SampleLesson"
 SAMPLE_LESSON_ID = "sample-barn-say-it"
 SAMPLE_ASSIGNMENT_ID = "sample-lesson"
 
-# Bare authored filenames (reused from the seed "barn say-it" theme). Resolved against
-# lesson.sample_asset_base_url when configured; otherwise shipped verbatim (firmware
-# falls back to caption-only, lesson still completes).
-_POSTER_FILE = "barn-round-field-poster.jpg"
-_OBJECT_FILE = "barn.png"
-_OVERLAY_TEACH_FILE = "bright-teach.png"
-_OVERLAY_CELEBRATE_FILE = "bright-celebrate.png"
+# Canonical seed asset paths reused from the "barn say-it" theme.
+_POSTER_FILE = "assets/background/barn-round-field-poster.jpg"
+_OBJECT_FILE = "assets/objects/barn.png"
+_OVERLAY_TEACH_FILE = "assets/robot/poses/bright-teach.png"
+_OVERLAY_LISTEN_FILE = "assets/robot/poses/bright-listening.png"
+_OVERLAY_THINK_FILE = "assets/robot/poses/bright-thinking.png"
+_OVERLAY_CELEBRATE_FILE = "assets/robot/poses/bright-celebrate.png"
+_SAMPLE_SD_CACHE_KEY = "sample"
+_SAMPLE_SD_ROOT = "sd://tbot/lesson-assets/sample-barn"
+_SAMPLE_ASSET_RECORDS = [
+    {
+        "key": "backgroundScene.poster",
+        "path": _POSTER_FILE,
+        "sha256": "d5cdaba9f9086ef56a5f41c5fddf2e32b91ecfe141cc346f3221c7b221a3a357",
+        "size": 18482,
+        "mediaType": "image/jpeg",
+        "critical": True,
+        "layer": "backgroundScene",
+        "role": "poster",
+    },
+    {
+        "key": "teachingObject.sample",
+        "path": _OBJECT_FILE,
+        "sha256": "bf3d88d17867f02872e3e6aff31b5d4d0a94977a5efa4214b7e831122938511b",
+        "size": 42107,
+        "mediaType": "image/png",
+        "critical": True,
+        "layer": "teachingObject",
+        "role": "primarySubject",
+    },
+    {
+        "key": "robotOverlay.teaching",
+        "path": _OVERLAY_TEACH_FILE,
+        "sha256": "576d86a75686f6eab606295529593da14b01554e21e0601c8f29aedbc1ba4965",
+        "size": 45408,
+        "mediaType": "image/png",
+        "critical": False,
+        "layer": "robotOverlay",
+        "role": "pose",
+    },
+    {
+        "key": "robotOverlay.listening",
+        "path": _OVERLAY_LISTEN_FILE,
+        "sha256": "572a61f140eca17968a85f61704967d03a1a3311222335e32b94b1ab370e2419",
+        "size": 43615,
+        "mediaType": "image/png",
+        "critical": False,
+        "layer": "robotOverlay",
+        "role": "pose",
+    },
+    {
+        "key": "robotOverlay.thinking",
+        "path": _OVERLAY_THINK_FILE,
+        "sha256": "3d3d3c3a7c6993ad2346e11cfee72a15750d0b5f35642b8d949902a8745352c8",
+        "size": 38733,
+        "mediaType": "image/png",
+        "critical": False,
+        "layer": "robotOverlay",
+        "role": "pose",
+    },
+    {
+        "key": "robotOverlay.celebrating",
+        "path": _OVERLAY_CELEBRATE_FILE,
+        "sha256": "8392fb31c53030147d27fbd96c5b2dd1a4e5c33efd35f8727bee6dabda62605d",
+        "size": 44193,
+        "mediaType": "image/png",
+        "critical": False,
+        "layer": "robotOverlay",
+        "role": "pose",
+    },
+]
+_SAMPLE_ASSET_BY_BASENAME = {
+    record["path"].rsplit("/", 1)[-1]: record for record in _SAMPLE_ASSET_RECORDS
+}
 
 
 def _resolve_src(filename: str, asset_base: str) -> str:
@@ -50,7 +114,7 @@ def _resolve_src(filename: str, asset_base: str) -> str:
 
 
 def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word: str,
-           glyph: str) -> Dict[str, Any]:
+           glyph: str, robot_state: str = "talking", pose: str = "teach") -> Dict[str, Any]:
     """The frozen 3-layer scene shape (backgroundScene + teachingObject + robotOverlay),
     structurally identical to the renderer-v1 fixture so it passes BOTH the server-side
     ``_invalid_lesson_step_scene_reason`` gate and the firmware three-layer gate."""
@@ -63,11 +127,11 @@ def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word:
                 "fit": "cover",
             },
             "video": None,
-            "altCaption": "A red barn in a round green field",
+            "altCaption": "Hình cái kho màu đỏ trên cánh đồng xanh",
         },
         "teachingObject": {
             "primaryWord": primary_word,
-            "supportWords": ["farm", "hay"],
+            "supportWords": ["cái kho", "farm", "mái đỏ"],
             "placement": {"anchor": "center", "paddingTopPercent": 8},
             "asset": {
                 "key": "teachingObject.sample",
@@ -80,8 +144,8 @@ def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word:
             },
         },
         "robotOverlay": {
-            "robotState": "talking",
-            "pose": "teach",
+            "robotState": robot_state,
+            "pose": pose,
             "expression": expression,
             "anchor": "bottomLeft",
             "pivot": {"x": 0.5, "y": 1.0},
@@ -105,6 +169,8 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
           completion_class: str = "passive",
           expected_responses: Optional[List[str]] = None,
           retry_prompt: Optional[str] = None,
+          success_prompt: Optional[str] = None,
+          interaction_prompts: Optional[Dict[str, str]] = None,
           response_timeout_sec: Optional[float] = None,
           max_no_answer_attempts: Optional[int] = None) -> Dict[str, Any]:
     # completionClass is the AUTHORITATIVE classifier. A PASSIVE step auto-advances on
@@ -128,6 +194,16 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
         step["expectedResponses"] = [str(item).strip() for item in expected_responses if str(item).strip()]
     if retry_prompt and retry_prompt.strip():
         step["retryPrompt"] = retry_prompt.strip()
+    if success_prompt and success_prompt.strip():
+        step["successPrompt"] = success_prompt.strip()
+    if interaction_prompts:
+        prompts = {
+            str(key): str(value).strip()
+            for key, value in interaction_prompts.items()
+            if str(key).strip() and str(value).strip()
+        }
+        if prompts:
+            step["interactionPrompts"] = prompts
     if response_timeout_sec is not None:
         try:
             if float(response_timeout_sec) > 0:
@@ -165,7 +241,7 @@ def build_sample_manifest(asset_base: str = "", dwell_sec: float = DEFAULT_SAMPL
         _step(
             "s3", "review",
             "Giỏi lắm! Mình vừa học từ mới: barn. Con nhớ chưa nào?",
-            _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_TEACH_FILE,
+            _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_THINK_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
@@ -195,57 +271,66 @@ INTERACTIVE_SAMPLE_LESSON_ID = "sample-barn-say-it-interactive"
 def build_interactive_sample_manifest(asset_base: str = "",
                                       dwell_sec: float = DEFAULT_SAMPLE_STEP_DWELL_SEC) -> Dict[str, Any]:
     """A short SPEAKING-practice demo: greeting → focus → SAY-IT (interactive)
-    → recall (interactive) → celebrate.
+    → recall (interactive) → complete.
 
     The interactive steps narrate the question, open a child-response window over Google
     Live (the provider waits for narration TTS to finish, then opens the mic), and only
     advance once the child says the target word (``runtime.on_child_response`` via the
     recognised Live transcript). Wrong attempts stay on the same step and get a retry
-    prompt so a child with no backend assignment can still practise vocabulary and reach
-    the happy ending after saying the word."""
+    prompt so a child with no backend assignment can still practise vocabulary and hear
+    the happy ending after saying the word. The final completion announcement is a Live
+    text successPrompt on the last interactive step rather than a separate passive
+    ``celebrate`` render frame, keeping production devices out of the crash-prone final
+    render path while preserving the spoken celebration."""
     steps: List[Dict[str, Any]] = [
         _step(
             "s1", "greeting",
-            "Chào con! Hôm nay mình cùng tập nói một từ mới nhé.",
+            "Chào con! Nhìn hình, nghe TeeBot, rồi nói khi mình mời nhé.",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s2", "focus",
-            "Đây là cái kho — barn. Con nhìn ngôi nhà đỏ trên cánh đồng xanh nhé!",
+            "Đây là cái kho. Tiếng Anh là barn. Con nhìn nhà đỏ nhé!",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s3", "repeat",
-            "Bây giờ con hãy nói theo mình nào: barn!",
-            _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_TEACH_FILE,
-                   primary_word="barn", glyph="🗣️"),
+            "Đến lượt con. Con nói theo mình: barn!",
+            _scene(asset_base, expression="listening", overlay_file=_OVERLAY_LISTEN_FILE,
+                   primary_word="barn", glyph="🗣️", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Con thử nói lại nhé: barn.",
+            retry_prompt="Chưa đúng. Nhìn hình cái kho và nói lại: barn.",
+            interaction_prompts={
+                "helpOrRepeat": "Mình nhắc lại: nhìn hình cái kho và nói barn.",
+                "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
+                "vietnameseObject": "Đúng rồi, đó là cái kho. Bây giờ nói tiếng Anh: barn.",
+                "alreadyInLesson": "Mình đang học rồi. Con nhìn hình và nói barn nhé.",
+            },
             response_timeout_sec=30.0,
             max_no_answer_attempts=3,
         ),
         _step(
             "s4", "recall",
-            "Giỏi lắm. Con thấy gì trong hình? Con thử nói: barn.",
-            _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_TEACH_FILE,
-                   primary_word="barn", glyph="🏠"),
+            "Con thấy gì trong hình? Nói tên tiếng Anh của cái kho.",
+            _scene(asset_base, expression="listening", overlay_file=_OVERLAY_LISTEN_FILE,
+                   primary_word="barn", glyph="🏠", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Con thử nói lại nhé: barn.",
+            retry_prompt="Chưa đúng. Nhìn hình cái kho và nói lại: barn.",
+            interaction_prompts={
+                "helpOrRepeat": "Mình nhắc lại: cái kho tiếng Anh là barn.",
+                "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
+                "vietnameseObject": "Đúng rồi, con thấy cái kho. Con nói tiếng Anh: barn.",
+                "alreadyInLesson": "Mình đang học rồi. Con trả lời bằng barn nhé.",
+            },
+            success_prompt="Tuyệt vời! Con nói được barn và hoàn thành bài học mẫu.",
             response_timeout_sec=30.0,
             max_no_answer_attempts=3,
-        ),
-        _step(
-            "s5", "celebrate",
-            "Tuyệt vời! Con vừa nói được từ barn và đã hoàn thành bài học mẫu. Hoan hô con!",
-            _scene(asset_base, expression="celebrating", overlay_file=_OVERLAY_CELEBRATE_FILE,
-                   primary_word="barn", glyph="🎉"),
-            dwell_sec=dwell_sec,
         ),
     ]
     manifest = {
@@ -296,10 +381,11 @@ class SampleAssetCache:
     (preload/synthesize_preload_status/assert_profile_renderable/public_url_for_source/
     aclose/preload_timeout_sec) plus harmless sd-path attrs."""
 
-    def __init__(self, preload_timeout_sec: float = 30.0) -> None:
+    def __init__(self, preload_timeout_sec: float = 30.0, *, sd_pack: bool = False) -> None:
         self.preload_timeout_sec = float(preload_timeout_sec)
-        self.cache_key = "sample"
+        self.cache_key = _SAMPLE_SD_CACHE_KEY
         self.asset_pack_local_root = "sd://tbot/lesson-assets"
+        self.sd_pack = bool(sd_pack)
 
     async def preload(self) -> bool:
         return True
@@ -315,6 +401,51 @@ class SampleAssetCache:
         # degrades to its caption fallback). Returning the source unchanged keeps the
         # layer src non-blank so the structural gates pass.
         return source
+
+    def local_pack_url_for_source(self, source: str) -> Optional[str]:
+        if not self.sd_pack or not source:
+            return None
+        filename = str(source).strip().rsplit("/", 1)[-1]
+        if filename not in _SAMPLE_ASSET_BY_BASENAME:
+            return None
+        return f"{_SAMPLE_SD_ROOT}/{filename}"
+
+    def asset_pack_manifest(
+        self,
+        *,
+        assignment_version: int,
+        lesson_id: str,
+        lesson_version: int,
+        manifest_checksum: str,
+    ) -> Dict[str, Any]:
+        def _basename(path: str) -> str:
+            return path.rsplit("/", 1)[-1]
+
+        return {
+            "assignmentVersion": assignment_version,
+            "lessonId": lesson_id,
+            "lessonVersion": lesson_version,
+            "manifestChecksum": manifest_checksum,
+            "cacheKey": self.cache_key,
+            "localRoot": _SAMPLE_SD_ROOT,
+            "ready": True,
+            "assets": [
+                {
+                    "key": record["key"],
+                    "path": _basename(record["path"]),
+                    "sha256": record["sha256"],
+                    "size": record["size"],
+                    "mediaType": record["mediaType"],
+                    "critical": record["critical"],
+                    "layer": record["layer"],
+                    "role": record["role"],
+                    "state": "READY",
+                    "checksumOk": True,
+                    "localPath": f"{_SAMPLE_SD_ROOT}/{_basename(record['path'])}",
+                }
+                for record in _SAMPLE_ASSET_RECORDS
+            ],
+        }
 
     async def aclose(self) -> None:
         return None
@@ -336,7 +467,11 @@ class NoOpLessonForwarder:
 def _sample_asset_base(conn: Any) -> str:
     config = getattr(conn, "config", {}) or {}
     lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
-    return str(lesson_cfg.get("sample_asset_base_url") or "").strip()
+    return str(
+        lesson_cfg.get("sample_asset_base_url")
+        or lesson_cfg.get("asset_origin_base")
+        or ""
+    ).strip().rstrip("/")
 
 
 def _sample_step_dwell_sec(conn: Any) -> float:
@@ -416,12 +551,7 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
 
     _set_status(conn, "CHECKING_ASSIGNMENT")
 
-    if _sd_pack_enabled(conn):
-        _set_status(conn, "SAMPLE_SD_PACK_UNSUPPORTED",
-                    "Bài học mẫu chỉ hỗ trợ tải ảnh trực tiếp, không dùng thẻ nhớ.")
-        _log("warning", "sample lesson skipped: sd_pack asset delivery is not supported")
-        return None
-
+    sd_pack = _sd_pack_enabled(conn)
     asset_base = _sample_asset_base(conn)
     interactive = _sample_mode(conn) == "interactive"
     if interactive:
@@ -434,9 +564,7 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
 
     existing = getattr(conn, "lesson_runtime", None)
     if _is_active_sample_runtime(existing, lesson_id):
-        _set_status(conn, "STARTED")
-        _log("info", f"sample lesson already active; reusing lessonId={lesson_id}")
-        return existing
+        _log("info", f"sample lesson restart requested; replacing active lessonId={lesson_id}")
 
     assignment = {
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
@@ -452,13 +580,18 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
         conn,
         assignment=assignment,
         manifest=manifest,
-        asset_cache=SampleAssetCache(),
+        asset_cache=SampleAssetCache(sd_pack=sd_pack),
         forwarder=NoOpLessonForwarder(),
         manifest_checksum="sample",
         # Reuse the connection's CP-8 voice-latency-during-preload alarm if one was
         # already created (by an earlier assignment pull) so the auto-disable still
         # brackets the sample's preload window; None when no alarm exists yet.
         alarm=getattr(conn, "lesson_voice_alarm", None),
+        # Demo-friendly: a silent spectator child through an interactive step must not
+        # end the demo on a sad abandon. TeeBot models the word and advances to the
+        # happy ending. Only the interactive sample opts in (real lessons abandon so the
+        # backend learns the child disengaged).
+        graceful_inactivity_finish=interactive,
     )
 
     # Supersede + tear down any prior runtime so its forwarder/asset client never leak

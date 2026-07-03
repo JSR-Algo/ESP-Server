@@ -111,8 +111,15 @@ class AssetState:
         self.reason: Optional[str] = None
 
     def as_status(self) -> Dict[str, Any]:
-        # The lesson_preload_status per-asset wire shape (plan §5.5): {key,state,checksumOk}.
-        return {"key": self.key, "state": self.state, "checksumOk": self.checksum_ok}
+        # Runtime forwards READY/FAILED critical records to the backend from this
+        # synthesized status, so preserve both identity and criticality.
+        return {
+            "key": self.key,
+            "assetId": self.key,
+            "state": self.state,
+            "checksumOk": self.checksum_ok,
+            "critical": self.critical,
+        }
 
 
 class AssetCache:

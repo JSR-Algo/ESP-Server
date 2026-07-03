@@ -151,7 +151,7 @@ class _AlwaysFailClient:
 
 
 class NonRetriableErrorTest(unittest.IsolatedAsyncioTestCase):
-    async def test_auth_error_skips_reconnect_and_falls_back(self):
+    async def test_auth_error_skips_reconnect_and_does_not_fallback_to_classic(self):
         conn = _Conn()
         client_holder = {}
 
@@ -186,7 +186,8 @@ class NonRetriableErrorTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
 
         self.assertEqual(client_holder["client"].connect_calls, 1)
-        self.assertEqual(classic_started["count"], 1)
+        self.assertEqual(classic_started["count"], 0)
+        self.assertIsNone(getattr(conn, "voice_provider", None))
 
 
 class ProactiveReconnectTest(unittest.IsolatedAsyncioTestCase):

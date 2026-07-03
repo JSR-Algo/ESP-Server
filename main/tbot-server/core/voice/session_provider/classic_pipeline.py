@@ -1,3 +1,4 @@
+from core.handle.intentHandler import speak_txt
 from core.voice.session_provider.base import VoiceSessionProvider
 
 
@@ -15,6 +16,10 @@ class ClassicPipelineProvider(VoiceSessionProvider):
 
     async def handle_audio_bytes(self, audio_bytes):
         return False
+
+    async def speak_child_notice(self, text):
+        speak_txt(self.conn, text)
+        return True
 
     async def interrupt(self):
         self.conn.client_abort = True

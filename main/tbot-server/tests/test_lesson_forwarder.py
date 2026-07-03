@@ -48,6 +48,24 @@ class _Client:
             raise RuntimeError("close failed")
 
 
+class _TerminalStore:
+    def __init__(self):
+        self.batches = {}
+        self.calls = []
+
+    async def store(self, device_id, batch):
+        self.calls.append("store")
+        self.batches[(device_id, batch["assignmentId"])] = batch
+
+    async def load(self, device_id, assignment_id):
+        self.calls.append("load")
+        return self.batches.get((device_id, assignment_id))
+
+    async def clear(self, device_id, batch):
+        self.calls.append("clear")
+        self.batches.pop((device_id, batch["assignmentId"]), None)
+
+
 class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _PENDING_TERMINAL_BATCHES.clear()
@@ -156,12 +174,20 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with mock.patch.object(forwarder_module.asyncio, "sleep", _sleep):
-            forwarder.enqueue({"events": [{"type": "step_completed"}]})
+            forwarder.enqueue(
+                {
+                    "assignmentId": "a1",
+                    "sessionId": "s1",
+                    "events": [{"type": "step_completed"}],
+                }
+            )
             await forwarder._queue.join()
 
         self.assertEqual(attempts, 2)
         self.assertEqual(slept, [0.25])
         self.assertIn("re-enqueued attempt=1/1", logger.messages[0][1])
+        self.assertIn("session_id=s1", logger.messages[0][1])
+        self.assertIn("assignment_id=a1", logger.messages[0][1])
 
         await forwarder.aclose()
 
@@ -292,6 +318,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
 
         terminal = {
             "assignmentId": "a1",
+            "sessionId": "s1",
             "events": [{"type": "lesson_failed"}],
         }
         forwarder = LessonEventForwarder(
@@ -305,6 +332,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await forwarder.replay_pending_terminal_event())
         self.assertIs(forwarder.pending_terminal_batch, terminal)
         self.assertIn("lesson terminal replay failed", logger.messages[0][1])
+        self.assertIn("session_id=s1", logger.messages[0][1])
 
     async def test_retry_classifier_errors_are_treated_as_not_retryable(self):
         forwarder = LessonEventForwarder(device_id="dev1", base_url="http://backend.test/v1")
@@ -451,8 +479,115 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
 
         await forwarder.aclose()
 
+    async def test_terminal_batch_is_written_to_injected_store_before_post(self):
+        store = _TerminalStore()
+        order = []
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            order.append("post")
+            raise _http_status_error(500)
+
+        async def _store(device_id, batch):
+            order.append("store")
+            await _TerminalStore.store(store, device_id, batch)
+
+        store.store = _store
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed"}],
+        }
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            post_fn=_post,
+            terminal_store=store,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=0,
+        )
+
+        forwarder.enqueue(terminal)
+        await forwarder._queue.join()
+
+        self.assertEqual(order, ["store", "post"])
+        self.assertEqual(store.batches[("dev1", "a1")], terminal)
+
+        await forwarder.aclose()
+
+    async def test_terminal_replay_store_includes_prior_lesson_started_for_backend_guard(self):
+        store = _TerminalStore()
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            raise _http_status_error(500)
+
+        started = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_started", "startedAt": 1_700_000_000_000}],
+        }
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed", "completedAt": 1_700_000_010_000}],
+        }
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            post_fn=_post,
+            terminal_store=store,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=0,
+        )
+
+        forwarder.enqueue(started)
+        await forwarder._queue.join()
+        forwarder.enqueue(terminal)
+        await forwarder._queue.join()
+
+        stored = store.batches[("dev1", "a1")]
+        self.assertEqual(
+            [event["type"] for event in stored["events"]],
+            ["lesson_started", "lesson_completed"],
+        )
+        self.assertEqual(stored["assignmentId"], "a1")
+        self.assertEqual(stored["sessionId"], "s1")
+
+        await forwarder.aclose()
+
+    async def test_stored_terminal_replay_uses_injected_store_after_process_dict_is_empty(self):
+        store = _TerminalStore()
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed"}],
+        }
+        await store.store("dev1", terminal)
+        _PENDING_TERMINAL_BATCHES.clear()
+        calls = []
+
+        async def _post(_client, base_url, device_id, batch, *, token=None):
+            calls.append((base_url, device_id, batch, token))
+
+        self.assertTrue(
+            await replay_stored_terminal_event(
+                device_id="dev1",
+                assignment_id="a1",
+                base_url="http://backend.test/v1",
+                token="tok",
+                post_fn=_post,
+                terminal_store=store,
+            )
+        )
+
+        self.assertEqual(calls, [("http://backend.test/v1", "dev1", terminal, "tok")])
+        self.assertEqual(store.batches, {})
+
     async def test_stored_terminal_replay_failure_logs_and_keeps_pending_batch(self):
-        terminal = {"assignmentId": "a1", "events": [{"type": "lesson_completed"}]}
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed"}],
+        }
         logger = _Logger()
 
         async def _post(_client, _base_url, _device_id, _batch, *, token=None):
@@ -471,6 +606,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(("dev1", "a1"), _PENDING_TERMINAL_BATCHES)
         self.assertIn("lesson terminal reconnect replay failed", logger.messages[0][1])
+        self.assertIn("session_id=s1", logger.messages[0][1])
 
         self.assertFalse(
             await replay_stored_terminal_event(

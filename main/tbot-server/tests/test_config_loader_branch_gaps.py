@@ -145,25 +145,24 @@ def test_lesson_env_skips_asset_origin_when_only_public_base_set(monkeypatch):
     assert "asset_origin_base" not in result["lesson"]
 
 
-# ── 208->210: COURSE_BACKEND_URL present AND lesson.api_base already set ───────────
+# ── COURSE_BACKEND_URL present AND lesson.api_base already set ────────────────────
 
 
-def test_course_backend_url_does_not_clobber_existing_api_base(monkeypatch):
-    """COURSE_BACKEND_URL set but the author already pinned lesson.api_base -> the
-    ``if not lesson_cfg.get("api_base"):`` guard (line 208) is False, so server.api_url
-    is updated but lesson.api_base is preserved (branch 208->210). Mutation guard:
-    dropping the ``not`` guard would overwrite the author's api_base."""
+def test_course_backend_url_overrides_existing_api_base(monkeypatch):
+    """An EXPLICIT COURSE_BACKEND_URL is the operator's production backend and MUST
+    win over any shipped/stale committed lesson.api_base, so the runtime never pulls
+    from a stale endpoint. Both server.api_url and lesson.api_base are overwritten."""
     _clear_lesson_env(monkeypatch)
     monkeypatch.setenv("COURSE_BACKEND_URL", "https://course.test/v1/")
     config = {
-        "lesson": {"runtime_enabled": True, "api_base": "https://author.pinned/v1"},
+        "lesson": {"runtime_enabled": True, "api_base": "https://stale.pinned/v1"},
         "server": {},
     }
 
     result = config_loader._apply_lesson_env_overrides(config)
 
     assert result["server"]["api_url"] == "https://course.test/v1"
-    assert result["lesson"]["api_base"] == "https://author.pinned/v1"
+    assert result["lesson"]["api_base"] == "https://course.test/v1"
 
 
 # ── 329->331: api_url env set but websocket env absent ─────────────────────────────

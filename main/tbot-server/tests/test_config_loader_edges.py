@@ -120,7 +120,7 @@ def test_voice_env_overrides_force_google_live_and_wake_words(monkeypatch):
     result = config_loader.normalize_voice_config(result)
 
     assert result["voice_mode"]["type"] == "google_live"
-    assert result["voice_mode"]["fallback_to_classic_on_error"] is True
+    assert result["voice_mode"]["fallback_to_classic_on_error"] is False
     assert result["google_live"]["api_key"] == "google-key"
     assert result["google_live"]["model"] == "gemini-live-test"
     assert result["google_live"]["language_code"] == "vi-VN"
@@ -136,6 +136,77 @@ def test_google_live_enabled_env_forces_voice_mode_without_voice_mode_name(monke
 
     assert result["voice_mode"]["type"] == "google_live"
 
+
+def test_google_live_defaults_pin_single_robot_voice():
+    config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["voice_name"] == "Kore"
+
+def test_google_live_runtime_policy_ignores_voice_env_override(monkeypatch):
+    monkeypatch.setenv("TBOT_GOOGLE_LIVE_VOICE_NAME", "Aoede")
+    config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["voice_name"] == "Kore"
+
+@pytest.mark.asyncio
+async def test_private_config_honors_session_resumption_env_override(monkeypatch):
+    monkeypatch.setenv("TBOT_GOOGLE_LIVE_SESSION_RESUMPTION_ENABLED", "false")
+
+    async def fake_get_agent_models(_device_id, _client_id, _selected_module):
+        return {
+            "voice_mode": {"type": "google_live"},
+            "google_live": {"model": "gemini-live-private"},
+        }
+
+    async def fake_get_correct_words(_device_id):
+        return None
+
+    monkeypatch.setattr(config_loader, "get_agent_models", fake_get_agent_models)
+    monkeypatch.setattr(config_loader, "get_correct_words", fake_get_correct_words)
+
+    result = await config_loader.get_private_config_from_api(
+        {"selected_module": {}},
+        "device-1",
+        "client-1",
+    )
+
+    assert result["google_live"]["session_resumption_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_private_config_inherits_base_google_live_for_external_and_lesson(monkeypatch):
+    async def fake_get_agent_models(_device_id, _client_id, _selected_module):
+        return {
+            "voice_mode": {"type": "classic_pipeline"},
+            "google_live": {"model": "agent-live-model"},
+            "lesson": {"runtime_enabled": True},
+        }
+
+    async def fake_get_correct_words(_device_id):
+        return None
+
+    monkeypatch.setattr(config_loader, "get_agent_models", fake_get_agent_models)
+    monkeypatch.setattr(config_loader, "get_correct_words", fake_get_correct_words)
+
+    result = await config_loader.get_private_config_from_api(
+        {
+            "selected_module": {},
+            "voice_mode": {"type": "google_live", "fallback_to_classic_on_error": False},
+            "google_live": {"model": "base-live-model", "voice_name": "Kore"},
+        },
+        "device-1",
+        "client-1",
+    )
+
+    assert result["voice_mode"]["type"] == "google_live"
+    assert result["voice_mode"]["fallback_to_classic_on_error"] is False
+    assert result["google_live"]["model"] == "agent-live-model"
+    assert result["google_live"]["voice_name"] == "Kore"
+    assert result["lesson"]["runtime_enabled"] is True
 
 def test_voice_env_accepts_google_gemini_api_key_alias(monkeypatch):
     monkeypatch.setenv("GOOGLE_GEMINI_API_KEY", "google-gemini-key")
@@ -278,6 +349,7 @@ def test_explicit_lesson_runtime_false_env_wins_over_auto_enable(monkeypatch):
 def test_server_endpoint_overrides_repair_bad_shapes_and_sync_lesson_api(monkeypatch):
     monkeypatch.setenv("TBOT_PUBLIC_WEBSOCKET_URL", "wss://public.test/ws")
     monkeypatch.setenv("TBOT_BACKEND_API_URL", "https://backend.test/v1/")
+    monkeypatch.setenv("TBOT_SERVER_AUTH_KEY", "env-auth-key")
     config = {"server": "bad"}
 
     result = config_loader._apply_server_endpoint_env_overrides(config)
@@ -285,6 +357,7 @@ def test_server_endpoint_overrides_repair_bad_shapes_and_sync_lesson_api(monkeyp
     assert result["server"] == {
         "websocket": "wss://public.test/ws",
         "api_url": "https://backend.test/v1",
+        "auth_key": "env-auth-key",
     }
 
     config = {"server": {"api_url": "https://old.test/v1"}, "lesson": {"api_base": "https://old.test/v1"}}
@@ -293,7 +366,15 @@ def test_server_endpoint_overrides_repair_bad_shapes_and_sync_lesson_api(monkeyp
 
     config = {"server": {"api_url": "https://old.test/v1"}, "lesson": {"api_base": "https://custom.test/v1"}}
     result = config_loader._apply_server_endpoint_env_overrides(config)
-    assert result["lesson"]["api_base"] == "https://custom.test/v1"
+    assert result["lesson"]["api_base"] == "https://backend.test/v1"
+
+def test_server_auth_enabled_env_override_wins_without_endpoint_env(monkeypatch):
+    monkeypatch.setenv("TBOT_SERVER_AUTH_ENABLED", "true")
+    config = {"server": {"auth": {"enabled": False}}}
+
+    result = config_loader._apply_server_endpoint_env_overrides(config)
+
+    assert result["server"]["auth"]["enabled"] is True
 
 
 def test_boot_safety_edges(monkeypatch):
@@ -318,8 +399,19 @@ def test_boot_safety_edges(monkeypatch):
         "AecProcessor",
         lambda **_kwargs: types.SimpleNamespace(bypassed=False, reason=None),
     )
+    with pytest.raises(RuntimeError, match="voice_mode.type=google_live"):
+        config_loader._assert_production_boot_safe(
+            {
+                "server": {"auth": {"enabled": True}, "auth_key": "auth-key"},
+                "voice_mode": {"type": "classic_pipeline"},
+            }
+        )
     config_loader._assert_production_boot_safe(
-        {"server": {"auth": {"enabled": True}}, "voice_mode": {"type": "google_live"}, "google_live": "bad"}
+        {
+            "server": {"auth": {"enabled": True}, "auth_key": "auth-key"},
+            "voice_mode": {"type": "google_live"},
+            "google_live": "bad",
+        }
     )
 
 
@@ -434,6 +526,34 @@ async def test_get_config_from_api_async_edges(monkeypatch):
     assert config["server"]["claim_reset_nonce"] == "repair-2026-06-22"
     assert config["prompt_template"] == {"default": "local"}
 
+
+@pytest.mark.asyncio
+async def test_manager_config_inherits_base_google_live_policy(monkeypatch):
+    monkeypatch.setattr(config_loader, "init_service", lambda config: None)
+
+    async def server_config():
+        return {
+            "server": {"auth": {"enabled": True}},
+            "selected_module": {},
+            "voice_mode": {"type": "classic_pipeline"},
+            "google_live": {"model": "manager-live-model"},
+        }
+
+    monkeypatch.setattr(config_loader, "get_server_config", server_config)
+
+    config = await config_loader.get_config_from_api_async(
+        {
+            "manager-api": {"url": "http://m", "secret": "s"},
+            "server": {"auth_key": "auth"},
+            "voice_mode": {"type": "google_live", "fallback_to_classic_on_error": False},
+            "google_live": {"model": "base-live-model", "voice_name": "Kore"},
+        }
+    )
+
+    assert config["voice_mode"]["type"] == "google_live"
+    assert config["voice_mode"]["fallback_to_classic_on_error"] is False
+    assert config["google_live"]["model"] == "manager-live-model"
+    assert config["google_live"]["voice_name"] == "Kore"
 
 @pytest.mark.asyncio
 async def test_get_private_config_from_api_exceptions_and_fallbacks(monkeypatch):

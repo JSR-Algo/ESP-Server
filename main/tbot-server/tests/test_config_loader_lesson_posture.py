@@ -40,6 +40,7 @@ from config.config_loader import (
 _LESSON_POSTURE_ENV = (
     "LESSON_RUNTIME_ENABLED",
     "COURSE_BACKEND_URL",
+    "TBOT_BACKEND_API_URL",
     "LESSON_ASSET_ORIGIN_BASE",
     "LESSON_ASSET_PUBLIC_BASE_URL",
     "LESSON_ASSET_DELIVERY_MODE",
@@ -92,20 +93,30 @@ def test_shipped_dark_config_auto_enables_when_env_prereqs_present(monkeypatch):
     """Starting from the shipped DARK file, full env prereqs flip the gate ON.
 
     Proves the gate is env-derived: the file says ``false`` but the effective
-    posture after ``_apply_lesson_env_overrides`` is ``true``. Note no
-    ``COURSE_BACKEND_URL`` is set — the auto-enable predicate uses the shipped
-    ``lesson.api_base`` as the backend fallback, so mint-secret + asset origin are
-    sufficient. That api_base fallback is itself a drift surface worth pinning.
+    posture after ``_apply_lesson_env_overrides`` is ``true``. The production
+    backend URL must be explicit; the shipped ``lesson.api_base`` alone is not
+    enough to arm the runtime.
     """
+    monkeypatch.setenv("COURSE_BACKEND_URL", "https://courses.example/v1")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
 
     config = _apply_lesson_env_overrides(copy.deepcopy(_shipped_config()))
 
     assert config["lesson"]["runtime_enabled"] is True
+    assert config["lesson"]["api_base"] == "https://courses.example/v1"
     assert config["lesson"]["asset_origin_base"] == "https://assets.origin"
     # And the resulting armed posture is boot-safe (env prereqs are present).
     assert _assert_lesson_runtime_boot_safe(config) is None
+
+def test_shipped_dark_config_does_not_auto_enable_without_explicit_backend_url(monkeypatch):
+    """Mint secret + asset origin do not arm prod lessons via shipped api_base."""
+    monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
+
+    config = _apply_lesson_env_overrides(copy.deepcopy(_shipped_config()))
+
+    assert config["lesson"]["runtime_enabled"] is False
 
 
 def test_shipped_dark_config_stays_dark_without_env_prereqs():
@@ -156,6 +167,7 @@ def test_boot_assert_rejects_file_derived_true_without_env_prereqs():
     assert "runtime_enabled=true requires boot env prerequisites" in message
     assert "TBOT_DEVICE_MINT_SECRET" in message
     assert "LESSON_ASSET_ORIGIN_BASE" in message
+    assert "COURSE_BACKEND_URL or TBOT_BACKEND_API_URL" in message
 
 
 def test_boot_assert_rejects_sd_pack_without_mount_root(monkeypatch):
@@ -166,6 +178,7 @@ def test_boot_assert_rejects_sd_pack_without_mount_root(monkeypatch):
     firmware reads ``sd://`` paths. Pins that the guard catches this second
     posture hole.
     """
+    monkeypatch.setenv("COURSE_BACKEND_URL", "https://courses.example/v1")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
     config = copy.deepcopy(_shipped_config())

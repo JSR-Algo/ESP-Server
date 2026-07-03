@@ -10,6 +10,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.voice.google_live.client import GoogleLiveClient
+from config.config_loader import (
+    DEFAULT_GOOGLE_LIVE_VOICE_NAME,
+    GOOGLE_LIVE_DEFAULTS,
+)
 
 
 class _ConsoleLogger:
@@ -40,6 +44,7 @@ def _build_env_config(model, voice_name):
         "enable_audio_output": True,
         "native_voice": bool(voice_name),
         "voice_name": voice_name,
+        "language_code": GOOGLE_LIVE_DEFAULTS["language_code"],
         "connect_timeout_sec": 15,
         "recv_timeout_sec": 5,
     }
@@ -93,7 +98,10 @@ def main():
     )
     parser.add_argument(
         "--voice-name",
-        default=os.environ.get("GOOGLE_LIVE_VOICE_NAME", ""),
+        default=os.environ.get(
+            "GOOGLE_LIVE_VOICE_NAME",
+            DEFAULT_GOOGLE_LIVE_VOICE_NAME,
+        ),
     )
     parser.add_argument(
         "--manager-device-id",

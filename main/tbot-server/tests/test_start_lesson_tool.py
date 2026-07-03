@@ -164,6 +164,153 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         # the audible NO_CURRENT_ASSIGNMENT failure feedback was suppressed (sample took over)
         self.assertEqual(conn.voice_provider.acks, [])
 
+    async def test_runtime_admitted_tokenless_device_falls_back_to_sample(self):
+        # A fresh/unclaimed robot has no backend device token yet. With the built-in
+        # sample flag on, the spoken demo must still run the local sample instead of
+        # surfacing the parent setup blocker; production assignment/claim remains untouched.
+        sample_calls = []
+
+        async def _pull_without_device_token():
+            conn.lesson_start_status = {
+                "code": "DEVICE_TOKEN_UNAVAILABLE",
+                "reason": "missing_identity",
+                "message": "Nhờ bố mẹ hoàn tất cài đặt robot trước nhé.",
+            }
+            return None
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        conn = _Conn(
+            loop=asyncio.get_running_loop(),
+            enabled=True,
+            sample=True,
+            pull=_pull_without_device_token,
+        )
+        conn.voice_provider = _VoiceProvider()
+
+        with patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            await asyncio.sleep(0)
+            for _ in range(10):
+                if conn.lesson_pull_task is not None and conn.lesson_pull_task.done() and sample_calls:
+                    break
+                if conn.lesson_pull_task is not None:
+                    await conn.lesson_pull_task
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(conn.pull_calls, 1)
+        self.assertEqual(sample_calls, [conn])
+        self.assertTrue(conn.lesson_pull_task.done())
+        self.assertEqual(conn.voice_provider.acks, [])
+
+    async def test_runtime_admitted_token_mint_failure_does_not_fallback_to_sample(self):
+        sample_calls = []
+
+        async def _pull_with_mint_failure():
+            conn.lesson_start_status = {
+                "code": "DEVICE_TOKEN_UNAVAILABLE",
+                "reason": "mint_failed",
+                "message": "Robot chưa xác thực được với máy chủ bài học.",
+            }
+            return None
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        conn = _Conn(
+            loop=asyncio.get_running_loop(),
+            enabled=True,
+            sample=True,
+            pull=_pull_with_mint_failure,
+        )
+        conn.voice_provider = _VoiceProvider()
+
+        with patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            for _ in range(10):
+                if conn.voice_provider.acks:
+                    break
+                if conn.lesson_pull_task is not None:
+                    await conn.lesson_pull_task
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(conn.pull_calls, 1)
+        self.assertEqual(sample_calls, [])
+        self.assertTrue(conn.lesson_pull_task.done())
+        self.assertEqual(len(conn.voice_provider.acks), 1)
+        ack = conn.voice_provider.acks[0]
+        self.assertEqual(ack.action, Action.RESPONSE)
+        self.assertEqual(ack.result, "lesson_start_failed")
+        self.assertEqual(ack.response, "Robot chưa xác thực được với máy chủ bài học.")
+
+    async def test_real_token_mint_failure_path_falls_back_to_sample(self):
+        sample_calls = []
+
+        class _RuntimeConn:
+            def __init__(self):
+                self.loop = asyncio.get_running_loop()
+                self.logger = _Logger()
+                self.lesson_pull_task = None
+                self.lesson_runtime = None
+                self.lesson_voice_alarm = None
+                self.lesson_start_status = None
+                self.device_id = "AA:BB:CC:DD:EE:FF"
+                self.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
+                self.config = {
+                    "lesson": {
+                        "api_base": "http://backend.test/v1",
+                        "runtime_enabled": True,
+                        "sample_lesson": True,
+                    }
+                }
+                self.voice_provider = _VoiceProvider()
+
+            def _lesson_runtime_enabled(self):
+                return True
+
+            def _sample_lesson_enabled(self):
+                return True
+
+            def is_realtime_busy(self):
+                return False
+
+            def _disable_lesson_runtime(self):
+                return None
+
+        async def _mint_failure(client, base_url, device_id, *, logger=None):
+            raise RuntimeError("ask parent to finish setup")
+
+        async def _assignment_must_not_run(client, base_url, device_id, *, token=None):
+            raise AssertionError("assignment/current must not run after token mint failure")
+
+        async def _fake_sample(c):
+            sample_calls.append(c)
+            return object()
+
+        conn = _RuntimeConn()
+
+        with patch("config.device_token_client.resolve_device_identity", _mint_failure), patch(
+            "config.manage_api_client.get_current_assignment",
+            _assignment_must_not_run,
+        ), patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+            response = start_lesson_module.start_lesson(conn)
+            for _ in range(20):
+                task = conn.lesson_pull_task
+                if sample_calls and task is not None and task.done():
+                    break
+                if task is not None:
+                    await task
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(sample_calls, [conn])
+        self.assertEqual(conn.voice_provider.acks, [])
+
     async def test_runtime_disabled_with_sample_on_runs_sample_directly(self):
         # FIX A: runtime DISABLED + sample on -> the assignment pull is gated dark, so the
         # sample is the ONLY admitted lesson path and runs directly (no real pull).

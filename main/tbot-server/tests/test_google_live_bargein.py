@@ -773,6 +773,23 @@ class TranscriptBargeInTest(unittest.IsolatedAsyncioTestCase):
         await bridge.close()
         self.assertEqual(captured, [])
 
+    async def test_transcript_barge_in_default_fires_immediately(self):
+        conn = _Conn()
+        conn.config["google_live"]["barge_in_via_transcript"] = True
+        conn.config["google_live"]["barge_in_transcript_min_chars"] = 3
+        conn.google_live_audio_out_started_at = time.monotonic()
+        captured = []
+
+        async def handler(text):
+            captured.append(text)
+
+        bridge = self._bridge(conn, handler)
+        await bridge.handle_event(
+            {"type": "transcript", "source": "user", "text": "dừng lại"}
+        )
+        await bridge.close()
+        self.assertEqual(captured, ["dừng lại"])
+
     async def test_transcript_barge_in_fires_past_min_output_age(self):
         conn = _Conn()
         conn.config["google_live"]["barge_in_via_transcript"] = True
@@ -808,6 +825,14 @@ class _PassthroughBridge:
 
     def allow_model_output(self):
         self._allow_model_output_calls += 1
+
+class _AecPassthroughBridge(_PassthroughBridge):
+    class _Aec:
+        bypassed = False
+
+    def __init__(self, rms=300):
+        super().__init__(rms=rms)
+        self._aec_processor = self._Aec()
 
 class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
     async def test_mic_frames_are_suppressed_while_robot_is_speaking(self):
@@ -846,7 +871,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             any("suppress_echo" in str(args) for _, args, _ in conn.logger.messages)
         )
 
-    async def test_loud_user_audio_interrupts_while_robot_is_speaking(self):
+    async def test_loud_user_audio_does_not_local_interrupt_while_robot_is_speaking(self):
         conn = _Conn()
         conn.client_is_speaking = True
         conn.google_live_audio_out_started_at = time.monotonic() - 1.0
@@ -862,9 +887,9 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(provider._bridge.forwarded, [])
-        self.assertEqual(client.interrupt_calls, 1)
+        self.assertEqual(client.interrupt_calls, 0)
         self.assertTrue(
-            any("echo_bypass" in str(args[0]) for _, args, _ in conn.logger.messages)
+            any("echo_suppressed" in str(args[0]) for _, args, _ in conn.logger.messages)
         )
 
     async def test_loud_user_audio_does_not_interrupt_when_bypass_interrupt_disabled(self):
@@ -890,6 +915,31 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             any("echo_suppressed" in str(args[0]) for _, args, _ in conn.logger.messages)
         )
 
+    async def test_aec_cleaned_audio_is_forwarded_while_robot_speaks_for_live_vad(self):
+        conn = _Conn()
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        conn.config["google_live"]["echo_bypass_interrupt_enabled"] = False
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _AecPassthroughBridge(rms=300)
+
+        handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
+
+        self.assertTrue(handled)
+        self.assertEqual(client.interrupt_calls, 0)
+        self.assertEqual(provider._bridge.forwarded, [b"\x01\x02" * 320])
+        self.assertTrue(
+            any("forward_input" in str(args) for _, args, _ in conn.logger.messages)
+        )
+        self.assertTrue(
+            any(
+                "aec_live_vad_forward" in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
     async def test_moderate_user_audio_interrupts_immediately_while_robot_speaks(self):
         conn = _Conn()
         conn.client_is_speaking = True
@@ -904,10 +954,10 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
+        self.assertEqual(client.interrupt_calls, 0)
         self.assertEqual(provider._bridge.forwarded, [])
 
-    async def test_default_mid_sentence_voice_level_interrupts_robot_output(self):
+    async def test_default_mid_sentence_voice_level_does_not_local_interrupt_robot_output(self):
         conn = _Conn()
         conn.client_is_speaking = True
         conn.google_live_audio_out_started_at = time.monotonic() - 1.0
@@ -920,7 +970,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
+        self.assertEqual(client.interrupt_calls, 0)
         self.assertEqual(provider._bridge.forwarded, [])
 
     async def test_loud_interrupt_audio_is_replayed_after_old_turn_drains(self):
@@ -950,9 +1000,11 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
 
         await bridge.handle_event({"type": "audio_start"})
         interrupt_frame = b"\xff\x7f" * 320
-        await provider.handle_audio_bytes(interrupt_frame)
+        await provider._begin_user_interrupt("audio_input")
+        provider._buffer_pending_interrupt_audio(interrupt_frame)
         sent_before_drain = list(client.sent_audio)
         await bridge.handle_event({"type": "audio_end"})
+        await provider._replay_pending_interrupt_audio("test")
         for _ in range(30):
             if client.sent_audio:
                 break
@@ -967,7 +1019,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
                 for _, args, _ in conn.logger.messages
             )
         )
-        self.assertEqual(client.end_stream_calls, 2)
+        self.assertEqual(client.end_stream_calls, 1)
         self.assertFalse(
             any(
                 "interrupt_input_finalized reason=interrupt_replay" in str(args[0])
@@ -990,10 +1042,11 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         provider._client = client
         provider._bridge = _PassthroughBridge(rms=3000)
 
-        await provider.handle_audio_bytes(b"\x01\x02" * 320)
+        await provider._begin_user_interrupt("audio_input")
+        provider._record_interrupt_capture_audio(b"\x01\x02" * 320)
         provider._bridge.rms = 100
         for _ in range(3):
-            await provider.handle_audio_bytes(b"\x01\x02" * 320)
+            provider._record_interrupt_capture_audio(b"\x01\x02" * 320)
         await asyncio.sleep(0.04)
         await provider.close()
 
@@ -1019,9 +1072,10 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         provider._client = client
         provider._bridge = _PassthroughBridge(rms=3000)
 
-        await provider.handle_audio_bytes(b"\x01\x02" * 320)
+        await provider._begin_user_interrupt("audio_input")
+        provider._record_interrupt_capture_audio(b"\x01\x02" * 320)
         await asyncio.sleep(0.03)
-        await provider.handle_audio_bytes(b"\x01\x02" * 320)
+        provider._record_interrupt_capture_audio(b"\x01\x02" * 320)
         await asyncio.sleep(0.03)
         self.assertEqual(client.end_stream_calls, 1)
         await asyncio.sleep(0.05)
@@ -1069,7 +1123,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(conn._music_session.is_paused())
         self.assertEqual(provider.current_response_id(), 1)
 
-    async def test_loud_speech_bypass_can_interrupt_music_only_when_enabled(self):
+    async def test_loud_speech_bypass_does_not_local_interrupt_music_even_when_configured(self):
         conn = _Conn()
         conn._music_session = _MusicSession()
         conn.config["google_live"]["echo_bypass_interrupt_enabled"] = True
@@ -1083,9 +1137,9 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
 
         self.assertTrue(handled)
-        self.assertEqual(client.interrupt_calls, 1)
-        self.assertTrue(conn._music_session.is_paused())
-        self.assertEqual(provider.current_response_id(), 1)
+        self.assertEqual(client.interrupt_calls, 0)
+        self.assertFalse(conn._music_session.is_paused())
+        self.assertEqual(provider.current_response_id(), 0)
         self.assertEqual(provider._bridge.forwarded, [])
 
     async def test_mic_frames_are_suppressed_while_music_session_is_active(self):
@@ -1167,6 +1221,17 @@ class InterruptionOutputAgeGuardTest(unittest.IsolatedAsyncioTestCase):
     def _bridge(self, conn):
         conn.websocket = None
         return GoogleLiveAudioBridge(conn, _Client(), _Logger())
+
+    async def test_default_interruption_is_honoured_immediately(self):
+        conn = _Conn()
+        conn.config["google_live"]["disable_server_side_interruptions"] = False
+        conn.google_live_audio_out_started_at = time.monotonic()
+        bridge = self._bridge(conn)
+        result = await bridge.handle_event({"type": "interruption"})
+        await bridge.close()
+        self.assertTrue(result)
+        self.assertIsNone(conn.google_live_audio_out_started_at)
+        self.assertTrue(conn.client_abort)
 
     async def test_interruption_within_min_age_is_suppressed(self):
         conn = _Conn()
@@ -1306,9 +1371,11 @@ class InterruptTurnControllerTest(unittest.IsolatedAsyncioTestCase):
 
         # Start output so stop_output latches the block
         await bridge.handle_event({"type": "audio_start"})
-        # Loud interrupt frame → buffers into _pending_interrupt_audio
+        # Seed an interrupt capture directly; production no longer starts this
+        # path from local raw/RMS echo bypass.
         interrupt_frame = b"\xff\x7f" * 320
-        await provider.handle_audio_bytes(interrupt_frame)
+        await provider._begin_user_interrupt("audio_input")
+        provider._buffer_pending_interrupt_audio(interrupt_frame)
 
         # Drain the old turn so allow_model_output can unblock
         await bridge.handle_event({"type": "audio_end"})
@@ -1371,20 +1438,14 @@ class InterruptTurnControllerTest(unittest.IsolatedAsyncioTestCase):
         """handle_audio_bytes sets _interrupt_forwarded_once=True once a mic frame
         is forwarded while an interrupt capture turn is active."""
         conn = _Conn()
-        conn.client_is_speaking = True
-        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
-        conn.config["google_live"]["robot_output_echo_bypass_rms_threshold"] = 2000
-        conn.config["google_live"]["echo_bypass_interrupt_enabled"] = True
+        conn.client_is_speaking = False
+        conn.google_live_audio_out_started_at = None
         client = _Client()
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
         provider._client = client
         provider._bridge = _PassthroughBridge(rms=3000)
 
-        # First frame triggers interrupt and starts capture turn
-        await provider.handle_audio_bytes(b"\x01\x02" * 320)
-
-        # At this point an interrupt capture turn is active;
-        # send a second frame at lower RMS so it falls through to forwarding path
+        provider._start_interrupt_capture_turn("audio_input")
         provider._bridge.rms = 100
         await provider.handle_audio_bytes(b"\x01\x02" * 320)
 

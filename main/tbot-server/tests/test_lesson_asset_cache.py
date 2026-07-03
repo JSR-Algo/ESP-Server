@@ -1420,7 +1420,12 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         keys = {a["key"] for a in status["assets"]}
         self.assertEqual(keys, {"backgroundScene.poster", "teachingObject.barn"})
         for a in status["assets"]:
-            self.assertEqual(set(a.keys()), {"key", "state", "checksumOk"})
+            self.assertEqual(
+                set(a.keys()),
+                {"key", "assetId", "state", "checksumOk", "critical"},
+            )
+            self.assertEqual(a["assetId"], a["key"])
+            self.assertIs(a["critical"], True)
 
     async def test_noncritical_pose_assets_still_gate_overall_ready(self):
         # criticalTotal remains 2 for telemetry, but all image assets must verify

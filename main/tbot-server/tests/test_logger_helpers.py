@@ -6,6 +6,41 @@ from types import SimpleNamespace
 from config import logger as logger_module
 
 
+def test_access_log_token_leak_detector_flags_ws_query_secrets():
+    captured_access_log = "\n".join(
+        [
+            '203.0.113.10 - - "GET /tbot/v1/?device-id=robot-1&client-id=esp32 HTTP/1.1" 101 -',
+            '203.0.113.11 - - "GET /tbot/v1/?device-id=robot-1&authorization=Bearer%20abc.def.ghi HTTP/1.1" 101 -',
+            '203.0.113.12 - - "GET /tbot/v1/?ws_url=wss%3A%2F%2Fesp.example.com%2Ftbot%2Fv1%2F%3Ftoken%3Dsecret-token HTTP/1.1" 200 -',
+            '203.0.113.13 - - "GET /tbot/v1/?websocket_token=secret-token HTTP/1.1" 101 -',
+        ]
+    )
+
+    leaks = logger_module.find_token_leaks_in_access_log(captured_access_log)
+
+    assert len(leaks) == 3
+    assert leaks[0]["line"] == 2
+    assert leaks[0]["kind"] == "authorization_query"
+    assert leaks[1]["line"] == 3
+    assert leaks[1]["kind"] == "token_bearing_ws_url"
+    assert leaks[2]["line"] == 4
+    assert leaks[2]["kind"] == "token_query"
+
+
+def test_access_log_token_leak_detector_allows_header_only_and_scrubbed_queries():
+    captured_access_log = "\n".join(
+        [
+            '203.0.113.20 - - "GET /tbot/v1/?device-id=robot-1&client-id=esp32 HTTP/1.1" 101 -',
+            '203.0.113.21 - - "GET /tbot/v1/?authorization=[REDACTED] HTTP/1.1" 101 -',
+            '203.0.113.22 - - "GET /tbot/v1/?authorization=Bearer%20[REDACTED] HTTP/1.1" 101 -',
+            '203.0.113.23 - - "GET /tbot/v1/?ws_url=wss%3A%2F%2Fesp.example.com%2Ftbot%2Fv1%2F HTTP/1.1" 200 -',
+            '203.0.113.24 - - "GET /tbot/v1/?token=[redacted] HTTP/1.1" 101 -',
+        ]
+    )
+
+    assert logger_module.find_token_leaks_in_access_log(captured_access_log) == []
+
+
 def test_module_abbreviations_build_expected_module_string():
     selected = {
         "VAD": "silero_vad",

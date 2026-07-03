@@ -36,7 +36,11 @@ from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from plugins_func.loadplugins import auto_import_modules
 from plugins_func.register import Action, ActionResponse
 from core.auth import AuthenticationError
-from config.config_loader import get_private_config_from_api, merge_configs
+from config.config_loader import (
+    get_private_config_from_api,
+    merge_configs,
+    normalize_voice_config,
+)
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
@@ -317,7 +321,9 @@ class ConnectionHandler:
                 async for message in self.websocket:
                     await self._route_message(message)
             except websockets.exceptions.ConnectionClosed:  # pragma: no cover - websocket integration close path
-                self.logger.bind(tag=TAG).info("Client disconnected")
+                self.logger.bind(tag=TAG).info(
+                    f"Client disconnected device_id={self.device_id or ''} client_ip={self.client_ip or ''}"
+                )
 
         except AuthenticationError as e:  # pragma: no cover - auth middleware integration path
             self.logger.bind(tag=TAG).error(f"Authentication failed: {str(e)}")
@@ -468,6 +474,18 @@ class ConnectionHandler:
         `DORMANT` lazily enters conversation mode before the selected voice
         provider handles audio.
         """
+        if self._lesson_runtime_active():
+            if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
+                self._set_session_mode(SessionMode.LESSON, reason="lesson_runtime_active")
+            if not self._lesson_runtime_accepts_voice_input():
+                return False
+            if self.voice_provider is None:  # pragma: no cover - defensive lesson provider guard
+                return False
+            handled = await self.voice_provider.handle_audio_bytes(message)
+            if handled:
+                self.last_activity_time = time.time() * 1000
+                self.last_live_activity_at = time.monotonic()
+            return bool(handled)
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
             if not self._lesson_runtime_accepts_voice_input():
                 return False
@@ -487,6 +505,13 @@ class ConnectionHandler:
             self.last_activity_time = time.time() * 1000
             self.last_live_activity_at = time.monotonic()
         return bool(handled)
+
+    def _lesson_runtime_active(self) -> bool:
+        runtime = getattr(self, "lesson_runtime", None)
+        if runtime is None:
+            return False
+        runtime_state = str(getattr(runtime, "state", "")).upper()
+        return runtime_state in {"PRELOADING", "RUNNING"}
 
     def _lesson_runtime_accepts_voice_input(self) -> bool:
         runtime = getattr(self, "lesson_runtime", None)
@@ -542,10 +567,9 @@ class ConnectionHandler:
             await self.enter_dormant_mode(reason=reason)
 
     async def finish_lesson_mode(self, *, reason: str = "lesson_completed") -> None:
-        """Successful-completion terminal: show a HAPPY celebration face on the device,
-        then RETURN TO NORMAL CONVERSATION mode (re-opening Live) so the child can keep
-        talking. This is the success counterpart to release_lesson_mode (which sends
-        every failure/timeout/abandon terminal to the idle/dormant state).
+        """Lesson terminal transition: show an appropriate face on the device, then
+        return to normal CONVERSATION mode (re-opening Live) so the child can keep
+        talking instead of seeing a silent dormant hop.
 
         The firmware's own lesson_stop handler already cleared the 3 lesson layers and
         set a NEUTRAL face; leave LESSON mode before sending the happy llm-emotion
@@ -557,13 +581,28 @@ class ConnectionHandler:
             return
         lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
         if lesson_cfg.get("return_to_conversation", True):
-            # enter_conversation_mode refuses while still in LESSON, so step out of
-            # LESSON first; it then re-opens the Live session for normal conversation.
-            self._set_session_mode(SessionMode.DORMANT, reason=reason)
-            await self.enter_conversation_mode(reason=reason)
+            if lesson_cfg.get("smooth_finish_to_conversation", True):
+                self._set_session_mode(SessionMode.CONVERSATION, reason=reason)
+                provider = self.voice_provider
+                if provider is not None and getattr(provider, "_client", None) is None:
+                    start_session = getattr(provider, "start_session", None)
+                    if callable(start_session):
+                        await start_session()
+                self.last_live_activity_at = time.monotonic()
+            else:
+                # Legacy path retained behind config for cost-conscious dormant
+                # fallback and rollback of the direct completion transition.
+                self._set_session_mode(SessionMode.DORMANT, reason=reason)
+                await self.enter_conversation_mode(reason=reason)
         else:
             await self.enter_dormant_mode(reason=reason)
-        await self._send_lesson_emotion("happy")
+        await self._send_lesson_emotion(self._lesson_terminal_emotion(reason))
+
+    @staticmethod
+    def _lesson_terminal_emotion(reason: str) -> str:
+        if str(reason or "") == "lesson_completed":
+            return "happy"
+        return "sad"
 
     async def _send_lesson_emotion(self, emotion: str) -> None:
         """Push a single emotion face to the device over the realtime WS, reusing the
@@ -1198,6 +1237,7 @@ class ConnectionHandler:
                 self.config.get("lesson", {}) or {},
                 private_config["lesson"],
             )
+        self.config = normalize_voice_config(self.config)
 
         voice_mode_config = self.config.get("voice_mode", {})
         if (
@@ -1853,16 +1893,22 @@ class ConnectionHandler:
         lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
         return bool(lesson_cfg.get("sample_lesson", False))
 
-    def _disable_lesson_runtime(self) -> None:
-        """S13 auto-disable target (plan §11.2 / CP-8): flip the ESP-side
-        ``LESSON_RUNTIME_ENABLED`` flag OFF so no further ``lesson_*`` is sent.
+    @staticmethod
+    def _consume_cancelled_task(task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
-        This is the rollback lever the voice-latency-during-preload alarm pulls when
-        the measured p95 regresses (the lesson layer caused choppy audio). It mutates
-        only the in-process ``config["lesson"]["runtime_enabled"]`` — the voice +
-        8-type paths never depended on the flag and are unaffected (plan §12.1). Any
-        in-flight pull/runtime is left to finish/teardown via the existing close path;
-        the flag-off only prevents NEW lesson work on this and subsequent connects.
+    def _disable_lesson_runtime(self) -> None:
+        """S13 auto-disable target (plan §11.2 / CP-8): stop lesson work.
+
+        The voice-latency-during-preload alarm uses this as a rollback lever. It
+        flips the in-process admission flag off, cancels any active assignment
+        pull, and detaches/closes the current runtime so no further lesson frames
+        are emitted from this connection after the breaker trips.
         """
         if not isinstance(self.config, dict):
             return
@@ -1871,6 +1917,26 @@ class ConnectionHandler:
             lesson_cfg = {}
             self.config["lesson"] = lesson_cfg
         lesson_cfg["runtime_enabled"] = False
+        if self.lesson_pull_task and not self.lesson_pull_task.done():
+            self.lesson_pull_task.cancel()
+            self.lesson_pull_task.add_done_callback(self._consume_cancelled_task)
+        runtime = self.lesson_runtime
+        self.lesson_runtime = None
+        if runtime is not None and hasattr(runtime, "close"):
+            try:
+                close_result = runtime.close()
+                if asyncio.iscoroutine(close_result):
+                    try:
+                        asyncio.get_running_loop().create_task(close_result)
+                    except RuntimeError:
+                        close_result.close()
+            except Exception as cleanup_error:
+                try:
+                    self.logger.bind(tag=TAG).error(
+                        f"Error auto-disabling lesson runtime: {cleanup_error}"
+                    )
+                except Exception:
+                    pass
         try:
             self.logger.bind(tag=TAG).error(
                 "LESSON_RUNTIME_ENABLED auto-disabled (voice-latency-during-preload alarm)"

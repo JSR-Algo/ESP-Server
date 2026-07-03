@@ -156,6 +156,26 @@ class LessonErrorBranchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt._last_inbound_sequence, 9)
 
 
+class RuntimeLogContextTest(unittest.TestCase):
+    def test_runtime_warning_log_includes_assignment_and_session_id(self):
+        messages = []
+
+        class _CapturingLogger(T._DummyLogger):
+            def warning(self, message, *args, **kwargs):
+                messages.append(str(message))
+
+        conn = T._FakeConn(session_id="sess-ctx")
+        conn.logger = _CapturingLogger()
+        rt = _runtime(conn=conn)
+
+        rt._log("warning", "runtime degraded")
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("runtime degraded", messages[0])
+        self.assertIn(f"assignment_id={rt.assignment_id}", messages[0])
+        self.assertIn("session_id=sess-ctx", messages[0])
+
+
 class FrameAckUnknownTypeBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 518->exit: an unrecognized acked frame type is a no-op state-wise ─────────
     async def test_on_frame_acked_ignores_unknown_frame_type(self):

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import types
 
 import pytest
@@ -210,9 +211,9 @@ async def test_handle_connection_no_device_auth_failure_and_handler_cleanup(monk
             handled.append(self.device_id)
             raise RuntimeError("handler down")
 
-    import core.connection as connection_module
-
-    monkeypatch.setattr(connection_module, "ConnectionHandler", Handler)
+    connection_module = types.ModuleType("core.connection")
+    connection_module.ConnectionHandler = Handler
+    monkeypatch.setitem(sys.modules, "core.connection", connection_module)
 
     async def auth_ok(websocket):
         return None

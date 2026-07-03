@@ -36,8 +36,8 @@ class _FakeOtaRequest:
 def _full_handler(server_overrides=None):
     """Build a real OTAHandler with a complete server config for handle_post().
 
-    Defaults mirror the shipped posture: auth disabled, no mqtt_gateway, a
-    concrete (non-placeholder) websocket + /v1 api_url.
+    Defaults keep auth disabled for legacy token-gating unit cases while using
+    a concrete (non-placeholder) websocket + /v1 api_url.
     """
     server = {
         "auth_key": "test-secret",
@@ -258,8 +258,8 @@ class OTAMqttForkGuardTest(unittest.TestCase):
 class OTAWebsocketTokenMintTest(unittest.TestCase):
     """P5 (GATED): when server.auth.enabled is true the OTA handler mints a
     real NON-EMPTY websocket.token (for non-whitelisted devices); when auth is
-    disabled (the shipped default) the token is empty. Whitelisted devices
-    bypass the token to stay in lockstep with WebSocketServer._handle_auth."""
+    explicitly disabled the token is empty. Whitelisted devices bypass the
+    token to stay in lockstep with WebSocketServer._handle_auth."""
 
     DEVICE = "AA:BB:CC:DD:EE:01"
 

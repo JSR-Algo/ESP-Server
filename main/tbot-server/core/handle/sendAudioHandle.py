@@ -22,6 +22,20 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     if sentence_id is not None and sentence_id != conn.sentence_id:
         return
 
+    if _is_google_live_connection(conn):
+        if sentenceType == SentenceType.LAST:
+            extra_fields = None
+            if getattr(conn, "lesson_continue_listening_after_tts_stop", False):
+                conn.lesson_continue_listening_after_tts_stop = False
+                extra_fields = {
+                    "continue_listening": True,
+                    "listen_mode": "realtime",
+                }
+            await send_tts_message(conn, "stop", None, extra_fields=extra_fields)
+            if conn.close_after_chat:
+                await conn.close()
+        return
+
     has_audio = audios is not None and len(audios) > 0
 
     if conn.tts.tts_audio_first_sentence:
@@ -299,7 +313,7 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fi
         # SaveCurrent sentence_idUsed for later determining whether current round
         current_sentence_id = conn.sentence_id
         # PlayPromptsound
-        tts_notify = conn.config.get("enable_stop_tts_notify", False)
+        tts_notify = conn.config.get("enable_stop_tts_notify", False) and not _is_google_live_connection(conn)
         if tts_notify:
             stop_tts_notify_voice = conn.config.get(
                 "stop_tts_notify_voice", "config/assets/tts_notify.mp3"

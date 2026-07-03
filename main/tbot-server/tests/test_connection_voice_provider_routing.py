@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -7,7 +8,7 @@ import unittest
 
 def _install_connection_import_stubs():
     if "core.connection" in sys.modules:
-        return
+        return lambda: None
 
     class DummyLogger:
         def bind(self, **kwargs):
@@ -277,14 +278,30 @@ def _install_connection_import_stubs():
         DummyVoiceprintProvider
     )
 
+    _missing = object()
+    previous_modules = {
+        name: sys.modules.get(name, _missing)
+        for name in [*modules.keys(), "core.connection"]
+    }
     sys.modules.update(modules)
 
+    def _restore_import_stubs():
+        for name, previous in previous_modules.items():
+            if previous is _missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
-_install_connection_import_stubs()
+    return _restore_import_stubs
+
+
+_restore_connection_import_stubs = _install_connection_import_stubs()
 
 from core.connection import ConnectionHandler
 from core.voice.session_provider.classic_pipeline import ClassicPipelineProvider
 import core.connection as connection_module
+
+_restore_connection_import_stubs()
 
 
 def test_connection_header_log_summary_redacts_authorization_tokens():
@@ -326,6 +343,37 @@ class _FakeWebSocket:
         if self._messages:
             return self._messages.pop(0)
         raise StopAsyncIteration
+
+class _SendingWebSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+class _RecordingLogger:
+    def __init__(self):
+        self.records = []
+
+    def bind(self, **kwargs):
+        return self
+
+    def info(self, message, *args, **kwargs):
+        self.records.append(("info", str(message)))
+
+    def error(self, message, *args, **kwargs):
+        self.records.append(("error", str(message)))
+
+    def debug(self, message, *args, **kwargs):
+        self.records.append(("debug", str(message)))
+
+    def warning(self, message, *args, **kwargs):
+        self.records.append(("warning", str(message)))
+
+
+class _ClosingWebSocket(_FakeWebSocket):
+    async def __anext__(self):
+        raise connection_module.websockets.exceptions.ConnectionClosed(None, None)
 
 
 class _RecordingVoiceProvider:
@@ -612,6 +660,43 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         allow_route_return.set()
         await asyncio.wait_for(handle_task, timeout=0.5)
 
+    async def test_handle_connection_logs_device_id_when_client_disconnects(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+
+        async def fake_initialize_private_config_async():
+            handler.bind_completed_event.set()
+
+        async def fake_background_initialize():
+            return None
+
+        async def fake_check_timeout():
+            return None
+
+        async def fake_save_and_close(ws):
+            return None
+
+        handler._initialize_private_config_async = fake_initialize_private_config_async
+        handler._background_initialize = fake_background_initialize
+        handler._check_timeout = fake_check_timeout
+        handler._save_and_close = fake_save_and_close
+
+        ws = _ClosingWebSocket([])
+        ws.request.headers["device-id"] = "28:84:85:85:1a:80"
+        ws.request.headers["client-id"] = "client-1"
+
+        await handler.handle_connection(ws)
+
+        self.assertTrue(
+            any(
+                level == "info"
+                and "Client disconnected" in message
+                and "device_id=28:84:85:85:1a:80" in message
+                for level, message in handler.logger.records
+            ),
+            handler.logger.records,
+        )
+
     async def test_route_message_waits_for_bind_then_forwards_to_provider(self):
         handler = self._build_handler()
         handler.voice_provider = _RecordingVoiceProvider()
@@ -647,6 +732,74 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         await handler._route_message(b"narration-opus-frame")
 
         self.assertEqual(handler.voice_provider.audio_calls, [])
+
+    async def test_active_lesson_runtime_restores_lesson_mode_from_dormant_audio(self):
+        handler = self._build_handler()
+        handler.bind_completed_event.set()
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.session_mode = connection_module.SessionMode.DORMANT
+        handler.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+
+        await handler._route_message(b"child-opus-frame")
+
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.LESSON)
+        self.assertEqual(handler.voice_provider.audio_calls, [b"child-opus-frame"])
+
+    async def test_active_passive_lesson_runtime_does_not_enter_conversation_from_audio(self):
+        handler = self._build_handler()
+        handler.bind_completed_event.set()
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.session_mode = connection_module.SessionMode.DORMANT
+        handler.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
+
+        await handler._route_message(b"narration-opus-frame")
+
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.LESSON)
+        self.assertEqual(handler.voice_provider.audio_calls, [])
+
+    async def test_finish_lesson_mode_avoids_visible_dormant_hop_when_returning_to_conversation(self):
+        handler = self._build_handler()
+        handler.config.setdefault("lesson", {})["return_to_conversation"] = True
+        handler.config["lesson"]["smooth_finish_to_conversation"] = True
+        handler.session_mode = connection_module.SessionMode.LESSON
+        handler.audio_channel_owner = connection_module.SessionMode.LESSON
+        handler.voice_provider = _ClassicLifecycleVoiceProvider()
+        transitions = []
+
+        def _record(mode, *, reason=""):
+            normalized = connection_module.normalize_session_mode(mode)
+            transitions.append((normalized, reason))
+            handler.session_mode = normalized
+            handler.audio_channel_owner = normalized
+            return normalized
+
+        handler._set_session_mode = _record
+
+        await handler.finish_lesson_mode(reason="lesson_completed")
+
+        self.assertNotIn(
+            (connection_module.SessionMode.DORMANT, "lesson_completed"),
+            transitions,
+        )
+        self.assertIn(
+            (connection_module.SessionMode.CONVERSATION, "lesson_completed"),
+            transitions,
+        )
+        self.assertTrue(handler.voice_provider.started)
+
+    async def test_finish_lesson_mode_uses_sad_face_for_error_terminal(self):
+        handler = self._build_handler()
+        handler.session_mode = connection_module.SessionMode.LESSON
+        handler.audio_channel_owner = connection_module.SessionMode.LESSON
+        handler.voice_provider = _ClassicLifecycleVoiceProvider()
+        handler.websocket = _SendingWebSocket()
+
+        await handler.finish_lesson_mode(reason="lesson_error")
+
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.CONVERSATION)
+        sent = [json.loads(payload) for payload in handler.websocket.sent]
+        self.assertEqual(sent[-1]["type"], "llm")
+        self.assertEqual(sent[-1]["emotion"], "sad")
 
     async def test_route_message_waits_for_manager_voice_provider_before_classic_text_path(self):
         handler = self._build_handler()
@@ -876,7 +1029,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bind_states_during_google_live_merge, [False])
         self.assertTrue(handler.bind_completed_event.is_set())
         self.assertFalse(handler.need_bind)
-        self.assertEqual(handler.config["voice_mode"], {"type": "google_live"})
+        self.assertEqual(
+            handler.config["voice_mode"],
+            {"type": "google_live", "fallback_to_classic_on_error": False},
+        )
         self.assertEqual(handler.config["google_live"]["api_key"], "bot-key")
         self.assertEqual(handler.config["google_live"]["model"], "live-model")
 
@@ -1042,7 +1198,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.config["voice_mode"]["type"], "google_live")
         self.assertFalse(handler.config["voice_mode"]["fallback_to_classic_on_error"])
         self.assertEqual(handler.config["google_live"]["model"], "gemini-live")
-        self.assertEqual(handler.config["google_live"]["voice_name"], "Aoede")
+        self.assertEqual(handler.config["google_live"]["voice_name"], "Kore")
         self.assertIs(handler.config["lesson"]["runtime_enabled"], True)
         self.assertEqual(handler.config["lesson"]["api_base"], "https://base.example/v1")
         self.assertEqual(handler.config["lesson"]["asset_delivery_mode"], "internet")

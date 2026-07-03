@@ -6,7 +6,8 @@ import unittest
 # not require optional MCP/server integrations just to import ConnectionHandler.
 import tests.test_connection_voice_provider_routing as routing  # noqa: F401
 
-from core.connection import ConnectionHandler, SessionMode
+ConnectionHandler = routing.ConnectionHandler
+SessionMode = routing.connection_module.SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 from core.voice.live_admission import (
     AdmissionDecision,
@@ -454,7 +455,7 @@ class GoogleLiveProviderOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
         self.assertEqual(bridge.forwarded, [b"opus-frame"])
 
-    async def test_over_budget_degrades_to_classic_without_opening_live(self):
+    async def test_over_budget_stays_google_live_only_without_opening_live(self):
         gate = _DecisionGate(
             type("Decision", (), {
                 "decision": AdmissionDecision.DEGRADE_TTS_ONLY,
@@ -477,8 +478,8 @@ class GoogleLiveProviderOrchestratorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(opened, 0)
-        self.assertEqual(fallback.started, 1)
-        self.assertIs(conn.voice_provider, fallback)
+        self.assertEqual(fallback.started, 0)
+        self.assertIs(conn.voice_provider, provider)
 
     async def test_reconnect_storm_returns_friendly_break_without_opening_live(self):
         gate = _DecisionGate(

@@ -20,6 +20,10 @@ _GUARD_ENV = (
     "TBOT_DEVICE_MINT_SECRET",
     "LESSON_ASSET_ORIGIN_BASE",
     "LESSON_ASSET_PACK_MOUNT_ROOT",
+    # runtime_enabled=true also requires a backend URL to arm lessons (added by the
+    # lesson-runtime-enablement hardening). Clear it so negative tests stay negative.
+    "COURSE_BACKEND_URL",
+    "TBOT_BACKEND_API_URL",
 )
 
 
@@ -56,8 +60,16 @@ def test_missing_lesson_block_is_boot_safe():
 def test_enabled_with_both_prerequisites_present_passes(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
+    monkeypatch.setenv("COURSE_BACKEND_URL", "https://backend.example/v1")
     # no raise — this is the supported "live" config
     assert _assert_lesson_runtime_boot_safe(_enabled()) is None
+
+
+def test_enabled_missing_backend_url_raises(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
+    monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
+    with pytest.raises(RuntimeError, match="COURSE_BACKEND_URL"):
+        _assert_lesson_runtime_boot_safe(_enabled())
 
 
 def test_enabled_missing_mint_secret_raises(monkeypatch):
@@ -86,6 +98,7 @@ def test_enabled_missing_both_lists_both(monkeypatch):
 def test_enabled_sd_pack_without_mount_root_raises(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
+    monkeypatch.setenv("COURSE_BACKEND_URL", "https://backend.example/v1")
     with pytest.raises(RuntimeError, match="LESSON_ASSET_PACK_MOUNT_ROOT"):
         _assert_lesson_runtime_boot_safe(_enabled(asset_delivery_mode="sd_pack"))
 
@@ -93,6 +106,7 @@ def test_enabled_sd_pack_without_mount_root_raises(monkeypatch):
 def test_enabled_sd_pack_with_mount_root_passes(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
+    monkeypatch.setenv("COURSE_BACKEND_URL", "https://backend.example/v1")
     assert (
         _assert_lesson_runtime_boot_safe(
             _enabled(asset_delivery_mode="sd_pack", asset_pack_mount_root="/mnt/lesson")

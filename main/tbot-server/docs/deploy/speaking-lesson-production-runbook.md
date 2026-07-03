@@ -56,10 +56,10 @@ Three coupled pieces are wired and pass their in-env gates:
 |---|---|---|
 | Speaking-lesson subsystem code (runtime + interactive sample) | ✅ done | Wired, in-env tests green. Reaches prod only via a **fresh image rebuild** (§3, item below). |
 | Firmware face-hide (`SetLessonMode`) code | ⚠️ needs-action | Wired + native gate green, but **uncommitted** on `ci/firmware-local-gates` (4 files working-tree only). Commit + push before fleet build. |
-| Provider conversation refactor / lesson model-muting-in-lesson | ❌ blocker | During the interactive answer window the model is **not muted**: child audio is forwarded into the AUDIO-modality Live session and can free-form an audio reply; suppression (`stop_output`) is reactive, post-transcript (`session_provider/google_live.py:356-381, 824-845`). Audio chunks never screened. |
-| Child-safety settings (`safety_settings` BLOCK_LOW_AND_ABOVE) | ❌ blocker | **Absent.** `_build_connect_config` attaches no `safety_settings` (`google_live/client.py:252-308`); repo-wide zero `HarmBlockThreshold` usage. Child session runs at Gemini default thresholds. |
-| Consent gate | ✅ done (with caveats) | `start_session` gates on `_voice_consent_allows_live`, fail-closed (`session_provider/google_live.py:101-114`, `config/voice_consent_client.py:21-90`). ⚠️ three bypasses must be off (`TBOT_BYPASS_VOICE_CONSENT`, `factory_test_claimed_all`, `factory_test_claimed_devices`); re-open path `_ensure_live_open_for_audio` does **not** re-verify consent. |
-| Endpoint stability | ❌ blocker | Committed device endpoint is a **QUICK trycloudflare tunnel** in every source of truth (`config.yaml:20/35`, firmware `Kconfig.projbuild:5/18`, all `sdkconfig` variants). Restart = new random hostname = stranded fleet. |
+| Provider conversation refactor / lesson model-muting-in-lesson | ✅ code done (deploy proof pending) | Interactive answer windows now force `session_mode=LESSON` before opening/forwarding child audio (`session_provider/google_live.py:381,931,1048`). `GoogleLiveAudioBridge._should_drop_lesson_model_output` drops model transcript/audio/tool events in lesson mode unless a server-authored lesson prompt explicitly opens the output gate (`audio_bridge.py:529-550`). |
+| Child-safety runtime moderation | ✅ code done (deploy proof pending) | `_build_connect_config` intentionally attaches no `safety_settings` because `google-genai` rejects that field on `LiveConnectConfig`; `test_build_connect_config_omits_sdk_forbidden_safety_settings` pins the SDK-compatible shape. Output transcript moderation is wired and tested before unsafe model audio reaches the websocket. Child response audio is covered by the deterministic transcription-only lesson gate above. |
+| Consent gate | ✅ done (with caveats) | `start_session` gates on `_voice_consent_allows_live`, fail-closed (`session_provider/google_live.py`, `config/voice_consent_client.py`). `handle_audio_bytes` re-checks active consent before forwarding every inbound frame. Production boot now rejects `TBOT_BYPASS_VOICE_CONSENT`, `factory_test_claimed_all`, and `factory_test_claimed_devices`; live VPS redeploy proof still required. |
+| Endpoint stability | ❌ blocker | Committed production endpoint seeds now use `admin.tjbot.vn` / `esp.tjbot.vn`, but live endpoint proof is still failing: the VPS/reverse proxy is not listening and deployed backend bootstrap still publishes ephemeral tunnel values until env is pinned and redeployed. |
 | Robot-server image rebuild from this tree | ❌ blocker | Image is `COPY main/tbot-server .` (`Dockerfile-server:5`). Last documented prod tag `dinhmanh11/tbot-server:vps-20260525144756` (2026-05-25, `deploy/README.md:11`) predates current lesson/TTS/provider work (tree mtime 2026-06-25) → prod lacks the lesson code. |
 | Firmware flash (LCDWiki ES3C35P) | ⚠️ needs-action | Not built/flashed from current tree; no device connected at audit time. USB flash is the only reliable path (OTA `IsNewVersionAvailable()==false`, same `PROJECT_VER 2.2.34`). |
 | Real AIza Google Live key (with quota) | ❌ blocker | Per MEMORY the prod key is a Live **ephemeral** token / 429-quota'd — operational live blocker. Need a real Live AUDIO key with quota for `gemini-3.1-flash-live-preview`. |
@@ -119,7 +119,7 @@ Do **not** reuse `vps-20260525144756` — it predates the lesson code.
 #### HARD — endpoints (prod compose requires these `:?`)
 | Env | Value | Why |
 |---|---|---|
-| `TBOT_PUBLIC_WEBSOCKET_URL` | `wss://<stable-domain>/tbot/v1/` | Overrides `config.yaml:20` quick tunnel at load (`config_loader.py:509-520`). `deploy-vps.sh:197` **rejects** any `*.trycloudflare.com`. |
+| `TBOT_PUBLIC_WEBSOCKET_URL` | `wss://<stable-domain>/tbot/v1/` | Overrides `server.websocket` at load (`config_loader.py:509-520`). `deploy-vps.sh:197` rejects ephemeral quick-tunnel hosts. |
 | `TBOT_BACKEND_API_URL` | `https://tbot-backend-8wmh.onrender.com/v1` | Overrides `server.api_url` + `lesson.api_base` (`config_loader.py:521-536`). `deploy-vps.sh:205` enforces the `/v1` prefix. |
 | `TBOT_SERVER_IMAGE` | `dinhmanh11/tbot-server:<new-tag>` | `docker-compose.prod.yml:19` (`:?` required). Must be the freshly built tag from Step 1, not `vps-20260525144756`. |
 
@@ -251,22 +251,20 @@ config confirmed.
 ## 6. Open P0 / P1 risks (from the audit)
 
 ### P0
-1. **No `safety_settings` on the child Live session.** `_build_connect_config` attaches none
-   (`google_live/client.py:252-308`); child session runs at Gemini default thresholds. Only a
-   prompt-text `<child_safety>` block + an 8-pattern EN/VI transcript regex back it.
-   **Fix:** attach `safety_settings` for all four `HarmCategory` (harassment, hate, sexually_explicit,
-   dangerous_content) at `BLOCK_LOW_AND_ABOVE` in `_build_connect_config`; make it non-optional for
-   child sessions.
-2. **Lesson model-mute absent (reactive-only).** Child audio is forwarded into the AUDIO-modality Live
-   session (`forward_decoded_input_audio → send_audio`); model can free-form an audio reply;
-   `stop_output` fires only **after** a transcript routes (`session_provider/google_live.py:356-381,
-   824-845`); audio chunks never screened (`audio_bridge.py:247-271`).
-   **Fix:** open the lesson-answer turn `response_modalities=TEXT`-only, or set
-   `_block_model_output_until_user_ack=True` at `open_lesson_child_response_window` time (before
-   forwarding child audio).
-3. **Production endpoint is a quick trycloudflare tunnel** in every committed source of truth
-   (`config.yaml:20/35`, firmware `Kconfig.projbuild:5/18`, all `sdkconfig` variants). Tunnel restart =
-   new random hostname = whole fleet stranded (OTA + WS unreachable).
+1. **Child Live moderation is code-complete, but `safety_settings` is not the fix path.**
+   `_build_connect_config` attaches no `safety_settings` because the current `google-genai`
+   Live SDK rejects the field (`test_build_connect_config_omits_sdk_forbidden_safety_settings`).
+   The runtime-owned output transcript screen is the primary control and is tested before unsafe
+   model audio reaches the websocket. Child response audio now enters a deterministic
+   transcription-only path: the provider forces `session_mode=LESSON` before opening/forwarding the
+   answer window, and the bridge drops non-prompt model output while lesson mode owns the child turn.
+   **Remaining proof:** deploy the patched image and validate CP-7 on hardware.
+2. **Parent-visible `safety_block` events remain a hardening item.** Output moderation suppresses and
+   deflects unsafe model output, but ops/parent audit surfacing is still covered by observability
+   goals rather than this runbook slice.
+3. **Production endpoint is not live on the stable host yet.** Committed production seeds point at
+   `esp.tjbot.vn`, but the live host must accept OTA + WS traffic and backend bootstrap must stop
+   publishing ephemeral tunnel values before a fleet can reconnect reliably.
    **Fix:** stand up a stable domain (named tunnel or real DNS+TLS) for OTA + WS; set
    `TBOT_PUBLIC_WEBSOCKET_URL` (env, no rebuild); reflash firmware with `CONFIG_OTA_URL`/
    `CONFIG_WEBSOCKET_URL` at the stable host (or seed the `wifi/ota_url` NVS key per

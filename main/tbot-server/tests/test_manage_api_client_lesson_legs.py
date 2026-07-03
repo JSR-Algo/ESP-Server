@@ -286,10 +286,19 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
                         "childResponse": "barn",
                         "transcript": "barn raw",
                         "utterance": "Yes! barn!",
+                        "userTranscript": "child user transcript",
+                        "userUtterance": "child user utterance",
                         "source": "voice_transcript",  # non-speech field kept
                         "nested": {"recognized_text": "nested raw", "keep": 1},
                     },
-                    "attempts": [{"ChildResponse": "attempt raw", "kept": True}],
+                    "attempts": [
+                        {
+                            "ChildResponse": "attempt raw",
+                            "user_transcript": "nested user transcript",
+                            "user_utterance": "nested user utterance",
+                            "kept": True,
+                        }
+                    ],
                 }
             ],
         }
@@ -351,6 +360,80 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Authorization", client.last["headers"])
         self.assertEqual(client.last["json"]["events"], [])
 
+    async def test_forwards_w3c_trace_context_from_batch_as_headers(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": 1}})])
+        batch = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "rojo=00f067aa0ba902b7",
+            "events": [{"type": "lesson_started"}],
+        }
+
+        await MAC.post_lesson_event(client, BASE, "dev1", batch, token=TOKEN)
+
+        self.assertEqual(
+            client.last["headers"]["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        self.assertEqual(client.last["headers"]["tracestate"], "rojo=00f067aa0ba902b7")
+        self.assertEqual(
+            client.last["json"]["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+
+
+class PostPreloadStatusContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pins_device_token_route_and_minimal_per_asset_body(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": True}})])
+
+        data = await MAC.post_preload_status(
+            client,
+            BASE,
+            "device-uuid-9",
+            {
+                "assignmentId": "a1",
+                "assetId": "backgroundScene.poster",
+                "state": "READY",
+                "checksumOk": True,
+                "sha256": "must-not-leak-extra-manifest-field",
+            },
+            token=TOKEN,
+        )
+
+        self.assertEqual(data, {"accepted": True})
+        call = client.last
+        self.assertEqual(call["method"], "POST")
+        self.assertEqual(
+            call["url"], "http://backend.test/v1/devices/device-uuid-9/preload-status"
+        )
+        self.assertEqual(call["headers"]["Authorization"], "Bearer dev-jwt-123")
+        self.assertEqual(call["headers"]["Accept"], "application/json")
+        self.assertEqual(
+            call["json"],
+            {
+                "assignmentId": "a1",
+                "assetId": "backgroundScene.poster",
+                "state": "READY",
+                "checksumOk": True,
+            },
+        )
+
+    async def test_no_token_preload_status_omits_authorization(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": None})])
+
+        await MAC.post_preload_status(
+            client,
+            BASE,
+            "dev1",
+            {"assignmentId": "a1", "assetId": "a2", "state": "FAILED"},
+        )
+
+        self.assertNotIn("Authorization", client.last["headers"])
+        self.assertEqual(
+            client.last["json"],
+            {"assignmentId": "a1", "assetId": "a2", "state": "FAILED"},
+        )
 
 if __name__ == "__main__":
     unittest.main()

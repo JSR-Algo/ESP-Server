@@ -1,4 +1,6 @@
 import asyncio
+import json
+import types
 
 import pytest
 
@@ -37,6 +39,95 @@ def test_http_server_websocket_url_preserves_explicit_and_falls_back_for_placeho
     server = SimpleHttpServer(_config(websocket="wss://public.example.com/tbot/v1/"))
     assert server._get_websocket_url("10.0.0.2", 9000) == "wss://public.example.com/tbot/v1/"
 
+@pytest.mark.asyncio
+async def test_preload_voice_alarm_snapshot_aggregates_connection_alarms():
+    alarm = types.SimpleNamespace(
+        snapshot=lambda: {
+            "tripped": True,
+            "thresholdMs": 1200.0,
+            "p95DuringPreloadMs": 1800.0,
+            "samplesTotal": 7,
+            "samplesDuringPreload": 5,
+            "preloadActive": False,
+            "lastDisabledAt": 123.0,
+        }
+    )
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={
+            "device-1": types.SimpleNamespace(lesson_voice_alarm=alarm),
+            "device-2": types.SimpleNamespace(lesson_voice_alarm=None),
+        },
+    )
+
+    response = await server.handle_preload_voice_alarm_snapshot(None)
+
+    assert response.status == 200
+    body = response.text
+    assert '"connections": 2' in body
+    assert '"alarms": 1' in body
+    assert '"deviceId": "device-1"' in body
+    assert '"tripped": true' in body
+
+@pytest.mark.asyncio
+async def test_preload_voice_alarm_reset_resets_each_connection_alarm():
+    resets = []
+    alarm = types.SimpleNamespace(reset=lambda: resets.append("reset"))
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={
+            "device-1": types.SimpleNamespace(lesson_voice_alarm=alarm),
+            "device-2": types.SimpleNamespace(lesson_voice_alarm=None),
+        },
+    )
+
+    response = await server.handle_preload_voice_alarm_reset(None)
+
+    assert response.status == 200
+    assert resets == ["reset"]
+    assert '"reset": 1' in response.text
+
+
+@pytest.mark.asyncio
+async def test_lesson_runtime_metrics_exposes_forwarder_drops_and_alarm_snapshot():
+    alarm = types.SimpleNamespace(
+        snapshot=lambda: {
+            "tripped": True,
+            "thresholdMs": 1200.0,
+            "p95DuringPreloadMs": 1800.0,
+        }
+    )
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={
+            "device-1": types.SimpleNamespace(
+                lesson_runtime=types.SimpleNamespace(
+                    forwarder=types.SimpleNamespace(dropped_events_total=3),
+                ),
+                safety_event_forwarder=types.SimpleNamespace(dropped_events_total=2),
+                lesson_voice_alarm=alarm,
+            ),
+            "device-2": types.SimpleNamespace(
+                lesson_runtime=types.SimpleNamespace(
+                    forwarder=types.SimpleNamespace(dropped_events_total=5),
+                ),
+                lesson_voice_alarm=None,
+            ),
+        },
+    )
+
+    response = await server.handle_lesson_runtime_metrics(None)
+
+    assert response.status == 200
+    body = json.loads(response.text)
+    assert body["connections"] == 2
+    assert body["counters"]["forwarder.dropped_events_total"] == 8
+    assert body["counters"]["safety_forwarder.dropped_events_total"] == 2
+    assert body["alarms"] == 1
+    assert body["devices"][0]["deviceId"] == "device-1"
+    assert body["devices"][0]["forwarderDroppedEventsTotal"] == 3
+    assert body["devices"][0]["safetyForwarderDroppedEventsTotal"] == 2
+    assert body["devices"][0]["alarm"]["tripped"] is True
 
 @pytest.mark.asyncio
 async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
@@ -79,6 +170,9 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
     assert "/internal/devices/{deviceId}/lesson-nudge" in route_paths
     assert "/internal/devices/{deviceId}/lesson-child-response" in route_paths
     assert "/internal/devices/{deviceId}/mcp-call" in route_paths
+    assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
+    assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
+    assert "/internal/lesson-runtime/metrics" in route_paths
     assert "/tbot/lesson-assets/{cacheToken}/{assetKey}" in route_paths
     assert "/tbot/assign/" in route_paths
 

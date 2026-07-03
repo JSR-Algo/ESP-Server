@@ -16,9 +16,13 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
+import tempfile
 import unittest
 
+from core.lesson.asset_cache import AssetCache, FAILED, READY
 from core.lesson.errors import LessonError
+from core.lesson.runtime import _classify_child_response_intent
 
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
@@ -135,6 +139,21 @@ def _assert_no_inline_media_payload(testcase, value, *, path="frame") -> None:
         testcase.assertFalse(lowered.startswith("data:"), f"inline data URI at {path}")
         testcase.assertLessEqual(len(value), 2048, f"oversized inline media-like string at {path}")
 
+class ChildResponseIntentClassifierTest(unittest.TestCase):
+    def test_vietnamese_object_word_is_not_confused_with_frustration_after_accent_stripping(self):
+        self.assertEqual(
+            _classify_child_response_intent("con thấy cái kho", ["barn"]),
+            "vietnamese_object",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("cái kho", ["barn"]),
+            "vietnamese_object",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("khó quá", ["barn"]),
+            "unknown_or_frustrated",
+        )
+
 def _assert_no_pronunciation_scoring_payload(testcase, value, *, path="event") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -237,10 +256,11 @@ class _FakeWebSocket:
 
 
 class _FakeConn:
-    def __init__(self, features=None, session_id=None):
+    def __init__(self, features=None, session_id=None, headers=None):
         self.logger = _DummyLogger()
         self.websocket = _FakeWebSocket()
         self.session_id = session_id or FIX["frames"]["lesson_prepare"]["sessionId"]
+        self.headers = headers or {}
         self.features = (
             {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
             if features is None
@@ -256,6 +276,7 @@ class _RecordingLessonVoiceProvider:
         self.prompts = []
         self.prompt_continue_listening = []
         self.child_response_windows = []
+        self.closed_child_response_windows = 0
 
     async def speak_lesson_step_prompt(self, text, *, continue_listening=False):
         self.prompts.append(text)
@@ -265,6 +286,9 @@ class _RecordingLessonVoiceProvider:
     async def open_lesson_child_response_window(self):
         self.child_response_windows.append(True)
         return True
+
+    def close_lesson_child_response_window(self):
+        self.closed_child_response_windows += 1
 
 
 class _FakeAssetCache:
@@ -413,6 +437,20 @@ class _FailingChildResponseWindowProvider:
     async def open_lesson_child_response_window(self):
         self.calls += 1
         raise RuntimeError("listener unavailable")
+
+class _SequenceChildResponseWindowProvider:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    async def open_lesson_child_response_window(self):
+        self.calls += 1
+        if not self.results:
+            return True
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 class _GatedSleep:
     def __init__(self):
@@ -835,6 +873,221 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
     def _sent_frames(self, conn):
         return [json.loads(p) for p in conn.websocket.sent]
 
+    async def test_preload_reports_ready_and_failed_critical_assets_to_backend(self):
+        class _PreloadStatusCache(_FakeAssetCache):
+            def synthesize_preload_status(self, assignment_version):
+                return {
+                    "assignmentVersion": assignment_version,
+                    "ready": False,
+                    "assets": [
+                        {
+                            "key": "backgroundScene.poster",
+                            "critical": True,
+                            "state": "READY",
+                            "checksumOk": True,
+                        },
+                        {
+                            "key": "teachingObject.barn",
+                            "critical": True,
+                            "state": "FAILED",
+                            "checksumOk": False,
+                        },
+                        {
+                            "key": "robotOverlay.teach",
+                            "critical": True,
+                            "state": "PENDING",
+                        },
+                        {
+                            "key": "robotOverlay.listen",
+                            "critical": False,
+                            "state": "READY",
+                            "checksumOk": True,
+                        },
+                    ],
+                }
+
+        reports = []
+
+        async def _report(report):
+            reports.append(dict(report))
+
+        conn = _FakeConn()
+        rt = self._runtime(
+            conn=conn,
+            asset_cache=_PreloadStatusCache(ready=False),
+            preload_status_reporter=_report,
+        )
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+
+        self.assertEqual(
+            reports,
+            [
+                {
+                    "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                    "assetId": "backgroundScene.poster",
+                    "state": "READY",
+                    "checksumOk": True,
+                },
+                {
+                    "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                    "assetId": "teachingObject.barn",
+                    "state": "FAILED",
+                    "checksumOk": False,
+                },
+            ],
+        )
+        self.assertEqual([frame["type"] for frame in self._sent_frames(conn)], ["lesson_prepare"])
+
+    async def test_preload_reports_real_synthesized_critical_asset_statuses_to_backend(self):
+        class _SynthesizingAssetCache(AssetCache):
+            async def preload(self):
+                self._by_key["backgroundScene.poster"].state = READY
+                self._by_key["backgroundScene.poster"].checksum_ok = True
+                self._by_key["teachingObject.barn"].state = FAILED
+                self._by_key["teachingObject.barn"].checksum_ok = False
+                self._by_key["robotOverlay.teach"].state = READY
+                self._by_key["robotOverlay.teach"].checksum_ok = True
+                return False
+
+        cache_root = tempfile.mkdtemp(prefix="lesson-runtime-cache-")
+        self.addCleanup(shutil.rmtree, cache_root, True)
+        cache = _SynthesizingAssetCache(
+            assets=[
+                {
+                    "key": "backgroundScene.poster",
+                    "path": "poster.jpg",
+                    "sha256": "a" * 64,
+                    "critical": True,
+                    "layer": "backgroundScene",
+                    "role": "poster",
+                    "mediaType": "image/jpeg",
+                },
+                {
+                    "key": "teachingObject.barn",
+                    "path": "barn.png",
+                    "sha256": "b" * 64,
+                    "critical": True,
+                    "layer": "teachingObject",
+                    "role": "primarySubject",
+                    "mediaType": "image/png",
+                },
+                {
+                    "key": "robotOverlay.teach",
+                    "path": "teach.png",
+                    "sha256": "c" * 64,
+                    "critical": False,
+                    "layer": "robotOverlay",
+                    "role": "pose",
+                    "mediaType": "image/png",
+                },
+            ],
+            profile="espTft",
+            cache_root=cache_root,
+        )
+        reports = []
+
+        async def _report(report):
+            reports.append(dict(report))
+
+        conn = _FakeConn()
+        rt = self._runtime(
+            conn=conn,
+            asset_cache=cache,
+            preload_status_reporter=_report,
+        )
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+
+        self.assertEqual(
+            reports,
+            [
+                {
+                    "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                    "assetId": "backgroundScene.poster",
+                    "state": "READY",
+                    "checksumOk": True,
+                },
+                {
+                    "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                    "assetId": "teachingObject.barn",
+                    "state": "FAILED",
+                    "checksumOk": False,
+                },
+            ],
+        )
+        self.assertEqual([frame["type"] for frame in self._sent_frames(conn)], ["lesson_prepare"])
+
+    async def test_preload_status_post_hang_does_not_block_lesson_start(self):
+        class _ReadyAssetCache(_FakeAssetCache):
+            def synthesize_preload_status(self, assignment_version):
+                return {
+                    "assignmentVersion": assignment_version,
+                    "ready": True,
+                    "assets": [
+                        {
+                            "key": "backgroundScene.poster",
+                            "critical": True,
+                            "state": "READY",
+                            "checksumOk": True,
+                        },
+                    ],
+                }
+
+        reporter_started = asyncio.Event()
+        reporter_cancelled = asyncio.Event()
+
+        async def _hung_reporter(report):
+            reporter_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                reporter_cancelled.set()
+                raise
+
+        conn = _FakeConn()
+        rt = self._runtime(
+            conn=conn,
+            asset_cache=_ReadyAssetCache(ready=True),
+            preload_status_reporter=_hung_reporter,
+        )
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await asyncio.wait_for(rt._preload_task, timeout=0.5)
+        await asyncio.wait_for(reporter_started.wait(), timeout=0.5)
+
+        self.assertEqual(rt.state, "READY")
+        self.assertEqual(
+            [frame["type"] for frame in self._sent_frames(conn)],
+            ["lesson_prepare", "lesson_start"],
+        )
+
+        await rt.close()
+        await asyncio.wait_for(reporter_cancelled.wait(), timeout=0.5)
+
+    def test_forwarded_progress_batch_preserves_ws_trace_context(self):
+        forwarder = _FakeForwarder()
+        conn = _FakeConn(
+            headers={
+                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                "tracestate": "rojo=00f067aa0ba902b7",
+            }
+        )
+        rt = self._runtime(conn=conn, forwarder=forwarder)
+
+        rt._forward({"type": "lesson_started"})
+
+        self.assertEqual(
+            forwarder.batches[0]["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        self.assertEqual(forwarder.batches[0]["tracestate"], "rojo=00f067aa0ba902b7")
+
     def test_step_body_preserves_safe_story_and_vocab_metadata(self):
         rt = self._runtime()
         step = copy.deepcopy(_build_manifest()["steps"][0])
@@ -1008,7 +1261,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # No finish hook -> backward-compatible release path still runs.
         self.assertEqual(released, ["lesson_completed"])
 
-    async def test_failed_terminal_does_not_route_to_finish_lesson_mode(self):
+    async def test_failed_terminal_routes_to_finish_lesson_mode_when_available(self):
         conn = _FakeConn()
         finished = []
         released = []
@@ -1037,9 +1290,10 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(rt.state, "FAILED")
-        # Failure must NOT show a happy face / resume conversation; it idles to dormant.
-        self.assertEqual(finished, [])
-        self.assertEqual(released, ["lesson_error"])
+        # Failure should still leave the child with a spoken/visible terminal transition
+        # instead of dropping silently into dormant mode.
+        self.assertEqual(finished, ["lesson_error"])
+        self.assertEqual(released, [])
 
     async def test_terminal_state_absorbs_late_ack_progress_and_error(self):
         conn = _FakeConn()
@@ -2121,6 +2375,17 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await rt.on_lesson_ack(_ack(4, 6))  # stop-ack: env seq 6, body.acks 4
         self.assertEqual(rt.state, "COMPLETED")
+
+    async def test_legacy_empty_lesson_ack_correlates_when_only_one_frame_is_outstanding(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack({"type": "lesson_ack"})
+
+        self.assertIsNotNone(rt._preload_task)
+        await rt._preload_task
+        self.assertIn("lesson_start", [f["type"] for f in self._sent_frames(conn)])
 
     # 3) lesson_start gated until ready ------------------------------------------
 
@@ -3618,6 +3883,32 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_completion_reentry_while_stop_ack_pending_does_not_emit_duplicate_stop(self):
+        conn = _FakeConn()
+        forwarder = _FakeForwarder()
+        manifest = _build_class_steps_manifest([("s4", "repeat", "interactive")])
+        rt = self._runtime(conn=conn, manifest=manifest, forwarder=forwarder)
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        self.assertTrue(await rt.on_child_response("con noi barn", source="voice_transcript"))
+        self.assertEqual(rt._steps_completed, 1)
+        self.assertEqual(
+            [frame["type"] for frame in self._sent_frames(conn)].count("lesson_stop"),
+            1,
+        )
+
+        await rt._maybe_finish_step()
+
+        self.assertEqual(rt._steps_completed, 1)
+        self.assertEqual(
+            [frame["type"] for frame in self._sent_frames(conn)].count("lesson_stop"),
+            1,
+        )
+
     async def test_late_progress_after_child_voice_completion_is_ignored(self):
         conn = _FakeConn()
         forwarder = _FakeForwarder()
@@ -3816,16 +4107,64 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pronunciation", completed_events[-1]["detail"])
 
         await rt.on_lesson_ack(_ack(4, 4, step_id="s5"))
-        self.assertEqual(
-            provider.prompts[:2],
-            [manifest["steps"][0]["prompt"], manifest["steps"][1]["prompt"]],
-        )
         self.assertEqual(provider.child_response_windows, [True, True])
         await rt.on_child_response("con nói barn", source="voice_transcript")
         await rt.on_lesson_ack(_ack(5, 5, step_id="s8"))
         await rt.on_lesson_ack(_ack(6, 6))
         self.assertEqual(rt.state, "COMPLETED")
         self.assertEqual(rt._steps_completed, 3)
+
+    async def test_child_voice_response_closes_provider_window_before_next_prompt(self):
+        conn = _FakeConn()
+
+        class _OrderedCloseProvider(_RecordingLessonVoiceProvider):
+            def __init__(self):
+                super().__init__()
+                self.events = []
+
+            async def speak_lesson_step_prompt(self, text, *, continue_listening=False):
+                self.events.append(("prompt", text))
+                return await super().speak_lesson_step_prompt(
+                    text,
+                    continue_listening=continue_listening,
+                )
+
+            async def open_lesson_child_response_window(self):
+                self.events.append(("open", None))
+                return await super().open_lesson_child_response_window()
+
+            def close_lesson_child_response_window(self):
+                self.events.append(("close", None))
+                super().close_lesson_child_response_window()
+
+        provider = _OrderedCloseProvider()
+        conn.voice_provider = provider
+        manifest = _build_class_steps_manifest(
+            [
+                ("s4", "model", "interactive"),
+                ("s5", "listen", "interactive"),
+            ]
+        )
+        manifest["steps"][0]["prompt"] = "Say barn."
+        manifest["steps"][1]["prompt"] = "Now say barn again."
+        rt = self._runtime(conn=conn, manifest=manifest)
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        self.assertTrue(await rt.on_child_response("barn", source="internal_dev_endpoint"))
+
+        self.assertEqual(provider.closed_child_response_windows, 1)
+        self.assertEqual(provider.prompts, ["Say barn."])
+        await rt.on_lesson_ack(_ack(4, 4, step_id="s5"))
+        self.assertEqual(provider.prompts, ["Say barn.", "Now say barn again."])
+        self.assertLess(
+            provider.events.index(("close", None)),
+            provider.events.index(("prompt", "Now say barn again.")),
+        )
 
     async def test_child_voice_response_is_ignored_when_empty_inactive_or_passive(self):
         conn = _FakeConn()
@@ -4045,19 +4384,79 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         conn = _FakeConn()
         provider = _FailingChildResponseWindowProvider()
         conn.voice_provider = provider
+        sleeper = _GatedSleep()
+        conn.config["lesson"] = {"child_response_timeout_sec": 3, "max_no_answer_attempts": 1}
         manifest = _build_class_steps_manifest([("s4", "repeat", "interactive")])
-        rt = self._runtime(conn=conn, manifest=manifest)
+        rt = self._runtime(conn=conn, manifest=manifest, sleep=sleeper)
         await rt.start()
         await rt.on_lesson_ack(_ack(1, 1))
         await rt._preload_task
         await rt.on_lesson_ack(_ack(2, 2))
 
         await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+        await asyncio.sleep(0)
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(rt.state, "RUNNING")
         self.assertEqual(rt._step_id, "s4")
         self.assertNotIn("lesson_stop", [f["type"] for f in self._sent_frames(conn)])
+        self.assertEqual([entry[0] for entry in sleeper.calls], [3])
+
+        sleeper.release_latest()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(rt.state, "PAUSED")
+        abandoned = [
+            event
+            for batch in rt.forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "lesson_abandoned"
+        ]
+        self.assertEqual(abandoned[-1]["reason"], "child_inactive")
+
+    async def test_child_response_reprompt_reopen_failure_keeps_liveness_until_pause(self):
+        conn = _FakeConn()
+        provider = _SequenceChildResponseWindowProvider(
+            [True, RuntimeError("listener unavailable")]
+        )
+        conn.voice_provider = provider
+        conn.voice_provider.prompts = []
+        sleeper = _GatedSleep()
+        conn.config["lesson"] = {"child_response_timeout_sec": 3, "max_no_answer_attempts": 2}
+        manifest = _build_class_steps_manifest([("s4", "repeat", "interactive")])
+        rt = self._runtime(conn=conn, manifest=manifest, sleep=sleeper)
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+        await asyncio.sleep(0)
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual([entry[0] for entry in sleeper.calls], [3])
+
+        sleeper.release_latest()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(rt.state, "RUNNING")
+        self.assertEqual([entry[0] for entry in sleeper.calls], [3])
+
+        sleeper.release_latest()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(rt.state, "PAUSED")
+        abandoned = [
+            event
+            for batch in rt.forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "lesson_abandoned"
+        ]
+        self.assertEqual(abandoned[-1]["reason"], "child_inactive")
 
     async def test_child_response_window_failure_does_not_accept_voice_response(self):
         conn = _FakeConn()
@@ -4092,7 +4491,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_ack_timeout_fails_and_releases_lesson_mode(self):
         sleeper = _GatedSleep()
         conn = _FakeConn()
-        conn.config["lesson"] = {"frame_ack_timeout_sec": 4}
+        conn.config["lesson"] = {"frame_ack_timeout_sec": 4, "frame_ack_max_retries": 0}
         released = []
 
         async def release_lesson_mode(*, reason):
@@ -4117,6 +4516,39 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 for batch in forwarder.batches
             )
         )
+
+    async def test_prepare_ack_timeout_retries_before_failing_lesson(self):
+        sleeper = _GatedSleep()
+        conn = _FakeConn()
+        conn.config["lesson"] = {"frame_ack_timeout_sec": 4, "frame_ack_max_retries": 1}
+        released = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        conn.release_lesson_mode = release_lesson_mode
+        rt = self._runtime(conn=conn, sleep=sleeper)
+
+        await rt.start()
+        await asyncio.sleep(0)
+        sleeper.release_latest()
+        await asyncio.sleep(0)
+
+        sent = self._sent_frames(conn)
+        self.assertEqual([f["type"] for f in sent], ["lesson_prepare", "lesson_prepare"])
+        self.assertEqual([f["sequence"] for f in sent], [1, 2])
+        self.assertEqual(rt.state, "PRELOADING")
+        self.assertEqual(released, [])
+
+        await rt.on_lesson_ack(_ack(1, 1))
+        self.assertIsNone(rt._preload_task)
+
+        await rt.on_lesson_ack(_ack(2, 1))
+        await rt._preload_task
+
+        sent = self._sent_frames(conn)
+        self.assertEqual([f["type"] for f in sent], ["lesson_prepare", "lesson_prepare", "lesson_start"])
+        self.assertEqual(rt.state, "READY")
 
     async def test_child_inactivity_reprompts_without_step_timeout_or_scoring(self):
         sleeper = _GatedSleep()
@@ -4953,6 +5385,144 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chưa có bài học", conn.lesson_start_status["message"].lower())
         self.assertEqual(conn.websocket.sent, [])
 
+    async def test_current_assignment_backend_errors_surface_redacted_status(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        for exc in (
+            TimeoutError("timeout from http://backend.test/v1 with Bearer secret-device-token"),
+            RuntimeError("backend down at http://backend.test/v1?token=secret-device-token"),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                conn = _RepublishConn()
+                events = []
+
+                class _CapturingLogger(_DummyLogger):
+                    def warning(self, message, *args, **kwargs):
+                        events.append(("warning", str(message)))
+                        return None
+
+                conn.logger = _CapturingLogger()
+
+                async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+                    return device_id, "secret-device-token"
+
+                async def _get_child_name(client, base_url, device_id, *, token=None):
+                    return None
+
+                async def _get_assignment(client, base_url, device_id, *, token=None):
+                    raise exc
+
+                async def _get_manifest(*args, **kwargs):
+                    events.append(("manifest", "called"))
+                    return _build_manifest(), f'"lesson-3-espTft-{_manifest_checksum()}"'
+
+                saved = (
+                    dtc.resolve_device_identity,
+                    mac.get_device_child_name,
+                    mac.get_current_assignment,
+                    mac.get_lesson_manifest,
+                )
+                dtc.resolve_device_identity = _resolve_device_identity
+                mac.get_device_child_name = _get_child_name
+                mac.get_current_assignment = _get_assignment
+                mac.get_lesson_manifest = _get_manifest
+                try:
+                    result = await maybe_start_lesson_on_connect(conn)
+                finally:
+                    (
+                        dtc.resolve_device_identity,
+                        mac.get_device_child_name,
+                        mac.get_current_assignment,
+                        mac.get_lesson_manifest,
+                    ) = saved
+
+                self.assertIsNone(result)
+                self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
+                status_message = conn.lesson_start_status["message"]
+                self.assertTrue(status_message)
+                self.assertNotIn("secret-device-token", status_message)
+                self.assertNotIn("backend.test", status_message)
+                self.assertNotIn("Bearer", status_message)
+                self.assertFalse(any(level == "manifest" for level, _message in events))
+                warning_messages = [message for level, message in events if level == "warning"]
+                self.assertTrue(warning_messages)
+                for message in warning_messages:
+                    self.assertNotIn("secret-device-token", message)
+                    self.assertNotIn("backend.test", message)
+                    self.assertNotIn("Bearer", message)
+
+    async def test_manifest_backend_error_surfaces_redacted_status(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn()
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def warning(self, message, *args, **kwargs):
+                events.append(("warning", str(message)))
+                return None
+
+        conn.logger = _CapturingLogger()
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "secret-device-token"
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            return None
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return {
+                "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                "assignmentVersion": 1,
+                "lessonId": FIX["frames"]["lesson_prepare"]["lessonId"],
+                "lessonVersion": 3,
+                "manifestChecksum": _manifest_checksum(),
+                "profile": "espTft",
+                "state": "ASSIGNED",
+            }
+
+        async def _get_manifest(*args, **kwargs):
+            raise RuntimeError("manifest fetch failed at http://backend.test/v1?token=secret-device-token")
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+            ) = saved
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
+        status_message = conn.lesson_start_status["message"]
+        self.assertTrue(status_message)
+        self.assertNotIn("secret-device-token", status_message)
+        self.assertNotIn("backend.test", status_message)
+        self.assertNotIn("Bearer", status_message)
+        warning_messages = [message for level, message in events if level == "warning"]
+        self.assertTrue(warning_messages)
+        for message in warning_messages:
+            self.assertNotIn("secret-device-token", message)
+            self.assertNotIn("backend.test", message)
+            self.assertNotIn("Bearer", message)
+        self.assertEqual(conn.websocket.sent, [])
+
     async def test_missing_device_token_is_surfaced_without_legacy_tokenless_pull(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
@@ -4990,8 +5560,52 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "DEVICE_TOKEN_UNAVAILABLE")
+        self.assertEqual(conn.lesson_start_status["reason"], "missing_identity")
         self.assertTrue(
             any("device token required" in message for _level, message in events),
+            events,
+        )
+        self.assertTrue(
+            any("device token required" in message and f"session_id={conn.session_id}" in message for _level, message in events),
+            events,
+        )
+
+    async def test_device_token_mint_exception_sets_token_unavailable_status(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn()
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def warning(self, message, *args, **kwargs):
+                events.append(("warning", str(message)))
+                return None
+
+        conn.logger = _CapturingLogger()
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            raise RuntimeError("mint route refused unclaimed device with secret-token")
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            raise AssertionError("assignment/current must not run after token mint failure")
+
+        saved = (dtc.resolve_device_identity, mac.get_current_assignment)
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            dtc.resolve_device_identity, mac.get_current_assignment = saved
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "DEVICE_TOKEN_UNAVAILABLE")
+        self.assertEqual(conn.lesson_start_status["reason"], "missing_identity")
+        self.assertTrue(
+            any("device-token mint unavailable" in message for _level, message in events),
             events,
         )
 
@@ -5044,7 +5658,8 @@ class _RegistryStartLessonHandler:
 class _LiveClientStub:
     connected = True
 
-    def __init__(self):
+    def __init__(self, provider=None):
+        self.provider = provider
         self.sent_texts = []
         self.interrupts = 0
         self.audio_stream_ends = 0
@@ -5057,6 +5672,8 @@ class _LiveClientStub:
 
     async def send_text(self, text):
         self.sent_texts.append(text)
+        if self.provider is not None:
+            self.provider.conn.google_live_lesson_prompt_output_allowed = False
 
     async def close(self):
         self.connected = False
@@ -5482,6 +6099,37 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
         self.assertIs(conn.lesson_runtime, result)
+        self.assertTrue(pinned.closed)
+        self.assertFalse(pinned.asset_cache.evicted)
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+        self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
+
+    async def test_unchanged_failed_session_restarts_when_child_says_start_again(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertIsNot(result, pinned)
+        self.assertIs(conn.lesson_runtime, result)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
         self.assertTrue(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
@@ -6168,7 +6816,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.loop = asyncio.get_running_loop()
         conn.func_handler = _RegistryStartLessonHandler()
         provider = GoogleLiveProvider(conn)
-        provider._client = _LiveClientStub()
+        provider._client = _LiveClientStub(provider)
         opened_windows = []
         open_child_response_window = provider.open_lesson_child_response_window
 
@@ -6227,7 +6875,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
             await rt.on_lesson_ack(_ack(frame["sequence"], inbound_seq, step_id=sid))
             if klass == "interactive":
-                await rt.on_child_response(f"child said {sid}", source="voice_transcript")
+                await rt.on_child_response("barn", source="voice_transcript")
             inbound_seq += 1
 
         stop = [f for f in sent() if f["type"] == "lesson_stop"][-1]
@@ -6296,7 +6944,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.loop = asyncio.get_running_loop()
         conn.func_handler = _RegistryStartLessonHandler()
         provider = GoogleLiveProvider(conn)
-        provider._client = _LiveClientStub()
+        provider._client = _LiveClientStub(provider)
         opened_windows = []
         open_child_response_window = provider.open_lesson_child_response_window
 
@@ -6340,7 +6988,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
             await rt.on_lesson_ack(_ack(frame["sequence"], inbound_seq, step_id=sid))
             if expected_step["completionClass"] == "interactive":
-                await rt.on_child_response(f"child said {sid}", source="voice_transcript")
+                await rt.on_child_response("barn", source="voice_transcript")
             inbound_seq += 1
 
         stop = [f for f in sent() if f["type"] == "lesson_stop"][-1]
@@ -6481,7 +7129,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.config["lesson"]["asset_delivery_mode"] = "sd_pack"
         conn.func_handler = _RegistryStartLessonHandler()
         provider = GoogleLiveProvider(conn)
-        provider._client = _LiveClientStub()
+        provider._client = _LiveClientStub(provider)
         opened_windows = []
         open_child_response_window = provider.open_lesson_child_response_window
 
@@ -6566,7 +7214,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
             await rt.on_lesson_ack(_ack(frame["sequence"], inbound_seq, step_id=step_id))
             if step_id in interactive_steps:
-                self.assertTrue(await rt.on_child_response(f"con nói {step_id} barn", source="voice_transcript"))
+                self.assertTrue(await rt.on_child_response("barn", source="voice_transcript"))
             inbound_seq += 1
 
         stop = sent()[-1]

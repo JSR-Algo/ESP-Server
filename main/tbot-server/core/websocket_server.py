@@ -102,7 +102,11 @@ class WebSocketServer:
         self.allowed_devices = set(auth_config.get("allowed_devices", []))
         secret_key = self.config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds", None)
-        self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+        self.auth = AuthManager(
+            secret_key=secret_key,
+            expire_seconds=expire_seconds,
+            device_revoked_after=auth_config.get("device_revoked_after", {}),
+        )
         self.lesson_connections = {}
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
@@ -226,14 +230,14 @@ class WebSocketServer:
 
     @staticmethod
     def _copy_query_identity_headers(websocket):
-        """Accept firmware/browser query auth even when device headers are present."""
+        """Accept identity query params, but never promote URL auth tokens."""
         from urllib.parse import parse_qs, urlparse
 
         request_path = getattr(websocket.request, "path", "")
         if not request_path:
             return
         query_params = parse_qs(urlparse(request_path).query)
-        for name in ("device-id", "client-id", "authorization"):
+        for name in ("device-id", "client-id"):
             if websocket.request.headers.get(name, None) is None and name in query_params:
                 websocket.request.headers[name] = query_params[name][0]
 

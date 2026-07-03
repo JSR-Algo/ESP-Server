@@ -20,6 +20,7 @@ config.manage_api_client stub, etc.) and exposes the same ConnectionHandler /
 ClassicPipelineProvider / connection_module the routing suite uses.
 """
 
+import asyncio
 import unittest
 
 # Importing this module runs _install_connection_import_stubs() at import time,
@@ -135,6 +136,14 @@ class _RecordingRuntime:
 
     async def on_lesson_error(self, msg_json):
         self.calls.append(("on_lesson_error", msg_json))
+
+class _ClosableRuntime(_RecordingRuntime):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeConnNoRuntime:
@@ -527,6 +536,8 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
 
         handler = _build_handler()
         handler.config["lesson"] = {"runtime_enabled": True}
+        handler.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
+        handler.lesson_runtime = _ClosableRuntime()
         alarm = PreloadVoiceLatencyAlarm(
             disable_callback=handler._disable_lesson_runtime,
             threshold_ms=1000.0,
@@ -539,6 +550,10 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
             handler.note_voice_round_trip(2000.0)
         self.assertTrue(alarm.tripped)
         self.assertFalse(handler._lesson_runtime_enabled())
+        await asyncio.sleep(0)
+        self.assertTrue(handler.lesson_pull_task.cancelled())
+        self.assertIsNone(handler.lesson_runtime)
+        self.assertTrue(alarm.tripped)
 
     # ---- Real TextMessageProcessor routes lesson_ack to the handler -----
     async def test_processor_routes_lesson_ack_to_handler(self):

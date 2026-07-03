@@ -4,8 +4,8 @@ The sibling ``test_config_loader_edges.py`` already drives most of ``config.conf
 through its real (importlib-loaded) module, but eleven statements stay uncovered because
 no existing test hits these specific branches:
 
-  * 214  -- lesson auto-enable falling back to ``server.api_url`` for ``api_base``
-            (the COURSE_BACKEND_URL path always sets ``lesson.api_base`` first, masking it)
+  * 214  -- lesson auto-enable refuses implicit ``server.api_url`` fallback unless an
+            explicit production backend URL env is present
   * 280  -- production boot ``RuntimeError`` for missing env prerequisites
   * 285  -- production boot ``TBOT_REQUIRE_DEVICE_TOKEN`` not truthy-bool
   * 287  -- production boot ``ADMIN_AUTH_DISABLED`` must not be true
@@ -96,17 +96,16 @@ def _clear_production_env(monkeypatch):
 # ── line 214: lesson auto-enable falls back to server.api_url for api_base ────────
 
 
-def test_lesson_auto_enable_uses_server_api_url_when_api_base_absent(monkeypatch):
-    """flag absent + runtime off + no lesson.api_base -> api_base must fall back to
-    server.api_url (line 214), and with the mint secret + asset origin present the
-    runtime auto-enables (line 216). The COURSE_BACKEND_URL path can't reach 214
-    because it always seeds lesson.api_base first."""
+def test_lesson_auto_enable_refuses_server_api_url_without_explicit_backend_env(monkeypatch):
+    """flag absent + runtime off + no explicit backend URL env keeps runtime dark.
+
+    A shipped or config-file ``server.api_url`` is not enough to arm production
+    lessons; COURSE_BACKEND_URL/TBOT_BACKEND_API_URL must be explicit.
+    """
     _clear_production_env(monkeypatch)
     monkeypatch.delenv("LESSON_RUNTIME_ENABLED", raising=False)
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin/")
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
-    # No COURSE_BACKEND_URL -> lesson.api_base stays unset; server.api_url is the
-    # only endpoint, forcing the line-214 fallback.
     config = {
         "lesson": {"runtime_enabled": False},
         "server": {"api_url": "https://server.only/v1"},
@@ -114,7 +113,7 @@ def test_lesson_auto_enable_uses_server_api_url_when_api_base_absent(monkeypatch
 
     result = config_loader._apply_lesson_env_overrides(config)
 
-    assert result["lesson"]["runtime_enabled"] is True
+    assert result["lesson"].get("runtime_enabled") is False
 
 
 def test_lesson_auto_enable_skipped_when_no_endpoint_anywhere(monkeypatch):
@@ -140,7 +139,7 @@ def test_production_boot_raises_on_missing_env_prereqs(monkeypatch):
     """auth.enabled True but the four required env vars absent -> line 280 RuntimeError."""
     _clear_production_env(monkeypatch)
     monkeypatch.setenv("NODE_ENV", "production")
-    config = {"server": {"auth": {"enabled": True}}}
+    config = {"server": {"auth": {"enabled": True}, "auth_key": "auth-key"}}
 
     with pytest.raises(RuntimeError, match="missing: TBOT_REQUIRE_DEVICE_TOKEN"):
         config_loader._assert_production_boot_safe(config)
@@ -156,7 +155,7 @@ def test_production_boot_requires_device_token_truthy_bool(monkeypatch):
     monkeypatch.setenv("JWT_PUBLIC_KEY", "key")
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.test")
-    config = {"server": {"auth": {"enabled": True}}}
+    config = {"server": {"auth": {"enabled": True}, "auth_key": "auth-key"}}
 
     with pytest.raises(RuntimeError, match="TBOT_REQUIRE_DEVICE_TOKEN=true"):
         config_loader._assert_production_boot_safe(config)
@@ -171,31 +170,26 @@ def test_production_boot_rejects_admin_auth_disabled(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.test")
     monkeypatch.setenv("ADMIN_AUTH_DISABLED", "true")
-    config = {"server": {"auth": {"enabled": True}}}
+    config = {"server": {"auth": {"enabled": True}, "auth_key": "auth-key"}}
 
     with pytest.raises(RuntimeError, match="ADMIN_AUTH_DISABLED must not be true"):
         config_loader._assert_production_boot_safe(config)
 
 
-# ── line 294: AEC readiness early-return for non-google_live voice_mode ────────────
+# ── AEC readiness early-return for non-google_live voice_mode ─────────────────────
 
 
 def test_aec_ready_check_noop_for_non_google_live(monkeypatch):
     """voice_mode != google_live -> _assert_production_google_live_aec_ready returns
-    early (line 294) without constructing an AecProcessor."""
+    early without constructing an AecProcessor."""
     _clear_production_env(monkeypatch)
-    monkeypatch.setenv("NODE_ENV", "production")
-    monkeypatch.setenv("TBOT_REQUIRE_DEVICE_TOKEN", "true")
-    monkeypatch.setenv("JWT_PUBLIC_KEY", "key")
-    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
-    monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.test")
     config = {
-        "server": {"auth": {"enabled": True}},
+        "server": {"auth": {"enabled": True}, "auth_key": "auth-key"},
         "voice_mode": {"type": "classic_pipeline"},
     }
 
-    # No raise: classic_pipeline skips the AEC gate entirely.
-    assert config_loader._assert_production_boot_safe(config) is None
+    # No raise: this helper's own non-google_live branch skips the AEC gate.
+    assert config_loader._assert_production_google_live_aec_ready(config) is None
 
 
 # ── lines 307-308: production boot requires active AEC (real bypassed processor) ───
@@ -212,7 +206,7 @@ def test_production_boot_raises_when_real_aec_bypassed(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.test")
     config = {
-        "server": {"auth": {"enabled": True}},
+        "server": {"auth": {"enabled": True}, "auth_key": "auth-key"},
         "voice_mode": {"type": "google_live"},
         "google_live": {"aec_enabled": False},
     }

@@ -24,6 +24,22 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
         self.assertFalse(config["native_voice"])
         self.assertEqual(config["voice_name"], "")
 
+    def test_main_defaults_to_production_voice(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        captured = {}
+
+        async def fake_run_smoke(config):
+            captured.update(config)
+
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "key"}, clear=True), patch(
+            "sys.argv", ["google_live_smoke.py"]
+        ), patch.object(smoke, "_run_smoke", fake_run_smoke):
+            self.assertEqual(smoke.main(), 0)
+
+        self.assertEqual(captured["voice_name"], "Kore")
+        self.assertEqual(captured["language_code"], "vi-VN")
+        self.assertTrue(captured["native_voice"])
+
     def test_has_resolvable_api_key_rejects_missing_placeholder_env(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
 

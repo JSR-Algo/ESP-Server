@@ -1,19 +1,21 @@
 """P5 (GATED) — WS auth token mint/verify round-trip.
 
-server.auth.enabled ships FALSE; this suite proves that WHEN it is turned on:
+The committed production config now ships ``server.auth.enabled: true``. This
+suite proves the auth-on production path and keeps the explicit auth-disabled
+compatibility branch covered:
   - the OTA handler mints a real, non-empty websocket.token, and
   - WebSocketServer._handle_auth ACCEPTS that token and REJECTS missing/invalid
     Authorization, for a non-whitelisted device.
 
-Enabling auth on the live public tunnel remains a separate activation step
-(lockout risk) — these tests only verify the code path is correct when enabled,
-they do NOT change the shipped default.
+Live real-robot proof remains a separate deploy/on-device step because firmware
+must present the OTA-minted token before auth can be considered complete.
 """
 
 import asyncio
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 # Mirror the defensive re-import guard used by test_ota_websocket_url.py so a
 # previously-stubbed core.auth module does not leak in under a full-suite run.
@@ -141,9 +143,80 @@ class WsAuthTokenRoundTripTest(unittest.TestCase):
         with self.assertRaises(AuthenticationError):
             asyncio.run(server._handle_auth(ws))
 
+    def test_enabled_auth_rejects_revoked_token(self):
+        token = _mint_ota_token({"enabled": True})
+        server = _build_ws_server({"enabled": True})
+        self.assertTrue(server.auth.revoke_token(token, CLIENT, DEVICE))
+        ws = _fake_ws(
+            {
+                "device-id": DEVICE,
+                "client-id": CLIENT,
+                "authorization": f"Bearer {token}",
+            }
+        )
+        with self.assertRaises(AuthenticationError):
+            asyncio.run(server._handle_auth(ws))
+
+    def test_enabled_auth_rejects_token_before_configured_device_revocation_cutoff(self):
+        with patch("core.auth.time.time", return_value=1000):
+            token = _mint_ota_token({"enabled": True})
+        server = _build_ws_server(
+            {"enabled": True, "device_revoked_after": {DEVICE: 1001}}
+        )
+        ws = _fake_ws(
+            {
+                "device-id": DEVICE,
+                "client-id": CLIENT,
+                "authorization": f"Bearer {token}",
+            }
+        )
+        with patch("core.auth.time.time", return_value=1002):
+            with self.assertRaises(AuthenticationError):
+                asyncio.run(server._handle_auth(ws))
+
+    def test_enabled_auth_revocation_cutoff_does_not_affect_other_devices(self):
+        other_device = "AA:BB:CC:DD:EE:02"
+        with patch("core.auth.time.time", return_value=1000):
+            token = _mint_ota_token({"enabled": True})
+            other = OTAHandler(
+                {
+                    "server": {
+                        "auth_key": SECRET,
+                        "auth": {"enabled": True},
+                        "websocket": "wss://ws.example.com/tbot/v1/",
+                        "port": 8000,
+                        "http_port": 8003,
+                    },
+                    "firmware_cache_ttl": 30,
+                }
+            )._mint_websocket_token(CLIENT, other_device)
+
+        server = _build_ws_server(
+            {"enabled": True, "device_revoked_after": {DEVICE: 1001}}
+        )
+        revoked_ws = _fake_ws(
+            {
+                "device-id": DEVICE,
+                "client-id": CLIENT,
+                "authorization": f"Bearer {token}",
+            }
+        )
+        other_ws = _fake_ws(
+            {
+                "device-id": other_device,
+                "client-id": CLIENT,
+                "authorization": f"Bearer {other}",
+            }
+        )
+
+        with patch("core.auth.time.time", return_value=1002):
+            with self.assertRaises(AuthenticationError):
+                asyncio.run(server._handle_auth(revoked_ws))
+            asyncio.run(server._handle_auth(other_ws))
+
     def test_disabled_auth_bypasses_verification(self):
-        """Shipped default: auth disabled -> _handle_auth is a no-op even with
-        no Authorization header (matches the empty token OTA advertises)."""
+        """Compatibility mode: auth disabled -> _handle_auth is a no-op even
+        with no Authorization header (matches the empty token OTA advertises)."""
         server = _build_ws_server({"enabled": False})
         ws = _fake_ws({"device-id": DEVICE, "client-id": CLIENT})
         # Must not raise despite missing Authorization.

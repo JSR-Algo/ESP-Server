@@ -70,6 +70,11 @@ from core.voice.session_orchestrator import (  # noqa: E402
     normalize_session_mode,
 )
 
+_ORIGINAL_ASYNCIO_SLEEP = asyncio.sleep
+_ORIGINAL_ASYNCIO_CREATE_TASK = asyncio.create_task
+_ORIGINAL_ASYNCIO_RUN = asyncio.run
+_ORIGINAL_ASYNCIO_RUN_COROUTINE_THREADSAFE = asyncio.run_coroutine_threadsafe
+
 FIX = L.FIX
 
 DEVICE_ID = "AA:BB:CC:DD:EE:01"
@@ -141,6 +146,14 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
     """Drives the full lesson journey over a real localhost websocket."""
 
     def setUp(self):
+        # Several lower-level connection tests patch asyncio module attributes
+        # directly. Because modules are shared process-wide, reset the event-loop
+        # primitives this real websocket E2E depends on before opening sockets.
+        asyncio.sleep = _ORIGINAL_ASYNCIO_SLEEP
+        asyncio.create_task = _ORIGINAL_ASYNCIO_CREATE_TASK
+        asyncio.run = _ORIGINAL_ASYNCIO_RUN
+        asyncio.run_coroutine_threadsafe = _ORIGINAL_ASYNCIO_RUN_COROUTINE_THREADSAFE
+
         # ── module-level bootstrap stubs (must precede WebSocketServer construction).
         self._saved_initialize_modules = ws_mod.initialize_modules
         self._saved_setup_logging = ws_mod.setup_logging
@@ -167,6 +180,12 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
 
         self._saved_create_provider = conn_mod.create_voice_session_provider
         conn_mod.create_voice_session_provider = _fake_voice_factory
+        self._saved_generate_chat_title = conn_mod.generate_and_save_chat_title
+
+        async def _skip_chat_title(_session_id):
+            return None
+
+        conn_mod.generate_and_save_chat_title = _skip_chat_title
 
         # ── backend HTTP seam: mint + assignment + manifest + child-name + the shared
         # HTTP-execute helper. Patched as MODULE ATTRIBUTES (the runtime + forwarder
@@ -230,6 +249,7 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
         ws_mod.initialize_modules = self._saved_initialize_modules
         ws_mod.setup_logging = self._saved_setup_logging
         conn_mod.create_voice_session_provider = self._saved_create_provider
+        conn_mod.generate_and_save_chat_title = self._saved_generate_chat_title
         self._dtc.resolve_device_identity = self._saved["mint"]
         self._mac.get_current_assignment = self._saved["assignment"]
         self._mac.get_lesson_manifest = self._saved["manifest"]

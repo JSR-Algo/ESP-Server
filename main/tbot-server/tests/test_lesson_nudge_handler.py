@@ -6,9 +6,24 @@ from unittest.mock import AsyncMock, patch
 
 
 class _FakeRequest:
-    def __init__(self, *, device_id="device-1", secret="secret", body=None):
+    def __init__(
+        self,
+        *,
+        device_id="device-1",
+        secret="secret",
+        body=None,
+        headers=None,
+        host="localhost",
+        remote="127.0.0.1",
+    ):
         self.match_info = {"deviceId": device_id}
-        self.headers = {"X-Mint-Secret": secret}
+        self.headers = {}
+        if secret is not None:
+            self.headers["X-Mint-Secret"] = secret
+        if headers:
+            self.headers.update(headers)
+        self.host = host
+        self.remote = remote
         self._body = body if body is not None else {"assignmentId": "assignment-1"}
 
     async def json(self):
@@ -57,6 +72,37 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 202)
         self.assertEqual(runtime.calls, [("barn", "internal_dev_endpoint")])
 
+    async def test_child_response_endpoint_stops_live_output_before_runtime_response(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+
+        events = []
+
+        class _Bridge:
+            async def stop_output(self):
+                events.append("stop_output")
+
+        class _Runtime:
+            async def on_child_response(self, text, *, source="voice_transcript"):
+                events.append(("runtime", text, source))
+                return True
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(
+            lesson_runtime=_Runtime(),
+            voice_provider=SimpleNamespace(_bridge=_Bridge()),
+        )
+        handler = LessonNudgeHandler({}, {"device-1": conn})
+
+        response = await handler.handle_child_response_post(
+            _FakeRequest(body={"text": "không biết"})
+        )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(
+            events,
+            ["stop_output", ("runtime", "không biết", "internal_dev_endpoint")],
+        )
+
     async def test_triggers_existing_pull_path_for_live_handler(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler
         import core.lesson.runtime as runtime
@@ -74,6 +120,127 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 202)
         pull.assert_awaited_once_with(conn)
+
+    async def test_sample_nudge_reports_refused_when_sample_runtime_does_not_start(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.sample as sample
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(
+            _sample_lesson_enabled=lambda: True,
+            lesson_start_status={
+                "code": "START_REFUSED",
+                "message": "Robot chưa hiển thị được bài học mẫu.",
+            },
+        )
+        start = AsyncMock(return_value=None)
+        saved = sample.start_sample_lesson
+        sample.start_sample_lesson = start
+        try:
+            handler = LessonNudgeHandler({}, {"device-1": conn})
+            response = await handler.handle_post(_FakeRequest())
+        finally:
+            sample.start_sample_lesson = saved
+
+        self.assertEqual(response.status, 202)
+        payload = json.loads(response.text)
+        self.assertEqual(
+            payload["data"],
+            {
+                "nudged": False,
+                "mode": "sample",
+                "reason": "START_REFUSED",
+                "message": "Robot chưa hiển thị được bài học mẫu.",
+            },
+        )
+        start.assert_awaited_once_with(conn)
+
+    async def test_local_sample_demo_bypass_starts_sample_without_mint_secret(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.sample as sample
+
+        os.environ.pop("TBOT_DEVICE_MINT_SECRET", None)
+        os.environ["TBOT_LOCAL_SAMPLE_DEMO_BYPASS"] = "1"
+        conn = SimpleNamespace(_sample_lesson_enabled=lambda: True)
+        start = AsyncMock(return_value=object())
+        saved = sample.start_sample_lesson
+        sample.start_sample_lesson = start
+        try:
+            handler = LessonNudgeHandler({}, {"device-1": conn})
+            response = await handler.handle_post(
+                _FakeRequest(
+                    secret=None,
+                    headers={"X-TBOT-Local-Sample-Demo": "1"},
+                    host="localhost:8080",
+                    remote="127.0.0.1",
+                )
+            )
+        finally:
+            sample.start_sample_lesson = saved
+            os.environ.pop("TBOT_LOCAL_SAMPLE_DEMO_BYPASS", None)
+
+        self.assertEqual(response.status, 202)
+        payload = json.loads(response.text)
+        self.assertEqual(payload["data"], {"nudged": True, "mode": "sample"})
+        start.assert_awaited_once_with(conn)
+
+    async def test_local_sample_demo_bypass_refuses_public_host(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.sample as sample
+
+        os.environ.pop("TBOT_DEVICE_MINT_SECRET", None)
+        os.environ["TBOT_LOCAL_SAMPLE_DEMO_BYPASS"] = "1"
+        conn = SimpleNamespace(_sample_lesson_enabled=lambda: True)
+        start = AsyncMock(return_value=object())
+        saved = sample.start_sample_lesson
+        sample.start_sample_lesson = start
+        try:
+            handler = LessonNudgeHandler({}, {"device-1": conn})
+            response = await handler.handle_post(
+                _FakeRequest(
+                    secret=None,
+                    headers={"X-TBOT-Local-Sample-Demo": "1"},
+                    host="esp.tjbot.vn",
+                    remote="127.0.0.1",
+                )
+            )
+        finally:
+            sample.start_sample_lesson = saved
+            os.environ.pop("TBOT_LOCAL_SAMPLE_DEMO_BYPASS", None)
+
+        self.assertEqual(response.status, 403)
+        payload = json.loads(response.text)
+        self.assertEqual(payload["error"], "LOCAL_SAMPLE_DEMO_FORBIDDEN")
+        start.assert_not_awaited()
+
+    async def test_local_sample_demo_bypass_refuses_assignment_pull_path(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.runtime as runtime
+
+        os.environ.pop("TBOT_DEVICE_MINT_SECRET", None)
+        os.environ["TBOT_LOCAL_SAMPLE_DEMO_BYPASS"] = "1"
+        conn = object()
+        pull = AsyncMock(return_value=None)
+        saved = runtime.maybe_start_lesson_on_connect
+        runtime.maybe_start_lesson_on_connect = pull
+        try:
+            handler = LessonNudgeHandler({}, {"device-1": conn})
+            response = await handler.handle_post(
+                _FakeRequest(
+                    secret=None,
+                    headers={"X-TBOT-Local-Sample-Demo": "1"},
+                    host="127.0.0.1:8080",
+                    remote="127.0.0.1",
+                )
+            )
+        finally:
+            runtime.maybe_start_lesson_on_connect = saved
+            os.environ.pop("TBOT_LOCAL_SAMPLE_DEMO_BYPASS", None)
+
+        self.assertEqual(response.status, 403)
+        payload = json.loads(response.text)
+        self.assertEqual(payload["error"], "LOCAL_SAMPLE_DEMO_ONLY")
+        pull.assert_not_awaited()
 
     async def test_resolves_backend_uuid_nudge_to_live_mac_connection(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler

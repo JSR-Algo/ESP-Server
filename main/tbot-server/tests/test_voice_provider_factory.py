@@ -101,6 +101,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
             "LESSON_RUNTIME_ENABLED": "true",
             "TBOT_DEVICE_MINT_SECRET": "mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com/lesson-assets/",
+            "COURSE_BACKEND_URL": "https://backend.example.com/v1",
             "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
             "LESSON_ASSET_PACK_LOCAL_ROOT": "sd://sdcard/tbot/lesson-assets/",
         },
@@ -132,6 +133,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
             "LESSON_RUNTIME_ENABLED": "true",
             "TBOT_DEVICE_MINT_SECRET": "mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "https://cdn.example.com/lesson-assets/",
+            "COURSE_BACKEND_URL": "https://backend.example.com/v1",
             "LESSON_ASSET_PUBLIC_BASE_URL": "https://ota.example.com/",
             "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
             "LESSON_ASSET_PACK_LOCAL_ROOT": "sd://sdcard/tbot/lesson-assets/",
@@ -243,7 +245,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
 
             with self.subTest(name=name, value=value):
                 self._assert_prod_config_rejected(
-                    {"server": {"auth": {"enabled": True}}},
+                    {"server": {"auth": {"enabled": True}, "auth_key": "local-auth"}},
                     env,
                     expected,
                 )
@@ -252,7 +254,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
         env = self._safe_prod_env()
         env["ADMIN_AUTH_DISABLED"] = "true"
         self._assert_prod_config_rejected(
-            {"server": {"auth": {"enabled": True}}},
+            {"server": {"auth": {"enabled": True}, "auth_key": "local-auth"}},
             env,
             "ADMIN_AUTH_DISABLED must not be true",
         )
@@ -261,7 +263,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
         with patch("core.voice.aec.aec_processor.AEC_AVAILABLE", False):
             self._assert_prod_config_rejected(
                 {
-                    "server": {"auth": {"enabled": True}},
+                    "server": {"auth": {"enabled": True}, "auth_key": "local-auth"},
                     "voice_mode": {"type": "google_live"},
                     "google_live": {"aec_enabled": True},
                 },
@@ -283,7 +285,7 @@ class VoiceProviderFactoryTest(unittest.TestCase):
     @patch("config.config_loader.ensure_directories")
     @patch(
         "config.config_loader.read_config",
-        side_effect=[{"server": {"auth": {"enabled": True}}}, {}],
+        side_effect=[{"server": {"auth": {"enabled": True}, "auth_key": "local-auth"}}, {}],
     )
     @patch("core.utils.cache.manager.cache_manager.set")
     @patch("core.utils.cache.manager.cache_manager.get", return_value=None)

@@ -11,8 +11,8 @@ Covers the still-uncovered override arms (round-1 coverage push):
 * ``LESSON_MAX_ASSET_BYTES``         -> lesson.max_asset_bytes         (line 217)
 * ``LESSON_MAX_TOTAL_ASSET_BYTES``   -> lesson.max_total_asset_bytes   (line 219)
 * ``COURSE_BACKEND_URL`` block: normalize, create missing server cfg,
-  set api_url, fallback lesson.api_base                               (222-229)
-* auto-derive runtime_enabled via server.api_url api_base fallback     (line 234)
+  set api_url, and authoritatively set lesson.api_base                 (222-229)
+* auto-derive runtime_enabled only from explicit backend URL prereqs    (line 234)
 
 Pure-function level: no network, no event loop. The function reads
 ``os.environ`` directly, so the autouse fixture clears every relevant
@@ -124,6 +124,21 @@ def test_docker_compose_defaults_do_not_disable_interactive_sample():
     assert "LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-passive}" not in prod_compose
 
 
+def test_prod_env_example_declares_shared_lesson_runtime_secrets():
+    project_dir = Path(get_project_dir())
+    env_example = (project_dir.parents[1] / "deploy" / ".env.example").read_text()
+
+    for key in (
+        "LESSON_RUNTIME_ENABLED",
+        "COURSE_BACKEND_URL",
+        "TBOT_DEVICE_MINT_SECRET",
+        "TBOT_REQUIRE_DEVICE_TOKEN",
+        "JWT_PUBLIC_KEY",
+        "LESSON_ASSET_ORIGIN_BASE",
+    ):
+        assert f"{key}=" in env_example
+
+
 def test_sample_enabled_override_sets_sample_lesson_bool(monkeypatch):
     """LESSON_SAMPLE_ENABLED -> lesson.sample_lesson (bool); NOT coupled to runtime_enabled."""
     monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "true")
@@ -151,6 +166,13 @@ def test_sample_mode_override_works_without_other_lesson_env(monkeypatch):
     config = _apply_lesson_env_overrides({"lesson": {}})
 
     assert config["lesson"]["sample_mode"] == "passive"
+
+def test_voice_rt_p95_disable_ms_override_sets_lesson_threshold(monkeypatch):
+    monkeypatch.setenv("LESSON_VOICE_RT_P95_DISABLE_MS", "1750")
+
+    config = _apply_lesson_env_overrides({"lesson": {}})
+
+    assert config["lesson"]["voice_rt_p95_disable_ms"] == 1750.0
 
 
 def test_sample_flags_absent_is_a_noop(monkeypatch):
@@ -231,11 +253,11 @@ def test_course_backend_url_creates_missing_server_cfg_and_sets_both(monkeypatch
     assert config["lesson"]["api_base"] == "https://courses.tbot.dev/api"
 
 
-def test_course_backend_url_with_existing_server_cfg_preserves_author_api_base(monkeypatch):
+def test_course_backend_url_with_existing_server_cfg_overrides_lesson_api_base(monkeypatch):
     """COURSE_BACKEND_URL with a preexisting server cfg AND author lesson.api_base.
 
-    server.api_url is overwritten, but the author-provided lesson.api_base is NOT
-    clobbered (the ``if not lesson_cfg.get("api_base")`` guard, line 228, is False).
+    server.api_url and lesson.api_base are both overwritten so runtime pulls from
+    the explicit production backend URL, not a shipped/stale default.
     """
     monkeypatch.setenv("COURSE_BACKEND_URL", "https://courses.tbot.dev/api")
 
@@ -248,19 +270,17 @@ def test_course_backend_url_with_existing_server_cfg_preserves_author_api_base(m
 
     assert config["server"]["api_url"] == "https://courses.tbot.dev/api"
     assert config["server"]["other"] == "keep"
-    # author-provided api_base preserved
-    assert config["lesson"]["api_base"] == "https://author.example/lesson"
+    assert config["lesson"]["api_base"] == "https://courses.tbot.dev/api"
 
 
-# ── auto-derive runtime_enabled via server.api_url api_base fallback (line 234) ───
+# ── auto-derive runtime_enabled requires explicit backend URL (line 234) ───
 
 
-def test_auto_enable_uses_server_api_url_when_lesson_api_base_absent(monkeypatch):
+def test_auto_enable_requires_explicit_backend_url_when_lesson_api_base_absent(monkeypatch):
     """No explicit flag, no COURSE_BACKEND_URL, no lesson.api_base.
 
-    The auto-enable predicate's api_base must fall back to server.api_url
-    (line 234). With mint secret + asset origin + a server.api_url present, the
-    runtime auto-enables.
+    Mint secret + asset origin + server.api_url are not enough; production
+    lessons must be armed by an explicit backend URL env override.
     """
     monkeypatch.setenv("LESSON_ASSET_ORIGIN_BASE", "https://assets.origin")
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
@@ -272,7 +292,7 @@ def test_auto_enable_uses_server_api_url_when_lesson_api_base_absent(monkeypatch
         }
     )
 
-    assert config["lesson"]["runtime_enabled"] is True
+    assert config["lesson"].get("runtime_enabled") in (None, False)
 
 
 def test_no_auto_enable_when_no_api_base_anywhere(monkeypatch):

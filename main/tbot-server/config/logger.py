@@ -1,12 +1,57 @@
 import os
 import sys
 import errno
+import re
 from datetime import datetime, timedelta
+from urllib.parse import unquote_plus
 from loguru import logger
 from config.config_loader import get_project_dir, merge_configs, read_config
 
 SERVER_VERSION = "0.9.3"
 _logger_initialized = False
+
+_TOKEN_QUERY_RE = re.compile(
+    r"(?i)(?:[?&]|\b)(authorization|token|access_token|device_token|websocket_token|ws_token|jwt)=([^&\s\"']+)"
+)
+_AUTHORIZATION_BEARER_QUERY_RE = re.compile(r"(?i)(?:[?&]|\b)authorization=Bearer(?:\s|$)")
+_WS_URL_QUERY_RE = re.compile(r"(?i)(?:[?&]|\b)ws_url=([^&\s\"']+)")
+_REDACTED_QUERY_VALUES = {"[redacted]", "redacted", "<redacted>", "***"}
+_REDACTED_BEARER_QUERY_RE = re.compile(
+    r"(?i)((?:[?&]|\b)authorization=)Bearer\s+(\[redacted\]|redacted|<redacted>|\*\*\*)"
+)
+
+
+def _is_redacted_query_value(value):
+    return value.strip().lower() in _REDACTED_QUERY_VALUES
+
+
+def _normalize_redacted_query_values(text):
+    return _REDACTED_BEARER_QUERY_RE.sub(r"\1[REDACTED]", text)
+
+
+def find_token_leaks_in_access_log(text):
+    """Return line/kind entries for token-bearing URL/query access-log leaks."""
+    leaks = []
+    for line_no, raw_line in enumerate(str(text).splitlines(), start=1):
+        line = _normalize_redacted_query_values(unquote_plus(raw_line))
+        ws_url_match = _WS_URL_QUERY_RE.search(line)
+        if ws_url_match:
+            ws_url = ws_url_match.group(1)
+            if _AUTHORIZATION_BEARER_QUERY_RE.search(ws_url) or any(
+                not _is_redacted_query_value(match.group(2))
+                for match in _TOKEN_QUERY_RE.finditer(ws_url)
+            ):
+                leaks.append({"line": line_no, "kind": "token_bearing_ws_url"})
+                continue
+        if _AUTHORIZATION_BEARER_QUERY_RE.search(line):
+            leaks.append({"line": line_no, "kind": "authorization_query"})
+            continue
+        if any(
+            not _is_redacted_query_value(match.group(2))
+            for match in _TOKEN_QUERY_RE.finditer(line)
+        ):
+            leaks.append({"line": line_no, "kind": "token_query"})
+    return leaks
 
 
 class _SafeFileSink:

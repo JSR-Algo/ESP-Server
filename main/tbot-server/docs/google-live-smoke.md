@@ -9,6 +9,9 @@ cd esp32-server/main/tbot-server
 GOOGLE_API_KEY=... ./.venv311/bin/python scripts/google_live_smoke.py
 ```
 
+By default this uses the production Live model and voice:
+`gemini-3.1-flash-live-preview`, voice `Kore`, language `vi-VN`.
+
 Optional overrides:
 
 ```bash
@@ -93,7 +96,13 @@ tmux capture-pane -t tbot_server -p -S -24000 > /tmp/tbot_physical_audit.log
   --device-id 3c:0f:02:de:c2:e0 \
   --client-id d16afa54-eb44-4fcb-8cac-cdefdf05f6fc \
   --server-ip 192.168.0.114 \
-  --min-interrupts 10
+  --expected-user-transcript "bắt đầu bài học" \
+  --min-interrupts 10 \
+  --max-first-audio-ms 1800 \
+  --require-aec-live-vad-forward \
+  --require-lesson \
+  --require-lesson-live-text \
+  --lesson-manifest <lesson-manifest.json>
 ```
 
 Optional proxy check before the physical run:

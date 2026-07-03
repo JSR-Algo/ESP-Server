@@ -44,6 +44,7 @@ P_RECV_START = re.compile(r"Google Live receive loop started")
 P_RECV_STOP = re.compile(r"Google Live receive loop stopped")
 P_SESSION_DROP = re.compile(r"Audio send loop exception|received 1000 \(OK\)")
 P_FALLBACK = re.compile(r"fallback_triggered reason=(?P<reason>\w+)")
+P_FALLBACK_DISABLED = re.compile(r"fallback_disabled reason=(?P<reason>.+)$")
 P_RECONNECT = re.compile(r"Google Live reconnect attempt (?P<n>\d+)")
 P_SERVER_INT_IGNORED = re.compile(r"Google Live server interruption ignored by config")
 P_CONN_OPEN = re.compile(r"core\.connection - (?P<ip>\S+) conn - Headers:")
@@ -51,6 +52,9 @@ P_GOAWAY = re.compile(r"goAway|go_away|sent 1011|received 1011|1008", re.I)
 P_RECV_TIMEOUT = re.compile(r"Google Live receive timed out")
 P_ECHO_SUPPRESSED = re.compile(
     r"Google Live echo_suppressed reason=(?P<reason>\w+) bytes=(?P<bytes>\d+) rms=(?P<rms>\d+|n/a)"
+)
+P_AEC_LIVE_VAD_FORWARD = re.compile(
+    r"Google Live aec_live_vad_forward reason=(?P<reason>\w+) bytes=(?P<bytes>\d+) rms=(?P<rms>\d+|n/a)"
 )
 P_ECHO_BYPASS = re.compile(
     r"Google Live echo_bypass reason=(?P<reason>\w+) bytes=(?P<bytes>\d+) rms=(?P<rms>\d+|n/a)"
@@ -76,6 +80,12 @@ P_INTERRUPT_INPUT_FINALIZED = re.compile(
     r"Google Live interrupt_input_finalized reason=(?P<reason>\w+) "
     r"elapsed_ms=(?P<elapsed>[\d.]+) response_id=(?P<response_id>\d+) "
     r"frames=(?P<frames>\d+) bytes=(?P<bytes>\d+) peak_rms=(?P<peak_rms>\d+)"
+)
+P_LESSON_PROMPT_LOCAL_TTS = re.compile(
+    r"Google Live lesson_\w+ queued via tts\b"
+)
+P_LESSON_PROMPT_LIVE_TEXT = re.compile(
+    r"Google Live lesson_step_prompt sent via live text\b"
 )
 P_TTS_STOP_SENT = re.compile(r"tts_state_stop_sent|tts_stop_sent")
 P_AUDIO_DECISION = re.compile(r"audio_decision decision=(?P<decision>\S+)")
@@ -150,11 +160,14 @@ class SessionState:
     recv_timeout_count: int = 0
     reconnect_attempts: int = 0
     fallback_reason: Optional[str] = None
+    fallback_disabled_reason: Optional[str] = None
     goaway_seen: bool = False
     echo_suppressed_count: int = 0
     echo_bypass_count: int = 0
+    aec_live_vad_forward_count: int = 0
     echo_suppressed_rms: list[int] = field(default_factory=list)
     echo_bypass_rms: list[int] = field(default_factory=list)
+    aec_live_vad_forward_rms: list[int] = field(default_factory=list)
     music_control_tools: list[str] = field(default_factory=list)
     stale_model_event_dropped_count: int = 0
     stale_model_event_types: list[str] = field(default_factory=list)
@@ -171,6 +184,8 @@ class SessionState:
     reconnect_started_count: int = 0
     reconnect_succeeded_count: int = 0
     reconnect_failed_count: int = 0
+    lesson_prompt_local_tts_count: int = 0
+    lesson_prompt_live_text_count: int = 0
     music_state_changed_count: int = 0
     audio_output_transport_closed_count: int = 0
 
@@ -421,6 +436,19 @@ def analyze(log_path: Path) -> dict:
                 current.fallback_reason = m.group("reason")
                 continue
 
+            m = P_FALLBACK_DISABLED.search(line)
+            if m:
+                current.fallback_disabled_reason = m.group("reason").strip()
+                continue
+
+            if P_LESSON_PROMPT_LOCAL_TTS.search(line):
+                current.lesson_prompt_local_tts_count += 1
+                continue
+
+            if P_LESSON_PROMPT_LIVE_TEXT.search(line):
+                current.lesson_prompt_live_text_count += 1
+                continue
+
             if P_GOAWAY.search(line):
                 current.goaway_seen = True
 
@@ -429,6 +457,13 @@ def analyze(log_path: Path) -> dict:
                 current.echo_suppressed_count += 1
                 if m.group("rms").isdigit():
                     current.echo_suppressed_rms.append(int(m.group("rms")))
+                continue
+
+            m = P_AEC_LIVE_VAD_FORWARD.search(line)
+            if m:
+                current.aec_live_vad_forward_count += 1
+                if m.group("rms").isdigit():
+                    current.aec_live_vad_forward_rms.append(int(m.group("rms")))
                 continue
 
             m = P_ECHO_BYPASS.search(line)
@@ -513,6 +548,9 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
     all_rms_silent = [r for s in sessions for r in s.rms_while_silent]
     all_bargein_rms = [r for s in sessions for r in s.bargein_rms_values]
     all_echo_suppressed_rms = [r for s in sessions for r in s.echo_suppressed_rms]
+    all_aec_live_vad_forward_rms = [
+        r for s in sessions for r in s.aec_live_vad_forward_rms
+    ]
     all_echo_bypass_rms = [r for s in sessions for r in s.echo_bypass_rms]
     all_connect_ms = [s.connect_ms for s in sessions if s.connect_ms is not None]
     all_first_audio_ms = [s.first_audio_ms for s in sessions if s.first_audio_ms is not None]
@@ -542,6 +580,7 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
     drop_count = sum(1 for s in sessions if s.drop_event)
     goaway_count = sum(1 for s in sessions if s.goaway_seen)
     fallback_count = sum(1 for s in sessions if s.fallback_reason)
+    fallback_disabled_count = sum(1 for s in sessions if s.fallback_disabled_reason)
     reconnect_count = sum(1 for s in sessions if s.reconnect_attempts > 0)
     server_interrupt_ignored_total = sum(
         s.server_interrupt_ignored_count for s in sessions
@@ -566,9 +605,13 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
             "recv_timeouts": sum(s.recv_timeout_count for s in sessions),
             "reconnect_attempts_sessions": reconnect_count,
             "fallback_triggered_sessions": fallback_count,
+            "fallback_disabled_sessions": fallback_disabled_count,
             "abrupt_drop_sessions": drop_count,
             "goaway_sessions": goaway_count,
             "echo_suppressed": sum(s.echo_suppressed_count for s in sessions),
+            "aec_live_vad_forward": sum(
+                s.aec_live_vad_forward_count for s in sessions
+            ),
             "echo_bypass": sum(s.echo_bypass_count for s in sessions),
             "stale_model_event_dropped": sum(
                 s.stale_model_event_dropped_count for s in sessions
@@ -599,12 +642,19 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
             "audio_output_transport_closed": sum(
                 s.audio_output_transport_closed_count for s in sessions
             ),
+            "lesson_prompt_local_tts": sum(
+                s.lesson_prompt_local_tts_count for s in sessions
+            ),
+            "lesson_prompt_live_text": sum(
+                s.lesson_prompt_live_text_count for s in sessions
+            ),
         },
         "interrupt_reason_distribution": dict(reason_counts),
         "music_control_tool_distribution": dict(music_tool_counts),
         "stale_model_event_type_distribution": dict(stale_model_event_type_counts),
         "clean_user_turn_reason_distribution": dict(clean_user_turn_reason_counts),
         "echo_suppressed_rms": summary_stats(all_echo_suppressed_rms),
+        "aec_live_vad_forward_rms": summary_stats(all_aec_live_vad_forward_rms),
         "echo_bypass_rms": summary_stats(all_echo_bypass_rms),
         "interrupt_input_finalized_elapsed_ms": summary_stats(
             all_interrupt_finalized_ms
@@ -636,8 +686,10 @@ def build_report(sessions: list[SessionState], total_lines: int, log_path: Path)
                 "goaway_seen": s.goaway_seen,
                 "recv_timeouts": s.recv_timeout_count,
                 "fallback_reason": s.fallback_reason,
+                "fallback_disabled_reason": s.fallback_disabled_reason,
                 "reconnect_attempts": s.reconnect_attempts,
                 "echo_suppressed": s.echo_suppressed_count,
+                "aec_live_vad_forward": s.aec_live_vad_forward_count,
                 "echo_bypass": s.echo_bypass_count,
                 "stale_model_event_dropped": s.stale_model_event_dropped_count,
                 "stale_model_event_types": list(s.stale_model_event_types),
@@ -695,6 +747,7 @@ def render_markdown(report: dict, log_path: Path) -> str:
     rms_silent = report["rms_while_silent_or_user_turn"]
     bargein = report["barge_in_rms_at_trigger"]
     echo_suppressed = report["echo_suppressed_rms"]
+    aec_live_vad_forward = report["aec_live_vad_forward_rms"]
     echo_bypass = report["echo_bypass_rms"]
     totals = report["totals"]
     gate = report.get("aec_necessity_gate") or {}
@@ -760,9 +813,11 @@ def render_markdown(report: dict, log_path: Path) -> str:
         f"- recv timeouts: **{totals['recv_timeouts']}**",
         f"- reconnect-attempted sessions: **{totals['reconnect_attempts_sessions']}**",
         f"- fallback-triggered sessions: **{totals['fallback_triggered_sessions']}**",
+        f"- fallback-disabled sessions: **{totals['fallback_disabled_sessions']}**",
         f"- abrupt drop sessions (websocket 1000 mid-send): **{totals['abrupt_drop_sessions']}**",
         f"- goAway / 1008 / 1011 sessions: **{totals['goaway_sessions']}**",
         f"- echo_suppressed events: **{totals['echo_suppressed']}**",
+        f"- aec_live_vad_forward events: **{totals['aec_live_vad_forward']}**",
         f"- echo_bypass events: **{totals['echo_bypass']}**",
         f"- stale model events dropped: **{totals['stale_model_event_dropped']}**",
         f"- model output still blocked waiting user turn: **{totals['model_output_still_blocked_waiting_user_turn']}**",
@@ -771,12 +826,15 @@ def render_markdown(report: dict, log_path: Path) -> str:
         f"- replayed interrupt frames: **{totals['replayed_interrupt_frames']}**",
         f"- interrupt input finalized: **{totals['interrupt_input_finalized']}**",
         f"- music_control_intents: **{totals['music_control_intents']}**",
+        f"- lesson prompt local TTS markers: **{totals['lesson_prompt_local_tts']}**",
+        f"- lesson prompt Live text markers: **{totals['lesson_prompt_live_text']}**",
         "",
         f"- interrupt reason distribution: `{report['interrupt_reason_distribution']}`",
         f"- music control tool distribution: `{report['music_control_tool_distribution']}`",
         f"- stale model event type distribution: `{report['stale_model_event_type_distribution']}`",
         f"- clean user turn reason distribution: `{report['clean_user_turn_reason_distribution']}`",
         f"- echo_suppressed_rms: `{echo_suppressed}`",
+        f"- aec_live_vad_forward_rms: `{aec_live_vad_forward}`",
         f"- echo_bypass_rms: `{echo_bypass}`",
         f"- interrupt_input_finalized_elapsed_ms: `{report['interrupt_input_finalized_elapsed_ms']}`",
         "",

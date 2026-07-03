@@ -13,7 +13,6 @@ warnings.filterwarnings(
 import audioop
 import json
 import time
-import uuid
 
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
@@ -54,6 +53,11 @@ EMOTION_KEYWORDS = (
 
 
 FALLBACK_EMOTION_CYCLE = ("happy", "thinking", "confident", "winking", "surprised")
+
+SAFE_DEFLECTION_LIVE_TEXT_INSTRUCTION = (
+    "Đọc nguyên văn câu sau bằng giọng Google Live đã cấu hình. "
+    "Không dịch, không thêm nội dung, không bỏ sót, không rút gọn: "
+)
 
 class GoogleLiveAudioBridge:
     """Bridge between websocket audio frames and live transport events."""
@@ -377,6 +381,7 @@ class GoogleLiveAudioBridge:
                     min_age * 1000,
                 )
                 return True
+            interruption_started_at = time.monotonic()
             self.conn.client_abort = True
             self.conn.google_live_audio_out_started_at = None
             self._mark_active_response_cancelled()
@@ -387,6 +392,10 @@ class GoogleLiveAudioBridge:
                 round(output_age * 1000, 1) if output_age is not None else "n/a",
             )
             await self._send_tts_stop_now()
+            self.logger.bind(tag="GoogleLive").info(
+                "Google Live interruption_stop_latency_ms={:.1f}",
+                max(0.0, (time.monotonic() - interruption_started_at) * 1000),
+            )
             return True
 
         return False
@@ -615,10 +624,10 @@ class GoogleLiveAudioBridge:
             return
         try:
             min_output_age = float(
-                config.get("barge_in_transcript_min_output_age_sec", 2.0)
+                config.get("barge_in_transcript_min_output_age_sec", 0.0)
             )
         except (TypeError, ValueError):
-            min_output_age = 2.0
+            min_output_age = 0.0
         output_age = self._current_output_age_sec()
         if (
             min_output_age > 0
@@ -741,6 +750,9 @@ class GoogleLiveAudioBridge:
         elif state == "stop":
             self.conn.client_is_speaking = False
             self._mark_echo_tail_suppression("tts_stop")
+            self.logger.bind(tag="GoogleLive").info(
+                "tts_stop_sent continue_listening=true listen_mode=realtime"
+            )
 
     async def _send_tts_stop_now(self):
         if self.conn.websocket is None:
@@ -758,9 +770,15 @@ class GoogleLiveAudioBridge:
                     # stop so the device cuts playback immediately (ResetDecoder)
                     # instead of draining the queue like a normal end-of-turn stop.
                     "reason": "interrupt",
+                    "continue_listening": True,
+                    "listen_mode": "realtime",
                     "session_id": self.conn.session_id,
                 }
             )
+        )
+        self.logger.bind(tag="GoogleLive").info(
+            "tts_stop_sent reason=interrupt continue_listening=true "
+            "listen_mode=realtime"
         )
 
     def _is_unsafe_model_output(self, text):
@@ -804,54 +822,25 @@ class GoogleLiveAudioBridge:
     async def _send_safe_deflection(self):
         if self.conn.websocket is None:
             return
-        from core.handle.sendAudioHandle import send_tts_message
-
-        await send_tts_message(
-            self.conn,
-            "sentence_start",
-            SAFE_DEFLECTION_LINE,
-        )
-        self._queue_safe_deflection_tts()
-
-    def _queue_safe_deflection_tts(self):
-        tts = getattr(self.conn, "tts", None)
-        queue_obj = getattr(tts, "tts_text_queue", None)
-        if queue_obj is None:
+        if not hasattr(self.client, "send_text"):
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live safe_deflection live text unavailable"
+            )
             return
         try:
-            from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
-
-            sentence_id = str(uuid.uuid4().hex)
-            self.conn.sentence_id = sentence_id
-            queue_obj.put(
-                TTSMessageDTO(
-                    sentence_id=sentence_id,
-                    sentence_type=SentenceType.FIRST,
-                    content_type=ContentType.ACTION,
-                )
+            await self.client.send_text(
+                f"{SAFE_DEFLECTION_LIVE_TEXT_INSTRUCTION}{SAFE_DEFLECTION_LINE}"
             )
-            queue_obj.put(
-                TTSMessageDTO(
-                    sentence_id=sentence_id,
-                    sentence_type=SentenceType.MIDDLE,
-                    content_type=ContentType.TEXT,
-                    content_detail=SAFE_DEFLECTION_LINE,
-                )
-            )
-            queue_obj.put(
-                TTSMessageDTO(
-                    sentence_id=sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                )
-            )
-            if hasattr(tts, "store_tts_text"):
-                tts.store_tts_text(sentence_id, SAFE_DEFLECTION_LINE)
         except Exception as exc:
             self.logger.bind(tag="GoogleLive").warning(
-                "Google Live safe_deflection_tts_queue failed: {}",
+                "Google Live safe_deflection live text failed: {}",
                 exc,
             )
+            return
+        self.logger.bind(tag="GoogleLive").info(
+            "Google Live safe_deflection sent via live text chars={}",
+            len(SAFE_DEFLECTION_LINE),
+        )
 
     async def _enqueue_safety_block(self, text):
         forwarder = await self._resolve_safety_event_forwarder()
@@ -956,7 +945,7 @@ class GoogleLiveAudioBridge:
             decoder = self._get_input_decoder()
             pcm_bytes = decoder.decode(audio_bytes, self._get_input_frame_size())
             resampled = self._resample_pcm16(pcm_bytes, input_rate, target_rate)
-            return self._apply_aec(resampled, target_rate)
+            return self._apply_input_gain(self._apply_aec(resampled, target_rate))
         except Exception as exc:
             self.logger.bind(tag="GoogleLive").warning(
                 "Google Live dropped corrupt input opus encoded_bytes={} source_rate={} target_rate={} error_type={}",
@@ -1106,11 +1095,9 @@ class GoogleLiveAudioBridge:
             "google_live", {}
         )
         try:
-            # GLIVE-2: default lowered 0.5 -> 0.2 so an early barge-in in the first
-            # half-second of output is not swallowed. Still overridable via config.
-            value = float(config.get("interruption_min_output_age_sec", 0.2))
+            value = float(config.get("interruption_min_output_age_sec", 0.0))
         except (TypeError, ValueError):
-            value = 0.2
+            value = 0.0
         return max(0.0, value)
 
     def _server_side_interruptions_disabled(self):
@@ -1122,7 +1109,7 @@ class GoogleLiveAudioBridge:
         # never silently block a real barge-in regardless of the disable default.
         if config.get("ignore_server_interruptions"):
             return False
-        return bool(config.get("disable_server_side_interruptions", True))
+        return bool(config.get("disable_server_side_interruptions", False))
 
     def _get_transcript_echo_window_sec(self):
         config = getattr(self.client, "config", None) or self.conn.config.get(
@@ -1433,11 +1420,42 @@ class GoogleLiveAudioBridge:
         try:
             return self._aec_processor.process_mic(pcm_bytes)
         except Exception as exc:
+            if self._aec_failure_exposes_robot_output():
+                self.logger.bind(tag="GoogleLive").warning(
+                    "Google Live AEC process_mic failed while output active, "
+                    "dropping input chunk: {}",
+                    exc,
+                )
+                return b""
             self.logger.bind(tag="GoogleLive").warning(
                 "Google Live AEC process_mic failed, dropping AEC for this chunk: {}",
                 exc,
             )
             return pcm_bytes
+
+    def _aec_failure_exposes_robot_output(self):
+        if getattr(self.conn, "google_live_audio_out_started_at", None) is not None:
+            return True
+        try:
+            return time.monotonic() < float(
+                getattr(self.conn, "google_live_echo_suppress_until", 0.0)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _apply_input_gain(self, pcm_bytes):
+        if not pcm_bytes:
+            return pcm_bytes
+        client_config = getattr(self.client, "config", None) or self.conn.config.get(
+            "google_live", {}
+        )
+        try:
+            gain = float(client_config.get("input_gain", 1.0))
+        except (TypeError, ValueError):
+            gain = 1.0
+        if gain <= 0 or gain == 1.0:
+            return pcm_bytes
+        return audioop.mul(pcm_bytes, 2, gain)
 
     def _push_aec_reference(self, pcm_bytes, source_rate):
         if (
