@@ -487,6 +487,39 @@ export default {
         scene.teachingObject = teachingObject;
       }
       if (Object.keys(scene).length) {
+        const expressionByType = {
+          greeting: 'teaching',
+          review: 'teaching',
+          focus: 'teaching',
+          model: 'teaching',
+          listen: 'listening',
+          repeat: 'listening',
+          fillBlank: 'thinking',
+          feedback: 'teaching',
+          celebrate: 'celebrating',
+        };
+        const poseByExpression = {
+          teaching: 'teach',
+          listening: 'listening',
+          thinking: 'thinking',
+          celebrating: 'celebrate',
+        };
+        const expression = this.stepForm.renderExpression || expressionByType[this.stepForm.stepType] || 'teaching';
+        const pose = poseByExpression[expression] || 'teach';
+        const overlay = this.assetByKey('robotOverlay.' + pose);
+        const overlaySrc = overlay && (overlay.path || overlay.url);
+        if (overlaySrc) {
+          scene.robotOverlay = {
+            robotState: pose === 'celebrate' ? 'celebrating' : (pose === 'listening' || pose === 'thinking' ? pose : 'talking'),
+            pose,
+            expression,
+            anchor: 'bottomLeft',
+            pivot: { x: 0.5, y: 1.0 },
+            asset: { key: overlay.assetKey, src: overlaySrc, sha256: overlay.sha256 },
+            atlas: { image: overlaySrc, cell: 0 },
+            pointerEvents: 'none',
+          };
+        }
         scene.audio = { via: 'tts' };
         scene.timeoutSec = Number(s.timeoutSec) || 12;
         return scene;
