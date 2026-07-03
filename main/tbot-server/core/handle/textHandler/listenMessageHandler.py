@@ -56,6 +56,8 @@ class ListenTextMessageHandler(TextMessageHandler):
             if "text" in msg_json:
                 conn.last_activity_time = time.time() * 1000
                 original_text = msg_json["text"]  # Keep original text
+                if _is_google_live_connection(conn):
+                    return
                 filtered_len, filtered_text = remove_punctuation_and_length(
                     original_text
                 )
@@ -81,3 +83,8 @@ class ListenTextMessageHandler(TextMessageHandler):
                     enqueue_asr_report(conn, original_text, [])
                     # Otherwise NeedLLMFor textContentReply
                     await startToChat(conn, original_text)
+
+def _is_google_live_connection(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    voice_mode = config.get("voice_mode") if isinstance(config, dict) else {}
+    return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"

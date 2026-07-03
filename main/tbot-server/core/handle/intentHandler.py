@@ -18,6 +18,9 @@ TAG = __name__
 
 
 async def handle_user_intent(conn: "ConnectionHandler", text):
+    if _is_google_live_connection(conn):
+        return True
+
     # Preprocess input text, handle possibleJSONFormat
     try:
         if text.strip().startswith("{") and text.strip().endswith("}"):
@@ -80,10 +83,18 @@ async def analyze_intent_with_llm(conn: "ConnectionHandler", text):
     return None
 
 
+def _is_google_live_connection(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    voice_mode = config.get("voice_mode") if isinstance(config, dict) else {}
+    return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
+
 async def process_intent_result(
     conn: "ConnectionHandler", intent_result, original_text
 ):
     """Handle intent recognition result"""
+    if _is_google_live_connection(conn):
+        return True
+
     try:
         # Try parse result asJSON
         intent_data = json.loads(intent_result)

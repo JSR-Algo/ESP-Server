@@ -1,6 +1,7 @@
 import json
+import sys
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from core.handle import intentHandler
@@ -90,6 +91,11 @@ def _run_threadsafe(result=None, error=None):
         return _FutureResult(result=result, error=error)
 
     return runner
+
+def _current_time_module(return_value):
+    module = ModuleType("core.utils.current_time")
+    module.get_current_time_info = Mock(return_value=return_value)
+    return module
 
 
 def _conn(**overrides):
@@ -185,7 +191,47 @@ class HandleUserIntentTest(unittest.IsolatedAsyncioTestCase):
         process_result.assert_awaited_once_with(conn, '{"intent":"x"}', "hello")
 
 
+    async def test_google_live_handle_user_intent_consumes_without_classic_intent_or_tts(self):
+        conn = _conn(
+            config={"voice_mode": {"type": "google_live"}},
+            intent=SimpleNamespace(
+                detect_intent=AsyncMock(return_value='{"function_call":{"name":"result_for_context"}}'),
+                replyResult=Mock(return_value="classic reply"),
+            ),
+        )
+
+        with patch.object(intentHandler, "checkWakeupWords", new=AsyncMock(return_value=False)) as wakeup, patch.object(
+            intentHandler, "send_stt_message", new=AsyncMock()
+        ) as send:
+            handled = await intentHandler.handle_user_intent(conn, "hello")
+
+        self.assertTrue(handled)
+        wakeup.assert_not_awaited()
+        send.assert_not_awaited()
+        conn.intent.detect_intent.assert_not_awaited()
+        self.assertEqual(conn.executor.calls, [])
+        self.assertEqual(conn.tts.tts_text_queue.items, [])
+
 class ProcessIntentResultTest(unittest.IsolatedAsyncioTestCase):
+    async def test_google_live_process_intent_result_consumes_without_classic_tts(self):
+        conn = _conn(config={"voice_mode": {"type": "google_live"}})
+        result = ActionResponse(action=Action.RESPONSE, result="ignored", response="done")
+
+        with patch.object(intentHandler, "send_stt_message", new=AsyncMock()) as send, patch.object(
+            intentHandler, "enqueue_tool_report"
+        ) as report, patch.object(intentHandler.asyncio, "run_coroutine_threadsafe", new=_run_threadsafe(result)):
+            handled = await intentHandler.process_intent_result(
+                conn,
+                json.dumps({"function_call": {"name": "move_arm", "arguments": {}}}),
+                "raise arm",
+            )
+
+        self.assertTrue(handled)
+        send.assert_not_awaited()
+        report.assert_not_called()
+        self.assertEqual(conn.executor.calls, [])
+        self.assertEqual(conn.tts.tts_text_queue.items, [])
+
     async def test_non_function_invalid_json_and_continue_chat_return_false(self):
         conn = _conn()
 
@@ -207,9 +253,13 @@ class ProcessIntentResultTest(unittest.IsolatedAsyncioTestCase):
         async def send(_conn, text):
             sent.append(text)
 
-        with patch.object(intentHandler, "send_stt_message", new=send), patch(
-            "core.utils.current_time.get_current_time_info",
-            return_value=("10:00", "2026-06-20", "Saturday", "lunar"),
+        with patch.object(intentHandler, "send_stt_message", new=send), patch.dict(
+            sys.modules,
+            {
+                "core.utils.current_time": _current_time_module(
+                    ("10:00", "2026-06-20", "Saturday", "lunar")
+                )
+            },
         ):
             handled = await intentHandler.process_intent_result(
                 conn,

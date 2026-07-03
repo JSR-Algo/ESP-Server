@@ -208,6 +208,28 @@ class ListenMessageVoiceProviderInterruptTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(starts, [("stt", "hiesp"), ("tts", "stop", None)])
         start_chat.assert_not_awaited()
 
+    async def test_google_live_detect_text_consumes_without_classic_stt_tts_or_chat(self):
+        conn = _DummyConn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.config["enable_greeting"] = False
+
+        with patch.object(listen_module, "send_stt_message", new=AsyncMock()) as send_stt, patch.object(
+            listen_module, "send_tts_message", new=AsyncMock()
+        ) as send_tts, patch.object(listen_module, "startToChat", new=AsyncMock()) as start_chat, patch.object(
+            listen_module, "enqueue_asr_report"
+        ) as report, patch.object(
+            listen_module.time, "time", return_value=12.5
+        ):
+            await ListenTextMessageHandler().handle(conn, {"state": "detect", "text": "hiesp"})
+
+        self.assertFalse(conn.client_have_voice)
+        self.assertEqual(conn.reset_audio_states_calls, 1)
+        self.assertEqual(conn.last_activity_time, 12500)
+        send_stt.assert_not_awaited()
+        send_tts.assert_not_awaited()
+        start_chat.assert_not_awaited()
+        report.assert_not_called()
+
     async def test_detect_wakeup_with_greeting_reports_synthetic_hello_and_starts_chat(self):
         conn = _DummyConn()
         reports = []
