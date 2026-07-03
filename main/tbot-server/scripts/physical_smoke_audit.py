@@ -34,6 +34,8 @@ FATAL_PATTERNS = (
     "Google Live echo_suppressed reason=robot_speaking",
     "Google Live AEC import failed",
     "Google Live AEC process_mic failed while output active",
+    "Google Live AEC reference resample failed",
+    "Google Live AEC push_reference failed",
     "Google Live receive timed out",
     "Google Live waiting_model_timeout",
     "Google Live lesson_prompt_output_guard_timeout",

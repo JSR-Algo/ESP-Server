@@ -89,6 +89,7 @@ Current server-side proof:
   Live echo_bypass`, `Google Live echo_suppressed reason=robot_speaking`,
   `Google Live AEC import failed`, `Google Live AEC initialised ... bypassed=True`,
   `Google Live AEC process_mic failed while output active`,
+  `Google Live AEC reference resample failed`, `Google Live AEC push_reference failed`,
   `live_identity_mismatch`, `Google Live
   interruption suppressed_for_age`, `interrupt_started reason=loud_input`,
   `Google Live user_interrupted reason=loud_input`,

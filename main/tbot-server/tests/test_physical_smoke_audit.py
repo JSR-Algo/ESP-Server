@@ -673,6 +673,14 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "260518 20:10:00[GoogleLive]-WARNING-Google Live AEC process_mic failed while output active, dropping input chunk: aec failed",
                 "Google Live AEC process_mic failed while output active",
             ),
+            (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live AEC reference resample failed: bad rate",
+                "Google Live AEC reference resample failed",
+            ),
+            (
+                "260518 20:10:00[GoogleLive]-WARNING-Google Live AEC push_reference failed: buffer error",
+                "Google Live AEC push_reference failed",
+            ),
         ):
             with self.subTest(fatal_hit=fatal_hit):
                 log_text = f"""
