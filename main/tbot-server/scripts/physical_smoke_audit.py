@@ -282,7 +282,7 @@ def _is_lesson_step_live_text_prompt_line(line):
 
 def _is_lesson_local_tts_prompt_line(line):
     lowered = line.lower()
-    return "google live lesson_" in lowered and "queued via tts" in lowered
+    return "lesson_" in lowered and "queued via tts" in lowered
 
 
 def _lesson_live_text_chars(lines):

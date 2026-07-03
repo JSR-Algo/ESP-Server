@@ -61,7 +61,8 @@ Current server-side proof:
   audio response from `Google Live first_audio_out_latency_ms=...`
 - `scripts/physical_smoke_audit.py --require-lesson --require-lesson-live-text`
   gates the lesson/course prompt path through Live text and rejects local
-  `lesson_* queued via tts` markers, even if a Live-text marker is also present
+  `lesson_* queued via tts` markers from any logger, even if a Live-text marker
+  is also present
 - `scripts/physical_smoke_audit.py --lesson-manifest ...` derives expected step
   count, interactive step count, content-free prompt char lower bound, and
   per-spoken-prompt SHA-256 hashes using the same prompt selection as runtime
@@ -213,6 +214,8 @@ Current server-side proof:
   Live send-audio/wake/provider/fallback suite `127 passed`
 - focused physical-audit mic-forwarding proof from 2026-07-03:
   robot-speaking suppress/drop/hold audit tests `3 passed`
+- focused physical-audit lesson-local-TTS proof from 2026-07-03:
+  GoogleLive and LessonRuntime `lesson_* queued via tts` audit tests `3 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`

@@ -1582,6 +1582,39 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertEqual(result["lesson_prompt_local_tts"], 1)
         self.assertIn("no_lesson_local_tts", result["missing"])
 
+    def test_audit_rejects_lesson_runtime_local_tts_even_when_live_text_was_sent(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:03[LessonRuntime]-INFO-emit lesson_prepare assignmentId=assignment-1 lessonId=lesson-1
+260518 20:10:04[LessonRuntime]-INFO-emit lesson_start
+260518 20:10:05[LessonRuntime]-INFO-emit lesson_step stepId=s1 stepType=greeting backgroundScene=1 teachingObject=1 robotOverlay=1 prompt=1
+260518 20:10:05[lesson_handler]-INFO-lesson_step rendered stepId=s1 passive=0 degraded=0
+260518 20:10:06[LessonRuntime]-INFO-lesson_step_prompt queued via tts stepId=s1 text='Xin chào.'
+260518 20:10:07[GoogleLive]-INFO-Google Live lesson_step_prompt sent via live text chars=8 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+260518 20:10:08[LessonRuntime]-INFO-emit lesson_stop
+260518 20:10:09[LessonRuntime]-INFO-lesson_completed stepsCompleted=1
+""" + "\n".join(
+            "260518 20:10:{:02d}[GoogleLive]-INFO-Google Live user_interrupted reason=audio_input cancelled_response_id={} next_response_id={}".format(i, i, i + 1)
+            for i in range(10)
+        )
+
+        result = audit.audit_log(
+            log_text,
+            device_id="3c:0f:02:de:c2:e0",
+            client_id="d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            min_interrupts=10,
+            require_lesson=True,
+            expected_lesson_steps=1,
+            require_lesson_live_text=True,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["lesson_prompt_local_tts"], 1)
+        self.assertIn("no_lesson_local_tts", result["missing"])
+
     def test_audit_rejects_local_tts_lesson_ack_even_when_step_live_text_was_sent(self):
         audit = importlib.import_module("scripts.physical_smoke_audit")
         log_text = """
