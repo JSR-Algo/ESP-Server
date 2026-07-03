@@ -914,15 +914,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
         delay = open_delay + prompt_estimate
         if max_open_delay > 0:
             delay = min(delay, max_open_delay)
-        if self._lesson_prompt_reopen_fast and fast_reopen_sec >= 0:
+        fast_reopen_requested = self._lesson_prompt_reopen_fast and fast_reopen_sec >= 0
+        if fast_reopen_requested:
             delay = min(delay, fast_reopen_sec)
         self._lesson_prompt_reopen_fast = False
         if delay > 0:
             # Call asyncio.sleep through the module-level asyncio so the test's
             # google_live_module.asyncio.sleep monkeypatch is honoured.
             await asyncio.sleep(delay)
-        if not await self._wait_for_lesson_prompt_output_idle(config):
+        prompt_output_idle = await self._wait_for_lesson_prompt_output_idle(
+            config,
+            output_timeout_override=fast_reopen_sec if fast_reopen_requested else None,
+            timeout_log_label=(
+                "lesson_prompt_output_fast_reopen_timeout"
+                if fast_reopen_requested
+                else "lesson_prompt_output_guard_timeout"
+            ),
+        )
+        if not prompt_output_idle and not fast_reopen_requested:
             return False
+        if not prompt_output_idle:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_prompt_output_timeout_opening_child_window "
+                "fast_reopen_sec={:.1f}",
+                fast_reopen_sec,
+            )
         if runtime is not None:
             current_runtime = getattr(self.conn, "lesson_runtime", None)
             if (
@@ -953,7 +969,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._interaction.state == InteractionState.USER_STREAMING:
             self._interaction.transition(InteractionState.LISTENING)
 
-    async def _wait_for_lesson_prompt_output_idle(self, config):
+    async def _wait_for_lesson_prompt_output_idle(
+        self,
+        config,
+        *,
+        output_timeout_override=None,
+        timeout_log_label="lesson_prompt_output_guard_timeout",
+    ):
         poll_sec = self._read_lesson_guard_float(
             config, "lesson_prompt_output_poll_sec", 0.1
         )
@@ -961,6 +983,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         output_timeout = self._read_lesson_guard_float(
             config, "lesson_prompt_output_guard_timeout_sec", 15.0
         )
+        if output_timeout_override is not None:
+            output_timeout = min(output_timeout, max(0.0, output_timeout_override))
         playback_timeout = self._read_lesson_guard_float(
             config, "lesson_prompt_playback_guard_timeout_sec", 12.0
         )
@@ -973,7 +997,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if remaining <= 0:
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.logger.bind(tag="GoogleLive").warning(
-                    "Google Live lesson_prompt_output_guard_timeout timeout_sec={:.1f}",
+                    "Google Live {} timeout_sec={:.1f}",
+                    timeout_log_label,
                     output_timeout,
                 )
                 return False
@@ -1015,10 +1040,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except (TypeError, ValueError):
             return default
 
-    def _lesson_child_response_window_active(self):
+    def _lesson_child_response_window_active(
+        self,
+        *,
+        require_audio_window=True,
+        require_explicit_runtime_window=False,
+    ):
         """True when a child-response window is open AND the active lesson
         runtime is interactive and running."""
-        if time.monotonic() >= self._user_audio_allowed_until:
+        if require_audio_window and time.monotonic() >= self._user_audio_allowed_until:
             return False
         runtime = getattr(self.conn, "lesson_runtime", None)
         if runtime is None:
@@ -1029,7 +1059,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if getattr(runtime, "_step_completed", False):
             return False
-        if getattr(runtime, "_child_response_window_open", True) is False:
+        runtime_window_open = getattr(runtime, "_child_response_window_open", None)
+        if runtime_window_open is False:
+            return False
+        if require_explicit_runtime_window and runtime_window_open is not True:
             return False
         state = getattr(runtime, "state", None)
         if state is not None and state not in ("RUNNING",):
@@ -1061,7 +1094,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             None  -> route does not apply / runtime declined non-blank text
                      (caller should fall through to command dispatch)
         """
-        if not self._lesson_child_response_window_active():
+        if not (
+            self._lesson_child_response_window_active()
+            or self._lesson_child_response_window_active(
+                require_audio_window=False,
+                require_explicit_runtime_window=True,
+            )
+        ):
             return None
         runtime = self.conn.lesson_runtime
         self._force_lesson_session_mode("lesson_child_response")
@@ -2717,6 +2756,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         merged["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
         merged["barge_in"] = False
         merged["interrupt_on_input_while_speaking"] = False
+        merged["drop_input_while_speaking"] = False
         merged["server_side_vad_enabled"] = True
         merged["context_window_compression_enabled"] = True
         # Force the RMS-based loud-input bypass interrupt OFF. Production

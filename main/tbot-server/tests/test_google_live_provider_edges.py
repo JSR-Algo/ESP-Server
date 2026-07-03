@@ -640,6 +640,37 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(slept)
         self.assertLessEqual(max(slept), 1.2)
 
+    async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        handled = []
+
+        async def _on_child_response(text, **kwargs):
+            handled.append((text, kwargs))
+            return True
+
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            _step_id="s4",
+            _step_passive=False,
+            _step_completed=False,
+            _child_response_window_open=True,
+            on_child_response=_on_child_response,
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._user_audio_allowed_until = 0.0
+
+        routed = await provider._route_lesson_child_response("barn barn barn")
+
+        self.assertTrue(routed)
+        self.assertEqual(
+            handled,
+            [("barn barn barn", {"source": "voice_transcript"})],
+        )
+        self.assertEqual(provider._bridge.stop_calls, 1)
+
     async def test_wake_word_detect_sends_listening_feedback_to_device(self):
         conn = _Conn()
         conn.config["wakeup_words"] = ["Hi ESP"]
@@ -2143,6 +2174,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             "enable_audio_input": False,
             "enable_audio_output": False,
             "native_voice": False,
+            "drop_input_while_speaking": True,
         }
         live_config = GoogleLiveProvider._get_live_config(provider)
         self.assertEqual(live_config["model"], "gemini-3.1-flash-live-preview")
@@ -2151,6 +2183,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(live_config["enable_audio_input"])
         self.assertTrue(live_config["enable_audio_output"])
         self.assertTrue(live_config["native_voice"])
+        self.assertFalse(live_config["drop_input_while_speaking"])
 
         conn.config["google_live"] = {"aec_enabled": False}
         live_config = GoogleLiveProvider._get_live_config(provider)

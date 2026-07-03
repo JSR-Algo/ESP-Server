@@ -262,7 +262,7 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.live_resumption_store.saved, [(conn.device_id, "resume-1")])
 
         handled = await conn._route_audio_message(b"lesson-audio")
-        self.assertFalse(handled)
+        self.assertTrue(handled)
         self.assertEqual(conn.voice_provider.audio, [])
 
 

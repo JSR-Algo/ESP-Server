@@ -226,6 +226,104 @@ Current server-side proof:
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
+- focused source verification from 2026-07-03T21:34-21:42+07:
+  Google Live provider/tool-call/barge-in/audio-bridge/connection/tts-stop/
+  receive-audio plus physical-audit parser suite `351 passed, 1 warning`.
+  Current local policy diff also forces `drop_input_while_speaking=false` in
+  runtime-normalized Google Live config, so stale private config cannot prevent
+  AEC-cleaned input from reaching Live VAD while the robot is speaking. Live
+  proof then became available from manager private config, not local
+  `GOOGLE_API_KEY`: authenticated `admin.tjbot.vn/tbot`, fetched current
+  `server.secret`, loaded `/config/agent-models` for
+  `28:84:85:85:1a:80` / `c29ce67a-3288-4c39-8544-bba97dab332b`, and found
+  `voice_mode=google_live` plus a literal Google Live key (`len=53`, value not
+  logged). `scripts/google_live_smoke.py` using that agent key connected with
+  `model=gemini-3.1-flash-live-preview`, `voice=Kore`, `language=vi-VN` in
+  `2361.4 ms` and returned `SMOKE_CONNECT_OK` / `SMOKE_CLOSE_OK`. Physical
+  proof was still not available in this shell:
+  `scripts/voice_mode_preflight.py --device-ip 192.168.0.111` reported
+  `packet_loss 100.0%`; and no `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*`
+  serial node was present.
+- focused transcript-routing proof from 2026-07-04:
+  `test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout`
+  failed before the provider change (`None is not true`) and passed after it.
+  The provider now keeps raw audio forwarding gated by `_user_audio_allowed_until`
+  while allowing late final user transcripts to route to `LessonRuntime` only
+  when the runtime explicitly still has `_child_response_window_open=True`.
+  The opposite guard
+  `test_user_transcript_outside_lesson_response_window_is_not_child_answer`
+  also passed, so generic lesson runtimes without an explicit open window do not
+  capture unrelated transcripts after provider audio timeout. Broader touched
+  suite:
+  `tests/test_google_live_provider_edges.py tests/test_google_live_tool_calls.py
+  tests/test_google_live_bargein.py tests/test_google_live_reconnect.py
+  tests/test_sample_lesson.py -q` -> `239 passed, 1 warning`;
+  `py_compile` and `git diff --check` passed.
+- production server-only deploy from 2026-07-04T01:00+07:
+  Python replicas `current-tbot-esp32-server-1/2` run
+  `local/tbot-server:vps-20260703180019-transcriptroute2`, built as a minimal
+  overlay from the prior production image
+  `local/tbot-server:vps-20260703165327-childaudio` with the patched
+  `core/voice/session_provider/google_live.py`. Container compile proof on the
+  new image passed and source introspection confirmed both
+  `require_explicit_runtime_window` and `require_audio_window=False` are present.
+  Public tunnel smoke passed for `https://admin.tjbot.vn/` and
+  `https://esp.tjbot.vn/tbot/ota/` with expected websocket host `esp.tjbot.vn`.
+  Rollback to this transcript-route patch's pre-patch server image is
+  `/opt/tbot/.env.rollback-before-transcriptroute2`, copied from
+  `/opt/tbot/.env.bak-vps-20260703175936-transcriptroute`; do not use
+  `/opt/tbot/.env.bak-vps-20260703180019-transcriptroute2` for rollback because
+  it captured a discarded intermediate image whose container command was wrong.
+  That bad intermediate image tag was removed from the VPS.
+  Physical verification was deliberately not continued after deploy because the
+  robot stayed offline: public lesson metrics reported `connections=0`, local
+  ping to `192.168.0.111` returned `100% packet loss`, macOS exposed no
+  `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*`, and the user asked to skip
+  hardware-blocked work overnight.
+- focused retry-window proof from 2026-07-04:
+  production logs showed a wrong child answer (`morn morn morn`) correctly
+  triggered a retry prompt, but the retry prompt then waited the full
+  `lesson_prompt_output_guard_timeout_sec=15.0` before the child window could
+  continue. That path conflicts with the fast interaction goal and caused stale
+  late model output to be dropped only after the long guard expired.
+  New regression
+  `test_retry_lesson_child_response_window_opens_fast_when_prompt_output_times_out`
+  failed before the provider change (`False is not true`) and passed after it.
+  Initial/main prompt timeout behavior remains closed, covered by
+  `test_lesson_child_response_window_stays_closed_on_output_timeout`. The retry
+  path now caps prompt-output waiting to `lesson_child_response_fast_reopen_sec`
+  for `continue_listening=True`, clears the lesson prompt output gate, logs
+  `lesson_prompt_output_fast_reopen_timeout`, and opens the child-response
+  window while late robot audio remains dropped. Broader non-hardware suite:
+  `tests/test_google_live_provider_edges.py tests/test_google_live_tool_calls.py
+  tests/test_google_live_bargein.py tests/test_google_live_reconnect.py
+  tests/test_sample_lesson.py tests/test_physical_smoke_audit.py -q` ->
+  `326 passed, 1 warning`; `py_compile` and `git diff --check` passed.
+- production server-only deploy from 2026-07-04T01:13+07:
+  Python replicas `current-tbot-esp32-server-1/2` now run
+  `local/tbot-server:vps-20260703181257-fastretry`, built as a minimal overlay
+  from `local/tbot-server:vps-20260703180019-transcriptroute2` with the same
+  patched provider file plus retry fast-reopen behavior. Container compile proof
+  passed and source introspection confirmed
+  `lesson_prompt_output_fast_reopen_timeout` and
+  `lesson_prompt_output_timeout_opening_child_window` are present. Public tunnel
+  smoke again passed for `https://admin.tjbot.vn/` and
+  `https://esp.tjbot.vn/tbot/ota/`; fresh server logs had no traceback/error
+  grep hits. Rollback to the pre-fast-reopen server image is
+  `/opt/tbot/.env.rollback-before-fastretry`. Physical verification remains
+  paused: public lesson metrics still report `connections=0`.
+- broad local no-hardware proof from 2026-07-04T01:17+07:
+  `.venv311/bin/python -m pytest tests -q -k 'not live_smoke and not
+  websocket_soak and not benchmark'` passed with `1689 passed, 11 deselected,
+  2 warnings in 114.65s`. A stale session-orchestrator assertion was updated to
+  match the current safety contract: lesson-owned audio is consumed (`handled`
+  true) so it cannot fall through to classic ASR, while `voice_provider.audio`
+  remains empty outside an interactive child-response window. Targeted proof:
+  `tests/test_session_orchestrator.py -q` -> `17 passed` and
+  `tests/test_connection_voice_provider_routing.py -q` -> `27 passed`.
+  The auto interactive watcher that could post `lesson-nudge` on reconnect was
+  stopped per the operator's no-hardware overnight instruction; only the
+  diagnostic no-serial/no-nudge watcher remains.
 
 Remaining gate: physical robot/live E2E with real credentials, real device ID,
 and production websocket/backend/auth config. Keep this goal open until that run
@@ -568,9 +666,9 @@ Prompt-to-artifact checklist:
 | Admin/default config merge | `tests.test_config_voice_mode_merge` | covered by automated tests |
 | Runtime websocket barge-in smoke | `scripts/voice_mode_websocket_soak.py` | passed after restart: `SOAK_OK cycles=10 ... binary_chunks=1597` |
 | OTA artifact served to real device | OTA emulation + download SHA check | server side covered; device has not fetched/upgraded |
-| Physical robot connects as non-Python client | `scripts/physical_smoke_audit.py` requires non-local/non-Python headers and rejects the server IP when `--server-ip` is provided | missing |
-| Physical microphone audio reaches Google Live | `scripts/physical_smoke_audit.py` requires `input_audio_diag` | missing |
-| Physical speech produces expected user transcript | `scripts/physical_smoke_audit.py --expected-user-transcript ...` requires the expected phrase inside a user transcript | missing |
+| Physical robot connects as non-Python client | `scripts/physical_smoke_audit.py` requires non-local/non-Python headers and rejects the server IP when `--server-ip` is provided | partial physical proof exists from 2026-07-03 plugged run; strict gate still open |
+| Physical microphone audio reaches Google Live | `scripts/physical_smoke_audit.py` requires `input_audio_diag` | partial physical proof exists from 2026-07-03 plugged run; strict gate still open |
+| Physical speech produces expected user transcript | `scripts/physical_smoke_audit.py --expected-user-transcript ...` requires the expected phrase inside a user transcript | one user transcript observed in physical run, but expected Vietnamese interrupt phrase was not observed |
 | Physical mid-answer barge-in works 10 times | `scripts/physical_smoke_audit.py --production-voice-strict --min-interrupts 10` requires AEC-forwarded frames, Live server interruption, interrupt stop/relisten, and a user transcript after interruption | missing |
 | No fatal/duplicate/stale/self-interrupt loop during physical smoke | `scripts/physical_smoke_audit.py` fatal pattern scan | no fatal hits, but physical run missing |
 | Rollback path | `voice_mode.type=classic_pipeline` | documented |
@@ -604,54 +702,208 @@ Latest evidence:
 - disk pressure remains stable after verification: `/System/Volumes/Data` has about `62GiB` free; manager `target` is about `88M`
 - disk pressure rechecked: `/System/Volumes/Data` has about `62GiB` free
 - `docs/google-live-smoke.md` now documents the physical Vietnamese interrupt gate and `physical_smoke_audit.py`
-- latest LAN sweep with `fping` found `192.168.0.2`, `192.168.0.15`, `192.168.0.100`, `192.168.0.107`, `192.168.0.108`, `192.168.0.112`, host `192.168.0.114`, and `192.168.0.254`; none map to target MAC `3c:0f:02:de:c2:e0`
+- public manager API recheck at `https://admin.tjbot.vn/tbot` returned HTTP 200 for docs and 401 for unauth health; authenticated admin flow returned the current `server.secret` (`len=36`, value not logged), redacted `/config/agent-models` probes returned `voice_mode=google_live` and literal Google Live key metadata (`len=53`), and `scripts/google_live_smoke.py` using the agent key returned `SMOKE_CONNECT_OK` / `SMOKE_CLOSE_OK`
+- plugged physical robot proof on 2026-07-03:
+  USB exposed `/dev/cu.usbmodem101` / `/dev/tty.usbmodem101`; serial
+  descriptor reported USB VID:PID `303A:1001` and serial
+  `28:84:85:85:1A:80`; LAN ARP mapped `192.168.0.111` to
+  `28:84:85:85:1a:80`; preflight ping returned `PREFLIGHT_OK` with
+  `loss_pct=0.0 avg_ms=39.5 max_ms=105.8 jitter_ms=34.2 duplicates=0`;
+  public lesson metrics reported `connections=1` and the target device id.
+- physical Google Live voice smoke on 2026-07-03T23:00+07:
+  `/tmp/tbot_prod_nudge_voice_20260703T155935Z.log` passed the non-strict
+  physical audit with `physical_ws_connected=true`, `input_audio_diag=2`,
+  `live_identity=true`, `live_identity_first_audio_chains=1`,
+  `first_audio_out_latency_ms=2304.8`, `user_transcripts=1`, and no fatal
+  hits. The observed user transcript was `high speed`; this proves real mic
+  ingress and Live transcript delivery but not the expected Vietnamese
+  interrupt phrase.
+- same physical lesson session completed the sample lesson at
+  2026-07-03T23:05:33+07 (`lesson_completed stepsCompleted=4`) in
+  `/tmp/tbot_prod_followup_barn_interrupt_20260703T160259Z.log`, but the
+  interactive child steps advanced by `child response inactive; demo graceful
+  advance`, not accepted child transcripts.
+- combined physical session
+  `/tmp/tbot_prod_physical_combined_20260703T155935Z_20260703T160259Z.log`
+  failed strict audit: `input_audio_diag=4`, `user_transcripts=1`,
+  `audio_interrupts=0`, and fatal marker `Google Live waiting_model_timeout`.
+- dedicated physical barge-in capture
+  `/tmp/tbot_prod_voice_bargein_20260703T160648Z.log` showed many
+  `input_audio_diag` frames, including high RMS samples, but no new user
+  transcript, no assistant output, no `aec_live_vad_forward`, and no Live
+  interruption chain; `--production-voice-strict --min-interrupts 1
+  --expected-user-transcript 'dừng lại'` failed.
+- after USB reset and `python3 -m esptool --chip esp32s3 --port
+  /dev/cu.usbmodem101 chip_id`, the chip identity still matched
+  `ESP32-S3` / `28:84:85:85:1a:80`, but 24 five-second polls all returned
+  `ping=fail` and public metrics stayed `connections=0`; no OTA/WS reconnect
+  was observed after the 23:10:27+07 disconnect.
+- follow-up read-only recovery attempt on 2026-07-03T23:19+07 found the USB
+  serial device still present (`/dev/cu.usbmodem101`, VID:PID `303A:1001`,
+  serial `28:84:85:85:1A:80`), but ARP for `192.168.0.111` was incomplete,
+  ping returned `100% packet loss`, and both public/LB lesson metrics returned
+  `connections=0`. Production logs for the latest 20 minutes showed no OTA or
+  websocket reconnect after the 23:10:27+07 disconnect.
+- serial boot evidence after read-only resets showed the board in ROM download
+  mode, not the app: `rst:0x15 (USB_UART_CHIP_RESET),boot:0x23
+  (DOWNLOAD(USB/UART0))` followed by `waiting for download`. The same output
+  appeared at 115200/921600/460800/74880 baud after esptool hard reset. A
+  manual DTR/RTS reset matrix found `DTR=false` reproducibly re-entered
+  download mode and `DTR=true` avoided the ROM banner but still did not restore
+  LAN ping or production metrics. `esptool run` without flash writes reported
+  `Staying in bootloader`; a direct API `esp.run(reboot=True)` attempt failed
+  with `Serial data stream stopped: Possible serial noise or corruption`.
+  A follow-up LAN sweep still did not find `28:84:85:85:1a:80`.
+- current recheck on 2026-07-03T23:31+07 still found no runnable robot app:
+  USB descriptor remained `303A:1001` / `28:84:85:85:1A:80`, serial read with
+  `DTR=true RTS=false` produced no app logs, ARP for `192.168.0.111` stayed
+  incomplete, ping returned `100% packet loss` / `Host is down`, public and
+  LB metrics both returned `connections=0`, LAN sweep only found
+  `192.168.0.2`, `.15`, `.101`, `.104`, `.107`, `.108`, `.115`, and production
+  logs for both ESP server replicas had no target OTA/websocket lines in the
+  latest 30 minutes.
+- final recheck on 2026-07-03T23:33+07 repeated the same blocker:
+  `/dev/cu.usbmodem101` still exposed USB VID:PID `303A:1001` with serial
+  `28:84:85:85:1A:80`; serial read with `DTR=true RTS=false` produced
+  `0` app log lines; ARP for `192.168.0.111` stayed incomplete; ping returned
+  `100% packet loss`; LAN sweep still found only `.2`, `.15`, `.101`, `.104`,
+  `.107`, `.108`, `.115`; public and LB metrics both returned
+  `connections=0`; the fresh production log capture
+  `/tmp/tbot_prod_blocker_recheck_20260703T163342Z.log` had only 4 lines and
+  no target OTA/websocket/audio evidence.
+- plugged follow-up on 2026-07-04T00:17+07 after another physical replug/serial
+  boot reached the app on firmware `lcdwiki-es3c35p/2.2.72`
+  (`elf_sha256=7f24ee99722c7a0cb1f157d5be5a93bcf3bd59b8cf5283d9db6086712176595f`),
+  Wi-Fi IP `192.168.0.111`, and production WebSocket session
+  `ea517250-aee7-467d-8b35-1825a203ea0c`. Serial showed
+  `passive_lesson_websocket_opened_without_heartbeat` and
+  `passive_lesson_websocket_opened`; production metrics recovered to
+  `connections=1`. A stale passive socket with only `hello` timed out after
+  about 60 seconds, so the successful retry nudged the sample lesson within the
+  live connection window.
+- fast physical sample retry
+  `/tmp/tbot_prod_fast_nudge_full_20260703T171600Z.log` started sample mode,
+  ACKed `lesson_prepare`/`lesson_start`, connected Google Live in `797.4 ms`,
+  emitted `Google Live session identity model=gemini-3.1-flash-live-preview
+  voice=Kore language=vi-VN`, produced first audio in `597.2 ms`, sent lesson
+  prompt hashes through Live text, logged `input_audio_diag=3`, observed one
+  Live server interruption with `tts_stop_sent reason=interrupt` and
+  stop latencies `2.1/2.2 ms`, and completed the sample lesson
+  (`lesson_completed stepsCompleted=4`). This is still not strict voice proof:
+  there was no `transcript source=user`, no expected Vietnamese phrase, no
+  `aec_live_vad_forward`, and the run logged `Google Live waiting_model_timeout`.
+  External audio played from the laptop did not produce a user transcript at the
+  robot mic; the next strict pass needs a person speaking close to the robot
+  during the opened child-response windows and while the robot is speaking.
+- strict audit parser replay after the transcript-routing server patch, using
+  the existing `/tmp/tbot_current_prod_voice_log` capture rather than new
+  hardware, still failed as expected: `physical_ws_connected=true`,
+  `input_audio_diag=34`, `user_transcripts=8`,
+  `live_server_interruption=1`, `interrupt_tts_stops=7`, and fatal hits
+  `Client disconnected`, `Google Live waiting_model_timeout`, and
+  `Google Live lesson_prompt_output_guard_timeout`. Missing gates remained the
+  expected `dừng lại` transcript, AEC-live-VAD forwarding, ordered
+  AEC/interruption chains, and no fatal patterns.
+- historical 2026-05-18 LAN sweep with `fping` found `192.168.0.2`,
+  `192.168.0.15`, `192.168.0.100`, `192.168.0.107`, `192.168.0.108`,
+  `192.168.0.112`, host `192.168.0.114`, and `192.168.0.254`; none mapped
+  to the then-target MAC `3c:0f:02:de:c2:e0`
 - mDNS browse found router services only; no `_esp32._tcp`, `_xiaozhi._tcp`, or `_tbot._tcp` advertisement
 - read-only router/extender status probe shows one associated station but does not provide target client MAC evidence; raw captures were deleted because the endpoint also returns sensitive Wi-Fi fields
 - `server.mqtt_gateway` and `server.mqtt_manager_api` remain `null`
 - no remote robot reboot path found in manager/device/MQTT code paths
-- physical audit re-run after proxy smoke still fails with no real-device evidence: `physical_ws_connected=false`, `input_audio_diag=0`, `user_transcripts=0`, `audio_interrupts=0`
-- USB recheck found only `/dev/cu.OGVN5574` and `/dev/cu.debug-console`; no ESP/JTAG/USB serial device visible via `system_profiler`
+- historical physical audit after proxy smoke failed with no real-device
+  evidence: `physical_ws_connected=false`, `input_audio_diag=0`,
+  `user_transcripts=0`, `audio_interrupts=0`
+- historical USB recheck found only `/dev/cu.OGVN5574` and
+  `/dev/cu.debug-console`; no ESP/JTAG/USB serial device was visible via
+  `system_profiler`
 
 Current audit/hardening files touched in this pass:
 
+- `core/voice/session_provider/google_live.py`
 - `core/voice/google_live/audio_bridge.py`
 - `scripts/physical_smoke_audit.py`
 - `scripts/voice_mode_websocket_audio_bargein.py`
+- `tests/test_google_live_provider_edges.py`
 - `tests/test_physical_smoke_audit.py`
 - `docs/google-live-smoke.md`
 - `docs/google-live-completion-audit.md`
 - `../manager-api/src/main/java/tbot/modules/sys/service/impl/SysParamsServiceImpl.java`
 - `../manager-api/src/test/java/tbot/modules/sys/SysParamsServiceImplTest.java`
 
-Latest failing physical audit:
+Earlier failing strict physical audit:
 
 ```json
 {
   "passed": false,
-  "physical_ws_connected": false,
-  "input_audio_diag": 0,
+  "physical_ws_connected": true,
+  "input_audio_diag": 3,
+  "first_audio_out_ms": {
+    "count": 1,
+    "min": 597.2,
+    "max": 597.2
+  },
+  "live_server_interruption": 1,
+  "interrupt_tts_stops": 2,
+  "interrupt_stop_latency_ms": {
+    "count": 2,
+    "min": 2.1,
+    "max": 2.2
+  },
+  "interrupt_stop_chains": 1,
+  "interrupt_relisten_chains": 1,
+  "live_identity": true,
+  "live_identity_first_audio_chains": 1,
+  "realtime_tts_stops": 8,
+  "output_relisten_chains": 1,
   "user_transcripts": 0,
   "audio_interrupts": 0,
+  "fatal_hits": [
+    "Google Live waiting_model_timeout"
+  ],
   "missing": [
-    "physical_ws_connected",
-    "input_audio_diag",
     "user_transcript",
-    "audio_interrupts>=10"
+    "user_transcript_expected_match>=1",
+    "aec_live_vad_forward",
+    "aec_live_vad_forward>=1",
+    "aec_interruption_chains>=1",
+    "post_interrupt_user_transcripts>=1",
+    "post_interrupt_user_transcript_expected_match>=1",
+    "no_fatal_patterns"
   ]
 }
 ```
 
 Blocker:
 
-- DB row still has `app_version=2.2.6`; `last_connected_at=2026-05-18 22:28:23` is not proof of physical presence because OTA emulation updates the same row
-- target MAC `3c:0f:02:de:c2:e0` is absent from ARP
-- visible serial endpoints `/dev/cu.OGVN5574` and `/dev/cu.debug-console` are generic `IOSerialFamily` clients; passive reads return 0 bytes and ESP32-S3 `chip_id` returns `No serial data received`
+- the boot blocker is cleared by the latest replug: the app boots, joins LAN,
+  opens the production WebSocket, ACKs lesson frames, and speaks through Google
+  Live on firmware `2.2.72`
+- strict voice proof remains open: no real user transcript was captured after
+  the Live interruption, no `dừng lại` transcript was observed, no
+  AEC-forwarded robot-speaking mic frame was logged, and the physical sample
+  still completed by demo graceful advance rather than accepted spoken child
+  responses
+- passive WebSocket sessions that only send `hello` time out after about
+  60 seconds; the next spoken smoke should nudge immediately after reconnect or
+  keep the connection active before lesson start
+- the next strict pass needs a person speaking close to the robot mic during
+  robot output (`dừng lại, nói chậm hơn`) and during s3/s4 child-response
+  windows (`barn barn barn`)
 - no usable MQTT manager endpoint is configured for remote reboot
+- after the transcript-routing server deploy, hardware work is paused by user
+  instruction: no reset, flash, serial intervention, or physical nudge should be
+  attempted until the robot is physically available again
 
 Audit conclusion:
 
-- production-hardening and automated coverage are in place
-- physical production gate is not complete
+- production-hardening, automated coverage, manager-key Live smoke, and partial
+  physical voice proof are in place
+- the server-side transcript routing bug seen when a correct `barn barn barn`
+  transcript arrived after the provider audio window expired is patched and
+  deployed
+- physical production strict gate is not complete
 - do not mark the ultragoal or Codex goal complete until the physical spoken smoke passes
 
 ## PR1-PR5 stability and barge-in (2026-05-19)

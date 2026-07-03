@@ -1332,6 +1332,39 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
         self.assertEqual(provider._user_audio_allowed_until, 0.0)
 
+    async def test_retry_lesson_child_response_window_opens_fast_when_prompt_output_times_out(self):
+        provider, _handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 0.0,
+                "lesson_prompt_tts_chars_per_sec": 0.0,
+                "lesson_child_response_max_open_delay_sec": 0.0,
+                "lesson_child_response_fast_reopen_sec": 0.3,
+                "lesson_child_response_window_sec": 25.0,
+                "lesson_prompt_output_poll_sec": 0.1,
+                "lesson_prompt_output_guard_timeout_sec": 15.0,
+            }
+        )
+        provider._lesson_prompt_reopen_fast = True
+        provider.conn.google_live_lesson_prompt_output_allowed = True
+        sleeps = []
+
+        async def _fake_sleep(delay):
+            sleeps.append(delay)
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertTrue(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertLessEqual(sum(sleeps), 0.31)
+        self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+
     async def test_lesson_child_response_window_uses_lesson_duration_without_session_mode(self):
         provider, _handler = self._make_provider()
         provider.conn.config["google_live"]["lesson_child_response_window_sec"] = 25.0
