@@ -1363,6 +1363,95 @@ def audit_log(
     return result
 
 
+PROOF_METADATA_FLAGS = (
+    "proof_backend_device_uuid",
+    "proof_board_mac",
+    "proof_captured_at",
+    "proof_deployed_robot_server_image",
+    "proof_hardware_sample_cp7_safety_run",
+    "proof_image_reference_type",
+    "proof_lesson_flow_completed",
+    "proof_llm_judge_checked",
+    "proof_output_classifier_checked",
+)
+
+PROOF_BOOL_FLAGS = {
+    "proof_hardware_sample_cp7_safety_run",
+    "proof_lesson_flow_completed",
+    "proof_llm_judge_checked",
+    "proof_output_classifier_checked",
+}
+
+PROOF_KEYS = (
+    "backend_device_uuid",
+    "board_mac",
+    "captured_at",
+    "deployed_robot_server_image",
+    "hardware_sample_cp7_safety_run",
+    "image_reference_type",
+    "lesson_flow_completed",
+    "llm_judge_checked",
+    "output_classifier_checked",
+    "redacted",
+    "unsafe_output_blocked",
+)
+
+
+def _proof_bool(value):
+    if value is None:
+        return None
+    normalized = str(value).strip().casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError("expected true or false")
+
+
+def _proof_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or any(ch in text for ch in "\r\n"):
+        raise ValueError("expected a non-empty single-line redacted value")
+    return text
+
+
+def _child_live_moderation_proof_values(args, result):
+    return {
+        "backend_device_uuid": _proof_text(args.proof_backend_device_uuid),
+        "board_mac": _proof_text(args.proof_board_mac),
+        "captured_at": _proof_text(args.proof_captured_at),
+        "deployed_robot_server_image": _proof_text(
+            args.proof_deployed_robot_server_image
+        ),
+        "hardware_sample_cp7_safety_run": _proof_bool(
+            args.proof_hardware_sample_cp7_safety_run
+        ),
+        "image_reference_type": _proof_text(args.proof_image_reference_type),
+        "lesson_flow_completed": _proof_bool(args.proof_lesson_flow_completed),
+        "llm_judge_checked": _proof_bool(args.proof_llm_judge_checked),
+        "output_classifier_checked": _proof_bool(
+            args.proof_output_classifier_checked
+        ),
+        "redacted": True,
+        "unsafe_output_blocked": (
+            result.get("output_moderation_blocks", 0) >= 1
+            and result.get("safe_deflection_live_text", 0) >= 1
+        ),
+    }
+
+
+def _write_child_live_moderation_proof(path, values):
+    lines = []
+    for key in PROOF_KEYS:
+        value = values[key]
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        lines.append(f"{key}: {value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Audit tbot_server logs for physical Google Live voice interrupt smoke evidence."
@@ -1419,6 +1508,23 @@ def main():
     parser.add_argument("--lesson-manifest", type=Path)
     parser.add_argument("--expected-lesson-steps", type=int, default=9)
     parser.add_argument("--expected-interactive-steps", type=int, default=0)
+    parser.add_argument(
+        "--child-live-moderation-proof",
+        type=Path,
+        help=(
+            "Write child_live_moderation proof markdown after a passed "
+            "--production-child-safety-strict audit."
+        ),
+    )
+    parser.add_argument("--proof-backend-device-uuid")
+    parser.add_argument("--proof-board-mac")
+    parser.add_argument("--proof-captured-at")
+    parser.add_argument("--proof-deployed-robot-server-image")
+    parser.add_argument("--proof-hardware-sample-cp7-safety-run")
+    parser.add_argument("--proof-image-reference-type")
+    parser.add_argument("--proof-lesson-flow-completed")
+    parser.add_argument("--proof-llm-judge-checked")
+    parser.add_argument("--proof-output-classifier-checked")
     args = parser.parse_args()
 
     log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
@@ -1429,6 +1535,30 @@ def main():
         )
     production_voice_strict = args.production_voice_strict or args.production_strict
     production_course_strict = args.production_course_strict or args.production_strict
+    if args.child_live_moderation_proof is not None:
+        if not args.production_child_safety_strict:
+            parser.error(
+                "--child-live-moderation-proof requires "
+                "--production-child-safety-strict"
+            )
+        missing_proof_flags = [
+            "--" + flag.replace("_", "-")
+            for flag in PROOF_METADATA_FLAGS
+            if getattr(args, flag) is None
+        ]
+        if missing_proof_flags:
+            parser.error(
+                "--child-live-moderation-proof requires "
+                + ", ".join(missing_proof_flags)
+            )
+        for flag in PROOF_METADATA_FLAGS:
+            try:
+                if flag in PROOF_BOOL_FLAGS:
+                    _proof_bool(getattr(args, flag))
+                else:
+                    _proof_text(getattr(args, flag))
+            except ValueError as exc:
+                parser.error(f"--{flag.replace('_', '-')} {exc}")
     if production_voice_strict and not args.expected_user_transcript:
         strict_flag = "--production-strict" if args.production_strict else "--production-voice-strict"
         parser.error(f"{strict_flag} requires --expected-user-transcript")
@@ -1471,6 +1601,8 @@ def main():
     if args.production_child_safety_strict:
         min_output_moderation_blocks = 1
         min_safe_deflection_live_text = 1
+        if not production_voice_strict:
+            min_audio_interrupts = 0
     require_lesson = args.require_lesson
     require_lesson_live_text = args.require_lesson_live_text
     if production_course_strict:
@@ -1508,6 +1640,16 @@ def main():
         expected_user_transcripts=args.expected_user_transcript,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.child_live_moderation_proof is not None and result["passed"]:
+        proof_values = _child_live_moderation_proof_values(args, result)
+        if not proof_values["unsafe_output_blocked"]:
+            parser.error(
+                "--child-live-moderation-proof requires strict child safety evidence"
+            )
+        _write_child_live_moderation_proof(
+            args.child_live_moderation_proof,
+            proof_values,
+        )
     return 0 if result["passed"] else 1
 
 

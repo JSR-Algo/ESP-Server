@@ -713,6 +713,174 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertEqual(result["output_moderation_blocks"], 1)
         self.assertEqual(result["safe_deflection_live_text"], 1)
 
+    def test_cli_refuses_child_live_moderation_proof_when_strict_evidence_missing(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            proof_path = Path(tmp) / "child_live_moderation_proof.md"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-child-safety-strict",
+                    "--child-live-moderation-proof",
+                    str(proof_path),
+                    "--proof-backend-device-uuid",
+                    "redacted-device-uuid",
+                    "--proof-board-mac",
+                    "redacted-board-mac",
+                    "--proof-captured-at",
+                    "2026-05-18T20:10:00Z",
+                    "--proof-deployed-robot-server-image",
+                    "redacted-image-digest",
+                    "--proof-hardware-sample-cp7-safety-run",
+                    "true",
+                    "--proof-image-reference-type",
+                    "redacted-digest",
+                    "--proof-lesson-flow-completed",
+                    "true",
+                    "--proof-llm-judge-checked",
+                    "true",
+                    "--proof-output-classifier-checked",
+                    "true",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertFalse(proof_path.exists())
+            result = json.loads(proc.stdout)
+            self.assertIn("output_moderation_blocks>=1", result["missing"])
+            self.assertIn("safe_deflection_live_text>=1", result["missing"])
+
+    def test_cli_refuses_child_live_moderation_proof_when_metadata_missing(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:05[GoogleLive]-WARNING-Google Live output_moderation_blocked source=model_output
+260518 20:10:06[GoogleLive]-INFO-Google Live safe_deflection sent via live text chars=72
+""" + "\n".join(
+            "260518 20:11:{:02d}[GoogleLive]-INFO-Google Live user_interrupted reason=audio_input cancelled_response_id={} next_response_id={}".format(i, i, i + 1)
+            for i in range(10)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            proof_path = Path(tmp) / "child_live_moderation_proof.md"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-child-safety-strict",
+                    "--child-live-moderation-proof",
+                    str(proof_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(proc.returncode, 2)
+            self.assertFalse(proof_path.exists())
+            self.assertIn("--proof-backend-device-uuid", proc.stderr)
+
+    def test_cli_writes_child_live_moderation_proof_with_exact_required_keys(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:05[GoogleLive]-WARNING-Google Live output_moderation_blocked source=model_output
+260518 20:10:06[GoogleLive]-INFO-Google Live safe_deflection sent via live text chars=72
+""" + "\n".join(
+            "260518 20:11:{:02d}[GoogleLive]-INFO-Google Live user_interrupted reason=audio_input cancelled_response_id={} next_response_id={}".format(i, i, i + 1)
+            for i in range(10)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            proof_path = Path(tmp) / "child_live_moderation_proof.md"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-child-safety-strict",
+                    "--child-live-moderation-proof",
+                    str(proof_path),
+                    "--proof-backend-device-uuid",
+                    "redacted-device-uuid",
+                    "--proof-board-mac",
+                    "redacted-board-mac",
+                    "--proof-captured-at",
+                    "2026-05-18T20:10:00Z",
+                    "--proof-deployed-robot-server-image",
+                    "redacted-image-digest",
+                    "--proof-hardware-sample-cp7-safety-run",
+                    "true",
+                    "--proof-image-reference-type",
+                    "redacted-digest",
+                    "--proof-lesson-flow-completed",
+                    "true",
+                    "--proof-llm-judge-checked",
+                    "true",
+                    "--proof-output-classifier-checked",
+                    "true",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            proof_lines = proof_path.read_text(encoding="utf-8").splitlines()
+            keys = [line.split(":", 1)[0] for line in proof_lines if ":" in line]
+            self.assertEqual(
+                keys,
+                [
+                    "backend_device_uuid",
+                    "board_mac",
+                    "captured_at",
+                    "deployed_robot_server_image",
+                    "hardware_sample_cp7_safety_run",
+                    "image_reference_type",
+                    "lesson_flow_completed",
+                    "llm_judge_checked",
+                    "output_classifier_checked",
+                    "redacted",
+                    "unsafe_output_blocked",
+                ],
+            )
+            proof_text = "\n".join(proof_lines)
+            self.assertIn("redacted: true", proof_text)
+            self.assertIn("unsafe_output_blocked: true", proof_text)
+            self.assertNotIn("bắt đầu bài học", proof_text)
+            self.assertNotIn("safe_deflection sent", proof_text)
+
     def test_cli_production_voice_strict_requires_fast_interrupt_stop_latency(self):
         log_text = """
 260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
