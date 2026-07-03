@@ -25,6 +25,7 @@ ARM_PERCENT_TOOLS = {
     "set_right_arm_percent": "self_robot_right_arm_set_percent",
     "set_both_arms_percent": "self_robot_both_arms_set_percent",
 }
+MOTION_TOOL_ACK_TIMEOUT_SEC = 0.25
 
 raise_right_arm_function_desc = {
     "type": "function",
@@ -226,6 +227,16 @@ def _tool_result_is_true(result) -> bool:
             return _tool_result_is_true(result["result"])
     return False
 
+def _motion_response(result, response: str) -> ActionResponse:
+    if _tool_result_is_true(result):
+        return ActionResponse(Action.RESPONSE, result="ok", response=response)
+
+    return ActionResponse(
+        Action.RESPONSE,
+        result="sent_unconfirmed",
+        response=response,
+    )
+
 def _clamp_percent(percent) -> int:
     try:
         target = int(percent)
@@ -270,19 +281,21 @@ async def _call_arm_tool(
 
     from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 
-    result = await call_mcp_tool(conn, mcp_client, tool_name, args_str)
-    if not _tool_result_is_true(result):
-        logger.bind(tag=TAG).warning(f"arm tool failed result={result!r}")
-        return ActionResponse(
-            Action.ERROR,
-            response="Main đã gọi lệnh nhưng servant không xác nhận UART.",
+    try:
+        result = await call_mcp_tool(
+            conn,
+            mcp_client,
+            tool_name,
+            args_str,
+            timeout=MOTION_TOOL_ACK_TIMEOUT_SEC,
         )
+    except TimeoutError:
+        logger.bind(tag=TAG).warning(f"arm tool ack timed out: {function_name} -> {tool_name}")
+        result = False
+    if not _tool_result_is_true(result):
+        logger.bind(tag=TAG).warning(f"arm tool unconfirmed result={result!r}")
 
-    return ActionResponse(
-        Action.RESPONSE,
-        result="ok",
-        response=success_response,
-    )
+    return _motion_response(result, success_response)
 
 
 @register_function("raise_right_arm", raise_right_arm_function_desc, ToolType.SYSTEM_CTL)
