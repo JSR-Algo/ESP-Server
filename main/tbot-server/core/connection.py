@@ -405,6 +405,8 @@ class ConnectionHandler:
         """Discard message and check whether binding prompt needs playback"""
         if self.tts is None:
             return
+        if self._google_live_mode_configured():
+            return
         current_time = time.time()
         # Check whether need play bindingPrompt
         if current_time - self.last_bind_prompt_time >= self.bind_prompt_interval:

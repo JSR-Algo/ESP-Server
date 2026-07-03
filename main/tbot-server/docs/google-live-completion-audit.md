@@ -143,6 +143,9 @@ Current server-side proof:
 - when `voice_mode.type=google_live` is configured but the Live provider is
   absent, connection routing consumes normal text and audio messages instead of
   falling through to legacy text handlers or the classic ASR queue
+- binding/discard prompts do not schedule `check_bind_device()` when
+  `voice_mode.type=google_live`, so local bind prompt audio cannot enter the
+  Google Live speaker/mic path
 - direct legacy `ConnectionHandler.chat()` calls are no-ops when
   `voice_mode.type=google_live`, so bypass callers cannot queue classic TTS for
   a Google Live session
@@ -188,7 +191,9 @@ Current server-side proof:
 - focused direct-chat guard proof from 2026-07-03:
   connection edge/routing suite `61 passed`
 - focused direct-startToChat guard proof from 2026-07-03:
-  receive-audio/direct-chat suite `13 passed`
+  receive-audio/direct-chat suite `14 passed`
+- focused bind-prompt guard proof from 2026-07-03:
+  connection edge/routing suite `61 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
