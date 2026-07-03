@@ -403,6 +403,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if decoded is None:
                 return False
             await bridge.forward_decoded_input_audio(decoded)
+            rms = self._input_rms(decoded)
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_child_audio_forwarded bytes={} rms={}",
+                len(decoded),
+                rms if rms is not None else "n/a",
+            )
             # The child's continued audio closes the WAITING_MODEL turn so the
             # next lesson step's audio is not dropped.
             if self._interaction.state == InteractionState.WAITING_MODEL:

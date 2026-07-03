@@ -1523,6 +1523,44 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(handler.calls, [])
 
+    async def test_lesson_child_response_audio_forward_logs_diagnostic(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 1000
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+        provider._bridge = _AudioBridge()
+        await provider.open_lesson_child_response_window()
+
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
+
+        messages = [
+            args
+            for level, args, _kwargs in provider.conn.logger.messages
+            if level == "info" and args and args[0] == "Google Live lesson_child_audio_forwarded bytes={} rms={}"
+        ]
+        self.assertEqual(messages, [("Google Live lesson_child_audio_forwarded bytes={} rms={}", 8, 1000)])
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertEqual(handler.calls, [])
+
     async def test_lesson_child_response_window_forces_lesson_mode_before_audio_forwarding(self):
         provider, handler = self._make_provider()
         provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
