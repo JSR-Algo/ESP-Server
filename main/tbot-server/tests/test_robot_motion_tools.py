@@ -26,11 +26,23 @@ class _FakeConn:
 class _CallRecorder:
     def __init__(self, result=None):
         self.calls = []
+        self.timeouts = []
         self.result = result if result is not None else {"content": [{"type": "text", "text": "true"}]}
 
     async def __call__(self, conn, mcp_client, tool_name, args_str, timeout=30):
         self.calls.append({"tool": tool_name, "args": args_str})
+        self.timeouts.append(timeout)
         return self.result
+
+class _TimeoutRecorder:
+    def __init__(self):
+        self.calls = []
+        self.timeouts = []
+
+    async def __call__(self, conn, mcp_client, tool_name, args_str, timeout=30):
+        self.calls.append({"tool": tool_name, "args": args_str})
+        self.timeouts.append(timeout)
+        raise TimeoutError("motion ack timed out")
 
 
 def _patch_mcp_call(recorder):
@@ -92,6 +104,23 @@ class RobotArmActionToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.response, "Đã hạ tay trái.")
         self.assertEqual(recorder.calls, [{"tool": "self_robot_left_arm_lower", "args": "{}"}])
 
+    async def test_arm_motion_uses_fast_ack_timeout(self):
+        recorder = _CallRecorder()
+        with _patch_mcp_call(recorder):
+            await robot_arm_actions.raise_right_arm(self._conn())
+
+        self.assertLess(recorder.timeouts[0], 1)
+
+    async def test_arm_motion_timeout_returns_sent_unconfirmed(self):
+        recorder = _TimeoutRecorder()
+        with _patch_mcp_call(recorder):
+            result = await robot_arm_actions.raise_right_arm(self._conn())
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, "sent_unconfirmed")
+        self.assertEqual(result.response, "Đã nâng tay phải.")
+        self.assertLess(recorder.timeouts[0], 1)
+
     def test_arm_result_parser_accepts_nested_truthy_mcp_shapes(self):
         self.assertTrue(robot_arm_actions._tool_result_is_true(True))
         self.assertTrue(robot_arm_actions._tool_result_is_true(" TRUE "))
@@ -146,6 +175,23 @@ class TurnHeadToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result, "sent_unconfirmed")
         self.assertEqual(result.response, "Đã quay đầu sang trái.")
         self.assertEqual(recorder.calls, [{"tool": turn_head.HEAD_TURN_LEFT_TOOL, "args": "{}"}])
+
+    async def test_head_motion_uses_fast_ack_timeout(self):
+        recorder = _CallRecorder()
+        with _patch_mcp_call(recorder):
+            await turn_head.turn_head_left(self._conn())
+
+        self.assertLess(recorder.timeouts[0], 1)
+
+    async def test_head_motion_timeout_returns_sent_unconfirmed(self):
+        recorder = _TimeoutRecorder()
+        with _patch_mcp_call(recorder):
+            result = await turn_head.turn_head_left(self._conn())
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, "sent_unconfirmed")
+        self.assertEqual(result.response, "Đã quay đầu sang trái.")
+        self.assertLess(recorder.timeouts[0], 1)
 
     async def test_head_angle_clamps_to_servo_range(self):
         for angle, expected in [(-15, 0), (999, 180), ("bad", 90)]:

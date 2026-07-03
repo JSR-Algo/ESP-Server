@@ -40,6 +40,7 @@ class _FakeConn:
 class _CapturingCallMcp:
     def __init__(self, result=None):
         self.calls = []
+        self.timeouts = []
         self.result = result or {
             "content": [{"type": "text", "text": "true"}],
             "isError": False,
@@ -47,7 +48,18 @@ class _CapturingCallMcp:
 
     async def __call__(self, conn, mcp_client, tool_name, args_str, timeout=30):
         self.calls.append({"tool": tool_name, "args": args_str})
+        self.timeouts.append(timeout)
         return self.result
+
+class _TimeoutCallMcp:
+    def __init__(self):
+        self.calls = []
+        self.timeouts = []
+
+    async def __call__(self, conn, mcp_client, tool_name, args_str, timeout=30):
+        self.calls.append({"tool": tool_name, "args": args_str})
+        self.timeouts.append(timeout)
+        raise TimeoutError("motion ack timed out")
 
 
 def _patched_call_mcp_tool(capturing):
@@ -113,6 +125,27 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
             capturing.calls,
             [{"tool": raise_left_arm_module.LEFT_ARM_TOOL, "args": "{}"}],
         )
+
+    async def test_arm_motion_uses_fast_ack_timeout(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+        capturing = _CapturingCallMcp()
+
+        with _patched_call_mcp_tool(capturing):
+            await raise_left_arm_module.raise_left_arm(conn)
+
+        self.assertLess(capturing.timeouts[0], 1)
+
+    async def test_returns_sent_unconfirmed_when_motion_ack_times_out(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+        capturing = _TimeoutCallMcp()
+
+        with _patched_call_mcp_tool(capturing):
+            result = await raise_left_arm_module.raise_left_arm(conn)
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, "sent_unconfirmed")
+        self.assertEqual(result.response, "Đã nâng tay trái.")
+        self.assertLess(capturing.timeouts[0], 1)
 
     def test_tool_name_uses_sanitized_mcp_name(self):
         self.assertEqual(raise_left_arm_module.LEFT_ARM_TOOL, "self_robot_left_arm_raise")

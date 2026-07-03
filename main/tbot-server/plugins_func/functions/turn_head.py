@@ -17,6 +17,7 @@ HEAD_TURN_RIGHT_TOOL = "self_robot_head_turn_right"
 HEAD_CENTER_TOOL = "self_robot_head_center"
 HEAD_SET_ANGLE_TOOL = "self_robot_head_set_angle"
 HEAD_SET_PERCENT_TOOL = "self_robot_head_set_percent"
+MOTION_TOOL_ACK_TIMEOUT_SEC = 0.25
 
 turn_head_left_function_desc = {
     "type": "function",
@@ -257,7 +258,17 @@ async def _call_head_tool(
 
     from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 
-    result = await call_mcp_tool(conn, mcp_client, tool_name, args_str)
+    try:
+        result = await call_mcp_tool(
+            conn,
+            mcp_client,
+            tool_name,
+            args_str,
+            timeout=MOTION_TOOL_ACK_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        logger.bind(tag=TAG).warning(f"head tool ack timed out: {tool_name}")
+        result = False
     if not _tool_result_is_true(result):
         logger.bind(tag=TAG).warning(f"head tool unconfirmed result={result!r}")
 

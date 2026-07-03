@@ -1,7 +1,6 @@
 import json
 import os
 import unittest
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -54,6 +53,43 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             timeout=30,
         )
 
+    async def test_robot_motion_tool_uses_fast_timeout(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(mcp_client=object())
+        call = AsyncMock(return_value="true")
+        handler = DeviceMCPAdminHandler({}, {"device-1": conn})
+
+        with patch("core.api.device_mcp_admin_handler.call_mcp_tool", call):
+            response = await handler.handle_post(
+                _FakeRequest(body={"toolName": "self_robot_head_turn_left", "args": {}})
+            )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(await _response_json(response), {"data": {"called": True, "result": "true"}})
+        self.assertLess(call.await_args.kwargs["timeout"], 1)
+
+    async def test_robot_motion_timeout_returns_sent_unconfirmed(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(mcp_client=object())
+        call = AsyncMock(side_effect=TimeoutError("Tool call request timed out"))
+        handler = DeviceMCPAdminHandler({}, {"device-1": conn})
+
+        with patch("core.api.device_mcp_admin_handler.call_mcp_tool", call):
+            response = await handler.handle_post(
+                _FakeRequest(body={"toolName": "self_robot_head_turn_left", "args": {}})
+            )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(
+            await _response_json(response),
+            {"data": {"called": True, "result": "sent_unconfirmed"}},
+        )
+        self.assertLess(call.await_args.kwargs["timeout"], 1)
+
     async def test_can_call_unlisted_user_tool_with_raw_mcp_name(self):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 
@@ -102,6 +138,29 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             sent[0]["params"],
             {"name": "self.upgrade_firmware", "arguments": {"url": "http://fw.bin"}},
         )
+
+    async def test_unlisted_raw_robot_motion_tool_uses_fast_timeout(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(mcp_client=object())
+        raw_call = AsyncMock(return_value="true")
+        handler = DeviceMCPAdminHandler({}, {"device-1": conn})
+
+        with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", raw_call):
+            response = await handler.handle_post(
+                _FakeRequest(
+                    body={
+                        "toolName": "self.robot.head_turn_left",
+                        "allowUnlisted": True,
+                        "args": {},
+                    }
+                )
+            )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(await _response_json(response), {"data": {"called": True, "result": "true"}})
+        self.assertLess(raw_call.await_args.kwargs["timeout"], 1)
 
     async def test_reports_offline_missing_tool_name_and_call_failures(self):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler

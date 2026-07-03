@@ -25,6 +25,7 @@ ARM_PERCENT_TOOLS = {
     "set_right_arm_percent": "self_robot_right_arm_set_percent",
     "set_both_arms_percent": "self_robot_both_arms_set_percent",
 }
+MOTION_TOOL_ACK_TIMEOUT_SEC = 0.25
 
 raise_right_arm_function_desc = {
     "type": "function",
@@ -280,7 +281,17 @@ async def _call_arm_tool(
 
     from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 
-    result = await call_mcp_tool(conn, mcp_client, tool_name, args_str)
+    try:
+        result = await call_mcp_tool(
+            conn,
+            mcp_client,
+            tool_name,
+            args_str,
+            timeout=MOTION_TOOL_ACK_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        logger.bind(tag=TAG).warning(f"arm tool ack timed out: {function_name} -> {tool_name}")
+        result = False
     if not _tool_result_is_true(result):
         logger.bind(tag=TAG).warning(f"arm tool unconfirmed result={result!r}")
 

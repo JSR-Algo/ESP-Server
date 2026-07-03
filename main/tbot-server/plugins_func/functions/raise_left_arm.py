@@ -17,6 +17,7 @@ LEFT_ARM_LOWER_TOOL = "self_robot_left_arm_lower"
 RIGHT_ARM_LOWER_TOOL = "self_robot_right_arm_lower"
 BOTH_ARMS_RAISE_TOOL = "self_robot_both_arms_raise"
 BOTH_ARMS_LOWER_TOOL = "self_robot_both_arms_lower"
+MOTION_TOOL_ACK_TIMEOUT_SEC = 0.25
 
 ARM_TOOL_BY_FUNCTION = {
     "raise_left_arm": LEFT_ARM_TOOL,
@@ -161,7 +162,17 @@ async def _run_arm_action(conn: "ConnectionHandler", function_name: str):
 
     from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 
-    result = await call_mcp_tool(conn, mcp_client, tool_name, "{}")
+    try:
+        result = await call_mcp_tool(
+            conn,
+            mcp_client,
+            tool_name,
+            "{}",
+            timeout=MOTION_TOOL_ACK_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        logger.bind(tag=TAG).warning(f"{function_name} ack timed out; treating command as sent")
+        result = False
     if not _tool_result_is_true(result):
         logger.bind(tag=TAG).warning(f"{function_name} unconfirmed result={result!r}")
 
