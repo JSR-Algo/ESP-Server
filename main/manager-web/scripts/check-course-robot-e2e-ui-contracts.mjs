@@ -115,11 +115,18 @@ function loadBuildScene() {
       url: 'https://old-cdn.example.com/lesson-assets/barn.png',
       sha256: 'obj-sha',
     },
+    'robotOverlay.teach': {
+      assetKey: 'robotOverlay.teach',
+      path: 'lesson-assets/bright-teach.png',
+      url: 'https://old-cdn.example.com/lesson-assets/bright-teach.png',
+      sha256: 'overlay-sha',
+    },
   };
   const scene = buildScene.call(
     {
       stepForm: {
         stepType: 'model',
+        renderExpression: '',
         scene: {
           backgroundKey: 'backgroundScene.poster',
           objectKey: 'teachingObject.barn',
@@ -143,6 +150,12 @@ function loadBuildScene() {
   assert.equal(scene.teachingObject.asset.src, 'lesson-assets/barn.png');
   assert.equal(scene.backgroundScene.poster.sha256, 'bg-sha');
   assert.equal(scene.teachingObject.asset.sha256, 'obj-sha');
+  assert.equal(scene.robotOverlay.pose, 'teach');
+  assert.equal(scene.robotOverlay.expression, 'teaching');
+  assert.equal(scene.robotOverlay.asset.key, 'robotOverlay.teach');
+  assert.equal(scene.robotOverlay.asset.src, 'lesson-assets/bright-teach.png');
+  assert.equal(scene.robotOverlay.asset.sha256, 'overlay-sha');
+  assert.equal(scene.robotOverlay.atlas.image, 'lesson-assets/bright-teach.png');
   assert.equal(JSON.stringify(scene.teachingObject.focusTarget.activeWindows[0]), JSON.stringify({
     tStart: 0.2,
     tEnd: 1.8,
@@ -151,6 +164,42 @@ function loadBuildScene() {
     w: 0.5,
     h: 0.25,
   }));
+}
+
+{
+  const buildScene = loadBuildScene();
+  const assets = {
+    'backgroundScene.poster': { assetKey: 'backgroundScene.poster', path: 'assets/background/barn.jpg', sha256: 'bg' },
+    'teachingObject.barn': { assetKey: 'teachingObject.barn', path: 'assets/objects/barn.png', sha256: 'obj' },
+    'robotOverlay.thinking': { assetKey: 'robotOverlay.thinking', path: 'assets/robot/poses/bright-thinking.png', sha256: 'think' },
+  };
+  const scene = buildScene.call(
+    {
+      stepForm: {
+        stepType: 'listen',
+        renderExpression: 'thinking',
+        scene: {
+          backgroundKey: 'backgroundScene.poster',
+          objectKey: 'teachingObject.barn',
+          fit: 'cover',
+          altCaption: '',
+          primaryWord: 'barn',
+          supportWords: [],
+          placementAnchor: 'center',
+          activeWindows: [],
+          successUtterance: '',
+          missUtterance: '',
+          timeoutSec: 12,
+        },
+      },
+      assetByKey(key) { return assets[key]; },
+    },
+    'barn',
+  );
+
+  assert.equal(scene.robotOverlay.pose, 'thinking');
+  assert.equal(scene.robotOverlay.expression, 'thinking');
+  assert.equal(scene.robotOverlay.asset.src, 'assets/robot/poses/bright-thinking.png');
 }
 
 console.log('course robot E2E UI contracts OK');
