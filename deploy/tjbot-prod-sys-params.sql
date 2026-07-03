@@ -1,9 +1,7 @@
--- Compatibility wrapper: apply the stable tjbot.vn URLs to manager-api
--- Parameter Management. This filename is retained for older local/manual
--- scripts; do not commit ephemeral lab tunnel values here.
--- Usage:
---   docker exec -i tbot-runtime-db sh -lc 'mysql -uroot -p123456 tbot_esp32_server' \
---     < robot/esp32-server/deploy/current-quick-tunnel-sys-params.sql
+-- Apply stable production URLs for tjbot.vn to manager-api Parameter Management.
+-- Usage on the VPS:
+--   docker exec -i tbot-esp32-server-db sh -lc 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" tbot_esp32_server' \
+--     < deploy/tjbot-prod-sys-params.sql
 
 UPDATE sys_params
 SET param_value = 'https://admin.tjbot.vn'

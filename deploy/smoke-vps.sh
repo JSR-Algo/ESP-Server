@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HOST=""
+ADMIN_URL=""
 TCP_PORT="8000"
 HTTP_PORT="8002"
 OTA_PORT="8003"
@@ -13,14 +14,17 @@ EXPECTED_WS_HOST=""
 usage() {
   cat <<'USAGE'
 Usage: smoke-vps.sh --host <host> [options]
+       smoke-vps.sh --admin-url <url> --ota-url <url> --expected-ws-host <host>
 
 Check TBOT VPS public endpoints:
   HTTP http://host:8002/
   HTTP http://host:8003/tbot/ota/
   TCP  host:8000
+  HTTPS admin/OTA domains when --admin-url and --ota-url are provided
 
 Options:
-  --host <host>            Required VPS host/IP.
+  --host <host>            VPS host/IP for direct port checks.
+  --admin-url <url>        Full admin URL for reverse-proxy checks.
   --port <port>            TCP WebSocket port (default: 8000).
   --http-port <port>       Admin HTTP port (default: 8002).
   --ota-port <port>        OTA HTTP port (default: 8003).
@@ -84,22 +88,32 @@ check_public_ota_payload() {
   curl --fail --silent --show-error --location --max-time "${TIMEOUT}" --output "${output}" "${PUBLIC_OTA_URL}"
   python3 - "${output}" "${EXPECTED_WS_HOST}" <<'PY'
 import json
+import re
 import sys
 from urllib.parse import urlparse
 
 path, expected_host = sys.argv[1], sys.argv[2]
 with open(path, 'r', encoding='utf-8') as fh:
-    payload = json.load(fh)
+    raw = fh.read()
 
-api_url = payload.get('api_url')
-if not isinstance(api_url, str) or not api_url.strip():
-    print('OTA response missing api_url', file=sys.stderr)
-    sys.exit(1)
+ws_url = None
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError:
+    match = re.search(r'wss?://[^\s"<>]+', raw)
+    if match:
+        ws_url = match.group(0)
+else:
+    api_url = payload.get('api_url')
+    if not isinstance(api_url, str) or not api_url.strip():
+        print('OTA response missing api_url', file=sys.stderr)
+        sys.exit(1)
 
-websocket = payload.get('websocket') or {}
-ws_url = websocket.get('url')
+    websocket = payload.get('websocket') or {}
+    ws_url = websocket.get('url')
+
 if not isinstance(ws_url, str) or not ws_url.strip():
-    print('OTA response missing websocket.url', file=sys.stderr)
+    print('OTA response missing websocket URL', file=sys.stderr)
     sys.exit(1)
 
 parsed = urlparse(ws_url)
@@ -117,6 +131,11 @@ while (($#)); do
     --host)
       [[ $# -ge 2 ]] || die "--host requires a value"
       HOST="$2"
+      shift 2
+      ;;
+    --admin-url)
+      [[ $# -ge 2 ]] || die "--admin-url requires a value"
+      ADMIN_URL="$2"
       shift 2
       ;;
     --port)
@@ -164,7 +183,7 @@ while (($#)); do
   esac
 done
 
-[[ -n "${HOST}" ]] || die "--host is required"
+[[ -n "${HOST}" || -n "${ADMIN_URL}" ]] || die "--host or --admin-url is required"
 need_cmd curl
 if [[ -n "${PUBLIC_OTA_URL}" || -n "${EXPECTED_WS_HOST}" ]]; then
   [[ -n "${PUBLIC_OTA_URL}" ]] || die "--ota-url is required when --expected-ws-host is set"
@@ -172,11 +191,19 @@ if [[ -n "${PUBLIC_OTA_URL}" || -n "${EXPECTED_WS_HOST}" ]]; then
   need_cmd python3
 fi
 
-check_http "${SCHEME}://${HOST}:${HTTP_PORT}/"
-check_http "${SCHEME}://${HOST}:${OTA_PORT}/tbot/ota/"
-check_tcp "${HOST}" "${TCP_PORT}"
+if [[ -n "${ADMIN_URL}" ]]; then
+  check_http "${ADMIN_URL}"
+else
+  check_http "${SCHEME}://${HOST}:${HTTP_PORT}/"
+fi
+
+if [[ -n "${HOST}" ]]; then
+  check_http "${SCHEME}://${HOST}:${OTA_PORT}/tbot/ota/"
+  check_tcp "${HOST}" "${TCP_PORT}"
+fi
+
 if [[ -n "${PUBLIC_OTA_URL}" ]]; then
   check_public_ota_payload
 fi
 
-printf 'Smoke checks passed for %s\n' "${HOST}"
+printf 'Smoke checks passed\n'

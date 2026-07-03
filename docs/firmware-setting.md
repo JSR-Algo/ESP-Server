@@ -8,7 +8,7 @@
 
 此刻，请你用浏览器打开你的ota地址，例如我的ota地址
 ```
-https://2662r3426b.vicp.fun/tbot/ota/
+https://esp.tjbot.vn/tbot/ota/
 ```
 
 如果显示“OTA接口运行正常，websocket集群数量：X”。那就往下。
@@ -22,7 +22,7 @@ https://2662r3426b.vicp.fun/tbot/ota/
 - 3、在列表中找到`server.websocket`项目，输入你的`Websocket`地址。例如我的就是
 
 ```
-wss://2662r3426b.vicp.fun/tbot/v1/
+wss://esp.tjbot.vn/tbot/v1/
 ```
 
 配置完后，再使用浏览器刷新你的ota接口地址，看看是不是正常了。如果还不正常就，就再次确认一下Websocket是否正常启动，是否配置了Websocket地址。

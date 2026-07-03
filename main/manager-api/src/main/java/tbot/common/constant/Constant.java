@@ -329,7 +329,7 @@ public interface Constant {
     /**
      * Invalid FirmwareURL
      */
-    String INVALID_FIRMWARE_URL = "http://tbot.server.com:8002/tbot/otaMag/download/NOT_ACTIVATED_FIRMWARE_THIS_IS_A_INVALID_URL";
+    String INVALID_FIRMWARE_URL = "https://esp.tjbot.vn/tbot/otaMag/download/NOT_ACTIVATED_FIRMWARE_THIS_IS_A_INVALID_URL";
 
     /**
      * Dictionary type
