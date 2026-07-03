@@ -725,6 +725,8 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_lesson_passive_voice_input_does_not_route_to_provider(self):
         handler = self._build_handler()
         handler.bind_completed_event.set()
+        handler.vad = object()
+        handler.asr = object()
         handler.voice_provider = _RecordingVoiceProvider()
         handler.session_mode = connection_module.SessionMode.LESSON
         handler.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
@@ -732,6 +734,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         await handler._route_message(b"narration-opus-frame")
 
         self.assertEqual(handler.voice_provider.audio_calls, [])
+        self.assertTrue(handler.asr_audio_queue.empty())
 
     async def test_active_lesson_runtime_restores_lesson_mode_from_dormant_audio(self):
         handler = self._build_handler()

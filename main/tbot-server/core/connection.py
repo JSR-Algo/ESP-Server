@@ -478,24 +478,24 @@ class ConnectionHandler:
             if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
                 self._set_session_mode(SessionMode.LESSON, reason="lesson_runtime_active")
             if not self._lesson_runtime_accepts_voice_input():
-                return False
+                return True
             if self.voice_provider is None:  # pragma: no cover - defensive lesson provider guard
-                return False
+                return True
             handled = await self.voice_provider.handle_audio_bytes(message)
             if handled:
                 self.last_activity_time = time.time() * 1000
                 self.last_live_activity_at = time.monotonic()
-            return bool(handled)
+            return True
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
             if not self._lesson_runtime_accepts_voice_input():
-                return False
+                return True
             if self.voice_provider is None:  # pragma: no cover - defensive lesson provider guard
-                return False
+                return True
             handled = await self.voice_provider.handle_audio_bytes(message)
             if handled:
                 self.last_activity_time = time.time() * 1000
                 self.last_live_activity_at = time.monotonic()
-            return bool(handled)
+            return True
         if self.voice_provider is None:
             return False
         if normalize_session_mode(self.session_mode) == SessionMode.DORMANT:

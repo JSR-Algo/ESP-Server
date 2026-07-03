@@ -402,10 +402,10 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.session_mode = connection_module.SessionMode.LESSON
         handler.lesson_runtime = routing_tests._LessonRuntimeStub(passive=False, completed=False)
         handler.voice_provider = types.SimpleNamespace(handle_audio_bytes=lambda audio: asyncio.sleep(0, result=False))
-        self.assertFalse(await handler._route_audio_message(b"lesson"))
+        self.assertTrue(await handler._route_audio_message(b"lesson"))
         handler.session_mode = connection_module.SessionMode.CONVERSATION
         handler.voice_provider = None
-        self.assertFalse(await handler._route_audio_message(b"no-provider"))
+        self.assertTrue(await handler._route_audio_message(b"no-provider"))
 
         class RaisingLogger(_Logger):
             def bind(self, **kwargs):

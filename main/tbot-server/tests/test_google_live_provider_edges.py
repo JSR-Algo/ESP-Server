@@ -546,10 +546,10 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(provider._pending_reconnect_audio)[-1][1], b"raw")
         provider._reconnecting = False
         provider._bridge = None
+        conn.session_mode = SessionMode.CONVERSATION
         self.assertTrue(await provider.handle_audio_bytes(b"raw"))
 
         provider._bridge = None
-        conn.session_mode = SessionMode.CONVERSATION
         async def _deny_live_open():
             return False
 
