@@ -54,6 +54,9 @@ FATAL_PATTERNS = (
     "Google Live interruption suppressed_for_age",
     "Google Live transcript_barge_in suppressed_for_age",
     "Google Live transcript_barge_in suppressed_as_model_echo",
+    "Google Live safe_deflection live text unavailable",
+    "Google Live safe_deflection live text failed",
+    "Google Live safety_block event dropped",
     "JPEG decode failed",
     "undecodable image; skipping",
     "lesson_step rejected",
@@ -1027,6 +1030,8 @@ def audit_log(
     min_post_interrupt_user_transcripts=None,
     min_realtime_tts_stops=None,
     min_output_relisten_chains=None,
+    min_output_moderation_blocks=None,
+    min_safe_deflection_live_text=None,
     max_first_audio_ms=None,
     max_interrupt_stop_latency_ms=None,
     require_lesson_live_text=False,
@@ -1101,6 +1106,18 @@ def audit_log(
         re.findall(
             r"(?:Google Live )?tts_stop_sent "
             r"continue_listening=true listen_mode=realtime",
+            evidence_log_text,
+        )
+    )
+    output_moderation_blocks = len(
+        re.findall(
+            r"Google Live output_moderation_blocked source=model_output",
+            evidence_log_text,
+        )
+    )
+    safe_deflection_live_text = len(
+        re.findall(
+            r"Google Live safe_deflection sent via live text chars=\d+",
             evidence_log_text,
         )
     )
@@ -1265,6 +1282,18 @@ def audit_log(
         min_output_relisten_chains = int(min_output_relisten_chains)
         if output_relisten_chains < min_output_relisten_chains:
             missing.append(f"output_relisten_chains>={min_output_relisten_chains}")
+    if min_output_moderation_blocks is not None:
+        min_output_moderation_blocks = int(min_output_moderation_blocks)
+        if output_moderation_blocks < min_output_moderation_blocks:
+            missing.append(
+                f"output_moderation_blocks>={min_output_moderation_blocks}"
+            )
+    if min_safe_deflection_live_text is not None:
+        min_safe_deflection_live_text = int(min_safe_deflection_live_text)
+        if safe_deflection_live_text < min_safe_deflection_live_text:
+            missing.append(
+                f"safe_deflection_live_text>={min_safe_deflection_live_text}"
+            )
     if fatal_hits:
         missing.append("no_fatal_patterns")
 
@@ -1301,6 +1330,8 @@ def audit_log(
         "live_identity_first_audio_chains": live_identity_first_audio_chains,
         "realtime_tts_stops": realtime_tts_stops,
         "output_relisten_chains": output_relisten_chains,
+        "output_moderation_blocks": output_moderation_blocks,
+        "safe_deflection_live_text": safe_deflection_live_text,
         "user_transcripts": user_transcripts,
         "expected_user_transcripts": len(expected_user_transcripts),
         "user_transcript_expected_matches": user_transcript_expected_matches,
@@ -1370,6 +1401,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--production-child-safety-strict",
+        action="store_true",
+        help=(
+            "Require child-safety evidence: Live output moderation blocked "
+            "unsafe model output and sent a safe deflection via Live text."
+        ),
+    )
+    parser.add_argument(
         "--production-strict",
         action="store_true",
         help="Require both production voice and lesson/course gates.",
@@ -1408,6 +1447,8 @@ def main():
     min_post_interrupt_user_transcripts = None
     min_realtime_tts_stops = None
     min_output_relisten_chains = None
+    min_output_moderation_blocks = None
+    min_safe_deflection_live_text = None
     min_audio_interrupts = None
     max_first_audio_ms = args.max_first_audio_ms
     max_interrupt_stop_latency_ms = None
@@ -1427,6 +1468,9 @@ def main():
         max_interrupt_stop_latency_ms = 250.0
         if max_first_audio_ms is None:
             max_first_audio_ms = 1800.0
+    if args.production_child_safety_strict:
+        min_output_moderation_blocks = 1
+        min_safe_deflection_live_text = 1
     require_lesson = args.require_lesson
     require_lesson_live_text = args.require_lesson_live_text
     if production_course_strict:
@@ -1454,6 +1498,8 @@ def main():
         min_post_interrupt_user_transcripts=min_post_interrupt_user_transcripts,
         min_realtime_tts_stops=min_realtime_tts_stops,
         min_output_relisten_chains=min_output_relisten_chains,
+        min_output_moderation_blocks=min_output_moderation_blocks,
+        min_safe_deflection_live_text=min_safe_deflection_live_text,
         max_first_audio_ms=max_first_audio_ms,
         max_interrupt_stop_latency_ms=max_interrupt_stop_latency_ms,
         require_lesson_live_text=require_lesson_live_text,

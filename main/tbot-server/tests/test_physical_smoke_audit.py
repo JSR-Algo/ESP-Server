@@ -612,6 +612,107 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertEqual(result["audio_interrupts"], 0)
         self.assertEqual(result["live_server_interruption"], 10)
 
+    def test_cli_production_child_safety_strict_requires_output_moderation_proof(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:00[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:03[GoogleLive]-INFO-Google Live first_audio_out_latency_ms=900
+260518 20:10:04[GoogleLive]-INFO-tts_stop_sent continue_listening=true listen_mode=realtime
+""" + "\n".join(
+            "\n".join(
+                (
+                    "260518 20:11:{:02d}[GoogleLive]-INFO-Google Live aec_live_vad_forward reason=robot_speaking bytes=640 rms=300".format(i),
+                    "260518 20:12:{:02d}[GoogleLive]-INFO-Google Live interruption output_age_ms=420".format(i),
+                    "260518 20:13:{:02d}[GoogleLive]-INFO-tts_stop_sent reason=interrupt continue_listening=true listen_mode=realtime".format(i),
+                    "260518 20:13:{:02d}[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=25.0".format(i),
+                )
+            )
+            for i in range(10)
+        ) + """
+260518 20:14:00[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='dừng lại'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--expected-user-transcript",
+                    "dừng lại",
+                    "--production-voice-strict",
+                    "--production-child-safety-strict",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertIn("output_moderation_blocks>=1", result["missing"])
+        self.assertIn("safe_deflection_live_text>=1", result["missing"])
+
+    def test_cli_production_child_safety_strict_accepts_moderation_block_and_deflection(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:00[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:03[GoogleLive]-INFO-Google Live first_audio_out_latency_ms=900
+260518 20:10:04[GoogleLive]-INFO-tts_stop_sent continue_listening=true listen_mode=realtime
+260518 20:10:05[GoogleLive]-WARNING-Google Live output_moderation_blocked source=model_output
+260518 20:10:06[GoogleLive]-INFO-Google Live safe_deflection sent via live text chars=72
+""" + "\n".join(
+            "\n".join(
+                (
+                    "260518 20:11:{:02d}[GoogleLive]-INFO-Google Live aec_live_vad_forward reason=robot_speaking bytes=640 rms=300".format(i),
+                    "260518 20:12:{:02d}[GoogleLive]-INFO-Google Live interruption output_age_ms=420".format(i),
+                    "260518 20:13:{:02d}[GoogleLive]-INFO-tts_stop_sent reason=interrupt continue_listening=true listen_mode=realtime".format(i),
+                    "260518 20:13:{:02d}[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=25.0".format(i),
+                )
+            )
+            for i in range(10)
+        ) + """
+260518 20:14:00[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='dừng lại'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--expected-user-transcript",
+                    "dừng lại",
+                    "--production-voice-strict",
+                    "--production-child-safety-strict",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["output_moderation_blocks"], 1)
+        self.assertEqual(result["safe_deflection_live_text"], 1)
+
     def test_cli_production_voice_strict_requires_fast_interrupt_stop_latency(self):
         log_text = """
 260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
