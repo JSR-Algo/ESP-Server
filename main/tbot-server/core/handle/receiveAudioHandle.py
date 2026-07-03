@@ -37,6 +37,9 @@ async def resume_vad_detection(conn: "ConnectionHandler"):
 
 
 async def startToChat(conn: "ConnectionHandler", text):
+    if _is_google_live_connection(conn):
+        return
+
     # Check whether input isJSONFormat (include speakerInfo)
     speaker_name = None
     language_tag = None
@@ -122,6 +125,11 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
                 prompt = "pleaseYouto```Time flies```future head, end this dialog with emotional, reluctant words.!"
             await startToChat(conn, prompt)
 
+
+def _is_google_live_connection(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    voice_mode = config.get("voice_mode") if isinstance(config, dict) else {}
+    return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
 
 async def max_out_size(conn: "ConnectionHandler"):
     # Play prompt for exceeding maximum output word count

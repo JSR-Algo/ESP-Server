@@ -107,6 +107,22 @@ class ReceiveAudioHandleTest(unittest.IsolatedAsyncioTestCase):
 
 
 class StartToChatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_google_live_start_to_chat_does_not_enter_classic_pipeline(self):
+        conn = _conn(config={"voice_mode": {"type": "google_live"}})
+        sent = []
+
+        async def send(_conn, text):
+            sent.append(text)
+
+        with patch.object(receiveAudioHandle, "handle_user_intent", new=AsyncMock(return_value=False)) as intent, patch.object(
+            receiveAudioHandle, "send_stt_message", new=send
+        ):
+            await receiveAudioHandle.startToChat(conn, "xin chao")
+
+        intent.assert_not_awaited()
+        self.assertEqual(sent, [])
+        self.assertEqual(conn.executor.calls, [])
+
     async def test_start_to_chat_preserves_json_payload_for_speaker_metadata(self):
         conn = _conn()
         sent = []
