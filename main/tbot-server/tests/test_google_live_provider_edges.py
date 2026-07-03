@@ -671,6 +671,36 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(provider._bridge.stop_calls, 1)
 
+    async def test_lesson_child_audio_logs_aec_live_vad_forward_while_robot_speaks(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            _step_id="s4",
+            _step_passive=False,
+            _step_completed=False,
+            _child_response_window_open=True,
+            on_child_response=lambda *_args, **_kwargs: True,
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge._aec_processor = SimpleNamespace(bypassed=False)
+        provider._user_audio_allowed_until = time.monotonic() + 5
+
+        handled = await provider.handle_audio_bytes(b"child")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:child"])
+        self.assertTrue(
+            any(
+                "aec_live_vad_forward" in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
     async def test_wake_word_detect_sends_listening_feedback_to_device(self):
         conn = _Conn()
         conn.config["wakeup_words"] = ["Hi ESP"]

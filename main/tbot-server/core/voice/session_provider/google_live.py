@@ -402,6 +402,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 decoded = bridge.decode_input_audio(audio_bytes)
             if decoded is None:
                 return False
+            if self._has_active_output() and self._can_forward_aec_audio_for_live_vad(
+                self._get_live_config()
+            ):
+                self._log_aec_live_vad_forward(decoded, "robot_speaking")
             await bridge.forward_decoded_input_audio(decoded)
             rms = self._input_rms(decoded)
             self.conn.logger.bind(tag="GoogleLive").info(
@@ -3182,17 +3186,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             return False
         if reason == "robot_speaking" and self._can_forward_aec_audio_for_live_vad(config):
-            log_key = "aec_live_vad_forward"
-            last_at = self._last_echo_suppressed_log_at.get(log_key, 0.0)
-            if now - last_at >= 1.0:
-                self._last_echo_suppressed_log_at[log_key] = now
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live aec_live_vad_forward reason={} bytes={} rms={} "
-                    "(throttled to 1/s)",
-                    reason,
-                    len(pcm_audio or b""),
-                    rms,
-                )
+            self._log_aec_live_vad_forward(pcm_audio, reason)
             return False
         # Throttle echo_suppressed log to once per second per reason.
         # Without throttling, during music playback this fires every 60ms
@@ -3207,8 +3201,29 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 reason,
                 len(pcm_audio or b""),
                 rms,
-            )
+        )
         return True
+
+    def _log_aec_live_vad_forward(self, pcm_audio=None, reason="robot_speaking"):
+        log_key = "aec_live_vad_forward"
+        now = time.monotonic()
+        last_at = self._last_echo_suppressed_log_at.get(log_key, 0.0)
+        if now - last_at < 1.0:
+            return
+        self._last_echo_suppressed_log_at[log_key] = now
+        rms = "n/a"
+        if pcm_audio and self._bridge is not None and hasattr(self._bridge, "input_rms"):
+            try:
+                rms = self._bridge.input_rms(pcm_audio)
+            except Exception:
+                rms = "n/a"
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live aec_live_vad_forward reason={} bytes={} rms={} "
+            "(throttled to 1/s)",
+            reason,
+            len(pcm_audio or b""),
+            rms,
+        )
 
     def _can_forward_aec_audio_for_live_vad(self, config):
         if bool(config.get("disable_server_side_interruptions", False)):

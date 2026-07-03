@@ -312,10 +312,29 @@ Current server-side proof:
   grep hits. Rollback to the pre-fast-reopen server image is
   `/opt/tbot/.env.rollback-before-fastretry`. Physical verification remains
   paused: public lesson metrics still report `connections=0`.
+- focused child-AEC marker proof from 2026-07-04:
+  `test_lesson_child_audio_logs_aec_live_vad_forward_while_robot_speaks` failed
+  before the provider change because lesson child audio forwarded during active
+  robot output without the strict-audit `aec_live_vad_forward` marker. The
+  provider now reuses the throttled marker log when a child-response window
+  forwards AEC-cleaned audio while `google_live_audio_out_started_at` is active.
+  This is observability only; forwarding behavior is unchanged. Guard proof:
+  the new regression plus existing normal AEC-forward, robot-speaking
+  suppression, retry fast-reopen, and prompt-timeout guard tests passed.
+- production server-only deploy from 2026-07-04T01:24+07:
+  Python replicas `current-tbot-esp32-server-1/2` now run
+  `local/tbot-server:vps-20260703182329-aecmarker`, built as a minimal overlay
+  from `local/tbot-server:vps-20260703181257-fastretry` with only the patched
+  provider file. Container compile proof passed; runtime introspection confirmed
+  `_log_aec_live_vad_forward` exists and `_forward_lesson_child_audio()` calls
+  it. Public admin/OTA smoke passed, recent server error grep was empty, and
+  metrics stayed `connections=0`. Rollback to the pre-AEC-marker server image is
+  `/opt/tbot/.env.rollback-before-aecmarker`.
 - broad local no-hardware proof from 2026-07-04T01:17+07:
   `.venv311/bin/python -m pytest tests -q -k 'not live_smoke and not
-  websocket_soak and not benchmark'` passed with `1689 passed, 11 deselected,
-  2 warnings in 114.65s`. A stale session-orchestrator assertion was updated to
+  websocket_soak and not benchmark'` passed again after the AEC marker patch
+  with `1690 passed, 11 deselected, 2 warnings in 117.61s`. A stale
+  session-orchestrator assertion was updated to
   match the current safety contract: lesson-owned audio is consumed (`handled`
   true) so it cannot fall through to classic ASR, while `voice_provider.audio`
   remains empty outside an interactive child-response window. Targeted proof:
@@ -324,6 +343,27 @@ Current server-side proof:
   The auto interactive watcher that could post `lesson-nudge` on reconnect was
   stopped per the operator's no-hardware overnight instruction; only the
   diagnostic no-serial/no-nudge watcher remains.
+- current AEC child-audio logging proof from 2026-07-04T01:22+07:
+  `GoogleLiveProvider.handle_audio_bytes` now emits the same throttled
+  `Google Live aec_live_vad_forward reason=robot_speaking ...` marker when an
+  active lesson child-response window forwards AEC-cleaned child audio while
+  the robot is speaking. This keeps physical audit evidence aligned with the
+  actual Live VAD forwarding path instead of relying only on suppress/drop
+  decisions. Targeted proof:
+  `tests/test_google_live_provider_edges.py` -> `49 passed`; broader audio
+  subset
+  `tests/test_google_live_provider_edges.py tests/test_google_live_audio_bridge_edges.py
+  tests/test_google_live_bargein.py tests/test_google_live_event_mapping.py
+  tests/test_google_live_provider_fallback.py tests/test_google_live_reconnect.py
+  -q` -> `233 passed, 1 warning`; `py_compile` and `git diff --check` passed.
+- broad current-worktree proof from 2026-07-04T01:27+07:
+  `.venv311/bin/python -m pytest tests -q -k 'not live_smoke and not
+  websocket_soak and not benchmark'` passed with `1690 passed, 11 deselected,
+  2 warnings in 121.69s` against the current AEC child-audio logging diff.
+  Firmware full local suite also passed separately with `695 passed`. Physical
+  sample completion remains unproven because read-only checks still show no
+  `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*` node and public ESP metrics
+  `connections=0`, `devices=[]`.
 
 Remaining gate: physical robot/live E2E with real credentials, real device ID,
 and production websocket/backend/auth config. Keep this goal open until that run
