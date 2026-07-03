@@ -137,6 +137,9 @@ Current server-side proof:
   consumed in Google Live mode when the Live client is missing or `send_text`
   fails, so connection routing cannot fall through to `handleTextMessage` and
   queue classic chat/TTS for the same user utterance
+- blank Google Live `listen detect` messages are consumed as no-ops, so an empty
+  wake/listen frame cannot fall through to the legacy listen handler and call
+  `startToChat("")`
 - exceptions from parsed Google Live text commands are also consumed after
   runtime-failure handling, so a failed local stop-word/command branch cannot
   fall through to the classic text handler
@@ -171,7 +174,8 @@ Current server-side proof:
   Live barge-in/fallback suite `109 passed`; provider/tool/audio/event suite
   `167 passed`; barge-in/fallback/connection-routing suite `135 passed`; bridge
   guard provider/fallback/connection-routing suite `119 passed`; lesson-owned
-  audio routing suite `59 passed`
+  audio routing suite `59 passed`; blank listen-detect provider/routing suite
+  `82 passed`
 - focused test evidence from 2026-07-02: Google Live/config/provider suite
   `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
   `44 passed`; analyzer tests `14 passed`
