@@ -204,5 +204,14 @@ class PreloadVoiceLatencyAlarmTest(unittest.TestCase):
         self.assertEqual(a.threshold_ms, 1500.0)
 
 
+    def test_logger_failures_are_swallowed(self):
+        class _BadLogger:
+            def bind(self, **_kwargs):
+                raise RuntimeError("closed")
+
+        a = PreloadVoiceLatencyAlarm(logger=_BadLogger())
+        a._log("error", "ignored")
+
+
 if __name__ == "__main__":
     unittest.main()

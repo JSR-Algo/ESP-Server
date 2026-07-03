@@ -2,7 +2,7 @@
 import type { Device, FirmwareType } from '@/api/device'
 import { computed, onMounted, ref } from 'vue'
 import { useMessage } from 'wot-design-uni/components/wd-message-box'
-import { bindDevice, bindDeviceManual, getBindDevices, getFirmwareTypes, unbindDevice, updateDeviceAutoUpdate } from '@/api/device'
+import { bindDevice, bindDeviceManual, getBindDevices, getFirmwareTypes, unbindDevice, updateDeviceAutoUpdate, updateDeviceProfile } from '@/api/device'
 import { t } from '@/i18n'
 import { toast } from '@/utils/toast'
 
@@ -50,6 +50,17 @@ const deviceList = ref<Device[]>([])
 const firmwareTypes = ref<FirmwareType[]>([])
 const loading = ref(false)
 const isBindDevice = ref(false)
+const isProfileDialog = ref(false)
+const profileSaving = ref(false)
+const editingDevice = ref<Device | null>(null)
+const profileForm = ref({
+  alias: '',
+  childName: '',
+  childAge: '',
+})
+const profileErrors = ref({
+  childAge: '',
+})
 
 // 手动绑定弹窗
 const isManualBindDialog = ref(false)
@@ -161,6 +172,80 @@ async function toggleAutoUpdate(device: Device) {
   catch (error: any) {
     console.error('更新设备OTA状态失败:', error)
     toast.error(t('device.operationFailed'))
+  }
+}
+
+function getDeviceDisplayName(device: Device): string {
+  return device.alias || getDeviceTypeName(device.board)
+}
+
+function getChildSummary(device: Device): string {
+  if (device.childName && device.childAge) {
+    return t('device.childSummaryWithAge', { name: device.childName, age: device.childAge })
+  }
+  if (device.childName) {
+    return device.childName
+  }
+  return t('device.childNotSet')
+}
+
+function openProfileDialog(device: Device) {
+  editingDevice.value = device
+  profileForm.value = {
+    alias: device.alias || '',
+    childName: device.childName || '',
+    childAge: device.childAge ? String(device.childAge) : '',
+  }
+  profileErrors.value = { childAge: '' }
+  isProfileDialog.value = true
+}
+
+function validateProfileForm(): boolean {
+  const rawAge = String(profileForm.value.childAge).trim()
+  if (!rawAge) {
+    profileErrors.value.childAge = ''
+    return true
+  }
+
+  const age = Number(rawAge)
+  if (!Number.isInteger(age) || age < 1 || age > 18) {
+    profileErrors.value.childAge = t('device.childAgeInvalid')
+    return false
+  }
+
+  profileErrors.value.childAge = ''
+  return true
+}
+
+async function saveProfile() {
+  if (!editingDevice.value || !validateProfileForm()) {
+    return
+  }
+
+  const rawAge = String(profileForm.value.childAge).trim()
+  const childAge = rawAge
+    ? Number(rawAge)
+    : undefined
+
+  try {
+    profileSaving.value = true
+    await updateDeviceProfile(editingDevice.value.id, {
+      alias: profileForm.value.alias.trim(),
+      childName: profileForm.value.childName.trim(),
+      childAge,
+    })
+    editingDevice.value.alias = profileForm.value.alias.trim() || undefined
+    editingDevice.value.childName = profileForm.value.childName.trim() || undefined
+    editingDevice.value.childAge = childAge
+    isProfileDialog.value = false
+    toast.success(t('device.profileSaveSuccess'))
+  }
+  catch (error: any) {
+    console.error('保存设备和儿童资料失败:', error)
+    toast.error(t('device.profileSaveFailed'))
+  }
+  finally {
+    profileSaving.value = false
   }
 }
 
@@ -398,11 +483,20 @@ defineExpose({
                 <view class="flex-1">
                   <view class="mb-[16rpx] flex items-center justify-between">
                     <text class="max-w-[60%] break-all text-[32rpx] text-[#232338] font-semibold">
-                      {{ getDeviceTypeName(device.board) }}
+                      {{ getDeviceDisplayName(device) }}
                     </text>
+                    <wd-button size="small" plain type="primary" @click.stop="openProfileDialog(device)">
+                      {{ t('device.editProfile') }}
+                    </wd-button>
                   </view>
 
                   <view class="mb-[20rpx]">
+                    <text class="mb-[12rpx] block text-[28rpx] text-[#232338] leading-[1.4]">
+                      {{ t('device.childProfile') }}：{{ getChildSummary(device) }}
+                    </text>
+                    <text class="mb-[12rpx] block text-[28rpx] text-[#65686f] leading-[1.4]">
+                      {{ t('device.deviceType') }}：{{ getDeviceTypeName(device.board) }}
+                    </text>
                     <text class="mb-[12rpx] block text-[28rpx] text-[#65686f] leading-[1.4]">
                       {{ t('device.macAddress') }}：{{ device.macAddress }}
                     </text>
@@ -463,6 +557,64 @@ defineExpose({
     <!-- MessageBox 组件 -->
     <wd-message-box />
     <wd-action-sheet v-model="isBindDevice" :actions="actions" @close="isBindDevice = false" @select="selectBindMode" />
+
+    <!-- 设备和儿童资料弹窗 -->
+    <wd-popup v-model="isProfileDialog" position="bottom" :close-on-click-modal="!profileSaving" custom-style="border-radius: 24rpx 24rpx 0 0;">
+      <view class="profile-dialog">
+        <view class="dialog-header">
+          <text class="dialog-title">
+            {{ t('device.editProfileTitle') }}
+          </text>
+          <wd-icon name="close" size="20" @click="isProfileDialog = false" />
+        </view>
+
+        <view class="dialog-content">
+          <view class="form-item">
+            <text class="form-label">
+              {{ t('device.deviceName') }}
+            </text>
+            <wd-input
+              v-model="profileForm.alias"
+              :maxlength="64"
+              :placeholder="t('device.deviceNamePlaceholder')"
+            />
+          </view>
+
+          <view class="form-item">
+            <text class="form-label">
+              {{ t('device.childName') }}
+            </text>
+            <wd-input
+              v-model="profileForm.childName"
+              :maxlength="64"
+              :placeholder="t('device.childNamePlaceholder')"
+            />
+          </view>
+
+          <view class="form-item">
+            <text class="form-label">
+              {{ t('device.childAge') }}
+            </text>
+            <wd-input
+              v-model="profileForm.childAge"
+              type="number"
+              :placeholder="t('device.childAgePlaceholder')"
+              @input="profileErrors.childAge = ''"
+              @blur="validateProfileForm"
+            />
+            <text v-if="profileErrors.childAge" class="error-text">
+              {{ profileErrors.childAge }}
+            </text>
+          </view>
+        </view>
+
+        <view class="dialog-footer">
+          <wd-button block type="primary" :loading="profileSaving" @click="saveProfile">
+            {{ t('device.saveProfile') }}
+          </wd-button>
+        </view>
+      </view>
+    </wd-popup>
 
     <!-- 手动绑定设备弹窗 -->
     <wd-popup v-model="isManualBindDialog" position="bottom" :close-on-click-modal="false" custom-style="border-radius: 24rpx 24rpx 0 0;">
@@ -568,6 +720,11 @@ defineExpose({
   box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.04);
   border: 1rpx solid #eeeeee;
 }
+
+:deep(.wd-swipe-action__right) {
+  right: -2rpx;
+}
+
 ::v-deep .wd-action-sheet__popup,
 ::v-deep .wd-popup {
   z-index: 100 !important;
@@ -580,7 +737,8 @@ defineExpose({
   font-size: 32rpx;
 }
 
-.manual-bind-dialog {
+.manual-bind-dialog,
+.profile-dialog {
   padding: 32rpx;
   background: #ffffff;
 }

@@ -63,6 +63,7 @@ class AgentControllerTtsVolumeTest {
         DeviceEntity device = new DeviceEntity();
         device.setAgentId("agent-123");
         when(deviceService.getDeviceByMacAddress("AA:BB:CC:DD:EE:FF")).thenReturn(device);
+        when(agentService.checkAgentPermission(eq("agent-123"), eq(null))).thenReturn(true);
 
         AgentTtsVolumeDTO dto = new AgentTtsVolumeDTO();
         dto.setTtsVolume(55);

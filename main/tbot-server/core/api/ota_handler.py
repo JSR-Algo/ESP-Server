@@ -7,6 +7,7 @@ import os
 import re
 import glob
 from typing import Dict, List, Tuple
+from urllib.parse import urlsplit, urlunsplit
 from aiohttp import web
 
 from core.auth import AuthManager
@@ -60,6 +61,16 @@ def is_placeholder_websocket_url(websocket_config: str) -> bool:
         )
     )
 
+def _normalize_device_id(value: str) -> str:
+    return (value or "").strip().lower()
+
+def _split_device_allowlist(value: str) -> set:
+    return {
+        _normalize_device_id(item)
+        for item in (value or "").split(",")
+        if _normalize_device_id(item)
+    }
+
 class OTAHandler(BaseHandler):
     def __init__(self, config: dict):
         super().__init__(config)
@@ -67,6 +78,44 @@ class OTAHandler(BaseHandler):
         self.auth_enable = auth_config.get("enabled", False)
         # Device whitelist
         self.allowed_devices = set(auth_config.get("allowed_devices", []))
+        configured_test_claimed = server_factory_test_devices = config["server"].get(
+            "factory_test_claimed_devices", []
+        )
+        if isinstance(server_factory_test_devices, str):
+            configured_test_claimed = list(_split_device_allowlist(server_factory_test_devices))
+        self.factory_test_claimed_devices = {
+            _normalize_device_id(device_id)
+            for device_id in configured_test_claimed
+            if _normalize_device_id(device_id)
+        } | _split_device_allowlist(os.environ.get("TBOT_FACTORY_TEST_CLAIMED_DEVICES", ""))
+        # Global bench/dev switch: when true, EVERY device that gets a non-empty
+        # ws token is marked factory_test_claimed (so it self-claims with WiFi
+        # only, no backend claim / household / child assignment). Per-device
+        # allowlist above still wins on its own; this just drops the allowlist
+        # requirement. Bench/dev ONLY — it removes the parental (COPPA) claim
+        # binding for all devices, so keep it OFF for any robot shipped to a child.
+        self.factory_test_claimed_all = bool(
+            config["server"].get("factory_test_claimed_all", False)
+        ) or os.environ.get("TBOT_FACTORY_TEST_CLAIMED_ALL", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        configured_claim_reset = server_claim_reset_devices = config["server"].get(
+            "claim_reset_devices", []
+        )
+        if isinstance(server_claim_reset_devices, str):
+            configured_claim_reset = list(_split_device_allowlist(server_claim_reset_devices))
+        self.claim_reset_devices = {
+            _normalize_device_id(device_id)
+            for device_id in configured_claim_reset
+            if _normalize_device_id(device_id)
+        } | _split_device_allowlist(os.environ.get("TBOT_CLAIM_RESET_DEVICES", ""))
+        self.claim_reset_nonce = str(
+            config["server"].get("claim_reset_nonce", "")
+            or os.environ.get("TBOT_CLAIM_RESET_NONCE", "")
+        ).strip()
         secret_key = config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds")
         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
@@ -181,9 +230,20 @@ class OTAHandler(BaseHandler):
         """
         vision_url = get_vision_url(self.config)
         download_path = f"/tbot/ota/download/{filename}"
+        server_config = self.config["server"]
+        forced_scheme = str(server_config.get("firmware_download_scheme", "")).strip().lower()
+
+        def apply_forced_scheme(url: str) -> str:
+            if forced_scheme not in ("http", "https"):
+                return url
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                return url
+            return urlunsplit((forced_scheme, parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+
         if vision_url and "/mcp/vision/explain" in vision_url:
-            return vision_url.replace("/mcp/vision/explain", download_path)
-        return f"http://{local_ip}:{port}{download_path}"
+            return apply_forced_scheme(vision_url.replace("/mcp/vision/explain", download_path))
+        return apply_forced_scheme(f"http://{local_ip}:{port}{download_path}")
 
     def _mint_websocket_token(self, client_id: str, device_id: str) -> str:
         """Mint the WebSocket auth token advertised in the OTA response.
@@ -212,6 +272,12 @@ class OTAHandler(BaseHandler):
                 "to advertise an unusable token (would lock out the device)."
             )
         return token
+
+    def _should_emit_claim_reset(self, device_id: str) -> bool:
+        return bool(
+            self.claim_reset_nonce
+            and _normalize_device_id(device_id) in self.claim_reset_devices
+        )
 
     async def handle_post(self, request):
         """Process OTA POST Request
@@ -308,6 +374,12 @@ class OTAHandler(BaseHandler):
             if api_url:
                 return_json["api_url"] = api_url
 
+            if self._should_emit_claim_reset(device_id):
+                return_json["claim_reset"] = {
+                    "local_claim": 1,
+                    "nonce": self.claim_reset_nonce,
+                }
+
             # existing mqtt/websocket logic (unchanged)
             mqtt_gateway_endpoint = server_config.get("mqtt_gateway")
 
@@ -315,7 +387,7 @@ class OTAHandler(BaseHandler):
                 # Try to get device model from request data (parsed above)
                 try:
                     group_id = f"GID_{device_model}".replace(":", "_").replace(" ", "_")
-                except Exception as e:
+                except Exception as e:  # pragma: no cover - f-string normalizes model to str before replace
                     self.logger.bind(tag=TAG).error(f"GetDevice modelFail: {e}")
                     group_id = "GID_default"
 
@@ -364,10 +436,20 @@ class OTAHandler(BaseHandler):
                 # non-empty token is minted so the WS handshake can verify it.
                 token = self._mint_websocket_token(client_id, device_id)
                 # NOTE: use websocket_port here
-                return_json["websocket"] = {
+                websocket_payload = {
                     "url": self._get_websocket_url(local_ip, websocket_port),
                     "token": token,
                 }
+                if (
+                    token
+                    and (
+                        self.factory_test_claimed_all
+                        or _normalize_device_id(device_id) in self.factory_test_claimed_devices
+                    )
+                    and not _is_higher_version("2.2.31", device_version)
+                ):
+                    websocket_payload["factory_test_claimed"] = 1
+                return_json["websocket"] = websocket_payload
                 self.logger.bind(tag=TAG).info(
                     f"Not configuredMQTTGateway, for device {device_id} IssueWebSocket config"
                 )

@@ -120,6 +120,16 @@ def _tool_result_is_true(result) -> bool:
             return _tool_result_is_true(result["result"])
     return False
 
+def _motion_response(result, response: str) -> ActionResponse:
+    if _tool_result_is_true(result):
+        return ActionResponse(Action.RESPONSE, result="ok", response=response)
+
+    return ActionResponse(
+        Action.RESPONSE,
+        result="sent_unconfirmed",
+        response=response,
+    )
+
 
 def _motion_response(result, response: str) -> ActionResponse:
     if _tool_result_is_true(result):

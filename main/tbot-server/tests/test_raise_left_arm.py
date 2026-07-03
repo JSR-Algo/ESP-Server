@@ -1,7 +1,7 @@
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
+from core.providers.tools.product_toolset import ALWAYS_INCLUDE
 from plugins_func.functions import raise_left_arm as raise_left_arm_module
 from plugins_func.register import Action
 
@@ -155,6 +155,21 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raise_left_arm_module.BOTH_ARMS_RAISE_TOOL, "self_robot_both_arms_raise")
         self.assertEqual(raise_left_arm_module.BOTH_ARMS_LOWER_TOOL, "self_robot_both_arms_lower")
 
+    def test_available_tools_ignores_non_dict_tool_containers(self):
+        mcp_client = _FakeMCPClient()
+        mcp_client.tools = [raise_left_arm_module.LEFT_ARM_TOOL]
+
+        self.assertEqual(raise_left_arm_module._available_tools(mcp_client), [])
+
+    def test_tool_result_accepts_true_string_and_nested_result(self):
+        self.assertTrue(raise_left_arm_module._tool_result_is_true(True))
+        self.assertTrue(raise_left_arm_module._tool_result_is_true(" TRUE "))
+        self.assertTrue(
+            raise_left_arm_module._tool_result_is_true(
+                {"result": {"content": [{"type": "text", "text": "true"}]}}
+            )
+        )
+
     def test_raise_descriptions_include_vietnamese_do_tay_phrase(self):
         descriptions = [
             raise_left_arm_module._function_desc("raise_left_arm")["function"]["description"],
@@ -167,8 +182,5 @@ class RobotArmActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dơ cả hai tay", descriptions[2])
 
     def test_server_plugin_exposes_robot_arm_functions_by_default(self):
-        source = Path(raise_left_arm_module.__file__).parents[2] / "core/providers/tools/server_plugins/plugin_executor.py"
-        text = source.read_text(encoding="utf-8")
-
         for function_name in raise_left_arm_module.ARM_TOOL_BY_FUNCTION:
-            self.assertIn(function_name, text)
+            self.assertIn(function_name, ALWAYS_INCLUDE)

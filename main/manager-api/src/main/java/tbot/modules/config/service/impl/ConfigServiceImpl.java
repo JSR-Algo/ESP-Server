@@ -172,6 +172,7 @@ public class ConfigServiceImpl implements ConfigService {
         // Get max daily output word count per device
         String deviceMaxOutputSize = sysParamsService.getValue("device_max_output_size", true);
         result.put("device_max_output_size", deviceMaxOutputSize);
+        result.put("child_profile", buildChildProfile(device));
 
         // Get chat history config
         Integer chatHistoryConf = agent.getChatHistoryConf();
@@ -249,6 +250,30 @@ public class ConfigServiceImpl implements ConfigService {
                 true);
 
         return result;
+    }
+
+    private Map<String, Object> buildChildProfile(DeviceEntity device) {
+        Map<String, Object> childProfile = new HashMap<>();
+        childProfile.put("device_id", device.getId());
+        childProfile.put("device_alias", device.getAlias());
+        childProfile.put("child_name", device.getChildName());
+        childProfile.put("child_age", device.getChildAge());
+        childProfile.put("interests", splitProfileTags(device.getChildInterests()));
+        childProfile.put("learning_style", device.getLearningStyle());
+        childProfile.put("vocabulary_level", device.getVocabularyLevel());
+        childProfile.put("parent_career", device.getParentCareer());
+        return childProfile;
+    }
+
+    private List<String> splitProfileTags(String tags) {
+        if (StringUtils.isBlank(tags)) {
+            return Collections.emptyList();
+        }
+        return List.of(tags.split(","))
+                .stream()
+                .map(StringUtils::trimToNull)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
     }
 
     @Override

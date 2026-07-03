@@ -11,9 +11,9 @@ blocks on a re-mint.
 Design notes:
 - The whole server runs on a single asyncio event loop (one process), so the
   module-level cache needs no lock.
-- ``resolve_device_identity`` NEVER raises: any failure returns ``(None, None)``
-  and the caller falls back to the legacy (MAC, no-token) pull — which 401s
-  harmlessly. The voice path is completely unaffected by anything here.
+- ``resolve_device_identity`` NEVER raises: any failure returns ``(None, None)``.
+  The caller surfaces that locally and skips the backend pull; a MAC/no-token
+  request would only produce a backend 401 and hide the real minting failure.
 - The shared secret is read from the environment ONLY; it is never logged.
 """
 
@@ -61,7 +61,9 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
     url = base_url.rstrip("/") + "/internal/devices/mint-token"
     try:
         resp = await client.post(
-            url, json={"mac": mac}, headers={"X-Mint-Secret": secret}
+            url,
+            json={"mac": mac},
+            headers={"X-Mint-Secret": secret, "Authorization": f"Bearer {secret}"},
         )
         resp.raise_for_status()
         data = (resp.json() or {}).get("data") or {}

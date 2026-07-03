@@ -25,8 +25,9 @@ class ManageApiClient:
     def __new__(cls, config):
         """Singleton mode ensures globally unique instance and supports passing config parameters"""
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            instance = super().__new__(cls)
             cls._init_client(config)
+            cls._instance = instance
         return cls._instance
 
     @classmethod
@@ -286,9 +287,10 @@ def manage_api_http_safe_close():
 # only and does NOT serve them. So these legs take their OWN caller-owned httpx
 # client/base_url. ``result -> outcome`` is renamed HERE as the single translation point.
 #
-# D-RUNTOKEN (ADR 0013 §F): no device-token minting path on the ESP yet, so
-# ``token`` is injectable and OPTIONAL — cross-device authz is enforced backend-side
-# on the ``device_id`` claim. Ops/backend follow-up; surfaced, not invented here.
+# D-RUNTOKEN (ADR 0013 §F): callers must resolve MAC -> backend device UUID and
+# present a device-scoped JWT before hitting lesson device routes. The function
+# signatures keep ``token`` optional only for tests/older call sites; production
+# runtime skips tokenless pulls instead of creating a swallowed backend 401.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _LESSON_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
@@ -310,18 +312,72 @@ def _lesson_auth_headers(token: Optional[str]) -> Dict[str, str]:
         headers["Authorization"] = "Bearer " + token
     return headers
 
+def _lesson_trace_headers(batch: Optional[Dict]) -> Dict[str, str]:
+    if not isinstance(batch, dict):
+        return {}
+    headers: Dict[str, str] = {}
+    for key in ("traceparent", "tracestate"):
+        value = batch.get(key)
+        if isinstance(value, str) and value.strip():
+            headers[key] = value.strip()
+    return headers
+
+
+LESSON_EVENT_SENSITIVE_DETAIL_KEYS = {
+    "utterance",
+    "childutterance",
+    "transcript",
+    "asrtranscript",
+    "rawspeech",
+    "speechtext",
+    "asrtext",
+    "voicetext",
+    "recognizedtext",
+    "childresponse",
+    "usertranscript",
+    "userutterance",
+    "score",
+    "pronunciation",
+    "pronunciationscore",
+    "pronunciationassessment",
+    "phonemescore",
+    "phonemeassessment",
+    "grade",
+    "correct",
+    "iscorrect",
+    "correctness",
+    "assessment",
+    "evaluation",
+}
+
+def _lesson_sensitive_key(key: str) -> str:
+    return str(key).replace("_", "").replace("-", "").lower()
+
+def _strip_lesson_sensitive_fields(value):
+    if isinstance(value, list):
+        return [_strip_lesson_sensitive_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            k: _strip_lesson_sensitive_fields(v)
+            for k, v in value.items()
+            if _lesson_sensitive_key(k) not in LESSON_EVENT_SENSITIVE_DETAIL_KEYS
+        }
+    return value
 
 def _normalize_lesson_event(event: Dict) -> Dict:
-    """Single ``result -> outcome`` translation point (plan §5.7/§6.4.1) + COPPA
-    strip of the authored ``detail.utterance`` (it never enters progress_events)."""
+    """Single ``result -> outcome`` translation point (plan §5.7/§6.4.1).
+
+    Strip child speech text and immediate assessment fields before the event body
+    leaves ESP; backend repeats the same boundary check before persistence.
+    """
     out = dict(event)
     if "result" in out and "outcome" not in out:
         out["outcome"] = out.pop("result")
     else:
         out.pop("result", None)
+    out = _strip_lesson_sensitive_fields(out)
     detail = out.get("detail")
-    if isinstance(detail, dict) and "utterance" in detail:
-        detail = {k: v for k, v in detail.items() if k != "utterance"}
+    if isinstance(detail, dict):
         if detail:
             out["detail"] = detail
         else:
@@ -376,6 +432,27 @@ async def _lesson_request_with_retry(
 def _lesson_base(base_url: str) -> str:
     return (base_url or "").rstrip("/")
 
+_ASSIGNMENT_KEY_ALIASES = {
+    "assignment_id": "assignmentId",
+    "assignment_version": "assignmentVersion",
+    "device_id": "deviceId",
+    "child_id": "childId",
+    "lesson_id": "lessonId",
+    "lesson_title": "lessonTitle",
+    "lesson_version": "lessonVersion",
+    "manifest_checksum": "manifestChecksum",
+    "created_at": "createdAt",
+}
+
+def _normalize_assignment_payload(assignment):
+    if not isinstance(assignment, dict):
+        return None
+    normalized = dict(assignment)
+    for snake_key, camel_key in _ASSIGNMENT_KEY_ALIASES.items():
+        if camel_key not in normalized and snake_key in assignment:
+            normalized[camel_key] = assignment[snake_key]
+    return normalized
+
 
 async def get_current_assignment(
     client, base_url: str, device_id: str, *, token: Optional[str] = None
@@ -392,7 +469,36 @@ async def get_current_assignment(
     if not isinstance(payload, dict):
         return None
     data = payload.get("data") or {}
-    return data.get("assignment")
+    return _normalize_assignment_payload(data.get("assignment"))
+
+
+async def get_device_child_name(
+    client, base_url: str, device_id: str, *, token: Optional[str] = None
+) -> Optional[str]:
+    """Device-leg read of the bound child's display name — GET
+    /v1/devices/:deviceId/child-profile.
+
+    The name a parent sets in the mobile app (Parent Settings) lands in the
+    backend ``child_profiles.display_name``; the robot reads it here so Google
+    Live can address the child by name in conversation. This is required because
+    the esp manager-api ``ai_device.child_name`` column lives in a SEPARATE
+    keyspace the mobile cannot write (migration 086) — the agent-models config the
+    robot loads from the manager-api therefore carries no name for mobile-only
+    households. Returns the trimmed name, or ``None`` when no child is bound /
+    the name is blank (the caller then leaves the existing config value alone).
+    """
+    url = f"{_lesson_base(base_url)}/devices/{device_id}/child-profile"
+    # Best-effort, single attempt (max_retries=0): unlike the authoritative lesson
+    # pull, a missed name is a graceful degradation (generic greeting), so this must
+    # never add retry latency to connect — fail fast and let the caller swallow it.
+    payload = await _lesson_request_with_retry(
+        client, "GET", url, headers=_lesson_auth_headers(token), max_retries=0
+    )
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data") or {}
+    name = data.get("childName")
+    return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 async def get_lesson_manifest(
@@ -403,6 +509,7 @@ async def get_lesson_manifest(
     *,
     token: Optional[str] = None,
     renderer_capabilities: Optional[list] = None,
+    lesson_version: Optional[int] = None,
 ):
     """S6 — GET /v1/lessons/:lessonId/manifest?profile=... Returns ``(manifest, etag)``.
 
@@ -425,6 +532,8 @@ async def get_lesson_manifest(
         return None, None
     url = f"{_lesson_base(base_url)}/lessons/{lesson_id}/manifest"
     params: Dict[str, str] = {"profile": profile}
+    if lesson_version:
+        params["version"] = str(int(lesson_version))
     headers = _lesson_auth_headers(token)
     if renderer_capabilities:
         joined = ",".join(renderer_capabilities)
@@ -447,12 +556,53 @@ async def post_lesson_event(
 ) -> Optional[Dict]:
     """S9 — POST /v1/devices/:deviceId/lesson-events (OWN dispatch path, NOT the
     chat-history report queue). Owns the single wire ``result -> outcome`` rename and
-    the COPPA ``detail.utterance`` strip before the body leaves the ESP (plan §6.4)."""
+    the COPPA child-speech strip before the body leaves the ESP (plan §6.4)."""
     url = f"{_lesson_base(base_url)}/devices/{device_id}/lesson-events"
     body = dict(batch)
     body["events"] = [_normalize_lesson_event(e) for e in batch.get("events", [])]
+    headers = _lesson_auth_headers(token)
+    headers.update(_lesson_trace_headers(batch))
     payload = await _lesson_request_with_retry(
-        client, "POST", url, json=body, headers=_lesson_auth_headers(token)
+        client, "POST", url, json=body, headers=headers
+    )
+    if isinstance(payload, dict):
+        return payload.get("data") or payload
+    return None
+
+def _normalize_preload_status_report(report: Dict) -> Dict:
+    body = {
+        "assignmentId": report.get("assignmentId"),
+        "assetId": report.get("assetId"),
+        "state": report.get("state"),
+    }
+    if report.get("checksumOk") is not None:
+        body["checksumOk"] = bool(report.get("checksumOk"))
+    return body
+
+async def post_preload_status(
+    client,
+    base_url: str,
+    device_id: str,
+    report: Dict,
+    *,
+    token: Optional[str] = None,
+    max_retries: int = 2,
+    retry_delay: float = 1.0,
+) -> Optional[Dict]:
+    """POST /v1/devices/:deviceId/preload-status for one asset preload outcome.
+
+    Caller owns the httpx client so runtime code can use a short-lived client from
+    a fire-and-forget task after the assignment/manifest pull client has closed.
+    """
+    url = f"{_lesson_base(base_url)}/devices/{device_id}/preload-status"
+    payload = await _lesson_request_with_retry(
+        client,
+        "POST",
+        url,
+        json=_normalize_preload_status_report(report),
+        headers=_lesson_auth_headers(token),
+        max_retries=max_retries,
+        retry_delay=retry_delay,
     )
     if isinstance(payload, dict):
         return payload.get("data") or payload

@@ -1,64 +1,63 @@
-# 天气插件使用指南
+# Weather plugin (`get_weather`)
 
-## 概述
+## Overview
 
-天气插件 `get_weather` 是小智ESP32语音助手的核心功能之一，支持通过语音查询全国各地的天气信息。插件基于和风天气API，提供实时天气和7天天气预报功能。
+`get_weather` lets the robot answer weather questions by voice — both for the
+device's current location and for any city the user names (e.g. *"thời tiết hôm
+nay"*, *"thời tiết Hà Nội"*, *"Đà Nẵng có mưa không"*). It returns the current
+conditions plus a 7-day forecast, which Gemini Live then narrates back to the
+child in their language.
 
-## API Key 申请指南
+## Backend: Open-Meteo (keyless)
 
-### 1. 注册和风天气账号
+The plugin is backed by [Open-Meteo](https://open-meteo.com), which is **free
+and requires no API key**. Two keyless JSON calls are made per lookup:
 
-1. 访问 [和风天气控制台](https://console.qweather.com/)
-2. 注册账号并完成邮箱验证
-3. 登录控制台
+1. **Geocoding** — `https://geocoding-api.open-meteo.com/v1/search` resolves a
+   place name → latitude/longitude (global coverage, including Vietnam).
+2. **Forecast** — `https://api.open-meteo.com/v1/forecast` returns current
+   conditions + a 7-day daily forecast.
 
-### 2. 创建应用获取API Key
+There is **no secret to provision**. The robot-server only needs outbound HTTPS
+to `*.open-meteo.com`. Results are cached (per location + language) to avoid
+repeated calls.
 
-1. 进入控制台后，点击右侧["项目管理"](https://console.qweather.com/project?lang=zh) → "创建项目"
-2. 填写项目信息：
-   - **项目名称**：如"小智语音助手"
-3. 点击保存
-4. 项目创建完成后，在该项目中点击"创建凭据"
-5. 填写凭据信息：
-    - **凭据名称**：如"小智语音助手"
-    - **身份认证方式**：选择"API Key"
-6. 点击保存
-7. 在凭据中复制`API Key`，这是第一个关键的配置信息
+> Migrated from the previous QWeather + HTML-scraping implementation, which
+> required a paid-ish API key (empty by default → every call failed) and
+> scraped a Chinese weather page. Open-Meteo removes the key dependency and the
+> fragile scraping entirely.
 
-### 3. 获取API Host
+## Configuration
 
-1. 在控制台中点击["设置"](https://console.qweather.com/setting?lang=zh) → "API Host"
-2. 查看分配给你的专属`API Host`地址，这个是第二个关键的配置信息
-
-以上操作，会得到两个重要的配置信息:`API Key`和`API Host`
-
-## 配置方式(任选一种)
-
-### 方式1. 如果你使用了智控台部署（推荐）
-
-1. 登录智控台
-2. 进入"角色配置"页面
-3. 选择要配置的智能体
-4. 点击"编辑功能"按钮
-5. 在右侧参数配置区域找到"天气查询"插件
-6. 勾选"天气查询"
-7. 将复制过来的第一个关键配置`API Key`,填入到`天气插件 API 密钥`里
-8. 将复制过来的第二个关键配置`API Host`,填入到`开发者 API Host`里
-9. 保存配置，再保存智能体配置
-
-### 方式2. 如果你只是单模块tbot-server部署
-
-在 `data/.config.yaml` 中配置：
-
-1. 将复制过来的第一个关键配置`API Key`,填入到`api_key`里
-2. 将复制过来的第二个关键配置`API Host`,填入到`api_host`里
-3. 将你所在的城市填入到`default_location`里，例如`广州`
+The only optional setting is `default_location`, used when the user does not
+name a city **and** the device IP cannot be geolocated:
 
 ```yaml
 plugins:
   get_weather:
-    api_key: "你的和风天气API密钥"
-    api_host: "你的和风天气API主机地址"
-    default_location: "你的默认查询城市"
+    default_location: "Ho Chi Minh City"
 ```
 
+Enable the tool by listing it under the active intent's `functions` (already the
+case in `config.yaml` under `Intent.function_call.functions`):
+
+```yaml
+Intent:
+  function_call:
+    functions:
+      - get_weather
+      # ...
+```
+
+## How it reaches the model
+
+`get_weather` is registered via `@register_function("get_weather", …,
+ToolType.SYSTEM_CTL)` (`plugins_func/functions/get_weather.py`) and is **not** in
+`GoogleLiveProvider._LIVE_INCOMPATIBLE_TOOLS`, so it is exposed to Gemini Live
+as a callable tool. When the model calls it, the server runs the lookup and
+returns the report via `ActionResponse(Action.REQLLM, report, None)` so the
+model speaks the answer.
+
+Local weather is also injected into the system prompt when the active prompt
+template (`agent-base-prompt.txt`) contains the `{{weather_info}}` placeholder
+and the device IP geolocates to a city (`core/utils/prompt_manager.py`).

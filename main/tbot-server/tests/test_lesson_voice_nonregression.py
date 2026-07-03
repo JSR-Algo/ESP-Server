@@ -20,6 +20,7 @@ config.manage_api_client stub, etc.) and exposes the same ConnectionHandler /
 ClassicPipelineProvider / connection_module the routing suite uses.
 """
 
+import asyncio
 import unittest
 
 # Importing this module runs _install_connection_import_stubs() at import time,
@@ -136,6 +137,14 @@ class _RecordingRuntime:
     async def on_lesson_error(self, msg_json):
         self.calls.append(("on_lesson_error", msg_json))
 
+class _ClosableRuntime(_RecordingRuntime):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
 
 class _FakeConnNoRuntime:
     lesson_runtime = None
@@ -189,6 +198,32 @@ class _FakeRegistry:
 
 
 class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
+    # ---- Route 0: lesson control frames bypass early bind wait -----------
+    async def test_route_message_lesson_control_bypasses_pending_bind_gate(self):
+        handler = _build_handler()
+        self.assertFalse(handler.bind_completed_event.is_set())
+
+        recorded = []
+        discarded = []
+        original_handle_text = connection_module.handleTextMessage
+
+        async def record_handle_text(conn, message):
+            recorded.append(message)
+
+        async def record_discard():
+            discarded.append("discard")
+
+        handler._discard_message_with_bind_prompt = record_discard
+        try:
+            connection_module.handleTextMessage = record_handle_text
+            for lesson_json in LESSON_JSONS:
+                await handler._route_message(lesson_json)
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+
+        self.assertEqual(recorded, list(LESSON_JSONS))
+        self.assertEqual(discarded, [])
+
     # ---- Route 1: classic pipeline provider falls through ----------------
     async def test_route_message_classic_pipeline_falls_through(self):
         handler = _build_handler()
@@ -324,6 +359,27 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
         handler.client_have_voice = False
         self.assertFalse(handler.is_realtime_busy())
 
+    async def test_persistent_listen_mode_without_voice_flag_does_not_pause_preload(self):
+        handler = _build_handler()
+        handler.voice_provider = None
+        handler.client_is_speaking = False
+        handler.client_have_voice = False
+
+        # ``client_listen_mode`` is a persistent mode switch, not a transient
+        # child-speaking signal. Preload must not pause for an entire session just
+        # because classic/listen mode is configured.
+        for listen_mode in ("auto", "manual", "continuous"):
+            with self.subTest(listen_mode=listen_mode):
+                handler.client_listen_mode = listen_mode
+                self.assertFalse(handler.is_realtime_busy())
+
+        # The actual transient voice flag still pauses preload on classic/no-live
+        # connections with no interaction controller.
+        handler.client_have_voice = True
+        self.assertTrue(handler.is_realtime_busy())
+        handler.client_have_voice = False
+        self.assertFalse(handler.is_realtime_busy())
+
     # ---- Registry mapping: message_type.value ---------------------------
     async def test_lesson_handler_message_type_values(self):
         self.assertEqual(LessonAckHandler().message_type, TextMessageType.LESSON_ACK)
@@ -365,6 +421,71 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
                 ("on_lesson_error", error_msg),
             ],
         )
+
+    async def test_lesson_handler_noop_tolerates_missing_or_broken_logger(self):
+        # Missing runtime + no logger is a silent no-op.
+        await LessonAckHandler().handle(object(), {"type": "lesson_ack"})
+
+        class _BrokenLogger:
+            def bind(self, **kwargs):
+                raise RuntimeError("logger unavailable")
+
+        class _Conn:
+            lesson_runtime = None
+            logger = _BrokenLogger()
+
+        # Even logging failure must not escape into the websocket receive loop.
+        await LessonAckHandler().handle(_Conn(), {"type": "lesson_ack"})
+
+    async def test_lesson_handler_ignores_runtime_without_matching_method(self):
+        class _RuntimeWithoutAck:
+            pass
+
+        await LessonAckHandler().handle(
+            _FakeConnWithRuntime(_RuntimeWithoutAck()), {"type": "lesson_ack"}
+        )
+
+    async def test_lesson_handler_runtime_exception_is_logged_and_swallowed(self):
+        warnings = []
+
+        class _BoundLogger:
+            def warning(self, message, **kwargs):
+                warnings.append((message, kwargs))
+
+        class _Logger:
+            def bind(self, **kwargs):
+                return _BoundLogger()
+
+        class _Runtime:
+            async def on_lesson_ack(self, msg_json):
+                raise RuntimeError("lesson failed")
+
+        conn = _FakeConnWithRuntime(_Runtime())
+        conn.logger = _Logger()
+
+        await LessonAckHandler().handle(conn, {"type": "lesson_ack"})
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("lesson on_lesson_ack handler raised", warnings[0][0])
+        self.assertIs(warnings[0][1]["exc_info"], True)
+
+    async def test_lesson_handler_runtime_exception_tolerates_broken_warning_logger(self):
+        class _BoundLogger:
+            def warning(self, *args, **kwargs):
+                raise RuntimeError("warning logger down")
+
+        class _Logger:
+            def bind(self, **kwargs):
+                return _BoundLogger()
+
+        class _Runtime:
+            async def on_lesson_ack(self, msg_json):
+                raise RuntimeError("lesson failed")
+
+        conn = _FakeConnWithRuntime(_Runtime())
+        conn.logger = _Logger()
+
+        await LessonAckHandler().handle(conn, {"type": "lesson_ack"})
 
     # ---- S13: _disable_lesson_runtime flips the ESP flag off ------------------
     async def test_disable_lesson_runtime_flips_flag_off(self):
@@ -415,6 +536,8 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
 
         handler = _build_handler()
         handler.config["lesson"] = {"runtime_enabled": True}
+        handler.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
+        handler.lesson_runtime = _ClosableRuntime()
         alarm = PreloadVoiceLatencyAlarm(
             disable_callback=handler._disable_lesson_runtime,
             threshold_ms=1000.0,
@@ -427,6 +550,10 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
             handler.note_voice_round_trip(2000.0)
         self.assertTrue(alarm.tripped)
         self.assertFalse(handler._lesson_runtime_enabled())
+        await asyncio.sleep(0)
+        self.assertTrue(handler.lesson_pull_task.cancelled())
+        self.assertIsNone(handler.lesson_runtime)
+        self.assertTrue(alarm.tripped)
 
     # ---- Real TextMessageProcessor routes lesson_ack to the handler -----
     async def test_processor_routes_lesson_ack_to_handler(self):

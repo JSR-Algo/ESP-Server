@@ -22,6 +22,20 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     if sentence_id is not None and sentence_id != conn.sentence_id:
         return
 
+    if _is_google_live_connection(conn):
+        if sentenceType == SentenceType.LAST:
+            extra_fields = None
+            if getattr(conn, "lesson_continue_listening_after_tts_stop", False):
+                conn.lesson_continue_listening_after_tts_stop = False
+                extra_fields = {
+                    "continue_listening": True,
+                    "listen_mode": "realtime",
+                }
+            await send_tts_message(conn, "stop", None, extra_fields=extra_fields)
+            if conn.close_after_chat:
+                await conn.close()
+        return
+
     has_audio = audios is not None and len(audios) > 0
 
     if conn.tts.tts_audio_first_sentence:
@@ -44,6 +58,8 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         else:
             # New sentence or flow controller not initialized, send immediately
             await send_tts_message(conn, "sentence_start", text)
+    elif has_audio and not getattr(conn, "client_is_speaking", False):
+        await send_tts_message(conn, "start")
 
     await sendAudio(conn, audios)
     # Send sentence startMessage
@@ -52,7 +68,14 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
 
     # Send EndMessage(if last text)
     if sentenceType == SentenceType.LAST:
-        await send_tts_message(conn, "stop", None)
+        extra_fields = None
+        if getattr(conn, "lesson_continue_listening_after_tts_stop", False):
+            conn.lesson_continue_listening_after_tts_stop = False
+            extra_fields = {
+                "continue_listening": True,
+                "listen_mode": "realtime",
+            }
+        await send_tts_message(conn, "stop", None, extra_fields=extra_fields)
         if conn.close_after_chat:
             await conn.close()
 
@@ -267,20 +290,30 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     flow_control["sequence"] = sequence + 1
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None):
+async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fields=None):
     """Send TTS status message"""
     if text is None and state == "sentence_start":
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
+    if state == "stop" and _is_google_live_connection(conn) and not _is_lesson_session(conn):
+        message["continue_listening"] = True
+        message["listen_mode"] = "realtime"
+    if extra_fields:
+        message.update(extra_fields)
+    if state == "sentence_start":
+        child_name = _child_name_for_tts_state(conn)
+        if child_name:
+            message["child_name"] = child_name
+            message["childName"] = child_name
 
     # TTSPlayback End
     if state == "stop":
         # SaveCurrent sentence_idUsed for later determining whether current round
         current_sentence_id = conn.sentence_id
         # PlayPromptsound
-        tts_notify = conn.config.get("enable_stop_tts_notify", False)
+        tts_notify = conn.config.get("enable_stop_tts_notify", False) and not _is_google_live_connection(conn)
         if tts_notify:
             stop_tts_notify_voice = conn.config.get(
                 "stop_tts_notify_voice", "config/assets/tts_notify.mp3"
@@ -306,6 +339,37 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     if state == "start":
         conn.client_is_speaking = True
 
+
+def _child_name_for_tts_state(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    if not isinstance(config, dict):
+        return None
+    child_profile = config.get("child_profile") or {}
+    if not isinstance(child_profile, dict):
+        return None
+    raw_name = child_profile.get("child_name") or child_profile.get("childName")
+    if not isinstance(raw_name, str):
+        return None
+    child_name = raw_name.strip()
+    return child_name or None
+
+def _is_google_live_connection(conn: "ConnectionHandler"):
+    config = getattr(conn, "config", {}) or {}
+    if isinstance(config, dict):
+        voice_mode = config.get("voice_mode") or {}
+        if isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live":
+            return True
+    provider = getattr(conn, "voice_provider", None)
+    provider_name = provider.__class__.__name__ if provider is not None else ""
+    return "GoogleLive" in provider_name
+
+def _is_lesson_session(conn: "ConnectionHandler"):
+    try:
+        from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+
+        return normalize_session_mode(getattr(conn, "session_mode", None)) == SessionMode.LESSON
+    except Exception:
+        return str(getattr(conn, "session_mode", "")).upper() == "LESSON"
 
 async def send_stt_message(conn: "ConnectionHandler", text):
     """Send STT status message"""

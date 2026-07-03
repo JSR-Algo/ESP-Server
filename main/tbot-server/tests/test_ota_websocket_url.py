@@ -2,6 +2,7 @@ import unittest
 import sys
 import asyncio
 import json
+import os
 
 for module_name, required_attr in (
     ("core.auth", "AuthManager"),
@@ -35,8 +36,8 @@ class _FakeOtaRequest:
 def _full_handler(server_overrides=None):
     """Build a real OTAHandler with a complete server config for handle_post().
 
-    Defaults mirror the shipped posture: auth disabled, no mqtt_gateway, a
-    concrete (non-placeholder) websocket + /v1 api_url.
+    Defaults keep auth disabled for legacy token-gating unit cases while using
+    a concrete (non-placeholder) websocket + /v1 api_url.
     """
     server = {
         "auth_key": "test-secret",
@@ -146,6 +147,73 @@ class OTAWebsocketUrlTest(unittest.TestCase):
         self.assertEqual(payload["api_url"], "https://tbot-backend-8wmh.onrender.com/v1")
 
 
+class OTAClaimResetAllowlistTest(unittest.TestCase):
+    DEVICE = "14:c1:9f:d1:ac:20"
+    NON_TARGET = "14:c1:9f:d1:ac:21"
+    NONCE = "repair-2026-06-22-tbot-14c19fd1ac20"
+
+    def test_claim_reset_is_emitted_only_for_allowlisted_device_with_nonce(self):
+        handler = _full_handler(
+            {
+                "claim_reset_devices": [self.DEVICE],
+                "claim_reset_nonce": self.NONCE,
+            }
+        )
+
+        response = asyncio.run(handler.handle_post(_FakeOtaRequest(self.DEVICE)))
+        payload = json.loads(response.text)
+
+        self.assertEqual(
+            payload["claim_reset"],
+            {"local_claim": 1, "nonce": self.NONCE},
+        )
+        self.assertNotIn("claim_reset", payload["websocket"])
+
+    def test_claim_reset_accepts_env_allowlist_and_normalizes_mac_case(self):
+        old_devices = os.environ.get("TBOT_CLAIM_RESET_DEVICES")
+        old_nonce = os.environ.get("TBOT_CLAIM_RESET_NONCE")
+        try:
+            os.environ["TBOT_CLAIM_RESET_DEVICES"] = self.DEVICE.upper()
+            os.environ["TBOT_CLAIM_RESET_NONCE"] = self.NONCE
+            handler = _full_handler()
+
+            response = asyncio.run(handler.handle_post(_FakeOtaRequest(self.DEVICE)))
+            payload = json.loads(response.text)
+
+            self.assertEqual(payload["claim_reset"]["local_claim"], 1)
+            self.assertEqual(payload["claim_reset"]["nonce"], self.NONCE)
+        finally:
+            if old_devices is None:
+                os.environ.pop("TBOT_CLAIM_RESET_DEVICES", None)
+            else:
+                os.environ["TBOT_CLAIM_RESET_DEVICES"] = old_devices
+            if old_nonce is None:
+                os.environ.pop("TBOT_CLAIM_RESET_NONCE", None)
+            else:
+                os.environ["TBOT_CLAIM_RESET_NONCE"] = old_nonce
+
+    def test_claim_reset_is_omitted_for_non_allowlisted_device(self):
+        handler = _full_handler(
+            {
+                "claim_reset_devices": [self.DEVICE],
+                "claim_reset_nonce": self.NONCE,
+            }
+        )
+
+        response = asyncio.run(handler.handle_post(_FakeOtaRequest(self.NON_TARGET)))
+        payload = json.loads(response.text)
+
+        self.assertNotIn("claim_reset", payload)
+
+    def test_claim_reset_is_omitted_without_nonce_even_when_device_allowlisted(self):
+        handler = _full_handler({"claim_reset_devices": [self.DEVICE]})
+
+        response = asyncio.run(handler.handle_post(_FakeOtaRequest(self.DEVICE)))
+        payload = json.loads(response.text)
+
+        self.assertNotIn("claim_reset", payload)
+
+
 class OTAMqttForkGuardTest(unittest.TestCase):
     """ENDPOINT RULE: the websocket{} block must be present whenever
     mqtt_gateway is unset (the current deployment), and must be REPLACED by
@@ -190,8 +258,8 @@ class OTAMqttForkGuardTest(unittest.TestCase):
 class OTAWebsocketTokenMintTest(unittest.TestCase):
     """P5 (GATED): when server.auth.enabled is true the OTA handler mints a
     real NON-EMPTY websocket.token (for non-whitelisted devices); when auth is
-    disabled (the shipped default) the token is empty. Whitelisted devices
-    bypass the token to stay in lockstep with WebSocketServer._handle_auth."""
+    explicitly disabled the token is empty. Whitelisted devices bypass the
+    token to stay in lockstep with WebSocketServer._handle_auth."""
 
     DEVICE = "AA:BB:CC:DD:EE:01"
 

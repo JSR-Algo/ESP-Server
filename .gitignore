@@ -111,6 +111,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env*.local
 .venv
 env/
 venv/
@@ -153,6 +154,7 @@ main/tbot-server/.claude
 .worktrees/
 
 main/manager-web/node_modules
+main/manager-web/.playwright-cli/
 .config.yaml
 .secrets.yaml
 .private_config.yaml

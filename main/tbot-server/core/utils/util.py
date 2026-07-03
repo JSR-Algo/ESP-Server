@@ -62,14 +62,14 @@ def is_private_ip(ip_addr):
             ip_addr = ip_addr.lower()
             if ip_addr.startswith("fc00:") or ip_addr.startswith("fd00:"):
                 return True  # Unique Local Addresses (FC00::/7)
-            elif ip_addr == "::1":
+            elif ip_addr == "::1":  # pragma: no cover - regex above rejects compressed IPv6
                 return True  # Loopback address
             elif ip_addr.startswith("fe80:"):
                 return True  # Link-local unicast addresses (FE80::/10)
             else:
                 return False  # Not a private IPv6 address
 
-    except (ValueError, IndexError):
+    except (ValueError, IndexError):  # pragma: no cover - regex validation prevents these branches
         return False  # IP address format error or insufficient segments
 
 
@@ -418,7 +418,7 @@ def opus_datas_to_wav_bytes(opus_datas, sample_rate=16000, channels=1):
         if decoder is not None:
             try:
                 del decoder
-            except Exception:
+            except Exception:  # pragma: no cover - deleting a local decoder reference should not raise
                 pass
 
 

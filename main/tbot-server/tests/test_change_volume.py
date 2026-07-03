@@ -37,6 +37,11 @@ class _FakeMCPClient:
     def has_tool(self, name):
         return name in self._tools
 
+class _BrokenToolsMCPClient(_FakeMCPClient):
+    @property
+    def tools(self):
+        raise RuntimeError("tools unavailable")
+
 
 class _FakeConn:
     def __init__(self, mcp_client=None, last_known_volume=None):
@@ -127,6 +132,44 @@ class ChangeVolumeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result, "0")
         self.assertEqual(json.loads(capturing.calls[-1]["args"]), {"volume": 0})
 
+    async def test_up_uses_last_known_and_default_step_when_status_is_invalid(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient(), last_known_volume=33)
+        capturing = _CapturingCallMcp(status_response="not json")
+
+        with _patched_call_mcp_tool(capturing):
+            result = await change_volume_module.change_volume(
+                conn,
+                action="up",
+                step="bad",
+            )
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, "53")
+        self.assertEqual(result.response, "Đã chỉnh âm lượng còn 53%")
+        self.assertEqual(json.loads(capturing.calls[-1]["args"]), {"volume": 53})
+
+    async def test_query_current_volume_returns_none_when_device_status_unavailable(self):
+        not_ready = _FakeConn(mcp_client=_FakeMCPClient(ready=False))
+        missing_status = _FakeConn(
+            mcp_client=_FakeMCPClient(tools=(change_volume_module.SET_VOLUME_TOOL,))
+        )
+        non_dict_status = _FakeConn(mcp_client=_FakeMCPClient())
+        capturing = _CapturingCallMcp(status_response=["bad"])
+
+        self.assertIsNone(await change_volume_module._query_current_volume(not_ready))
+        self.assertIsNone(await change_volume_module._query_current_volume(missing_status))
+        with _patched_call_mcp_tool(capturing):
+            self.assertIsNone(await change_volume_module._query_current_volume(non_dict_status))
+
+    async def test_query_current_volume_returns_none_when_status_call_raises(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+
+        async def _raise_call(*args, **kwargs):
+            raise RuntimeError("status failed")
+
+        with patch("core.providers.tools.device_mcp.mcp_handler.call_mcp_tool", new=_raise_call):
+            self.assertIsNone(await change_volume_module._query_current_volume(conn))
+
     async def test_mute_caches_current_and_sets_zero(self):
         conn = _FakeConn(mcp_client=_FakeMCPClient())
         capturing = _CapturingCallMcp(status_response='{"audio_speaker": {"volume": 70}}')
@@ -158,6 +201,38 @@ class ChangeVolumeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result, "42")
         self.assertEqual(json.loads(capturing.calls[-1]["args"]), {"volume": 42})
 
+    async def test_unmute_without_cached_volume_uses_default_volume(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+        capturing = _CapturingCallMcp()
+
+        with _patched_call_mcp_tool(capturing):
+            result = await change_volume_module.change_volume(
+                conn,
+                action="unmute",
+                response_success="Đã bật lại {volume}%",
+            )
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual(result.result, str(change_volume_module.DEFAULT_VOLUME_ON_UNMUTE))
+        self.assertEqual(
+            json.loads(capturing.calls[-1]["args"]),
+            {"volume": change_volume_module.DEFAULT_VOLUME_ON_UNMUTE},
+        )
+
+    async def test_mute_with_cached_volume_skips_status_lookup(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient(), last_known_volume=25)
+        capturing = _CapturingCallMcp()
+
+        with _patched_call_mcp_tool(capturing):
+            result = await change_volume_module.change_volume(
+                conn,
+                action="mute",
+                response_success="Đã tắt tiếng",
+            )
+
+        self.assertEqual(result.action, Action.RESPONSE)
+        self.assertEqual([call["tool"] for call in capturing.calls], [change_volume_module.SET_VOLUME_TOOL])
+
     async def test_returns_error_when_mcp_client_missing(self):
         conn = _FakeConn(mcp_client=None)
 
@@ -185,6 +260,15 @@ class ChangeVolumeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.action, Action.ERROR)
 
+    async def test_set_with_invalid_level_returns_error(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+
+        result = await change_volume_module.change_volume(
+            conn, action="set", level="max", response_success="x"
+        )
+
+        self.assertEqual(result.action, Action.ERROR)
+
     async def test_returns_error_when_device_lacks_set_volume_tool(self):
         """If device MCP doesn't expose set_volume (under sanitized name), fail clearly."""
         conn = _FakeConn(mcp_client=_FakeMCPClient(tools=("self_get_device_status",)))
@@ -198,6 +282,25 @@ class ChangeVolumeTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.action, Action.ERROR)
+
+    async def test_set_device_volume_returns_false_when_client_not_ready(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient(ready=False))
+
+        self.assertFalse(await change_volume_module._set_device_volume(conn, 20))
+
+    async def test_set_device_volume_handles_unreadable_tool_list(self):
+        conn = _FakeConn(mcp_client=_BrokenToolsMCPClient(tools=()))
+
+        self.assertFalse(await change_volume_module._set_device_volume(conn, 20))
+
+    async def test_set_device_volume_returns_false_when_call_raises(self):
+        conn = _FakeConn(mcp_client=_FakeMCPClient())
+
+        async def _raise_call(*args, **kwargs):
+            raise RuntimeError("set failed")
+
+        with patch("core.providers.tools.device_mcp.mcp_handler.call_mcp_tool", new=_raise_call):
+            self.assertFalse(await change_volume_module._set_device_volume(conn, 20))
 
     def test_constants_use_sanitized_tool_names(self):
         """Regression: MCP client keys tools by sanitized name (dots → underscores)."""

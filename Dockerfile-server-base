@@ -39,12 +39,13 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     if [ "${TBOT_FAST_GOOGLE_LIVE}" = "1" ]; then \
         pip install --no-cache-dir -r requirements.txt --default-timeout=120 --retries 5; \
     else \
+        grep -E '^(torch|torchaudio)==' requirements.txt > requirements.torch.txt && \
         sed '/^torch==/d; /^torchaudio==/d' requirements.txt > requirements.runtime.txt && \
         pip install --no-cache-dir \
             --index-url "${PYTORCH_CPU_INDEX_URL}" \
             --trusted-host download.pytorch.org \
-            torch==2.2.2+cpu torchaudio==2.2.2+cpu \
+            -r requirements.torch.txt \
             --default-timeout=120 --retries 5 && \
         pip install --no-cache-dir -r requirements.runtime.txt --default-timeout=120 --retries 5; \
     fi && \
-    rm -f requirements.runtime.txt
+    rm -f requirements.torch.txt requirements.runtime.txt

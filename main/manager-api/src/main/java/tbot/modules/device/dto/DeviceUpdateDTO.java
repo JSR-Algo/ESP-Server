@@ -25,5 +25,42 @@ public class DeviceUpdateDTO implements Serializable {
     @Size(max = 64)
     private String alias;
 
+    /**
+    * Child display name for personalized conversation
+    */
+    @Size(max = 64)
+    private String childName;
+
+    /**
+    * Child age for age-appropriate conversation
+    */
+    @Max(18)
+    @Min(1)
+    private Integer childAge;
+
+    /**
+    * Comma-separated child interests for lesson personalization
+    */
+    @Size(max = 255)
+    private String childInterests;
+
+    /**
+    * Preferred learning style for lesson personalization
+    */
+    @Size(max = 32)
+    private String learningStyle;
+
+    /**
+    * Vocabulary level for lesson personalization
+    */
+    @Size(max = 32)
+    private String vocabularyLevel;
+
+    /**
+    * Parent career topic for lesson personalization
+    */
+    @Size(max = 64)
+    private String parentCareer;
+
     private static final long serialVersionUID = 1L;
 }

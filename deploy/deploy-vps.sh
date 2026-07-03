@@ -10,9 +10,12 @@ PORT="22"
 KEY_FILE=""
 ENV_FILE=""
 REMOTE_ROOT="/opt/tbot"
+REMOTE_ROOT_SET=0
 DRY_RUN=0
 BOOTSTRAP=0
 RELEASE_ROOT="${PROJECT_DIR}/dist/deploy"
+SMOKE_EXPECTED_WS_HOST=""
+SMOKE_OTA_URL=""
 
 usage() {
   cat <<'USAGE'
@@ -127,6 +130,94 @@ env_value() {
   printf '%s' "${value:-${fallback}}"
 }
 
+url_host() {
+  local url="$1"
+  local rest="${url#*://}"
+  printf '%s' "${rest%%/*}"
+}
+
+url_path() {
+  local url="$1"
+  local rest="${url#*://}"
+  if [[ "${rest}" == */* ]]; then
+    printf '/%s' "${rest#*/}"
+  else
+    printf '/'
+  fi
+}
+
+is_quick_tunnel_host() {
+  local host="$1"
+  [[ "${host}" == "trycloudflare.com" || "${host}" == *.trycloudflare.com ]]
+}
+
+validate_public_endpoint_env() {
+  [[ -n "${ENV_FILE}" ]] || return 0
+
+  local env_remote_root websocket_url backend_url ws_host backend_path failed
+  failed=0
+  env_remote_root="$(env_value TBOT_REMOTE_ROOT "")"
+  if [[ -n "${env_remote_root}" ]]; then
+    if [[ "${REMOTE_ROOT_SET}" -eq 1 && "${env_remote_root}" != "${REMOTE_ROOT}" ]]; then
+      die "TBOT_REMOTE_ROOT in env file conflicts with --remote-root"
+    fi
+    REMOTE_ROOT="${env_remote_root}"
+  fi
+
+  websocket_url="$(env_value TBOT_PUBLIC_WEBSOCKET_URL "")"
+  backend_url="$(env_value TBOT_BACKEND_API_URL "")"
+
+  if [[ -z "${websocket_url}" ]]; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL is required in env file\n' >&2
+    failed=1
+  fi
+  if [[ -z "${backend_url}" ]]; then
+    printf 'error: TBOT_BACKEND_API_URL is required in env file\n' >&2
+    failed=1
+  fi
+  [[ "${failed}" -eq 0 ]] || exit 1
+
+  if [[ "${websocket_url}" == *your-public-domain* ]]; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL still uses a placeholder value\n' >&2
+    failed=1
+  fi
+  if [[ "${backend_url}" == *your-backend-api-domain* ]]; then
+    printf 'error: TBOT_BACKEND_API_URL still uses a placeholder value\n' >&2
+    failed=1
+  fi
+  [[ "${failed}" -eq 0 ]] || exit 1
+
+  if [[ "${websocket_url}" != ws://* && "${websocket_url}" != wss://* ]]; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL must be a ws:// or wss:// URL\n' >&2
+  fi
+  if [[ "$(url_path "${websocket_url}")" != "/tbot/v1/" ]]; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL must use the /tbot/v1/ WebSocket path\n' >&2
+  fi
+  ws_host="$(url_host "${websocket_url}")"
+  if is_quick_tunnel_host "${ws_host}"; then
+    printf 'error: TBOT_PUBLIC_WEBSOCKET_URL must not use a trycloudflare quick tunnel\n' >&2
+  fi
+
+  if [[ "${backend_url}" != http://* && "${backend_url}" != https://* ]]; then
+    printf 'error: TBOT_BACKEND_API_URL must be an http:// or https:// URL\n' >&2
+  fi
+  backend_path="$(url_path "${backend_url}")"
+  if [[ "${backend_path}" != "/v1" && "${backend_path}" != "/v1/" && "${backend_path}" != /v1/* ]]; then
+    printf 'error: TBOT_BACKEND_API_URL must include the /v1 route prefix\n' >&2
+  fi
+
+  if [[ "${websocket_url}" != ws://* && "${websocket_url}" != wss://* ]] || \
+     [[ "$(url_path "${websocket_url}")" != "/tbot/v1/" ]] || \
+     is_quick_tunnel_host "${ws_host}" || \
+     [[ "${backend_url}" != http://* && "${backend_url}" != https://* ]] || \
+     [[ "${backend_path}" != "/v1" && "${backend_path}" != "/v1/" && "${backend_path}" != /v1/* ]]; then
+    exit 1
+  fi
+
+  SMOKE_EXPECTED_WS_HOST="${ws_host}"
+  SMOKE_OTA_URL="https://${ws_host}/tbot/ota/"
+}
+
 while (($#)); do
   case "$1" in
     --host)
@@ -167,6 +258,7 @@ while (($#)); do
     --remote-root)
       [[ $# -ge 2 ]] || die "--remote-root requires a value"
       REMOTE_ROOT="$2"
+      REMOTE_ROOT_SET=1
       shift 2
       ;;
     --bootstrap)
@@ -194,6 +286,12 @@ done
 [[ -z "${ENV_FILE}" || -r "${ENV_FILE}" ]] || die "cannot read env file: ${ENV_FILE}"
 need_cmd ssh
 need_cmd scp
+
+if [[ "${HOST}" == "160.187.240.56" && -z "${ENV_FILE}" ]]; then
+  die "known Levcloud VPS deploy requires --env-file with TBOT_REMOTE_ROOT=/opt/tbot"
+fi
+
+validate_public_endpoint_env
 
 if [[ -n "${SSH_PASSWORD:-}" && -z "${KEY_FILE}" ]] && ! command -v sshpass >/dev/null 2>&1 && ! command -v expect >/dev/null 2>&1; then
   printf 'warning: SSH_PASSWORD set but neither sshpass nor expect was found; falling back to interactive SSH auth\n' >&2
@@ -230,7 +328,11 @@ fi
 run_ssh "cd ${REMOTE_RELEASE_Q} && sha256sum -c checksums.sha256 && for f in *.tar.gz; do gunzip -c \"\$f\" | docker load; done && ln -sfn ${REMOTE_RELEASE_Q} ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; fi"
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
-  "${SCRIPT_DIR}/smoke-vps.sh" --host "${HOST}" --port "${SMOKE_WS_PORT}" --http-port "${SMOKE_HTTP_PORT}" --ota-port "${SMOKE_OTA_PORT}"
+  if [[ -n "${SMOKE_OTA_URL}" && -n "${SMOKE_EXPECTED_WS_HOST}" ]]; then
+    "${SCRIPT_DIR}/smoke-vps.sh" --host "${HOST}" --port "${SMOKE_WS_PORT}" --http-port "${SMOKE_HTTP_PORT}" --ota-port "${SMOKE_OTA_PORT}" --ota-url "${SMOKE_OTA_URL}" --expected-ws-host "${SMOKE_EXPECTED_WS_HOST}"
+  else
+    "${SCRIPT_DIR}/smoke-vps.sh" --host "${HOST}" --port "${SMOKE_WS_PORT}" --http-port "${SMOKE_HTTP_PORT}" --ota-port "${SMOKE_OTA_PORT}"
+  fi
 else
   printf '[dry-run] skip smoke checks\n'
 fi

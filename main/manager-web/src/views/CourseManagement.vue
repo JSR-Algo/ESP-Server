@@ -28,6 +28,37 @@
     </div>
 
     <div class="main-wrapper">
+      <div class="course-filter-panel">
+        <el-input
+          v-model="courseKeyword"
+          :placeholder="$t('course.quickSearchPlaceholder')"
+          size="small"
+          clearable
+          class="filter-input wide"
+        />
+        <el-select v-model="riskFilter" size="small" class="filter-input">
+          <el-option :label="$t('course.riskAll')" value="all" />
+          <el-option :label="$t('insights.riskAttention')" value="attention" />
+          <el-option :label="$t('insights.riskWatch')" value="watch" />
+          <el-option :label="$t('insights.riskHealthy')" value="healthy" />
+        </el-select>
+        <el-select v-model="qualityWindow" size="small" class="filter-input" @change="fetchQuality">
+          <el-option :label="$t('insights.window7')" :value="7" />
+          <el-option :label="$t('insights.window14')" :value="14" />
+          <el-option :label="$t('insights.window30')" :value="30" />
+          <el-option :label="$t('insights.window90')" :value="90" />
+        </el-select>
+        <el-input
+          v-model="learnerKeyword"
+          :placeholder="$t('course.learnerFilterPlaceholder')"
+          size="small"
+          clearable
+          class="filter-input wide"
+          @keyup.enter.native="openLearnerFilter"
+        />
+        <el-button size="small" @click="openLearnerFilter">{{ $t('course.openLearners') }}</el-button>
+      </div>
+
       <div class="course-stats">
         <div class="stat-item">
           <span class="stat-label">{{ $t('course.statTotal') }}</span>
@@ -44,6 +75,14 @@
         <div class="stat-item">
           <span class="stat-label">{{ $t('course.statPublished') }}</span>
           <strong>{{ publishedCount }}</strong>
+        </div>
+        <div class="stat-item quality-preview">
+          <span class="stat-label">{{ $t('course.qualityPreview') }}</span>
+          <strong>{{ avgQuality }}</strong>
+        </div>
+        <div class="stat-item attention-preview">
+          <span class="stat-label">{{ $t('course.needsAttention') }}</span>
+          <strong>{{ needsAttentionCount }}</strong>
         </div>
       </div>
       <el-card class="content-area" shadow="never">
@@ -63,10 +102,24 @@
               <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column :label="$t('course.colActions')" width="360">
+          <el-table-column :label="$t('course.colQuality')" width="150">
+            <template slot-scope="scope">
+              <div v-if="qualityFor(scope.row).courseId" class="quality-cell">
+                <el-tag size="mini" :type="riskTagType(qualityFor(scope.row).riskLevel)">
+                  {{ qualityFor(scope.row).qualityScore }}
+                </el-tag>
+                <span class="muted small">{{ riskLabel(qualityFor(scope.row).riskLevel) }}</span>
+              </div>
+              <span v-else class="muted small">{{ $t('course.noQuality') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column :label="$t('course.colActions')" width="430">
             <template slot-scope="scope">
               <el-button type="text" size="small" @click="openLessons(scope.row)">
                 {{ $t('course.lessons') }}
+              </el-button>
+              <el-button type="text" size="small" @click="openInsightsForCourse(scope.row)">
+                {{ $t('course.quality') }}
               </el-button>
               <el-button type="text" size="small" @click="openClone(scope.row)">
                 {{ $t('course.clone') }}
@@ -154,6 +207,12 @@ export default {
       editing: false,
       saving: false,
       kindFilter: 'all',
+      courseKeyword: '',
+      learnerKeyword: '',
+      riskFilter: 'all',
+      qualityWindow: 30,
+      qualityRows: [],
+      qualityLoading: false,
       cloneVisible: false,
       cloning: false,
       cloneSource: {},
@@ -163,9 +222,24 @@ export default {
   },
   computed: {
     filteredList() {
-      if (this.kindFilter === 'template') return this.list.filter((c) => c.isTemplate);
-      if (this.kindFilter === 'custom') return this.list.filter((c) => !c.isTemplate);
-      return this.list;
+      const kw = this.courseKeyword.trim().toLowerCase();
+      return this.list.filter((c) => {
+        if (this.kindFilter === 'template' && !c.isTemplate) return false;
+        if (this.kindFilter === 'custom' && c.isTemplate) return false;
+        if (kw && ![c.courseKey, c.title, c.locale, c.ageBand, c.status].some((v) => String(v || '').toLowerCase().includes(kw))) return false;
+        if (this.riskFilter !== 'all') {
+          const q = this.qualityFor(c);
+          if (!q.courseId || q.riskLevel !== this.riskFilter) return false;
+        }
+        return true;
+      });
+    },
+    qualityByCourse() {
+      return this.qualityRows.reduce((acc, row) => {
+        if (row.courseId) acc[row.courseId] = row;
+        if (row.courseKey) acc[row.courseKey] = row;
+        return acc;
+      }, {});
     },
     templateCount() {
       return this.list.filter((c) => c.isTemplate).length;
@@ -176,11 +250,32 @@ export default {
     publishedCount() {
       return this.list.filter((c) => c.status === 'published').length;
     },
+    avgQuality() {
+      if (!this.qualityRows.length) return 0;
+      return Math.round(this.qualityRows.reduce((sum, row) => sum + row.qualityScore, 0) / this.qualityRows.length);
+    },
+    needsAttentionCount() {
+      return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
+    },
   },
   created() {
     this.fetchList();
+    this.fetchQuality();
   },
   methods: {
+    qualityFor(row) {
+      return this.qualityByCourse[row.courseId] || this.qualityByCourse[row.courseKey] || {};
+    },
+    riskTagType(level) {
+      if (level === 'attention') return 'danger';
+      if (level === 'healthy') return 'success';
+      return 'warning';
+    },
+    riskLabel(level) {
+      if (level === 'attention') return this.$t('insights.riskAttention');
+      if (level === 'healthy') return this.$t('insights.riskHealthy');
+      return this.$t('insights.riskWatch');
+    },
     statusType(status) {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
@@ -198,6 +293,32 @@ export default {
           this.$message.error(msg || this.$t('course.loadFail'));
         },
       );
+    },
+    fetchQuality() {
+      this.qualityLoading = true;
+      Api.courseInsights.getCourseQuality(
+        { windowDays: this.qualityWindow },
+        (rows) => {
+          this.qualityLoading = false;
+          this.qualityRows = rows;
+        },
+        () => {
+          this.qualityLoading = false;
+          this.qualityRows = [];
+        },
+      );
+    },
+    openInsightsForCourse(row) {
+      this.$router.push({
+        path: '/course-insights',
+        query: { tab: 'quality', courseId: row.courseId, keyword: row.courseKey },
+      });
+    },
+    openLearnerFilter() {
+      this.$router.push({
+        path: '/course-insights',
+        query: { tab: 'learners', keyword: this.learnerKeyword.trim() || this.courseKeyword.trim() },
+      });
     },
     openLessons(row) {
       this.$router.push({
@@ -360,9 +481,21 @@ export default {
 .main-wrapper {
   padding: 16px 24px;
 }
+.course-filter-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.filter-input {
+  width: 190px;
+}
+.filter-input.wide {
+  width: 280px;
+}
 .course-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -382,6 +515,17 @@ export default {
   font-size: 22px;
   color: #303133;
 }
+.quality-preview strong {
+  color: #409eff;
+}
+.attention-preview strong {
+  color: #f56c6c;
+}
+.quality-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .danger-text {
   color: #f56c6c;
 }
@@ -396,6 +540,28 @@ export default {
   }
   .course-stats {
     grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}
+@media (max-width: 720px) {
+  .operation-bar,
+  .main-wrapper {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .left-title,
+  .right-operations,
+  .course-filter-panel {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+  .filter-input,
+  .filter-input.wide,
+  .course-filter-panel .el-button {
+    width: 100%;
+  }
+  .course-stats {
+    grid-template-columns: 1fr;
   }
 }
 </style>

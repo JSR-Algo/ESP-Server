@@ -372,7 +372,11 @@ async def call_mcp_tool(
     }
 
     logger.bind(tag=TAG).info(f"Send client mcp tool call request: {actual_name}, parameters: {args}")
-    await send_mcp_message(conn, payload)
+    try:
+        await send_mcp_message(conn, payload)
+    except Exception:
+        await mcp_client.cleanup_call_result(tool_call_id)
+        raise
 
     try:
         # Wait for response or timeout

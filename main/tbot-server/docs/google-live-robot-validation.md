@@ -72,9 +72,24 @@ Then the script prints the AC summary and writes the JSON report.
 AC6 and AC7 are separate workstreams:
 - **AC6 (test coverage)** is gated by `python -m unittest discover -s tests`
   in CI — not part of the soak.
-- **AC7 (server-side AEC effectiveness)** is gated by
-  `scripts/aec_loopback_eval.py` (deferred; see plan v2.1 §17 — AEC is
-  optional given PR1 baseline verdict).
+- **AC7 (AEC-forward evidence)** is gated in physical robot logs by
+  `scripts/physical_smoke_audit.py --require-aec-live-vad-forward`, which
+  requires `Google Live aec_live_vad_forward reason=robot_speaking`. Quantitative
+  AEC effectiveness remains covered by `scripts/aec_loopback_eval.py`.
+- **First-audio response speed** is gated by
+  `scripts/physical_smoke_audit.py --max-first-audio-ms 1800`, using
+  `Google Live first_audio_out_latency_ms=...` log markers.
+- **Expected user speech recognition** is gated by
+  `scripts/physical_smoke_audit.py --expected-user-transcript "bắt đầu bài học"`,
+  which requires the expected phrase to appear in a user transcript after
+  case/punctuation/whitespace normalization. The flag is repeatable.
+- **Lesson Live voice path** is gated by
+  `scripts/physical_smoke_audit.py --require-lesson --require-lesson-live-text`,
+  which requires each expected lesson prompt to be queued through Live text.
+  Add `--lesson-manifest <lesson-manifest.json>` so the audit derives expected
+  step count, interactive step count, prompt char lower bound, and per-prompt
+  SHA-256 hashes from the selected lesson to catch truncated or changed
+  payloads without logging content.
 
 ---
 

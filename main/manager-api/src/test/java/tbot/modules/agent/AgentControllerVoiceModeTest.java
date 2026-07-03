@@ -208,6 +208,7 @@ class AgentControllerVoiceModeTest {
         public Object invoke(Object proxy, Method method, Object[] args) {
             return switch (method.getName()) {
                 case "getAgentById" -> agentToReturn;
+                case "checkAgentPermission" -> true;
                 case "updateAgentById" -> {
                     lastUpdatedAgentId = (String) args[0];
                     lastUpdateDto = (AgentUpdateDTO) args[1];

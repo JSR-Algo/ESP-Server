@@ -5,6 +5,8 @@ import warnings
 from contextlib import suppress
 from collections.abc import Iterable, Mapping
 
+from core.voice.child_safety import ensure_child_safety_block
+
 # Eager import of google.genai at module load (server startup).
 # First-time import of this SDK costs 80-100 seconds (protobuf + grpc + auth
 # transitive imports). Doing it at startup hides the cost from device-side
@@ -80,6 +82,12 @@ class GoogleLiveClient:
         except asyncio.TimeoutError as exc:
             raise RuntimeError("Google Live connect timed out") from exc
         self.connected = True
+        self.logger.bind(tag="GoogleLive").info(
+            "Google Live session identity model={} voice={} language={}",
+            model,
+            self.config.get("voice_name") or "none",
+            self.config.get("language_code") or "none",
+        )
         self.logger.bind(tag="GoogleLive").info(
             "Google Live session connected in {:.1f} ms",
             (time.monotonic() - connect_started_at) * 1000,
@@ -162,7 +170,7 @@ class GoogleLiveClient:
                         continue
                     if message is False:
                         for event in self._finish_open_audio_turn("stream_end"):
-                            yield event
+                            yield event  # pragma: no cover - coverage.py misses this async-generator yield
                         break
                     received_turn_message = True
                     for event in self._normalize_message(message):
@@ -242,7 +250,15 @@ class GoogleLiveClient:
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         if self._live_context is not None:
-            await self._live_context.__aexit__(None, None, None)
+            try:
+                await self._live_context.__aexit__(None, None, None)
+            except RuntimeError as exc:
+                if "asynchronous generator is already running" not in str(exc):
+                    raise
+                self.logger.bind(tag="GoogleLive").warning(
+                    "Google Live context close already in progress: {}",
+                    exc,
+                )
         self._sdk_client = None
         self._live_context = None
         self._session = None
@@ -309,7 +325,7 @@ class GoogleLiveClient:
         prompt = self.config.get("system_prompt") or self.config.get("prompt")
         if not prompt:
             return None
-        text = str(prompt).strip()
+        text = ensure_child_safety_block(prompt).strip()
         if not text:
             return None
         # Live API accepts either a Content object or a plain dict. We use the
@@ -460,20 +476,16 @@ class GoogleLiveClient:
             except (TypeError, ValueError):
                 continue
         disable_server_side_interruptions = bool(
-            self.config.get("disable_server_side_interruptions", True)
+            self.config.get("disable_server_side_interruptions", False)
         )
-        explicit_activity_handling = "activity_handling" in self.config
-        if (
-            not disable_server_side_interruptions
-            and not aad
-            and not explicit_activity_handling
-        ):
-            return None
+        default_activity_handling = (
+            "NO_INTERRUPTION"
+            if disable_server_side_interruptions
+            else "START_OF_ACTIVITY_INTERRUPTS"
+        )
         activity_handling = str(
-            self.config.get("activity_handling") or "START_OF_ACTIVITY_INTERRUPTS"
+            self.config.get("activity_handling") or default_activity_handling
         )
-        if activity_handling == "NO_INTERRUPTION":
-            activity_handling = "START_OF_ACTIVITY_INTERRUPTS"
         realtime_input_config = {
             "activity_handling": activity_handling,
             "turn_coverage": self.config.get(

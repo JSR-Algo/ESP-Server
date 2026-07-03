@@ -1,5 +1,6 @@
 package xiaozhi.modules.sys;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -14,6 +15,7 @@ import xiaozhi.modules.sys.dto.RetrievePasswordDTO;
 @Slf4j
 @SpringBootTest
 @ActiveProfiles("dev")
+@Disabled("Integration test requires local MySQL/Redis from application-dev.yml")
 class loginControllerTest {
 
     @Autowired

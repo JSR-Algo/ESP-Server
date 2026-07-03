@@ -23,6 +23,9 @@ public class DeviceReportRespDTO {
     @Schema(description = "WebSocket配置")
     private Websocket websocket;
 
+    @Schema(description = "固件访问后端 API 的基础地址")
+    private String apiUrl;
+
     @Schema(description = "MQTT Gateway配置")
     private MQTT mqtt;
 

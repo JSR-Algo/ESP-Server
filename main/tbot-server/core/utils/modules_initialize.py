@@ -29,7 +29,7 @@ def initialize_modules(
 
     # Initialize TTS module
     if init_tts:
-        select_tts_module = config["selected_module"]["TTS"]
+        select_tts_module = _selected_module(config, "TTS")
         modules["tts"] = initialize_tts(config)
         logger.bind(tag=TAG).info(f"Initialize component: tts success {select_tts_module}")
 
@@ -98,8 +98,22 @@ def initialize_modules(
     return modules
 
 
+def _selected_module(config, module_name):
+    selected = config.get("selected_module", {}) or {}
+    module_config = config.get(module_name, {}) or {}
+    configured = selected.get(module_name)
+    if configured in module_config:
+        return configured
+    if module_name == "TTS" and "EdgeTTS" in module_config:
+        return "EdgeTTS"
+    if len(module_config) == 1:
+        return next(iter(module_config))
+    return configured
+
 def initialize_tts(config):
-    select_tts_module = config["selected_module"]["TTS"]
+    select_tts_module = _selected_module(config, "TTS")
+    if not select_tts_module or select_tts_module not in (config.get("TTS") or {}):
+        raise KeyError("TTS")
     tts_type = (
         select_tts_module
         if "type" not in config["TTS"][select_tts_module]
@@ -148,4 +162,3 @@ def initialize_voiceprint(asr_instance, config):
     except Exception as e:
         logger.bind(tag=TAG).error(f"DynamicInitialize voiceprint recognitionFail: {str(e)}")
         return False
-

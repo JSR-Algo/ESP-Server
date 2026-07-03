@@ -1,5 +1,177 @@
 # Google Live Completion Audit
 
+## 2026-07-02 current robot-production objective
+
+The stricter robot-production goal is not complete until a real robot run proves
+all of these in the same production path:
+
+- normal conversation uses Google Live with one configured voice (`Kore`) and
+  fast conversation turn timing
+- lesson/course narration sends the full prompt text verbatim through the same
+  Live voice before opening the child-response window
+- user speech can interrupt while the robot is speaking through official Live
+  VAD, not local raw/RMS barge-in
+- robot speaker audio is suppressed unless an active AEC-cleaned input path is
+  forwarding frames for Live VAD
+
+Current server-side proof:
+
+- `scripts/physical_smoke_audit.py --production-strict` enables all production
+  voice and lesson/course gates together
+- production boot now rejects non-`google_live` voice mode, so production cannot
+  silently start on `classic_pipeline`
+- production boot now rejects a configured `google_live.model` other than
+  `gemini-3.1-flash-live-preview`, so env/private config cannot switch the
+  production robot off the chosen Google Live model
+- production boot also requires `enable_audio_input=true`,
+  `enable_audio_output=true`, `native_voice=true`, and `language_code=vi-VN`,
+  so production cannot silently disable Live audio or switch out of the
+  Vietnamese native-voice path
+- Google Live session connect logs now include
+  `Google Live session identity model=... voice=... language=...`, and
+  production voice strict requires the physical target segment to show
+  `gemini-3.1-flash-live-preview`, `Kore`, and `vi-VN` before first audio output;
+  any later target-segment Live identity with a different model, voice, or
+  language is fatal
+- `scripts/physical_smoke_audit.py --production-voice-strict` enables the
+  expected user transcript after a Live interruption, fast-first-audio,
+  AEC-forward count matching
+  `--min-interrupts`, ordered AEC-forward-to-interruption chains matching
+  `--min-interrupts`, Live server interruption count matching
+  `--min-interrupts`, and `tts_stop_sent reason=interrupt` count matching
+  `--min-interrupts` together; normal output stop markers do not satisfy this
+  interrupt-stop count. It also requires `Google Live
+  interruption_stop_latency_ms=...` count matching `--min-interrupts` with max
+  latency no higher than 250ms, those interruption and interrupt stop markers to
+  appear in order, interrupt stops to carry `continue_listening=true`
+  and `listen_mode=realtime`, plus a normal output stop marker with
+  `continue_listening=true` and `listen_mode=realtime` after first audio output,
+  and at least one `transcript source=user` marker after a Live interruption.
+  The expected transcript must also match after a Live interruption, so a
+  pre-output user phrase cannot satisfy the barge-in proof. Production strict
+  does not require local `user_interrupted reason=audio_input` markers; Live
+  server interruption is the barge-in proof.
+- `scripts/physical_smoke_audit.py --production-course-strict --lesson-manifest`
+  enables lesson flow, sent Live-text handoff, manifest-derived
+  `prompt`/`retryPrompt`/`successPrompt` character count, and per-text hash
+  gates together
+- `scripts/physical_smoke_audit.py --require-aec-live-vad-forward` requires
+  `Google Live aec_live_vad_forward reason=robot_speaking`
+- `scripts/physical_smoke_audit.py --max-first-audio-ms 1800` gates fast first
+  audio response from `Google Live first_audio_out_latency_ms=...`
+- `scripts/physical_smoke_audit.py --require-lesson --require-lesson-live-text`
+  gates the lesson/course prompt path through Live text and rejects local
+  `lesson_* queued via tts` markers, even if a Live-text marker is also present
+- `scripts/physical_smoke_audit.py --lesson-manifest ...` derives expected step
+  count, interactive step count, content-free prompt char lower bound, and
+  per-spoken-prompt SHA-256 hashes using the same prompt selection as runtime
+  (`storyBeat.ask` for guided interactive steps, else `prompt`, plus
+  `retryPrompt`/`successPrompt`) so truncated/rút gọn/changed prompts fail the
+  physical audit without hand math or logging lesson text; Live-text prompt
+  hashes outside the expected spoken manifest or out of manifest order also fail
+  the production course audit
+- `scripts/physical_smoke_audit.py --expected-user-transcript ...` gates the
+  expected user phrase after case/punctuation/whitespace normalization
+- physical audit counts transcript, first-audio, AEC-forward, Live interruption,
+  lesson flow, and fatal markers only inside the target physical device/client
+  WebSocket segment; evidence from later local/Python or non-target sessions is
+  ignored
+- target `Client disconnected` is fatal and closes the target evidence segment,
+  so markers logged after a disconnect cannot satisfy the same physical run
+- physical audit fatal markers now reject `fallback_disabled`,
+  `Send first voice segment:`,
+  `Send audio message:`,
+  `tts` `sentence_start` frames,
+  `audio_decision decision=suppress_echo reason=robot_speaking`, `Google Live
+  echo_bypass`, `Google Live echo_suppressed reason=robot_speaking`, `Google
+  Live AEC import failed`, `Google Live AEC initialised ... bypassed=True`,
+  `Google Live AEC process_mic failed while output active`,
+  `live_identity_mismatch`, `Google Live
+  interruption suppressed_for_age`, `interrupt_started reason=loud_input`,
+  `Google Live user_interrupted reason=loud_input`,
+  `Google Live transcript_barge_in suppressed_for_age`, `Google Live
+  transcript_barge_in suppressed_as_model_echo`, and `Google Live server
+  interruption ignored by config`, Google Live receive/waiting-model timeouts,
+  lesson prompt output/playback guard timeouts, reconnect attempts,
+  `reconnect_started`, `Google Live tool timeout`, `STEP_TIMEOUT`, and direct
+  user transcripts that exactly match or contain a long substring from earlier
+  model transcripts, so a run cannot pass if Live is unavailable,
+  local/classic TTS speaks normal conversation, robot speaker echo is used as
+  an interrupt source or transcribed as user speech, mic frames are suppressed
+  instead of AEC-forwarded while the robot speaks, server-side Live/transcript
+  interruption is delayed/disabled, or Live gets stuck in timeout/reconnect
+  recovery after otherwise valid first-audio evidence
+- `scripts/analyze_google_live_log.py` reports `aec_live_vad_forward` totals,
+  `fallback_disabled` sessions, lesson local-TTS markers, lesson Live-text
+  markers, and RMS distribution for longer QA log analysis
+- runtime safety policy forces `voice_name=Kore` after manager/private config
+  merge and ignores voice env overrides, so stale per-agent or shell config
+  cannot switch normal conversation or lesson narration to another AI voice
+- runtime config/provider policy also forces the Live model, voice, language,
+  native voice, audio input/output flags, and `aec_enabled=true` after direct
+  config merge, so manager/private config or bypass callers cannot open a
+  session with a different Google Live identity or disable the AEC boundary that
+  keeps robot speaker audio out of user input
+- runtime provider policy also clamps direct slow timing overrides:
+  `waiting_model_timeout_sec<=2.0`,
+  `interruption_min_output_age_sec=0.0`, and
+  `barge_in_transcript_min_output_age_sec=0.0`
+- runtime provider policy also forces `echo_bypass_interrupt_enabled=false`, so
+  direct runtime config cannot re-enable local raw/RMS loud-input interruption
+  around the config normalizer
+- connection private-config setup reruns voice normalization after merging API
+  fields, so fallback/mock/bypass callers cannot start a Google Live provider
+  with stale `voice_name` or interruption policy
+- moderation safe deflection sends a read-verbatim instruction plus the safety
+  line through Google Live text and does not queue local/classic TTS
+- Google Live connections bypass the cached wake-word local-audio reply in
+  `checkWakeupWords`; wake feedback stays on the Google Live provider path
+- Google Live connections also drop classic `sendAudioMessage` audio/text
+  segments before they can emit `tts start`, `tts sentence_start`, or binary
+  local TTS audio; `LAST` still sends the stop control frame needed for
+  realtime relisten
+- Google Live `tts stop` skips local `stop_tts_notify_voice` audio even if the
+  legacy notify option is enabled, so relisten does not inject a local prompt
+  sound into the speaker/mic path
+- normal text already parsed by `GoogleLiveProvider.handle_text_message` is
+  consumed in Google Live mode when the Live client is missing or `send_text`
+  fails, so connection routing cannot fall through to `handleTextMessage` and
+  queue classic chat/TTS for the same user utterance
+- exceptions from parsed Google Live text commands are also consumed after
+  runtime-failure handling, so a failed local stop-word/command branch cannot
+  fall through to the classic text handler
+- Google Live audio decode/forward/send exceptions are consumed after
+  runtime-failure handling, so a bad Live audio frame or send failure cannot
+  fall through to the connection's classic ASR queue for the same mic audio
+- runtime safety policy forces `waiting_model_timeout_sec=2.0` after
+  manager/private config merge, so old agent configs cannot leave the robot in a
+  long `WAITING_MODEL` state
+- runtime safety policy forces `interruption_min_output_age_sec=0.0` and
+  `barge_in_transcript_min_output_age_sec=0.0`; Live interruption and confirmed
+  user transcripts can stop output immediately, and physical audit rejects any
+  delayed suppression log, missing interrupt stop marker, out-of-order
+  AEC/interruption or interruption/stop evidence, interrupt stops without
+  realtime relisten fields, or missing
+  realtime relisten stop marker after model output; production strict also
+  requires the expected user transcript after a Live interruption so a stale
+  pre-output transcript cannot satisfy the barge-in proof
+- focused production voice/config/course/audit proof from 2026-07-03:
+  config loader/voice merge, tool-call lesson Live text, provider edges,
+  barge-in, audio bridge edges, event mapping, fallback, smoke/local/audit,
+  client, analyzer, connection, and voice-provider routing suites `535 passed`
+- focused wake/listen/local-audio guard proof from 2026-07-03:
+  wake-word suite `9 passed`; wake/listen/send-audio suite `43 passed`; Google
+  Live barge-in/fallback suite `109 passed`; provider/tool/audio/event suite
+  `167 passed`; barge-in/fallback/connection-routing suite `135 passed`
+- focused test evidence from 2026-07-02: Google Live/config/provider suite
+  `332 passed`; lesson slice `34 passed, 1 warning`; physical audit tests
+  `44 passed`; analyzer tests `14 passed`
+
+Remaining gate: physical robot/live E2E with real credentials, real device ID,
+and production websocket/backend/auth config. Keep this goal open until that run
+shows conversation latency, lesson completeness, mid-speech interruption,
+AEC-forward evidence, and no fallback/self-interrupt/fatal loop.
+
 Status date: 2026-05-14
 
 Scope: audit current `google_live` additive integration against approved design and implementation requirements.
@@ -23,7 +195,8 @@ Evidence:
 
 - default config remains `classic_pipeline`
   - `config/config_loader.py`
-- provider factory falls back to classic when mode is absent or malformed
+- provider factory uses classic only when mode is absent, malformed, or explicitly
+  `classic_pipeline`
   - `core/voice/session_provider/factory.py`
   - `tests/test_voice_provider_factory.py`
 - classic provider delegates to existing flow instead of replacing it
@@ -158,18 +331,17 @@ Evidence:
   - `core/voice/session_provider/google_live.py`
   - `core/voice/google_live/audio_bridge.py`
 
-### 9. Fallback on failure
+### 9. Google Live failure behavior
 
-Status: satisfied
+Status: superseded by production Google Live-only policy
 
 Evidence:
 
-- config flag:
-  - `voice_mode.fallback_to_classic_on_error`
-- runtime fallback path:
-  - `core/voice/session_provider/google_live.py`
-- fallback tests:
-  - `tests/test_google_live_provider_fallback.py`
+- production config sets `voice_mode.fallback_to_classic_on_error=false`
+- lesson narration returns failure if Live text cannot be sent; it does not queue
+  local/classic TTS
+- Google Live provider fallback tests now assert no classic provider swap
+- explicit classic mode remains covered separately
   - `tests/test_voice_provider_factory.py`
 
 ### 10. Code quality / minimal invasive changes
@@ -267,6 +439,9 @@ cd /Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server
 GOOGLE_API_KEY=... ./.venv311/bin/python scripts/google_live_smoke.py
 ```
 
+Default smoke config now matches production voice policy: model
+`gemini-3.1-flash-live-preview`, voice `Kore`, language `vi-VN`.
+
 Result:
 
 - `SMOKE_CONNECT_OK`
@@ -291,11 +466,11 @@ Implementation is complete for approved additive integration scope.
 
 Requirement-by-requirement proof now includes:
 
-- classic pipeline preserved as default
+- classic pipeline preserved as an explicit legacy mode
 - additive provider abstraction and routing
 - config + admin UI wiring
 - firmware-compatible websocket/audio mapping
-- runtime fallback and reconnect coverage
+- runtime reconnect and Google Live-only failure coverage
 - focused server/backend/web verification
 - real credentialed Google Live smoke
 
@@ -321,21 +496,22 @@ Prompt-to-artifact checklist:
 
 | Requirement | Evidence artifact | Current status |
 | --- | --- | --- |
-| Vietnamese Google Live conversation mode enabled | manager private config logs show `voice_mode.type=google_live`, `language_code=vi-VN`, `barge_in=true`, `drop_input_while_speaking=false` on websocket soak | covered by synthetic websocket soak only |
+| Vietnamese Google Live conversation mode enabled | config merge tests require `voice_mode.type=google_live`, `language_code=vi-VN`, `barge_in=false`, `interrupt_on_input_while_speaking=false`, `disable_server_side_interruptions=false`, `activity_handling=START_OF_ACTIVITY_INTERRUPTS`; production physical audit also requires `Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN` before first audio output and rejects any later target identity mismatch | covered by automated tests; physical run missing |
 | Classic pipeline compatibility preserved | `tests.test_classic_pipeline_provider`, `tests.test_voice_provider_factory`, `tests.test_connection_voice_provider_routing` | covered by automated tests |
 | Inbound Opus/PCM validation and diagnostics | `tests.test_google_live_event_mapping`, `Google Live input_audio_diag ... rms=...` log pattern | code/test covered; physical log missing |
-| User audio forwarded while AI speaks by default | `tests.test_google_live_provider_fallback` barge-in/default-forward tests | covered by automated tests |
-| Loud sustained user audio interrupts and forwards latest audio | `tests.test_google_live_provider_fallback` sustained/loud interrupt tests | covered by automated tests |
+| AEC-cleaned user audio can reach Live VAD while robot speaks | `Google Live aec_live_vad_forward reason=robot_speaking` plus `scripts/physical_smoke_audit.py --require-aec-live-vad-forward` | automated branch covered; physical marker missing |
+| User speech interrupts through official Live VAD | `activity_handling=START_OF_ACTIVITY_INTERRUPTS`, `server_side_vad_enabled=true`, runtime `echo_bypass_interrupt_enabled=false`, `Google Live aec_live_vad_forward reason=robot_speaking` ordered before `Google Live interruption output_age_ms=<number>` matching `--min-interrupts`, `tts_stop_sent reason=interrupt` count matching `--min-interrupts`, `Google Live interruption_stop_latency_ms` count matching `--min-interrupts` with max `<=250ms`, ordered interruption-to-stop chains matching `--min-interrupts`, and the expected user transcript after Live interruption; production strict does not require local `user_interrupted reason=audio_input` | config/test covered; physical run missing |
+| Robot relistens immediately after normal output | `tts_stop_sent continue_listening=true listen_mode=realtime` after `first_audio_out_latency_ms` in the target physical segment | config/test covered; physical run missing |
 | Echo protection does not drop quiet/early input | `tests.test_google_live_provider_fallback` quiet/echo tests | covered by automated tests |
 | Response isolation drops stale/cancelled audio | `tests.test_google_live_event_mapping` stale/drop/suppress tests | covered by automated tests |
-| Runtime reconnect and classic fallback | `tests.test_google_live_provider_fallback` reconnect/fallback tests | covered by automated tests |
+| Runtime reconnect and Google Live-only failure visibility | `tests.test_google_live_provider_fallback` reconnect tests plus config defaults with `fallback_to_classic_on_error=false` | covered by automated tests |
 | Admin/default config merge | `tests.test_config_voice_mode_merge` | covered by automated tests |
 | Runtime websocket barge-in smoke | `scripts/voice_mode_websocket_soak.py` | passed after restart: `SOAK_OK cycles=10 ... binary_chunks=1597` |
 | OTA artifact served to real device | OTA emulation + download SHA check | server side covered; device has not fetched/upgraded |
 | Physical robot connects as non-Python client | `scripts/physical_smoke_audit.py` requires non-local/non-Python headers and rejects the server IP when `--server-ip` is provided | missing |
 | Physical microphone audio reaches Google Live | `scripts/physical_smoke_audit.py` requires `input_audio_diag` | missing |
-| Physical speech produces user transcript signal | `scripts/physical_smoke_audit.py` requires `Google Live transcript source=user chars=N`; transcript content judged by human smoke checklist | missing |
-| Physical mid-answer barge-in works 10 times | `scripts/physical_smoke_audit.py --min-interrupts 10` requires `user_interrupted reason=audio_input` | missing |
+| Physical speech produces expected user transcript | `scripts/physical_smoke_audit.py --expected-user-transcript ...` requires the expected phrase inside a user transcript | missing |
+| Physical mid-answer barge-in works 10 times | `scripts/physical_smoke_audit.py --production-voice-strict --min-interrupts 10` requires AEC-forwarded frames, Live server interruption, interrupt stop/relisten, and a user transcript after interruption | missing |
 | No fatal/duplicate/stale/self-interrupt loop during physical smoke | `scripts/physical_smoke_audit.py` fatal pattern scan | no fatal hits, but physical run missing |
 | Rollback path | `voice_mode.type=classic_pipeline` | documented |
 
@@ -346,7 +522,7 @@ Latest evidence:
 - real server websocket barge-in soak after local server restart: `SOAK_OK cycles=10 tts_starts=20 tts_stops=10 binary_chunks=1597`
 - LAN websocket barge-in soak via `ws://192.168.0.114:8000/tbot/v1/` after DB threshold fix: `SOAK_OK cycles=10 tts_starts=20 tts_stops=10 binary_chunks=731`
 - LAN synthetic Opus audio barge-in smoke via `scripts/voice_mode_websocket_audio_bargein.py`: `AUDIO_BARGE_IN_OK opus_packets=10 tts_starts=1 tts_stops=1 binary_chunks=16`
-- DB agent config for `cf79d254a1dd4c11a41d11d389866673`: `voice_mode=google_live`, `language_code=vi-VN`, `barge_in=true`, `drop_input_while_speaking=false`, `input_sample_rate=16000`, `output_sample_rate=24000`, `send_transcript_events=true`, `interrupt_rms_threshold=5000`, `barge_in_rms_threshold=5000`
+- Historical DB agent config for `cf79d254a1dd4c11a41d11d389866673` used legacy raw/RMS barge-in values. Current production policy is the server-side Live VAD policy listed at the top of this file: `barge_in=false`, `interrupt_on_input_while_speaking=false`, `activity_handling=START_OF_ACTIVITY_INTERRUPTS`.
 - Redis cache scan found no target agent config key after threshold update; secret-bearing Redis values were not dumped
 - local `tbot_server` tmux process restarted after transcript metadata logging change; Python is listening on `*:8000`
 - post-soak socket check shows only the listening `*:8000` socket and no lingering established websocket clients

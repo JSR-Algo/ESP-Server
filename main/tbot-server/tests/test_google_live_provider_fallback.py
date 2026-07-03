@@ -33,6 +33,10 @@ class _DummyWebSocket:
         self.sent_messages.append(payload)
 
 
+class _VoiceConsentClient:
+    async def ensure_voice_allowed(self, _conn):
+        return True
+
 class _DummyConn:
     def __init__(self):
         self.config = {
@@ -43,6 +47,8 @@ class _DummyConn:
             "google_live": {
                 "api_key": "test-key",
                 "model": "gemini-live-test",
+                "aec_enabled": False,
+                "aec_required": False,
             },
         }
         self.logger = _DummyLogger()
@@ -55,6 +61,7 @@ class _DummyConn:
         self.client_is_speaking = False
         self.clear_queue_calls = 0
         self.clear_speak_calls = 0
+        self.voice_consent_client = _VoiceConsentClient()
 
     async def _start_classic_pipeline_session(self):
         self.classic_start_calls += 1
@@ -79,6 +86,11 @@ class _FailingClient:
 
     def receive_events(self):
         return _empty_events()
+
+
+class _SessionExpiredClient(_FailingClient):
+    async def connect(self):
+        raise RuntimeError("received 1008 BidiGenerateContent session expired")
 
 
 class _RecordingClient:
@@ -132,6 +144,18 @@ class _PassThroughBridge:
     async def forward_input_audio(self, audio_bytes):
         await self.client.send_audio(audio_bytes)
 
+class _RecordingClassicFallback:
+    def __init__(self, events):
+        self.events = events
+        self.spoken_notices = []
+
+    async def start_session(self):
+        self.events.append(("classic_start", None))
+
+    async def speak_child_notice(self, text):
+        self.events.append(("classic_speak", text))
+        self.spoken_notices.append(text)
+
 class _DecodedBridge:
     def __init__(self, client, pcm_audio, rms):
         self.client = client
@@ -146,6 +170,20 @@ class _DecodedBridge:
 
     async def forward_decoded_input_audio(self, pcm_audio):
         await self.client.send_audio(pcm_audio)
+
+class _AsyncDecodedBridge(_DecodedBridge):
+    def __init__(self, client, pcm_audio, rms):
+        super().__init__(client, pcm_audio, rms)
+        self.sync_decode_calls = 0
+        self.async_decode_calls = 0
+
+    def decode_input_audio(self, audio_bytes):
+        self.sync_decode_calls += 1
+        return b"sync-pcm"
+
+    async def decode_input_audio_async(self, audio_bytes):
+        self.async_decode_calls += 1
+        return self.pcm_audio
 
 class _RecordingBridge:
     def __init__(self):
@@ -239,7 +277,7 @@ async def _empty_events():
 
 
 class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
-    async def test_start_session_falls_back_to_classic_provider_on_init_failure(self):
+    async def test_start_session_does_not_fallback_to_classic_provider_on_init_failure(self):
         conn = _DummyConn()
         provider = GoogleLiveProvider(
             conn,
@@ -248,17 +286,49 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         await provider.start_session()
 
-        self.assertEqual(conn.classic_start_calls, 1)
-        self.assertEqual(conn.voice_provider.__class__.__name__, "ClassicPipelineProvider")
-        handled = await provider.handle_audio_bytes(b"opus-frame")
-        self.assertFalse(handled)
+        self.assertEqual(conn.classic_start_calls, 0)
+        voice_provider = getattr(conn, "voice_provider", None)
+        self.assertNotEqual(
+            getattr(voice_provider, "__class__", type(None)).__name__,
+            "ClassicPipelineProvider",
+        )
+        warning_messages = [
+            args[0]
+            for level, args, _kwargs in conn.logger.messages
+            if level == "warning" and args
+        ]
+        self.assertFalse(
+            any("fallback_triggered" in message for message in warning_messages)
+        )
+
+    async def test_start_session_retries_without_stale_resumption_before_classic_fallback(self):
+        conn = _DummyConn()
+        conn.google_live_session_resumption_handle = "stale-resume-handle"
+        configs = []
+        clients = [_SessionExpiredClient(), _PersistentReceiveClient()]
+
+        def client_factory(config, logger):
+            configs.append(dict(config))
+            return clients[len(configs) - 1]
+
+        provider = GoogleLiveProvider(conn, client_factory=client_factory)
+
+        await provider.start_session()
+        await provider.close()
+
+        self.assertEqual(len(configs), 2)
+        self.assertEqual(configs[0]["session_resumption_handle"], "stale-resume-handle")
+        self.assertNotIn("session_resumption_handle", configs[1])
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIs(conn.voice_provider, provider)
         warning_messages = [
             args[0]
             for level, args, _kwargs in conn.logger.messages
             if level == "warning" and args
         ]
         self.assertTrue(
-            any("fallback_triggered" in message for message in warning_messages)
+            any("retrying_without_session_resumption" in message for message in warning_messages),
+            warning_messages,
         )
 
     async def test_handle_audio_bytes_forwards_to_live_client_after_start(self):
@@ -278,6 +348,25 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.connected)
         self.assertEqual(client.audio_packets, [b"pcm-frame"])
         self.assertTrue(client.closed)
+
+    async def test_handle_audio_bytes_prefers_async_decode_path(self):
+        conn = _DummyConn()
+        client = _PersistentReceiveClient()
+        provider = GoogleLiveProvider(
+            conn,
+            client_factory=lambda config, logger: client,
+        )
+
+        await provider.start_session()
+        bridge = _AsyncDecodedBridge(client, b"async-pcm", rms=100)
+        provider._bridge = bridge
+        handled = await provider.handle_audio_bytes(b"opus-frame")
+        await provider.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(bridge.async_decode_calls, 1)
+        self.assertEqual(bridge.sync_decode_calls, 0)
+        self.assertEqual(client.audio_packets, [b"async-pcm"])
 
     async def test_start_session_is_idempotent_for_active_live_client(self):
         conn = _DummyConn()
@@ -768,7 +857,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"pcm-frame")
         await provider.close()
 
-        self.assertFalse(handled)
+        self.assertTrue(handled)
         self.assertEqual(conn.classic_start_calls, 0)
         self.assertIs(conn.voice_provider, provider)
 
@@ -937,7 +1026,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
             [{"type": "audio", "audio": b"after-retry-budget"}],
         )
 
-    async def test_reconnect_exhaustion_falls_back_to_classic_once(self):
+    async def test_reconnect_exhaustion_does_not_fallback_to_classic(self):
         conn = _DummyConn()
         conn.config["google_live"]["reconnect"] = {
             "enabled": True,
@@ -953,8 +1042,8 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         self.assertEqual(client_factory.calls, 3)
-        self.assertEqual(conn.classic_start_calls, 1)
-        self.assertEqual(conn.voice_provider.__class__.__name__, "ClassicPipelineProvider")
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIs(conn.voice_provider, provider)
 
     async def test_runtime_error_classification_keeps_logs_secret_free(self):
         conn = _DummyConn()
@@ -1077,6 +1166,89 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(fake_key, safe_message)
         self.assertIn("AIza***", safe_message)
+
+    async def test_quota_failure_does_not_send_child_notice_or_swap_provider(self):
+        events = []
+        conn = _DummyConn()
+
+        original_send = conn.websocket.send
+
+        async def _recording_send(payload):
+            events.append(("notice", payload))
+            await original_send(payload)
+
+        conn.websocket.send = _recording_send
+
+        provider = GoogleLiveProvider(conn)
+        self.assertFalse(
+            await provider._activate_classic_fallback(RuntimeError("quota exceeded 429"))
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(conn.classic_start_calls, 0)
+        self.assertIsNone(getattr(conn, "voice_provider", None))
+
+    async def test_quota_failure_does_not_start_or_speak_classic_notice(self):
+        events = []
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+        fallback = _RecordingClassicFallback(events)
+
+        def _recording_factory(_conn):
+            events.append(("swap", None))
+            return fallback
+
+        provider._classic_provider_factory = _recording_factory
+
+        self.assertFalse(
+            await provider._activate_classic_fallback(RuntimeError("quota exceeded 429"))
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(fallback.spoken_notices, [])
+
+    async def test_quota_failure_notice_never_contains_raw_api_key(self):
+        # FIX B: the alert payload must never carry the raw exception (which can contain
+        # an API key) — it uses a fixed child-friendly message.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+        fake_key = "AIza" + "SyDD3tLwoZjDZK9iv3JIDVtoCqF68g4nMao"
+
+        await provider._send_fallback_notice(
+            RuntimeError(f"quota 429 for key {fake_key}")
+        )
+
+        self.assertTrue(conn.websocket.sent_messages)
+        self.assertFalse(
+            any(fake_key in payload for payload in conn.websocket.sent_messages)
+        )
+
+    async def test_benign_stream_closed_failure_emits_no_child_notice(self):
+        # FIX B: a benign normal close (stream_closed / unknown) must NOT narrate a
+        # spurious "robot needs a break" alert to the child.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+
+        await provider._activate_classic_fallback(
+            RuntimeError("Google Live receive loop ended")  # -> stream_closed
+        )
+
+        alerts = [
+            payload for payload in conn.websocket.sent_messages
+            if '"type": "alert"' in payload or '"type":"alert"' in payload
+        ]
+        self.assertEqual(alerts, [])
+        self.assertEqual(conn.classic_start_calls, 0)
+
+    async def test_unknown_failure_emits_no_child_notice(self):
+        # FIX B control: the "boom"/unknown init failure path must stay silent (no notice)
+        # so we never narrate over a benign close.
+        conn = _DummyConn()
+        provider = GoogleLiveProvider(conn)
+
+        await provider._send_fallback_notice(RuntimeError("boom"))  # -> unknown
+
+        self.assertEqual(conn.websocket.sent_messages, [])
 
     async def test_fallback_trigger_log_masks_google_api_keys(self):
         conn = _DummyConn()

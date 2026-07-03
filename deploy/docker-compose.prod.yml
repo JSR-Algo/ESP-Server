@@ -1,10 +1,25 @@
 version: "2.4"
 
 services:
+  tbot-wss-lb:
+    image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
+    container_name: tbot-wss-lb
+    restart: unless-stopped
+    depends_on:
+      - tbot-esp32-server
+    ports:
+      - "${TBOT_WS_PORT:-8000}:8000"
+      - "${TBOT_HTTP_PORT:-8003}:8003"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - tbot
+
   tbot-esp32-server:
     image: ${TBOT_SERVER_IMAGE:?set TBOT_SERVER_IMAGE}
-    container_name: tbot-esp32-server
     restart: unless-stopped
+    deploy:
+      replicas: ${TBOT_SERVER_REPLICAS:-2}
     depends_on:
       tbot-esp32-server-db:
         condition: service_healthy
@@ -15,9 +30,23 @@ services:
     environment:
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-    ports:
-      - "${TBOT_WS_PORT:-8000}:8000"
-      - "${TBOT_HTTP_PORT:-8003}:8003"
+      TBOT_PUBLIC_WEBSOCKET_URL: ${TBOT_PUBLIC_WEBSOCKET_URL:?set TBOT_PUBLIC_WEBSOCKET_URL}
+      TBOT_BACKEND_API_URL: ${TBOT_BACKEND_API_URL:?set TBOT_BACKEND_API_URL}
+      TBOT_FACTORY_TEST_CLAIMED_DEVICES: ${TBOT_FACTORY_TEST_CLAIMED_DEVICES:-}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@tbot-esp32-server-redis:6379/0
+      TBOT_LIVE_REDIS_NAMESPACE: ${TBOT_LIVE_REDIS_NAMESPACE:-prod}
+      # Lesson runtime toggles (additive; default empty = off). LESSON_SAMPLE_ENABLED
+      # turns on the built-in demo lesson that plays on the start_lesson voice trigger
+      # with no backend assignment; LESSON_RUNTIME_ENABLED / COURSE_BACKEND_URL drive
+      # the real assigned-lesson path. Previously unforwarded, so these env vars never
+      # reached the app — set them in /opt/tbot/.env to take effect.
+      LESSON_RUNTIME_ENABLED: ${LESSON_RUNTIME_ENABLED:-}
+      LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-}
+      LESSON_SAMPLE_ASSET_BASE: ${LESSON_SAMPLE_ASSET_BASE:-}
+      COURSE_BACKEND_URL: ${COURSE_BACKEND_URL:-}
+    expose:
+      - "8000"
+      - "8003"
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/models:/opt/tbot-esp32-server/models

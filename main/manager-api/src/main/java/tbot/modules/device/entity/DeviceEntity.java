@@ -40,6 +40,24 @@ public class DeviceEntity {
     @Schema(description = "Device alias")
     private String alias;
 
+    @Schema(description = "Child display name for personalized conversation")
+    private String childName;
+
+    @Schema(description = "Child age for age-appropriate conversation")
+    private Integer childAge;
+
+    @Schema(description = "Comma-separated child interests for lesson personalization")
+    private String childInterests;
+
+    @Schema(description = "Preferred learning style for lesson personalization")
+    private String learningStyle;
+
+    @Schema(description = "Vocabulary level for lesson personalization")
+    private String vocabularyLevel;
+
+    @Schema(description = "Parent career topic for lesson personalization")
+    private String parentCareer;
+
     @Schema(description = "Agent ID")
     private String agentId;
 

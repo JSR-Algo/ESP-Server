@@ -1,6 +1,8 @@
 # Google Live Mode
 
-`google_live` is additive voice mode alongside existing `classic_pipeline`.
+`google_live` is the production robot voice mode for normal conversation and
+lesson narration. `classic_pipeline` remains a separate legacy mode, not a
+fallback for production Google Live speech.
 
 ## Modes
 
@@ -16,13 +18,14 @@
 
 ```yaml
 voice_mode:
-  type: classic_pipeline
-  fallback_to_classic_on_error: true
+  type: google_live
+  fallback_to_classic_on_error: false
 
 google_live:
   api_key: ${GOOGLE_API_KEY}
   model: gemini-3.1-flash-live-preview
-  voice_name: ""
+  voice_name: Kore
+  language_code: vi-VN
   enable_audio_input: true
   enable_audio_output: true
   native_voice: true
@@ -32,18 +35,24 @@ google_live:
   output_sample_rate: 24000
   input_live_chunk_ms: 20
   response_modalities: [AUDIO]
+  disable_server_side_interruptions: false
   activity_handling: START_OF_ACTIVITY_INTERRUPTS
   connect_timeout_sec: 10
   recv_timeout_sec: 60               # PR2: raised from 30 to give native-audio model headroom
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
-  input_flush_delay_sec: 1.0
+  conversation_input_flush_delay_sec: 0.7
+  conversation_input_speech_tail_ms: 650
+  input_flush_delay_sec: 1.4
+  input_speech_tail_ms: 1300
+  waiting_model_timeout_sec: 2.0
   reconnect_buffer_ms: 2000          # current-turn mic packets preserved across reconnect
   interrupt_replay_buffer_ms: 900
   interrupt_on_input_while_speaking: false
   interrupt_rms_threshold: 5000      # legacy rollback knob; not active by default
   interrupt_min_input_duration_sec: 0.42
   interrupt_min_output_age_sec: 0.25
+  interruption_min_output_age_sec: 0.0
   interrupt_suppress_audio_sec: 0.25
   echo_tail_suppression_ms: 400
   interrupt_debounce_sec: 0.2
@@ -53,6 +62,7 @@ google_live:
   barge_in_rms_threshold: 4500       # legacy rollback knob; not active by default
   barge_in_min_input_duration_sec: 0.30
   barge_in_min_output_age_sec: 0.25
+  barge_in_transcript_min_output_age_sec: 0.0
   suppress_robot_output_echo: true
   wake_audio_allow_window_sec: 5.0
   echo_bypass_interrupt_enabled: false
@@ -82,6 +92,12 @@ google_live:
 | `context_window_compression_enabled` | true | keep long sessions alive with sliding-window compression | US-004 |
 | `tool_timeout_sec` | 10 | bound manual Live tool execution; late cancelled tool results are dropped | US-004 |
 | `interrupt_policy` | `wake_or_transcript` | only wake/listen, user transcript, or deterministic music command can interrupt production output | US-004 |
+| `conversation_input_flush_delay_sec` | 0.7 | normal conversation turn-close safety net; faster than lesson timing | US-004 |
+| `conversation_input_speech_tail_ms` | 650 | normal conversation silence tail before finalising input | US-004 |
+| `waiting_model_timeout_sec` | 2.0 | reopen listening if Live returns no model audio, so the robot does not stay stuck in waiting state | US-004 |
+| `input_flush_delay_sec` / `input_speech_tail_ms` | 1.4 / 1300 | lesson/child speech timing; longer to avoid cutting a paused child | US-006 |
+| `interruption_min_output_age_sec` | 0.0 | honor Live interruption immediately when robot output has just started | US-004 |
+| `barge_in_transcript_min_output_age_sec` | 0.0 | confirmed user transcript can stop output immediately instead of waiting for a minimum output age | US-004 |
 | `raw_audio_barge_in_enabled` | false | raw/RMS barge-in is disabled unless an explicit tested rollout enables it | US-004 |
 | `echo_tail_suppression_ms` | 400 | suppress mic frames briefly after robot output stops | US-004 |
 | `reconnect_buffer_ms` | 2000 | how much current-turn mic audio to preserve across reconnect | US-004 |
@@ -90,6 +106,15 @@ google_live:
 | `interrupt_debounce_sec` | 0.2 | minimum gap between successive `audio_input` interrupts (text / explicit interrupts are NOT debounced) | PR4 |
 | `model_output_unblock_timeout_sec` | 1.5 | if no user transcript arrives after interrupt, unblock model output automatically | PR4 |
 | `barge_in_min_input_duration_sec` | 0.30 | legacy raw-audio rollback knob; not active by default | US-004 |
+
+Production normalization reapplies the Live safety policy after manager/private
+config merge, so old agent configs cannot change `voice_name` away from the
+single robot voice (`Kore` by default), raise `waiting_model_timeout_sec`,
+`interruption_min_output_age_sec`, or
+`barge_in_transcript_min_output_age_sec` back to slow values.
+Connection setup also normalizes after applying private config, so tests or
+fallback callers that bypass the API normalizer cannot reopen those values before
+the Google Live provider starts.
 
 ## Admin UI
 
@@ -103,7 +128,7 @@ When `voiceMode = google_live`, admin panel exposes:
 - native voice
 - barge-in
 - send LLM state events
-- fallback to classic on error
+- no classic/local TTS fallback for AI speech
 - connect timeout
 - receive timeout
 - input flush delay
@@ -114,7 +139,13 @@ When `voiceMode = google_live`, admin panel exposes:
 - reconnect max retries
 - reconnect backoff
 
-`classic_pipeline` remains default.
+The same `google_live` block is used for external conversation and
+`LessonRuntime` prompt handoff through `GoogleLiveProvider.speak_lesson_step_prompt`,
+so one configured Live voice speaks both surfaces.
+Lesson prompt text is sent as verbatim Live text: no translation, additions,
+omissions, or shortening before the child-response window can open.
+Production audit derives lesson spoken text from manifest `prompt`,
+`retryPrompt`, and `successPrompt` fields.
 
 ## Runtime Flow
 
@@ -151,7 +182,11 @@ Notes:
 - inbound raw/RMS audio does not trigger production barge-in by default
 - Gemini Live automatic VAD remains active with `START_OF_ACTIVITY_INTERRUPTS`
 - allowed interrupt gates are wake/listen, confirmed user transcript, deterministic Vietnamese music command, or explicitly tested loud-speech bypass
-- while robot speech/music is active, mic frames are suppressed before they reach Google Live, with a 400 ms echo tail after output stop
+- while robot speech is active and AEC is available, AEC-cleaned mic frames are
+  forwarded to Google Live so official Live VAD can catch a real user
+  interruption; local raw/RMS interrupt gates stay off
+- music/no-AEC frames and the 400 ms post-output echo tail are suppressed before
+  they reach Google Live
 - when Live sends `serverContent.interrupted`, the server stops playback and
   clears queued audio immediately; `NO_INTERRUPTION` must not be configured
 - robot `listen:stop` is handled by the Live provider and calls
@@ -159,13 +194,17 @@ Notes:
 - firmware `tts:stop` waits only a bounded playback-drain window before
   relistening; explicit abort/wake interruption clears queued playback first
 
-## Fallback
+## Failure Behavior
 
 If Google Live init or runtime path fails:
 
 - reconnect is attempted if enabled
-- provider can fall back to `classic_pipeline`
-- websocket session should stay alive
+- `google_live` does not switch to `classic_pipeline`
+- local/classic TTS is not queued for AI speech or lesson narration
+- failures are logged as `fallback_disabled`; websocket session should stay
+  alive where possible
+- required AEC failures hard-fail instead of degrading, because echo isolation is
+  part of the production safety boundary
 
 ## Rollback
 
@@ -176,7 +215,8 @@ voice_mode:
   type: classic_pipeline
 ```
 
-Or disable fallback if you want hard failure visibility during staged testing:
+Production Google Live mode should fail fast instead of switching to a different
+voice stack:
 
 ```yaml
 voice_mode:
@@ -228,6 +268,28 @@ Optional live smoke:
 - `docs/google-live-smoke.md`
 - `scripts/google_live_smoke.py`
 
+Physical interrupt/course audit for the production robot should use one strict
+preset so latency, transcript accuracy, AEC-forwarding, and full lesson-prompt
+hash gates cannot be accidentally omitted:
+
+```bash
+python scripts/physical_smoke_audit.py tmp/server.log \
+  --device-id <robot-mac> \
+  --client-id <robot-client-id> \
+  --server-ip <server-ip> \
+  --expected-user-transcript "bắt đầu bài học" \
+  --min-interrupts 10 \
+  --production-strict \
+  --lesson-manifest <lesson-manifest.json>
+```
+
+Pass criteria: first-audio latency under budget, `aec_live_vad_forward` count
+matching `--min-interrupts`, numeric `live_server_interruption` count matching
+`--min-interrupts`, expected user speech matched in transcript, lesson prompts
+sent via Live text with enough total text and matching SHA-256 hashes from the
+manifest, no lesson prompt queued through local TTS, required audio interrupts present, and no
+fatal/self-interrupt/fallback patterns.
+
 ## Best-practice config for TBOT robot
 
 Recommended `config.yaml` block for production TBOT Live mode. Apply via manager-web > role config or directly in the agent's private config.
@@ -235,7 +297,7 @@ Recommended `config.yaml` block for production TBOT Live mode. Apply via manager
 ```yaml
 voice_mode:
   type: google_live
-  fallback_to_classic_on_error: true
+  fallback_to_classic_on_error: false
   google_live:
     reconnect:
       enabled: true
@@ -251,6 +313,7 @@ voice_mode:
     interrupt_on_input_while_speaking: false
     echo_tail_suppression_ms: 400
     interrupt_replay_buffer_ms: 900
+    barge_in_transcript_min_output_age_sec: 0.0
     interrupt_debounce_sec: 0.2              # PR4: prevents double-fire on audio_input
     model_output_unblock_timeout_sec: 1.5   # PR4: auto-unblock if user transcript never arrives
 ```
@@ -263,8 +326,10 @@ voice_mode:
 | `reconnect.backoff_ms: 250` / `backoff_multiplier: 2` | Rapid re-connect storm under flakey network | PR2 |
 | `recv_timeout_sec: 60` | Zombie sessions: server never fires timeout reset, session drifts | PR2 |
 | `activity_handling: START_OF_ACTIVITY_INTERRUPTS` | User speech can interrupt model output through official Live VAD; queue clear handles stale playback | US-004 |
+| `aec_enabled: true` | lets AEC-cleaned mic audio reach Live VAD while robot speech is active, without enabling local raw/RMS barge-in | US-004 |
 | `barge_in: false` / `interrupt_on_input_while_speaking: false` | raw mic frames must not interrupt robot output | US-004 |
 | `echo_tail_suppression_ms: 400` | stale echo immediately after `tts stop` leaking upstream | US-004 |
+| `barge_in_transcript_min_output_age_sec: 0.0` | User transcript arrives while robot has just started speaking but output is not stopped | US-004 |
 | `interrupt_debounce_sec: 0.2` | Double-fire on short audio burst; two interrupts sent in quick succession | PR4 |
 | `model_output_unblock_timeout_sec: 1.5` | Model output stuck after interrupt when user utterance is too short to produce transcript | PR4 |
 

@@ -259,6 +259,9 @@ class PromptManager:
                 or "Chinese"
             )
             self.logger.bind(tag=TAG).debug(f"Got selected language: {language}")
+            child_profile = self._normalize_child_profile(
+                kwargs.pop("child_profile", None) or self.config.get("child_profile")
+            )
 
             # Replace template variables
             template = Template(self.base_prompt_template)
@@ -275,6 +278,7 @@ class PromptManager:
                 client_ip=client_ip,
                 dynamic_context=self.context_data,
                 language=language,
+                child_profile=child_profile,
                 *args,
                 **kwargs,
             )
@@ -290,3 +294,30 @@ class PromptManager:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Build enhanced prompt failed: {e}")
             return user_prompt
+
+    def _normalize_child_profile(self, child_profile: Any) -> Dict[str, Any]:
+        """Return safe child profile fields for prompt rendering."""
+        if not isinstance(child_profile, dict):
+            return {}
+
+        normalized = {}
+        for source_key, target_key in (
+            ("device_id", "device_id"),
+            ("device_alias", "device_alias"),
+            ("child_name", "child_name"),
+            ("child_age", "child_age"),
+            ("interests", "interests"),
+            ("learning_style", "learning_style"),
+            ("vocabulary_level", "vocabulary_level"),
+            ("parent_career", "parent_career"),
+            ("childName", "child_name"),
+            ("childAge", "child_age"),
+            ("deviceAlias", "device_alias"),
+            ("learningStyle", "learning_style"),
+            ("vocabularyLevel", "vocabulary_level"),
+            ("parentCareer", "parent_career"),
+        ):
+            value = child_profile.get(source_key)
+            if value not in (None, ""):
+                normalized[target_key] = value
+        return normalized

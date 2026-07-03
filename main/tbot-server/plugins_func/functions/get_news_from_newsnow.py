@@ -94,7 +94,13 @@ GET_NEWS_FROM_NEWSNOW_FUNCTION_DESC = {
     "type": "function",
     "function": {
         "name": "get_news_from_newsnow",
-        "description": "Call when user requests view or listen to news (e.g.'Get news''What news today').",
+        "description": (
+            "Child-safe news lookup. Call only when the child explicitly asks for "
+            "news. Prefer science, technology, school, culture, sports, and light "
+            "general-interest updates. Do not read adult, violent, graphic, crime, "
+            "war, self-harm, hateful, extremist, medical, legal, financial, or "
+            "private personal data content."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -115,6 +121,44 @@ GET_NEWS_FROM_NEWSNOW_FUNCTION_DESC = {
         },
     },
 }
+
+CHILD_UNSAFE_NEWS_KEYWORDS = (
+    "adult",
+    "porn",
+    "sex",
+    "nude",
+    "violent",
+    "violence",
+    "gore",
+    "blood",
+    "crime",
+    "murder",
+    "war",
+    "attack",
+    "suicide",
+    "self harm",
+    "self-harm",
+    "kill",
+    "weapon",
+    "drug",
+    "gambling",
+    "terror",
+    "extremist",
+    "hate",
+)
+
+
+def _is_child_safe_news_text(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return not any(keyword in lowered for keyword in CHILD_UNSAFE_NEWS_KEYWORDS)
+
+
+def _child_safe_news_items(news_items):
+    return [
+        item
+        for item in news_items
+        if _is_child_safe_news_text(item.get("title", ""))
+    ]
 
 
 def fetch_news_from_api(conn: "ConnectionHandler", source="thepaper"):
@@ -209,6 +253,14 @@ def get_news_from_newsnow(
             source_id = conn.last_newsnow_link.get("source_id", "thepaper")
             source_name = CHANNEL_MAP.get(source_id, "UnknownSource")
 
+            if not _is_child_safe_news_text(title):
+                return ActionResponse(
+                    Action.REQLLM,
+                    "Child-safe news cannot provide details for adult, violent, "
+                    "crime, war, self-harm, or graphic content.",
+                    None,
+                )
+
             if not url or url == "#":
                 return ActionResponse(
                     Action.REQLLM, "Sorry, no available link for this news to get detailsContent.", None
@@ -267,6 +319,15 @@ def get_news_from_newsnow(
             return ActionResponse(
                 Action.REQLLM,
                 f"Sorry, failed from{source}Got newsInfoPlease try later or try other news source.",
+                None,
+            )
+
+        news_items = _child_safe_news_items(news_items)
+        if not news_items:
+            return ActionResponse(
+                Action.REQLLM,
+                "Child-safe news could not find a suitable story from this source. "
+                "Please ask for science, school, sports, culture, or technology news.",
                 None,
             )
 

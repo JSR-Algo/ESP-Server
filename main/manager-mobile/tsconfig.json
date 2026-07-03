@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "composite": true,
-    "lib": ["esnext", "dom"],
     "target": "ES2015",
+    "lib": ["esnext", "dom"],
     "baseUrl": ".",
     "module": "ESNext",
     "moduleResolution": "Node",
@@ -15,7 +15,6 @@
       "@dcloudio/types",
       "@uni-helper/uni-types",
       "@types/wechat-miniprogram",
-      "./src/types/wot-design-uni-shim.d.ts",
       "z-paging/types",
       "./src/typings.d.ts"
     ],

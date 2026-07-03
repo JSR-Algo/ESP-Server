@@ -872,4 +872,60 @@ export default {
 .el-icon-arrow-down {
   transition: transform 0.3s ease;
 }
+
+@media (max-width: 720px) {
+  .header {
+    min-width: 0;
+    height: auto !important;
+    padding: 8px 6px;
+  }
+
+  .header-container {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0;
+  }
+
+  .header-left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .logo-img {
+    width: 34px;
+    height: 34px;
+  }
+
+  .brand-text {
+    font-size: 22px;
+  }
+
+  .header-center {
+    order: 2;
+    position: static;
+    transform: none;
+    flex: 1 1 auto;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .header-right {
+    order: 3;
+    flex: 0 0 auto;
+    min-width: 0;
+    margin-left: auto;
+  }
+
+  .equipment-management {
+    height: 28px;
+    min-width: 0;
+    padding: 0 10px;
+  }
+
+  .nav-text {
+    max-width: 72px;
+  }
+}
 </style>

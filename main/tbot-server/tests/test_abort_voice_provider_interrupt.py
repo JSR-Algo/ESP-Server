@@ -30,6 +30,10 @@ class _DummyVoiceProvider:
     async def interrupt(self):
         self.interrupt_calls += 1
 
+class _FailingVoiceProvider:
+    async def interrupt(self):
+        raise RuntimeError("interrupt failed")
+
 
 class _DummyConn:
     def __init__(self):
@@ -64,3 +68,25 @@ class AbortVoiceProviderInterruptTest(unittest.IsolatedAsyncioTestCase):
             json.loads(conn.websocket.sent_messages[0]),
             {"type": "tts", "state": "stop", "session_id": "session-1"},
         )
+
+    async def test_abort_continues_when_voice_provider_interrupt_fails(self):
+        conn = _DummyConn()
+        conn.voice_provider = _FailingVoiceProvider()
+
+        await handleAbortMessage(conn)
+
+        self.assertTrue(conn.client_abort)
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertEqual(conn.clear_speak_calls, 1)
+        self.assertEqual(len(conn.websocket.sent_messages), 1)
+
+    async def test_abort_without_voice_provider_still_stops_client_speaking(self):
+        conn = _DummyConn()
+        conn.voice_provider = None
+
+        await handleAbortMessage(conn)
+
+        self.assertTrue(conn.client_abort)
+        self.assertEqual(conn.clear_queue_calls, 1)
+        self.assertEqual(conn.clear_speak_calls, 1)
+        self.assertEqual(len(conn.websocket.sent_messages), 1)

@@ -147,7 +147,7 @@ async def process_intent_result(
             if function_args:
                 if isinstance(function_args, str):
                     tool_input = json.loads(function_args) if function_args else {}
-                elif isinstance(function_args, dict):
+                elif isinstance(function_args, dict):  # pragma: no cover - dict args are normalized to JSON above.
                     tool_input = function_args
 
             # Report tool call
