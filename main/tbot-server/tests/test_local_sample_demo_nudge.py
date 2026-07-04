@@ -49,6 +49,27 @@ def test_refuses_when_local_metrics_do_not_contain_target_device():
     ]
 
 
+def test_refuses_when_local_metrics_payload_is_not_an_object():
+    module = _load_script()
+    calls = []
+
+    def open_url(url, *, method="GET", headers=None, timeout=5):
+        calls.append((url, method, headers))
+        return json.dumps([{"deviceId": "28:84:85:85:1a:80"}]).encode()
+
+    with pytest.raises(SystemExit) as exc:
+        module.nudge(
+            device_id="28:84:85:85:1a:80",
+            base_url="http://127.0.0.1:8003",
+            open_url=open_url,
+        )
+
+    assert exc.value.code == 3
+    assert calls == [
+        ("http://127.0.0.1:8003/internal/lesson-runtime/metrics", "GET", None)
+    ]
+
+
 def test_refuses_when_local_metrics_are_unreachable():
     module = _load_script()
 

@@ -35,6 +35,8 @@ def _norm(value: str) -> str:
 
 
 def _device_ids(metrics: dict) -> set[str]:
+    if not isinstance(metrics, dict):
+        return set()
     device_ids = set()
     for device in metrics.get("devices", []):
         if isinstance(device, dict) and device.get("deviceId"):
