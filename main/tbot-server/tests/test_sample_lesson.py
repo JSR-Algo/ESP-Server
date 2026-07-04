@@ -187,6 +187,11 @@ class SampleManifestTest(unittest.TestCase):
         self.assertIsNone(cache.assert_profile_renderable())
         self.assertTrue(isinstance(cache.preload_timeout_sec, float))
 
+    def test_passthrough_asset_cache_defaults_invalid_preload_timeout(self):
+        self.assertEqual(SampleAssetCache(preload_timeout_sec="bad").preload_timeout_sec, 30.0)
+        self.assertEqual(SampleAssetCache(preload_timeout_sec=0).preload_timeout_sec, 30.0)
+        self.assertEqual(SampleAssetCache(preload_timeout_sec=float("inf")).preload_timeout_sec, 30.0)
+
     def test_interactive_sample_finishes_with_lesson_completion_announcement(self):
         manifest = build_interactive_sample_manifest()
 

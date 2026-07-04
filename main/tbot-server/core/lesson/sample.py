@@ -402,7 +402,11 @@ class SampleAssetCache:
     aclose/preload_timeout_sec) plus harmless sd-path attrs."""
 
     def __init__(self, preload_timeout_sec: float = 30.0, *, sd_pack: bool = False) -> None:
-        self.preload_timeout_sec = float(preload_timeout_sec)
+        try:
+            timeout = float(preload_timeout_sec)
+        except (TypeError, ValueError):
+            timeout = 30.0
+        self.preload_timeout_sec = timeout if math.isfinite(timeout) and timeout > 0 else 30.0
         self.cache_key = _SAMPLE_SD_CACHE_KEY
         self.asset_pack_local_root = "sd://tbot/lesson-assets"
         self.sd_pack = bool(sd_pack)
