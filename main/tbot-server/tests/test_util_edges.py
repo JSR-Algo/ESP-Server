@@ -305,5 +305,6 @@ def test_config_update_and_vision_helpers(monkeypatch):
     assert filtered["number"] == 3
 
     monkeypatch.setattr(util, "get_local_ip", lambda: "10.0.0.5")
+    assert util.get_vision_url({"server": "bad"}) == ""
     assert util.get_vision_url({"server": {"vision_explain": "Your URL", "http_port": "9000"}}) == "http://10.0.0.5:9000/mcp/vision/explain"
     assert util.get_vision_url({"server": {"vision_explain": "https://vision.test"}}) == "https://vision.test"

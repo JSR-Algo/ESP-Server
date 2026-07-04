@@ -530,7 +530,9 @@ def get_vision_url(config: dict) -> str:
     Returns:
         str: vision URL
     """
-    server_config = config["server"]
+    server_config = config.get("server") if isinstance(config, dict) else {}
+    if not isinstance(server_config, dict):
+        return ""
     vision_explain = server_config.get("vision_explain", "")
     if "Your" in vision_explain:
         local_ip = get_local_ip()
