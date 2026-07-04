@@ -1279,6 +1279,8 @@ class LessonRuntime:
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
+            if not math.isfinite(timeout_sec):
+                raise ValueError
         except (TypeError, ValueError):
             timeout_sec = max(float(self._default_step_timeout_sec), self._min_step_timeout_sec)
         body = self._step_body(step)

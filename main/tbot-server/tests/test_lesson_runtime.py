@@ -1891,6 +1891,21 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(timeouts, [])
 
+    async def test_emit_step_rejects_infinite_step_timeout_values(self):
+        manifest = _build_manifest()
+        manifest["steps"][0]["timeoutSec"] = "inf"
+        rt = self._runtime(manifest=manifest)
+        timeouts = []
+
+        def record_timeout(_seq, _step_id, timeout_sec):
+            timeouts.append(timeout_sec)
+
+        rt._start_step_timeout = record_timeout
+
+        await rt._emit_step()
+
+        self.assertEqual(timeouts, [12.0])
+
     def test_no_forwarder_and_missing_logger_are_noops(self):
         class _BadLogger:
             def bind(self, **_kwargs):
