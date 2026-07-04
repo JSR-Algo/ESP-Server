@@ -3,6 +3,7 @@ import json
 import unittest
 
 from core.lesson.sample import (
+    DEFAULT_SAMPLE_STEP_DWELL_SEC,
     INTERACTIVE_SAMPLE_LESSON_ID,
     SAMPLE_ASSIGNMENT_ID,
     SAMPLE_LESSON_ID,
@@ -558,6 +559,21 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             if step.get("completionClass") == "interactive"
         ]
         self.assertTrue(interactive_steps)
+
+    async def test_start_sample_lesson_falls_back_from_infinite_sample_dwell_config(self):
+        conn = _FakeConn(
+            config={"lesson": {"sample_mode": "passive", "sample_step_dwell_sec": "inf"}}
+        )
+
+        runtime = await start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertTrue(
+            all(
+                step.get("dwellSec") == DEFAULT_SAMPLE_STEP_DWELL_SEC
+                for step in runtime.manifest["steps"]
+            )
+        )
 
     async def test_start_sample_lesson_restarts_active_sample_runtime_cleanly(self):
         conn = _FakeConn()

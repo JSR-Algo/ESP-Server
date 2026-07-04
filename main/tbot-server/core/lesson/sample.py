@@ -25,6 +25,7 @@ sample SD directory populated by
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, Dict, List, Optional
 
 TAG = "SampleLesson"
@@ -491,7 +492,7 @@ def _sample_step_dwell_sec(conn: Any) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_SAMPLE_STEP_DWELL_SEC
-    return value if value >= 0 else DEFAULT_SAMPLE_STEP_DWELL_SEC
+    return value if math.isfinite(value) and value >= 0 else DEFAULT_SAMPLE_STEP_DWELL_SEC
 
 
 def _sample_mode(conn: Any) -> str:
