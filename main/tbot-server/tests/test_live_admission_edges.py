@@ -193,6 +193,34 @@ def test_create_live_state_store_defaults_and_redis_path(monkeypatch):
     assert store.reconnect_ttl_sec == 3
 
 
+def test_create_live_state_store_defaults_invalid_redis_ttls(monkeypatch):
+    class _RedisFactory:
+        @staticmethod
+        def from_url(_url, decode_responses=True):
+            return _Redis()
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "redis.asyncio",
+        types.SimpleNamespace(Redis=_RedisFactory),
+    )
+    store = create_live_state_store(
+        {
+            "live_state": {
+                "redis_url": "redis://localhost:6379/0",
+                "resumption_ttl_sec": "bad",
+                "budget_ttl_sec": None,
+                "reconnect_ttl_sec": 0,
+            }
+        }
+    )
+
+    assert isinstance(store, RedisLiveStateStore)
+    assert store.resumption_ttl_sec == 86400
+    assert store.budget_ttl_sec == 172800
+    assert store.reconnect_ttl_sec == 300
+
+
 def test_create_live_state_store_falls_back_when_redis_package_missing(monkeypatch):
     real_import = builtins.__import__
 

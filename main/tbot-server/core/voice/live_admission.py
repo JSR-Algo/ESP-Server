@@ -113,6 +113,15 @@ class InMemoryLiveAdmissionStore:
     async def reconnect_count_async(self, device_id, *, window_sec, now=None):
         return self.reconnect_count(device_id, window_sec=window_sec, now=now)
 
+
+def _positive_int_or_default(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return parsed if parsed > 0 else int(default)
+
+
 class RedisLiveStateStore:
     """Redis-backed MP-11 live state contract for resumption + budget state."""
 
@@ -129,9 +138,9 @@ class RedisLiveStateStore:
         self.redis = redis
         self.namespace = str(namespace or "prod")
         self.day_key = day_key
-        self.resumption_ttl_sec = int(resumption_ttl_sec)
-        self.budget_ttl_sec = int(budget_ttl_sec)
-        self.reconnect_ttl_sec = int(reconnect_ttl_sec)
+        self.resumption_ttl_sec = _positive_int_or_default(resumption_ttl_sec, 86400)
+        self.budget_ttl_sec = _positive_int_or_default(budget_ttl_sec, 172800)
+        self.reconnect_ttl_sec = _positive_int_or_default(reconnect_ttl_sec, 300)
 
     async def save(self, device_id, handle):
         if not device_id or not handle:
