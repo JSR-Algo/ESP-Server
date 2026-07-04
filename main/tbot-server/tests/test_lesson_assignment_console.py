@@ -30,6 +30,13 @@ class LessonAssignmentConsoleHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("https://tbot-backend-8wmh.onrender.com/v1", response.text)
 
+    async def test_console_defaults_malformed_server_config(self):
+        from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
+
+        response = await LessonAssignmentConsoleHandler({"server": "bad"}, {}).handle_get(object())
+
+        self.assertIn("https://tbot-backend-8wmh.onrender.com/v1", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

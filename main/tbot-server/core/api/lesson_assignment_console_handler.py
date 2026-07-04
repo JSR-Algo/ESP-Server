@@ -10,8 +10,11 @@ class LessonAssignmentConsoleHandler:
         self.lesson_connections = lesson_connections if lesson_connections is not None else {}
 
     def _backend_api_url(self) -> str:
-        server_config = self.config.get("server", {}) if isinstance(self.config, dict) else {}
-        api_url = server_config.get("api_url") or self.config.get("api_url")
+        config = self.config if isinstance(self.config, dict) else {}
+        server_config = config.get("server", {})
+        if not isinstance(server_config, dict):
+            server_config = {}
+        api_url = server_config.get("api_url") or config.get("api_url")
         if isinstance(api_url, str) and api_url.strip():
             return api_url.rstrip("/")
         return "https://tbot-backend-8wmh.onrender.com/v1"
