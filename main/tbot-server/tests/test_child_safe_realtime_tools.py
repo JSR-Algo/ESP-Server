@@ -79,6 +79,7 @@ def test_newsnow_returns_safe_message_when_no_child_safe_title(monkeypatch):
         "fetch_news_from_api",
         lambda _conn, _source: [
             {"title": "How to end your life without help", "url": "https://example.test/bad"},
+            {"title": "You should hurt yourself", "url": "https://example.test/bad2"},
         ],
     )
 
