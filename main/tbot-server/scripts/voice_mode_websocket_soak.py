@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from urllib import request
 
 import websockets
 
@@ -38,6 +39,57 @@ def _is_tts_state(payload, state):
     return payload.get("type") == "tts" and payload.get("state") == state
 
 
+def _mint_websocket_token(ota_url, device_id, client_id, timeout_sec):
+    payload = {
+        "application": {
+            "name": "voice-mode-websocket-soak",
+            "version": "synthetic",
+        },
+        "board": {
+            "type": "synthetic",
+            "ssid": "synthetic",
+            "rssi": -45,
+            "channel": 1,
+            "ip": "127.0.0.1",
+            "mac": device_id,
+        },
+        "mac_address": device_id,
+        "uuid": client_id,
+    }
+    req = request.Request(
+        ota_url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "device-id": device_id,
+            "client-id": client_id,
+        },
+        method="POST",
+    )
+    with request.urlopen(req, timeout=timeout_sec) as response:
+        data = json.loads(response.read().decode())
+    return str(((data.get("websocket") or {}).get("token") or "")).strip()
+
+
+def _build_headers(args):
+    headers = {
+        "device-id": args.device_id,
+        "client-id": args.client_id,
+        "x-tbot-affinity-key": args.device_id,
+    }
+    token = str(getattr(args, "authorization_token", "") or "").strip()
+    if not token and getattr(args, "ota_url", ""):
+        token = _mint_websocket_token(
+            args.ota_url,
+            args.device_id,
+            args.client_id,
+            args.open_timeout_sec,
+        )
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    return headers
+
+
 async def _recv_until(websocket, predicate, timeout_sec):
     deadline = time.monotonic() + timeout_sec
     binary_chunks = 0
@@ -63,10 +115,7 @@ async def _recv_until(websocket, predicate, timeout_sec):
 
 async def run_soak(args):
     uri = args.websocket_url
-    headers = {
-        "device-id": args.device_id,
-        "client-id": args.client_id,
-    }
+    headers = _build_headers(args)
     summary = {
         "cycles": 0,
         "tts_starts": 0,
@@ -152,6 +201,8 @@ def main():
         description="Websocket Google Live voice-mode text barge-in soak."
     )
     parser.add_argument("--websocket-url", default="ws://127.0.0.1:8000/tbot/v1/")
+    parser.add_argument("--ota-url", default="")
+    parser.add_argument("--authorization-token", default="")
     parser.add_argument("--device-id", required=True)
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--cycles", type=int, default=10)
