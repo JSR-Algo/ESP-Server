@@ -1254,6 +1254,8 @@ class ConnectionHandler:
             # Load plugin config
             if model_intent and model_intent != "Intent_nointent":
                 plugin_from_server = private_config.get("plugins", {})
+                if not isinstance(plugin_from_server, dict):
+                    plugin_from_server = {}
                 for plugin, config_str in plugin_from_server.items():
                     plugin_from_server[plugin] = json.loads(config_str)
                 self.config["plugins"] = plugin_from_server
