@@ -122,6 +122,11 @@ async def test_lesson_asset_handler_serves_safe_cached_files_and_rejects_bad_pat
     assert LessonAssetHandler._decode_cache_token("not ascii \u2603") == ""
 
 
+def test_lesson_asset_handler_defaults_malformed_lesson_config():
+    handler = LessonAssetHandler({"lesson": "bad"})
+
+    assert handler.cache_root.endswith(os.path.join("data", "lesson_assets"))
+
 @pytest.mark.asyncio
 async def test_voice_consent_client_edges_and_singleton(monkeypatch):
     class _Response:

@@ -14,6 +14,8 @@ class LessonAssetHandler(BaseHandler):
     def __init__(self, config: dict):
         super().__init__(config)
         lesson_cfg = config.get("lesson", {}) or {}
+        if not isinstance(lesson_cfg, dict):
+            lesson_cfg = {}
         cache_root = lesson_cfg.get("asset_cache_root") or "data/lesson_assets"
         self.cache_root = os.path.realpath(cache_root)
 
