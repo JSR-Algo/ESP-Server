@@ -86,6 +86,7 @@ CHILD_UNSAFE_QUERY_PATTERNS = (
     re.compile(r"\bdrink\s+bleach\b", re.I),
     re.compile(r"\b(?:take|swallow)\s+(?:all\s+)?(?:(?:my|your)\s+)?pills\b", re.I),
     re.compile(r"\bjump\s+off\s+(?:a\s+)?(?:bridge|building|roof|window)\b", re.I),
+    re.compile(r"\bmy\s+(?:full|real)\s+name\s+is\s+[A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){1,3}\b", re.I),
     re.compile(
         r"\b(?:end\s+(?:my|your)\s+life|take\s+(?:my|your)\s+own\s+life|unalive\s+(?:myself|yourself))\b",
         re.I,

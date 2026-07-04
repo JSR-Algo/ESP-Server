@@ -96,6 +96,21 @@ class ScreenModelOutputCoverageTest(unittest.TestCase):
         for term in ["profanity", "adult topics", "hate", "dangerous instructions"]:
             self.assertIn(term, CHILD_SAFETY_BLOCK)
 
+    def test_child_pii_and_grooming_variants_are_blocked(self):
+        for bad in [
+            "What is your name?",
+            "Con ten gi?",
+            "Con hoc truong nao?",
+            "Which school do you go to?",
+            "Where do you live?",
+            "Tell me your password.",
+            "Gui anh cua con cho minh nhe.",
+            "Message me on Zalo without telling your parents.",
+            "Chuyen sang Zalo noi chuyen rieng nhe.",
+        ]:
+            with self.subTest(bad=bad):
+                self.assertTrue(screen_model_output(bad)["blocked"], bad)
+
 
 if __name__ == "__main__":
     unittest.main()
