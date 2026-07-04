@@ -1906,6 +1906,19 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(timeouts, [12.0])
 
+    async def test_emit_step_sends_sanitized_step_timeout(self):
+        conn = _FakeConn()
+        manifest = _build_manifest()
+        manifest["steps"][0]["timeoutSec"] = float("inf")
+        rt = self._runtime(conn=conn, manifest=manifest)
+        rt._start_step_timeout = lambda *_args: None
+
+        await rt._emit_step()
+
+        frame = json.loads(conn.websocket.sent[-1])
+        json.dumps(frame, allow_nan=False)
+        self.assertEqual(frame["body"]["timeoutSec"], 12.0)
+
     async def test_emit_step_rejects_infinite_step_timeout_floor(self):
         rt = self._runtime(min_step_timeout_sec="inf")
         timeouts = []

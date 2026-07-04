@@ -1287,6 +1287,7 @@ class LessonRuntime:
         except (TypeError, ValueError):
             timeout_sec = max(float(self._default_step_timeout_sec), self._min_step_timeout_sec)
         body = self._step_body(step)
+        body["timeoutSec"] = timeout_sec
         invalid_reason = self._invalid_lesson_step_scene_reason(body.get("scene"))
         if invalid_reason is not None:
             await self._fail_invalid_step_frame(self._step_id, invalid_reason)
