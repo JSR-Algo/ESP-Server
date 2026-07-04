@@ -563,6 +563,14 @@ def _int_or_default(value: Any, default: int) -> int:
     except (TypeError, ValueError, OverflowError):
         return default
 
+def _positive_float_or_default(value: Any, default: float) -> float:
+    parsed = _finite_float_or_default(value, default)
+    return parsed if parsed > 0 else default
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    parsed = _int_or_default(value, default)
+    return parsed if parsed > 0 else default
+
 def _assignment_metadata_errors(assignment: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     for key in ("assignmentId", "lessonId", "profile", "manifestChecksum"):
@@ -2541,10 +2549,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         lesson_key=str(assignment.get("lessonId") or "lesson"),
         lesson_version=int(assignment.get("lessonVersion", 1)),
         manifest_checksum=new_manifest_checksum,
-        preload_timeout_sec=_finite_float_or_default(lesson_cfg.get("preload_timeout_sec", 90), 90.0),
-        concurrency=_int_or_default(lesson_cfg.get("preload_concurrency", 2), 2),
-        max_asset_bytes=_int_or_default(lesson_cfg.get("max_asset_bytes", 8 * 1024 * 1024), 8 * 1024 * 1024),
-        max_total_asset_bytes=_int_or_default(lesson_cfg.get("max_total_asset_bytes", 64 * 1024 * 1024), 64 * 1024 * 1024),
+        preload_timeout_sec=_positive_float_or_default(lesson_cfg.get("preload_timeout_sec", 90), 90.0),
+        concurrency=_positive_int_or_default(lesson_cfg.get("preload_concurrency", 2), 2),
+        max_asset_bytes=_positive_int_or_default(lesson_cfg.get("max_asset_bytes", 8 * 1024 * 1024), 8 * 1024 * 1024),
+        max_total_asset_bytes=_positive_int_or_default(lesson_cfg.get("max_total_asset_bytes", 64 * 1024 * 1024), 64 * 1024 * 1024),
         busy_check=getattr(conn, "is_realtime_busy", None),
         logger=logger,
     )

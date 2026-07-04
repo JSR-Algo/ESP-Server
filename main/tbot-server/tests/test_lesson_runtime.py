@@ -6167,6 +6167,41 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured[0]["max_asset_bytes"], 8 * 1024 * 1024)
         self.assertEqual(captured[0]["max_total_asset_bytes"], 64 * 1024 * 1024)
 
+    async def test_non_positive_asset_cache_config_uses_defaults(self):
+        import core.lesson.asset_cache as asset_cache_module
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"].update({
+            "preload_timeout_sec": -1,
+            "preload_concurrency": 0,
+            "max_asset_bytes": -1,
+            "max_total_asset_bytes": 0,
+        })
+        captured = []
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        saved_asset_cache = asset_cache_module.AssetCache
+
+        def _asset_cache_factory(**kwargs):
+            captured.append(kwargs)
+            return _FakeAssetCache(ready=True)
+
+        asset_cache_module.AssetCache = _asset_cache_factory
+        try:
+            result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            asset_cache_module.AssetCache = saved_asset_cache
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured[0]["preload_timeout_sec"], 90.0)
+        self.assertEqual(captured[0]["concurrency"], 2)
+        self.assertEqual(captured[0]["max_asset_bytes"], 8 * 1024 * 1024)
+        self.assertEqual(captured[0]["max_total_asset_bytes"], 64 * 1024 * 1024)
+
     async def test_unchanged_version_keeps_existing_session(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
