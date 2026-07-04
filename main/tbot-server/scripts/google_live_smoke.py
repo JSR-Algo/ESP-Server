@@ -73,7 +73,8 @@ async def _load_manager_google_live_config(device_id, client_id):
     google_live_config = private_config.get("google_live") or {}
     if not google_live_config:
         raise RuntimeError("manager private config has no google_live section")
-    if private_config.get("voice_mode", {}).get("type") != "google_live":
+    voice_mode = private_config.get("voice_mode") or {}
+    if not isinstance(voice_mode, dict) or voice_mode.get("type") != "google_live":
         raise RuntimeError("manager private config voice_mode is not google_live")
     return dict(google_live_config)
 

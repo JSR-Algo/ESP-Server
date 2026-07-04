@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import unittest
 from unittest.mock import patch
@@ -60,6 +61,42 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
         smoke = importlib.import_module("scripts.google_live_smoke")
 
         self.assertTrue(smoke._has_resolvable_api_key({"api_key": "literal-key"}))
+
+    def test_manager_config_rejects_malformed_voice_mode_cleanly(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        closed = []
+
+        async def fake_load_config_async():
+            return {}
+
+        async def fake_private_config(_config, _device_id, _client_id):
+            return {"google_live": {"api_key": "literal-key"}, "voice_mode": "bad"}
+
+        class FakeManageApiClient:
+            def __init__(self, _config):
+                pass
+
+            @staticmethod
+            def safe_close():
+                closed.append(True)
+
+        with patch(
+            "config.config_loader.load_config_async", new=fake_load_config_async
+        ), patch(
+            "config.config_loader.get_private_config_from_api",
+            new=fake_private_config,
+        ), patch(
+            "config.manage_api_client.ManageApiClient",
+            new=FakeManageApiClient,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "manager private config voice_mode is not google_live"
+            ):
+                asyncio.run(
+                    smoke._load_manager_google_live_config("device", "client")
+                )
+
+        self.assertEqual(closed, [True])
 
 
 if __name__ == "__main__":
