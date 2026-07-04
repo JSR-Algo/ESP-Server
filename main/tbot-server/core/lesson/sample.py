@@ -197,9 +197,12 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
         "scene": scene,
     }
     if completion_class == "passive" and dwell_sec:
-        dwell_value = float(dwell_sec)
-        if math.isfinite(dwell_value) and dwell_value > 0:
-            step["dwellSec"] = dwell_value
+        try:
+            dwell_value = float(dwell_sec)
+            if math.isfinite(dwell_value) and dwell_value > 0:
+                step["dwellSec"] = dwell_value
+        except (TypeError, ValueError):
+            pass
     if expected_responses:
         step["expectedResponses"] = [str(item).strip() for item in expected_responses if str(item).strip()]
     if retry_prompt and retry_prompt.strip():

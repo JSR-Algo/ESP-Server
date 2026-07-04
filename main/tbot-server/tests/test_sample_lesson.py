@@ -139,6 +139,12 @@ class SampleManifestTest(unittest.TestCase):
         json.dumps(manifest, allow_nan=False)
         self.assertTrue(all("dwellSec" not in step for step in manifest["steps"]))
 
+    def test_sample_manifest_rejects_malformed_direct_dwell(self):
+        manifest = build_sample_manifest(dwell_sec="not-a-number")
+
+        json.dumps(manifest, allow_nan=False)
+        self.assertTrue(all("dwellSec" not in step for step in manifest["steps"]))
+
     def test_sample_step_rejects_non_finite_direct_timing_fields(self):
         scene = build_sample_manifest()["steps"][0]["scene"]
 
