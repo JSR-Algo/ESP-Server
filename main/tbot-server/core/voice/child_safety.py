@@ -34,7 +34,7 @@ _MODEL_OUTPUT_BLOCK_PATTERNS = (
     ("meet_child", re.compile(r"\b(meet\s+me|meet\s+up|come\s+meet|secretly\s+meet|meet\s+(?:them|him|her)\s+alone|gap\s+minh|gặp\s+mình)\b", re.I)),
     ("secret_from_parent", re.compile(r"\b(don't\s+tell|do\s+not\s+tell|without\s+telling\s+(?:your\s+)?(?:parents?|mom|dad|mother|father)|keep\s+.*secret|giu\s+bi\s+mat|giữ\s+bí\s+mật)\b", re.I)),
     ("sexual", re.compile(r"\b(sex|sexual|nude|porn|khiêu\s+dâm|tình\s+dục)\b", re.I)),
-    ("self_harm", re.compile(r"\b((?:kill|hurt|harm|injure|poison)\s+(?:yourself|myself)|end\s+(?:your|my)\s+life|take\s+(?:your|my)\s+own\s+life|unalive\s+(?:yourself|myself)|suicide|self\s*harm|tu\s+tu|tự\s+tử)\b", re.I)),
+    ("self_harm", re.compile(r"\b((?:kill|hurt|harm|injure|poison|starve)\s+(?:yourself|myself)|end\s+(?:your|my)\s+life|take\s+(?:your|my)\s+own\s+life|unalive\s+(?:yourself|myself)|suicide|self\s*harm|tu\s+tu|tự\s+tử)\b", re.I)),
     ("violence", re.compile(r"\b(kill|stab|shoot|bomb|weapon|giết|dao|súng|bom)\b", re.I)),
     # Categories the CHILD_SAFETY_BLOCK contract already declares as hard refusals
     # but the screen historically did not enforce — added after a live hardware
