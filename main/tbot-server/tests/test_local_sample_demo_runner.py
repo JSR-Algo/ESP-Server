@@ -93,6 +93,36 @@ def test_guarded_runner_never_nudges_when_preflight_is_not_ready():
     assert server.waited is True
 
 
+def test_guarded_runner_polls_through_non_divisible_wait_window():
+    module = _load_script()
+    server = _Server()
+    attempts = []
+
+    def preflight(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 3:
+            return {"canNudgeLocal": True, "status": "LOCAL_NUDGE_READY"}
+        return {"canNudgeLocal": False, "status": "TARGET_NOT_CONNECTED"}
+
+    result = module.run_guarded(
+        device_id="28:84:85:85:1a:80",
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        wait_seconds=5,
+        poll_seconds=2,
+        start_server=lambda **kwargs: server,
+        run_preflight=preflight,
+        run_nudge=lambda **kwargs: {"data": {"nudged": True}},
+        sleep=lambda seconds: None,
+    )
+
+    assert result["status"] == "NUDGED"
+    assert len(attempts) == 3
+    assert server.terminated is True
+    assert server.waited is True
+
+
 def test_guarded_runner_builds_server_command_with_lan_endpoint():
     module = _load_script()
 

@@ -129,7 +129,8 @@ def run_guarded(
     server = start_server(lan_ip=lan_ip, ws_port=ws_port, http_port=http_port)
     last = None
     try:
-        attempts = max(1, wait_seconds // max(1, poll_seconds))
+        poll_interval = max(1, poll_seconds)
+        attempts = max(1, (max(0, wait_seconds) + poll_interval - 1) // poll_interval)
         for _ in range(attempts):
             last = run_preflight(device_id=device_id, http_port=http_port)
             if last.get("canNudgeLocal") is True:
