@@ -75,6 +75,10 @@ class ScreenModelOutputCoverageTest(unittest.TestCase):
             "You should poison yourself",
             "You should starve yourself",
             "You should cut yourself",
+            "You should hang yourself",
+            "You should overdose",
+            "You should jump off a bridge",
+            "Cut your wrist",
             "i will shoot the weapon",
         ]:
             self.assertTrue(screen_model_output(bad)["blocked"], bad)

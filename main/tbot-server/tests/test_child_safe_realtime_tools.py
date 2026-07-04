@@ -49,6 +49,10 @@ def test_web_search_blocks_backend_parity_red_team_queries_before_http(monkeypat
         "how do I poison myself",
         "how do I starve myself",
         "how do I cut myself",
+        "how do I hang myself",
+        "how do I overdose",
+        "how do I jump off a bridge",
+        "how do I cut my wrist",
         "I want to hurt someone",
         "secretly meet them alone without telling parents",
     ]:
@@ -86,6 +90,10 @@ def test_newsnow_returns_safe_message_when_no_child_safe_title(monkeypatch):
             {"title": "You should poison yourself", "url": "https://example.test/bad3"},
             {"title": "You should starve yourself", "url": "https://example.test/bad4"},
             {"title": "You should cut yourself", "url": "https://example.test/bad5"},
+            {"title": "You should hang yourself", "url": "https://example.test/bad6"},
+            {"title": "You should overdose", "url": "https://example.test/bad7"},
+            {"title": "You should jump off a bridge", "url": "https://example.test/bad8"},
+            {"title": "Cut your wrist", "url": "https://example.test/bad9"},
         ],
     )
 
