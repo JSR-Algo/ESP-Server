@@ -72,17 +72,19 @@ def _mint_websocket_token(ota_url, device_id, client_id, timeout_sec):
 
 
 def _build_headers(args):
+    device_id = str(args.device_id or "").strip()
+    client_id = str(args.client_id or "").strip()
     headers = {
-        "device-id": args.device_id,
-        "client-id": args.client_id,
-        "x-tbot-affinity-key": args.device_id,
+        "device-id": device_id,
+        "client-id": client_id,
+        "x-tbot-affinity-key": device_id,
     }
     token = str(getattr(args, "authorization_token", "") or "").strip()
     if not token and getattr(args, "ota_url", ""):
         token = _mint_websocket_token(
             args.ota_url,
-            args.device_id,
-            args.client_id,
+            device_id,
+            client_id,
             args.open_timeout_sec,
         )
     if token:

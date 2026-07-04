@@ -48,6 +48,33 @@ class VoiceModeWebsocketSoakTest(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer tok-1")
         self.assertEqual(headers["x-tbot-affinity-key"], "robot-1")
 
+    def test_build_headers_trims_identity_before_affinity_and_token_mint(self):
+        soak = importlib.import_module("scripts.voice_mode_websocket_soak")
+        args = SimpleNamespace(
+            device_id="  robot-1\n",
+            client_id="\tclient-1  ",
+            authorization_token="",
+            ota_url="https://esp.example/tbot/ota/",
+            open_timeout_sec=5,
+        )
+        captured = {}
+
+        def _mint(ota_url, device_id, client_id, timeout_sec):
+            captured["mint_args"] = (ota_url, device_id, client_id, timeout_sec)
+            return "ota-token"
+
+        with patch.object(soak, "_mint_websocket_token", _mint):
+            headers = soak._build_headers(args)
+
+        self.assertEqual(headers["device-id"], "robot-1")
+        self.assertEqual(headers["client-id"], "client-1")
+        self.assertEqual(headers["x-tbot-affinity-key"], "robot-1")
+        self.assertEqual(headers["authorization"], "Bearer ota-token")
+        self.assertEqual(
+            captured["mint_args"],
+            ("https://esp.example/tbot/ota/", "robot-1", "client-1", 5),
+        )
+
     def test_mint_websocket_token_reads_ota_payload(self):
         soak = importlib.import_module("scripts.voice_mode_websocket_soak")
         captured = {}
