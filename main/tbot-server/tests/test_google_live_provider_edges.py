@@ -668,7 +668,6 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wake_word_detect_sends_listening_feedback_to_device(self):
         conn = _Conn()
-        conn.config["wakeup_words"] = ["Hi ESP"]
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()

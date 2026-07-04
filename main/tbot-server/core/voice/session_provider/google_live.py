@@ -26,6 +26,19 @@ LESSON_LIVE_TEXT_INSTRUCTION = (
     "Giữ đúng ngôn ngữ từng phần: tiếng Việt đọc tiếng Việt, từ hoặc cụm tiếng Anh "
     "đọc tiếng Anh, không dịch, không thêm nội dung, không bỏ sót, không rút gọn: "
 )
+LIVE_WAKE_WORD_ALIASES = {
+    "hi esp",
+    "hai esp",
+    "hey esp",
+    "hi spy",
+    "hai spy",
+    "hey spy",
+    "i spy",
+    "high spy",
+    "hi tam",
+    "hai tam",
+    "hey tam",
+}
 
 
 class GoogleLiveProvider(VoiceSessionProvider):
@@ -3053,7 +3066,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         for wake_word in wake_words or []:
             if normalized == self._normalize_intent_text(wake_word):
                 return True
-        return False
+        return normalized in LIVE_WAKE_WORD_ALIASES
 
     def _is_live_wake_transcript_only(self, text):
         normalized = self._normalize_intent_text(text)
@@ -3061,20 +3074,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if self._is_wake_word_only(text):
             return True
-        wake_aliases = {
-            "hi esp",
-            "hai esp",
-            "hey esp",
-            "hi spy",
-            "hai spy",
-            "hey spy",
-            "i spy",
-            "high spy",
-            "hi tam",
-            "hai tam",
-            "hey tam",
-        }
-        return normalized in wake_aliases
+        return False
 
     def _auto_pause_music_for_interaction(self):
         """Pause any active music playback so the user-AI exchange is audible."""
