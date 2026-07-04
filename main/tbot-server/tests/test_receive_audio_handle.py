@@ -192,6 +192,7 @@ class IdleAndPromptTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_voice_close_connect_starts_default_or_configured_end_prompt(self):
         default_conn = _conn(last_activity_time=1000.0, config={"close_connection_no_voice_time": 1, "end_prompt": {}})
+        malformed_conn = _conn(last_activity_time=1000.0, config={"close_connection_no_voice_time": 1, "end_prompt": "bad"})
         custom_conn = _conn(
             last_activity_time=1000.0,
             config={"close_connection_no_voice_time": 1, "end_prompt": {"prompt": "bye prompt"}},
@@ -205,10 +206,12 @@ class IdleAndPromptTest(unittest.IsolatedAsyncioTestCase):
             receiveAudioHandle, "startToChat", new=start
         ):
             await receiveAudioHandle.no_voice_close_connect(default_conn, False)
+            await receiveAudioHandle.no_voice_close_connect(malformed_conn, False)
             await receiveAudioHandle.no_voice_close_connect(custom_conn, False)
 
         self.assertIn("Time flies", prompts[0])
-        self.assertEqual(prompts[1], "bye prompt")
+        self.assertIn("Time flies", prompts[1])
+        self.assertEqual(prompts[2], "bye prompt")
 
     async def test_max_out_size_sends_prompt_audio_and_marks_close_after_chat(self):
         conn = _conn()

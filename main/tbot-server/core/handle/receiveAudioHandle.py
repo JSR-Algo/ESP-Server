@@ -115,7 +115,10 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
         ):
             conn.close_after_chat = True
             conn.client_abort = False
-            end_prompt = conn.config.get("end_prompt", {})
+            config = getattr(conn, "config", {}) or {}
+            end_prompt = config.get("end_prompt", {}) if isinstance(config, dict) else {}
+            if not isinstance(end_prompt, dict):
+                end_prompt = {}
             if end_prompt and end_prompt.get("enable", True) is False:
                 conn.logger.bind(tag=TAG).info("End conversation, no need to send end prompt")
                 await conn.close()
