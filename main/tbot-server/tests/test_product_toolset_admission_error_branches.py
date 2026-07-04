@@ -42,6 +42,13 @@ class _NoConfigConn:
     # No _lesson_runtime_enabled method -> falls through to the config branch too.
 
 
+class _MalformedLessonConfigConn:
+    """Connection whose config carries a malformed ``lesson`` block."""
+
+    config = {"lesson": "bad"}
+    # No flag methods -> exercises the config fallback path directly.
+
+
 class ProductToolsetErrorBranchTest(unittest.TestCase):
     def test_lesson_runtime_enabled_swallows_checker_exception_and_falls_closed(self):
         """75-76: a raising flag checker must be swallowed and resolve to False,
@@ -68,6 +75,16 @@ class ProductToolsetErrorBranchTest(unittest.TestCase):
 
         # And the public builder still produces a valid base list off a None config
         # (lesson flag also falls closed via the config fallback's isinstance guard).
+        names = product_tool_names(conn)
+        for base_tool in ALWAYS_INCLUDE:
+            self.assertIn(base_tool, names)
+        for gated in ALWAYS_INCLUDE_WHEN_LESSON_ENABLED:
+            self.assertNotIn(gated, names)
+
+    def test_malformed_lesson_config_falls_closed_for_lesson_admission(self):
+        conn = _MalformedLessonConfigConn()
+
+        self.assertFalse(lesson_runtime_enabled(conn))
         names = product_tool_names(conn)
         for base_tool in ALWAYS_INCLUDE:
             self.assertIn(base_tool, names)

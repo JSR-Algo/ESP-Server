@@ -80,6 +80,8 @@ def lesson_runtime_enabled(conn: Any) -> bool:
             return False
     config = getattr(conn, "config", None)
     lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    if not isinstance(lesson_cfg, Mapping):
+        return False
     return bool(lesson_cfg.get("runtime_enabled", False))
 
 
@@ -92,6 +94,8 @@ def sample_lesson_enabled(conn: Any) -> bool:
             return False
     config = getattr(conn, "config", None)
     lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    if not isinstance(lesson_cfg, Mapping):
+        return False
     return bool(lesson_cfg.get("sample_lesson", False))
 
 
