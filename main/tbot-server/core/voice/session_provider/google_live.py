@@ -2469,6 +2469,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type == "audio_start":
             self._cancel_waiting_model_timeout_task()
+            self._cancel_input_flush_task()
+            self._cancel_forced_interrupt_flush_task()
         if event_type == "audio_end":
             if self._interaction.state == InteractionState.WAITING_MODEL:
                 self._cancel_waiting_model_timeout_task()

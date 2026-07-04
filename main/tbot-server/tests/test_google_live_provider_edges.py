@@ -858,6 +858,31 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._waiting_model_timeout_task)
         self.assertEqual(provider._client.text, [])
 
+    async def test_model_audio_start_cancels_pending_idle_input_flush(self):
+        conn = _Conn()
+        conn.config["google_live"].update(
+            {
+                "input_flush_delay_sec": 0.01,
+                "waiting_model_timeout_sec": 0.01,
+            }
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.transition(google_live_module.InteractionState.USER_STREAMING)
+        provider._schedule_input_flush()
+
+        await provider._handle_live_event({"type": "audio_start"})
+        await asyncio.sleep(0.03)
+
+        self.assertEqual(provider._client.end_calls, 0)
+        self.assertNotEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.WAITING_MODEL,
+        )
+        self.assertIsNone(provider._waiting_model_since)
+        self.assertIsNone(provider._waiting_model_timeout_task)
+
     async def test_waiting_model_timeout_reopens_input_when_live_returns_nothing(self):
         conn = _Conn()
         conn.config["google_live"]["waiting_model_timeout_sec"] = 0.01
