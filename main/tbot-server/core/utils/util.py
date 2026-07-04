@@ -423,14 +423,15 @@ def opus_datas_to_wav_bytes(opus_datas, sample_rate=16000, channels=1):
 
 
 def check_vad_update(before_config, new_config):
+    selected_module = new_config.get("selected_module")
     if (
-        new_config.get("selected_module") is None
-        or new_config["selected_module"].get("VAD") is None
+        not isinstance(selected_module, dict)
+        or selected_module.get("VAD") is None
     ):
         return False
     update_vad = False
     current_vad_module = before_config["selected_module"]["VAD"]
-    new_vad_module = new_config["selected_module"]["VAD"]
+    new_vad_module = selected_module["VAD"]
     current_vad_type = (
         current_vad_module
         if "type" not in before_config["VAD"][current_vad_module]
@@ -446,14 +447,15 @@ def check_vad_update(before_config, new_config):
 
 
 def check_asr_update(before_config, new_config):
+    selected_module = new_config.get("selected_module")
     if (
-        new_config.get("selected_module") is None
-        or new_config["selected_module"].get("ASR") is None
+        not isinstance(selected_module, dict)
+        or selected_module.get("ASR") is None
     ):
         return False
     update_asr = False
     current_asr_module = before_config["selected_module"]["ASR"]
-    new_asr_module = new_config["selected_module"]["ASR"]
+    new_asr_module = selected_module["ASR"]
 
     # If ModuleNameDifferent, then need update
     if current_asr_module != new_asr_module:

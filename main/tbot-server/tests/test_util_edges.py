@@ -267,6 +267,7 @@ def test_config_update_and_vision_helpers(monkeypatch):
     before = {"selected_module": {"VAD": "vad_a", "ASR": "asr_a"}, "VAD": {"vad_a": {}}, "ASR": {"asr_a": {}}}
     assert util.check_vad_update(before, {}) is False
     assert util.check_vad_update(before, {"selected_module": {}}) is False
+    assert util.check_vad_update(before, {"selected_module": "bad"}) is False
     assert util.check_vad_update(before, {"selected_module": {"VAD": "vad_b"}, "VAD": {"vad_b": {}}}) is True
     assert util.check_vad_update(before, {"selected_module": {"VAD": "vad_a"}, "VAD": {"vad_a": {}}}) is False
     assert util.check_vad_update(
@@ -276,6 +277,7 @@ def test_config_update_and_vision_helpers(monkeypatch):
 
     assert util.check_asr_update(before, {}) is False
     assert util.check_asr_update(before, {"selected_module": {}}) is False
+    assert util.check_asr_update(before, {"selected_module": "bad"}) is False
     assert util.check_asr_update(before, {"selected_module": {"ASR": "asr_b"}, "ASR": {"asr_b": {}}}) is True
     assert util.check_asr_update(before, {"selected_module": {"ASR": "asr_a"}, "ASR": {"asr_a": {}}}) is False
     assert util.check_asr_update(
