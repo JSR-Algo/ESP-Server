@@ -318,6 +318,20 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.session_mode, SessionMode.DORMANT)
         self.assertEqual(conn.voice_provider.started, 0)
 
+    async def test_finish_lesson_defaults_malformed_lesson_config(self):
+        conn = _conn()
+        conn.voice_provider = _VoiceProvider()
+        conn.websocket = _RecordingWS()
+        conn.websocket.mode_getter = lambda: conn.session_mode
+        conn.config["lesson"] = "bad"
+        conn.session_mode = SessionMode.LESSON
+        conn.audio_channel_owner = SessionMode.LESSON
+
+        await conn.finish_lesson_mode(reason="lesson_completed")
+
+        self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
+        self.assertEqual(conn.voice_provider.started, 1)
+
     async def test_finish_lesson_noop_when_not_in_lesson_mode(self):
         conn = _conn()
         conn.voice_provider = _VoiceProvider()

@@ -1305,6 +1305,9 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
     def test_runtime_flags_metrics_and_busy_state(self):
         handler = _build_handler()
         self.assertFalse(handler._lesson_runtime_enabled())
+        handler.config["lesson"] = "bad"
+        self.assertFalse(handler._lesson_runtime_enabled())
+        self.assertFalse(handler._sample_lesson_enabled())
         handler.config["lesson"] = {"runtime_enabled": True}
         self.assertTrue(handler._lesson_runtime_enabled())
         handler._disable_lesson_runtime()

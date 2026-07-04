@@ -87,6 +87,13 @@ def _float_or_none(value):
         return None
 
 
+def _lesson_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    lesson_cfg = config.get("lesson", {}) or {}
+    return lesson_cfg if isinstance(lesson_cfg, dict) else {}
+
+
 def _private_config_log_summary(private_config: Dict[str, Any]) -> Dict[str, Any]:
     google_live = private_config.get("google_live") or {}
     return {
@@ -598,7 +605,7 @@ class ConnectionHandler:
         — never raises into the lesson terminal path."""
         if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
             return
-        lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
+        lesson_cfg = _lesson_config(self.config)
         if lesson_cfg.get("return_to_conversation", True):
             if lesson_cfg.get("smooth_finish_to_conversation", True):
                 self._set_session_mode(SessionMode.CONVERSATION, reason=reason)
@@ -1923,7 +1930,7 @@ class ConnectionHandler:
         """Lesson-runtime admission gate. The config loader may auto-enable this when
         production lesson prerequisites are present; an explicit false keeps the
         lesson layer dark."""
-        lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
+        lesson_cfg = _lesson_config(self.config)
         return bool(lesson_cfg.get("runtime_enabled", False))
 
     def _sample_lesson_enabled(self) -> bool:
@@ -1931,7 +1938,7 @@ class ConnectionHandler:
         spoken start_lesson trigger loads the built-in sample lesson IGNORING any backend
         assignment. Default ON in robot config; never consulted at connect-time
         (only the explicit start_lesson tool path) so production behavior is unchanged."""
-        lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
+        lesson_cfg = _lesson_config(self.config)
         return bool(lesson_cfg.get("sample_lesson", False))
 
     @staticmethod
