@@ -35,6 +35,8 @@ LIVE_WAKE_WORD_ALIASES = {
     "hey spy",
     "i spy",
     "high spy",
+    "high speed",
+    "hi speed",
     "hi tam",
     "hai tam",
     "hey tam",
@@ -736,8 +738,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _on_user_transcript(self, transcript_text):
         if await self._dispatch_lesson_child_response(transcript_text):
             return True
-        if await self._dispatch_lesson_start_intent(transcript_text):
-            return True
         if self._is_live_wake_transcript_only(transcript_text):
             await self._send_wake_listening_feedback(transcript_text)
             await self._open_user_audio_window("wake_word")
@@ -745,6 +745,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "Google Live wake_transcript_only text_preview={!r}",
                 str(transcript_text or "")[:40],
             )
+            return True
+        if await self._dispatch_lesson_start_intent(transcript_text):
             return True
         if await self._dispatch_music_control_intent(transcript_text):
             return True
@@ -1236,13 +1238,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         if any(blocker in text for blocker in blockers):
             return None
-        # Production Google Live ASR has misheard the Vietnamese command
-        # "bắt đầu bài học" as this exact phrase. Keep it exact to avoid turning
-        # arbitrary English "high speed" mentions inside longer utterances into a
-        # lesson start command.
+        # Keep the high-speed workaround scoped to transcripts that still carry
+        # explicit start/lesson context; plain "high speed" is a wake alias for
+        # "Hi ESP" in production.
         exact_markers = {
-            "high speed",
-            "hi speed",
             "high speed start",
             "hi speed start",
             "high speed lesson",

@@ -685,6 +685,30 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1]["state"], "stop")
         self.assertEqual(provider._client.text, [])
 
+    async def test_high_speed_transcript_is_wake_only_not_lesson_start(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        lesson_calls = []
+
+        async def _lesson_start(text):
+            lesson_calls.append(text)
+            return True
+
+        provider._dispatch_lesson_start_intent = _lesson_start
+
+        handled = await provider._on_user_transcript("high speed")
+
+        self.assertTrue(handled)
+        self.assertEqual(lesson_calls, [])
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+        sent = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual(sent[0]["type"], "stt")
+        self.assertEqual(sent[0]["text"], "high speed")
+        self.assertEqual(sent[1]["type"], "tts")
+        self.assertEqual(sent[1]["state"], "stop")
+
     async def test_listen_start_opens_listening_without_greeting(self):
         conn = _Conn()
         conn.config["enable_greeting"] = True

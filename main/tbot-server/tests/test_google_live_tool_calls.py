@@ -911,9 +911,6 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             "tiếp tục bài học",
             "tiếp tục khóa học",
             "tiep tuc khoa hoc",
-            # Real Google Live ASR heard the user's Vietnamese "bắt đầu bài học"
-            # request as this exact English phrase in production.
-            "high speed",
             # Real production transcript for "Alô, bắt đầu bài học" on
             # 2026-06-28. This must start the lesson, not fall through to chat.
             "Alô. High Speed",
