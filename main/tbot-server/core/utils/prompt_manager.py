@@ -255,8 +255,11 @@ class PromptManager:
             selected_module = self.config.get("selected_module") or {}
             if not isinstance(selected_module, dict):
                 selected_module = {}
+            tts_config = self.config.get("TTS") or {}
+            if not isinstance(tts_config, dict):
+                tts_config = {}
             language = (
-                self.config.get("TTS", {})
+                tts_config
                 .get(selected_module.get("TTS", ""), {})
                 .get("language")
                 or "Chinese"

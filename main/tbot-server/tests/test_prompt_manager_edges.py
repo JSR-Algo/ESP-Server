@@ -197,6 +197,11 @@ def test_build_enhanced_prompt_success_fallback_and_child_profile_aliases():
     bad_selection._get_current_time_info = lambda: ("2026-06-20", "Saturday", "lunar")
     assert bad_selection.build_enhanced_prompt("base", "robot-bad", None) == "Chinese"
 
+    bad_tts = _manager(prompt_module, {"selected_module": {"TTS": "edge"}, "TTS": "bad"})
+    bad_tts.base_prompt_template = "{{language}}"
+    bad_tts._get_current_time_info = lambda: ("2026-06-20", "Saturday", "lunar")
+    assert bad_tts.build_enhanced_prompt("base", "robot-bad-tts", None) == "Chinese"
+
     override = manager.build_enhanced_prompt(
         "base",
         "robot-2",
