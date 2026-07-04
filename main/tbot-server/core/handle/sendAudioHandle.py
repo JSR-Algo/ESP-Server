@@ -373,7 +373,11 @@ def _is_lesson_session(conn: "ConnectionHandler"):
 
 async def send_stt_message(conn: "ConnectionHandler", text):
     """Send STT status message"""
-    end_prompt_str = conn.config.get("end_prompt", {}).get("prompt")
+    config = getattr(conn, "config", {}) or {}
+    end_prompt = config.get("end_prompt", {}) if isinstance(config, dict) else {}
+    if not isinstance(end_prompt, dict):
+        end_prompt = {}
+    end_prompt_str = end_prompt.get("prompt")
     if end_prompt_str and end_prompt_str == text:
         return
 

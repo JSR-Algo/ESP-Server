@@ -518,6 +518,14 @@ class SendTtsStopTest(unittest.IsolatedAsyncioTestCase):
         await sendAudioHandle.send_stt_message(end_prompt, "bye prompt")
         self.assertEqual(end_prompt.websocket.sent, [])
 
+        malformed_end_prompt = _Conn()
+        malformed_end_prompt.config["end_prompt"] = "bad"
+        await sendAudioHandle.send_stt_message(malformed_end_prompt, "hello")
+        self.assertEqual(
+            json.loads(malformed_end_prompt.websocket.sent[0]),
+            {"type": "stt", "text": "hello", "session_id": "session-1"},
+        )
+
         conn = _Conn()
         await sendAudioHandle.send_stt_message(conn, '{"speaker":"Ada","content":"Hi!!!"}')
         self.assertEqual(conn.current_speaker, "Ada")
