@@ -869,6 +869,39 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(classic_text_calls, [])
         self.assertTrue(handler.asr_audio_queue.empty())
 
+    async def test_google_live_ping_routes_to_classic_heartbeat_handler(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["enable_websocket_ping"] = True
+        handler.bind_completed_event.set()
+        handler.websocket = _SendingWebSocket()
+        handler.last_activity_time = 1000.0
+        provider_text_calls = []
+
+        class Provider(_RecordingVoiceProvider):
+            async def handle_text_message(self, message):
+                provider_text_calls.append(message)
+                return False
+
+        handler.voice_provider = Provider()
+        from core.handle.textHandle import handleTextMessage as real_handle_text_message
+
+        original_handle_text = connection_module.handleTextMessage
+        original_time = connection_module.time.time
+        try:
+            connection_module.handleTextMessage = real_handle_text_message
+            connection_module.time.time = lambda: 12.5
+
+            await handler._route_message('{"type":"ping"}')
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+            connection_module.time.time = original_time
+
+        self.assertEqual(provider_text_calls, [])
+        self.assertEqual(handler.last_activity_time, 12500.0)
+        sent = [json.loads(payload) for payload in handler.websocket.sent]
+        self.assertEqual(sent[-1]["type"], "pong")
+
     async def test_hello_message_routes_before_manager_bind_ready(self):
         handler = self._build_handler()
         handler.read_config_from_api = True

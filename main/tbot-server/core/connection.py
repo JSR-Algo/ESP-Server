@@ -420,6 +420,7 @@ class ConnectionHandler:
         """Message routing"""
         if isinstance(message, str) and (
             self._is_hello_message(message)
+            or self._is_ping_message(message)
             or self._is_lesson_control_message(message)
         ):
             await handleTextMessage(self, message)
@@ -686,6 +687,13 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "hello"
+
+    def _is_ping_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "ping"
 
     def _is_lesson_control_message(self, message):
         try:
