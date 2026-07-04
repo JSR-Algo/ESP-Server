@@ -1424,6 +1424,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         conn.config = {"Intent": {}, "selected_module": {}}
         provider._inject_live_extra_functions_into_intent()
+        conn.config = {"Intent": {}, "selected_module": "bad"}
+        provider._inject_live_extra_functions_into_intent()
         conn.config = {"Intent": {}, "selected_module": {"Intent": "child"}}
         provider._inject_live_extra_functions_into_intent()
         conn.config = {"Intent": {"child": []}, "selected_module": {"Intent": "child"}}

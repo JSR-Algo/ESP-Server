@@ -181,7 +181,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         intent_root = config.get("Intent")
         if not isinstance(intent_root, dict):
             return
-        selected_intent = config.get("selected_module", {}).get("Intent")
+        selected_module = config.get("selected_module") or {}
+        if not isinstance(selected_module, dict):
+            return
+        selected_intent = selected_module.get("Intent")
         if not selected_intent:
             return
         intent_profile = intent_root.get(selected_intent)
