@@ -1241,10 +1241,18 @@ class ConnectionHandler:
                 self.config.get("Intent", {}) or {},
                 private_config["Intent"],
             )
-            model_intent = private_config.get("selected_module", {}).get("Intent", {})
-            self.config["selected_module"]["Intent"] = model_intent
+            selected_module = private_config.get("selected_module") or {}
+            model_intent = (
+                selected_module.get("Intent")
+                if isinstance(selected_module, dict)
+                else None
+            )
+            if not model_intent:
+                model_intent = self.config.get("selected_module", {}).get("Intent")
+            if model_intent:
+                self.config["selected_module"]["Intent"] = model_intent
             # Load plugin config
-            if model_intent != "Intent_nointent":
+            if model_intent and model_intent != "Intent_nointent":
                 plugin_from_server = private_config.get("plugins", {})
                 for plugin, config_str in plugin_from_server.items():
                     plugin_from_server[plugin] = json.loads(config_str)

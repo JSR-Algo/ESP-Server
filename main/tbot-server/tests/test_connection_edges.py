@@ -974,6 +974,46 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.chat_history_conf, 1)
         self.assertIs(handler.memory, modules["memory"])
 
+    async def test_private_config_intent_merge_ignores_malformed_selected_module(self):
+        handler = _build_handler()
+        handler.read_config_from_api = True
+        handler.config["read_config_from_api"] = True
+        handler.headers = {"device-id": "dev-1", "client-id": "client-1"}
+        handler.common_config = dict(handler.config)
+        handler.loop = asyncio.get_running_loop()
+        handler.config.update(
+            {
+                "selected_module": {"Intent": "Intent_nointent"},
+                "Intent": {"Intent_nointent": {"type": "nointent"}},
+            }
+        )
+        private_config = {
+            "selected_module": "bad",
+            "Intent": {"Intent_tool": {"type": "function_call"}},
+            "plugins": {"weather": '{"city": "hanoi"}'},
+        }
+        original_get_private_config = connection_module.get_private_config_from_api
+        original_vad = connection_module.check_vad_update
+        original_asr = connection_module.check_asr_update
+        original_init = connection_module.initialize_modules
+        try:
+            connection_module.get_private_config_from_api = lambda *args, **kwargs: asyncio.sleep(0, result=private_config)
+            connection_module.check_vad_update = lambda *args, **kwargs: False
+            connection_module.check_asr_update = lambda *args, **kwargs: False
+            connection_module.initialize_modules = lambda *args: {}
+
+            await handler._initialize_private_config_async()
+        finally:
+            connection_module.get_private_config_from_api = original_get_private_config
+            connection_module.check_vad_update = original_vad
+            connection_module.check_asr_update = original_asr
+            connection_module.initialize_modules = original_init
+
+        self.assertTrue(handler.bind_completed_event.is_set())
+        self.assertEqual(handler.config["selected_module"]["Intent"], "Intent_nointent")
+        self.assertIn("Intent_tool", handler.config["Intent"])
+        self.assertNotIn("plugins", handler.config)
+
     async def test_private_config_bind_error_paths_set_bind_state(self):
         async def run_with_error(error):
             handler = _build_handler()
