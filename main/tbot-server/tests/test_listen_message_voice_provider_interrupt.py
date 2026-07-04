@@ -78,6 +78,7 @@ _ORIGINAL_MODULES = _install_listen_handler_import_stubs()
 
 listen_module = importlib.import_module("core.handle.textHandler.listenMessageHandler")
 _restore_import_stubs(_ORIGINAL_MODULES)
+sys.modules.pop("core.handle.textHandler.listenMessageHandler", None)
 ListenTextMessageHandler = listen_module.ListenTextMessageHandler
 
 
