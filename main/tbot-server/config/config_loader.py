@@ -560,6 +560,11 @@ def _assert_production_boot_safe(config):
             factory_claimed_devices = [factory_claimed_devices]
         if any(str(device).strip() for device in factory_claimed_devices):
             raise RuntimeError("production boot forbids server.factory_test_claimed_devices in production")
+        voice_consent_bypass_devices = server_cfg.get("voice_consent_bypass_devices") or []
+        if isinstance(voice_consent_bypass_devices, (str, Mapping)):
+            voice_consent_bypass_devices = [voice_consent_bypass_devices]
+        if any(str(device).strip() for device in voice_consent_bypass_devices):
+            raise RuntimeError("production boot forbids server.voice_consent_bypass_devices in production")
     voice_mode = config.get("voice_mode")
     if not isinstance(voice_mode, Mapping) or voice_mode.get("type") != "google_live":
         raise RuntimeError("production boot requires voice_mode.type=google_live")

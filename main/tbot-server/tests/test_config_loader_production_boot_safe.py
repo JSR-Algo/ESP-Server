@@ -183,6 +183,14 @@ def test_prod_boot_safe_rejects_factory_test_claimed_devices(monkeypatch):
     with pytest.raises(RuntimeError, match="factory_test_claimed_devices"):
         _assert_production_boot_safe(config)
 
+def test_prod_boot_safe_rejects_voice_consent_bypass_devices(monkeypatch):
+    _full_prod_env(monkeypatch)
+    config = _auth_on_config()
+    config["server"]["voice_consent_bypass_devices"] = [{"mac": "14:c1:9f:d1:a8:48"}]
+
+    with pytest.raises(RuntimeError, match="voice_consent_bypass_devices"):
+        _assert_production_boot_safe(config)
+
 def test_prod_boot_safe_rejects_non_default_google_live_model(monkeypatch):
     _full_prod_env(monkeypatch)
     config = _auth_on_config()

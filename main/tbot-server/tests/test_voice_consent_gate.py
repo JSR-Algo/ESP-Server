@@ -32,6 +32,7 @@ class _Conn:
         self.func_handler = None
         self.client_abort = False
         self.client_is_speaking = False
+        self.client_ip = "192.168.0.103"
         self.sent = []
         self.voice_consent_client = types.SimpleNamespace(
             ensure_voice_allowed=self._ensure_voice_allowed,
@@ -64,6 +65,18 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
 
         self.assertTrue(allowed)
+
+    async def test_voice_consent_bypass_devices_allows_matching_mac_or_ip(self):
+        for key, value in (("mac", "14:C1:9F:D1:A8:48"), ("ip", "192.168.0.103")):
+            with self.subTest(key=key):
+                conn = _Conn(allowed=False)
+                conn.device_id = "14:c1:9f:d1:a8:48"
+                conn.config["server"]["voice_consent_bypass_devices"] = [{key: value}]
+                conn.voice_consent_client = VoiceConsentClient(client=types.SimpleNamespace())
+
+                allowed = await conn.voice_consent_client.ensure_voice_allowed(conn)
+
+                self.assertTrue(allowed)
 
     async def test_global_factory_test_claimed_allows_voice_without_backend_consent(self):
         conn = _Conn(allowed=False)

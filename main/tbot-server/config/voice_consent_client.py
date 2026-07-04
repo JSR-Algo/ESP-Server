@@ -36,6 +36,15 @@ class VoiceConsentClient:
             self._remember(cache_key, True)
             return True
 
+        bypass_key = self._voice_consent_bypass_key(conn, device_id)
+        if bypass_key:
+            cache_key = f"voice_consent_bypass:{bypass_key}"
+            if self._cached_allowed(cache_key):
+                return True
+            self._log(conn, "warning", "voice consent bypass enabled for configured device")
+            self._remember(cache_key, True)
+            return True
+
         base_url = self._base_url(conn)
         secret = os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
         if not device_id or not base_url or not secret:
@@ -122,6 +131,31 @@ class VoiceConsentClient:
             configured = [item.strip() for item in configured.split(",")]
         normalized = str(device_id).strip().lower()
         return normalized in {str(item).strip().lower() for item in configured if item}
+
+    def _voice_consent_bypass_key(self, conn, device_id) -> str:
+        config = getattr(conn, "config", {})
+        if not isinstance(config, dict):
+            return ""
+        server = config.get("server", {})
+        if not isinstance(server, dict):
+            return ""
+        configured = server.get("voice_consent_bypass_devices") or []
+        if isinstance(configured, dict):
+            configured = [configured]
+        elif isinstance(configured, str):
+            configured = [{"mac": item.strip()} for item in configured.split(",")]
+        device_id = str(device_id or "").strip().lower()
+        client_ip = str(getattr(conn, "client_ip", "") or "").strip().lower()
+        for item in configured:
+            if not isinstance(item, dict):
+                continue
+            mac = str(item.get("mac") or "").strip().lower()
+            ip = str(item.get("ip") or "").strip().lower()
+            if mac and device_id and mac == device_id:
+                return f"mac:{mac}"
+            if ip and client_ip and ip == client_ip:
+                return f"ip:{ip}"
+        return ""
 
     def _remember(self, cache_key: str, allowed: bool) -> None:
         now = time.monotonic()
