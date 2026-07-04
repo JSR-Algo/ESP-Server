@@ -100,6 +100,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # Conversation-turn finalization / waiting-model reopen bookkeeping.
         self._waiting_model_since = None
         self._last_waiting_model_retry_prompt_at = 0.0
+        self._last_wake_greeting_at = None
         self._echo_bypass_pending_interrupt = False
         self._last_clean_user_turn_response_id = None
         self._interaction = GoogleLiveInteractionController(conn)
@@ -229,7 +230,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return await self._fallback_provider.handle_text_message(message)
         listen_state, listen_text = self._extract_listen_control(message)
         if listen_state == "start":
+            should_greet = self._should_greet_on_listen_start(message)
             await self._open_user_audio_window("listen_start")
+            if should_greet:
+                await self._send_wake_greeting()
             return True
         if listen_state == "stop":
             await self._finalize_user_audio_input("listen_stop")
@@ -2894,6 +2898,38 @@ class GoogleLiveProvider(VoiceSessionProvider):
             reason,
             max(0.1, window_sec) * 1000,
         )
+
+    def _should_greet_on_listen_start(self, message):
+        config = getattr(self.conn, "config", {}) or {}
+        if not bool(config.get("enable_greeting", True)):
+            return False
+        if self._lesson_runtime_active():
+            return False
+        if normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        ) == SessionMode.LESSON:
+            return False
+        if self._has_active_output() or self._has_music_session():
+            return False
+        try:
+            msg_json = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        mode = str(msg_json.get("mode") or "").strip().lower()
+        return mode != "manual"
+
+    async def _send_wake_greeting(self):
+        now = time.monotonic()
+        if (
+            self._last_wake_greeting_at is not None
+            and now - self._last_wake_greeting_at < 2.0
+        ):
+            return False
+        text = "Dạ, con hỏi gì nào?"
+        sent = await self._send_live_text_ack(text, log_label="wake_greeting")
+        if sent:
+            self._last_wake_greeting_at = now
+        return sent
 
     async def _dispatch_music_control_intent(self, transcript_text):
         payload = self._classify_music_control_intent(transcript_text)

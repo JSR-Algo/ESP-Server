@@ -684,6 +684,20 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1]["type"], "tts")
         self.assertEqual(sent[1]["state"], "stop")
 
+    async def test_listen_start_sends_wake_greeting_in_conversation(self):
+        conn = _Conn()
+        conn.config["enable_greeting"] = True
+        conn.session_mode = SessionMode.CONVERSATION
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+
+        handled = await provider.handle_text_message('{"type":"listen","state":"start"}')
+
+        self.assertTrue(handled)
+        self.assertTrue(provider._client.text)
+        self.assertIn("con hỏi gì", provider._client.text[-1])
+
     async def test_lesson_start_intent_bootstraps_missing_tool_handler_in_dormant_live_mode(self):
         conn = _Conn()
         conn.func_handler = None
