@@ -181,13 +181,19 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
     # child's spoken answer (runtime.on_child_response via Live STT) before advancing.
     # dwellSec only applies to passive steps: it keeps the rendered scene on screen for N
     # seconds before auto-advancing so the child can see/hear it (runtime _passive_dwell_sec).
+    try:
+        timeout_value = float(timeout_sec)
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            timeout_value = DEFAULT_SAMPLE_STEP_TIMEOUT_SEC
+    except (TypeError, ValueError):
+        timeout_value = DEFAULT_SAMPLE_STEP_TIMEOUT_SEC
     step: Dict[str, Any] = {
         "id": step_id,
         "type": step_type,
         "completionClass": completion_class,
         "prompt": prompt,
         "audio": {"via": "tts"},
-        "timeoutSec": timeout_sec,
+        "timeoutSec": timeout_value,
         "scene": scene,
     }
     if completion_class == "passive" and dwell_sec:
@@ -214,8 +220,9 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
             step["storyBeat"] = {"ask": ask, "waitForChild": story_beat.get("waitForChild") is True}
     if response_timeout_sec is not None:
         try:
-            if float(response_timeout_sec) > 0:
-                step["responseTimeoutSec"] = float(response_timeout_sec)
+            response_timeout_value = float(response_timeout_sec)
+            if math.isfinite(response_timeout_value) and response_timeout_value > 0:
+                step["responseTimeoutSec"] = response_timeout_value
         except (TypeError, ValueError):
             pass
     if max_no_answer_attempts is not None:

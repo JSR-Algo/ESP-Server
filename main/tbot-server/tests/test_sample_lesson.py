@@ -4,11 +4,13 @@ import unittest
 
 from core.lesson.sample import (
     DEFAULT_SAMPLE_STEP_DWELL_SEC,
+    DEFAULT_SAMPLE_STEP_TIMEOUT_SEC,
     INTERACTIVE_SAMPLE_LESSON_ID,
     SAMPLE_ASSIGNMENT_ID,
     SAMPLE_LESSON_ID,
     NoOpLessonForwarder,
     SampleAssetCache,
+    _step,
     build_interactive_sample_manifest,
     build_sample_manifest,
     start_sample_lesson,
@@ -127,6 +129,23 @@ class SampleManifestTest(unittest.TestCase):
 
         json.dumps(manifest, allow_nan=False)
         self.assertTrue(all("dwellSec" not in step for step in manifest["steps"]))
+
+    def test_sample_step_rejects_non_finite_direct_timing_fields(self):
+        scene = build_sample_manifest()["steps"][0]["scene"]
+
+        step = _step(
+            "s3",
+            "repeat",
+            "Say barn.",
+            scene,
+            timeout_sec=float("inf"),
+            completion_class="interactive",
+            response_timeout_sec=float("inf"),
+        )
+
+        json.dumps(step, allow_nan=False)
+        self.assertEqual(step["timeoutSec"], DEFAULT_SAMPLE_STEP_TIMEOUT_SEC)
+        self.assertNotIn("responseTimeoutSec", step)
 
     def test_passthrough_asset_cache_surface(self):
         cache = SampleAssetCache()
