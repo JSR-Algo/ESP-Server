@@ -76,9 +76,15 @@ CHILD_UNSAFE_QUERY_PATTERNS = (
         r"(?:someone|somebody|a\s+person|a\s+child|a\s+kid|an\s+animal)\b",
         re.I,
     ),
-    re.compile(r"\b(?:hurt|harm|injure|kill|poison|starve|cut|hang)\s+(?:myself|yourself)\b", re.I),
+    re.compile(
+        r"\b(?:hurt|harm|injure|kill|poison|starve|cut|hang|choke|drown|burn|stab|shoot)\s+"
+        r"(?:myself|yourself)\b",
+        re.I,
+    ),
     re.compile(r"\bcut\s+(?:my|your)\s+wrist\b", re.I),
     re.compile(r"\boverdose\b", re.I),
+    re.compile(r"\bdrink\s+bleach\b", re.I),
+    re.compile(r"\b(?:take|swallow)\s+(?:all\s+)?(?:(?:my|your)\s+)?pills\b", re.I),
     re.compile(r"\bjump\s+off\s+(?:a\s+)?(?:bridge|building|roof|window)\b", re.I),
     re.compile(
         r"\b(?:end\s+(?:my|your)\s+life|take\s+(?:my|your)\s+own\s+life|unalive\s+(?:myself|yourself))\b",
