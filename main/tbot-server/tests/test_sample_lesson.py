@@ -156,6 +156,24 @@ class SampleManifestTest(unittest.TestCase):
         self.assertEqual(step["timeoutSec"], DEFAULT_SAMPLE_STEP_TIMEOUT_SEC)
         self.assertNotIn("responseTimeoutSec", step)
 
+    def test_sample_step_rejects_non_finite_direct_attempt_count(self):
+        scene = build_sample_manifest()["steps"][0]["scene"]
+
+        try:
+            step = _step(
+                "s3",
+                "repeat",
+                "Say barn.",
+                scene,
+                completion_class="interactive",
+                max_no_answer_attempts=float("inf"),
+            )
+        except OverflowError as exc:
+            self.fail(f"non-finite maxNoAnswerAttempts should be ignored, got {type(exc).__name__}")
+
+        json.dumps(step, allow_nan=False)
+        self.assertNotIn("maxNoAnswerAttempts", step)
+
     def test_passthrough_asset_cache_surface(self):
         cache = SampleAssetCache()
         self.assertEqual(cache.public_url_for_source("barn.png"), "barn.png")

@@ -229,7 +229,7 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
         try:
             if int(max_no_answer_attempts) > 0:
                 step["maxNoAnswerAttempts"] = int(max_no_answer_attempts)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
     return step
 
