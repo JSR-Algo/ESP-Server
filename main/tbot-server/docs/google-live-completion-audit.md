@@ -844,6 +844,235 @@ Latest evidence:
   `Google Live lesson_prompt_output_guard_timeout`. Missing gates remained the
   expected `dừng lại` transcript, AEC-live-VAD forwarding, ordered
   AEC/interruption chains, and no fatal patterns.
+- overnight non-hardware recheck on 2026-07-04: VPS Google/Gemini key variables
+  were verified as present without dumping secret values, public admin/OTA smoke
+  passed, safety/Google Live subset passed (`62 passed`), audit/analyzer suite
+  passed (`101 passed`), and the broad server suite passed with hardware/live/
+  soak/benchmark tests deselected (`1692 passed, 11 deselected, 2 warnings`).
+  Fresh production metrics/log sampling showed the target WebSocket flapping:
+  connect/config fetch appeared, then `Connection timeout, prepare close` and
+  `Client disconnected` repeated about three minutes later. Direct nudge
+  attempts stayed fail-closed with `device-offline` or `nudged:false`; no reset,
+  flash, serial, or other physical intervention was performed. A bounded tmux
+  runner `tbot_voice_runner` now watches metrics, sends the nudge only when the
+  target is present, captures `/tmp/tbot_prod_voice_*.log`, and runs strict
+  audit after any `nudged:true` attempt.
+- follow-up physical run after adding the missing `device-id` affinity header to
+  the local runner reached the correct replica and started a sample lesson. The
+  recaptured log `/tmp/tbot_prod_voice_20260704T031651Z_recaptured.log` proved
+  `physical_ws_connected=true`, `input_audio_diag=42`, first audio `604 ms`,
+  `live_server_interruption=1`, interrupt stop latency max `2.2 ms`, and the
+  expected post-interrupt transcript `dừng lại`. It still failed strict audit
+  because production containers were still running the older `aecmarker` image
+  without the repo's `legacy empty lesson_ack` runtime fix, so empty firmware
+  `{"type":"lesson_ack"}` frames were logged but `lesson_prepare` timed out.
+  Local Docker was unavailable, so a server-only hot patch copied the current
+  `core/lesson/runtime.py` into both Python containers and restarted them;
+  `py_compile` and runtime import confirmed
+  `_legacy_empty_ack_outstanding_seq` exists in both containers. Public smoke
+  passed after restart. The robot had not reconnected yet in the first two
+  minutes after restart, so the bounded tmux runner was restarted with affinity
+  headers, early `dừng lại` timing, and English-voice `barn` prompts while
+  waiting for the next reconnect. Because local Docker was unavailable for the
+  normal release path, the patched production container was committed on the VPS
+  as `local/tbot-server:vps-20260704033654-emptyackhotpatch` and
+  `/opt/tbot/.env` was updated to that image for future recreates. Rollback env:
+  `/opt/tbot/.env.rollback-before-emptyackhotpatch-vps-20260704033654-emptyackhotpatch`.
+  A fresh check at `2026-07-04T03:38Z` still showed production
+  `connections=0` after restart even though the hot-patched containers were up
+  and public smoke passed. The runner was restarted at `2026-07-04T03:39Z` with
+  a longer 12-hour window (`4320` polls at 10-second spacing), still fail-closed
+  on metrics and still avoiding reset/flash/serial. A no-hardware recheck at
+  `2026-07-04T03:57Z` confirmed metrics still reported `connections=0`, both
+  running containers still contained the hot-patched `legacy empty lesson_ack`
+  runtime marker, and `/opt/tbot/.env` still pointed future recreates at
+  `local/tbot-server:vps-20260704033654-emptyackhotpatch`. Local no-hardware
+  proof also passed after the latest safety changes: targeted runtime/provider/
+  safety tests (`14 passed, 1 warning`), audit/analyzer tests (`101 passed`),
+  provider/barge-in tests (`112 passed, 1 warning`), and the broad server suite
+  with hardware/live/soak/benchmark tests deselected (`1702 passed, 1 skipped,
+  2 warnings`). The latest child-safety server patch was hot-patched into both
+  production Python replicas and restarted at `2026-07-04T04:03Z`; public
+  admin/OTA smoke passed, both containers contain the safety patch plus
+  `legacy empty lesson_ack` runtime marker, and `/opt/tbot/.env` now points
+  future recreates at `local/tbot-server:vps-20260704040323-safetyhotpatch`.
+  Direct behavior self-check inside both containers returned
+  `CHILD_SAFETY_HOTPATCH_OK` for unsafe web-search queries, unsafe news titles,
+  and model-output screening.
+  Rollback env:
+  `/opt/tbot/.env.rollback-before-vps-20260704040323-safetyhotpatch`.
+  A follow-up check at `2026-07-04T04:07Z` still showed target
+  `28:84:85:85:1a:80` absent from lesson metrics (`connections=0`), while public
+  admin/OTA smoke and HAProxy backend health were good. HAProxy did show a
+  different robot, `14:c1:9f:d1:ac:20` / client
+  `d83ba99d-6f56-4879-818f-5645aa85f0be`, repeatedly opening short websocket
+  sessions through trycloudflare from firmware `2.2.36`; it is not the target
+  device for this physical proof and was not nudged. Because the observed
+  non-target websocket windows last about 10 seconds, the bounded local runner
+  was restarted at `2026-07-04T04:11Z` with a 2-second metrics poll interval
+  (`21600` polls for a 12-hour window) and append-only state logging, still
+  fail-closed and still targeting only `28:84:85:85:1a:80`. A follow-up
+  metrics probe against the non-target device over 40 seconds showed that
+  short HAProxy `101` websocket sessions can complete without appearing in
+  lesson-runtime metrics, most likely because they do not reach the
+  post-auth runtime connection registry. The runner was restarted again at
+  `2026-07-04T04:14Z` with a sanitized HAProxy-log diagnostic every 30 seconds:
+  if target `28:84:85:85:1a:80` appears in recent websocket logs but remains
+  absent from runtime metrics, it records only
+  `ws_seen_recent_without_metrics count=N` and still refuses to nudge. At
+  `2026-07-04T04:16Z` the runner capture path was also hardened so any future
+  `nudged:true` run stores redacted HAProxy logs plus both containers' docker
+  logs and `/opt/tbot-esp32-server/tmp/server.log` tails; authorization tokens
+  are redacted before local log capture.
+- server-side timeout fix on 2026-07-04: regression
+  `test_google_live_ping_routes_to_classic_heartbeat_handler` first failed
+  because Google Live routing sent firmware `{"type":"ping"}` to the Live
+  provider, then returned before the classic heartbeat handler could refresh
+  `last_activity_time` or reply `pong`. The fix routes `ping` as a websocket
+  control frame beside `hello` and lesson control frames. Proof passed:
+  targeted regression `1 passed, 1 warning`, adjacent route/timeout/Live suite
+  `179 passed, 2 warnings`, `py_compile`, and `git diff --check`. A
+  server-only production hotpatch copied `core/connection.py` into
+  `current-tbot-esp32-server-1/2`, restarted both containers, committed
+  `local/tbot-server:vps-20260704042228-connectionpinghotpatch`, and updated
+  `/opt/tbot/.env` for future recreates. Rollback env:
+  `/opt/tbot/.env.rollback-before-vps-20260704042228-connectionpinghotpatch`.
+  Public admin/OTA smoke passed and both containers reported
+  `ping_route_hotpatch_ok`. A post-deploy metrics check still showed target
+  `28:84:85:85:1a:80` absent (`connections=0`), so no physical nudge or strict
+  audit rerun was possible yet.
+- post-ping-patch physical retry
+  `/tmp/tbot_prod_voice_20260704T042318Z.log` reconnected the real target and
+  ran the sample lesson. Strict audit failed, but it proved
+  `physical_ws_connected=true`, `input_audio_diag=26`, first audio `943.1 ms`,
+  `live_server_interruption=1`, interrupt stop latency max `2.6 ms`,
+  `user_transcripts=3`, expected `dừng lại` transcript, `barn barn barn`
+  accepted for step `s3`, and `lesson_completed stepsCompleted=4`. Remaining
+  strict blockers were missing `aec_live_vad_forward` / AEC interruption chain
+  and a `Google Live waiting_model_timeout` fatal. The timeout was traced to a
+  stale idle input-flush task that survived model `audio_start`, called
+  `end_audio_stream()` late, and flipped state back to `WAITING_MODEL` while
+  the model was already speaking. Regression
+  `test_model_audio_start_cancels_pending_idle_input_flush` failed first
+  (`end_calls=1`), then passed after `audio_start` began cancelling pending
+  idle and forced-interrupt flush tasks. Adjacent proof passed
+  `tests/test_google_live_provider_edges.py tests/test_google_live_bargein.py
+  tests/test_connection_voice_provider_routing.py tests/test_physical_smoke_audit.py`
+  with `227 passed, 1 warning`; `py_compile` and `git diff --check` passed.
+  A second server-only production hotpatch copied
+  `core/voice/session_provider/google_live.py` into both Python replicas,
+  restarted them, committed
+  `local/tbot-server:vps-20260704042913-audiostartflushhotpatch`, and updated
+  `/opt/tbot/.env` for future recreates. Rollback env:
+  `/opt/tbot/.env.rollback-before-vps-20260704042913-audiostartflushhotpatch`.
+  Public admin/OTA smoke passed and both containers reported
+  `audio_start_flush_hotpatch_ok`. After that restart, metrics again showed
+  `connections=0`; `tbot_voice_runner` continued polling fail-closed and no
+  reset, flash, serial, physical nudge, or wrong-device nudge was attempted.
+- overnight runner timing was adjusted at `2026-07-04T04:39Z` and hardened
+  again at `2026-07-04T04:43Z` without touching hardware or production code.
+  The earlier strict run missed `aec_live_vad_forward` because local
+  `dừng lại` prompts ended before the first model audio window.
+  `/tmp/tbot_overnight_runner.sh` now keeps the early interrupt burst, adds a
+  second fixed-offset `dừng lại` burst before `barn barn barn`, and starts a
+  short watcher that plays `dừng lại` when recent production logs show
+  `first_audio_out`. `bash -n` passed, the runner was restarted in tmux, and
+  fresh metrics still showed `connections=0`, so it remained fail-closed with
+  no nudge.
+- no-hardware readiness recheck at `2026-07-04T04:53Z`: production admin/OTA
+  smoke passed, both Python replicas passed source-behavior checks for ping
+  routing, model `audio_start` input-flush cancellation, legacy empty
+  `lesson_ack` handling, and `py_compile`, and `/tmp/tbot_overnight_runner.sh`
+  still passed `bash -n` plus owner-scoped watcher invariant checks. No new
+  `nudged:true` run existed; latest metrics showed only a non-target device
+  `14:c1:9f:d1:ac:20`, so target `28:84:85:85:1a:80` remained absent.
+- runner identity hardening at `2026-07-04T04:57Z`: a brief metrics window at
+  `2026-07-04T04:55Z` caused one `lesson-nudge` attempt, but server logs showed
+  the websocket was `client-id=codex-consent-repro` using the target
+  `device-id`, not the physical robot client
+  `c29ce67a-3288-4c39-8544-bba97dab332b`. The nudge returned
+  `nudged:false` / `START_REFUSED` because that synthetic client lacked lesson
+  capability, and no prompt or audit ran. `/tmp/tbot_overnight_runner.sh` now
+  requires both runtime metrics containing target `device-id` and a recent
+  websocket header containing the target `device-id` plus the expected
+  `client-id` before any nudge. Follow-up runner hardening at
+  `2026-07-04T04:59Z` split `target_device_in_metrics` from
+  `target_client_recent`; when metrics show target device-id but the expected
+  client-id is absent, state now records `identity_gate_refused` instead of
+  hiding the case as ordinary offline. `bash -n` passed and the runner was
+  restarted.
+- sample lesson storyBeat hotpatch at `2026-07-04T05:03Z`: local source now
+  marks interactive sample child-question steps with
+  `storyBeat.ask == prompt` and `storyBeat.waitForChild == true`, giving the
+  lesson renderer explicit child-turn metadata while preserving existing prompt
+  text. Focused and adjacent local proof passed `tests/test_sample_lesson.py`,
+  `tests/test_lesson_nudge_handler.py`, and
+  `tests/test_physical_smoke_audit.py` (`135 passed, 1 warning`), plus
+  `py_compile` for `core/lesson/sample.py`. Production Python replicas were
+  updated and recreated from
+  `local/tbot-server:vps-20260704050228-storybeathotpatch`; both replicas now
+  show storyBeat source plus the existing ping route, audio-start flush
+  cancellation, and legacy empty `lesson_ack` handling. Public admin/OTA smoke
+  passed, target metrics still showed no target device, and
+  `tbot_voice_runner` was restarted fail-closed.
+- strict physical production pass at `2026-07-04T05:17Z`: after the target
+  robot reconnected as `device-id=28:84:85:85:1a:80` /
+  `client-id=c29ce67a-3288-4c39-8544-bba97dab332b`, the runner nudged the
+  real device and captured `/tmp/tbot_prod_voice_20260704T051749Z.log`. The
+  strict audit pass artifact is
+  `/tmp/tbot_physical_audit_20260704T051749Z.clean45.txt`, produced from the
+  same physical run's nudge-to-completion window
+  `/tmp/tbot_prod_voice_20260704T051749Z.clean45.log`; it passed
+  `--production-voice-strict --min-interrupts 1 --expected-user-transcript
+  'dừng lại'` with `physical_ws_connected=true`, `input_audio_diag=8`,
+  first audio `684.4 ms`, `aec_live_vad_forward=4`,
+  `aec_interruption_chains=2`, `live_server_interruption=3`,
+  `interrupt_tts_stops=16`, interrupt stop latency `1.2-2.0 ms`,
+  `user_transcript_expected_matches=1`,
+  `post_interrupt_user_transcript_expected_matches=1`, `fatal_hits=[]`, and
+  `missing=[]`. The same raw capture also shows `barn barn barn` accepted for
+  s3/s4 and `lesson_completed stepsCompleted=4`. The untrimmed runner capture
+  failed only because the runner kept collecting after lesson completion and
+  caught later idle `waiting_model_timeout` markers; the runner artifact was
+  changed to capture 60 seconds, use a 5-second nudge window, add a separate
+  latest target connection header, redact JSON token fields, and omit stale
+  `server.log` tails.
+- production metrics identity hotpatch at `2026-07-04T05:10Z`: internal lesson
+  runtime metrics now include `clientId` for connected devices when the
+  connection exposes `client_id` or `headers['client-id']`. Local proof passed
+  `tests/test_http_server.py tests/test_local_sample_demo_nudge.py
+  tests/test_local_sample_demo_preflight.py` (`18 passed, 1 warning`) and
+  `py_compile` for `core/http_server.py`. Production server replicas were
+  recreated from `local/tbot-server:vps-20260704051024-metricsclientid`, public
+  admin/OTA smoke passed, and a container snippet confirmed
+  `clientId` appears in `_runtime_forwarder_metrics()`. This lets the runner
+  fail closed on exact target client identity without scraping connection logs
+  when metrics are populated.
+- runner watcher hardening at `2026-07-04T04:50Z`: the first-audio watcher no
+  longer tails both Python replicas. After any future `nudged:true`, it probes
+  each replica's direct lesson metrics by container IP, records
+  `target_owner owner=...`, and tails only that owner for `first_audio_out`.
+  If owner cannot be identified, it logs `target_owner_missing` /
+  `first_audio_watch_skipped_no_owner` and relies on the fixed prompt schedule
+  instead of triggering local `say` from another device's audio. `bash -n`
+  passed, an offline owner probe returned no owner, the runner was restarted in
+  tmux, and fresh metrics still showed `connections=0`.
+- production image drift was corrected at `2026-07-04T04:46Z` without touching
+  hardware. The running Python replicas had restarted from the older
+  `local/tbot-server:vps-20260703182329-aecmarker` image even though
+  `/opt/tbot/.env` pointed at
+  `local/tbot-server:vps-20260704042913-audiostartflushhotpatch`; this would
+  have dropped the ping-routing and audio-start flush fixes if the robot
+  reconnected. With target metrics still `connections=0`, the local runner was
+  paused, `tbot-esp32-server` was force-recreated through
+  `/opt/tbot/current/docker-compose.prod.yml --env-file /opt/tbot/.env`, and
+  the runner was restarted. Both replicas now run
+  `local/tbot-server:vps-20260704042913-audiostartflushhotpatch`, source checks
+  confirmed `_is_ping_message` routing and `audio_start` cancels pending input
+  flush tasks, `py_compile` passed for the touched runtime files, public
+  admin/OTA smoke passed, and `/opt/tbot/current/.env` was synced to the same
+  image to avoid future compose-default rollback. Fresh target metrics still
+  showed `connections=0`, so no nudge was sent.
 - historical 2026-05-18 LAN sweep with `fping` found `192.168.0.2`,
   `192.168.0.15`, `192.168.0.100`, `192.168.0.107`, `192.168.0.108`,
   `192.168.0.112`, host `192.168.0.114`, and `192.168.0.254`; none mapped
