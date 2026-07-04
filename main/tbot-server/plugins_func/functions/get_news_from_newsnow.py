@@ -1,6 +1,7 @@
 import random
 import requests
 import json
+from collections.abc import Mapping
 from config.logger import setup_logging
 from core.voice.child_safety import screen_model_output
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
@@ -54,18 +55,23 @@ CHANNEL_MAP = {
 # Default NewsSourceDictionary, used when config not specified
 DEFAULT_NEWS_SOURCES = "The Paper;Baidu Hot Search;Cailian Press"
 
+def _mapping(value):
+    return value if isinstance(value, Mapping) else {}
+
 def _get_newsnow_config(conn):
     """Get newsnow plugin config from connection config, use conn.common_config first, fall back to conn.config"""
     # Prefer fromPublic configGet (keep localconfig.yamlconfig)
-    common_plugins = getattr(conn, "common_config", {}).get("plugins", {})
-    common_newsnow = common_plugins.get("get_news_from_newsnow", {})
+    common_config = _mapping(getattr(conn, "common_config", {}))
+    common_plugins = _mapping(common_config.get("plugins"))
+    common_newsnow = _mapping(common_plugins.get("get_news_from_newsnow"))
     common_sources = common_newsnow.get("news_sources", "")
     if isinstance(common_sources, str) and common_sources.strip():
         return common_sources
 
     # Fallback get from connection config
-    plugins = conn.config.get("plugins", {})
-    newsnow = plugins.get("get_news_from_newsnow", {})
+    config = _mapping(getattr(conn, "config", {}))
+    plugins = _mapping(config.get("plugins"))
+    newsnow = _mapping(plugins.get("get_news_from_newsnow"))
     sources = newsnow.get("news_sources", "")
     if isinstance(sources, str) and sources.strip():
         return sources
@@ -210,7 +216,9 @@ def fetch_news_from_api(conn: "ConnectionHandler", source="thepaper"):
     try:
         api_url = f"https://newsnow.busiyi.world/api/s?id={source}"
 
-        news_config = conn.config.get("plugins", {}).get("get_news_from_newsnow", {})
+        config = _mapping(getattr(conn, "config", {}))
+        plugins = _mapping(config.get("plugins"))
+        news_config = _mapping(plugins.get("get_news_from_newsnow"))
         if news_config.get("url"):
             api_url = news_config["url"] + source
 

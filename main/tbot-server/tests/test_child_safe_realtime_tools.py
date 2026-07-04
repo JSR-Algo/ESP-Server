@@ -111,6 +111,31 @@ def test_newsnow_filters_regex_unsafe_titles(monkeypatch):
     assert "Zalo" not in result.result
 
 
+def test_newsnow_fetch_uses_default_url_when_plugin_config_is_malformed(monkeypatch):
+    conn = _conn()
+    conn.config["plugins"] = "bad"
+    calls = []
+    items = [{"title": "School science fair opens", "url": "https://example.test/good"}]
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"items": items}
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr(newsnow.requests, "get", fake_get)
+
+    result = newsnow.fetch_news_from_api(conn, "hackernews")
+
+    assert result == items
+    assert calls == ["https://newsnow.busiyi.world/api/s?id=hackernews"]
+
+
 def test_newsnow_returns_safe_message_when_no_child_safe_title(monkeypatch):
     monkeypatch.setattr(
         newsnow,
