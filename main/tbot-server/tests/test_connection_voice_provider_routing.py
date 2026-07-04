@@ -1286,6 +1286,46 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.config["lesson"]["asset_delivery_mode"], "internet")
         self.assertEqual(handler.config["lesson"]["asset_origin_base"], "https://assets.example")
 
+    async def test_private_config_ignores_malformed_lesson_config(self):
+        handler = self._build_handler()
+        handler.read_config_from_api = True
+        handler.config["read_config_from_api"] = True
+        handler.headers = {"device-id": "device-1", "client-id": "client-1"}
+        handler.config["voice_mode"] = {"type": "classic_pipeline"}
+        handler.config["lesson"] = {
+            "sample_lesson": True,
+            "sample_mode": "interactive",
+            "api_base": "https://base.example/v1",
+        }
+        private_config = {
+            "voice_mode": {"type": "google_live"},
+            "lesson": "bad",
+            "selected_module": {},
+        }
+        original_private_config = connection_module.get_private_config_from_api
+        original_initialize_modules = connection_module.initialize_modules
+
+        async def fake_private_config(*args, **kwargs):
+            return private_config
+
+        try:
+            connection_module.get_private_config_from_api = fake_private_config
+            connection_module.initialize_modules = lambda *args, **kwargs: {}
+
+            await handler._initialize_private_config_async()
+        finally:
+            connection_module.get_private_config_from_api = original_private_config
+            connection_module.initialize_modules = original_initialize_modules
+
+        self.assertEqual(
+            handler.config["lesson"],
+            {
+                "sample_lesson": True,
+                "sample_mode": "interactive",
+                "api_base": "https://base.example/v1",
+            },
+        )
+
     async def test_private_config_init_stops_before_component_init_when_connection_closes(self):
         handler = self._build_handler()
         handler.read_config_from_api = True

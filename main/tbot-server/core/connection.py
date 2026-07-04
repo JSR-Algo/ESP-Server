@@ -1290,10 +1290,12 @@ class ConnectionHandler:
                 private_config["google_live"],
             )
         if private_config.get("lesson", None) is not None:
-            self.config["lesson"] = merge_configs(
-                self.config.get("lesson", {}) or {},
-                private_config["lesson"],
-            )
+            private_lesson = private_config["lesson"]
+            if isinstance(private_lesson, dict):
+                self.config["lesson"] = merge_configs(
+                    self.config.get("lesson", {}) or {},
+                    private_lesson,
+                )
         self.config = normalize_voice_config(self.config)
 
         voice_mode_config = self.config.get("voice_mode", {})
