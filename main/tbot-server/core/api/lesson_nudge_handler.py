@@ -14,10 +14,17 @@ def _conn_mac(conn, fallback_key=""):
     return headers.get("device-id") or fallback_key
 
 
+def _config_block(config, key):
+    if not isinstance(config, dict):
+        return {}
+    block = config.get(key, {}) or {}
+    return block if isinstance(block, dict) else {}
+
+
 def _conn_base_url(conn):
     config = getattr(conn, "config", {}) or {}
-    lesson_cfg = config.get("lesson", {}) or {}
-    server_cfg = config.get("server", {}) or {}
+    lesson_cfg = _config_block(config, "lesson")
+    server_cfg = _config_block(config, "server")
     return lesson_cfg.get("api_base") or server_cfg.get("api_url")
 
 

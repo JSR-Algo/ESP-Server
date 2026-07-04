@@ -305,6 +305,42 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolve.await_count, 2)
         pull.assert_awaited_once_with(good_conn)
 
+    async def test_backend_uuid_resolution_malformed_connection_config_does_not_block_matching_connection(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.runtime as runtime
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        malformed_conn = SimpleNamespace(
+            device_id="00:00:00:00:00:01",
+            config={"lesson": "bad", "server": "bad"},
+            logger=None,
+        )
+        good_conn = SimpleNamespace(
+            device_id="00:00:00:00:00:02",
+            config={"server": {"api_url": "http://backend.local/v1"}},
+            logger=None,
+        )
+        pull = AsyncMock(return_value=None)
+        saved = runtime.maybe_start_lesson_on_connect
+        runtime.maybe_start_lesson_on_connect = pull
+        resolve = AsyncMock(return_value=("backend-device-uuid", "token"))
+        try:
+            handler = LessonNudgeHandler(
+                {},
+                {
+                    "00:00:00:00:00:01": malformed_conn,
+                    "00:00:00:00:00:02": good_conn,
+                },
+            )
+            with patch("config.device_token_client.resolve_device_identity", resolve):
+                response = await handler.handle_post(_FakeRequest(device_id="backend-device-uuid"))
+        finally:
+            runtime.maybe_start_lesson_on_connect = saved
+
+        self.assertEqual(response.status, 202)
+        resolve.assert_awaited_once()
+        pull.assert_awaited_once_with(good_conn)
+
     async def test_backend_uuid_nudge_pulls_assignment_and_emits_lesson_prepare(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler
         import config.device_token_client as dtc
