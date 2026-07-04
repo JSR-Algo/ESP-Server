@@ -234,7 +234,10 @@ class RedisLiveStateStore:
             return 0.0
         if isinstance(value, bytes):
             value = value.decode("utf-8")
-        return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _resumption_key(self, device_id):
         return f"tbot:live:{self.namespace}:session:{device_id}:resumption"
