@@ -1428,6 +1428,20 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt._child_response_timeout_sec(), 5.0)
         self.assertEqual(rt._max_child_response_timeouts(), 3)
 
+    def test_passive_dwell_rejects_infinite_step_and_config_values(self):
+        conn = _FakeConn()
+        conn.config = {"lesson": {"passive_step_dwell_sec": "inf"}}
+        rt = self._runtime(conn=conn)
+        rt._step = {}
+
+        self.assertEqual(rt._passive_dwell_sec(), 0.0)
+
+        rt._step = {"dwellSec": "inf"}
+        self.assertEqual(rt._passive_dwell_sec(), 0.0)
+
+        rt._step = {"dwellSec": "0.25"}
+        self.assertEqual(rt._passive_dwell_sec(), 0.25)
+
     def test_runtime_helper_edges_are_stable(self):
         from core.lesson.runtime import (
             _coerce_ack_seq,

@@ -1426,7 +1426,7 @@ class LessonRuntime:
             value = float(raw)
         except (TypeError, ValueError):
             return 0.0
-        return value if value > 0 else 0.0
+        return value if math.isfinite(value) and value > 0 else 0.0
 
     def _start_passive_dwell(self, step_seq: Optional[int], step_id: Optional[str], dwell_sec: float) -> None:
         self._cancel_passive_dwell()
