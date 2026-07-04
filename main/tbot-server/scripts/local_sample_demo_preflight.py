@@ -13,6 +13,10 @@ def _norm(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def _compact_id(value: str) -> str:
+    return "".join(ch for ch in _norm(value) if ch.isalnum())
+
+
 def _metrics_device_ids(metrics: dict | None) -> set[str]:
     if not isinstance(metrics, dict):
         return set()
@@ -28,7 +32,13 @@ def _metrics_device_ids(metrics: dict | None) -> set[str]:
 
 def _usb_target_present(device_id: str, usb_ports: list[str]) -> bool:
     target = _norm(device_id)
-    return any(target in _norm(port) or "303a:1001" in _norm(port) for port in usb_ports)
+    compact_target = _compact_id(target)
+    if not compact_target:
+        return False
+    return any(
+        target in _norm(port) or compact_target in _compact_id(port)
+        for port in usb_ports
+    )
 
 
 def classify(

@@ -79,6 +79,23 @@ def test_classifies_usb_absent_before_endpoint_actions():
     assert result["canNudgeLocal"] is False
 
 
+def test_classifies_non_target_esp_usb_as_target_absent():
+    module = _load_script()
+
+    result = module.classify(
+        device_id="28:84:85:85:1a:80",
+        usb_ports=["/dev/cu.usbmodem222 USB VID:PID=303A:1001 SER=AA:BB:CC:DD:EE:FF"],
+        local_metrics={"connections": 0, "devices": []},
+        public_metrics={"connections": 0, "devices": []},
+        local_error=None,
+        public_error=None,
+    )
+
+    assert result["status"] == "TARGET_USB_ABSENT"
+    assert result["usbTargetPresent"] is False
+    assert result["canNudgeLocal"] is False
+
+
 def test_classifies_malformed_metrics_devices_as_target_absent():
     module = _load_script()
 
