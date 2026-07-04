@@ -139,7 +139,7 @@ def run_guarded(
                     base_url=f"http://127.0.0.1:{http_port}",
                 )
                 return {"status": "NUDGED", "preflight": last, "nudge": nudge}
-            sleep(poll_seconds)
+            sleep(poll_interval)
         return {"status": "NOT_READY", "lastPreflight": last}
     finally:
         _stop_server(server)

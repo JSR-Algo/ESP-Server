@@ -123,6 +123,33 @@ def test_guarded_runner_polls_through_non_divisible_wait_window():
     assert server.waited is True
 
 
+def test_guarded_runner_clamps_negative_poll_sleep():
+    module = _load_script()
+    server = _Server()
+    sleeps = []
+
+    result = module.run_guarded(
+        device_id="28:84:85:85:1a:80",
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        wait_seconds=2,
+        poll_seconds=-1,
+        start_server=lambda **kwargs: server,
+        run_preflight=lambda **kwargs: {
+            "canNudgeLocal": False,
+            "status": "TARGET_NOT_CONNECTED",
+        },
+        run_nudge=lambda **kwargs: {"data": {"nudged": True}},
+        sleep=sleeps.append,
+    )
+
+    assert result["status"] == "NOT_READY"
+    assert sleeps == [1, 1]
+    assert server.terminated is True
+    assert server.waited is True
+
+
 def test_guarded_runner_builds_server_command_with_lan_endpoint():
     module = _load_script()
 
