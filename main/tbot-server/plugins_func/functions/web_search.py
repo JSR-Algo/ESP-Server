@@ -77,6 +77,10 @@ CHILD_UNSAFE_QUERY_PATTERNS = (
         re.I,
     ),
     re.compile(r"\b(?:hurt|harm|injure|kill)\s+(?:myself|yourself)\b", re.I),
+    re.compile(
+        r"\b(?:end\s+(?:my|your)\s+life|take\s+(?:my|your)\s+own\s+life|unalive\s+(?:myself|yourself))\b",
+        re.I,
+    ),
     re.compile(r"\b(?:secretly\s+meet|without\s+telling\s+(?:your\s+)?parents?)\b", re.I),
 )
 
