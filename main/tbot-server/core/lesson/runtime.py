@@ -1582,7 +1582,7 @@ class LessonRuntime:
             parsed = float(raw)
         except (TypeError, ValueError):
             parsed = 12.0
-        return parsed if parsed > 0 else 12.0
+        return parsed if math.isfinite(parsed) and parsed > 0 else 12.0
 
     def _max_child_response_timeouts(self) -> int:
         step = self._step or {}
