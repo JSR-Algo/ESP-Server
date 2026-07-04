@@ -666,7 +666,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_wake_word_detect_sends_listening_feedback_to_device(self):
+    async def test_wake_word_detect_opens_listening_without_greeting(self):
         conn = _Conn()
         provider = self.make_provider(conn)
         provider._client = _Client()
@@ -683,10 +683,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]["text"], "Hi ESP")
         self.assertEqual(sent[1]["type"], "tts")
         self.assertEqual(sent[1]["state"], "stop")
-        self.assertTrue(provider._client.text)
-        self.assertIn("con hỏi gì", provider._client.text[-1])
+        self.assertEqual(provider._client.text, [])
 
-    async def test_listen_start_sends_wake_greeting_in_conversation(self):
+    async def test_listen_start_opens_listening_without_greeting(self):
         conn = _Conn()
         conn.config["enable_greeting"] = True
         conn.session_mode = SessionMode.CONVERSATION
@@ -697,10 +696,10 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_text_message('{"type":"listen","state":"start"}')
 
         self.assertTrue(handled)
-        self.assertTrue(provider._client.text)
-        self.assertIn("con hỏi gì", provider._client.text[-1])
+        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+        self.assertEqual(provider._client.text, [])
 
-    async def test_listen_start_wake_greeting_has_long_cooldown(self):
+    async def test_repeated_listen_start_stays_silent(self):
         conn = _Conn()
         conn.config["enable_greeting"] = True
         conn.session_mode = SessionMode.CONVERSATION
@@ -717,7 +716,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             await provider.handle_text_message('{"type":"listen","state":"start"}')
             await provider.handle_text_message('{"type":"listen","state":"start"}')
 
-        self.assertEqual(len(provider._client.text), 2)
+        self.assertEqual(provider._client.text, [])
 
     async def test_lesson_start_intent_bootstraps_missing_tool_handler_in_dormant_live_mode(self):
         conn = _Conn()
