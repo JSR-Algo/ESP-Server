@@ -252,9 +252,12 @@ class PromptManager:
                     )
 
             # GetTTSSelectedLanguage, default value isChinese
+            selected_module = self.config.get("selected_module") or {}
+            if not isinstance(selected_module, dict):
+                selected_module = {}
             language = (
                 self.config.get("TTS", {})
-                .get(self.config.get("selected_module", {}).get("TTS", ""), {})
+                .get(selected_module.get("TTS", ""), {})
                 .get("language")
                 or "Chinese"
             )

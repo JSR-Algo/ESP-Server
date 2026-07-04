@@ -192,6 +192,11 @@ def test_build_enhanced_prompt_success_fallback_and_child_profile_aliases():
     assert prompt == "base|2026-06-20|Saturday|lunar|Hanoi|Sunny|robot|1.1.1.1|dynamic|English|Bong|6|Bedroom"
     assert manager.cache_manager.values[(_CacheType.DEVICE_PROMPT, "device_prompt:robot")] == prompt
 
+    bad_selection = _manager(prompt_module, {"selected_module": "bad", "TTS": {"edge": {"language": "English"}}})
+    bad_selection.base_prompt_template = "{{language}}"
+    bad_selection._get_current_time_info = lambda: ("2026-06-20", "Saturday", "lunar")
+    assert bad_selection.build_enhanced_prompt("base", "robot-bad", None) == "Chinese"
+
     override = manager.build_enhanced_prompt(
         "base",
         "robot-2",
