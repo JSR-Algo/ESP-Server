@@ -69,6 +69,7 @@ class ScreenModelOutputCoverageTest(unittest.TestCase):
             "what is your phone number",
             "keep this secret from your parents",
             "send a nude photo",
+            "Here is how to hurt yourself",
             "here is how to kill yourself",
             "i will shoot the weapon",
         ]:
