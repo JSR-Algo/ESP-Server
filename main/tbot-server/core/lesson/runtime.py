@@ -1469,7 +1469,7 @@ class LessonRuntime:
             parsed = float(raw)
         except (TypeError, ValueError):
             parsed = 12.0
-        return max(0.0, parsed)
+        return max(0.0, parsed) if math.isfinite(parsed) else 12.0
 
     def _frame_ack_max_retries(self) -> int:
         config = getattr(self.conn, "config", {}) or {}

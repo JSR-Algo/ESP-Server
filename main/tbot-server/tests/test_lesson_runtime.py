@@ -1448,6 +1448,22 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt._step = {"dwellSec": "0.25"}
         self.assertEqual(rt._passive_dwell_sec(), 0.25)
 
+    def test_frame_ack_timeout_rejects_infinite_config_values(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        conn.config = {"lesson": {"frame_ack_timeout_sec": "inf"}}
+        self.assertEqual(rt._frame_ack_timeout_sec(), 12.0)
+
+        conn.config = {"lesson": {"ack_timeout_sec": "inf"}}
+        self.assertEqual(rt._frame_ack_timeout_sec(), 12.0)
+
+        conn.config = {"lesson": {"frame_ack_timeout_sec": "0"}}
+        self.assertEqual(rt._frame_ack_timeout_sec(), 0.0)
+
+        conn.config = {"lesson": {"frame_ack_timeout_sec": "0.25"}}
+        self.assertEqual(rt._frame_ack_timeout_sec(), 0.25)
+
     def test_runtime_helper_edges_are_stable(self):
         from core.lesson.runtime import (
             _coerce_ack_seq,
