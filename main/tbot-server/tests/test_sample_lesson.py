@@ -159,6 +159,16 @@ class SampleManifestTest(unittest.TestCase):
             self.assertGreaterEqual(step.get("responseTimeoutSec", 0), 30.0, step["id"])
             self.assertGreaterEqual(step.get("maxNoAnswerAttempts", 0), 3, step["id"])
 
+    def test_interactive_sample_marks_child_questions_with_storybeat(self):
+        manifest = build_interactive_sample_manifest()
+
+        for step in manifest["steps"]:
+            if step.get("completionClass") != "interactive":
+                continue
+            story_beat = step.get("storyBeat") or {}
+            self.assertIs(story_beat.get("waitForChild"), True, step["id"])
+            self.assertEqual(story_beat.get("ask"), step["prompt"], step["id"])
+
     def test_interactive_sample_has_child_centered_production_ux_copy_and_scene_metadata(self):
         manifest = build_interactive_sample_manifest()
 

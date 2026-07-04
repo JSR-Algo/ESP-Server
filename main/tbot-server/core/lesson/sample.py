@@ -171,6 +171,7 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
           retry_prompt: Optional[str] = None,
           success_prompt: Optional[str] = None,
           interaction_prompts: Optional[Dict[str, str]] = None,
+          story_beat: Optional[Dict[str, Any]] = None,
           response_timeout_sec: Optional[float] = None,
           max_no_answer_attempts: Optional[int] = None) -> Dict[str, Any]:
     # completionClass is the AUTHORITATIVE classifier. A PASSIVE step auto-advances on
@@ -204,6 +205,10 @@ def _step(step_id: str, step_type: str, prompt: str, scene: Dict[str, Any],
         }
         if prompts:
             step["interactionPrompts"] = prompts
+    if story_beat:
+        ask = str(story_beat.get("ask") or "").strip()
+        if ask:
+            step["storyBeat"] = {"ask": ask, "waitForChild": story_beat.get("waitForChild") is True}
     if response_timeout_sec is not None:
         try:
             if float(response_timeout_sec) > 0:
@@ -311,6 +316,7 @@ def build_interactive_sample_manifest(asset_base: str = "",
                 "vietnameseObject": "Đúng rồi, đó là cái kho. Bây giờ nói tiếng Anh: barn.",
                 "alreadyInLesson": "Mình đang học rồi. Con nhìn hình và nói barn nhé.",
             },
+            story_beat={"ask": "Đến lượt con. Con nói theo mình: barn!", "waitForChild": True},
             response_timeout_sec=30.0,
             max_no_answer_attempts=3,
         ),
@@ -328,6 +334,7 @@ def build_interactive_sample_manifest(asset_base: str = "",
                 "vietnameseObject": "Đúng rồi, con thấy cái kho. Con nói tiếng Anh: barn.",
                 "alreadyInLesson": "Mình đang học rồi. Con trả lời bằng barn nhé.",
             },
+            story_beat={"ask": "Con thấy gì trong hình? Nói tên tiếng Anh của cái kho.", "waitForChild": True},
             success_prompt="Tuyệt vời! Con nói được barn và hoàn thành bài học mẫu.",
             response_timeout_sec=30.0,
             max_no_answer_attempts=3,
