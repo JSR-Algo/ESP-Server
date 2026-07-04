@@ -15,7 +15,13 @@ if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
 from core.utils.opus_encoder_utils import OpusEncoderUtils
-from scripts.voice_mode_websocket_soak import _hello_message, _is_tts_state, _recv_until
+from core.utils.util import audio_to_data_stream
+from scripts.voice_mode_websocket_soak import (
+    _build_headers,
+    _hello_message,
+    _is_tts_state,
+    _recv_until,
+)
 
 DEFAULT_TEXT = (
     "Hãy trả lời bằng tiếng Việt trong khoảng hai câu về kiểm thử ngắt ngang "
@@ -47,17 +53,37 @@ def _opus_packets(sample_rate, frame_duration_ms, duration_sec, rms):
     return packets
 
 
+def _opus_packets_from_audio_file(audio_file, sample_rate, frame_duration_ms):
+    encoder = OpusEncoderUtils(sample_rate, 1, frame_duration_ms)
+    packets = []
+    try:
+        audio_to_data_stream(
+            audio_file,
+            is_opus=True,
+            callback=packets.append,
+            sample_rate=sample_rate,
+            opus_encoder=encoder,
+        )
+    finally:
+        encoder.close()
+    return packets
+
+
 async def run_smoke(args):
-    headers = {
-        "device-id": args.device_id,
-        "client-id": args.client_id,
-    }
-    packets = _opus_packets(
-        args.sample_rate,
-        args.frame_duration_ms,
-        args.audio_duration_sec,
-        args.rms,
-    )
+    headers = _build_headers(args)
+    if getattr(args, "audio_file", ""):
+        packets = _opus_packets_from_audio_file(
+            args.audio_file,
+            args.sample_rate,
+            args.frame_duration_ms,
+        )
+    else:
+        packets = _opus_packets(
+            args.sample_rate,
+            args.frame_duration_ms,
+            args.audio_duration_sec,
+            args.rms,
+        )
     if not packets:
         raise RuntimeError("no opus packets generated")
 
@@ -122,12 +148,15 @@ def main():
         description="Websocket Google Live voice-mode synthetic Opus audio barge-in smoke."
     )
     parser.add_argument("--websocket-url", default="ws://127.0.0.1:8000/tbot/v1/")
+    parser.add_argument("--ota-url", default="")
+    parser.add_argument("--authorization-token", default="")
     parser.add_argument("--device-id", required=True)
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--text", default=DEFAULT_TEXT)
     parser.add_argument("--sample-rate", type=int, default=24000)
     parser.add_argument("--frame-duration-ms", type=int, default=60)
     parser.add_argument("--audio-duration-sec", type=float, default=0.6)
+    parser.add_argument("--audio-file", default="")
     parser.add_argument("--rms", type=int, default=9000)
     parser.add_argument("--interrupt-delay-sec", type=float, default=0.3)
     parser.add_argument("--open-timeout-sec", type=float, default=5)
