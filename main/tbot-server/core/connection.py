@@ -96,6 +96,8 @@ def _lesson_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def _private_config_log_summary(private_config: Dict[str, Any]) -> Dict[str, Any]:
     google_live = private_config.get("google_live") or {}
+    if not isinstance(google_live, dict):
+        google_live = {}
     return {
         "voice_mode": private_config.get("voice_mode"),
         "selected_module": private_config.get("selected_module"),

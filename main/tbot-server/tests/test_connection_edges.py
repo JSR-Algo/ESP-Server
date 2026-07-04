@@ -247,6 +247,14 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    def test_private_config_log_summary_defaults_malformed_google_live(self):
+        summary = connection_module._private_config_log_summary(
+            {"google_live": "bad", "voice_mode": {"type": "google_live"}}
+        )
+
+        self.assertEqual(summary["google_live"]["model"], None)
+        self.assertEqual(summary["voice_mode"], {"type": "google_live"})
+
     async def test_mqtt_audio_extracts_length_header_and_falls_back_to_tail(self):
         handler = _build_handler()
         first = b"12345678" + (10).to_bytes(4, "big") + (3).to_bytes(4, "big") + b"abczzz"
