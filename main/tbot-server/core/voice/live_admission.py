@@ -122,6 +122,32 @@ def _positive_int_or_default(value, default):
     return parsed if parsed > 0 else int(default)
 
 
+def _non_negative_int_or_default(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return parsed if parsed >= 0 else int(default)
+
+
+def _positive_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_float_or_default(value, default):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed > 0 else float(default)
+
+
 class RedisLiveStateStore:
     """Redis-backed MP-11 live state contract for resumption + budget state."""
 
@@ -255,10 +281,10 @@ class LiveAdmissionGate:
         reconnect_limit=5,
     ):
         self.store = store or InMemoryLiveAdmissionStore()
-        self.daily_device_minutes = daily_device_minutes
-        self.daily_household_minutes = daily_household_minutes
-        self.reconnect_window_sec = reconnect_window_sec
-        self.reconnect_limit = reconnect_limit
+        self.daily_device_minutes = _positive_float_or_none(daily_device_minutes)
+        self.daily_household_minutes = _positive_float_or_none(daily_household_minutes)
+        self.reconnect_window_sec = _positive_float_or_default(reconnect_window_sec, 60)
+        self.reconnect_limit = _non_negative_int_or_default(reconnect_limit, 5)
 
     @classmethod
     def from_config(cls, config, store=None):

@@ -258,6 +258,26 @@ def test_gate_from_config_fallbacks_and_sync_noops():
     gate.record_reconnect("device-1")
 
 
+def test_gate_from_config_defaults_invalid_numeric_limits():
+    gate = LiveAdmissionGate.from_config(
+        {
+            "live_admission": {
+                "daily_device_minutes": "bad",
+                "daily_household_minutes": "bad",
+                "reconnect_window_sec": "bad",
+                "reconnect_limit": "bad",
+            }
+        }
+    )
+
+    assert gate.daily_device_minutes is None
+    assert gate.daily_household_minutes is None
+    assert gate.reconnect_window_sec == 60
+    assert gate.reconnect_limit == 5
+    gate.record_reconnect("device-1", now=1)
+    assert gate.admit("device-1", "house-1", now=2).decision == AdmissionDecision.ALLOW_LIVE
+
+
 @pytest.mark.asyncio
 async def test_gate_async_falls_back_to_sync_store_methods_and_budget_reasons():
     store = _SyncFallbackStore()
