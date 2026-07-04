@@ -103,7 +103,10 @@ class VisionHandler(BaseHandler):
                     client_id,
                 )
 
-            select_vllm_module = current_config["selected_module"].get("VLLM")
+            selected_module = current_config.get("selected_module") or {}
+            if not isinstance(selected_module, dict):
+                selected_module = {}
+            select_vllm_module = selected_module.get("VLLM")
             if not select_vllm_module:
                 raise ValueError("You have not set default visual analysis module")
 

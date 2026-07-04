@@ -169,6 +169,7 @@ async def test_vision_post_rejects_unsupported_image(monkeypatch):
     ("config", "message"),
     [
         (_config(selected_module={}), "You have not set default visual analysis module"),
+        (_config(selected_module="bad"), "You have not set default visual analysis module"),
         (_config(VLLM={"demo": {"type": ""}}), "Cannot find provider corresponding to VLLM module"),
     ],
 )
