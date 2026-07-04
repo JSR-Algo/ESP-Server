@@ -867,8 +867,8 @@ class GoogleLiveAudioBridge:
 
     async def _create_connection_safety_forwarder(self):
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
-        server_cfg = config.get("server", {}) or {}
+        lesson_cfg = self._config_block(config, "lesson")
+        server_cfg = self._config_block(config, "server")
         base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
         device_id = getattr(self.conn, "device_id", None)
         if not base_url or not device_id:
@@ -917,6 +917,13 @@ class GoogleLiveAudioBridge:
         )
         setattr(self.conn, "safety_event_forwarder", forwarder)
         return forwarder
+
+    @staticmethod
+    def _config_block(config, key):
+        if not isinstance(config, dict):
+            return {}
+        value = config.get(key, {}) or {}
+        return value if isinstance(value, dict) else {}
 
     def _redact_safety_text(self, text):
         redacted = str(text or "")

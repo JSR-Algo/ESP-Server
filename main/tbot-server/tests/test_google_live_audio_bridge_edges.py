@@ -572,6 +572,12 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         import core.lesson.forwarder as forwarder_module
 
         logger = _Logger()
+        malformed_bridge = self.make_bridge(
+            conn=_Conn(config={"lesson": "bad", "server": "bad"}),
+            logger=logger,
+        )
+        self.assertIsNone(await malformed_bridge._create_connection_safety_forwarder())
+
         conn = _Conn(config={"lesson": {"api_base": "http://backend"}})
         bridge = self.make_bridge(conn=conn, logger=logger)
 
