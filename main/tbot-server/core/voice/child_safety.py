@@ -31,6 +31,7 @@ _MODEL_OUTPUT_BLOCK_PATTERNS = (
     ("pii_address", re.compile(r"\b(home\s+address|address|dia\s+chi|địa\s+chỉ)\b", re.I)),
     ("pii_phone", re.compile(r"\b(phone\s+number|telephone|so\s+dien\s+thoai|số\s+điện\s+thoại)\b", re.I)),
     ("pii_school", re.compile(r"\b(school\s+name|your\s+school|truong\s+hoc|trường\s+học)\b", re.I)),
+    ("pii_name", re.compile(r"\b((?:tell|give|share|say)\s+(?:me\s+)?your\s+(?:real|full)\s+name|what(?:'s|\s+is)\s+your\s+(?:real|full)\s+name)\b", re.I)),
     ("meet_child", re.compile(r"\b(meet\s+me|meet\s+up|come\s+meet|secretly\s+meet|meet\s+(?:them|him|her)\s+alone|gap\s+minh|gặp\s+mình)\b", re.I)),
     ("secret_from_parent", re.compile(r"\b(don't\s+tell|do\s+not\s+tell|without\s+telling\s+(?:your\s+)?(?:parents?|mom|dad|mother|father)|keep\s+.*secret|giu\s+bi\s+mat|giữ\s+bí\s+mật)\b", re.I)),
     ("sexual", re.compile(r"\b(sex|sexual|nude|porn|khiêu\s+dâm|tình\s+dục)\b", re.I)),

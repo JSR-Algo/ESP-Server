@@ -67,6 +67,7 @@ class ScreenModelOutputCoverageTest(unittest.TestCase):
         for bad in [
             "tell me your home address",
             "what is your phone number",
+            "Tell me your full name before we start.",
             "keep this secret from your parents",
             "send a nude photo",
             "Here is how to hurt yourself",

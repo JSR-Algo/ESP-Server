@@ -17,6 +17,7 @@ from core.voice.session_provider.google_live import (
     GoogleLiveProvider,
     LESSON_LIVE_TEXT_INSTRUCTION,
 )
+from core.voice.child_safety import screen_model_output
 
 
 class _DummyLogger:
@@ -235,6 +236,21 @@ class SampleManifestTest(unittest.TestCase):
                 self.assertIn(expected_pose_file[expression], overlay["atlas"]["image"], step["id"])
                 if step.get("completionClass") == "interactive":
                     self.assertEqual(overlay["robotState"], "listening", step["id"])
+
+    def test_sample_child_facing_copy_passes_output_safety_screen(self):
+        for manifest in (build_sample_manifest(), build_interactive_sample_manifest()):
+            for step in manifest["steps"]:
+                texts = [
+                    step.get("prompt"),
+                    step.get("retryPrompt"),
+                    step.get("successPrompt"),
+                    *list((step.get("interactionPrompts") or {}).values()),
+                ]
+                for text in texts:
+                    if not text:
+                        continue
+                    result = screen_model_output(text)
+                    self.assertFalse(result["blocked"], (manifest["lessonId"], step["id"], result, text))
 
 
 class SampleManifestTestAsync(unittest.IsolatedAsyncioTestCase):
