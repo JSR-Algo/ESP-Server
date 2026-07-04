@@ -2,6 +2,7 @@ import random
 import requests
 import json
 from config.logger import setup_logging
+from core.voice.child_safety import screen_model_output
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from typing import TYPE_CHECKING
 
@@ -191,7 +192,9 @@ CHILD_UNSAFE_NEWS_KEYWORDS = (
 
 def _is_child_safe_news_text(text: str) -> bool:
     lowered = str(text or "").lower()
-    return not any(keyword in lowered for keyword in CHILD_UNSAFE_NEWS_KEYWORDS)
+    return not any(keyword in lowered for keyword in CHILD_UNSAFE_NEWS_KEYWORDS) and not screen_model_output(
+        text
+    ).get("blocked")
 
 
 def _child_safe_news_items(news_items):

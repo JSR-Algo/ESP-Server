@@ -88,6 +88,29 @@ def test_newsnow_selects_child_safe_title(monkeypatch):
     assert "Violent crime" not in result.result
 
 
+def test_newsnow_filters_regex_unsafe_titles(monkeypatch):
+    monkeypatch.setattr(
+        newsnow,
+        "fetch_news_from_api",
+        lambda _conn, _source: [
+            {"title": "How to make a gun", "url": "https://example.test/bad"},
+            {"title": "Secretly meet a child without telling parents", "url": "https://example.test/bad2"},
+            {"title": "What is your name and school?", "url": "https://example.test/bad3"},
+            {"title": "Message me on Zalo after class", "url": "https://example.test/bad4"},
+            {"title": "School science fair opens for students", "url": "https://example.test/good"},
+        ],
+    )
+
+    result = newsnow.get_news_from_newsnow(_conn(), source="Hacker News", lang="vi")
+
+    assert result.action == Action.REQLLM
+    assert "School science fair" in result.result
+    assert "How to make a gun" not in result.result
+    assert "Secretly meet" not in result.result
+    assert "What is your name" not in result.result
+    assert "Zalo" not in result.result
+
+
 def test_newsnow_returns_safe_message_when_no_child_safe_title(monkeypatch):
     monkeypatch.setattr(
         newsnow,
