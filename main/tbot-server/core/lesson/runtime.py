@@ -571,6 +571,12 @@ def _positive_int_or_default(value: Any, default: int) -> int:
     parsed = _int_or_default(value, default)
     return parsed if parsed > 0 else default
 
+def _lesson_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    lesson_cfg = config.get("lesson", {}) or {}
+    return lesson_cfg if isinstance(lesson_cfg, dict) else {}
+
 def _assignment_metadata_errors(assignment: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     for key in ("assignmentId", "lessonId", "profile", "manifestChecksum"):
@@ -594,7 +600,7 @@ def _manifest_identity_errors(assignment: Dict[str, Any], manifest: Dict[str, An
     return errors
 
 def lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
-    lesson_cfg = config.get("lesson", {}) or {}
+    lesson_cfg = _lesson_config(config)
     server_cfg = config.get("server", {}) or {}
     explicit = (
         lesson_cfg.get("asset_public_base_url")
@@ -755,7 +761,7 @@ class LessonRuntime:
         # Mirrors the capability/manifestVersion gates above -> caller logs, NO frame on
         # the wire, the lesson is skipped instead of rendering blank.
         config = getattr(self.conn, "config", {}) or {}
-        supported = (config.get("lesson", {}) or {}).get("supported_profiles") or ["espTft"]
+        supported = _lesson_config(config).get("supported_profiles") or ["espTft"]
         if self.profile not in supported:
             self.last_error = LessonError(
                 LESSON_VERSION_UNSUPPORTED,
@@ -1449,7 +1455,7 @@ class LessonRuntime:
         (advance immediately on ack — unchanged default)."""
         step = self._step or {}
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         raw = step.get("dwellSec")
         if raw is None:
             raw = lesson_cfg.get("passive_step_dwell_sec")
@@ -1494,7 +1500,7 @@ class LessonRuntime:
 
     def _frame_ack_timeout_sec(self) -> float:
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         raw = lesson_cfg.get("frame_ack_timeout_sec", lesson_cfg.get("ack_timeout_sec", 12.0))
         try:
             parsed = float(raw)
@@ -1504,7 +1510,7 @@ class LessonRuntime:
 
     def _frame_ack_max_retries(self) -> int:
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         raw = lesson_cfg.get(
             "frame_ack_max_retries",
             lesson_cfg.get("lifecycle_frame_ack_max_retries", 1),
@@ -1601,7 +1607,7 @@ class LessonRuntime:
     def _child_response_timeout_sec(self) -> float:
         step = self._step or {}
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         raw = (
             step.get("responseTimeoutSec")
             or step.get("childResponseTimeoutSec")
@@ -1618,7 +1624,7 @@ class LessonRuntime:
     def _max_child_response_timeouts(self) -> int:
         step = self._step or {}
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         raw = step.get("maxNoAnswerAttempts") or lesson_cfg.get("max_no_answer_attempts") or 2
         try:
             parsed = int(raw)
@@ -1875,7 +1881,7 @@ class LessonRuntime:
         if not source:
             return False
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         roots = [lesson_cfg.get("asset_pack_local_root"), getattr(self.asset_cache, "asset_pack_local_root", None)]
         for root in roots:
             if not isinstance(root, str) or not root:
@@ -2116,7 +2122,7 @@ class LessonRuntime:
 
     def _sd_asset_pack_enabled(self) -> bool:
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = config.get("lesson", {}) or {}
+        lesson_cfg = _lesson_config(config)
         mode = str(lesson_cfg.get("asset_delivery_mode") or "").strip().lower()
         return mode == "sd_pack" or lesson_cfg.get("sd_asset_pack_enabled") is True
 
@@ -2190,7 +2196,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     """
     config = getattr(conn, "config", {}) or {}
     _set_lesson_start_status(conn, "CHECKING_ASSIGNMENT")
-    lesson_cfg = config.get("lesson", {}) or {}
+    lesson_cfg = _lesson_config(config)
     server_cfg = config.get("server", {}) or {}
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
     device_id = getattr(conn, "device_id", None)

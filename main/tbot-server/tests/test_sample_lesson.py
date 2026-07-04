@@ -623,6 +623,14 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(interactive_steps)
 
+    async def test_start_sample_lesson_defaults_malformed_lesson_config(self):
+        conn = _FakeConn(config={"lesson": "bad"})
+
+        runtime = await start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.lesson_id, INTERACTIVE_SAMPLE_LESSON_ID)
+
     async def test_start_sample_lesson_falls_back_from_infinite_sample_dwell_config(self):
         conn = _FakeConn(
             config={"lesson": {"sample_mode": "passive", "sample_step_dwell_sec": "inf"}}

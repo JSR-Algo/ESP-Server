@@ -489,8 +489,7 @@ class NoOpLessonForwarder:
 
 
 def _sample_asset_base(conn: Any) -> str:
-    config = getattr(conn, "config", {}) or {}
-    lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    lesson_cfg = _lesson_config(conn)
     return str(
         lesson_cfg.get("sample_asset_base_url")
         or lesson_cfg.get("asset_origin_base")
@@ -498,9 +497,13 @@ def _sample_asset_base(conn: Any) -> str:
     ).strip().rstrip("/")
 
 
-def _sample_step_dwell_sec(conn: Any) -> float:
+def _lesson_config(conn: Any) -> Dict[str, Any]:
     config = getattr(conn, "config", {}) or {}
     lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    return lesson_cfg if isinstance(lesson_cfg, dict) else {}
+
+def _sample_step_dwell_sec(conn: Any) -> float:
+    lesson_cfg = _lesson_config(conn)
     raw = lesson_cfg.get("sample_step_dwell_sec")
     if raw is None:
         return DEFAULT_SAMPLE_STEP_DWELL_SEC
@@ -514,15 +517,13 @@ def _sample_step_dwell_sec(conn: Any) -> float:
 def _sample_mode(conn: Any) -> str:
     """``interactive`` (default speaking drill) or ``passive`` (all-passive narration demo).
     Sourced from ``lesson.sample_mode`` (env ``LESSON_SAMPLE_MODE``)."""
-    config = getattr(conn, "config", {}) or {}
-    lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    lesson_cfg = _lesson_config(conn)
     mode = str(lesson_cfg.get("sample_mode") or "interactive").strip().lower()
     return "passive" if mode == "passive" else "interactive"
 
 
 def _sd_pack_enabled(conn: Any) -> bool:
-    config = getattr(conn, "config", {}) or {}
-    lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    lesson_cfg = _lesson_config(conn)
     mode = str(lesson_cfg.get("asset_delivery_mode") or "").strip().lower()
     return mode == "sd_pack" or lesson_cfg.get("sd_asset_pack_enabled") is True
 
