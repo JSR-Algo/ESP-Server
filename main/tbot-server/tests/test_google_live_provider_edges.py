@@ -684,6 +684,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]["text"], "Hi ESP")
         self.assertEqual(sent[1]["type"], "tts")
         self.assertEqual(sent[1]["state"], "stop")
+        self.assertTrue(provider._client.text)
+        self.assertIn("con hỏi gì", provider._client.text[-1])
 
     async def test_listen_start_sends_wake_greeting_in_conversation(self):
         conn = _Conn()

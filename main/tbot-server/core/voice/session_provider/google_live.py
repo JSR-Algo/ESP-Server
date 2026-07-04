@@ -252,6 +252,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if listen_state == "detect" and self._is_wake_word_only(text):
                 await self._send_wake_listening_feedback(listen_text or text)
                 await self._open_user_audio_window("wake_word")
+                if self._should_greet_on_listen_start(message):
+                    await self._send_wake_greeting()
                 return True
             if await self._dispatch_lesson_start_intent(text):
                 return True
