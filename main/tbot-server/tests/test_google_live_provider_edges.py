@@ -906,6 +906,61 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._waiting_model_since)
         self.assertIsNone(provider._waiting_model_timeout_task)
 
+    async def test_wake_listen_window_expires_without_mic_audio(self):
+        conn = _Conn()
+        conn.config["google_live"]["wake_audio_allow_window_sec"] = 0.01
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+
+        await provider.handle_text_message(
+            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+        )
+        await asyncio.sleep(0.15)
+
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.IDLE,
+        )
+        self.assertEqual(provider._client.end_calls, 0)
+        sent = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual(sent[-1]["type"], "tts")
+        self.assertEqual(sent[-1]["state"], "stop")
+        self.assertFalse(sent[-1]["continue_listening"])
+        self.assertEqual(sent[-1]["listen_mode"], "manual")
+        self.assertFalse(conn.client_abort)
+        self.assertTrue(
+            any(
+                "user_audio_window_expired" in str(args)
+                and "wake_word" in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
+    async def test_wake_listen_window_expiry_cancels_after_mic_audio(self):
+        conn = _Conn()
+        conn.config["google_live"]["wake_audio_allow_window_sec"] = 0.01
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+
+        await provider.handle_text_message(
+            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+        )
+        await provider.handle_audio_bytes(b"voice")
+        await asyncio.sleep(0.15)
+
+        sent = [json.loads(payload) for payload in conn.websocket.sent]
+        manual_stop = [
+            payload
+            for payload in sent
+            if payload.get("type") == "tts"
+            and payload.get("state") == "stop"
+            and payload.get("continue_listening") is False
+        ]
+        self.assertEqual(manual_stop, [])
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:voice"])
+
     async def test_waiting_model_timeout_reopens_input_when_live_returns_nothing(self):
         conn = _Conn()
         conn.config["google_live"]["waiting_model_timeout_sec"] = 0.01

@@ -370,10 +370,10 @@ class EchoSuppressionPolicyTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_echo_tail_suppresses_mic_after_output_stop(self):
         conn = _Conn()
-        conn.google_live_echo_suppress_until = time.monotonic() + 0.4
         client = _Client(connected=True)
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
         await provider.start_session()
+        conn.google_live_echo_suppress_until = time.monotonic() + 0.4
 
         self.assertTrue(provider._should_suppress_robot_output_echo(b"\x00\x00" * 10))
 

@@ -23,6 +23,7 @@ class VpsVoiceGoalWatcherScriptTest(unittest.TestCase):
         self.assertIn("input_audio_diag", text)
         self.assertIn("tts_stop_sent", text)
         self.assertIn("transcript source=user", text)
+        self.assertIn("user_audio_window_expired", text)
 
     def test_remote_worker_respects_launcher_environment(self):
         script = (

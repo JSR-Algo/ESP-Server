@@ -61,6 +61,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._input_flush_task = None
         self._forced_interrupt_flush_task = None
         self._waiting_model_timeout_task = None
+        self._user_audio_window_task = None
         self._fallback_provider = None
         self._fallback_activating = False
         self._reconnect_attempts = 0
@@ -73,6 +74,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._cancelled_response_ids = set()
         self._input_flush_generation = 0
         self._forced_interrupt_flush_generation = 0
+        self._user_audio_window_generation = 0
         self._loud_input_duration_sec = 0.0
         self._last_loud_input_at = None
         self._pending_reconnect_audio = deque(maxlen=self._get_reconnect_buffer_capacity())
@@ -250,6 +252,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await self._open_user_audio_window("listen_start")
             return True
         if listen_state == "stop":
+            self._cancel_user_audio_window_task()
             await self._finalize_user_audio_input("listen_stop")
             return True
         text = self._extract_user_text_message(message)
@@ -307,6 +310,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if await self._forward_lesson_child_audio(audio_bytes):
             return True
+        self._cancel_user_audio_window_task()
         # Conversation-side WAITING_MODEL handling. While waiting for the model to
         # respond, mic frames are normally dropped (the model is "speaking"). But
         # if the model returns nothing within waiting_model_timeout_sec, reopen the
@@ -1447,12 +1451,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
         flush_task = self._input_flush_task
         forced_interrupt_flush_task = self._forced_interrupt_flush_task
         waiting_model_timeout_task = self._waiting_model_timeout_task
+        user_audio_window_task = self._user_audio_window_task
         proactive_task = self._proactive_reconnect_task
         idle_task = self._idle_close_task
         self._receive_task = None
         self._input_flush_task = None
         self._forced_interrupt_flush_task = None
         self._waiting_model_timeout_task = None
+        self._user_audio_window_task = None
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         if receive_task is not None and receive_task is not current_task:
@@ -1483,6 +1489,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
             waiting_model_timeout_task.cancel()
             try:
                 await waiting_model_timeout_task
+            except asyncio.CancelledError:
+                pass
+        if user_audio_window_task is not None and user_audio_window_task is not current_task:
+            user_audio_window_task.cancel()
+            try:
+                await user_audio_window_task
             except asyncio.CancelledError:
                 pass
         if proactive_task is not None and proactive_task is not current_task:
@@ -2550,6 +2562,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if existing_task is not None:
             existing_task.cancel()
 
+    def _cancel_user_audio_window_task(self):
+        self._user_audio_window_generation += 1
+        existing_task = self._user_audio_window_task
+        self._user_audio_window_task = None
+        if existing_task is not None:
+            existing_task.cancel()
+
     def _get_input_flush_delay(self):
         config = self._get_live_config()
         if self._uses_lesson_input_timing():
@@ -2906,6 +2925,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._user_audio_allowed_until,
             time.monotonic() + max(0.1, window_sec),
         )
+        self._schedule_user_audio_window_expiry(reason, max(0.1, window_sec))
         if self._has_active_output() or self._has_music_session():
             await self._begin_user_interrupt(reason)
         self.conn.client_abort = False
@@ -2914,6 +2934,51 @@ class GoogleLiveProvider(VoiceSessionProvider):
             reason,
             max(0.1, window_sec) * 1000,
         )
+
+    def _schedule_user_audio_window_expiry(self, reason, window_sec):
+        self._cancel_user_audio_window_task()
+        self._user_audio_window_generation += 1
+        generation = self._user_audio_window_generation
+        self._user_audio_window_task = asyncio.create_task(
+            self._expire_user_audio_window_after(window_sec, generation, reason)
+        )
+
+    async def _expire_user_audio_window_after(self, window_sec, generation, reason):
+        try:
+            await asyncio.sleep(window_sec)
+            if generation != self._user_audio_window_generation:
+                return
+            if self._closing:
+                return
+            if self._user_stream_started_at is not None:
+                return
+            self._user_audio_allowed_until = 0.0
+            if self._interaction.state == InteractionState.LISTENING:
+                self._interaction.transition(InteractionState.IDLE)
+            await self._send_user_audio_window_expired_feedback()
+            self.conn.client_abort = False
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live user_audio_window_expired reason={} window_ms={:.0f} no_audio=true",
+                reason,
+                window_sec * 1000,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._handle_runtime_failure(exc)
+
+    async def _send_user_audio_window_expired_feedback(self):
+        websocket = getattr(self.conn, "websocket", None)
+        if websocket is None:
+            return
+        payload = {
+            "type": "tts",
+            "state": "stop",
+            "session_id": getattr(self.conn, "session_id", None),
+            "continue_listening": False,
+            "listen_mode": "manual",
+        }
+        await websocket.send(json.dumps(payload))
 
     async def _dispatch_music_control_intent(self, transcript_text):
         payload = self._classify_music_control_intent(transcript_text)

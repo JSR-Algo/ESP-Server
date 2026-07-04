@@ -102,7 +102,7 @@ run_remote_worker() {
     docker ps --filter name=current-tbot-esp32-server --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null || true
   } >> "${summary}"
 
-  pattern="Headers:|Client disconnected|${TARGET}|${CLIENT}|Google Live|wake_transcript_only|wake_listening_feedback|Hi ESP|high speed|lesson_start_intent|user_audio_window_open|window_ms=15000|input_audio_diag|audio_decision|transcript source=user|input_finalized|tts_stop_sent|echo_suppressed|suppress_echo|Traceback|ERROR|WARNING|timeout"
+  pattern="Headers:|Client disconnected|${TARGET}|${CLIENT}|Google Live|wake_transcript_only|wake_listening_feedback|Hi ESP|high speed|lesson_start_intent|user_audio_window_open|user_audio_window_expired|window_ms=15000|input_audio_diag|audio_decision|transcript source=user|input_finalized|tts_stop_sent|echo_suppressed|suppress_echo|Traceback|ERROR|WARNING|timeout"
 
   follow_container() {
     local container="$1"
