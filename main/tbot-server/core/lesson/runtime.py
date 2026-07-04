@@ -647,7 +647,10 @@ class LessonRuntime:
         self._sleep = sleep or asyncio.sleep
         self._default_step_timeout_sec = default_step_timeout_sec
         try:
-            self._min_step_timeout_sec = max(0.0, float(min_step_timeout_sec or 0.0))
+            min_timeout = float(min_step_timeout_sec or 0.0)
+            self._min_step_timeout_sec = (
+                max(0.0, min_timeout) if math.isfinite(min_timeout) else 0.0
+            )
         except (TypeError, ValueError):
             self._min_step_timeout_sec = 0.0
         # S13 alarm (plan §11.2 / CP-8): brackets the preload window so the voice
