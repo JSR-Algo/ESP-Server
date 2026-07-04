@@ -1597,7 +1597,7 @@ class LessonRuntime:
         raw = step.get("maxNoAnswerAttempts") or lesson_cfg.get("max_no_answer_attempts") or 2
         try:
             parsed = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             parsed = 2
         return max(1, parsed)
 

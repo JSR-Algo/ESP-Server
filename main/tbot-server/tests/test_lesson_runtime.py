@@ -1430,6 +1430,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt._step = {"responseTimeoutSec": "inf"}
         self.assertEqual(rt._child_response_timeout_sec(), 12.0)
 
+        rt._step = {"maxNoAnswerAttempts": float("inf")}
+        self.assertEqual(rt._max_child_response_timeouts(), 2)
+
         rt._step = {"childResponseTimeoutSec": "5", "maxNoAnswerAttempts": "3"}
         self.assertEqual(rt._child_response_timeout_sec(), 5.0)
         self.assertEqual(rt._max_child_response_timeouts(), 3)
