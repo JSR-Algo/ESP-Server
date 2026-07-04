@@ -1528,6 +1528,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ),
             "http://robot.local",
         )
+        self.assertEqual(lesson_asset_public_base_url({"server": "bad"}), "")
 
         rt = self._runtime()
         self.assertEqual(rt._invalid_lesson_step_scene_reason(None), "scene")
@@ -5868,6 +5869,18 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         conn = _RepublishConn(api_base=None)
+
+        result = await maybe_start_lesson_on_connect(conn)
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "LESSON_CONFIG_MISSING")
+        self.assertEqual(conn.websocket.sent, [])
+
+    async def test_malformed_server_config_skips_lesson_start_with_status(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn(api_base=None)
+        conn.config["server"] = "bad"
 
         result = await maybe_start_lesson_on_connect(conn)
 

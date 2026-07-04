@@ -577,6 +577,12 @@ def _lesson_config(config: Dict[str, Any]) -> Dict[str, Any]:
     lesson_cfg = config.get("lesson", {}) or {}
     return lesson_cfg if isinstance(lesson_cfg, dict) else {}
 
+def _server_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    server_cfg = config.get("server", {}) or {}
+    return server_cfg if isinstance(server_cfg, dict) else {}
+
 def _assignment_metadata_errors(assignment: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     for key in ("assignmentId", "lessonId", "profile", "manifestChecksum"):
@@ -601,7 +607,7 @@ def _manifest_identity_errors(assignment: Dict[str, Any], manifest: Dict[str, An
 
 def lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
     lesson_cfg = _lesson_config(config)
-    server_cfg = config.get("server", {}) or {}
+    server_cfg = _server_config(config)
     explicit = (
         lesson_cfg.get("asset_public_base_url")
         or lesson_cfg.get("asset_public_base")
@@ -609,7 +615,7 @@ def lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
     )
     if explicit:
         return str(explicit).rstrip("/")
-    if "server" not in config:
+    if not server_cfg:
         return ""
     vision_url = get_vision_url(config)
     if vision_url and "/mcp/vision/explain" in vision_url:
@@ -2197,7 +2203,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     config = getattr(conn, "config", {}) or {}
     _set_lesson_start_status(conn, "CHECKING_ASSIGNMENT")
     lesson_cfg = _lesson_config(config)
-    server_cfg = config.get("server", {}) or {}
+    server_cfg = _server_config(config)
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
     device_id = getattr(conn, "device_id", None)
     logger = getattr(conn, "logger", None)
