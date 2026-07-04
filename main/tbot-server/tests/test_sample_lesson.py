@@ -124,6 +124,15 @@ class SampleManifestTest(unittest.TestCase):
             "http://assets.test/sample/assets/robot/poses/bright-teach.png",
         )
 
+    def test_asset_base_trims_direct_input_before_layer_sources(self):
+        manifest = build_sample_manifest("  http://assets.test/sample/  ")
+        scene = manifest["steps"][0]["scene"]
+
+        self.assertEqual(
+            scene["backgroundScene"]["poster"]["src"],
+            "http://assets.test/sample/assets/background/barn-round-field-poster.jpg",
+        )
+
     def test_sample_manifest_rejects_non_finite_direct_dwell(self):
         manifest = build_sample_manifest(dwell_sec=float("inf"))
 

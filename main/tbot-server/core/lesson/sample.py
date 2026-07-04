@@ -110,7 +110,7 @@ _SAMPLE_ASSET_BY_BASENAME = {
 
 
 def _resolve_src(filename: str, asset_base: str) -> str:
-    base = (asset_base or "").rstrip("/")
+    base = str(asset_base or "").strip().rstrip("/")
     return f"{base}/{filename}" if base else filename
 
 
