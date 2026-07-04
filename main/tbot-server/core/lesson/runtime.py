@@ -546,6 +546,23 @@ def _positive_int(value: Any) -> Optional[int]:
         return parsed if parsed > 0 else None
     return None
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+def _int_or_default(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 def _assignment_metadata_errors(assignment: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     for key in ("assignmentId", "lessonId", "profile", "manifestChecksum"):
@@ -2524,10 +2541,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         lesson_key=str(assignment.get("lessonId") or "lesson"),
         lesson_version=int(assignment.get("lessonVersion", 1)),
         manifest_checksum=new_manifest_checksum,
-        preload_timeout_sec=float(lesson_cfg.get("preload_timeout_sec", 90)),
-        concurrency=int(lesson_cfg.get("preload_concurrency", 2)),
-        max_asset_bytes=int(lesson_cfg.get("max_asset_bytes", 8 * 1024 * 1024)),
-        max_total_asset_bytes=int(lesson_cfg.get("max_total_asset_bytes", 64 * 1024 * 1024)),
+        preload_timeout_sec=_finite_float_or_default(lesson_cfg.get("preload_timeout_sec", 90), 90.0),
+        concurrency=_int_or_default(lesson_cfg.get("preload_concurrency", 2), 2),
+        max_asset_bytes=_int_or_default(lesson_cfg.get("max_asset_bytes", 8 * 1024 * 1024), 8 * 1024 * 1024),
+        max_total_asset_bytes=_int_or_default(lesson_cfg.get("max_total_asset_bytes", 64 * 1024 * 1024), 64 * 1024 * 1024),
         busy_check=getattr(conn, "is_realtime_busy", None),
         logger=logger,
     )
@@ -2536,9 +2553,9 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     )
 
     async def _report_preload_status(report: Dict[str, Any]) -> None:
-        timeout_sec = float(lesson_cfg.get("preload_status_timeout_sec", 5.0))
-        retry_delay = float(lesson_cfg.get("preload_status_retry_delay_sec", 1.0))
-        max_retries = int(lesson_cfg.get("preload_status_max_retries", 2))
+        timeout_sec = _finite_float_or_default(lesson_cfg.get("preload_status_timeout_sec", 5.0), 5.0)
+        retry_delay = _finite_float_or_default(lesson_cfg.get("preload_status_retry_delay_sec", 1.0), 1.0)
+        max_retries = _int_or_default(lesson_cfg.get("preload_status_max_retries", 2), 2)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_sec),
             limits=httpx.Limits(max_keepalive_connections=0),
