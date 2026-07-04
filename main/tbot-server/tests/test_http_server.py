@@ -19,6 +19,14 @@ class _Logger:
         self.messages.append(("error", message))
 
 
+class _HeaderMapping:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self, name, default=None):
+        return self.value if name == "Client-Id" else default
+
+
 def _config(**server_overrides):
     server = {
         "auth_key": "test-key",
@@ -106,11 +114,17 @@ async def test_lesson_runtime_metrics_exposes_forwarder_drops_and_alarm_snapshot
                 ),
                 safety_event_forwarder=types.SimpleNamespace(dropped_events_total=2),
                 lesson_voice_alarm=alarm,
+                client_id="client-1",
             ),
             "device-2": types.SimpleNamespace(
                 lesson_runtime=types.SimpleNamespace(
                     forwarder=types.SimpleNamespace(dropped_events_total=5),
                 ),
+                headers={"client-id": "client-2"},
+                lesson_voice_alarm=None,
+            ),
+            "device-3": types.SimpleNamespace(
+                headers=_HeaderMapping("client-3"),
                 lesson_voice_alarm=None,
             ),
         },
@@ -120,14 +134,17 @@ async def test_lesson_runtime_metrics_exposes_forwarder_drops_and_alarm_snapshot
 
     assert response.status == 200
     body = json.loads(response.text)
-    assert body["connections"] == 2
+    assert body["connections"] == 3
     assert body["counters"]["forwarder.dropped_events_total"] == 8
     assert body["counters"]["safety_forwarder.dropped_events_total"] == 2
     assert body["alarms"] == 1
     assert body["devices"][0]["deviceId"] == "device-1"
+    assert body["devices"][0]["clientId"] == "client-1"
     assert body["devices"][0]["forwarderDroppedEventsTotal"] == 3
     assert body["devices"][0]["safetyForwarderDroppedEventsTotal"] == 2
     assert body["devices"][0]["alarm"]["tripped"] is True
+    assert body["devices"][1]["clientId"] == "client-2"
+    assert body["devices"][2]["clientId"] == "client-3"
 
 @pytest.mark.asyncio
 async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):

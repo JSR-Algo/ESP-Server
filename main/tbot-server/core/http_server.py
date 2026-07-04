@@ -226,14 +226,19 @@ class SimpleHttpServer:
 
             forwarder_dropped_total += forwarder_dropped
             safety_forwarder_dropped_total += safety_dropped
-            devices.append(
-                {
-                    "deviceId": device_id,
-                    "forwarderDroppedEventsTotal": forwarder_dropped,
-                    "safetyForwarderDroppedEventsTotal": safety_dropped,
-                    "alarm": alarm_payload,
-                }
-            )
+            client_id = getattr(connection, "client_id", None)
+            headers = getattr(connection, "headers", None)
+            if not client_id and hasattr(headers, "get"):
+                client_id = headers.get("client-id") or headers.get("Client-Id")
+            device = {
+                "deviceId": device_id,
+                "forwarderDroppedEventsTotal": forwarder_dropped,
+                "safetyForwarderDroppedEventsTotal": safety_dropped,
+                "alarm": alarm_payload,
+            }
+            if client_id:
+                device["clientId"] = str(client_id)
+            devices.append(device)
 
         return {
             "connections": len(self.lesson_connections),
