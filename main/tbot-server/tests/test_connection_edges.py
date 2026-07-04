@@ -326,6 +326,17 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.google_live_session_started_at = 95
         self.assertFalse(await handler.close_live_if_idle(now=99))
 
+    async def test_live_idle_timeout_defaults_bad_config(self):
+        handler = _build_handler()
+        handler.session_mode = connection_module.SessionMode.CONVERSATION
+        handler.voice_provider = _AsyncClose()
+        handler.last_live_activity_at = 1.0
+        handler.config["google_live"] = {"idle_timeout_sec": "bad"}
+
+        self.assertFalse(await handler.close_live_if_idle(now=40.0))
+        self.assertTrue(await handler.close_live_if_idle(now=47.0))
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.DORMANT)
+
     async def test_wait_for_voice_provider_ready_covers_cancel_and_done_paths(self):
         handler = _build_handler()
         handler.read_config_from_api = False

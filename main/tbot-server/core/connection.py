@@ -79,6 +79,14 @@ def _sanitize_headers_for_log(headers):
             sanitized[name] = value
     return sanitized
 
+
+def _float_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _private_config_log_summary(private_config: Dict[str, Any]) -> Dict[str, Any]:
     google_live = private_config.get("google_live") or {}
     return {
@@ -664,10 +672,17 @@ class ConnectionHandler:
         if normalize_session_mode(self.session_mode) != SessionMode.CONVERSATION:
             return False
         cfg = self.config.get("live_admission", {}) if isinstance(self.config, dict) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
         timeout = cfg.get("idle_timeout_sec")
         if timeout is None:
-            timeout = (self.config.get("google_live", {}) or {}).get("idle_timeout_sec", 45)
-        timeout = float(timeout)
+            google_cfg = self.config.get("google_live", {}) if isinstance(self.config, dict) else {}
+            if not isinstance(google_cfg, dict):
+                google_cfg = {}
+            timeout = google_cfg.get("idle_timeout_sec", 45)
+        timeout = _float_or_none(timeout)
+        if timeout is None:
+            timeout = 45.0
         now = time.monotonic() if now is None else float(now)
         last_activity = self.last_live_activity_at
         if last_activity is None:
