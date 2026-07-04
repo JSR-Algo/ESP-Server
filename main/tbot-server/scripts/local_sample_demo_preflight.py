@@ -16,9 +16,12 @@ def _norm(value: str) -> str:
 def _metrics_device_ids(metrics: dict | None) -> set[str]:
     if not isinstance(metrics, dict):
         return set()
+    devices = metrics.get("devices", [])
+    if not isinstance(devices, list):
+        return set()
     return {
         _norm(device.get("deviceId"))
-        for device in metrics.get("devices", [])
+        for device in devices
         if isinstance(device, dict) and device.get("deviceId")
     }
 
