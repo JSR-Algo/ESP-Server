@@ -59,6 +59,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_min_output_age_sec": 0.25,
     "interruption_min_output_age_sec": 0.0,
     "interrupt_suppress_audio_sec": 0.25,
+    "mute_input_after_audio_start_sec": 0.25,
     "suppress_robot_output_echo": True,
     "wake_audio_allow_window_sec": 5.0,
     "robot_output_echo_bypass_rms_threshold": 650,

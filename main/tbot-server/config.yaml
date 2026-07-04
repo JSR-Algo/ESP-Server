@@ -218,6 +218,7 @@ google_live:
   interrupt_min_output_age_sec: 0.25
   interruption_min_output_age_sec: 0.0
   interrupt_suppress_audio_sec: 0.25
+  mute_input_after_audio_start_sec: 0.25
   echo_tail_suppression_ms: 400
   suppress_robot_output_echo: true
   wake_audio_allow_window_sec: 5.0

@@ -857,7 +857,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
         conn = _Conn()
         conn.websocket = None
         conn.client_is_speaking = True
-        conn.google_live_audio_out_started_at = time.monotonic() - 0.1
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
         provider._bridge = _PassthroughBridge(rms=180)
         provider._user_audio_allowed_until = time.monotonic() + 5.0
@@ -1297,6 +1297,7 @@ class BargeInConfigTuneTest(unittest.TestCase):
         self.assertEqual(google_live["interrupt_max_capture_ms"], 1200)
         self.assertEqual(google_live["robot_output_echo_bypass_rms_threshold"], 650)
         self.assertEqual(google_live["robot_output_echo_bypass_min_duration_sec"], 0.06)
+        self.assertEqual(google_live["mute_input_after_audio_start_sec"], 0.25)
         self.assertFalse(google_live["hard_reconnect_on_interrupt"])
 
     def test_google_live_defaults_match_pr4_tune(self):
@@ -1315,6 +1316,7 @@ class BargeInConfigTuneTest(unittest.TestCase):
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["interrupt_max_capture_ms"], 1200)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["robot_output_echo_bypass_rms_threshold"], 650)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["robot_output_echo_bypass_min_duration_sec"], 0.06)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["mute_input_after_audio_start_sec"], 0.25)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["hard_reconnect_on_interrupt"])
 
     def test_runtime_config_forces_local_audio_interrupts_off(self):
