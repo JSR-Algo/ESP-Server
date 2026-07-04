@@ -64,19 +64,12 @@ class ListenTextMessageHandler(TextMessageHandler):
 
                 # Recognize whether wake word
                 is_wakeup_words = filtered_text in conn.config.get("wakeup_words")
-                # Whether enable wake word reply
-                enable_greeting = conn.config.get("enable_greeting", True)
 
-                if is_wakeup_words and not enable_greeting:
-                    # If wake word and wake word reply is off, no need answer
+                if is_wakeup_words:
+                    # Wake word only opens listening; do not synthesize a greeting turn.
                     await send_stt_message(conn, original_text)
                     await send_tts_message(conn, "stop", None)
                     conn.client_is_speaking = False
-                elif is_wakeup_words:
-                    conn.just_woken_up = True
-                    # Report plain text data (reuseASRReport function, but do not provide audio data)
-                    enqueue_asr_report(conn, "Hey, hello", [])
-                    await startToChat(conn, "Hey, hello")
                 else:
                     conn.just_woken_up = True
                     # Report plain text data (reuseASRReport function, but do not provide audio data)

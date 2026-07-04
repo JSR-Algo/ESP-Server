@@ -230,18 +230,27 @@ class ListenMessageVoiceProviderInterruptTest(unittest.IsolatedAsyncioTestCase):
         start_chat.assert_not_awaited()
         report.assert_not_called()
 
-    async def test_detect_wakeup_with_greeting_reports_synthetic_hello_and_starts_chat(self):
+    async def test_detect_wakeup_with_greeting_stays_silent_and_does_not_chat(self):
         conn = _DummyConn()
-        reports = []
+        sends = []
 
-        with patch.object(listen_module, "enqueue_asr_report", side_effect=lambda *args: reports.append(args)), patch.object(
+        async def send_stt(_conn, text):
+            sends.append(("stt", text))
+
+        async def send_tts(_conn, state, text=None):
+            sends.append(("tts", state, text))
+
+        with patch.object(listen_module, "send_stt_message", new=send_stt), patch.object(
+            listen_module, "send_tts_message", new=send_tts
+        ), patch.object(listen_module, "enqueue_asr_report") as report, patch.object(
             listen_module, "startToChat", new=AsyncMock()
         ) as start_chat:
             await ListenTextMessageHandler().handle(conn, {"state": "detect", "text": "hiesp"})
 
-        self.assertTrue(conn.just_woken_up)
-        self.assertEqual(reports, [(conn, "Hey, hello", [])])
-        start_chat.assert_awaited_once_with(conn, "Hey, hello")
+        self.assertFalse(conn.client_is_speaking)
+        self.assertEqual(sends, [("stt", "hiesp"), ("tts", "stop", None)])
+        report.assert_not_called()
+        start_chat.assert_not_awaited()
 
     async def test_detect_regular_text_reports_original_text_and_starts_chat(self):
         conn = _DummyConn()
