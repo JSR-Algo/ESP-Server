@@ -402,18 +402,6 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
         self.assertIs(conn.voice_provider, provider)
 
-        conn.voice_consent_client = _Consent(fail=True)
-        self.assertFalse(await provider._voice_consent_allows_live())
-        conn.voice_consent_client = _Consent(False)
-        self.assertFalse(await provider._ensure_active_voice_consent())
-        self.assertEqual(conn.sent[-1]["status"], "voice_consent_required")
-
-        conn.sent = None
-        conn.websocket = _WebSocket(fail=True)
-        await provider._send_voice_consent_required()
-        conn.websocket = None
-        await provider._send_voice_consent_required()
-
         fallback = _Fallback()
         conn.voice_consent_client = _Consent(True)
         provider._fallback_provider = fallback
@@ -421,30 +409,6 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await provider.handle_audio_bytes(b"a"), "fallback-audio")
         await provider.interrupt()
         self.assertEqual(fallback.interrupted, 1)
-
-    async def test_ensure_consent_denial_closes_active_fallback_provider(self):
-        """Round-2 gap: denied consent + a live fallback provider must close it.
-
-        The lifecycle edge test denies consent while ``_fallback_provider`` is
-        still ``None``, so the ``await self._fallback_provider.close()`` branch
-        (session_provider/google_live.py) never fired. Here a fallback IS
-        attached and ``_voice_consent_denied`` is False, so the first denial
-        tears the fallback down and latches the denied flag.
-        """
-        conn = _Conn()
-        provider = self.make_provider(conn)
-        provider._client = _Client()
-        provider._bridge = _Bridge()
-        await provider.start_session()
-
-        fallback = _Fallback()
-        provider._fallback_provider = fallback
-        provider._voice_consent_denied = False
-        conn.voice_consent_client = _Consent(False)
-
-        self.assertFalse(await provider._ensure_active_voice_consent())
-        self.assertEqual(fallback.closed, 1)
-        self.assertTrue(provider._voice_consent_denied)
 
     async def test_start_session_covers_consent_dormant_success_and_fallback_paths(self):
         denied_conn = _Conn()
@@ -454,8 +418,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await denied_provider.start_session()
 
         self.assertIs(denied_conn.voice_provider, denied_provider)
-        self.assertTrue(denied_provider._voice_consent_denied)
-        self.assertEqual(denied_conn.sent[-1]["status"], "voice_consent_required")
+        self.assertFalse(denied_provider._voice_consent_denied)
+        self.assertEqual(denied_conn.sent, [])
 
         dormant_conn = _Conn()
         dormant_conn.session_mode = SessionMode.DORMANT
@@ -1662,14 +1626,6 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             _step_completed=False,
         )
         self.assertTrue(provider._lesson_runtime_accepts_voice_input())
-
-        original_consent_factory = google_live_module.get_voice_consent_client
-        google_live_module.get_voice_consent_client = lambda: _Consent(True)
-        try:
-            delattr(conn, "voice_consent_client")
-            self.assertTrue(await provider._voice_consent_allows_live())
-        finally:
-            google_live_module.get_voice_consent_client = original_consent_factory
 
         provider._closing = True
         provider._schedule_proactive_reconnect({"time_left_ms": 1})

@@ -232,7 +232,7 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.get_calls, 2)
 
-    async def test_start_session_denies_before_opening_live_without_consent(self):
+    async def test_start_session_ignores_consent_and_opens_live(self):
         conn = _Conn(allowed=False)
         opened = False
 
@@ -250,12 +250,10 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
         handled = await provider.handle_audio_bytes(b"child-audio")
 
-        self.assertFalse(opened)
+        self.assertTrue(opened)
         self.assertIs(conn.voice_provider, provider)
         self.assertTrue(handled)
-        self.assertEqual(conn.sent[-1]["type"], "alert")
-        self.assertEqual(conn.sent[-1]["status"], "voice_consent_required")
-        self.assertIn("parent", conn.sent[-1]["message"])
+        self.assertEqual(conn.sent, [])
 
     async def test_start_session_opens_live_with_active_consent(self):
         conn = _Conn(allowed=True)
@@ -277,7 +275,7 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(opened)
         self.assertIs(conn.voice_provider, provider)
 
-    async def test_withdrawal_stops_active_voice_before_forwarding_next_frame(self):
+    async def test_consent_withdrawal_no_longer_stops_active_voice(self):
         conn = _Conn(allowed=True)
         forwarded = False
 
@@ -308,12 +306,11 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"child-audio")
 
         self.assertTrue(handled)
-        self.assertFalse(forwarded)
-        self.assertEqual(conn.sent[-1]["type"], "alert")
-        self.assertEqual(conn.sent[-1]["status"], "voice_consent_required")
+        self.assertTrue(forwarded)
+        self.assertEqual(conn.sent, [])
 
 
-    async def test_withdrawal_stops_classic_fallback_before_forwarding_next_frame(self):
+    async def test_consent_withdrawal_no_longer_stops_classic_fallback(self):
         conn = _Conn(allowed=True)
         forwarded = False
 
@@ -339,9 +336,8 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
         handled = await provider.handle_audio_bytes(b"child-audio")
 
         self.assertTrue(handled)
-        self.assertFalse(forwarded)
-        self.assertEqual(conn.sent[-1]["type"], "alert")
-        self.assertEqual(conn.sent[-1]["status"], "voice_consent_required")
+        self.assertTrue(forwarded)
+        self.assertEqual(conn.sent, [])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ from core.voice.session_provider.base import VoiceSessionProvider
 from core.providers.tools.product_toolset import product_tool_names
 from core.voice.live_admission import AdmissionDecision, AdmissionReason, LiveAdmissionGate
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
-from config.voice_consent_client import get_voice_consent_client
 from plugins_func.register import Action
 
 
@@ -112,14 +111,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._closing = False
             if self._client is not None and self._bridge is not None:
                 self.conn.voice_provider = self
-                return
-            if not await self._voice_consent_allows_live():
-                self._voice_consent_denied = True
-                self.conn.voice_provider = self
-                await self._send_voice_consent_required()
-                self.conn.logger.bind(tag="GoogleLive").warning(
-                    "Google Live start denied: missing active AI voice consent"
-                )
                 return
             if self._has_session_orchestrator():
                 self.conn.voice_provider = self
@@ -283,13 +274,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
 
     async def handle_audio_bytes(self, audio_bytes):
-        # Re-verify ACTIVE parental voice consent on every inbound frame, not just at
-        # start_session: a mid-session withdrawal must stop voice BEFORE the next frame is
-        # forwarded (tears down Live/classic and sends a voice_consent_required alert). When
-        # allowed this is a cheap cached check that just clears the denied latch. Runs ahead
-        # of the classic-fallback delegation so a withdrawal also stops the fallback.
-        if not await self._ensure_active_voice_consent():
-            return True
         if self._fallback_provider is not None:
             return await self._fallback_provider.handle_audio_bytes(audio_bytes)
         if self._has_session_orchestrator() and self._bridge is None:
@@ -438,55 +422,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     def _has_session_orchestrator(self):
         return hasattr(self.conn, "session_mode")
-
-    async def _voice_consent_allows_live(self):
-        client = getattr(self.conn, "voice_consent_client", None)
-        if client is None:
-            client = get_voice_consent_client()
-        try:
-            return bool(await client.ensure_voice_allowed(self.conn))
-        except Exception as exc:
-            self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live consent check failed: {}",
-                self._safe_error_message(exc),
-            )
-            return False
-
-    async def _ensure_active_voice_consent(self):
-        if await self._voice_consent_allows_live():
-            self._voice_consent_denied = False
-            return True
-        if not self._voice_consent_denied:
-            await self._close_live_resources()
-            if self._fallback_provider is not None:
-                await self._fallback_provider.close()
-        self._voice_consent_denied = True
-        await self._send_voice_consent_required()
-        return False
-
-    async def _send_voice_consent_required(self):
-        message = "Ask a parent to finish setup."
-        payload = {
-            "type": "alert",
-            "status": "voice_consent_required",
-            "session_id": getattr(self.conn, "session_id", None),
-            "message": message,
-            "emotion": "neutral",
-        }
-        sent = getattr(self.conn, "sent", None)
-        if isinstance(sent, list):
-            sent.append(payload)
-            return
-        websocket = getattr(self.conn, "websocket", None)
-        if websocket is None:
-            return
-        try:
-            await websocket.send(json.dumps(payload))
-        except Exception as exc:
-            self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live consent prompt send failed: {}",
-                self._safe_error_message(exc),
-            )
 
     async def _ensure_live_open_for_audio(self):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
@@ -1226,8 +1161,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if client is not None and hasattr(client, "send_text"):
             return True
         if not self._has_session_orchestrator():
-            return False
-        if not await self._ensure_active_voice_consent():
             return False
         decision = await self._admit_live_open()
         if decision.decision == AdmissionDecision.FRIENDLY_BREAK:
