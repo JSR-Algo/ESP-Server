@@ -30,17 +30,21 @@ def _default_open_url(url: str, *, method: str = "GET", headers=None, timeout: i
         return response.read()
 
 
+def _norm(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
 def _device_ids(metrics: dict) -> set[str]:
     device_ids = set()
     for device in metrics.get("devices", []):
         if isinstance(device, dict) and device.get("deviceId"):
-            device_ids.add(str(device["deviceId"]).lower())
+            device_ids.add(_norm(device["deviceId"]))
     return device_ids
 
 
 def nudge(*, device_id: str, base_url: str, open_url=_default_open_url) -> dict:
     base_url = base_url.rstrip("/")
-    target_id = device_id.lower()
+    target_id = _norm(device_id)
     if not _is_loopback_base_url(base_url):
         print("Refusing non-loopback local nudge base URL.", file=sys.stderr)
         raise SystemExit(2)

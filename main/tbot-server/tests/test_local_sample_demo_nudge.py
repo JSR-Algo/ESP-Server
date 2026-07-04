@@ -95,3 +95,31 @@ def test_posts_loopback_nudge_only_after_target_is_present():
             {"X-TBOT-Local-Sample-Demo": "1"},
         ),
     ]
+
+def test_posts_loopback_nudge_with_normalized_target_identity():
+    module = _load_script()
+    calls = []
+
+    def open_url(url, *, method="GET", headers=None, timeout=5):
+        calls.append((url, method, headers))
+        if url.endswith("/metrics"):
+            return json.dumps(
+                {
+                    "connections": 1,
+                    "devices": [{"deviceId": "  28:84:85:85:1A:80\n"}],
+                }
+            ).encode()
+        return json.dumps({"data": {"nudged": True, "mode": "sample"}}).encode()
+
+    result = module.nudge(
+        device_id="\t28:84:85:85:1A:80 ",
+        base_url="http://127.0.0.1:8003/",
+        open_url=open_url,
+    )
+
+    assert result == {"data": {"nudged": True, "mode": "sample"}}
+    assert calls[-1] == (
+        "http://127.0.0.1:8003/internal/devices/28:84:85:85:1a:80/lesson-nudge",
+        "POST",
+        {"X-TBOT-Local-Sample-Demo": "1"},
+    )
