@@ -122,6 +122,12 @@ class SampleManifestTest(unittest.TestCase):
             "http://assets.test/sample/assets/robot/poses/bright-teach.png",
         )
 
+    def test_sample_manifest_rejects_non_finite_direct_dwell(self):
+        manifest = build_sample_manifest(dwell_sec=float("inf"))
+
+        json.dumps(manifest, allow_nan=False)
+        self.assertTrue(all("dwellSec" not in step for step in manifest["steps"]))
+
     def test_passthrough_asset_cache_surface(self):
         cache = SampleAssetCache()
         self.assertEqual(cache.public_url_for_source("barn.png"), "barn.png")
