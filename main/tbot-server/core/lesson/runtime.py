@@ -1486,7 +1486,7 @@ class LessonRuntime:
         )
         try:
             parsed = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             parsed = 1
         return max(0, parsed)
 

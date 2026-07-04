@@ -1467,6 +1467,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         conn.config = {"lesson": {"frame_ack_timeout_sec": "0.25"}}
         self.assertEqual(rt._frame_ack_timeout_sec(), 0.25)
 
+        conn.config = {"lesson": {"frame_ack_max_retries": float("inf")}}
+        self.assertEqual(rt._frame_ack_max_retries(), 1)
+
     def test_runtime_helper_edges_are_stable(self):
         from core.lesson.runtime import (
             _coerce_ack_seq,
