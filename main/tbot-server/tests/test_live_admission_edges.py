@@ -167,6 +167,17 @@ async def test_redis_live_state_store_defaults_malformed_usage_values():
     assert await store.household_usage_sec_async("house-1") == 0.0
 
 
+@pytest.mark.asyncio
+async def test_redis_live_state_store_defaults_non_finite_usage_values():
+    redis = _Redis()
+    store = RedisLiveStateStore(redis, namespace="test", day_key="2026-06-20")
+    redis.values[store._budget_key("device", "device-1")] = "inf"
+    redis.values[store._budget_key("household", "house-1")] = b"nan"
+
+    assert await store.device_usage_sec_async("device-1") == 0.0
+    assert await store.household_usage_sec_async("house-1") == 0.0
+
+
 def test_create_live_state_store_defaults_and_redis_path(monkeypatch):
     assert isinstance(create_live_state_store({}), InMemoryLiveAdmissionStore)
     assert isinstance(create_live_state_store({"live_state": "bad"}), InMemoryLiveAdmissionStore)

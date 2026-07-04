@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import os
 import inspect
+import math
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -235,9 +236,10 @@ class RedisLiveStateStore:
         if isinstance(value, bytes):
             value = value.decode("utf-8")
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return 0.0
+        return parsed if math.isfinite(parsed) else 0.0
 
     def _resumption_key(self, device_id):
         return f"tbot:live:{self.namespace}:session:{device_id}:resumption"
