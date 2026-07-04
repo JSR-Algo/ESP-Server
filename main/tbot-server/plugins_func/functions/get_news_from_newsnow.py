@@ -144,6 +144,8 @@ CHILD_UNSAFE_NEWS_KEYWORDS = (
     "harm yourself",
     "injure myself",
     "injure yourself",
+    "cut myself",
+    "cut yourself",
     "poison myself",
     "poison yourself",
     "starve myself",
