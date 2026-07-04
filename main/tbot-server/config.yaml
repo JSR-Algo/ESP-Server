@@ -221,7 +221,7 @@ google_live:
   mute_input_after_audio_start_sec: 0.25
   echo_tail_suppression_ms: 400
   suppress_robot_output_echo: true
-  wake_audio_allow_window_sec: 5.0
+  wake_audio_allow_window_sec: 15.0
   # Cho phép user nói đủ lớn/ngắt thật sự lọt qua echo gate khi firmware
   # không gửi wake event trong lúc robot đang nói. Echo loa thường thấp hơn.
   robot_output_echo_bypass_rms_threshold: 650

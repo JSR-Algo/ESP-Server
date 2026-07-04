@@ -677,7 +677,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(handled)
-        self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+        remaining = provider._user_audio_allowed_until - time.monotonic()
+        self.assertGreater(remaining, 10.0)
         sent = [json.loads(payload) for payload in conn.websocket.sent]
         self.assertEqual(sent[0]["type"], "stt")
         self.assertEqual(sent[0]["text"], "Hi ESP")
@@ -2303,7 +2304,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_config["barge_in_transcript_min_output_age_sec"], 0.0)
 
         provider._get_live_config = lambda: {"wake_audio_allow_window_sec": "bad"}
-        self.assertEqual(provider._get_wake_audio_allow_window_sec(), 5.0)
+        self.assertEqual(provider._get_wake_audio_allow_window_sec(), 15.0)
         self.assertIsNone(provider._classify_lesson_start_intent("không bắt đầu bài học"))
         self.assertIsNone(provider._classify_music_control_intent(""))
         self.assertIsNone(provider._extract_strict_music_title(""))

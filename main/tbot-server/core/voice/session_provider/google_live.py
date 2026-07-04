@@ -2894,7 +2894,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             window_default = 25.0
         else:
             window_key = "wake_audio_allow_window_sec"
-            window_default = 5.0
+            window_default = 15.0
         try:
             return float(config.get(window_key, window_default))
         except (TypeError, ValueError):
@@ -3259,9 +3259,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _get_wake_audio_allow_window_sec(self):
         config = self._get_live_config()
         try:
-            window_sec = float(config.get("wake_audio_allow_window_sec", 5.0))
+            window_sec = float(config.get("wake_audio_allow_window_sec", 15.0))
         except (TypeError, ValueError):
-            window_sec = 5.0
+            window_sec = 15.0
         return max(0.1, window_sec)
 
     def _extract_listen_control(self, message):
