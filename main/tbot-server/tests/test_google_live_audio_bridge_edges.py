@@ -415,6 +415,11 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         bridge._locally_cancelled_response_ids.add("response-1")
         self.assertTrue(bridge._is_stale_response_event())
 
+    async def test_unblock_timeout_defaults_malformed_connection_config(self):
+        bridge = self.make_bridge(conn=_Conn(config=["bad"]), client=_Client({}))
+
+        self.assertEqual(bridge._get_unblock_timeout_sec(), 1.5)
+
     async def test_transcript_handler_and_barge_in_failure_edges(self):
         async def fail_user(_text):
             raise RuntimeError("user failed")

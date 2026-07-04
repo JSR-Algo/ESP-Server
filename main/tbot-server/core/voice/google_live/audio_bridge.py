@@ -490,9 +490,7 @@ class GoogleLiveAudioBridge:
             task.cancel()
 
     def _get_unblock_timeout_sec(self):
-        config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        config = self._google_live_config()
         try:
             value = float(config.get("model_output_unblock_timeout_sec", 1.5))
         except (TypeError, ValueError):
@@ -606,9 +604,7 @@ class GoogleLiveAudioBridge:
         """
         if self._user_transcript_barge_in_handler is None:
             return
-        config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        config = self._google_live_config()
         if not bool(config.get("barge_in_via_transcript", False)):
             return
         if (
@@ -920,10 +916,16 @@ class GoogleLiveAudioBridge:
 
     @staticmethod
     def _config_block(config, key):
-        if not isinstance(config, dict):
+        if not isinstance(config, Mapping):
             return {}
         value = config.get(key, {}) or {}
-        return value if isinstance(value, dict) else {}
+        return value if isinstance(value, Mapping) else {}
+
+    def _google_live_config(self):
+        client_config = getattr(self.client, "config", None)
+        if isinstance(client_config, Mapping) and client_config:
+            return client_config
+        return self._config_block(getattr(self.conn, "config", {}), "google_live")
 
     def _redact_safety_text(self, text):
         redacted = str(text or "")
@@ -941,9 +943,7 @@ class GoogleLiveAudioBridge:
         if not audio_bytes:
             return audio_bytes
         input_rate = self._client_input_sample_rate()
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         target_rate = int(client_config.get("input_sample_rate", 16000))
         self._last_input_source_rate = input_rate
         self._last_input_target_rate = target_rate
@@ -1027,9 +1027,7 @@ class GoogleLiveAudioBridge:
                 return int(str(mime_type).split("rate=", 1)[1].split(";", 1)[0])
             except (TypeError, ValueError):
                 pass
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         return int(client_config.get("output_sample_rate", 24000))
 
     def _log_first_audio_out_latency(self):
@@ -1086,9 +1084,7 @@ class GoogleLiveAudioBridge:
     def _should_send_llm_state(self, event):
         if event.get("source") != "model":
             return False
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         return bool(client_config.get("send_llm_state_events", False))
 
     def _current_output_age_sec(self):
@@ -1098,9 +1094,7 @@ class GoogleLiveAudioBridge:
         return max(0.0, time.monotonic() - started_at)
 
     def _get_interruption_min_output_age_sec(self):
-        config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        config = self._google_live_config()
         try:
             value = float(config.get("interruption_min_output_age_sec", 0.0))
         except (TypeError, ValueError):
@@ -1108,9 +1102,7 @@ class GoogleLiveAudioBridge:
         return max(0.0, value)
 
     def _server_side_interruptions_disabled(self):
-        config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        config = self._google_live_config()
         # Explicit operator override: ignore_server_interruptions=True forces live
         # interruptions to be HONORED (subject only to the output-age guard), so it can
         # never silently block a real barge-in regardless of the disable default.
@@ -1119,9 +1111,7 @@ class GoogleLiveAudioBridge:
         return bool(config.get("disable_server_side_interruptions", False))
 
     def _get_transcript_echo_window_sec(self):
-        config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        config = self._google_live_config()
         try:
             value = float(config.get("transcript_echo_window_sec", 15.0))
         except (TypeError, ValueError):
@@ -1194,9 +1184,7 @@ class GoogleLiveAudioBridge:
         self._input_chunk_count += 1
         if self._input_chunk_count != 1 and self._input_chunk_count % 50 != 0:
             return
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         if not bool(client_config.get("log_audio_diagnostics", True)):
             return
         source_rate = getattr(
@@ -1252,10 +1240,7 @@ class GoogleLiveAudioBridge:
             return 24000
 
     def _get_live_input_chunk_bytes(self):
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live",
-            {},
-        )
+        client_config = self._google_live_config()
         try:
             chunk_ms = int(client_config.get("input_live_chunk_ms", 20))
         except (TypeError, ValueError):
@@ -1348,7 +1333,7 @@ class GoogleLiveAudioBridge:
             self._locally_cancelled_response_ids.add(self._active_response_id)
 
     def _get_interrupt_suppress_audio_sec(self):
-        config = self.conn.config.get("google_live", {})
+        config = self._google_live_config()
         try:
             suppress_sec = float(config.get("interrupt_suppress_audio_sec", 0.25))
         except (TypeError, ValueError):
@@ -1356,7 +1341,7 @@ class GoogleLiveAudioBridge:
         return max(0, suppress_sec)
 
     def _mark_echo_tail_suppression(self, reason):
-        config = self.conn.config.get("google_live", {})
+        config = self._google_live_config()
         try:
             tail_ms = float(config.get("echo_tail_suppression_ms", 400))
         except (TypeError, ValueError):
@@ -1377,9 +1362,7 @@ class GoogleLiveAudioBridge:
     # ------------------------------------------------------------------
 
     def _build_aec_processor(self):
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         if not isinstance(client_config, Mapping):
             client_config = {}
         enabled = bool(client_config.get("aec_enabled", False))
@@ -1453,9 +1436,7 @@ class GoogleLiveAudioBridge:
     def _apply_input_gain(self, pcm_bytes):
         if not pcm_bytes:
             return pcm_bytes
-        client_config = getattr(self.client, "config", None) or self.conn.config.get(
-            "google_live", {}
-        )
+        client_config = self._google_live_config()
         try:
             gain = float(client_config.get("input_gain", 1.0))
         except (TypeError, ValueError):
