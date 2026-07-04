@@ -414,6 +414,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             # next lesson step's audio is not dropped.
             if self._interaction.state == InteractionState.WAITING_MODEL:
                 self._interaction.transition(InteractionState.USER_STREAMING)
+            self._record_user_stream_audio(decoded)
+            if self._user_turn_can_finalize():
+                await self._finalize_user_turn_clean()
+            else:
+                self._schedule_input_flush()
             self.conn.client_abort = False
             return True
         except Exception as exc:

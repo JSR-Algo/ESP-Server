@@ -1007,6 +1007,38 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._user_stream_frames, 0)
         self.assertIsNotNone(provider._waiting_model_since)
 
+    async def test_lesson_child_audio_uses_clean_turn_finalizer(self):
+        conn = _Conn()
+        conn.config["google_live"].update(
+            {
+                "input_min_capture_ms": 0,
+                "input_speech_tail_ms": 0,
+                "input_max_capture_ms": 0,
+            }
+        )
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            _step_passive=False,
+            _step_completed=False,
+            _child_response_window_open=True,
+            on_child_response=lambda *_args, **_kwargs: True,
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._user_audio_allowed_until = time.monotonic() + 5
+
+        handled = await provider.handle_audio_bytes(b"barn")
+
+        self.assertTrue(handled)
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertEqual(provider._client.end_calls, 1)
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.WAITING_MODEL,
+        )
+        self.assertIsNone(provider._user_stream_started_at)
+
     async def test_finalize_is_guarded_against_re_arm_while_waiting_model(self):
         # FIX B: a redundant finalize (late listen_stop / idle-flush race) arriving
         # while already WAITING_MODEL must not re-send end_audio_stream nor re-stamp

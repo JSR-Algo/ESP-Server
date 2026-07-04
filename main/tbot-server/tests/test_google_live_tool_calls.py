@@ -1513,7 +1513,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._bridge.forwarded, [b"pcm:next-step"])
         self.assertEqual(handler.calls, [])
 
-    async def test_waiting_model_does_not_drop_audio_during_open_lesson_response_window(self):
+    async def test_waiting_model_forwards_and_finalizes_lesson_response_audio(self):
         provider, handler = self._make_provider()
         provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
@@ -1550,10 +1550,11 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await provider.handle_audio_bytes(b"barn"))
 
         self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
-        self.assertNotEqual(
+        self.assertEqual(
             provider._interaction.state,
             google_live_module.InteractionState.WAITING_MODEL,
         )
+        self.assertIsNone(provider._user_stream_started_at)
         self.assertEqual(handler.calls, [])
 
     async def test_lesson_child_response_audio_forward_logs_diagnostic(self):
