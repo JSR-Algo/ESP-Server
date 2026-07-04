@@ -4,6 +4,7 @@ import time
 import unittest
 from collections import deque
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from plugins_func.register import Action
 from core.voice.live_admission import AdmissionDecision, AdmissionReason
@@ -697,6 +698,25 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(provider._client.text)
         self.assertIn("con hỏi gì", provider._client.text[-1])
+
+    async def test_listen_start_wake_greeting_has_long_cooldown(self):
+        conn = _Conn()
+        conn.config["enable_greeting"] = True
+        conn.session_mode = SessionMode.CONVERSATION
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+
+        with patch.object(
+            google_live_module.time,
+            "monotonic",
+            side_effect=[100.0, 100.0, 105.0, 105.0, 116.0, 116.0],
+        ):
+            await provider.handle_text_message('{"type":"listen","state":"start"}')
+            await provider.handle_text_message('{"type":"listen","state":"start"}')
+            await provider.handle_text_message('{"type":"listen","state":"start"}')
+
+        self.assertEqual(len(provider._client.text), 2)
 
     async def test_lesson_start_intent_bootstraps_missing_tool_handler_in_dormant_live_mode(self):
         conn = _Conn()

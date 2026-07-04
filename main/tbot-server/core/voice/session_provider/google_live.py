@@ -2922,7 +2922,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         now = time.monotonic()
         if (
             self._last_wake_greeting_at is not None
-            and now - self._last_wake_greeting_at < 2.0
+            and now - self._last_wake_greeting_at < 15.0
         ):
             return False
         text = "Dạ, con hỏi gì nào?"
