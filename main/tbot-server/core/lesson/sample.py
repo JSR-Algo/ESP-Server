@@ -630,6 +630,19 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
     conn.lesson_runtime = runtime
 
     try:
+        prepare_voice = getattr(
+            getattr(conn, "voice_provider", None),
+            "prepare_for_sample_lesson",
+            None,
+        )
+        if callable(prepare_voice):
+            try:
+                _log("info", "sample lesson preparing voice provider")
+                prepared = prepare_voice()
+                if asyncio.iscoroutine(prepared) or hasattr(prepared, "__await__"):
+                    await prepared
+            except Exception as exc:
+                _log("warning", f"sample lesson voice prepare failed: {type(exc).__name__}")
         enter_lesson = getattr(conn, "enter_lesson_mode", None)
         if callable(enter_lesson):
             _log("info", "sample lesson entering lesson mode")

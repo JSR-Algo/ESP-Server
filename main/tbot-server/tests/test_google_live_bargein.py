@@ -255,6 +255,56 @@ class EndAudioStreamGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(skipped_logs)
 
 
+    async def test_interrupt_runtime_error_is_swallowed_when_client_not_connected(self):
+        conn = _Conn()
+
+        class _InterruptFailClient(_Client):
+            async def interrupt(self):
+                self.interrupt_calls += 1
+                raise RuntimeError("Google Live client not connected")
+
+        client = _InterruptFailClient(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+        await provider._begin_user_interrupt("explicit_interrupt")
+        await provider.close()
+
+        skipped_logs = [
+            args
+            for level, args, _ in conn.logger.messages
+            if level == "info"
+            and args
+            and "interrupt skipped" in str(args[0])
+        ]
+        self.assertEqual(client.interrupt_calls, 1)
+        self.assertTrue(skipped_logs)
+
+    async def test_stop_output_runtime_error_is_swallowed_during_interrupt(self):
+        conn = _Conn()
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        class _StopFailBridge:
+            async def stop_output(self):
+                raise RuntimeError("Google Live client not connected")
+
+            async def flush_pending_input_audio(self):
+                return 0
+
+        provider._bridge = _StopFailBridge()
+        await provider._begin_user_interrupt("explicit_interrupt")
+        await provider.close()
+
+        skipped_logs = [
+            args
+            for level, args, _ in conn.logger.messages
+            if level == "info"
+            and args
+            and "stop_output skipped" in str(args[0])
+        ]
+        self.assertTrue(skipped_logs)
+
     async def test_interrupt_hard_reconnect_when_enabled(self):
         conn = _Conn()
         conn.config["google_live"]["hard_reconnect_on_interrupt"] = True
@@ -915,7 +965,7 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             any("echo_suppressed" in str(args[0]) for _, args, _ in conn.logger.messages)
         )
 
-    async def test_aec_cleaned_audio_is_forwarded_while_robot_speaks_for_live_vad(self):
+    async def test_aec_cleaned_audio_is_suppressed_while_robot_speaks(self):
         conn = _Conn()
         conn.client_is_speaking = True
         conn.google_live_audio_out_started_at = time.monotonic() - 1.0
@@ -929,13 +979,19 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(provider._bridge.forwarded, [b"\x01\x02" * 320])
-        self.assertTrue(
+        self.assertEqual(provider._bridge.forwarded, [])
+        self.assertIsNone(provider._user_stream_started_at)
+        self.assertIsNone(provider._input_flush_task)
+        self.assertIsNone(conn.google_live_turn_started_at)
+        self.assertFalse(
             any("forward_input" in str(args) for _, args, _ in conn.logger.messages)
         )
         self.assertTrue(
-            any(
-                "aec_live_vad_forward" in str(args)
+            any("echo_suppressed" in str(args) for _, args, _ in conn.logger.messages)
+        )
+        self.assertTrue(
+            all(
+                "aec_live_vad_forward" not in str(args)
                 for _, args, _ in conn.logger.messages
             )
         )

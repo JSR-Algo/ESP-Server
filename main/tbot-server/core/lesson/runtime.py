@@ -370,10 +370,17 @@ def _child_response_matches_expected(response: Any, expected_responses: List[str
     response_tokens = _matching_tokens(response)
     if not response_tokens:
         return False
+    token_aliases = {
+        "barn": {"bang", "bon", "bong", "darn", "nong"},
+    }
     for expected in expected_responses:
         expected_tokens = _matching_tokens(expected)
         if _contains_token_sequence(response_tokens, expected_tokens):
             return True
+        if len(expected_tokens) == 1:
+            aliases = token_aliases.get(expected_tokens[0], set())
+            if aliases and any(token in aliases for token in response_tokens):
+                return True
     return False
 
 def _child_response_retry_prompt(
@@ -865,11 +872,15 @@ class LessonRuntime:
             return None
         if body:
             return None
-        if any(
-            key in msg_json
-            for key in ("assignmentId", "sessionId", "lessonId", "lessonVersion", "stepId", "sequence")
-        ):
-            return None
+        expected_fields = (
+            ("assignmentId", self.assignment_id),
+            ("sessionId", self.session_id),
+            ("lessonId", self.lesson_id),
+            ("lessonVersion", self.lesson_version),
+        )
+        for key, expected in expected_fields:
+            if key in msg_json and expected is not None and msg_json.get(key) != expected:
+                return None
         if len(self._outstanding) != 1:
             return None
         seq = next(iter(self._outstanding))
@@ -1081,8 +1092,9 @@ class LessonRuntime:
             # acknowledged the rendered lesson_step. This keeps the visual scene
             # (backgroundScene + teachingObject + robotOverlay) on screen before
             # TeeBot starts teaching or listening for the child's reply.
+            prompt_handed_off = False
             if self._step is not None:
-                await self._speak_step_prompt(self._step)
+                prompt_handed_off = await self._speak_step_prompt(self._step)
             if not self._is_active_runtime():
                 return
             if self._step_passive:
@@ -1098,6 +1110,14 @@ class LessonRuntime:
                 # Default 0 -> advance immediately on ack (byte-for-byte the prior behavior;
                 # real lessons that set no dwell are unchanged). The dwell runs as a guarded
                 # task so it never blocks the inbound receive loop.
+                if prompt_handed_off:
+                    await self._wait_lesson_prompt_idle()
+                    if (
+                        not self._is_active_runtime()
+                        or self.state != S_RUNNING
+                        or not self._step_passive
+                    ):
+                        return
                 dwell = self._passive_dwell_sec()
                 if dwell > 0:
                     self._start_passive_dwell(self._step_seq, self._step_id, dwell)
@@ -1337,11 +1357,11 @@ class LessonRuntime:
             return
         self._start_step_timeout(self._step_seq, self._step_id, timeout_sec)
 
-    async def _speak_step_prompt(self, step: Dict[str, Any]) -> None:
+    async def _speak_step_prompt(self, step: Dict[str, Any]) -> bool:
         prompt = _spoken_step_prompt(step)
         if prompt is None:
-            return
-        await self._speak_lesson_prompt_text(
+            return False
+        return await self._speak_lesson_prompt_text(
             prompt,
             step_id=self._step_id,
             continue_listening=not self._step_passive,
@@ -1353,13 +1373,13 @@ class LessonRuntime:
         *,
         step_id: Optional[str] = None,
         continue_listening: bool = False,
-    ) -> None:
+    ) -> bool:
         if not self._is_active_runtime():
-            return
+            return False
         provider = getattr(self.conn, "voice_provider", None)
         speaker = getattr(provider, "speak_lesson_step_prompt", None)
         if not callable(speaker):
-            return
+            return False
         try:
             try:
                 handed_off = bool(
@@ -1373,10 +1393,25 @@ class LessonRuntime:
                 "info" if handed_off else "warning",
                 f"lesson step prompt handoff stepId={step_id or self._step_id or ''} handoff={int(handed_off)}",
             )
+            return handed_off
         except Exception as exc:  # pragma: no cover - voice prompt is best-effort
             self._log(
                 "warning",
                 f"lesson step prompt voice handoff failed stepId={step_id or self._step_id or ''}: {type(exc).__name__}",
+            )
+            return False
+
+    async def _wait_lesson_prompt_idle(self) -> None:
+        provider = getattr(self.conn, "voice_provider", None)
+        waiter = getattr(provider, "wait_lesson_step_prompt_idle", None)
+        if not callable(waiter):
+            return
+        try:
+            await waiter()
+        except Exception as exc:  # pragma: no cover - prompt idle wait is best-effort
+            self._log(
+                "warning",
+                f"lesson step prompt idle wait failed stepId={self._step_id or ''}: {type(exc).__name__}",
             )
 
     async def _maybe_finish_step(self) -> None:
@@ -2275,38 +2310,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         limits=httpx.Limits(max_keepalive_connections=0),
         follow_redirects=True,
     ) as client:
-        # D-RUNTOKEN bridge: resolve the robot's Wi-Fi MAC -> backend device UUID
-        # + a short-lived device-scoped JWT so the assignment pull authenticates as
-        # the device. A mint failure is surfaced locally and the pull is skipped;
-        # a legacy MAC/no-token request only creates a swallowed backend 401.
+        # Use the WebSocket device identity directly. The robot voice path must not
+        # depend on dynamic DeviceToken minting; unclaimed devices can make the
+        # backend pull fail without blocking the realtime connection.
         backend_device_id = device_id
-        try:
-            from config.device_token_client import resolve_device_identity
-
-            minted_uuid, minted_token = await resolve_device_identity(
-                client, base_url, device_id, logger=logger
-            )
-            if minted_uuid and minted_token:
-                backend_device_id = minted_uuid
-                token = minted_token
-            else:
-                _set_lesson_start_status(
-                    conn,
-                    "DEVICE_TOKEN_UNAVAILABLE",
-                    "Robot chưa xác thực được với máy chủ bài học.",
-                    reason="missing_identity",
-                )
-                _log("warning", "device token required for lesson pull; skipping tokenless request")
-                return None
-        except Exception as exc:  # pragma: no cover - bridge is best-effort
-            _set_lesson_start_status(
-                conn,
-                "DEVICE_TOKEN_UNAVAILABLE",
-                "Robot chưa xác thực được với máy chủ bài học.",
-                reason="missing_identity",
-            )
-            _log("warning", f"device-token mint unavailable: {type(exc).__name__}: {exc}")
-            return None
         # Best-effort: address the child by name in plain CONVERSATION. The name
         # the parent sets in the mobile app lives in the backend child profile, NOT
         # the esp manager-api ``ai_device.child_name`` the agent-models config

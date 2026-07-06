@@ -435,6 +435,21 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
+        if (
+            isinstance(message, str)
+            and self._google_live_mode_configured()
+            and self._is_listen_control_message(message)
+        ):
+            await self._wait_for_voice_provider_ready()
+            if self.voice_provider is not None:
+                await self.voice_provider.handle_text_message(message)
+            return
+
+        if isinstance(message, bytes) and self._google_live_mode_configured():
+            await self._wait_for_voice_provider_ready()
+            await self._route_audio_message(message)
+            return
+
         if isinstance(message, str) and (
             self._is_hello_message(message)
             or self._is_ping_message(message)
@@ -607,6 +622,7 @@ class ConnectionHandler:
         — never raises into the lesson terminal path."""
         if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
             return
+        await self._stop_lesson_terminal_speaking_status()
         lesson_cfg = _lesson_config(self.config)
         if lesson_cfg.get("return_to_conversation", True):
             if lesson_cfg.get("smooth_finish_to_conversation", True):
@@ -625,6 +641,28 @@ class ConnectionHandler:
         else:
             await self.enter_dormant_mode(reason=reason)
         await self._send_lesson_emotion(self._lesson_terminal_emotion(reason))
+
+    async def _stop_lesson_terminal_speaking_status(self) -> None:
+        if not getattr(self, "client_is_speaking", False):
+            return
+        ws = getattr(self, "websocket", None)
+        if ws is not None:
+            try:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": self.session_id,
+                        }
+                    )
+                )
+            except Exception as e:  # pragma: no cover - best-effort terminal clear
+                try:
+                    self.logger.bind(tag=TAG).warning(f"send lesson tts stop failed: {e}")
+                except Exception:
+                    pass
+        self.clearSpeakStatus()
 
     @staticmethod
     def _lesson_terminal_emotion(reason: str) -> str:
@@ -718,6 +756,13 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "ping"
+
+    def _is_listen_control_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "listen"
 
     def _is_lesson_control_message(self, message):
         try:

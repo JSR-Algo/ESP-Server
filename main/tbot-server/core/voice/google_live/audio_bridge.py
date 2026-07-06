@@ -189,6 +189,8 @@ class GoogleLiveAudioBridge:
                 if self._should_drop_lesson_model_output(event_type):
                     return True
                 self._record_model_transcript(transcript_text)
+                if self._is_lesson_prompt_output_allowed():
+                    return True
                 if self._is_unsafe_model_output(transcript_text):
                     await self._block_unsafe_model_output(transcript_text)
                     return True
@@ -297,16 +299,19 @@ class GoogleLiveAudioBridge:
                 self._reset_output_encoder()
                 self._active_response_id = None
                 self.conn.google_live_audio_out_started_at = None
+                self._clear_lesson_prompt_output_gate()
                 return True
             if self._moderation_block_active:
                 self._moderation_block_active = False
                 self._reset_output_encoder()
                 self._active_response_id = None
+                self._clear_lesson_prompt_output_gate()
                 return True
             if self._block_model_output_until_user_ack:
                 self._reset_output_encoder()
                 self._active_response_id = None
                 self._waiting_for_interrupted_audio_end = False
+                self._clear_lesson_prompt_output_gate()
                 self._log_stale_model_event_drop(event_type, "blocked_until_user_turn")
                 if self._maybe_unblock_after_interrupted_turn_drained():
                     self.logger.bind(tag="GoogleLive").info(
@@ -317,6 +322,7 @@ class GoogleLiveAudioBridge:
             if self._is_stale_response_event():
                 self._reset_output_encoder()
                 self._active_response_id = None
+                self._clear_lesson_prompt_output_gate()
                 return True
             flushed_packets = await self._flush_output_audio()
             self.logger.bind(tag="GoogleLive").info(
@@ -366,6 +372,11 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "interruption":
+            if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+                self.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_interruption_ignored"
+                )
+                return True
             if self._server_side_interruptions_disabled():
                 self.logger.bind(tag="GoogleLive").info(
                     "Google Live server interruption ignored by config"
@@ -401,6 +412,7 @@ class GoogleLiveAudioBridge:
         return False
 
     async def stop_output(self):
+        output_age = self._current_output_age_sec()
         self.conn.google_live_audio_out_started_at = None
         self._mark_active_response_cancelled()
         self._waiting_for_interrupted_audio_end = (
@@ -418,6 +430,10 @@ class GoogleLiveAudioBridge:
         self._output_byte_count = 0
         self._reset_output_encoder()
         self._clear_conn_queues()
+        self.logger.bind(tag="GoogleLive").info(
+            "Google Live interruption output_age_ms={}",
+            round(output_age * 1000, 1) if output_age is not None else 0.0,
+        )
         self._schedule_unblock_timeout()
         await self._send_tts_stop_now()
 
@@ -564,6 +580,17 @@ class GoogleLiveAudioBridge:
             return False
         self._log_stale_model_event_drop(event_type, "lesson_mode_model_output")
         return True
+
+    def _is_lesson_prompt_output_allowed(self):
+        try:
+            in_lesson = normalize_session_mode(
+                getattr(self.conn, "session_mode", None)
+            ) == SessionMode.LESSON
+        except Exception:
+            in_lesson = False
+        return in_lesson and bool(
+            getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
+        )
 
     def _clear_lesson_prompt_output_gate(self):
         if hasattr(self.conn, "google_live_lesson_prompt_output_allowed"):
@@ -870,8 +897,6 @@ class GoogleLiveAudioBridge:
         if not base_url or not device_id:
             return None
         try:
-            import httpx
-            from config.device_token_client import resolve_device_identity
             from core.lesson.forwarder import LessonEventForwarder
         except Exception as exc:
             self.logger.bind(tag="GoogleLive").warning(
@@ -882,24 +907,6 @@ class GoogleLiveAudioBridge:
 
         token = lesson_cfg.get("device_token")
         backend_device_id = device_id
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(5.0),
-                limits=httpx.Limits(max_keepalive_connections=0),
-                follow_redirects=True,
-            ) as client:
-                minted_uuid, minted_token = await resolve_device_identity(
-                    client, base_url, device_id, logger=self.logger
-                )
-            if minted_uuid and minted_token:
-                backend_device_id = minted_uuid
-                token = minted_token
-        except Exception as exc:
-            self.logger.bind(tag="GoogleLive").warning(
-                "Google Live safety forwarder token mint failed: {}",
-                exc,
-            )
-
         if not token:
             self.logger.bind(tag="GoogleLive").warning(
                 "Google Live safety_block event dropped: no device token"
@@ -1351,6 +1358,8 @@ class GoogleLiveAudioBridge:
         until = time.monotonic() + tail_ms / 1000.0
         current_until = getattr(self.conn, "google_live_echo_suppress_until", 0.0)
         self.conn.google_live_echo_suppress_until = max(current_until, until)
+        current_audible_until = getattr(self.conn, "google_live_audible_output_until", 0.0)
+        self.conn.google_live_audible_output_until = max(current_audible_until, until)
         self.logger.bind(tag="GoogleLive").info(
             "echo_tail_suppression_started reason={} duration_ms={:.0f}",
             reason,

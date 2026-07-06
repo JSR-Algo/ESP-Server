@@ -164,8 +164,8 @@ google_live:
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
   # ── Child-speech capture tuning ("robot can't hear the child / con nói lại") ──
-  # Previously absent → ran on code defaults (tail 900ms, min 360, max 8000,
-  # waiting_model 6.0s). The 900ms tail finalized a still-talking child on any
+  # Previously absent -> ran on code defaults (tail 900ms, min 360, max 8000).
+  # The 900ms tail finalized a still-talking child on any
   # mid-sentence pause ≥0.9s, then the WAITING_MODEL branch hard-dropped the
   # continuation → child unheard. Starting values below; TUNE ON-DEVICE using
   # log_audio_diagnostics (measure mid-utterance pause distribution + model
@@ -176,16 +176,21 @@ google_live:
   input_flush_delay_sec: 1.4
   # Faster normal conversation turn-close. Lesson mode keeps the longer values
   # above so a child pause does not cut the answer early.
-  conversation_input_flush_delay_sec: 0.7
+  conversation_input_flush_delay_sec: 0.45
   input_speech_tail_ms: 1300
-  conversation_input_speech_tail_ms: 650
+  conversation_input_speech_tail_ms: 420
   input_min_capture_ms: 400
   input_max_capture_ms: 8000
+  conversation_input_max_capture_ms: 2500
   input_speech_rms_threshold: 500
+  lesson_child_input_speech_rms_threshold: 2000
   input_gain: 6.0
-  # Reopen listening quickly if Live returns no model audio.
-  waiting_model_timeout_sec: 2.0
+  # Hold a pending Live turn long enough for real first audio before reopening
+  # the mic. Too low makes the UI look like listening while Gemini is still
+  # preparing audio and stacks ambient-noise turns.
+  waiting_model_timeout_sec: 4.0
   waiting_model_retry_prompt_after_sec: 12.0
+  live_open_timeout_sec: 12.0
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
   # risk of clipping the trailing syllable; higher = safer transcript

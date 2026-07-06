@@ -95,16 +95,18 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(merged["google_live"]["interrupt_policy"], "wake_or_transcript")
         self.assertFalse(merged["google_live"]["raw_audio_barge_in_enabled"])
         self.assertEqual(merged["google_live"]["input_flush_delay_sec"], 1.4)
-        self.assertEqual(merged["google_live"]["conversation_input_flush_delay_sec"], 0.7)
+        self.assertEqual(merged["google_live"]["conversation_input_flush_delay_sec"], 0.45)
         self.assertEqual(merged["google_live"]["input_speech_tail_ms"], 1300)
-        self.assertEqual(merged["google_live"]["conversation_input_speech_tail_ms"], 650)
+        self.assertEqual(merged["google_live"]["conversation_input_speech_tail_ms"], 420)
         self.assertEqual(merged["google_live"]["input_min_capture_ms"], 400)
         self.assertEqual(merged["google_live"]["input_max_capture_ms"], 8000)
+        self.assertEqual(merged["google_live"]["conversation_input_max_capture_ms"], 2500)
         self.assertEqual(merged["google_live"]["input_speech_rms_threshold"], 500)
+        self.assertEqual(merged["google_live"]["lesson_child_input_speech_rms_threshold"], 2000)
         self.assertEqual(merged["google_live"]["input_gain"], 6.0)
-        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 2.0)
+        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 4.0)
         self.assertEqual(merged["google_live"]["waiting_model_retry_prompt_after_sec"], 12.0)
-        self.assertEqual(merged["google_live"]["lesson_prompt_output_guard_timeout_sec"], 15.0)
+        self.assertEqual(merged["google_live"]["lesson_prompt_output_guard_timeout_sec"], 30.0)
         self.assertEqual(merged["google_live"]["lesson_prompt_playback_guard_timeout_sec"], 12.0)
         self.assertEqual(merged["google_live"]["interrupt_rms_threshold"], 5000)
         self.assertEqual(
@@ -166,19 +168,21 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         # Tuned up from the 1.0 code default (child-speech capture fix); must stay
         # >= input_speech_tail_ms so the idle safety-net doesn't re-cut a paused child.
         self.assertEqual(google_live["input_flush_delay_sec"], 1.4)
-        self.assertEqual(google_live["conversation_input_flush_delay_sec"], 0.7)
-        self.assertEqual(google_live["waiting_model_timeout_sec"], 2.0)
+        self.assertEqual(google_live["conversation_input_flush_delay_sec"], 0.45)
+        self.assertEqual(google_live["waiting_model_timeout_sec"], 4.0)
         self.assertEqual(google_live["interruption_min_output_age_sec"], 0.0)
         self.assertEqual(google_live["barge_in_transcript_min_output_age_sec"], 0.0)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_flush_delay_sec"], 1.4)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_flush_delay_sec"], 0.7)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_flush_delay_sec"], 0.45)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_tail_ms"], 1300)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_speech_tail_ms"], 650)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_speech_tail_ms"], 420)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_min_capture_ms"], 400)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_max_capture_ms"], 8000)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_max_capture_ms"], 2500)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_rms_threshold"], 500)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["lesson_child_input_speech_rms_threshold"], 2000)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_gain"], 6.0)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 2.0)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 4.0)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["interruption_min_output_age_sec"], 0.0)
         self.assertEqual(
             GOOGLE_LIVE_DEFAULTS["barge_in_transcript_min_output_age_sec"],
@@ -243,7 +247,7 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
             merged["google_live"]["barge_in_transcript_min_output_age_sec"],
             0.0,
         )
-        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 2.0)
+        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 4.0)
         self.assertEqual(
             merged["google_live"]["voice_name"],
             DEFAULT_GOOGLE_LIVE_VOICE_NAME,

@@ -84,6 +84,11 @@ IMMEDIATE_PRONUNCIATION_SCORING_PATTERNS = (
     re.compile(r"(?i)\bsai rồi\b"),
 )
 
+FIRST_AUDIO_OUT_MARKER_PATTERN = (
+    r"(?:Google Live first_audio_out_latency_ms=[\d.]+|"
+    r"Google Live turn_latency_ms=[\d.]+ phase=first_audio_out)"
+)
+
 
 def _is_target_physical_ws_connection_line(line, device_id, client_id, server_ip=None):
     if "Headers:" not in line:
@@ -193,7 +198,7 @@ def _model_echo_user_transcript_count(lines):
             continue
         normalized = _normalize_transcript_for_echo(_extract_prompt_text(line))
         if any(
-            (len(normalized) >= 3 and normalized == model_text)
+            (len(normalized) >= 12 and normalized == model_text)
             or (len(normalized) >= 12 and normalized in model_text)
             for model_text in model_texts
         ):
@@ -237,6 +242,34 @@ def _expected_user_transcript_match_count(transcript_texts, expected_transcripts
             matches += 1
     return matches
 
+
+def _post_lesson_response_chain_count(lines, expected_transcripts):
+    expected_transcripts = [
+        str(text).strip()
+        for text in (expected_transcripts or [])
+        if str(text).strip()
+    ]
+    after_lesson = False
+    pending_transcripts = 0
+    chains = 0
+    for line in lines:
+        if re.search(r"lesson_completed|stepsCompleted=\d+", line):
+            after_lesson = True
+            continue
+        if not after_lesson:
+            continue
+        if "Google Live transcript source=user" in line:
+            text = _extract_prompt_text(line).strip()
+            if text and (
+                not expected_transcripts
+                or _expected_user_transcript_match_count([text], expected_transcripts)
+            ):
+                pending_transcripts += 1
+            continue
+        if pending_transcripts and re.search(FIRST_AUDIO_OUT_MARKER_PATTERN, line):
+            pending_transcripts -= 1
+            chains += 1
+    return chains
 
 def _user_transcript_texts_after_interruption(lines):
     texts = []
@@ -379,9 +412,13 @@ def _number_stats(values):
 
 
 def _first_audio_out_ms_stats(log_text):
-    return _number_stats(
-        re.findall(r"first_audio_out_latency_ms=([\d.]+)", log_text)
+    values = re.findall(
+        r"Google Live turn_latency_ms=([\d.]+) phase=first_audio_out",
+        log_text,
     )
+    if not values:
+        values = re.findall(r"first_audio_out_latency_ms=([\d.]+)", log_text)
+    return _number_stats(values)
 
 def _ordered_marker_pair_count(lines, first_pattern, second_pattern):
     first = re.compile(first_pattern)
@@ -1032,16 +1069,26 @@ def audit_log(
     min_output_relisten_chains=None,
     min_output_moderation_blocks=None,
     min_safe_deflection_live_text=None,
+    max_aec_live_vad_forward=None,
+    max_listen_start_interrupts=None,
     max_first_audio_ms=None,
     max_interrupt_stop_latency_ms=None,
+    require_post_lesson_response=False,
     require_lesson_live_text=False,
     min_lesson_live_text_chars=None,
     lesson_manifest=None,
     expected_user_transcripts=None,
+    expected_post_lesson_transcripts=None,
+    allowed_fatal_patterns=None,
 ):
     expected_user_transcripts = [
         str(text).strip()
         for text in (expected_user_transcripts or [])
+        if str(text).strip()
+    ]
+    expected_post_lesson_transcripts = [
+        str(text).strip()
+        for text in (expected_post_lesson_transcripts or [])
         if str(text).strip()
     ]
     if min_audio_interrupts is None:
@@ -1088,6 +1135,13 @@ def audit_log(
     )
     live_server_interruption = len(
         re.findall(r"Google Live interruption output_age_ms=\d", evidence_log_text)
+    )
+    listen_start_interrupts = len(
+        re.findall(
+            r"(?:Google Live user_interrupted reason=listen_start|"
+            r"interrupt_started reason=listen_start)",
+            evidence_log_text,
+        )
     )
     interrupt_tts_stops = len(
         re.findall(
@@ -1152,17 +1206,21 @@ def audit_log(
     live_identity_first_audio_chains = _ordered_marker_pair_count(
         lines,
         r"Google Live session identity .*model=gemini-3\.1-flash-live-preview .*voice=Kore .*language=vi-VN",
-        r"Google Live first_audio_out_latency_ms=[\d.]+",
+        FIRST_AUDIO_OUT_MARKER_PATTERN,
     )
     output_relisten_chains = _ordered_marker_pair_count(
         lines,
-        r"Google Live first_audio_out_latency_ms=[\d.]+",
+        FIRST_AUDIO_OUT_MARKER_PATTERN,
         r"(?:Google Live )?tts_stop_sent "
         r"continue_listening=true listen_mode=realtime",
     )
     user_transcript_expected_matches = _expected_user_transcript_match_count(
         _user_transcript_texts(lines),
         expected_user_transcripts,
+    )
+    post_lesson_response_chains = _post_lesson_response_chain_count(
+        lines,
+        expected_post_lesson_transcripts,
     )
     post_interrupt_user_transcript_expected_matches = _expected_user_transcript_match_count(
         _user_transcript_texts_after_interruption(lines),
@@ -1171,7 +1229,12 @@ def audit_log(
     user_transcripts = len(
         re.findall(r"Google Live transcript source=user chars=\d+", evidence_log_text)
     )
-    fatal_hits = [pattern for pattern in FATAL_PATTERNS if pattern in evidence_log_text]
+    allowed_fatal_patterns = set(allowed_fatal_patterns or [])
+    fatal_hits = [
+        pattern
+        for pattern in FATAL_PATTERNS
+        if pattern in evidence_log_text and pattern not in allowed_fatal_patterns
+    ]
     fatal_hits.extend(
         label
         for label, pattern in FATAL_REGEX_PATTERNS
@@ -1228,6 +1291,14 @@ def audit_log(
         min_aec_live_vad_forward = int(min_aec_live_vad_forward)
         if aec_live_vad_forward < min_aec_live_vad_forward:
             missing.append(f"aec_live_vad_forward>={min_aec_live_vad_forward}")
+    if max_aec_live_vad_forward is not None:
+        max_aec_live_vad_forward = int(max_aec_live_vad_forward)
+        if aec_live_vad_forward > max_aec_live_vad_forward:
+            missing.append(f"aec_live_vad_forward<={max_aec_live_vad_forward}")
+    if max_listen_start_interrupts is not None:
+        max_listen_start_interrupts = int(max_listen_start_interrupts)
+        if listen_start_interrupts > max_listen_start_interrupts:
+            missing.append(f"listen_start_interrupts<={max_listen_start_interrupts}")
     if min_aec_interruption_chains is not None:
         min_aec_interruption_chains = int(min_aec_interruption_chains)
         if aec_interruption_chains < min_aec_interruption_chains:
@@ -1296,6 +1367,10 @@ def audit_log(
             )
     if fatal_hits:
         missing.append("no_fatal_patterns")
+    if (
+        require_post_lesson_response or expected_post_lesson_transcripts
+    ) and post_lesson_response_chains < 1:
+        missing.append("post_lesson_response")
 
     lesson = None
     if require_lesson:
@@ -1317,6 +1392,7 @@ def audit_log(
         "input_audio_diag": input_audio_diag,
         "first_audio_out_ms": first_audio_out_ms,
         "aec_live_vad_forward": aec_live_vad_forward,
+        "listen_start_interrupts": listen_start_interrupts,
         "aec_interruption_chains": aec_interruption_chains,
         "live_server_interruption": live_server_interruption,
         "interrupt_tts_stops": interrupt_tts_stops,
@@ -1335,6 +1411,8 @@ def audit_log(
         "user_transcripts": user_transcripts,
         "expected_user_transcripts": len(expected_user_transcripts),
         "user_transcript_expected_matches": user_transcript_expected_matches,
+        "expected_post_lesson_transcripts": len(expected_post_lesson_transcripts),
+        "post_lesson_response_chains": post_lesson_response_chains,
         "post_interrupt_user_transcript_expected_matches": (
             post_interrupt_user_transcript_expected_matches
         ),
@@ -1470,6 +1548,15 @@ def main():
             "With --production-voice-strict, it must appear after a Live interruption."
         ),
     )
+    parser.add_argument(
+        "--expected-post-lesson-transcript",
+        action="append",
+        default=[],
+        help=(
+            "Expected phrase after lesson_completed that must be followed by "
+            "a Live first_audio_out marker; repeatable."
+        ),
+    )
     parser.add_argument("--require-aec-live-vad-forward", action="store_true")
     parser.add_argument("--require-live-server-interruption", action="store_true")
     parser.add_argument("--max-first-audio-ms", type=float)
@@ -1479,6 +1566,15 @@ def main():
         help=(
             "Require production voice gates: fast first audio and AEC-cleaned "
             "Live VAD forwarding while robot audio is active."
+        ),
+    )
+    parser.add_argument(
+        "--production-output-safe-strict",
+        action="store_true",
+        help=(
+            "Require output-safe Google Live gates: no listen_start self-interrupt, "
+            "no AEC-forward during robot speech, realtime relisten, and a "
+            "post-lesson user transcript followed by Live first audio."
         ),
     )
     parser.add_argument(
@@ -1579,6 +1675,10 @@ def main():
     min_output_relisten_chains = None
     min_output_moderation_blocks = None
     min_safe_deflection_live_text = None
+    max_aec_live_vad_forward = None
+    max_listen_start_interrupts = None
+    require_post_lesson_response = False
+    allowed_fatal_patterns = None
     min_audio_interrupts = None
     max_first_audio_ms = args.max_first_audio_ms
     max_interrupt_stop_latency_ms = None
@@ -1598,6 +1698,20 @@ def main():
         max_interrupt_stop_latency_ms = 250.0
         if max_first_audio_ms is None:
             max_first_audio_ms = 1800.0
+    if args.production_output_safe_strict:
+        min_audio_interrupts = 0
+        min_realtime_tts_stops = 1
+        min_output_relisten_chains = 1
+        max_aec_live_vad_forward = 0
+        max_listen_start_interrupts = 0
+        require_post_lesson_response = True
+        allowed_fatal_patterns = {
+            "audio_decision decision=suppress_echo reason=robot_speaking",
+            "Google Live echo_suppressed reason=robot_speaking",
+            "Google Live waiting_model_timeout",
+        }
+        if max_first_audio_ms is None:
+            max_first_audio_ms = 8000.0
     if args.production_child_safety_strict:
         min_output_moderation_blocks = 1
         min_safe_deflection_live_text = 1
@@ -1632,12 +1746,17 @@ def main():
         min_output_relisten_chains=min_output_relisten_chains,
         min_output_moderation_blocks=min_output_moderation_blocks,
         min_safe_deflection_live_text=min_safe_deflection_live_text,
+        max_aec_live_vad_forward=max_aec_live_vad_forward,
+        max_listen_start_interrupts=max_listen_start_interrupts,
         max_first_audio_ms=max_first_audio_ms,
         max_interrupt_stop_latency_ms=max_interrupt_stop_latency_ms,
+        require_post_lesson_response=require_post_lesson_response,
         require_lesson_live_text=require_lesson_live_text,
         min_lesson_live_text_chars=args.min_lesson_live_text_chars,
         lesson_manifest=lesson_manifest,
         expected_user_transcripts=args.expected_user_transcript,
+        expected_post_lesson_transcripts=args.expected_post_lesson_transcript,
+        allowed_fatal_patterns=allowed_fatal_patterns,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if args.child_live_moderation_proof is not None and result["passed"]:

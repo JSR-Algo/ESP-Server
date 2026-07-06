@@ -41,11 +41,11 @@ google_live:
   recv_timeout_sec: 60               # PR2: raised from 30 to give native-audio model headroom
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
-  conversation_input_flush_delay_sec: 0.7
-  conversation_input_speech_tail_ms: 650
+  conversation_input_flush_delay_sec: 0.45
+  conversation_input_speech_tail_ms: 420
   input_flush_delay_sec: 1.4
   input_speech_tail_ms: 1300
-  waiting_model_timeout_sec: 2.0
+  waiting_model_timeout_sec: 1.2
   reconnect_buffer_ms: 2000          # current-turn mic packets preserved across reconnect
   interrupt_replay_buffer_ms: 900
   interrupt_on_input_while_speaking: false
@@ -92,9 +92,9 @@ google_live:
 | `context_window_compression_enabled` | true | keep long sessions alive with sliding-window compression | US-004 |
 | `tool_timeout_sec` | 10 | bound manual Live tool execution; late cancelled tool results are dropped | US-004 |
 | `interrupt_policy` | `wake_or_transcript` | only wake/listen, user transcript, or deterministic music command can interrupt production output | US-004 |
-| `conversation_input_flush_delay_sec` | 0.7 | normal conversation turn-close safety net; faster than lesson timing | US-004 |
-| `conversation_input_speech_tail_ms` | 650 | normal conversation silence tail before finalising input | US-004 |
-| `waiting_model_timeout_sec` | 2.0 | reopen listening if Live returns no model audio, so the robot does not stay stuck in waiting state | US-004 |
+| `conversation_input_flush_delay_sec` | 0.45 | normal conversation turn-close safety net; faster than lesson timing | US-004 |
+| `conversation_input_speech_tail_ms` | 420 | normal conversation silence tail before finalising input | US-004 |
+| `waiting_model_timeout_sec` | 1.2 | reopen listening if Live returns no model audio, so the robot does not stay stuck in waiting state | US-004 |
 | `input_flush_delay_sec` / `input_speech_tail_ms` | 1.4 / 1300 | lesson/child speech timing; longer to avoid cutting a paused child | US-006 |
 | `interruption_min_output_age_sec` | 0.0 | honor Live interruption immediately when robot output has just started | US-004 |
 | `barge_in_transcript_min_output_age_sec` | 0.0 | confirmed user transcript can stop output immediately instead of waiting for a minimum output age | US-004 |
@@ -158,6 +158,12 @@ Production audit derives lesson spoken text from manifest `prompt`,
    - output PCM16 is resampled back to device sample rate
    - encoded to Opus
    - sent through existing audio send path
+   - text input sent with `turn_complete=true` is treated as a complete user
+     turn: the provider opens the normal no-response watchdog and reopens
+     listening if Live returns no model audio
+   - consumed text/control messages, inbound user audio, and Live model events
+     refresh Live idle activity; idle close is based on real inactivity, not
+     session age
 
 ## Firmware Compatibility
 

@@ -25,6 +25,56 @@ class VpsVoiceGoalWatcherScriptTest(unittest.TestCase):
         self.assertIn("transcript source=user", text)
         self.assertIn("user_audio_window_expired", text)
 
+    def test_passive_watcher_captures_haproxy_target_sessions(self):
+        script = (
+            Path(__file__).resolve().parents[3]
+            / "deploy"
+            / "watch-voice-goal-vps.sh"
+        )
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn("follow_container tbot-wss-lb", text)
+        self.assertIn("tbot-wss-lb", text)
+
+    def test_passive_watcher_matches_haproxy_url_encoded_target(self):
+        script = (
+            Path(__file__).resolve().parents[3]
+            / "deploy"
+            / "watch-voice-goal-vps.sh"
+        )
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn('TARGET_URLENC="${TARGET//:/%3A}"', text)
+        self.assertIn("${TARGET_URLENC}", text)
+
+    def test_passive_watcher_snapshots_haproxy_only_target_sessions(self):
+        script = (
+            Path(__file__).resolve().parents[3]
+            / "deploy"
+            / "watch-voice-goal-vps.sh"
+        )
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn("raw_target_seen=", text)
+        self.assertIn('grep -E "${TARGET}|${TARGET_URLENC}|${CLIENT}"', text)
+        self.assertIn('if printf \'%s\' "${metrics}" | grep -q "${TARGET}" || [[ "${raw_target_seen}" == "1" ]]; then', text)
+
+    def test_passive_watcher_reads_metrics_from_direct_server_container_ips(self):
+        script = (
+            Path(__file__).resolve().parents[3]
+            / "deploy"
+            / "watch-voice-goal-vps.sh"
+        )
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn("docker inspect", text)
+        self.assertIn("owner_ip", text)
+        self.assertIn('http://${owner_ip}:8003/internal/lesson-runtime/metrics', text)
+        self.assertNotIn(
+            "http://127.0.0.1:8003/internal/lesson-runtime/metrics",
+            text,
+        )
+
     def test_remote_worker_respects_launcher_environment(self):
         script = (
             Path(__file__).resolve().parents[3]

@@ -123,7 +123,7 @@ class _Bridge:
         self.forwarded.append(decoded)
 
     def input_rms(self, _pcm):
-        return 0
+        return 1000
 
     def allow_model_output(self):
         return None
@@ -298,6 +298,22 @@ class SessionOrchestratorModeTest(unittest.IsolatedAsyncioTestCase):
         # ...then the robot returns to NORMAL CONVERSATION (Live reopened).
         self.assertEqual(conn.session_mode, SessionMode.CONVERSATION)
         self.assertEqual(conn.voice_provider.started, 1)
+
+    async def test_finish_lesson_sends_tts_stop_before_terminal_face_when_still_speaking(self):
+        conn = _conn()
+        conn.voice_provider = _VoiceProvider()
+        conn.websocket = _RecordingWS()
+        conn.session_mode = SessionMode.LESSON
+        conn.audio_channel_owner = SessionMode.LESSON
+        conn.client_is_speaking = True
+
+        await conn.finish_lesson_mode(reason="lesson_completed")
+
+        messages = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual(messages[0]["type"], "tts")
+        self.assertEqual(messages[0]["state"], "stop")
+        self.assertEqual(messages[1]["type"], "llm")
+        self.assertFalse(conn.client_is_speaking)
 
     async def test_finish_lesson_can_stay_dormant_when_return_to_conversation_off(self):
         conn = _conn()

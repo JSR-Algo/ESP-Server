@@ -364,6 +364,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._get_interrupt_suppress_audio_sec(), 0.25)
         bridge._mark_echo_tail_suppression("test")
         self.assertGreater(bridge.conn.google_live_echo_suppress_until, 0)
+        self.assertGreater(bridge.conn.google_live_audible_output_until, 0)
 
         bridge._aec_processor = _FailingAec()
         self.assertEqual(bridge._apply_aec(b"\x00\x00", 24000), b"\x00\x00")
@@ -589,29 +590,28 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         original_resolve = token_module.resolve_device_identity
         original_forwarder = forwarder_module.LessonEventForwarder
 
-        async def no_token(_client, _base_url, _device_id, logger=None):
-            return None, None
+        mint_calls = []
 
-        async def minted_token(_client, _base_url, _device_id, logger=None):
+        async def unexpected_mint(_client, _base_url, _device_id, logger=None):
+            mint_calls.append((_base_url, _device_id))
             return "backend-device", "minted-token"
 
-        async def token_error(_client, _base_url, _device_id, logger=None):
-            raise RuntimeError("mint failed")
-
         try:
-            token_module.resolve_device_identity = token_error
+            token_module.resolve_device_identity = unexpected_mint
             self.assertIsNone(await bridge._create_connection_safety_forwarder())
+            self.assertEqual(mint_calls, [])
 
-            token_module.resolve_device_identity = no_token
-            self.assertIsNone(await bridge._create_connection_safety_forwarder())
-
-            token_module.resolve_device_identity = minted_token
+            conn_with_token = _Conn(
+                config={"lesson": {"api_base": "http://backend", "device_token": "static-token"}}
+            )
+            bridge_with_token = self.make_bridge(conn=conn_with_token, logger=logger)
             forwarder_module.LessonEventForwarder = _Forwarder
-            forwarder = await bridge._create_connection_safety_forwarder()
+            forwarder = await bridge_with_token._create_connection_safety_forwarder()
             self.assertIsInstance(forwarder, _Forwarder)
-            self.assertEqual(forwarder.kwargs["device_id"], "backend-device")
-            self.assertEqual(forwarder.kwargs["token"], "minted-token")
-            self.assertIs(conn.safety_event_forwarder, forwarder)
+            self.assertEqual(forwarder.kwargs["device_id"], "device-1")
+            self.assertEqual(forwarder.kwargs["token"], "static-token")
+            self.assertIs(conn_with_token.safety_event_forwarder, forwarder)
+            self.assertEqual(mint_calls, [])
         finally:
             token_module.resolve_device_identity = original_resolve
             forwarder_module.LessonEventForwarder = original_forwarder

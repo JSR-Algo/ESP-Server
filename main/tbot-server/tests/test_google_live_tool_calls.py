@@ -56,6 +56,10 @@ _GET_WEATHER_SPEC = {
 
 
 class BuildToolsTest(unittest.TestCase):
+    def test_lesson_live_text_instruction_forbids_contextual_echo(self):
+        self.assertIn("Không phản hồi", LESSON_LIVE_TEXT_INSTRUCTION)
+        self.assertIn("không nhắc lại câu trẻ vừa nói", LESSON_LIVE_TEXT_INSTRUCTION)
+
     def test_build_tools_returns_none_when_no_functions(self):
         client = GoogleLiveClient({}, _DummyLogger())
 
@@ -897,6 +901,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             "vào học bài",
             "vô bài học",
             "vo bai hoc",
+            "đào về học",
             "bắt đầu khoá học",
             "bắt đầu khóa học",
             "vào khóa học",
@@ -930,7 +935,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(handled)
                 self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
 
-    async def test_start_lesson_command_enqueues_audible_ack(self):
+    async def test_start_lesson_command_does_not_enqueue_success_ack(self):
         provider, handler = self._make_provider()
         provider.conn.websocket = _RecordingWebSocket()
         provider.conn.tts = _RecordingTts()
@@ -941,16 +946,17 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(handler.calls[-1]["name"], "start_lesson")
-        self.assertEqual(
-            provider._client.sent_texts,
-            [LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé."],
-        )
+        self.assertEqual(provider._client.sent_texts, [])
         self.assertEqual(provider.conn.websocket.sent, [])
         self.assertEqual(provider.conn.tts.stored_texts, [])
         self.assertEqual(len(provider.conn.tts.tts_text_queue.items), 0)
 
-    async def test_start_lesson_ack_prefers_google_live_over_local_tts(self):
+    async def test_start_lesson_error_ack_prefers_google_live_over_local_tts(self):
         provider, handler = self._make_provider()
+        handler._response = ActionResponse(
+            action=Action.ERROR,
+            response="Robot chưa bắt đầu bài học được.",
+        )
         provider.conn.websocket = _RecordingWebSocket()
         provider.conn.tts = _RecordingTts()
         provider.conn.sentence_id = None
@@ -962,7 +968,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls[-1]["name"], "start_lesson")
         self.assertEqual(
             provider._client.sent_texts,
-            [LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé."],
+            [LESSON_LIVE_TEXT_INSTRUCTION + "Robot chưa bắt đầu bài học được."],
         )
         self.assertEqual(provider.conn.websocket.sent, [])
         self.assertEqual(provider.conn.tts.stored_texts, [])
@@ -1329,7 +1335,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
         self.assertEqual(provider._user_audio_allowed_until, 0.0)
 
-    async def test_retry_lesson_child_response_window_opens_fast_when_prompt_output_times_out(self):
+    async def test_retry_lesson_child_response_window_waits_past_fast_reopen_for_live_audio_end(self):
         provider, _handler = self._make_provider()
         provider.conn.session_mode = SessionMode.LESSON
         provider.conn.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
@@ -1350,6 +1356,8 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         async def _fake_sleep(delay):
             sleeps.append(delay)
+            if len(sleeps) == 4:
+                provider.conn.google_live_lesson_prompt_output_allowed = False
 
         original_sleep = google_live_module.asyncio.sleep
         google_live_module.asyncio.sleep = _fake_sleep
@@ -1358,9 +1366,51 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         finally:
             google_live_module.asyncio.sleep = original_sleep
 
-        self.assertLessEqual(sum(sleeps), 0.31)
+        self.assertEqual(sleeps, [0.1, 0.1, 0.1, 0.1])
         self.assertFalse(provider.conn.google_live_lesson_prompt_output_allowed)
         self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
+
+    async def test_fast_retry_window_does_not_stop_prompt_output_before_listening(self):
+        provider, _handler = self._make_provider()
+        provider.conn.session_mode = SessionMode.LESSON
+        provider.conn.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        provider.conn.google_live_audio_out_started_at = time.monotonic()
+        provider.conn.config["google_live"].update(
+            {
+                "lesson_child_response_open_delay_sec": 0.0,
+                "lesson_prompt_tts_chars_per_sec": 0.0,
+                "lesson_child_response_max_open_delay_sec": 0.0,
+                "lesson_child_response_fast_reopen_sec": 0.3,
+                "lesson_prompt_output_poll_sec": 0.1,
+                "lesson_prompt_output_guard_timeout_sec": 15.0,
+            }
+        )
+        provider._lesson_prompt_reopen_fast = True
+        provider.conn.google_live_lesson_prompt_output_allowed = True
+
+        class _Bridge:
+            def __init__(self):
+                self.stop_calls = 0
+
+            async def stop_output(self):
+                self.stop_calls += 1
+                provider.conn.google_live_audio_out_started_at = None
+
+        bridge = _Bridge()
+        provider._bridge = bridge
+
+        async def _fake_sleep(_delay):
+            return None
+
+        original_sleep = google_live_module.asyncio.sleep
+        google_live_module.asyncio.sleep = _fake_sleep
+        try:
+            self.assertFalse(await provider.open_lesson_child_response_window())
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(bridge.stop_calls, 0)
+        self.assertIsNotNone(provider.conn.google_live_audio_out_started_at)
 
     async def test_lesson_child_response_window_uses_lesson_duration_without_session_mode(self):
         provider, _handler = self._make_provider()
@@ -1484,6 +1534,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         class _AudioBridge:
             def __init__(self):
                 self.forwarded = []
+                self._aec_processor = SimpleNamespace(bypassed=False)
 
             def is_model_output_blocked(self):
                 return False
@@ -1549,9 +1600,67 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
         self.assertEqual(
             provider._interaction.state,
-            google_live_module.InteractionState.WAITING_MODEL,
+            google_live_module.InteractionState.LISTENING,
         )
         self.assertIsNone(provider._user_stream_started_at)
+        self.assertIsNone(provider._waiting_model_since)
+        self.assertIsNone(provider._waiting_model_timeout_task)
+        self.assertTrue(provider._lesson_child_audio_pending_transcript)
+        self.assertEqual(handler.calls, [])
+
+    async def test_lesson_child_audio_drops_extra_frames_after_finalization(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
+        provider.conn.config["google_live"].update(
+            {
+                "input_min_capture_ms": 0,
+                "input_max_capture_ms": 0,
+                "input_speech_tail_ms": 0,
+            }
+        )
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _Client:
+            connected = True
+
+            def __init__(self):
+                self.audio_stream_end_calls = 0
+
+            async def end_audio_stream(self):
+                self.audio_stream_end_calls += 1
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 1000
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+            async def flush_pending_input_audio(self):
+                return 0
+
+        client = _Client()
+        provider._client = client
+        provider._bridge = _AudioBridge()
+        await provider.open_lesson_child_response_window()
+
+        self.assertTrue(await provider.handle_audio_bytes(b"first"))
+        self.assertTrue(await provider.handle_audio_bytes(b"second"))
+
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:first"])
+        self.assertEqual(client.audio_stream_end_calls, 1)
         self.assertEqual(handler.calls, [])
 
     async def test_lesson_child_response_audio_forward_logs_diagnostic(self):
@@ -1589,6 +1698,50 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             if level == "info" and args and args[0] == "Google Live lesson_child_audio_forwarded bytes={} rms={}"
         ]
         self.assertEqual(messages, [("Google Live lesson_child_audio_forwarded bytes={} rms={}", 8, 1000)])
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertEqual(handler.calls, [])
+
+    async def test_blocked_output_lesson_child_audio_logs_aec_marker(self):
+        provider, handler = self._make_provider()
+        provider.conn.lesson_runtime = _InteractiveRecordingLessonRuntime(handled=True)
+
+        async def _active_voice_consent(_conn):
+            return True
+
+        provider.conn.voice_consent_client = SimpleNamespace(
+            ensure_voice_allowed=_active_voice_consent,
+        )
+
+        class _AudioBridge:
+            def __init__(self):
+                self.forwarded = []
+                self._aec_processor = SimpleNamespace(bypassed=False)
+
+            def is_model_output_blocked(self):
+                return True
+
+            async def decode_input_audio_async(self, audio):
+                return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 1000
+
+            async def forward_decoded_input_audio(self, pcm):
+                self.forwarded.append(pcm)
+
+        provider._bridge = _AudioBridge()
+        await provider.open_lesson_child_response_window()
+
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
+
+        aec_logs = [
+            args
+            for level, args, _kwargs in provider.conn.logger.messages
+            if level == "info"
+            and args
+            and args[0].startswith("Google Live aec_live_vad_forward")
+        ]
+        self.assertEqual(len(aec_logs), 1)
         self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
         self.assertEqual(handler.calls, [])
 

@@ -140,6 +140,34 @@ def _assert_no_inline_media_payload(testcase, value, *, path="frame") -> None:
         testcase.assertLessEqual(len(value), 2048, f"oversized inline media-like string at {path}")
 
 class ChildResponseIntentClassifierTest(unittest.TestCase):
+    def test_vietnamese_asr_alias_for_barn_is_accepted(self):
+        self.assertEqual(
+            _classify_child_response_intent("bóng bóng bóng", ["barn"]),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("con nói bóng", ["barn"]),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_child_response_intent(
+                "bâng bâng bâng bâng bâng bâng", ["barn"]
+            ),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("nóng nóng nóng", ["barn"]),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("darn darn darn", ["barn"]),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("Bòn bòn bon", ["barn"]),
+            "correct",
+        )
+
     def test_vietnamese_object_word_is_not_confused_with_frustration_after_accent_stripping(self):
         self.assertEqual(
             _classify_child_response_intent("con thấy cái kho", ["barn"]),
@@ -2466,6 +2494,17 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await rt.start()
         await rt.on_lesson_ack({"type": "lesson_ack"})
+
+        self.assertIsNotNone(rt._preload_task)
+        await rt._preload_task
+        self.assertIn("lesson_start", [f["type"] for f in self._sent_frames(conn)])
+
+    async def test_legacy_empty_lesson_ack_with_envelope_sequence_correlates(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack({"type": "lesson_ack", "sequence": 1})
 
         self.assertIsNotNone(rt._preload_task)
         await rt._preload_task
@@ -5443,6 +5482,62 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_assignment_pull_uses_device_id_without_minting_device_token(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn()
+        conn.device_id = "AA:BB:CC:DD:EE:FF"
+        assignment_calls = []
+
+        async def _resolve_device_identity(*args, **kwargs):
+            raise AssertionError("lesson pull must not mint a device token")
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            return None
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            assignment_calls.append((device_id, token))
+            return _build_assignment()
+
+        async def _get_manifest(
+            client,
+            base_url,
+            lesson_id,
+            profile,
+            *,
+            token=None,
+            renderer_capabilities=None,
+            lesson_version=None,
+        ):
+            self.assertIsNone(token)
+            return _build_manifest(), f'"lesson-3-espTft-{_manifest_checksum()}"'
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+            ) = saved
+
+        self.assertIsNotNone(result)
+        self.assertEqual(assignment_calls, [("AA:BB:CC:DD:EE:FF", None)])
+        self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+
     async def test_no_current_assignment_sets_user_visible_start_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
@@ -5607,7 +5702,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Bearer", message)
         self.assertEqual(conn.websocket.sent, [])
 
-    async def test_missing_device_token_is_surfaced_without_legacy_tokenless_pull(self):
+    async def test_tokenless_assignment_failure_surfaces_backend_unavailable_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
         import config.device_token_client as dtc
@@ -5644,18 +5739,13 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(conn.websocket.sent, [])
-        self.assertEqual(conn.lesson_start_status["code"], "DEVICE_TOKEN_UNAVAILABLE")
-        self.assertEqual(conn.lesson_start_status["reason"], "missing_identity")
+        self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("device token required" in message for _level, message in events),
-            events,
-        )
-        self.assertTrue(
-            any("device token required" in message and f"session_id={conn.session_id}" in message for _level, message in events),
+            any("lesson backend assignment unavailable" in message for _level, message in events),
             events,
         )
 
-    async def test_device_token_mint_exception_sets_token_unavailable_status(self):
+    async def test_tokenless_assignment_exception_sets_backend_unavailable_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
         import config.device_token_client as dtc
@@ -5686,10 +5776,9 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(conn.websocket.sent, [])
-        self.assertEqual(conn.lesson_start_status["code"], "DEVICE_TOKEN_UNAVAILABLE")
-        self.assertEqual(conn.lesson_start_status["reason"], "missing_identity")
+        self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("device-token mint unavailable" in message for _level, message in events),
+            any("lesson backend assignment unavailable" in message for _level, message in events),
             events,
         )
 
@@ -6595,17 +6684,12 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pull_uses_server_api_url_fallback_and_fetches_esptft_manifest(self):
         import config.manage_api_client as mac
-        import config.device_token_client as dtc
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         conn = _RepublishConn(api_base=None)
         conn.config["lesson"].pop("api_base", None)
         conn.config["server"] = {"api_url": "http://course-backend.test/v1"}
         calls = []
-
-        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
-            calls.append(("mint", base_url, device_id))
-            return "backend-device-123", "device-token"
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
             calls.append(("assignment", base_url, device_id, token))
@@ -6624,19 +6708,17 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             calls.append(("manifest", base_url, lesson_id, profile, token, lesson_version))
             return _build_manifest(), '"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'
 
-        saved = (dtc.resolve_device_identity, mac.get_current_assignment, mac.get_lesson_manifest)
-        dtc.resolve_device_identity = _resolve_device_identity
+        saved = (mac.get_current_assignment, mac.get_lesson_manifest)
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
         try:
             result = await maybe_start_lesson_on_connect(conn)
         finally:
-            dtc.resolve_device_identity, mac.get_current_assignment, mac.get_lesson_manifest = saved
+            mac.get_current_assignment, mac.get_lesson_manifest = saved
 
         self.assertIsNotNone(result)
-        self.assertIn(("mint", "http://course-backend.test/v1", "dev-republish"), calls)
         self.assertIn(
-            ("assignment", "http://course-backend.test/v1", "backend-device-123", "device-token"),
+            ("assignment", "http://course-backend.test/v1", "dev-republish", None),
             calls,
         )
         self.assertIn(
@@ -6645,7 +6727,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 "http://course-backend.test/v1",
                 FIX["frames"]["lesson_prepare"]["lessonId"],
                 "espTft",
-                "device-token",
+                None,
                 3,
             ),
             calls,

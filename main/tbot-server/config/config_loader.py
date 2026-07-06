@@ -30,16 +30,19 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_policy": "wake_or_transcript",
     "raw_audio_barge_in_enabled": False,
     "input_flush_delay_sec": 1.4,
-    "conversation_input_flush_delay_sec": 0.7,
+    "conversation_input_flush_delay_sec": 0.45,
     "input_speech_tail_ms": 1300,
-    "conversation_input_speech_tail_ms": 650,
+    "conversation_input_speech_tail_ms": 420,
     "input_min_capture_ms": 400,
     "input_max_capture_ms": 8000,
+    "conversation_input_max_capture_ms": 2500,
     "input_speech_rms_threshold": 500,
+    "lesson_child_input_speech_rms_threshold": 2000,
     "input_gain": 6.0,
-    "waiting_model_timeout_sec": 2.0,
+    "waiting_model_timeout_sec": 4.0,
     "waiting_model_retry_prompt_after_sec": 12.0,
-    "lesson_prompt_output_guard_timeout_sec": 15.0,
+    "live_open_timeout_sec": 12.0,
+    "lesson_prompt_output_guard_timeout_sec": 30.0,
     "lesson_prompt_playback_guard_timeout_sec": 12.0,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
@@ -254,7 +257,11 @@ def _apply_google_live_runtime_safety_policy(google_live):
     google_live["drop_input_while_speaking"] = False
     google_live["interruption_min_output_age_sec"] = 0.0
     google_live["barge_in_transcript_min_output_age_sec"] = 0.0
-    google_live["waiting_model_timeout_sec"] = 2.0
+    try:
+        waiting_timeout = float(google_live.get("waiting_model_timeout_sec", 4.0))
+    except (TypeError, ValueError):
+        waiting_timeout = 4.0
+    google_live["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 4.0)
     google_live["echo_bypass_interrupt_enabled"] = False
     google_live["server_side_vad_enabled"] = True
     google_live["aec_enabled"] = True

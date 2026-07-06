@@ -123,12 +123,19 @@ Current server-side proof:
   active audio route while Google Live starts, so early mic frames wait for the
   Live provider instead of entering the legacy pipeline
 - runtime provider policy also clamps direct slow timing overrides:
-  `waiting_model_timeout_sec<=2.0`,
+  `waiting_model_timeout_sec<=1.2`,
   `interruption_min_output_age_sec=0.0`, and
   `barge_in_transcript_min_output_age_sec=0.0`
 - runtime provider policy also forces `echo_bypass_interrupt_enabled=false`, so
   direct runtime config cannot re-enable local raw/RMS loud-input interruption
   around the config normalizer
+- Google Live complete text turns now move from `USER_STREAMING` to
+  `WAITING_MODEL` after `send_text(turn_complete=true)`, arm the same
+  no-response watchdog as audio turns, and reopen listening if Live returns no
+  model audio
+- Google Live consumed text/control messages, inbound user audio frames, and
+  model events refresh `last_live_activity_at`, so conversation idle close is
+  based on real inactivity and does not terminate an active model answer
 - connection private-config setup reruns voice normalization after merging API
   fields, so fallback/mock/bypass callers cannot start a Google Live provider
   with stale `voice_name` or interruption policy
@@ -185,7 +192,7 @@ Current server-side proof:
   not accepting a child response, and also when the lesson voice provider is
   unavailable or reports unhandled, so prompt narration cannot leak robot/mic
   audio into the classic ASR queue
-- runtime safety policy forces `waiting_model_timeout_sec=2.0` after
+- runtime safety policy forces `waiting_model_timeout_sec=1.2` after
   manager/private config merge, so old agent configs cannot leave the robot in a
   long `WAITING_MODEL` state
 - runtime safety policy forces `interruption_min_output_age_sec=0.0` and
@@ -1087,15 +1094,60 @@ Latest evidence:
 - historical USB recheck found only `/dev/cu.OGVN5574` and
   `/dev/cu.debug-console`; no ESP/JTAG/USB serial device was visible via
   `system_profiler`
+- conversation responsiveness deploy at `2026-07-04T21:41+07:00`: local TDD
+  first reproduced the text-turn gap (`USER_STREAMING != WAITING_MODEL`) and
+  the stale idle-activity close (`_close_if_idle_once(1)` closed an active text
+  turn). Final local proof passed the focused provider/barge-in/fallback suite
+  (`168 passed`), the broader Google Live timing/provider/barge-in/bridge/client
+  suite (`190 passed`), runtime benchmark p95s of `3.444 ms` frame latency,
+  `2.253 ms` connection loop, `2.176 ms` heartbeat, and `git diff --check`.
+  Production Python replicas were recreated from
+  `local/tbot-server:vps-20260704214129-idleactivityhotpatch`; public admin/OTA
+  smoke and in-container marker checks passed. The deployed text-barge-in soak
+  that previously failed at cycle 6 then passed:
+  `SOAK_OK cycles=10 tts_starts=20 tts_stops=10 binary_chunks=138`. Physical
+  robot proof was not rerun because target metrics later showed
+  `connections=0`; no nudge, reset, flash, serial, or wrong-device action was
+  performed.
+- envelope-only lesson ACK hotpatch at `2026-07-04T22:05+07:00`: local TDD
+  first reproduced two gaps from the latest physical run: empty
+  `lesson_ack` frames with envelope metadata (`sequence`, matching identity)
+  did not correlate to the sole outstanding lesson frame, and the strict audit
+  parser did not count the deployed
+  `Google Live turn_latency_ms=... phase=first_audio_out` marker. Focused
+  regressions passed, then adjacent proof passed
+  `test_lesson_runtime.py`, `test_sample_lesson.py`, and
+  `test_physical_smoke_audit.py` (`311 passed, 1 warning`), plus
+  `py_compile` and `git diff --check`. Production Python replicas were
+  recreated from `local/tbot-server:vps-20260704220440-envelopeackhotpatch`;
+  public admin/OTA smoke and in-container runtime marker checks passed. Two
+  owner-gated physical attempts refused to nudge because neither runtime
+  metrics nor recent container logs showed the target device/client
+  (`28:84:85:85:1a:80` /
+  `c29ce67a-3288-4c39-8544-bba97dab332b`). No reset, flash, serial, public
+  host nudge, wrong-replica nudge, or wrong-client nudge was performed.
+  The passive VPS watcher was then restarted at `2026-07-04T22:56+07:00`
+  with HAProxy (`tbot-wss-lb`) log capture in addition to both Python
+  replicas, and it now matches both raw and URL-encoded target MAC forms
+  (`28:84:85:85:1a:80` and `28%3A84%3A85%3A85%3A1a%3A80`). Future target
+  sessions that reach the load balancer but do not enter runtime metrics are
+  recorded under `/opt/tbot/voice_goal_watch`; the watcher now writes target
+  snapshots when either runtime metrics contain the target or followed raw logs
+  contain the raw/URL-encoded target/client identity.
 
 Current audit/hardening files touched in this pass:
 
 - `core/voice/session_provider/google_live.py`
 - `core/voice/google_live/audio_bridge.py`
+- `config.yaml`
+- `config/config_loader.py`
+- `deploy/watch-voice-goal-vps.sh`
 - `scripts/physical_smoke_audit.py`
 - `scripts/voice_mode_websocket_audio_bargein.py`
+- `tests/test_config_voice_mode_merge.py`
 - `tests/test_google_live_provider_edges.py`
 - `tests/test_physical_smoke_audit.py`
+- `tests/test_vps_voice_goal_watcher_script.py`
 - `docs/google-live-smoke.md`
 - `docs/google-live-completion-audit.md`
 - `../manager-api/src/main/java/tbot/modules/sys/service/impl/SysParamsServiceImpl.java`

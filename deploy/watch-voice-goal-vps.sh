@@ -87,7 +87,7 @@ redact_stream() {
 run_remote_worker() {
   mkdir -p "${WATCH_DIR}"
 
-  local run_id summary raw pidfile end pattern
+  local run_id summary raw pidfile end pattern TARGET_URLENC
   run_id="watch-$(date -u +%Y%m%dT%H%M%SZ)-continuous-head-${HEAD_TAG}"
   summary="${WATCH_DIR}/${run_id}.summary.log"
   raw="${WATCH_DIR}/${run_id}.raw.log"
@@ -102,7 +102,8 @@ run_remote_worker() {
     docker ps --filter name=current-tbot-esp32-server --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null || true
   } >> "${summary}"
 
-  pattern="Headers:|Client disconnected|${TARGET}|${CLIENT}|Google Live|wake_transcript_only|wake_listening_feedback|Hi ESP|high speed|lesson_start_intent|user_audio_window_open|user_audio_window_expired|window_ms=15000|input_audio_diag|audio_decision|transcript source=user|input_finalized|tts_stop_sent|echo_suppressed|suppress_echo|Traceback|ERROR|WARNING|timeout"
+  TARGET_URLENC="${TARGET//:/%3A}"
+  pattern="Headers:|Client disconnected|${TARGET}|${TARGET_URLENC}|${CLIENT}|Google Live|wake_transcript_only|wake_listening_feedback|Hi ESP|high speed|lesson_start_intent|user_audio_window_open|user_audio_window_expired|window_ms=15000|input_audio_diag|audio_decision|transcript source=user|input_finalized|tts_stop_sent|echo_suppressed|suppress_echo|Traceback|ERROR|WARNING|timeout"
 
   follow_container() {
     local container="$1"
@@ -121,28 +122,54 @@ run_remote_worker() {
     done
   }
 
+  read_owner_metrics() {
+    local container owner_ip body output
+    output=""
+    for container in current-tbot-esp32-server-1 current-tbot-esp32-server-2; do
+      owner_ip="$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container}" 2>/dev/null || true)"
+      if [[ -z "${owner_ip}" ]]; then
+        continue
+      fi
+      body="$(
+        curl -sS --max-time 8 \
+          -H "device-id: ${TARGET}" \
+          "http://${owner_ip}:8003/internal/lesson-runtime/metrics" \
+          2>/dev/null || true
+      )"
+      output="${output}${container}@${owner_ip}=${body} "
+    done
+    printf '%s' "${output}"
+  }
+
   follow_container current-tbot-esp32-server-1 &
   local tail_pid_1=$!
   follow_container current-tbot-esp32-server-2 &
   local tail_pid_2=$!
+  follow_container tbot-wss-lb &
+  local tail_pid_lb=$!
 
   cleanup() {
-    kill "${tail_pid_1}" "${tail_pid_2}" 2>/dev/null || true
+    kill "${tail_pid_1}" "${tail_pid_2}" "${tail_pid_lb}" 2>/dev/null || true
   }
   trap cleanup INT TERM EXIT
 
   end=$(( $(date +%s) + DURATION_SEC ))
   while [[ "$(date +%s)" -lt "${end}" ]]; do
-    local ts metrics snap
+    local ts metrics snap raw_target_seen
     ts="$(date -Is)"
-    metrics="$(curl -sS --max-time 8 -H "device-id: ${TARGET}" http://127.0.0.1:8003/internal/lesson-runtime/metrics 2>/dev/null || true)"
+    metrics="$(read_owner_metrics)"
+    raw_target_seen=0
+    if tail -500 "${raw}" 2>/dev/null | grep -E "${TARGET}|${TARGET_URLENC}|${CLIENT}" >/dev/null; then
+      raw_target_seen=1
+    fi
     printf '%s metrics=%s\n' "${ts}" "${metrics}" >> "${summary}"
-    if printf '%s' "${metrics}" | grep -q "${TARGET}"; then
+    if printf '%s' "${metrics}" | grep -q "${TARGET}" || [[ "${raw_target_seen}" == "1" ]]; then
       snap="${WATCH_DIR}/${run_id}-target-${ts//[:+]/_}.log"
       {
         printf 'snapshot=%s target=%s client=%s\n' "${ts}" "${TARGET}" "${CLIENT}"
         grep -E '^TBOT_SERVER_IMAGE=' /opt/tbot/.env 2>/dev/null || true
         printf 'metrics=%s\n' "${metrics}"
+        printf 'raw_target_seen=%s\n' "${raw_target_seen}"
         docker ps --filter name=current-tbot-esp32-server --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null || true
         printf 'recent_raw_log=%s\n' "${raw}"
         tail -500 "${raw}" 2>/dev/null || true

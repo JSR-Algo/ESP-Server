@@ -563,6 +563,23 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(latency_logs), 1)
 
+    async def test_stop_output_logs_interruption_marker_for_physical_audit(self):
+        conn = _DummyConn({"disable_server_side_interruptions": False})
+        conn.google_live_audio_out_started_at = time.monotonic() - 0.25
+        bridge = self._build_bridge(conn)
+
+        await bridge.stop_output()
+
+        interruption_logs = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "Google Live interruption output_age_ms=" in args[0]
+        ]
+        self.assertEqual(len(interruption_logs), 1)
+        self.assertIsInstance(interruption_logs[0][1], (int, float))
+
     async def test_server_interruption_stops_audio_even_with_explicit_ignore_config(self):
         conn = _DummyConn(
             {
@@ -885,6 +902,21 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(stop_logs), 1)
 
+    async def test_lesson_prompt_ignores_server_interruption(self):
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        conn.google_live_audio_out_started_at = time.monotonic()
+        bridge = self._build_bridge(conn)
+
+        self.assertTrue(await bridge.handle_event({"type": "interruption"}))
+
+        self.assertEqual(conn.websocket.sent_messages, [])
+        self.assertFalse(conn.client_abort)
+        self.assertEqual(conn.clear_queue_calls, 0)
+
     async def test_lesson_prompt_live_output_is_allowed_once_and_closes_on_audio_end(self):
         from core.voice.session_orchestrator import SessionMode
 
@@ -928,6 +960,44 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(conn.websocket.sent_messages.count(b"opus-tail"), 1)
+
+    async def test_lesson_prompt_model_transcript_does_not_duplicate_display_text(self):
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        bridge = self._build_bridge(conn)
+
+        self.assertTrue(
+            await bridge.handle_event(
+                {"type": "transcript", "source": "model", "text": "Con thử nói lại nhé."}
+            )
+        )
+
+        sent_json = [
+            json.loads(payload)
+            for payload in conn.websocket.sent_messages
+            if isinstance(payload, str)
+        ]
+        self.assertEqual(sent_json, [])
+
+    async def test_lesson_prompt_stale_audio_end_clears_output_gate(self):
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        bridge = self._build_bridge(
+            conn,
+            response_id_getter=lambda: 2,
+            response_cancelled_checker=lambda _rid: False,
+        )
+        bridge._active_response_id = 1
+
+        self.assertTrue(await bridge.handle_event({"type": "audio_end"}))
+
+        self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
 
     async def test_pcm_audio_encoding_offloads_resample_aec_reference_and_opus_encode_to_connection_worker(self):
         conn = _DummyConn()

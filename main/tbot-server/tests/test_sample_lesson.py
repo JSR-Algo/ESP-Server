@@ -60,16 +60,19 @@ class _FakeConn:
         self.finished = []
         self.released = []
         self.entered = []
+        self.events = []
         self.voice_provider = None
 
     async def enter_lesson_mode(self, *, reason="lesson_start"):
         self.entered.append(reason)
+        self.events.append(f"enter:{reason}")
 
     async def finish_lesson_mode(self, *, reason="lesson_completed"):
         self.finished.append(reason)
 
     async def release_lesson_mode(self, *, reason="lesson_terminal"):
         self.released.append(reason)
+        self.events.append(f"release:{reason}")
 
     def is_realtime_busy(self):
         return False
@@ -339,6 +342,19 @@ class SampleManifestTestAsync(unittest.IsolatedAsyncioTestCase):
 
 
 class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_sample_lesson_prepares_voice_provider_before_lesson_mode(self):
+        class _PrepareVoiceProvider:
+            async def prepare_for_sample_lesson(self):
+                conn.events.append("prepare_voice")
+
+        conn = _FakeConn()
+        conn.voice_provider = _PrepareVoiceProvider()
+
+        runtime = await start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(conn.events[:2], ["prepare_voice", "enter:sample_lesson_start"])
+
     async def test_sample_lesson_plays_all_steps_to_completed_then_finishes(self):
         conn = _FakeConn()
         # dwell_sec=0 -> passive steps advance immediately on ack (no per-step pacing);
@@ -437,6 +453,131 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.finished, ["lesson_completed"])
         # Every sample step carried a dwellSec so the scene paces on the device.
         self.assertTrue(all(s.get("dwellSec") == 0.02 for s in manifest["steps"]))
+
+    async def test_passive_step_waits_for_prompt_audio_idle_before_auto_advance(self):
+        class _BlockingPromptIdleProvider:
+            def __init__(self):
+                self.prompts = []
+                self.wait_started = asyncio.Event()
+                self.release_wait = asyncio.Event()
+
+            async def speak_lesson_step_prompt(self, text, *, continue_listening=False):
+                self.prompts.append((text, continue_listening))
+                return True
+
+            async def wait_lesson_step_prompt_idle(self):
+                self.wait_started.set()
+                await self.release_wait.wait()
+                return True
+
+        conn = _FakeConn()
+        provider = _BlockingPromptIdleProvider()
+        conn.voice_provider = provider
+        manifest = build_sample_manifest(dwell_sec=0)
+        rt = LessonRuntime(
+            conn,
+            assignment={
+                "assignmentId": SAMPLE_ASSIGNMENT_ID,
+                "assignmentVersion": 1,
+                "lessonId": SAMPLE_LESSON_ID,
+                "lessonVersion": 1,
+                "profile": "espTft",
+                "sessionId": conn.session_id,
+                "manifestChecksum": "sample",
+            },
+            manifest=manifest,
+            asset_cache=SampleAssetCache(),
+            forwarder=NoOpLessonForwarder(),
+            manifest_checksum="sample",
+            alarm=None,
+        )
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(conn, 1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(conn, 2, 2))
+
+        ack_task = asyncio.create_task(rt.on_lesson_ack(_ack(conn, 3, 3, step_id="s1")))
+        try:
+            await asyncio.wait_for(provider.wait_started.wait(), timeout=0.2)
+            await asyncio.sleep(0)
+
+            self.assertFalse(ack_task.done())
+            self.assertEqual(rt._step_id, "s1")
+            step_ids = [
+                json.loads(payload).get("stepId")
+                for payload in conn.websocket.sent
+                if json.loads(payload).get("type") == "lesson_step"
+            ]
+            self.assertEqual(step_ids, ["s1"])
+
+            provider.release_wait.set()
+            await asyncio.wait_for(ack_task, timeout=1.0)
+
+            self.assertEqual(rt._step_id, "s2")
+        finally:
+            provider.release_wait.set()
+            if not ack_task.done():
+                await asyncio.wait_for(ack_task, timeout=1.0)
+
+    async def test_passive_dwell_starts_after_prompt_audio_idle(self):
+        class _BlockingPromptIdleProvider:
+            def __init__(self):
+                self.wait_started = asyncio.Event()
+                self.release_wait = asyncio.Event()
+
+            async def speak_lesson_step_prompt(self, text, *, continue_listening=False):
+                return True
+
+            async def wait_lesson_step_prompt_idle(self):
+                self.wait_started.set()
+                await self.release_wait.wait()
+                return True
+
+        conn = _FakeConn()
+        provider = _BlockingPromptIdleProvider()
+        conn.voice_provider = provider
+        manifest = build_sample_manifest(dwell_sec=0.01)
+        rt = LessonRuntime(
+            conn,
+            assignment={
+                "assignmentId": SAMPLE_ASSIGNMENT_ID,
+                "assignmentVersion": 1,
+                "lessonId": SAMPLE_LESSON_ID,
+                "lessonVersion": 1,
+                "profile": "espTft",
+                "sessionId": conn.session_id,
+                "manifestChecksum": "sample",
+            },
+            manifest=manifest,
+            asset_cache=SampleAssetCache(),
+            forwarder=NoOpLessonForwarder(),
+            manifest_checksum="sample",
+            alarm=None,
+        )
+
+        await rt.start()
+        await rt.on_lesson_ack(_ack(conn, 1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(conn, 2, 2))
+
+        ack_task = asyncio.create_task(rt.on_lesson_ack(_ack(conn, 3, 3, step_id="s1")))
+        try:
+            await asyncio.wait_for(provider.wait_started.wait(), timeout=0.2)
+            await asyncio.sleep(0.02)
+
+            self.assertFalse(ack_task.done())
+            self.assertEqual(rt._step_id, "s1")
+
+            provider.release_wait.set()
+            await asyncio.wait_for(ack_task, timeout=1.0)
+            await asyncio.sleep(0.03)
+
+            self.assertEqual(rt._step_id, "s2")
+        finally:
+            provider.release_wait.set()
+            if not ack_task.done():
+                await asyncio.wait_for(ack_task, timeout=1.0)
 
     async def test_start_sample_lesson_under_sd_pack_sends_sd_asset_pack_and_local_step_paths(self):
         conn = _FakeConn(config={"lesson": {"asset_delivery_mode": "sd_pack"}})

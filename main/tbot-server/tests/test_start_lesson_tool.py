@@ -248,7 +248,7 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack.result, "lesson_start_failed")
         self.assertEqual(ack.response, "Robot chưa xác thực được với máy chủ bài học.")
 
-    async def test_real_token_mint_failure_path_falls_back_to_sample(self):
+    async def test_backend_unavailable_path_falls_back_to_sample(self):
         sample_calls = []
 
         class _RuntimeConn:
@@ -282,11 +282,8 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
             def _disable_lesson_runtime(self):
                 return None
 
-        async def _mint_failure(client, base_url, device_id, *, logger=None):
-            raise RuntimeError("ask parent to finish setup")
-
-        async def _assignment_must_not_run(client, base_url, device_id, *, token=None):
-            raise AssertionError("assignment/current must not run after token mint failure")
+        async def _assignment_unavailable(client, base_url, device_id, *, token=None):
+            raise RuntimeError("backend unavailable")
 
         async def _fake_sample(c):
             sample_calls.append(c)
@@ -294,10 +291,9 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RuntimeConn()
 
-        with patch("config.device_token_client.resolve_device_identity", _mint_failure), patch(
-            "config.manage_api_client.get_current_assignment",
-            _assignment_must_not_run,
-        ), patch("core.lesson.sample.start_sample_lesson", _fake_sample):
+        with patch("config.manage_api_client.get_current_assignment", _assignment_unavailable), patch(
+            "core.lesson.sample.start_sample_lesson", _fake_sample
+        ):
             response = start_lesson_module.start_lesson(conn)
             for _ in range(20):
                 task = conn.lesson_pull_task

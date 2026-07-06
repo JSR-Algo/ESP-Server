@@ -382,6 +382,22 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.connect_calls, 1)
 
+    async def test_prepare_for_sample_lesson_keeps_active_receive_session_open(self):
+        conn = _DummyConn()
+        client = _PersistentReceiveClient()
+        factory = _SequencedClientFactory([client, _RecordingClient()])
+        provider = GoogleLiveProvider(conn, client_factory=factory)
+
+        await provider.start_session()
+        prepared = await provider.prepare_for_sample_lesson()
+        old_client_closed = client.closed
+        factory_calls = factory.calls
+        await provider.close()
+
+        self.assertTrue(prepared)
+        self.assertFalse(old_client_closed)
+        self.assertEqual(factory_calls, 1)
+
     async def test_idle_audio_flush_signals_audio_stream_end(self):
         conn = _DummyConn()
         conn.config["google_live"]["input_flush_delay_sec"] = 0.01

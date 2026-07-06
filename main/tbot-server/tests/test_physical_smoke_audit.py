@@ -9,6 +9,87 @@ import unittest
 
 
 class PhysicalSmokeAuditTest(unittest.TestCase):
+    def test_cli_production_output_safe_strict_accepts_suppressed_echo_and_post_lesson_response(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:02[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:03[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:04[GoogleLive]-INFO-Google Live turn_latency_ms=620.0 phase=first_audio_out
+260518 20:10:05[GoogleLive]-INFO-tts_stop_sent continue_listening=true listen_mode=realtime
+260518 20:10:06[GoogleLive]-INFO-Google Live echo_suppressed reason=robot_speaking bytes=1920 rms=2600
+260518 20:10:07[GoogleLive]-INFO-Google Live waiting_model_timeout released_without_audio timeout_sec=4.0
+260518 20:10:08[LessonRuntime]-INFO-lesson_completed stepsCompleted=4
+260518 20:10:09[GoogleLive]-INFO-Google Live transcript source=user chars=24 text='con nói sau bài học'
+260518 20:10:10[GoogleLive]-INFO-Google Live turn_latency_ms=900.0 phase=first_audio_out
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/physical_smoke_audit.py",
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-output-safe-strict",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        result = json.loads(proc.stdout)
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertEqual(result["fatal_hits"], [])
+        self.assertEqual(result["post_lesson_response_chains"], 1)
+
+    def test_cli_production_output_safe_strict_rejects_aec_forward_and_listen_start_interrupt(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:02[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:03[GoogleLive]-INFO-Google Live transcript source=user chars=14 text='bắt đầu bài học'
+260518 20:10:04[GoogleLive]-INFO-Google Live turn_latency_ms=620.0 phase=first_audio_out
+260518 20:10:05[GoogleLive]-INFO-tts_stop_sent continue_listening=true listen_mode=realtime
+260518 20:10:06[GoogleLive]-INFO-Google Live aec_live_vad_forward reason=robot_speaking bytes=640 rms=300
+260518 20:10:07[GoogleLive]-INFO-Google Live user_interrupted reason=listen_start cancelled_response_id=1 next_response_id=2
+260518 20:10:08[LessonRuntime]-INFO-lesson_completed stepsCompleted=4
+260518 20:10:09[GoogleLive]-INFO-Google Live transcript source=user chars=24 text='con nói sau bài học'
+260518 20:10:10[GoogleLive]-INFO-Google Live turn_latency_ms=900.0 phase=first_audio_out
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/physical_smoke_audit.py",
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-output-safe-strict",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+        result = json.loads(proc.stdout)
+        self.assertIn("aec_live_vad_forward<=0", result["missing"])
+        self.assertIn("listen_start_interrupts<=0", result["missing"])
+
     def test_cli_production_voice_strict_requires_aec_forward_and_first_audio_budget(self):
         log_text = """
 260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
@@ -157,6 +238,91 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         result = json.loads(proc.stdout)
         self.assertIn("live_server_interruptions>=10", result["missing"])
+
+    def test_cli_production_voice_strict_accepts_turn_latency_first_audio_marker(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='xin chào'
+260518 20:10:03[GoogleLive]-INFO-Google Live turn_latency_ms=900.0 phase=first_audio_out
+260518 20:10:04[GoogleLive]-INFO-Google Live aec_live_vad_forward reason=robot_speaking bytes=640 rms=300
+260518 20:10:05[GoogleLive]-INFO-Google Live interruption output_age_ms=420.5
+260518 20:10:05[GoogleLive]-INFO-Google Live tts_stop_sent reason=interrupt continue_listening=true listen_mode=realtime
+260518 20:10:05[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=2.0
+260518 20:10:06[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='dừng lại'
+260518 20:10:07[GoogleLive]-INFO-Google Live tts_stop_sent continue_listening=true listen_mode=realtime
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--expected-user-transcript",
+                    "dừng lại",
+                    "--production-voice-strict",
+                    "--min-interrupts",
+                    "1",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["first_audio_out_ms"]["max"], 900.0)
+
+    def test_cli_production_voice_strict_prefers_turn_latency_over_session_start_latency(self):
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live session identity model=gemini-3.1-flash-live-preview voice=Kore language=vi-VN
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='xin chào'
+260518 20:10:03[GoogleLive]-INFO-Google Live first_audio_out_latency_ms=9710.4
+260518 20:10:03[GoogleLive]-INFO-Google Live turn_latency_ms=578.3 phase=first_audio_out
+260518 20:10:04[GoogleLive]-INFO-Google Live aec_live_vad_forward reason=robot_speaking bytes=640 rms=300
+260518 20:10:05[GoogleLive]-INFO-Google Live interruption output_age_ms=420.5
+260518 20:10:05[GoogleLive]-INFO-Google Live tts_stop_sent reason=interrupt continue_listening=true listen_mode=realtime
+260518 20:10:05[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=2.0
+260518 20:10:06[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='dừng lại'
+260518 20:10:07[GoogleLive]-INFO-Google Live tts_stop_sent continue_listening=true listen_mode=realtime
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(log_text, encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path("scripts/physical_smoke_audit.py")),
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--expected-user-transcript",
+                    "dừng lại",
+                    "--production-voice-strict",
+                    "--min-interrupts",
+                    "1",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["first_audio_out_ms"]["max"], 578.3)
 
     def test_cli_production_voice_strict_requires_aec_forward_per_cycle(self):
         log_text = """
@@ -1638,6 +1804,50 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["expected_user_transcripts"], 1)
         self.assertEqual(result["user_transcript_expected_matches"], 1)
+
+    def test_audit_requires_post_lesson_transcript_to_get_first_audio(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[LessonRuntime]-INFO-lesson_completed stepsCompleted=4
+260518 20:10:03[GoogleLive]-INFO-Google Live transcript source=user chars=24 text='bạn nghe thấy con không'
+"""
+
+        result = audit.audit_log(
+            log_text,
+            device_id="3c:0f:02:de:c2:e0",
+            client_id="d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            min_interrupts=0,
+            min_audio_interrupts=0,
+            expected_post_lesson_transcripts=["bạn nghe thấy con không"],
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["post_lesson_response_chains"], 0)
+        self.assertIn("post_lesson_response", result["missing"])
+
+    def test_audit_accepts_post_lesson_transcript_followed_by_first_audio(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        log_text = """
+260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}
+260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2
+260518 20:10:02[LessonRuntime]-INFO-lesson_completed stepsCompleted=4
+260518 20:10:03[GoogleLive]-INFO-Google Live transcript source=user chars=24 text='bạn nghe thấy con không'
+260518 20:10:04[GoogleLive]-INFO-Google Live turn_latency_ms=720.0 phase=first_audio_out
+"""
+
+        result = audit.audit_log(
+            log_text,
+            device_id="3c:0f:02:de:c2:e0",
+            client_id="d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            min_interrupts=0,
+            min_audio_interrupts=0,
+            expected_post_lesson_transcripts=["bạn nghe thấy con không"],
+        )
+
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertEqual(result["post_lesson_response_chains"], 1)
 
     def test_audit_rejects_expected_user_transcript_when_log_has_only_chars(self):
         audit = importlib.import_module("scripts.physical_smoke_audit")
@@ -3254,6 +3464,15 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         result = json.loads(proc.stdout)
         self.assertIn("model_echo_user_transcript", result["fatal_hits"])
         self.assertIn("no_fatal_patterns", result["missing"])
+
+    def test_model_echo_detector_ignores_short_user_prompt_fragment(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        lines = [
+            "260518 20:10:01[GoogleLive]-INFO-Google Live transcript source=model chars=5 text=' nghe'",
+            "260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=4 text='nghe'",
+        ]
+
+        self.assertEqual(audit._model_echo_user_transcript_count(lines), 0)
 
     def test_audit_rejects_robot_speaking_audio_decision_suppression(self):
         audit = importlib.import_module("scripts.physical_smoke_audit")

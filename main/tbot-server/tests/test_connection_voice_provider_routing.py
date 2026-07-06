@@ -379,12 +379,14 @@ class _ClosingWebSocket(_FakeWebSocket):
 class _RecordingVoiceProvider:
     def __init__(self):
         self.audio_calls = []
+        self.text_calls = []
 
     async def handle_audio_bytes(self, audio_bytes):
         self.audio_calls.append(audio_bytes)
         return True
 
     async def handle_text_message(self, message):
+        self.text_calls.append(message)
         return False
 
 class _LessonRuntimeStub:
@@ -708,6 +710,30 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         handler.bind_completed_event.set()
         await asyncio.wait_for(route_task, timeout=0.5)
+
+        self.assertEqual(handler.voice_provider.audio_calls, [b"opus-frame"])
+
+    async def test_google_live_listen_start_bypasses_pending_bind_gate(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.voice_provider = _RecordingVoiceProvider()
+
+        await asyncio.wait_for(
+            handler._route_message('{"type":"listen","state":"start","mode":"auto"}'),
+            timeout=1.5,
+        )
+
+        self.assertEqual(
+            handler.voice_provider.text_calls,
+            ['{"type":"listen","state":"start","mode":"auto"}'],
+        )
+
+    async def test_google_live_audio_bypasses_pending_bind_gate(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.voice_provider = _RecordingVoiceProvider()
+
+        await asyncio.wait_for(handler._route_message(b"opus-frame"), timeout=1.5)
 
         self.assertEqual(handler.voice_provider.audio_calls, [b"opus-frame"])
 
