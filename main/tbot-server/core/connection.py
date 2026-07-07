@@ -786,9 +786,21 @@ class ConnectionHandler:
         if provider_task is current_task:
             return
         try:
+            if self._google_live_mode_configured() and self.voice_provider is not None:
+                try:
+                    # ponytail: base/env Google Live is the production fast path.
+                    # If per-device config is slow, route wake audio now; make this
+                    # configurable only if non-Live manager profiles need it.
+                    await asyncio.wait_for(asyncio.shield(provider_task), timeout=0.5)
+                except asyncio.TimeoutError:
+                    self.logger.bind(tag=TAG).warning(
+                        "voice_provider_ready_wait_timeout; continuing with existing provider"
+                    )
+                return
             await provider_task
         except asyncio.CancelledError:  # pragma: no cover - task cancellation propagation guard
-            if current_task is not None and current_task.cancelling():
+            cancelling = getattr(current_task, "cancelling", None)
+            if current_task is not None and callable(cancelling) and cancelling():
                 raise
 
     async def _start_classic_pipeline_session(self):

@@ -223,8 +223,16 @@ class SampleManifestTest(unittest.TestCase):
 
         for step in interactive_steps:
             self.assertEqual(step.get("expectedResponses"), ["barn"], step["id"])
-            self.assertGreaterEqual(step.get("responseTimeoutSec", 0), 30.0, step["id"])
-            self.assertGreaterEqual(step.get("maxNoAnswerAttempts", 0), 3, step["id"])
+            self.assertLessEqual(step.get("responseTimeoutSec", 0), 10.0, step["id"])
+            self.assertLessEqual(step.get("maxNoAnswerAttempts", 0), 1, step["id"])
+
+        passive_dwells = [
+            step.get("dwellSec", 0)
+            for step in manifest["steps"]
+            if step.get("completionClass") == "passive"
+        ]
+        self.assertTrue(passive_dwells)
+        self.assertTrue(all(value <= 0.5 for value in passive_dwells))
 
     def test_interactive_sample_marks_child_questions_with_storybeat(self):
         manifest = build_interactive_sample_manifest()
@@ -859,9 +867,16 @@ class _FakeLiveClient:
 
     connected = True
 
-    def __init__(self, provider=None):
+    def __init__(self, provider=None, sent_texts=None):
         self.provider = provider
-        self.sent_texts = []
+        self.sent_texts = [] if sent_texts is None else sent_texts
+
+    async def connect(self):
+        self.connected = True
+
+    async def receive_events(self):
+        if False:
+            yield None
 
     async def send_text(self, text):
         self.sent_texts.append(text)
@@ -960,6 +975,20 @@ class _RealProviderConn(_FakeConn):
         return True
 
 
+def _make_real_google_live_provider(conn):
+    provider_ref = {}
+    sent_texts = []
+
+    def client_factory(*_args, **_kwargs):
+        return _FakeLiveClient(provider_ref["provider"], sent_texts=sent_texts)
+
+    provider = GoogleLiveProvider(conn, client_factory=client_factory)
+    provider_ref["provider"] = provider
+    provider._client = client_factory()
+    conn.voice_provider = provider
+    return provider
+
+
 def _iack(conn, acks, env_seq, *, step_id=None):
     """lesson_ack carrying the INTERACTIVE sample's lessonId."""
     return {
@@ -986,9 +1015,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
 
     async def _start_until_repeat_step(self):
         conn = _RealProviderConn()
-        provider = GoogleLiveProvider(conn)
-        provider._client = _FakeLiveClient(provider)
-        conn.voice_provider = provider
+        provider = _make_real_google_live_provider(conn)
 
         rt = await start_sample_lesson(conn)
         self.assertIsNotNone(rt)
@@ -1007,9 +1034,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_speaking_flow_child_says_word_then_completes_happy(self):
         conn = _RealProviderConn()
-        provider = GoogleLiveProvider(conn)
-        provider._client = _FakeLiveClient(provider)
-        conn.voice_provider = provider
+        provider = _make_real_google_live_provider(conn)
 
         # start_sample_lesson(interactive) builds the runtime, enters lesson mode (face
         # off on the device), and emits lesson_prepare.
@@ -1334,9 +1359,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         and NO transcript routing — proving the interactive wait above is load-bearing."""
         conn = _RealProviderConn()
         conn.config["lesson"]["sample_mode"] = "passive"
-        provider = GoogleLiveProvider(conn)
-        provider._client = _FakeLiveClient(provider)
-        conn.voice_provider = provider
+        provider = _make_real_google_live_provider(conn)
 
         rt = await start_sample_lesson(conn)
         self.assertIsNotNone(rt)
@@ -1361,9 +1384,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         lesson_completed ending, never a sad child_inactive abandon. Real assigned
         lessons keep abandon semantics (graceful_inactivity_finish stays False)."""
         conn = _RealProviderConn()
-        provider = GoogleLiveProvider(conn)
-        provider._client = _FakeLiveClient(provider)
-        conn.voice_provider = provider
+        provider = _make_real_google_live_provider(conn)
 
         rt = await start_sample_lesson(conn)
         self.assertIsNotNone(rt)

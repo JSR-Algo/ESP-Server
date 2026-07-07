@@ -378,6 +378,38 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         await wait_from_same_task()
 
+    async def test_google_live_listen_start_does_not_block_on_slow_private_config(self):
+        handler = _build_handler()
+        handler.read_config_from_api = True
+        handler.config["read_config_from_api"] = True
+        handler.config["voice_mode"] = {"type": "google_live"}
+        routed = []
+
+        class Provider:
+            async def handle_text_message(self, message):
+                routed.append(message)
+                return True
+
+        handler.voice_provider = Provider()
+        blocker = asyncio.create_task(asyncio.Event().wait())
+        handler.voice_provider_task = blocker
+
+        try:
+            await asyncio.wait_for(
+                handler._route_message('{"type":"listen","state":"start","mode":"auto"}'),
+                timeout=1.0,
+            )
+            self.assertFalse(blocker.done())
+        finally:
+            blocker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await blocker
+
+        self.assertEqual(
+            routed,
+            ['{"type":"listen","state":"start","mode":"auto"}'],
+        )
+
     async def test_route_message_timeout_bind_and_fallback_paths(self):
         handler = _build_handler()
         discarded = []

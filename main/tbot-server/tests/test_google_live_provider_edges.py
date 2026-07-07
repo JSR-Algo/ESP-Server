@@ -290,7 +290,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         return self.provider
 
-    async def test_prepare_for_sample_lesson_reopens_fresh_session_and_resets_turn_state(self):
+    async def test_prepare_for_sample_lesson_keeps_active_receive_session_and_resets_turn_state(self):
         conn = _Conn()
         old_client = _Client()
         new_clients = []
@@ -313,10 +313,10 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()):
             await provider.prepare_for_sample_lesson()
 
-        self.assertEqual(old_client.closed, 1)
-        self.assertEqual(len(new_clients), 1)
-        self.assertIs(provider._client, new_clients[0])
-        self.assertIsNone(conn.google_live_session_resumption_handle)
+        self.assertEqual(old_client.closed, 0)
+        self.assertEqual(len(new_clients), 0)
+        self.assertIs(provider._client, old_client)
+        self.assertEqual(conn.google_live_session_resumption_handle, "old-handle")
         self.assertIsNone(conn.google_live_turn_started_at)
         self.assertIsNone(conn.google_live_audio_out_started_at)
         self.assertIsNone(provider._waiting_model_since)
@@ -827,6 +827,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._client = _Client()
         provider._bridge = _Bridge()
         provider._user_audio_allowed_until = 0.0
+        old_client = provider._client
+        old_bridge = provider._bridge
 
         routed = await provider._route_lesson_child_response("barn barn barn")
 
@@ -835,7 +837,44 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             handled,
             [("barn barn barn", {"source": "voice_transcript"})],
         )
-        self.assertEqual(provider._bridge.stop_calls, 1)
+        self.assertEqual(old_client.interrupt_calls, 1)
+        self.assertFalse(conn.client_abort)
+        self.assertEqual(old_bridge.stop_calls, 1)
+
+    async def test_lesson_child_transcript_reopens_live_before_runtime_prompt(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        events = []
+
+        async def _on_child_response(text, **kwargs):
+            events.append(("runtime", text, kwargs))
+            return True
+
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            _step_id="s4",
+            _step_passive=False,
+            _step_completed=False,
+            _child_response_window_open=True,
+            on_child_response=_on_child_response,
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._user_audio_allowed_until = 0.0
+
+        async def _reconnect(reason, **kwargs):
+            events.append(("reconnect", reason, kwargs))
+
+        provider._hard_reconnect_after_interrupt = _reconnect
+
+        routed = await provider._route_lesson_child_response("bond")
+
+        self.assertTrue(routed)
+        self.assertEqual(events[0][0], "reconnect")
+        self.assertEqual(events[0][1], "lesson_child_response_prompt")
+        self.assertEqual(events[0][2], {"restore_session_resumption": False})
+        self.assertEqual(events[1], ("runtime", "bond", {"source": "voice_transcript"}))
 
     async def test_lesson_child_transcript_routes_after_child_audio_before_runtime_window_flag(self):
         conn = _Conn()
@@ -859,6 +898,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = _Bridge()
         provider._lesson_child_audio_pending_transcript = True
         provider._user_audio_allowed_until = 0.0
+        old_bridge = provider._bridge
 
         routed = await provider._route_lesson_child_response("bỏ")
 
@@ -868,7 +908,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             [("bỏ", {"source": "voice_transcript"}, True)],
         )
         self.assertFalse(provider._lesson_child_audio_pending_transcript)
-        self.assertEqual(provider._bridge.stop_calls, 1)
+        self.assertEqual(old_bridge.stop_calls, 1)
 
     async def test_lesson_child_audio_waits_while_robot_speaks(self):
         conn = _Conn()
@@ -958,11 +998,18 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             return True
 
         provider._dispatch_lesson_start_intent = _lesson_start
+        interrupts = []
+
+        async def _interrupt(reason):
+            interrupts.append(reason)
+
+        provider._begin_user_interrupt = _interrupt
 
         handled = await provider._on_user_transcript("high speed")
 
         self.assertTrue(handled)
         self.assertEqual(lesson_calls, [])
+        self.assertEqual(interrupts, ["wake_word"])
         self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
         sent = [json.loads(payload) for payload in conn.websocket.sent]
         self.assertEqual(sent[0]["type"], "stt")
@@ -1551,7 +1598,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await provider._finalize_user_audio_input("listen_stop")
         await asyncio.sleep(0.05)
 
-        self.assertEqual(provider._interaction.state, google_live_module.InteractionState.LISTENING)
+        self.assertEqual(provider._interaction.state, google_live_module.InteractionState.IDLE)
         self.assertIsNone(provider._waiting_model_since)
         self.assertEqual(provider._client.text, [])
         sent = [json.loads(payload) for payload in conn.websocket.sent]
@@ -2404,6 +2451,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.lesson_runtime = SimpleNamespace(on_child_response=lambda *_args, **_kwargs: False)
         self.assertFalse(await provider._dispatch_lesson_child_response("answer"))
 
+        conn.lesson_runtime = None
         barge_interrupts = []
 
         async def _barge_interrupt(reason):
@@ -2413,7 +2461,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await provider._on_user_transcript_barge_in("plain chatter")
         self.assertEqual(barge_interrupts, ["transcript_barge_in"])
 
-        self.assertEqual(provider._lesson_start_ack_text(None), "Bắt đầu bài học nhé.")
+        self.assertEqual(provider._lesson_start_ack_text(None), "")
         self.assertIn("chưa", provider._lesson_start_ack_text(SimpleNamespace(action=Action.ERROR, response="", result="")))
         self.assertIn("chưa", provider._lesson_start_ack_text(SimpleNamespace(action=Action.RESPONSE, response="", result="failed")))
         self.assertFalse(await provider.speak_lesson_step_prompt("   "))
@@ -2468,7 +2516,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._log_audio_decision("drop", "echo", b"pcm")
 
         conn.google_live_audible_output_until = time.monotonic() + 1
+        config["echo_bypass_interrupt_enabled"] = False
         provider._bridge._aec_processor = SimpleNamespace(bypassed=False)
+        provider._last_echo_suppressed_log_at["robot_speaking"] = time.monotonic() - 2
         self.assertEqual(provider._current_audio_suppression_reason(), "robot_speaking")
         self.assertEqual(
             provider._current_interaction_state_for_audio().value,

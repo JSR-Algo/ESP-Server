@@ -990,6 +990,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if await self._dispatch_lesson_child_response(transcript_text):
             return True
         if self._is_live_wake_transcript_only(transcript_text):
+            await self._begin_user_interrupt("wake_word")
             await self._send_wake_listening_feedback(transcript_text)
             await self._open_user_audio_window("wake_word")
             await self._reset_conversation_live_context("wake_transcript")
@@ -1387,12 +1388,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_lesson_child_speech_start_frames()
         self._cancel_lesson_child_transcript_timeout_task()
         self._force_lesson_session_mode("lesson_child_response")
-        # Block model output BEFORE advancing the runtime so the runtime never
-        # races the model's audio for this turn.
-        if self._bridge is not None and hasattr(self._bridge, "stop_output"):
-            await self._bridge.stop_output()
-        # Close any open WAITING_MODEL turn so next-step audio is forwarded.
+        # Cancel Live's own answer to the child's audio before the runtime emits
+        # the controlled retry/success prompt for this lesson turn.
+        await self._begin_user_interrupt("lesson_child_response")
+        await self._hard_reconnect_after_interrupt(
+            "lesson_child_response_prompt",
+            restore_session_resumption=False,
+        )
         self._interaction.transition(InteractionState.LISTENING)
+        self.conn.client_abort = False
         handled = await runtime.on_child_response(
             transcript_text, source="voice_transcript"
         )
@@ -4444,6 +4448,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             "explicit_interrupt",
             "listen_start",
             "wake_word",
+            "lesson_child_response",
             "transcript_barge_in",
             "loud_input",
         }
@@ -4565,13 +4570,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
         config = self._get_live_config()
         return bool(config.get("hard_reconnect_on_interrupt", False))
 
-    async def _hard_reconnect_after_interrupt(self, reason):
+    async def _hard_reconnect_after_interrupt(self, reason, *, restore_session_resumption=True):
         if self._closing or self._fallback_provider is not None or self._reconnecting:
             return
         self._reconnecting = True
         try:
             await self._close_live_resources()
-            await self._open_live_session()
+            if restore_session_resumption:
+                await self._open_live_session()
+            else:
+                self.conn.google_live_session_resumption_handle = None
+                async with self._get_live_open_lock():
+                    await self._open_live_session_locked(restore_session_resumption=False)
             self.conn.voice_provider = self
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live hard_reconnected_after_interrupt reason={} response_id={}",

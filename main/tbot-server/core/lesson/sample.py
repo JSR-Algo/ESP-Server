@@ -160,7 +160,7 @@ def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word:
     }
 
 
-DEFAULT_SAMPLE_STEP_DWELL_SEC = 5.0
+DEFAULT_SAMPLE_STEP_DWELL_SEC = 0.3
 DEFAULT_SAMPLE_STEP_TIMEOUT_SEC = 75.0
 
 
@@ -330,8 +330,8 @@ def build_interactive_sample_manifest(asset_base: str = "",
                 "alreadyInLesson": "Mình đang học rồi. Con nhìn hình và nói barn nhé.",
             },
             story_beat={"ask": "Đến lượt con. Con nói theo mình: barn!", "waitForChild": True},
-            response_timeout_sec=30.0,
-            max_no_answer_attempts=3,
+            response_timeout_sec=10.0,
+            max_no_answer_attempts=1,
         ),
         _step(
             "s4", "recall",
@@ -349,8 +349,8 @@ def build_interactive_sample_manifest(asset_base: str = "",
             },
             story_beat={"ask": "Con thấy gì trong hình? Nói tên tiếng Anh của cái kho.", "waitForChild": True},
             success_prompt="Tuyệt vời! Con nói được barn và hoàn thành bài học mẫu.",
-            response_timeout_sec=30.0,
-            max_no_answer_attempts=3,
+            response_timeout_sec=10.0,
+            max_no_answer_attempts=1,
         ),
     ]
     manifest = {
