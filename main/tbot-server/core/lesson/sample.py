@@ -322,7 +322,7 @@ def build_interactive_sample_manifest(asset_base: str = "",
                    primary_word="barn", glyph="🗣️", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Chưa đúng. Nhìn hình cái kho và nói lại: barn.",
+            retry_prompt="Không sao. Nhìn hình cái kho, nói chậm: barn.",
             interaction_prompts={
                 "helpOrRepeat": "Mình nhắc lại: nhìn hình cái kho và nói barn.",
                 "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
@@ -340,7 +340,7 @@ def build_interactive_sample_manifest(asset_base: str = "",
                    primary_word="barn", glyph="🏠", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Chưa đúng. Nhìn hình cái kho và nói lại: barn.",
+            retry_prompt="Không sao. Nhìn hình cái kho, nói chậm: barn.",
             interaction_prompts={
                 "helpOrRepeat": "Mình nhắc lại: cái kho tiếng Anh là barn.",
                 "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
@@ -401,7 +401,7 @@ class SampleAssetCache:
     (preload/synthesize_preload_status/assert_profile_renderable/public_url_for_source/
     aclose/preload_timeout_sec) plus harmless sd-path attrs."""
 
-    def __init__(self, preload_timeout_sec: float = 30.0, *, sd_pack: bool = False) -> None:
+    def __init__(self, preload_timeout_sec: float = 30.0, *, sd_pack: bool = False, asset_base: str = "") -> None:
         try:
             timeout = float(preload_timeout_sec)
         except (TypeError, ValueError):
@@ -410,6 +410,7 @@ class SampleAssetCache:
         self.cache_key = _SAMPLE_SD_CACHE_KEY
         self.asset_pack_local_root = "sd://tbot/lesson-assets"
         self.sd_pack = bool(sd_pack)
+        self.asset_base = str(asset_base or "").strip().rstrip("/")
 
     async def preload(self) -> bool:
         return True
@@ -457,6 +458,7 @@ class SampleAssetCache:
                 {
                     "key": record["key"],
                     "path": _basename(record["path"]),
+                    "url": _resolve_src(record["path"], self.asset_base),
                     "sha256": record["sha256"],
                     "size": record["size"],
                     "mediaType": record["mediaType"],
@@ -605,7 +607,7 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
         conn,
         assignment=assignment,
         manifest=manifest,
-        asset_cache=SampleAssetCache(sd_pack=sd_pack),
+        asset_cache=SampleAssetCache(sd_pack=sd_pack, asset_base=asset_base),
         forwarder=NoOpLessonForwarder(),
         manifest_checksum="sample",
         # Reuse the connection's CP-8 voice-latency-during-preload alarm if one was

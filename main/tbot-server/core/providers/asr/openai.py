@@ -18,6 +18,7 @@ class ASRProvider(ASRProviderBase):
         self.model = config.get("model_name")        
         self.output_dir = config.get("output_dir")
         self.delete_audio_file = delete_audio_file
+        self.last_error = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -26,6 +27,7 @@ class ASRProvider(ASRProviderBase):
 
     async def speech_to_text(self, opus_data: List[bytes], session_id: str, audio_format="opus", artifacts=None) -> Tuple[Optional[str], Optional[str]]:
         file_path = None
+        self.last_error = None
         try:
             if artifacts is None:
                 return "", None
@@ -65,6 +67,7 @@ class ASRProvider(ASRProviderBase):
                 raise Exception(f"APIRequest failed: {response.status_code} - {response.text}")
                 
         except Exception as e:
+            self.last_error = str(e)
             logger.bind(tag=TAG).error(f"Speech recognition failed: {e}")
             return "", None
         

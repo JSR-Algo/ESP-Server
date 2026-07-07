@@ -33,6 +33,9 @@ def test_build_config_uses_in_memory_local_demo_posture():
     assert config["lesson"]["runtime_enabled"] is False
     assert config["lesson"]["sample_lesson"] is True
     assert config["lesson"]["sample_mode"] == "interactive"
+    assert config["lesson"]["asset_delivery_mode"] == "sd_pack"
+    assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"
+    assert config["lesson"]["asset_pack_mount_root"] == "/sdcard/tbot/lesson-assets"
 
 
 def test_status_lines_include_loopback_nudge_and_lan_ota_urls():

@@ -106,9 +106,11 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
     async def test_features_with_mcp_initializes_client_and_schedules_initialize_message(self):
         conn = _Conn()
         created = []
+        sent_counts_at_schedule = []
 
         def create_task(coro):
             created.append(coro)
+            sent_counts_at_schedule.append(len(conn.websocket.sent))
             coro.close()
             return SimpleNamespace(done=lambda: True)
 
@@ -120,6 +122,7 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.features, {"mcp": True, "vision": True})
         self.assertEqual(conn.mcp_client, "mcp-client")
         self.assertEqual(len(created), 1)
+        self.assertEqual(sent_counts_at_schedule, [1])
         self.assertEqual(json.loads(conn.websocket.sent[0])["type"], "hello")
 
     async def test_empty_hello_still_sends_server_welcome_without_overwriting_state(self):

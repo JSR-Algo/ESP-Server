@@ -566,6 +566,11 @@ class GoogleLiveAudioBridge:
             in_lesson = False
         if not in_lesson:
             return False
+        if (
+            event_type == "audio_end"
+            and getattr(self.conn, "google_live_lesson_prompt_output_inferred_idle", False)
+        ):
+            return False
         if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
             return False
         if event_type not in {
@@ -595,6 +600,8 @@ class GoogleLiveAudioBridge:
     def _clear_lesson_prompt_output_gate(self):
         if hasattr(self.conn, "google_live_lesson_prompt_output_allowed"):
             self.conn.google_live_lesson_prompt_output_allowed = False
+        if hasattr(self.conn, "google_live_lesson_prompt_output_inferred_idle"):
+            self.conn.google_live_lesson_prompt_output_inferred_idle = False
 
     def _log_stale_model_event_drop(self, event_type, reason):
         try:

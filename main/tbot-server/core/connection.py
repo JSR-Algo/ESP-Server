@@ -223,6 +223,7 @@ class ConnectionHandler:
         # Holds the per-device lesson session state when a lesson is in flight.
         self.lesson_runtime = None
         self.lesson_pull_task = None
+        self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
         # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
         # lazily created on the first lesson pull. None until a lesson runs.
@@ -264,9 +265,10 @@ class ConnectionHandler:
         self.load_function_plugin = False
         self.intent_type = "nointent"
 
-        self.timeout_seconds = (
-                int(self.config.get("close_connection_no_voice_time", 120)) + 60
-        )  # Add on basis of original first close60seconds, perform second-stage close
+        self.timeout_seconds = max(
+            int(self.config.get("close_connection_no_voice_time", 120)) + 60,
+            61 * 60,
+        )  # Keep WebSocket alive for 60-minute Live/lesson sessions.
         self.timeout_task = None
 
         # {"mcp":true} IndicateEnableMCPFunction
@@ -435,6 +437,7 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
+        self.last_activity_time = time.time() * 1000
         if (
             isinstance(message, str)
             and self._google_live_mode_configured()
@@ -453,6 +456,7 @@ class ConnectionHandler:
         if isinstance(message, str) and (
             self._is_hello_message(message)
             or self._is_ping_message(message)
+            or self._is_mcp_message(message)
             or self._is_lesson_control_message(message)
         ):
             await handleTextMessage(self, message)
@@ -756,6 +760,13 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "ping"
+
+    def _is_mcp_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "mcp"
 
     def _is_listen_control_message(self, message):
         try:
@@ -2161,6 +2172,22 @@ class ConnectionHandler:
             )
             return None
 
+    def schedule_cached_lesson_sd_sync(self):
+        if self.sd_pack_sync_task and not self.sd_pack_sync_task.done():
+            return
+        self.sd_pack_sync_task = asyncio.create_task(self._sync_cached_lesson_assets_to_sd())
+
+    async def _sync_cached_lesson_assets_to_sd(self):
+        try:
+            from core.lesson.sd_pack_sync import sync_cached_lesson_assets_to_sd
+
+            return await sync_cached_lesson_assets_to_sd(self)
+        except Exception as exc:  # pragma: no cover - background sync must not break voice
+            self.logger.bind(tag=TAG).warning(
+                f"cached lesson SD sync failed: {type(exc).__name__}: {exc}"
+            )
+            return None
+
     async def close(self, ws=None):
         """Resource cleanup method"""
         try:
@@ -2215,6 +2242,10 @@ class ConnectionHandler:
                 self.lesson_pull_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self.lesson_pull_task
+            if self.sd_pack_sync_task and not self.sd_pack_sync_task.done():
+                self.sd_pack_sync_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self.sd_pack_sync_task
             if self.lesson_runtime is not None:
                 try:
                     await self.lesson_runtime.close()

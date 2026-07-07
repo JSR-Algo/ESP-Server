@@ -436,10 +436,10 @@ lesson:
   # not listed here (LESSON_VERSION_UNSUPPORTED, no frame on the wire). Add 'piTft' /
   # 'mobile' here ONLY when that firmware ships.
   supported_profiles: ['espTft']
-  # Asset delivery defaults to verified HTTP URLs. For SD-pack mode, set both via env:
-  # LESSON_ASSET_DELIVERY_MODE=sd_pack
-  # LESSON_ASSET_PACK_LOCAL_ROOT=sd://sdcard/tbot/lesson-assets
-  # LESSON_ASSET_PACK_MOUNT_ROOT=/sdcard/tbot/lesson-assets
+  # Sample/demo uses SD-pack paths so firmware does not fetch HTTPS images during lesson_step.
+  asset_delivery_mode: sd_pack
+  asset_pack_local_root: sd://tbot/lesson-assets
+  asset_pack_mount_root: /sdcard/tbot/lesson-assets
   # The ESP server writes verified bytes under the mount root; firmware reads the
   # matching sd:// localPath and refuses start until those files exist.
 

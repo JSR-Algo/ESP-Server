@@ -19,6 +19,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from core.lesson.asset_cache import AssetCache, FAILED, READY
 from core.lesson.errors import LessonError
@@ -167,6 +168,20 @@ class ChildResponseIntentClassifierTest(unittest.TestCase):
             _classify_child_response_intent("Bòn bòn bon", ["barn"]),
             "correct",
         )
+
+    def test_near_child_pronunciation_for_short_word_is_accepted(self):
+        for response in ("con nói ban", "bar", "born", "burn"):
+            self.assertEqual(
+                _classify_child_response_intent(response, ["barn"]),
+                "correct",
+                response,
+            )
+        for response in ("cat", "car", "farm"):
+            self.assertEqual(
+                _classify_child_response_intent(response, ["barn"]),
+                "wrong",
+                response,
+            )
 
     def test_vietnamese_object_word_is_not_confused_with_frustration_after_accent_stripping(self):
         self.assertEqual(
@@ -444,6 +459,27 @@ class _FakeAssetCache:
 
     async def aclose(self):
         self.closed = True
+
+class _ReadyLessonAssetMcpClient:
+    def __init__(self):
+        self.ready = True
+        self.tools = {"self_lesson_assets_sync_to_sd": {}}
+
+    async def is_ready(self):
+        return self.ready
+
+    def has_tool(self, name):
+        return name in self.tools
+
+class _NotReadyLessonAssetMcpClient(_ReadyLessonAssetMcpClient):
+    def __init__(self):
+        super().__init__()
+        self.ready = False
+
+class _MissingLessonAssetToolMcpClient(_ReadyLessonAssetMcpClient):
+    def __init__(self):
+        super().__init__()
+        self.tools = {}
 
 
 class _FakeForwarder:
@@ -2262,7 +2298,152 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(asset["state"] == "READY" for asset in pack_assets.values()))
 
-    async def test_sd_asset_pack_not_ready_after_preload_fails_before_prepare(self):
+    async def test_sd_asset_pack_calls_robot_mcp_sync_before_prepare(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        calls = []
+
+        async def capture_call(conn_arg, mcp_client, tool_name, args, timeout=30):
+            calls.append(
+                {
+                    "conn": conn_arg,
+                    "mcp_client": mcp_client,
+                    "tool_name": tool_name,
+                    "args": copy.deepcopy(args),
+                    "timeout": timeout,
+                    "sent_before_call": list(conn.websocket.sent),
+                }
+            )
+            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+            await rt.start()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["conn"], conn)
+        self.assertEqual(calls[0]["mcp_client"], conn.mcp_client)
+        self.assertEqual(calls[0]["tool_name"], "self_lesson_assets_sync_to_sd")
+        self.assertEqual(calls[0]["sent_before_call"], [])
+        self.assertGreaterEqual(calls[0]["timeout"], 60)
+        pack = calls[0]["args"]["assetPack"]
+        self.assertEqual(pack["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertTrue(pack["ready"])
+        self.assertEqual(
+            {asset["key"] for asset in pack["assets"]},
+            {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
+        )
+        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_raw_syncs_unlisted_internal_robot_tool(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _MissingLessonAssetToolMcpClient()
+        calls = []
+
+        async def capture_raw(conn_arg, mcp_client, tool_name, args, timeout=30):
+            calls.append(
+                {
+                    "conn": conn_arg,
+                    "mcp_client": mcp_client,
+                    "tool_name": tool_name,
+                    "args": copy.deepcopy(args),
+                    "timeout": timeout,
+                    "sent_before_call": list(conn.websocket.sent),
+                }
+            )
+            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", new=capture_raw):
+            await rt.start()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["tool_name"], "self.lesson_assets.sync_to_sd")
+        self.assertEqual(calls[0]["sent_before_call"], [])
+        self.assertGreaterEqual(calls[0]["timeout"], 60)
+        self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_mcp_sync_failure_falls_back_to_online_urls(self):
+        manifest = _build_manifest()
+        scene = manifest["steps"][0]["scene"]
+        poster_source = scene["backgroundScene"]["poster"]["src"]
+        object_source = scene["teachingObject"]["asset"]["src"]
+        overlay_source = scene["robotOverlay"]["atlas"]["image"]
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True))
+
+        async def failing_call(*_args, **_kwargs):
+            raise TimeoutError("robot sd sync timed out")
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=failing_call):
+            await rt.start()
+
+        prepare = self._sent_frames(conn)[-1]
+        self.assertEqual(prepare["type"], "lesson_prepare")
+        self.assertNotIn("assetPack", prepare["body"])
+
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        step = self._sent_frames(conn)[-1]
+
+        self.assertEqual(step["type"], "lesson_step")
+        self.assertEqual(step["body"]["scene"]["backgroundScene"]["poster"]["src"], poster_source)
+        self.assertEqual(step["body"]["scene"]["teachingObject"]["asset"]["src"], object_source)
+        self.assertEqual(step["body"]["scene"]["robotOverlay"]["asset"]["src"], overlay_source)
+
+    async def test_sd_asset_pack_mcp_unavailable_falls_back_to_online_urls(self):
+        for mcp_client in (
+            None,
+            _NotReadyLessonAssetMcpClient(),
+            _MissingLessonAssetToolMcpClient(),
+        ):
+            with self.subTest(mcp_client=type(mcp_client).__name__ if mcp_client else None):
+                manifest = _build_manifest()
+                scene = manifest["steps"][0]["scene"]
+                poster_source = scene["backgroundScene"]["poster"]["src"]
+                features = None
+                if mcp_client is None:
+                    features = {
+                        "lesson": True,
+                        "renderer": "teebot-lesson-renderer.v1",
+                        "mcp": True,
+                    }
+                conn = _FakeConn(
+                    features=features,
+                    session_id=FIX["frames"]["lesson_prepare"]["sessionId"],
+                )
+                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.mcp_client = mcp_client
+                rt = self._runtime(
+                    conn=conn,
+                    manifest=manifest,
+                    asset_cache=_FakeAssetCache(ready=True),
+                )
+
+                await rt.start()
+
+                prepare = self._sent_frames(conn)[-1]
+                self.assertEqual(prepare["type"], "lesson_prepare")
+                self.assertNotIn("assetPack", prepare["body"])
+
+                await rt.on_lesson_ack(_ack(1, 1))
+                await rt._preload_task
+                await rt.on_lesson_ack(_ack(2, 2))
+                step = self._sent_frames(conn)[-1]
+                self.assertEqual(
+                    step["body"]["scene"]["backgroundScene"]["poster"]["src"],
+                    poster_source,
+                )
+
+    async def test_sd_asset_pack_not_ready_falls_back_to_online_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=False))
@@ -2270,9 +2451,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.start()
 
         sent = self._sent_frames(conn)
-        self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
-        self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
-        self.assertEqual(rt.state, "FAILED")
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])
+        self.assertNotIn("assetPack", sent[0]["body"])
+        self.assertEqual(rt.state, "PRELOADING")
 
     async def test_sd_asset_pack_preload_error_fails_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
@@ -6191,7 +6372,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             _build_manifest(),
         )
         saved_asset_cache = asset_cache_module.AssetCache
-        asset_cache_module.AssetCache = lambda **_kwargs: _FakeAssetCache(ready=False)
+        asset_cache_module.AssetCache = lambda **_kwargs: _FakeAssetCache(
+            preload_error=LessonError("ASSET_CHECKSUM_MISMATCH", "bad asset")
+        )
         try:
             result = await runtime_module.maybe_start_lesson_on_connect(conn)
         finally:
@@ -6200,11 +6383,11 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(conn.lesson_start_status["code"], "START_REFUSED")
-        self.assertEqual(released, ["sd_asset_pack_not_ready"])
+        self.assertEqual(released, ["sd_asset_pack_preload_failed"])
         self.assertIsNone(conn.lesson_runtime)
         sent = [json.loads(payload) for payload in conn.websocket.sent]
         self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
-        self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
+        self.assertEqual(sent[0]["body"]["code"], "ASSET_CHECKSUM_MISMATCH")
 
     async def test_asset_cache_size_limits_are_passed_from_lesson_config(self):
         import core.lesson.asset_cache as asset_cache_module

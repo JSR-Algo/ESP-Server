@@ -38,9 +38,12 @@ from core.lesson.errors import (
     lesson_capability_ok,
     device_renderer_capabilities,
 )
+from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 
 TAG = "LessonRuntime"
+SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
+SD_ASSET_SYNC_TIMEOUT_SEC = 120
 
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
 # never inline JSON, so 16 KiB is generous for a 3-layer step with prompts/choices.
@@ -264,6 +267,34 @@ def _contains_token_sequence(tokens: List[str], expected: List[str]) -> bool:
 def _contains_any_token_sequence(tokens: List[str], expected_values: List[str]) -> bool:
     return any(_contains_token_sequence(tokens, _matching_tokens(value)) for value in expected_values)
 
+def _edit_distance_at_most(left: str, right: str, limit: int) -> bool:
+    if abs(len(left) - len(right)) > limit:
+        return False
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, 1):
+        current = [left_index]
+        row_min = current[0]
+        for right_index, right_char in enumerate(right, 1):
+            cost = 0 if left_char == right_char else 1
+            value = min(
+                previous[right_index] + 1,
+                current[right_index - 1] + 1,
+                previous[right_index - 1] + cost,
+            )
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+def _near_child_pronunciation_token(token: str, expected: str) -> bool:
+    if not token or not expected or token[0] != expected[0]:
+        return False
+    if len(expected) < 3 or len(expected) > 8:
+        return False
+    return _edit_distance_at_most(token, expected, 1)
+
 def _child_response_interaction_prompt(step: Dict[str, Any], key: str) -> Optional[str]:
     prompts = step.get("interactionPrompts")
     if not isinstance(prompts, dict):
@@ -378,8 +409,14 @@ def _child_response_matches_expected(response: Any, expected_responses: List[str
         if _contains_token_sequence(response_tokens, expected_tokens):
             return True
         if len(expected_tokens) == 1:
-            aliases = token_aliases.get(expected_tokens[0], set())
+            expected_token = expected_tokens[0]
+            aliases = token_aliases.get(expected_token, set())
             if aliases and any(token in aliases for token in response_tokens):
+                return True
+            if any(
+                _near_child_pronunciation_token(token, expected_token)
+                for token in response_tokens
+            ):
                 return True
     return False
 
@@ -729,6 +766,7 @@ class LessonRuntime:
         # enqueue a second terminal event for the same run.
         self._failure_forwarded = False
         self._completion_stop_sent = False
+        self._sd_asset_pack_online_fallback = False
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -788,7 +826,7 @@ class LessonRuntime:
             raise self.last_error
 
         self.state = S_PRELOADING
-        if self._sd_asset_pack_enabled():
+        if self._use_sd_asset_pack():
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
                 return
@@ -1063,7 +1101,7 @@ class LessonRuntime:
             return
         ftype = frame.get("type")
         if ftype == "lesson_prepare":
-            if self._sd_asset_pack_enabled() and not self._ack_reports_asset_pack_ready(ack_body):
+            if self._use_sd_asset_pack() and not self._ack_reports_asset_pack_ready(ack_body):
                 self.last_error = LessonError(
                     ASSET_PACK_NOT_READY,
                     "device did not report verified SD asset pack before lesson start",
@@ -1073,7 +1111,7 @@ class LessonRuntime:
                 await self._emit_error(self.last_error)
                 await self._notify_lesson_terminal("asset_pack_not_ready")
                 return
-            if self._sd_asset_pack_enabled():
+            if self._use_sd_asset_pack():
                 self.state = S_READY
                 self._forward({"type": "preload_ready"})
                 await self._emit("lesson_start", body={})
@@ -1301,15 +1339,14 @@ class LessonRuntime:
         if self._preload_status_report_tasks:
             await asyncio.sleep(0)
         if not ready or not status.get("ready"):
-            self.last_error = LessonError(
-                ASSET_PACK_NOT_READY,
-                "ESP could not materialize verified SD asset pack before lesson_prepare",
-                retryable=True,
-            )
-            self.state = S_FAILED
-            await self._emit_error(self.last_error)
-            await self._notify_lesson_terminal("sd_asset_pack_not_ready")
-            return False
+            self._sd_asset_pack_online_fallback = True
+            self._log("warning", "sd asset pack not ready; falling back to online URLs")
+            await self._notify_lesson_terminal("sd_asset_pack_online_fallback")
+            return True
+        if not await self._sync_sd_asset_pack_to_robot():
+            self._sd_asset_pack_online_fallback = True
+            self._log("warning", "robot SD sync unavailable; falling back to online URLs")
+            await self._notify_lesson_terminal("sd_asset_pack_online_fallback")
         return True
 
     async def _emit_step(self) -> None:
@@ -1911,7 +1948,7 @@ class LessonRuntime:
         for reason, node in self._required_lesson_step_asset_nodes(scene):
             if not isinstance(node, dict) or not isinstance(node.get("src"), str) or not node.get("src", "").strip():
                 return reason
-            if self._sd_asset_pack_enabled() and not self._is_sd_asset_pack_source(node.get("src")):
+            if self._use_sd_asset_pack() and not self._is_sd_asset_pack_source(node.get("src")):
                 return reason
         return None
 
@@ -1983,7 +2020,7 @@ class LessonRuntime:
             "criticalAssets": self._critical_assets_payload(),
             "preloadTimeoutSec": int(self.asset_cache.preload_timeout_sec),
         }
-        if self._sd_asset_pack_enabled():
+        if self._use_sd_asset_pack():
             pack = getattr(self.asset_cache, "asset_pack_manifest", None)
             if callable(pack):
                 body["assetPack"] = pack(
@@ -2078,7 +2115,7 @@ class LessonRuntime:
             return None
         rewritten = copy.deepcopy(scene)
         self._ensure_robot_overlay_asset_source(rewritten)
-        if self._sd_asset_pack_enabled():
+        if self._use_sd_asset_pack():
             self._rewrite_required_sd_pack_layer_sources(rewritten)
         else:
             self._rewrite_required_http_layer_sources(rewritten)
@@ -2147,7 +2184,7 @@ class LessonRuntime:
                 if key == "src" and isinstance(child, str):
                     resolver_name = (
                         "local_pack_url_for_source"
-                        if self._sd_asset_pack_enabled()
+                        if self._use_sd_asset_pack()
                         else "public_url_for_source"
                     )
                     resolver = getattr(self.asset_cache, resolver_name, None)
@@ -2166,6 +2203,68 @@ class LessonRuntime:
         lesson_cfg = _lesson_config(config)
         mode = str(lesson_cfg.get("asset_delivery_mode") or "").strip().lower()
         return mode == "sd_pack" or lesson_cfg.get("sd_asset_pack_enabled") is True
+
+    def _use_sd_asset_pack(self) -> bool:
+        return self._sd_asset_pack_enabled() and not self._sd_asset_pack_online_fallback
+
+    async def _sync_sd_asset_pack_to_robot(self) -> bool:
+        mcp_client = getattr(self.conn, "mcp_client", None)
+        if mcp_client is None:
+            features = getattr(self.conn, "features", {}) or {}
+            return not bool(features.get("mcp"))
+        is_ready = getattr(mcp_client, "is_ready", None)
+        if callable(is_ready) and not await is_ready():
+            return False
+        pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
+        if not callable(pack_builder):
+            return False
+        pack = pack_builder(
+            assignment_version=self.assignment_version,
+            lesson_id=self.lesson_id,
+            lesson_version=self.lesson_version,
+            manifest_checksum=self.manifest_checksum,
+        )
+        if not isinstance(pack, dict) or not pack.get("assets"):
+            return False
+        try:
+            has_tool = getattr(mcp_client, "has_tool", None)
+            if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
+                result = await call_mcp_tool(
+                    self.conn,
+                    mcp_client,
+                    SD_ASSET_SYNC_TOOL,
+                    {"assetPack": pack},
+                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                )
+            else:
+                from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+                result = await _call_raw_mcp_tool(
+                    self.conn,
+                    mcp_client,
+                    "self.lesson_assets.sync_to_sd",
+                    {"assetPack": pack},
+                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                )
+        except Exception as exc:
+            self._log("warning", f"robot SD sync failed: {type(exc).__name__}")
+            return False
+        return self._sd_asset_sync_result_ready(result)
+
+    def _sd_asset_sync_result_ready(self, result: Any) -> bool:
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                return False
+        if not isinstance(result, dict):
+            return False
+        if result.get("ready") is False:
+            return False
+        failed = result.get("failedCount")
+        if isinstance(failed, int) and failed > 0:
+            return False
+        return True
 
     def _ack_reports_asset_pack_ready(self, ack_body: Dict[str, Any]) -> bool:
         pack = ack_body.get("assetPack")

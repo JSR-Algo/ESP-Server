@@ -274,6 +274,24 @@ class _ASR:
         self.calls.append((list(opus_data), session_id, audio_format))
         return self.text, None
 
+class _FailingASR:
+    def __init__(self, message):
+        self.message = message
+        self.calls = []
+
+    async def speech_to_text_wrapper(self, opus_data, session_id, audio_format="opus"):
+        self.calls.append((list(opus_data), session_id, audio_format))
+        raise RuntimeError(self.message)
+
+class _EmptyAuthFailingASR:
+    def __init__(self, message):
+        self.last_error = message
+        self.calls = []
+
+    async def speech_to_text_wrapper(self, opus_data, session_id, audio_format="opus"):
+        self.calls.append((list(opus_data), session_id, audio_format))
+        return "", None
+
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         provider = getattr(self, "provider", None)
@@ -806,6 +824,44 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(idle)
         self.assertGreaterEqual(elapsed, 16.0)
 
+    async def test_lesson_prompt_guard_infers_idle_when_live_omits_audio_end(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        provider = self.make_provider(conn)
+        now = 1000.0
+        original_sleep = google_live_module.asyncio.sleep
+        original_monotonic = google_live_module.time.monotonic
+
+        async def _advance_time(delay):
+            nonlocal now
+            now += delay
+
+        google_live_module.asyncio.sleep = _advance_time
+        google_live_module.time.monotonic = lambda: now
+        try:
+            await provider._handle_live_event(
+                {
+                    "type": "transcript",
+                    "source": "model",
+                    "text": "Chào con! Nhìn hình, nghe TeeBot, rồi nói khi mình mời nhé.",
+                }
+            )
+            idle = await provider._wait_for_lesson_prompt_output_idle(
+                {
+                    "lesson_prompt_output_poll_sec": 0.1,
+                    "lesson_prompt_output_guard_timeout_sec": 1.0,
+                    "lesson_prompt_inferred_idle_sec": 0.3,
+                }
+            )
+        finally:
+            google_live_module.asyncio.sleep = original_sleep
+            google_live_module.time.monotonic = original_monotonic
+
+        self.assertTrue(idle)
+        self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
+        self.assertLess(now, 1001.0)
+
     async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
         conn = _Conn()
         conn.session_mode = SessionMode.LESSON
@@ -986,6 +1042,32 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(configs), 1)
         self.assertNotIn("session_resumption_handle", configs[0])
 
+    async def test_listen_start_after_wake_detect_does_not_reset_live_context_again(self):
+        conn = _Conn()
+        conn.google_live_session_resumption_handle = "fresh-wake-handle"
+        conn.live_resumption_store = _Store(handle="fresh-wake-handle")
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+
+        self.assertTrue(
+            await provider.handle_text_message(
+                '{"type":"listen","state":"detect","text":"Hi ESP"}'
+            )
+        )
+        fresh_client = _Client()
+        conn.google_live_session_resumption_handle = "fresh-wake-handle"
+        provider._client = fresh_client
+        provider._bridge = _Bridge()
+
+        self.assertTrue(
+            await provider.handle_text_message('{"type":"listen","state":"start"}')
+        )
+
+        self.assertEqual(conn.google_live_session_resumption_handle, "fresh-wake-handle")
+        self.assertIs(provider._client, fresh_client)
+        self.assertEqual(fresh_client.closed, 0)
+
     async def test_high_speed_transcript_is_wake_only_not_lesson_start(self):
         conn = _Conn()
         provider = self.make_provider(conn)
@@ -1016,6 +1098,32 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]["text"], "high speed")
         self.assertEqual(sent[1]["type"], "tts")
         self.assertEqual(sent[1]["state"], "stop")
+
+    async def test_wake_only_transcript_suppresses_tail_audio_response(self):
+        conn = _Conn()
+        conn.config["google_live"].update(
+            {
+                "input_min_capture_ms": 0,
+                "input_speech_tail_ms": 0,
+                "input_speech_rms_threshold": 500,
+            }
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.rms = 2200
+
+        self.assertTrue(await provider._on_user_transcript("high speed"))
+        end_calls_after_wake = provider._client.end_calls
+        self.assertTrue(await provider.handle_audio_bytes(b"tail"))
+
+        self.assertEqual(provider._bridge.forwarded, [])
+        self.assertEqual(provider._client.end_calls, end_calls_after_wake)
+        self.assertIsNone(provider._waiting_model_since)
+        self.assertNotEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.WAITING_MODEL,
+        )
 
     async def test_listen_start_opens_listening_without_greeting(self):
         conn = _Conn()
@@ -1140,6 +1248,37 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             conn.func_handler.calls[-1][1],
             {"name": "start_lesson", "arguments": {}},
         )
+
+    async def test_asr_fallback_auth_failure_disables_retries_for_session(self):
+        conn = _Conn()
+        conn.asr = _EmptyAuthFailingASR("APIRequest failed: 401")
+        conn.config["google_live"].update(
+            {
+                "input_min_capture_ms": 0,
+                "input_speech_tail_ms": 0,
+                "input_speech_rms_threshold": 500,
+                "lesson_start_asr_fallback_delay_sec": 0,
+                "waiting_model_timeout_sec": 4.0,
+            }
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.rms = 1800
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+        provider._waiting_model_since = time.monotonic() - 2.0
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            self.assertTrue(await provider.handle_audio_bytes(b"first"))
+            await asyncio.sleep(0.05)
+            provider._waiting_model_since = time.monotonic() - 2.0
+            self.assertTrue(await provider.handle_audio_bytes(b"second"))
+            await asyncio.sleep(0.05)
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(conn.asr.calls, [([b"first"], "session-1", "opus")])
 
     async def test_repeated_listen_start_stays_silent(self):
         conn = _Conn()
@@ -1884,14 +2023,10 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge.rms = 2200
         provider._user_audio_allowed_until = time.monotonic() + 5
 
-        handled = True
-        for frame in (b"barn1", b"barn2", b"barn3", b"barn4", b"barn5"):
-            handled = handled and await provider.handle_audio_bytes(frame)
-
-        self.assertTrue(handled)
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
         self.assertEqual(
             provider._bridge.forwarded,
-            [b"pcm:barn1", b"pcm:barn2", b"pcm:barn3", b"pcm:barn4", b"pcm:barn5"],
+            [b"pcm:barn"],
         )
         self.assertEqual(provider._client.end_calls, 1)
         self.assertEqual(
@@ -1934,32 +2069,16 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider._lesson_child_audio_pending_transcript)
 
         provider._bridge.rms = 2200
-        self.assertTrue(await provider.handle_audio_bytes(b"barn1"))
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertFalse(provider._lesson_child_audio_pending_transcript)
-
-        self.assertTrue(await provider.handle_audio_bytes(b"barn2"))
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertFalse(provider._lesson_child_audio_pending_transcript)
-
-        self.assertTrue(await provider.handle_audio_bytes(b"barn3"))
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertFalse(provider._lesson_child_audio_pending_transcript)
-
-        self.assertTrue(await provider.handle_audio_bytes(b"barn4"))
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertFalse(provider._lesson_child_audio_pending_transcript)
-
-        self.assertTrue(await provider.handle_audio_bytes(b"barn5"))
+        self.assertTrue(await provider.handle_audio_bytes(b"barn"))
 
         self.assertEqual(
             provider._bridge.forwarded,
-            [b"pcm:barn1", b"pcm:barn2", b"pcm:barn3", b"pcm:barn4", b"pcm:barn5"],
+            [b"pcm:barn"],
         )
         self.assertEqual(provider._client.end_calls, 1)
         self.assertTrue(provider._lesson_child_audio_pending_transcript)
 
-    async def test_lesson_child_single_rms_spike_does_not_open_turn(self):
+    async def test_lesson_child_short_speech_frame_opens_turn(self):
         conn = _Conn()
         conn.config["google_live"].update(
             {
@@ -1982,14 +2101,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._user_audio_allowed_until = time.monotonic() + 5
 
         provider._bridge.rms = 2071
-        self.assertTrue(await provider.handle_audio_bytes(b"spike"))
-        provider._bridge.rms = 1107
-        self.assertTrue(await provider.handle_audio_bytes(b"tail"))
+        self.assertTrue(await provider.handle_audio_bytes(b"bo"))
 
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertEqual(provider._client.end_calls, 0)
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:bo"])
+        self.assertEqual(provider._client.end_calls, 1)
         self.assertIsNone(provider._user_stream_started_at)
-        self.assertFalse(provider._lesson_child_audio_pending_transcript)
+        self.assertTrue(provider._lesson_child_audio_pending_transcript)
 
     async def test_lesson_child_ambient_audio_after_window_expiry_does_not_open_turn(self):
         conn = _Conn()
@@ -2095,15 +2212,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             provider._bridge.forwarded,
             [
                 b"pcm:first1",
-                b"pcm:first2",
-                b"pcm:first3",
-                b"pcm:first4",
-                b"pcm:first5",
                 b"pcm:second1",
-                b"pcm:second2",
-                b"pcm:second3",
-                b"pcm:second4",
-                b"pcm:second5",
             ],
         )
         self.assertIsNone(provider._waiting_model_since)
@@ -2831,6 +2940,19 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await provider._handle_live_event({"type": "audio_start"})
 
         self.assertFalse(await provider._close_if_idle_once(1))
+
+    async def test_model_audio_refreshes_websocket_connection_activity(self):
+        conn = _Conn()
+        conn.last_activity_time = 1000.0
+        provider = self.make_provider(conn)
+        original_time = google_live_module.time.time
+        try:
+            google_live_module.time.time = lambda: 123.456
+            await provider._handle_live_event({"type": "audio_start"})
+        finally:
+            google_live_module.time.time = original_time
+
+        self.assertEqual(conn.last_activity_time, 123456.0)
 
     async def test_interrupt_flush_and_finalize_guard_edges(self):
         conn = _Conn()

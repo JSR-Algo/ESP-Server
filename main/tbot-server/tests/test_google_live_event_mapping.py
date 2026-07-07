@@ -999,6 +999,26 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
 
+    async def test_lesson_prompt_inferred_idle_allows_late_audio_end_stop(self):
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = False
+        conn.google_live_lesson_prompt_output_inferred_idle = True
+        bridge = self._build_bridge(conn)
+
+        self.assertTrue(await bridge.handle_event({"type": "audio_end"}))
+
+        sent_json = [
+            json.loads(payload)
+            for payload in conn.websocket.sent_messages
+            if isinstance(payload, str)
+        ]
+        self.assertEqual(sent_json[-1]["state"], "stop")
+        self.assertTrue(sent_json[-1]["continue_listening"])
+        self.assertFalse(conn.google_live_lesson_prompt_output_inferred_idle)
+
     async def test_pcm_audio_encoding_offloads_resample_aec_reference_and_opus_encode_to_connection_worker(self):
         conn = _DummyConn()
         bridge = self._build_bridge(conn)

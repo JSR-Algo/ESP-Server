@@ -71,6 +71,7 @@ def _google_live_output_sample_rate(conn: "ConnectionHandler"):
 
 async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
+    send_mcp_initialize = False
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
@@ -101,10 +102,11 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         if features.get("mcp"):
             conn.logger.bind(tag=TAG).debug("Client supports MCP")
             conn.mcp_client = MCPClient()
-            # Send initialization
-            asyncio.create_task(send_mcp_initialize_message(conn))
+            send_mcp_initialize = True
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
+    if send_mcp_initialize:
+        asyncio.create_task(send_mcp_initialize_message(conn))
 
 
 async def checkWakeupWords(conn: "ConnectionHandler", text):

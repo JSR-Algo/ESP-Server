@@ -103,6 +103,9 @@ def test_default_config_starts_interactive_sample_lesson():
 
     assert config["lesson"]["sample_lesson"] is True
     assert config["lesson"]["sample_mode"] == "interactive"
+    assert config["lesson"]["asset_delivery_mode"] == "sd_pack"
+    assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"
+    assert config["lesson"]["asset_pack_mount_root"] == "/sdcard/tbot/lesson-assets"
 
 
 def test_empty_boolean_env_is_absent_not_false(monkeypatch):

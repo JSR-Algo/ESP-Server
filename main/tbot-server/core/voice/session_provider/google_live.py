@@ -53,6 +53,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
     _SILENT_LIVE_REOPEN_COOLDOWN_SEC = 60.0
     _START_LESSON_DUPLICATE_TOOL_WINDOW_SEC = 2.0
     _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC = 1.5
+    _WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC = 0.8
 
     def __init__(
         self,
@@ -94,6 +95,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         self._start_lesson_asr_fallback_audio = deque(maxlen=96)
         self._start_lesson_asr_fallback_generation = 0
+        self._start_lesson_asr_fallback_disabled = False
         self._last_expired_audio_window_drop_log_at = 0.0
         self._pending_interrupt_audio_response_id = None
         self._interrupt_capture_response_id = None
@@ -118,12 +120,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._pending_tool_calls = set()
         self._cancelled_tool_call_ids = set()
         self._user_audio_allowed_until = 0.0
+        self._wake_audio_window_until = 0.0
+        self._wake_transcript_tail_suppress_until = 0.0
         # Lesson child-response window bookkeeping. _last_lesson_prompt_len sizes
         # the pre-listen guard delay; the _user_stream_* fields mark an in-flight
         # user audio stream so a WAITING_MODEL frame is forwarded (not dropped)
         # while the lesson listening window is open.
         self._last_lesson_prompt_len = 0
         self._lesson_prompt_reopen_fast = False
+        self._lesson_prompt_output_last_activity_at = None
         self._lesson_child_audio_pending_transcript = False
         self._lesson_child_speech_start_frames = []
         self._user_stream_response_id = None
@@ -270,12 +275,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
         listen_state, listen_text = self._extract_listen_control(message)
         if listen_state == "start":
             self._touch_live_activity()
-            await self._reset_conversation_live_context("listen_start")
+            if time.monotonic() >= self._wake_audio_window_until:
+                await self._reset_conversation_live_context("listen_start")
+            else:
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live conversation_context_reset_skipped reason=listen_start wake_window_active=true"
+                )
             await self._open_user_audio_window("listen_start")
             return True
         if listen_state == "stop":
             self._touch_live_activity()
             self._cancel_user_audio_window_task()
+            self._wake_audio_window_until = 0.0
+            self._wake_transcript_tail_suppress_until = 0.0
             await self._finalize_user_audio_input("listen_stop")
             return True
         text = self._extract_user_text_message(message)
@@ -363,6 +375,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 decoded_audio = self._bridge.decode_input_audio(audio_bytes)
         except Exception as exc:
             await self._handle_runtime_failure(exc)
+            return True
+        if time.monotonic() < self._wake_transcript_tail_suppress_until:
+            self._log_audio_decision(
+                "drop_input",
+                "wake_transcript_tail",
+                decoded_audio,
+            )
+            self.conn.client_abort = False
             return True
         # Conversation-side WAITING_MODEL handling. While waiting for the model to
         # respond, mic frames are normally dropped (the model is "speaking"). But
@@ -580,6 +600,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._clear_lesson_child_speech_start_frames()
             self._cancel_lesson_child_transcript_timeout_task()
             self._user_audio_allowed_until = 0.0
+            self._wake_audio_window_until = 0.0
+            self._wake_transcript_tail_suppress_until = 0.0
             self._clear_user_stream()
             self._pending_reconnect_audio.clear()
             self._pending_interrupt_audio.clear()
@@ -807,6 +829,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _touch_live_activity(self):
         if self._has_session_orchestrator():
             self.conn.last_live_activity_at = time.monotonic()
+        if hasattr(self.conn, "last_activity_time"):
+            self.conn.last_activity_time = time.time() * 1000
 
     async def _record_live_session_usage(self):
         started_at = getattr(self.conn, "google_live_session_started_at", None)
@@ -991,6 +1015,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if self._is_live_wake_transcript_only(transcript_text):
             await self._begin_user_interrupt("wake_word")
+            self._wake_transcript_tail_suppress_until = (
+                time.monotonic() + self._WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC
+            )
             await self._send_wake_listening_feedback(transcript_text)
             await self._open_user_audio_window("wake_word")
             await self._reset_conversation_live_context("wake_transcript")
@@ -1210,8 +1237,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
         remaining = max(0.0, output_timeout)
         while getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+            if self._lesson_prompt_output_inferred_idle(config):
+                self.conn.google_live_lesson_prompt_output_allowed = False
+                self.conn.google_live_lesson_prompt_output_inferred_idle = True
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_output_inferred_idle idle_sec={:.1f}",
+                    self._get_lesson_prompt_inferred_idle_sec(config),
+                )
+                break
             if remaining <= 0:
                 self.conn.google_live_lesson_prompt_output_allowed = False
+                self.conn.google_live_lesson_prompt_output_inferred_idle = False
                 self.conn.logger.bind(tag="GoogleLive").warning(
                     "Google Live {} timeout_sec={:.1f}",
                     timeout_log_label,
@@ -1255,6 +1291,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return float(config.get(key, default))
         except (TypeError, ValueError):
             return default
+
+    def _lesson_prompt_output_inferred_idle(self, config):
+        last_activity_at = self._lesson_prompt_output_last_activity_at
+        if last_activity_at is None:
+            return False
+        idle_sec = self._get_lesson_prompt_inferred_idle_sec(config)
+        if idle_sec <= 0:
+            return False
+        # ponytail: Live sometimes omits audio_end for text-prompt TTS; upgrade
+        # to provider finish-reason handling if Gemini exposes a stable signal.
+        return (time.monotonic() - last_activity_at) >= idle_sec
+
+    def _get_lesson_prompt_inferred_idle_sec(self, config):
+        return max(
+            0.0,
+            self._read_lesson_guard_float(
+                config, "lesson_prompt_inferred_idle_sec", 2.0
+            ),
+        )
 
     def _lesson_child_response_window_active(
         self,
@@ -1480,6 +1535,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         try:
             if allow_lesson_output:
                 self.conn.google_live_lesson_prompt_output_allowed = True
+                self.conn.google_live_lesson_prompt_output_inferred_idle = False
+                self._lesson_prompt_output_last_activity_at = None
             if self._bridge is not None:
                 if allow_lesson_output and hasattr(self._bridge, "force_allow_model_output"):
                     self._bridge.force_allow_model_output()
@@ -1801,6 +1858,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         self._func_handler_bootstrap_task = None
+        self._wake_audio_window_until = 0.0
+        self._wake_transcript_tail_suppress_until = 0.0
         if receive_task is not None and receive_task is not current_task:
             receive_task.cancel()
             try:
@@ -2794,8 +2853,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._clear_lesson_child_speech_start_frames()
             return None
         self._lesson_child_speech_start_frames.append(decoded)
-        if len(self._lesson_child_speech_start_frames) < 5:
-            return None
         frames = list(self._lesson_child_speech_start_frames)
         self._clear_lesson_child_speech_start_frames()
         return frames
@@ -2877,6 +2934,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._start_lesson_asr_fallback_audio.append(audio_bytes)
 
     def _start_lesson_asr_fallback_enabled(self):
+        if self._start_lesson_asr_fallback_disabled:
+            return False
         if normalize_session_mode(
             getattr(self.conn, "session_mode", SessionMode.DORMANT)
         ) == SessionMode.LESSON:
@@ -2931,6 +2990,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 getattr(self.conn, "session_id", ""),
                 getattr(self.conn, "audio_format", "opus"),
             )
+            if self._is_asr_auth_failure(getattr(asr, "last_error", "")):
+                self._start_lesson_asr_fallback_disabled = True
+                self._start_lesson_asr_fallback_audio.clear()
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "Google Live lesson_start_asr_fallback disabled reason=asr_auth_failure"
+                )
+                return
             transcript = self._extract_asr_transcript_text(text)
             if not transcript:
                 return
@@ -2949,10 +3015,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if self._is_asr_auth_failure(exc):
+                self._start_lesson_asr_fallback_disabled = True
+                self._start_lesson_asr_fallback_audio.clear()
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live lesson_start_asr_fallback failed: {}",
                 self._safe_error_message(exc),
             )
+
+    def _is_asr_auth_failure(self, exc):
+        message = str(exc).lower()
+        return (
+            "401" in message
+            or "unauthorized" in message
+            or "invalid api key" in message
+            or "invalid_api_key" in message
+        )
 
     def _get_start_lesson_asr_provider(self):
         asr = getattr(self.conn, "asr", None)
@@ -3090,6 +3168,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type is not None:
             self._touch_live_activity()
+        if (
+            getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
+            and self._is_model_output_event(event_type, event)
+        ):
+            self._lesson_prompt_output_last_activity_at = time.monotonic()
         if self._is_model_output_event(event_type, event):
             self._consecutive_waiting_model_timeouts = 0
         if event_type == "audio_start":
@@ -3722,6 +3805,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._user_audio_allowed_until,
             time.monotonic() + max(0.1, window_sec),
         )
+        if reason == "wake_word":
+            self._wake_audio_window_until = self._user_audio_allowed_until
         self._schedule_user_audio_window_expiry(reason, max(0.1, window_sec))
         user_turn_open = (
             reason == "listen_start"
@@ -3767,6 +3852,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if self._user_stream_started_at is not None:
                 return
             self._user_audio_allowed_until = 0.0
+            if reason == "wake_word":
+                self._wake_audio_window_until = 0.0
             if self._interaction.state == InteractionState.LISTENING:
                 self._interaction.transition(InteractionState.IDLE)
             await self._send_user_audio_window_expired_feedback()

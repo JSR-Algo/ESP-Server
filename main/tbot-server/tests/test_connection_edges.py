@@ -247,6 +247,11 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    def test_websocket_timeout_allows_sixty_minute_live_sessions(self):
+        handler = _build_handler()
+
+        self.assertGreaterEqual(handler.timeout_seconds, 61 * 60)
+
     def test_private_config_log_summary_defaults_malformed_google_live(self):
         summary = connection_module._private_config_log_summary(
             {"google_live": "bad", "voice_mode": {"type": "google_live"}}
@@ -409,6 +414,28 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
             routed,
             ['{"type":"listen","state":"start","mode":"auto"}'],
         )
+
+    async def test_google_live_listen_control_refreshes_connection_activity(self):
+        handler = _build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.last_activity_time = 1000.0
+        routed = []
+
+        class Provider:
+            async def handle_text_message(self, message):
+                routed.append(message)
+                return True
+
+        handler.voice_provider = Provider()
+        original_time = connection_module.time.time
+        try:
+            connection_module.time.time = lambda: 123.456
+            await handler._route_message('{"type":"listen","state":"start","mode":"auto"}')
+        finally:
+            connection_module.time.time = original_time
+
+        self.assertEqual(handler.last_activity_time, 123456.0)
+        self.assertEqual(routed, ['{"type":"listen","state":"start","mode":"auto"}'])
 
     async def test_route_message_timeout_bind_and_fallback_paths(self):
         handler = _build_handler()

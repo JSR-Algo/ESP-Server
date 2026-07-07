@@ -276,8 +276,8 @@ class SampleManifestTest(unittest.TestCase):
             step.get("retryPrompt", "") for step in manifest["steps"]
             if step.get("completionClass") == "interactive"
         ).lower()
-        self.assertIn("chưa đúng", retry_prompts)
         self.assertIn("nhìn hình", retry_prompts)
+        self.assertIn("nói chậm", retry_prompts)
         self.assertIn("barn", retry_prompts)
 
         for step in manifest["steps"]:
@@ -588,7 +588,10 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(ack_task, timeout=1.0)
 
     async def test_start_sample_lesson_under_sd_pack_sends_sd_asset_pack_and_local_step_paths(self):
-        conn = _FakeConn(config={"lesson": {"asset_delivery_mode": "sd_pack"}})
+        conn = _FakeConn(config={"lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "sample_asset_base_url": "https://esp.example/sample",
+        }})
 
         runtime = await start_sample_lesson(conn)
 
@@ -618,6 +621,11 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             pack_assets["barn-round-field-poster.jpg"]["localPath"],
             "sd://tbot/lesson-assets/sample-barn/barn-round-field-poster.jpg",
         )
+        self.assertEqual(
+            pack_assets["barn-round-field-poster.jpg"]["url"],
+            "https://esp.example/sample/assets/background/barn-round-field-poster.jpg",
+        )
+        self.assertTrue(all(asset.get("url") for asset in pack_assets.values()))
 
         await runtime.on_lesson_ack(
             {
@@ -1137,7 +1145,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(lesson_steps_after_wrong, lesson_steps_before)
         self.assertTrue(
-            any("nói lại" in text.lower() and "barn" in text.lower() for text in provider._client.sent_texts),
+            any("nói chậm" in text.lower() and "barn" in text.lower() for text in provider._client.sent_texts),
             provider._client.sent_texts,
         )
         self.assertTrue(
@@ -1148,12 +1156,8 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
             any("cat" in text.lower() for text in provider._client.sent_texts),
             provider._client.sent_texts,
         )
-        self.assertTrue(
-            any("chưa đúng" in text.lower() for text in provider._client.sent_texts),
-            provider._client.sent_texts,
-        )
         self.assertFalse(
-            any("chưa đúng rồi. chưa đúng" in text.lower() for text in provider._client.sent_texts),
+            any("chưa đúng" in text.lower() for text in provider._client.sent_texts),
             provider._client.sent_texts,
         )
 

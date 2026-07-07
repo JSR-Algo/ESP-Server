@@ -946,6 +946,25 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(classic_text_calls, ['{"type":"hello","version":1}'])
 
+    async def test_mcp_message_routes_before_manager_bind_ready(self):
+        handler = self._build_handler()
+        handler.read_config_from_api = True
+        handler.config["read_config_from_api"] = True
+        raw_message = '{"type":"mcp","payload":{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}}'
+        classic_text_calls = []
+        original_handle_text = connection_module.handleTextMessage
+
+        async def fake_classic_text(conn, message):
+            classic_text_calls.append(message)
+
+        try:
+            connection_module.handleTextMessage = fake_classic_text
+            await handler._route_message(raw_message)
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+
+        self.assertEqual(classic_text_calls, [raw_message])
+
     async def test_bind_prompt_is_skipped_until_tts_ready(self):
         handler = self._build_handler()
         handler.tts = None

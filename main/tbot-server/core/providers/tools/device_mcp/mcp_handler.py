@@ -216,6 +216,9 @@ async def handle_mcp_message(
                     if hasattr(conn, "func_handler") and conn.func_handler:
                         conn.func_handler.tool_manager.refresh_tools()
                         conn.func_handler.current_support_functions()
+                    schedule_sd_sync = getattr(conn, "schedule_cached_lesson_sd_sync", None)
+                    if callable(schedule_sd_sync):
+                        schedule_sd_sync()
             return
 
     # Handle method calls (requests from the client)
