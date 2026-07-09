@@ -592,10 +592,26 @@ class ConnectionHandler:
             return False
         self._set_session_mode(SessionMode.CONVERSATION, reason=reason)
         provider = self.voice_provider
+        # Prefer ensure_live_ready/prewarm over start_session (dormant path never opens Live).
         if provider is not None and getattr(provider, "_client", None) is None:
-            start_session = getattr(provider, "start_session", None)
-            if callable(start_session):
-                await start_session()
+            ensure = getattr(provider, "ensure_live_ready", None)
+            if callable(ensure):
+                try:
+                    await ensure(reason=reason)
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning(
+                        "ensure_live_ready failed reason={} error={}",
+                        reason,
+                        exc,
+                    )
+            else:
+                schedule = getattr(provider, "_schedule_live_prewarm", None)
+                if callable(schedule):
+                    schedule(reason or "conversation", delay_sec=0.0)
+                else:
+                    start_session = getattr(provider, "start_session", None)
+                    if callable(start_session):
+                        await start_session()
         self.last_live_activity_at = time.monotonic()
         return True
 
@@ -2179,9 +2195,13 @@ class ConnectionHandler:
 
     async def _sync_cached_lesson_assets_to_sd(self):
         try:
+            from core.lesson.sd_pack_fanout import drain_pending_for_connection
             from core.lesson.sd_pack_sync import sync_cached_lesson_assets_to_sd
 
-            return await sync_cached_lesson_assets_to_sd(self)
+            # Drain admin fan-out markers first (offline queue), then full cache sync.
+            pending_result = await drain_pending_for_connection(self)
+            full_result = await sync_cached_lesson_assets_to_sd(self)
+            return {"pending": pending_result, "full": full_result}
         except Exception as exc:  # pragma: no cover - background sync must not break voice
             self.logger.bind(tag=TAG).warning(
                 f"cached lesson SD sync failed: {type(exc).__name__}: {exc}"

@@ -349,7 +349,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._get_interruption_min_output_age_sec(), 0.0)
         self.assertEqual(bridge._get_transcript_echo_window_sec(), 15.0)
         self.assertEqual(bridge._normalize_transcript_for_echo(None), "")
-        self.assertFalse(bridge._looks_like_model_echo("hi"))
+        self.assertFalse(bridge.looks_like_model_echo("hi"))
 
         self.assertEqual(GoogleLiveAudioBridge._safe_queue_length(_QueueRaises()), 0)
         self.assertEqual(GoogleLiveAudioBridge._safe_queue_length(_LenRaises()), 0)
@@ -364,7 +364,20 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._get_interrupt_suppress_audio_sec(), 0.25)
         bridge._mark_echo_tail_suppression("test")
         self.assertGreater(bridge.conn.google_live_echo_suppress_until, 0)
-        self.assertGreater(bridge.conn.google_live_audible_output_until, 0)
+        # Default echo_tail_audible_ms latches audible after stop (anti-monologue).
+        self.assertGreater(
+            getattr(bridge.conn, "google_live_audible_output_until", 0),
+            time.monotonic(),
+        )
+        bridge.client.config = {
+            "echo_tail_suppression_ms": 200,
+            "echo_tail_audible_ms": 0,
+        }
+        bridge.conn.google_live_audible_output_until = 0
+        bridge._mark_echo_tail_suppression("no_audible")
+        self.assertFalse(
+            getattr(bridge.conn, "google_live_audible_output_until", 0) > time.monotonic()
+        )
 
         bridge._aec_processor = _FailingAec()
         self.assertEqual(bridge._apply_aec(b"\x00\x00", 24000), b"\x00\x00")

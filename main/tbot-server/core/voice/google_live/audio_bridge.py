@@ -62,6 +62,9 @@ SAFE_DEFLECTION_LIVE_TEXT_INSTRUCTION = (
 class GoogleLiveAudioBridge:
     """Bridge between websocket audio frames and live transport events."""
 
+    # Silence preroll so lesson TTS first syllable is not clipped by device start.
+    _LESSON_OUTPUT_PREROLL_SILENCE_MS = 120
+
     def __init__(
         self,
         conn,
@@ -100,6 +103,7 @@ class GoogleLiveAudioBridge:
         self._input_decoder = None
         self._output_encoder = None
         self._first_audio_out_logged = False
+        self._output_preroll_sent = False
         self._output_chunk_count = 0
         self._output_byte_count = 0
         self._input_chunk_count = 0
@@ -260,6 +264,7 @@ class GoogleLiveAudioBridge:
                             "music_auto_pause_at_audio_start failed: {}", exc
                         )
             self.conn.google_live_audio_out_started_at = time.monotonic()
+            self._output_preroll_sent = False
             self._output_chunk_count = 0
             self._output_byte_count = 0
             self.logger.bind(tag="GoogleLive").info("Google Live audio_start")
@@ -671,7 +676,7 @@ class GoogleLiveAudioBridge:
                 min_output_age * 1000,
             )
             return
-        if self._looks_like_model_echo(transcript_text):
+        if self.looks_like_model_echo(transcript_text):
             self.logger.bind(tag="GoogleLive").info(
                 "Google Live transcript_barge_in suppressed_as_model_echo "
                 "chars={} text_preview={!r}",
@@ -988,14 +993,48 @@ class GoogleLiveAudioBridge:
         from core.handle.sendAudioHandle import sendAudio
 
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
+            include_preroll = self._should_send_lesson_output_preroll()
+            if include_preroll:
+                self._output_preroll_sent = True
+                self.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_output_preroll silence_ms={}",
+                    self._LESSON_OUTPUT_PREROLL_SILENCE_MS,
+                )
             packets = await self._run_audio_cpu(
-                self._encode_output_audio, audio_bytes, mime_type
+                self._encode_output_audio_packets,
+                audio_bytes,
+                mime_type,
+                include_preroll,
             )
             if packets:
                 await sendAudio(self.conn, packets)
             return
         if audio_bytes:
             await sendAudio(self.conn, audio_bytes)
+
+    def _should_send_lesson_output_preroll(self):
+        if self._output_preroll_sent:
+            return False
+        if self._is_lesson_prompt_output_allowed():
+            return True
+        return (
+            normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT))
+            == SessionMode.LESSON
+        )
+
+    def _encode_output_audio_packets(self, audio_bytes, mime_type=None, include_preroll=False):
+        packets = []
+        if include_preroll:
+            packets.extend(self._encode_lesson_output_preroll(mime_type))
+        packets.extend(self._encode_output_audio(audio_bytes, mime_type))
+        return packets
+
+    def _encode_lesson_output_preroll(self, mime_type=None):
+        source_rate = self._extract_sample_rate_from_mime(mime_type)
+        sample_count = int(source_rate * self._LESSON_OUTPUT_PREROLL_SILENCE_MS / 1000)
+        if sample_count <= 0:
+            return []
+        return self._encode_output_audio(b"\x00\x00" * sample_count, mime_type)
 
     def _encode_output_audio(self, audio_bytes, mime_type=None):
         source_rate = self._extract_sample_rate_from_mime(mime_type)
@@ -1153,7 +1192,8 @@ class GoogleLiveAudioBridge:
         segments.append((now, norm))
         self._recent_model_transcript_segments = segments
 
-    def _looks_like_model_echo(self, user_text):
+    def looks_like_model_echo(self, user_text):
+        """True when user STT matches recent model speech (speaker echo monologue)."""
         norm_user = self._normalize_transcript_for_echo(user_text)
         if len(norm_user) < 3:
             return False
@@ -1164,7 +1204,24 @@ class GoogleLiveAudioBridge:
         for ts, norm_model in self._recent_model_transcript_segments:
             if ts < cutoff:
                 continue
-            if norm_user in norm_model:
+            if not norm_model:
+                continue
+            if norm_user in norm_model or norm_model in norm_user:
+                return True
+            if self._has_long_common_substring(norm_user, norm_model, min_len=8):
+                return True
+        return False
+
+    @staticmethod
+    def _has_long_common_substring(left, right, min_len=8):
+        if not left or not right:
+            return False
+        if len(left) > len(right):
+            left, right = right, left
+        if len(left) < min_len:
+            return False
+        for start in range(0, len(left) - min_len + 1):
+            if left[start : start + min_len] in right:
                 return True
         return False
 
@@ -1337,6 +1394,7 @@ class GoogleLiveAudioBridge:
 
     def _reset_output_encoder(self):
         self._output_encoder = None
+        self._output_preroll_sent = False
         self._output_chunk_count = 0
         self._output_byte_count = 0
         self._output_resampler_state = None
@@ -1354,23 +1412,43 @@ class GoogleLiveAudioBridge:
             suppress_sec = 0.25
         return max(0, suppress_sec)
 
+    @staticmethod
+    def _as_float(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _mark_echo_tail_suppression(self, reason):
         config = self._google_live_config()
-        try:
-            tail_ms = float(config.get("echo_tail_suppression_ms", 400))
-        except (TypeError, ValueError):
-            tail_ms = 400.0
+        tail_ms = self._as_float(config.get("echo_tail_suppression_ms", 550), 550.0)
         if tail_ms <= 0:
             return
-        until = time.monotonic() + tail_ms / 1000.0
-        current_until = getattr(self.conn, "google_live_echo_suppress_until", 0.0)
+        now = time.monotonic()
+        until = now + tail_ms / 1000.0
+        current_until = self._as_float(
+            getattr(self.conn, "google_live_echo_suppress_until", 0.0), 0.0
+        )
         self.conn.google_live_echo_suppress_until = max(current_until, until)
-        current_audible_until = getattr(self.conn, "google_live_audible_output_until", 0.0)
-        self.conn.google_live_audible_output_until = max(current_audible_until, until)
+        # Latch residual playout under the echo gate (anti-monologue).
+        audible_ms = self._as_float(config.get("echo_tail_audible_ms", 400), 400.0)
+        if audible_ms > 0:
+            self.conn.google_live_audible_output_until = max(
+                self._as_float(
+                    getattr(self.conn, "google_live_audible_output_until", 0.0), 0.0
+                ),
+                now + audible_ms / 1000.0,
+            )
+        # Anchor for adaptive residual-energy extensions (provider).
+        if getattr(self.conn, "google_live_echo_suppress_started_at", None) is None or (
+            now >= current_until
+        ):
+            self.conn.google_live_echo_suppress_started_at = now
         self.logger.bind(tag="GoogleLive").info(
-            "echo_tail_suppression_started reason={} duration_ms={:.0f}",
+            "echo_tail_suppression_started reason={} duration_ms={:.0f} audible_ms={:.0f}",
             reason,
             tail_ms,
+            max(0.0, audible_ms),
         )
 
     # ------------------------------------------------------------------

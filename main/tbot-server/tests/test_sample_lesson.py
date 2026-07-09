@@ -258,11 +258,23 @@ class SampleManifestTest(unittest.TestCase):
         self.assertIn("nhìn hình", first_prompt)
         self.assertIn("nghe", first_prompt)
         self.assertIn("mời", first_prompt)
+        # Listen-first framing: TeeBot models slowly before inviting the child.
+        self.assertIn("chậm", first_prompt)
 
-        focus_prompt = manifest["steps"][1]["prompt"]
+        focus_prompt = manifest["steps"][1]["prompt"].lower()
         self.assertIn("barn", focus_prompt)
-        self.assertIn("cái kho", focus_prompt.lower())
+        self.assertIn("cái kho", focus_prompt)
+        # Double model so the child hears the word shape twice before speaking.
+        self.assertGreaterEqual(focus_prompt.count("barn"), 2)
+        self.assertIn("nghe chậm", focus_prompt)
         self.assertLessEqual(max(len(step["prompt"]) for step in manifest["steps"]), 135)
+
+        repeat_prompt = manifest["steps"][2]["prompt"].lower()
+        self.assertIn("nói chậm", repeat_prompt)
+        self.assertIn("nói theo", repeat_prompt)
+        self.assertIn("barn", repeat_prompt)
+        # Positive mid-turn feedback before the harder recall turn.
+        self.assertIn("barn", (manifest["steps"][2].get("successPrompt") or "").lower())
 
         for step in manifest["steps"]:
             scene = step["scene"]
@@ -272,26 +284,14 @@ class SampleManifestTest(unittest.TestCase):
             self.assertEqual(scene["teachingObject"]["placement"]["anchor"], "center")
             self.assertEqual(scene["robotOverlay"]["anchor"], "bottomLeft")
 
-        retry_prompts = " ".join(
-            step.get("retryPrompt", "") for step in manifest["steps"]
-            if step.get("completionClass") == "interactive"
-        ).lower()
-        self.assertIn("nhìn hình", retry_prompts)
-        self.assertIn("nói chậm", retry_prompts)
-        self.assertIn("barn", retry_prompts)
-
+        # Coaching is runtime-adaptive (not canned sample scripts). Manifest only
+        # needs expectedResponses so the live path can remodel the target word.
         for step in manifest["steps"]:
             if step.get("completionClass") != "interactive":
                 continue
-            prompts = step.get("interactionPrompts") or {}
-            self.assertIn("helpOrRepeat", prompts, step["id"])
-            self.assertIn("unknownOrFrustrated", prompts, step["id"])
-            self.assertIn("vietnameseObject", prompts, step["id"])
-            self.assertIn("alreadyInLesson", prompts, step["id"])
-            self.assertIn("barn", prompts["helpOrRepeat"], step["id"])
-            self.assertIn("không sao", prompts["unknownOrFrustrated"].lower(), step["id"])
-            self.assertIn("cái kho", prompts["vietnameseObject"].lower(), step["id"])
-            self.assertIn("đang học", prompts["alreadyInLesson"].lower(), step["id"])
+            self.assertEqual(step.get("expectedResponses"), ["barn"], step["id"])
+            self.assertNotIn("interactionPrompts", step, step["id"])
+            self.assertNotIn("retryPrompt", step, step["id"])
 
     def test_interactive_sample_copy_is_short_for_fast_child_turns(self):
         manifest = build_interactive_sample_manifest()
@@ -1114,7 +1114,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         # The child actually heard the SAY-IT prompt verbatim, and only the interactive
         # step waited on a spoken answer.
         self.assertIn(
-            LESSON_LIVE_TEXT_INSTRUCTION + "Đến lượt con. Con nói theo mình: barn!",
+            LESSON_LIVE_TEXT_INSTRUCTION + "Mình nói chậm: barn. Con nói theo mình: barn!",
             provider._client.sent_texts,
         )
 
@@ -1144,12 +1144,15 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
             if json.loads(payload)["type"] == "lesson_step"
         ]
         self.assertEqual(lesson_steps_after_wrong, lesson_steps_before)
+        # Adaptive coaching: acknowledge attempt + remodel target word (no raw echo).
         self.assertTrue(
-            any("nói chậm" in text.lower() and "barn" in text.lower() for text in provider._client.sent_texts),
-            provider._client.sent_texts,
-        )
-        self.assertTrue(
-            any("nhìn hình" in text.lower() and "cái kho" in text.lower() for text in provider._client.sent_texts),
+            any(
+                "mình nghe rồi" in text.lower()
+                and "từ mình học là" in text.lower()
+                and "barn" in text.lower()
+                and "nói chậm" in text.lower()
+                for text in provider._client.sent_texts
+            ),
             provider._client.sent_texts,
         )
         self.assertFalse(
@@ -1184,6 +1187,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rt._child_response_window_open)
         last_prompt = provider._client.sent_texts[-1].lower()
         self.assertIn("mình nhắc lại", last_prompt)
+        self.assertIn("từ mới là", last_prompt)
         self.assertIn("barn", last_prompt)
         self.assertNotIn("chưa đúng", last_prompt)
 
@@ -1198,7 +1202,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rt._child_response_window_open)
         last_prompt = provider._client.sent_texts[-1].lower()
         self.assertIn("không sao", last_prompt)
-        self.assertIn("nhìn hình", last_prompt)
+        self.assertIn("tiếng anh là", last_prompt)
         self.assertIn("barn", last_prompt)
         self.assertNotIn("chưa đúng", last_prompt)
 
@@ -1214,7 +1218,7 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         last_prompt = provider._client.sent_texts[-1].lower()
         self.assertIn("đúng", last_prompt)
         self.assertIn("cái kho", last_prompt)
-        self.assertIn("tiếng anh", last_prompt)
+        self.assertIn("tiếng anh là", last_prompt)
         self.assertIn("barn", last_prompt)
         self.assertNotIn("chưa đúng", last_prompt)
 

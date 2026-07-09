@@ -212,10 +212,15 @@ IMMEDIATE_SCORING_DETAIL_KEYS = frozenset(
 
 CHILD_RESPONSE_INTENT_CORRECT = "correct"
 CHILD_RESPONSE_INTENT_WRONG = "wrong"
+CHILD_RESPONSE_INTENT_NEAR_MISS = "near_miss"
 CHILD_RESPONSE_INTENT_HELP_OR_REPEAT = "help_or_repeat"
 CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED = "unknown_or_frustrated"
 CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT = "vietnamese_object"
 CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON = "already_in_lesson"
+
+# Vietnamese L1 labels that map to the current teaching object. Safe to speak back
+# because they name the concept, not free-form child speech.
+_VIETNAMESE_OBJECT_LABELS = ("cái kho", "nhà kho")
 
 def _normalized_detail_key(key: Any) -> str:
     return str(key).replace("-", "_").lower()
@@ -264,7 +269,7 @@ def _contains_token_sequence(tokens: List[str], expected: List[str]) -> bool:
             return True
     return False
 
-def _contains_any_token_sequence(tokens: List[str], expected_values: List[str]) -> bool:
+def _contains_any_token_sequence(tokens: List[str], expected_values) -> bool:
     return any(_contains_token_sequence(tokens, _matching_tokens(value)) for value in expected_values)
 
 def _edit_distance_at_most(left: str, right: str, limit: int) -> bool:
@@ -288,21 +293,42 @@ def _edit_distance_at_most(left: str, right: str, limit: int) -> bool:
         previous = current
     return previous[-1] <= limit
 
-def _near_child_pronunciation_token(token: str, expected: str) -> bool:
+def _pronunciation_token_within_distance(
+    token: str, expected: str, max_distance: int
+) -> bool:
+    """Same first letter + short-word band; used for accept vs near-miss coaching."""
     if not token or not expected or token[0] != expected[0]:
         return False
     if len(expected) < 3 or len(expected) > 8:
         return False
-    return _edit_distance_at_most(token, expected, 1)
+    return _edit_distance_at_most(token, expected, max_distance)
 
-def _child_response_interaction_prompt(step: Dict[str, Any], key: str) -> Optional[str]:
-    prompts = step.get("interactionPrompts")
-    if not isinstance(prompts, dict):
-        return None
-    prompt = prompts.get(key)
-    if isinstance(prompt, str) and prompt.strip():
-        return prompt.strip()
-    return None
+def _near_child_pronunciation_token(token: str, expected: str) -> bool:
+    return _pronunciation_token_within_distance(token, expected, 1)
+
+def _near_miss_child_pronunciation_token(token: str, expected: str) -> bool:
+    """Close attempt that is not close enough to accept — coach, do not advance."""
+    return (
+        _pronunciation_token_within_distance(token, expected, 2)
+        and not _near_child_pronunciation_token(token, expected)
+    )
+
+def _target_vocab_word(expected_responses: List[str], step: Optional[Dict[str, Any]] = None) -> str:
+    if expected_responses:
+        return str(expected_responses[0]).strip() or "từ này"
+    if isinstance(step, dict):
+        vocab = step.get("vocab")
+        if isinstance(vocab, dict):
+            word = vocab.get("targetWord") or vocab.get("word") or vocab.get("expectedResponse")
+            if word not in (None, ""):
+                return str(word).strip()
+        scene = step.get("scene") if isinstance(step.get("scene"), dict) else {}
+        teaching = scene.get("teachingObject") if isinstance(scene, dict) else {}
+        if isinstance(teaching, dict):
+            primary = teaching.get("primaryWord")
+            if primary not in (None, ""):
+                return str(primary).strip()
+    return "từ này"
 
 def _classify_child_response_intent(
     response: Any,
@@ -344,7 +370,7 @@ def _classify_child_response_intent(
     ):
         return CHILD_RESPONSE_INTENT_HELP_OR_REPEAT
     if (
-        _contains_any_token_sequence(tokens, ["cái kho", "nhà kho"])
+        _contains_any_token_sequence(tokens, _VIETNAMESE_OBJECT_LABELS)
         or (
             "kho" in tokens
             and not _contains_any_token_sequence(tokens, ["khó quá", "kho qua"])
@@ -365,6 +391,8 @@ def _classify_child_response_intent(
         ],
     ):
         return CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED
+    if _is_near_miss_child_response(response, expected_responses):
+        return CHILD_RESPONSE_INTENT_NEAR_MISS
     return CHILD_RESPONSE_INTENT_WRONG
 
 def _coerce_expected_child_responses(step: Optional[Dict[str, Any]]) -> List[str]:
@@ -379,7 +407,7 @@ def _coerce_expected_child_responses(step: Optional[Dict[str, Any]]) -> List[str
             values.append(raw)
     vocab = step.get("vocab")
     if isinstance(vocab, dict):
-        raw_word = vocab.get("expectedResponse") or vocab.get("targetWord")
+        raw_word = vocab.get("expectedResponse") or vocab.get("targetWord") or vocab.get("word")
         if raw_word not in (None, ""):
             values.append(raw_word)
     expected: List[str] = []
@@ -420,19 +448,23 @@ def _child_response_matches_expected(response: Any, expected_responses: List[str
                 return True
     return False
 
-def _child_response_retry_prompt(
-    step: Dict[str, Any],
-    expected_responses: List[str],
-    response: Any = None,
-) -> str:
-    retry = step.get("retryPrompt")
-    if isinstance(retry, str) and retry.strip():
-        base = retry.strip()
-    elif expected_responses:
-        base = f"Con thử nói lại nhé: {expected_responses[0]}."
-    else:
-        base = "Con thử nói lại nhé."
-    return base
+def _is_near_miss_child_response(response: Any, expected_responses: List[str]) -> bool:
+    if not expected_responses:
+        return False
+    response_tokens = _matching_tokens(response)
+    if not response_tokens:
+        return False
+    for expected in expected_responses:
+        expected_tokens = _matching_tokens(expected)
+        if len(expected_tokens) != 1:
+            continue
+        expected_token = expected_tokens[0]
+        if any(
+            _near_miss_child_pronunciation_token(token, expected_token)
+            for token in response_tokens
+        ):
+            return True
+    return False
 
 def _child_response_coaching_prompt(
     step: Dict[str, Any],
@@ -440,34 +472,38 @@ def _child_response_coaching_prompt(
     response: Any,
     intent: str,
 ) -> str:
-    target = expected_responses[0] if expected_responses else "từ này"
-    if intent == CHILD_RESPONSE_INTENT_HELP_OR_REPEAT:
-        return (
-            _child_response_interaction_prompt(step, "helpOrRepeat")
-            or f"Mình nhắc lại nhé. Con nhìn hình và nói theo mình: {target}."
-        )
-    if intent == CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED:
-        return (
-            _child_response_interaction_prompt(step, "unknownOrFrustrated")
-            or f"Không sao. Con nhìn hình cái kho màu đỏ nhé. Tiếng Anh là {target}. Con thử nói: {target}."
-        )
-    if intent == CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT:
-        return (
-            _child_response_interaction_prompt(step, "vietnameseObject")
-            or f"Đúng rồi, đó là cái kho. Bây giờ mình nói tên tiếng Anh của cái kho: {target}."
-        )
-    if intent == CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON:
-        return (
-            _child_response_interaction_prompt(step, "alreadyInLesson")
-            or f"Mình đang học bài này rồi. Con nhìn hình và nói từ {target} nhé."
-        )
-    return _child_response_retry_prompt(step, expected_responses, response)
+    """Short adaptive coaching from child intent; never raw-echo free-form speech."""
+    target = _target_vocab_word(expected_responses, step)
 
-def _child_response_success_prompt(step: Dict[str, Any]) -> Optional[str]:
+    if intent == CHILD_RESPONSE_INTENT_HELP_OR_REPEAT:
+        return f"Mình nhắc lại nhé. Từ mới là {target}. Nói theo mình: {target}."
+
+    if intent == CHILD_RESPONSE_INTENT_UNKNOWN_OR_FRUSTRATED:
+        return f"Không sao. Nhìn hình, tiếng Anh là {target}. Thử nói: {target}."
+
+    if intent == CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT:
+        return f"Đúng, cái kho! Tiếng Anh là {target}. Con nói: {target}."
+
+    if intent == CHILD_RESPONSE_INTENT_ALREADY_IN_LESSON:
+        return f"Mình đang học {target} rồi. Con nói {target} nhé."
+
+    if intent == CHILD_RESPONSE_INTENT_NEAR_MISS:
+        return f"Gần đúng lắm! Nói chậm, rõ: {target}."
+
+    return f"Mình nghe rồi. Từ mình học là {target}. Nói chậm: {target}."
+
+def _child_response_success_prompt(
+    step: Dict[str, Any],
+    expected_responses: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Authored successPrompt wins for ceremony; else short adaptive cheer."""
     success = step.get("successPrompt")
     if isinstance(success, str) and success.strip():
         return success.strip()
-    return None
+    target = _target_vocab_word(list(expected_responses or []), step)
+    if target and target != "từ này":
+        return f"Đúng rồi! {target}!"
+    return "Giỏi lắm!"
 
 def _is_false_child_response_flag_value(value: Any) -> bool:
     if isinstance(value, bool):
@@ -1058,7 +1094,7 @@ class LessonRuntime:
         self._log("info", f"interactive child response accepted stepId={self._step_id}")
         self._close_child_response_window()
         self._step_completed = True
-        success_prompt = _child_response_success_prompt(self._step)
+        success_prompt = _child_response_success_prompt(self._step, expected_responses)
         if success_prompt is not None:
             await self._speak_lesson_prompt_text(
                 success_prompt,
@@ -1179,6 +1215,15 @@ class LessonRuntime:
             await self._notify_lesson_terminal("lesson_completed")
 
     async def _notify_lesson_terminal(self, reason: str) -> None:
+        # Only real terminal states may leave LESSON mode. Non-terminal callers
+        # (historically online-fallback miswired as a notify) must not kick the
+        # child out mid-start.
+        if self.state not in (S_FAILED, S_COMPLETED, S_PAUSED):
+            self._log(
+                "warning",
+                f"ignoring non-terminal lesson notify reason={reason} state={self.state}",
+            )
+            return
         # Every S_FAILED path routes through here. Forward ONE durable terminal
         # lesson_failed (the forwarder classifies it terminal -> stored + reconnect
         # -replayed) so the backend assignment leaves its single-active slot and
@@ -1339,14 +1384,16 @@ class LessonRuntime:
         if self._preload_status_report_tasks:
             await asyncio.sleep(0)
         if not ready or not status.get("ready"):
+            # Online fallback continues the lesson with HTTP asset URLs. This is
+            # NOT a terminal outcome — never call _notify_lesson_terminal here or
+            # finish_lesson_mode will kick the child out of LESSON mode mid-start
+            # ("văng không vào được bài học").
             self._sd_asset_pack_online_fallback = True
             self._log("warning", "sd asset pack not ready; falling back to online URLs")
-            await self._notify_lesson_terminal("sd_asset_pack_online_fallback")
             return True
         if not await self._sync_sd_asset_pack_to_robot():
             self._sd_asset_pack_online_fallback = True
             self._log("warning", "robot SD sync unavailable; falling back to online URLs")
-            await self._notify_lesson_terminal("sd_asset_pack_online_fallback")
         return True
 
     async def _emit_step(self) -> None:
@@ -1779,7 +1826,7 @@ class LessonRuntime:
             }
         )
         self._step_completed = True
-        success_prompt = _child_response_success_prompt(self._step)
+        success_prompt = _child_response_success_prompt(self._step, expected)
         if success_prompt is not None:
             await self._speak_lesson_prompt_text(
                 success_prompt, step_id=step_id, continue_listening=False

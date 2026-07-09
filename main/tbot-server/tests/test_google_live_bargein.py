@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+from core.voice.session_orchestrator import SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
 
@@ -423,9 +424,51 @@ class EchoSuppressionPolicyTest(unittest.IsolatedAsyncioTestCase):
         client = _Client(connected=True)
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
         await provider.start_session()
-        conn.google_live_echo_suppress_until = time.monotonic() + 0.4
+        conn.google_live_echo_suppress_until = time.monotonic() + 0.9
 
         self.assertTrue(provider._should_suppress_robot_output_echo(b"\x00\x00" * 10))
+
+        await provider.close()
+
+    async def test_residual_energy_extends_echo_tail_suppression(self):
+        conn = _Conn()
+        conn.config["google_live"]["echo_tail_extend_rms_threshold"] = 100
+        conn.config["google_live"]["echo_tail_extend_ms"] = 250
+        conn.config["google_live"]["echo_tail_max_total_ms"] = 2500
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        now = time.monotonic()
+        conn.google_live_echo_suppress_started_at = now
+        conn.google_live_echo_suppress_until = now + 0.05
+        before = conn.google_live_echo_suppress_until
+
+        # Non-zero PCM so input_rms is a real number; provider path extends.
+        loud_pcm = (2000).to_bytes(2, "little", signed=True) * 160
+        self.assertTrue(provider._should_suppress_robot_output_echo(loud_pcm))
+        self.assertGreater(conn.google_live_echo_suppress_until, before)
+
+        await provider.close()
+
+    async def test_echo_tail_extension_respects_max_total(self):
+        conn = _Conn()
+        conn.config["google_live"]["echo_tail_extend_rms_threshold"] = 1
+        conn.config["google_live"]["echo_tail_extend_ms"] = 500
+        conn.config["google_live"]["echo_tail_max_total_ms"] = 200
+        client = _Client(connected=True)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        now = time.monotonic()
+        # Already past the max continuous window.
+        conn.google_live_echo_suppress_started_at = now - 0.5
+        conn.google_live_echo_suppress_until = now + 0.05
+        before = conn.google_live_echo_suppress_until
+
+        loud_pcm = (2000).to_bytes(2, "little", signed=True) * 160
+        self.assertTrue(provider._should_suppress_robot_output_echo(loud_pcm))
+        self.assertEqual(conn.google_live_echo_suppress_until, before)
 
         await provider.close()
 
@@ -503,7 +546,46 @@ class _RawInputCapturingBridge(_CapturingBridge):
         return audio_bytes
 
 
+class _PrerollCapturingBridge(GoogleLiveAudioBridge):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.encoded_inputs = []
+
+    async def _run_audio_cpu(self, func, *args):
+        return func(*args)
+
+    def _encode_output_audio(self, audio_bytes, mime_type=None):
+        self.encoded_inputs.append(audio_bytes)
+        if audio_bytes and all(byte == 0 for byte in audio_bytes):
+            return [b"silence"]
+        return [b"real"]
+
 class TurnIsolationBarrierTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_prompt_pcm_audio_prerolls_silence_before_first_chunk(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        bridge = _PrerollCapturingBridge(conn, _Client(), _Logger())
+        sent_packets = []
+
+        async def fake_send_audio(_conn, packets):
+            sent_packets.extend(packets if not isinstance(packets, bytes) else [packets])
+
+        with patch("core.handle.sendAudioHandle.sendAudio", fake_send_audio):
+            await bridge.handle_event({"type": "audio_start"})
+            await bridge.handle_event(
+                {
+                    "type": "audio_chunk",
+                    "audio": b"\x01\x00" * 480,
+                    "mime_type": "audio/pcm;rate=24000",
+                }
+            )
+        await bridge.close()
+
+        self.assertGreaterEqual(len(sent_packets), 2)
+        self.assertEqual(sent_packets[0], b"silence")
+        self.assertEqual(sent_packets[-1], b"real")
+
     async def test_stale_model_events_are_dropped_after_interrupted_audio_end(self):
         conn = _Conn()
         conn.websocket = None
@@ -737,6 +819,35 @@ class TranscriptBargeInTest(unittest.IsolatedAsyncioTestCase):
         )
         await bridge.handle_event(
             {"type": "transcript", "source": "user", "text": "mình là TBOT"}
+        )
+        await bridge.close()
+        self.assertEqual(captured, [])
+
+    async def test_partial_model_echo_with_extra_noise_words_is_suppressed(self):
+        """STT of speaker echo can wrap the model line with extra garbage tokens."""
+        conn = _Conn()
+        conn.config["google_live"]["barge_in_via_transcript"] = True
+        conn.config["google_live"]["barge_in_transcript_min_chars"] = 3
+        conn.google_live_audio_out_started_at = time.monotonic() - 5
+        captured = []
+
+        async def handler(text):
+            captured.append(text)
+
+        bridge = self._bridge(conn, handler)
+        await bridge.handle_event(
+            {
+                "type": "transcript",
+                "source": "model",
+                "text": "Hôm nay chúng ta học màu đỏ",
+            }
+        )
+        await bridge.handle_event(
+            {
+                "type": "transcript",
+                "source": "user",
+                "text": "à Hôm nay chúng ta học màu đỏ ừ",
+            }
         )
         await bridge.close()
         self.assertEqual(captured, [])
@@ -1353,7 +1464,11 @@ class BargeInConfigTuneTest(unittest.TestCase):
         self.assertEqual(google_live["interrupt_max_capture_ms"], 1200)
         self.assertEqual(google_live["robot_output_echo_bypass_rms_threshold"], 650)
         self.assertEqual(google_live["robot_output_echo_bypass_min_duration_sec"], 0.06)
-        self.assertEqual(google_live["mute_input_after_audio_start_sec"], 0.25)
+        self.assertEqual(google_live["mute_input_after_audio_start_sec"], 0.28)
+        self.assertEqual(google_live["echo_tail_suppression_ms"], 550)
+        self.assertEqual(google_live["echo_tail_extend_rms_threshold"], 700)
+        self.assertEqual(google_live["echo_tail_extend_ms"], 350)
+        self.assertEqual(google_live["echo_tail_max_total_ms"], 1400)
         self.assertFalse(google_live["hard_reconnect_on_interrupt"])
 
     def test_google_live_defaults_match_pr4_tune(self):
@@ -1372,7 +1487,11 @@ class BargeInConfigTuneTest(unittest.TestCase):
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["interrupt_max_capture_ms"], 1200)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["robot_output_echo_bypass_rms_threshold"], 650)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["robot_output_echo_bypass_min_duration_sec"], 0.06)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["mute_input_after_audio_start_sec"], 0.25)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["mute_input_after_audio_start_sec"], 0.28)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["echo_tail_suppression_ms"], 550)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["echo_tail_extend_rms_threshold"], 700)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["echo_tail_extend_ms"], 350)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["echo_tail_max_total_ms"], 1400)
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["hard_reconnect_on_interrupt"])
 
     def test_runtime_config_forces_local_audio_interrupts_off(self):

@@ -23,7 +23,11 @@ from unittest.mock import patch
 
 from core.lesson.asset_cache import AssetCache, FAILED, READY
 from core.lesson.errors import LessonError
-from core.lesson.runtime import _classify_child_response_intent
+from core.lesson.runtime import (
+    _child_response_coaching_prompt,
+    _child_response_success_prompt,
+    _classify_child_response_intent,
+)
 
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
@@ -195,6 +199,76 @@ class ChildResponseIntentClassifierTest(unittest.TestCase):
         self.assertEqual(
             _classify_child_response_intent("khó quá", ["barn"]),
             "unknown_or_frustrated",
+        )
+
+    def test_near_miss_pronunciation_is_coached_not_accepted(self):
+        # edit-distance 2, same first letter → coach, do not advance
+        self.assertEqual(
+            _classify_child_response_intent("ball", ["barn"]),
+            "near_miss",
+        )
+        self.assertEqual(
+            _classify_child_response_intent("band", ["barn"]),
+            "near_miss",
+        )
+        # edit-distance 1 stays accepted as correct (low-pressure aliases)
+        self.assertEqual(
+            _classify_child_response_intent("bark", ["barn"]),
+            "correct",
+        )
+        # different first letter is wrong, not a near-miss
+        self.assertEqual(
+            _classify_child_response_intent("farm", ["barn"]),
+            "wrong",
+        )
+
+    def test_adaptive_vocab_coaching_reacts_to_child_intent_not_canned_sample(self):
+        step = {
+            "expectedResponses": ["barn"],
+            # Authored sample lines must NOT be spoken — adaptive coaching wins.
+            "retryPrompt": "Câu mẫu retry không được đọc.",
+            "interactionPrompts": {
+                "helpOrRepeat": "Câu mẫu help không được đọc.",
+                "unknownOrFrustrated": "Câu mẫu unknown không được đọc.",
+                "vietnameseObject": "Câu mẫu vietnamese không được đọc.",
+                "alreadyInLesson": "Câu mẫu already không được đọc.",
+            },
+        }
+        cases = [
+            ("help_or_repeat", "nói lại đi", ["mình nhắc lại", "từ mới là", "barn"]),
+            ("unknown_or_frustrated", "con không biết", ["không sao", "tiếng anh là", "barn"]),
+            ("vietnamese_object", "cái kho", ["cái kho", "tiếng anh là", "barn"]),
+            ("already_in_lesson", "bắt đầu bài học", ["đang học", "barn"]),
+            ("near_miss", "ball", ["gần đúng", "nói chậm", "barn"]),
+            ("wrong", "cat", ["mình nghe rồi", "từ mình học là", "barn", "nói chậm"]),
+        ]
+        for intent, child_said, must_include in cases:
+            self.assertEqual(
+                _classify_child_response_intent(child_said, ["barn"]),
+                intent,
+                child_said,
+            )
+            spoken = _child_response_coaching_prompt(
+                step, ["barn"], child_said, intent
+            ).lower()
+            for needle in must_include:
+                self.assertIn(needle, spoken, (intent, spoken))
+            # Safety: no raw free-form wrong answer echo, no canned sample line.
+            self.assertNotIn("cat", spoken)
+            self.assertNotIn("câu mẫu", spoken)
+            self.assertNotIn("chưa đúng", spoken)
+
+    def test_success_prompt_names_target_word_when_no_ceremony_line(self):
+        self.assertEqual(
+            _child_response_success_prompt({"expectedResponses": ["barn"]}, ["barn"]),
+            "Đúng rồi! barn!",
+        )
+        self.assertEqual(
+            _child_response_success_prompt(
+                {"successPrompt": "  Hoàn thành bài học mẫu.  "},
+                ["barn"],
+            ),
+            "Hoàn thành bài học mẫu.",
         )
 
 def _assert_no_pronunciation_scoring_payload(testcase, value, *, path="event") -> None:
@@ -2446,6 +2520,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_sd_asset_pack_not_ready_falls_back_to_online_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        finished = []
+
+        async def finish_lesson_mode(*, reason):
+            finished.append(reason)
+
+        conn.finish_lesson_mode = finish_lesson_mode
+        conn.session_mode = "lesson"
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=False))
 
         await rt.start()
@@ -2454,6 +2535,37 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])
         self.assertNotIn("assetPack", sent[0]["body"])
         self.assertEqual(rt.state, "PRELOADING")
+        # Online fallback is NOT a terminal outcome — must keep LESSON mode so the
+        # child is not kicked out ("văng") right as the lesson begins.
+        self.assertEqual(finished, [])
+        self.assertTrue(rt._sd_asset_pack_online_fallback)
+
+    async def test_sd_asset_pack_robot_sync_fail_keeps_lesson_mode_on_online_fallback(self):
+        """When MCP SD sync is unavailable, lesson continues online without finish()."""
+        conn = _FakeConn(
+            session_id=FIX["frames"]["lesson_prepare"]["sessionId"],
+            # Device claims MCP so a missing client is a real sync failure.
+            features={"lesson": True, "renderer": "teebot-lesson-renderer.v1", "mcp": True},
+        )
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = None  # sync cannot run → online fallback
+        finished = []
+
+        async def finish_lesson_mode(*, reason):
+            finished.append(reason)
+
+        conn.finish_lesson_mode = finish_lesson_mode
+        conn.session_mode = "lesson"
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        await rt.start()
+
+        self.assertEqual(rt.state, "PRELOADING")
+        self.assertTrue(rt._sd_asset_pack_online_fallback)
+        self.assertEqual(finished, [])
+        prepare = self._sent_frames(conn)[-1]
+        self.assertEqual(prepare["type"], "lesson_prepare")
+        self.assertNotIn("assetPack", prepare["body"])
 
     async def test_sd_asset_pack_preload_error_fails_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])

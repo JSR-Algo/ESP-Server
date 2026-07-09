@@ -47,13 +47,33 @@ LIVE_WAKE_WORD_ALIASES = {
 class GoogleLiveProvider(VoiceSessionProvider):
     """Google Live session provider for production robot speech."""
 
-    # ponytail: fixed for current robot field issue; make configurable if fleet
-    # telemetry needs per-device tuning.
     _SILENT_LIVE_REOPEN_TIMEOUTS = 2
     _SILENT_LIVE_REOPEN_COOLDOWN_SEC = 60.0
     _START_LESSON_DUPLICATE_TOOL_WINDOW_SEC = 2.0
     _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC = 1.5
-    _WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC = 0.8
+    # Short: Live STT often re-emits the wake alias after firmware already handled Hi ESP.
+    _WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC = 0.15
+    _WAKE_GREETING_LIVE_INSTRUCTION = (
+        "Bạn là robot TBOT nói với trẻ. Chỉ nói đúng một câu chào ngắn bằng tiếng Việt, "
+        "ấm áp, không hỏi thêm, không gọi tool, không giải thích. Câu: "
+    )
+
+    @staticmethod
+    def _as_float(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _as_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _conn_float(self, name, default=0.0):
+        return self._as_float(getattr(self.conn, name, default), default)
 
     def __init__(
         self,
@@ -74,6 +94,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._lesson_child_transcript_timeout_task = None
         self._start_lesson_asr_fallback_task = None
         self._func_handler_bootstrap_task = None
+        self._live_prewarm_task = None
+        self._wake_greeting_task = None
+        self._wake_greeting_sent_until = 0.0
         self._fallback_provider = None
         self._fallback_activating = False
         self._reconnect_attempts = 0
@@ -160,6 +183,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live provider initialized dormant"
                 )
+                # Cold first-wake hang fix: open Live in the background right after
+                # the robot websocket is up so "Hi ESP" does not wait ~1s on
+                # Google connect before the first spoken turn.
+                if self._prewarm_live_on_connect_enabled():
+                    # delay 0: first Hi ESP after boot should not wait for cold connect.
+                    self._schedule_live_prewarm(
+                        "connect",
+                        delay_sec=self._prewarm_live_on_connect_delay_sec(),
+                    )
+                    # Bootstrap tools in parallel so first Live turn is not blocked.
+                    self._schedule_func_handler_bootstrap("connect_prewarm")
                 return
             try:
                 await self._ensure_func_handler()
@@ -305,8 +339,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return True
             if listen_state == "detect" and self._is_wake_word_only(text):
                 await self._reset_conversation_live_context("wake_word")
+                # Clear stale turn timer so first_audio latency is measured from this wake.
+                self.conn.google_live_turn_started_at = None
                 await self._send_wake_listening_feedback(listen_text or text)
                 await self._open_user_audio_window("wake_word")
+                # Open Live immediately + speak a short first line so the first
+                # post-connect Hi ESP is not silent for several seconds.
+                self._schedule_live_prewarm("wake_word", delay_sec=0.0)
+                self._schedule_wake_greeting("wake_detect")
                 return True
             if await self._dispatch_lesson_start_intent(text):
                 return True
@@ -345,9 +385,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         opened_live_for_audio = False
         if self._has_session_orchestrator() and self._bridge is None:
-            if not await self._ensure_live_open_for_audio():
-                return True
-            opened_live_for_audio = True
+            # Prefer awaiting an in-flight wake/connect prewarm so the first
+            # spoken words after "Hi ESP" do not start a second connect race.
+            if not await self._await_live_prewarm_if_running():
+                if not await self._ensure_live_open_for_audio():
+                    return True
+            if self._bridge is None:
+                if not await self._ensure_live_open_for_audio():
+                    return True
+            opened_live_for_audio = self._bridge is not None
         if (
             opened_live_for_audio
             and time.monotonic() >= self._user_audio_allowed_until
@@ -633,13 +679,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _has_session_orchestrator(self):
         return hasattr(self.conn, "session_mode")
 
+    def _is_live_client_ready(self):
+        return (
+            self._client is not None
+            and self._bridge is not None
+            and (
+                not hasattr(self._client, "connected")
+                or bool(getattr(self._client, "connected", False))
+            )
+        )
+
+    async def ensure_live_ready(self, reason="ensure"):
+        """Public hook for connection orchestrator to open Live without dormancy."""
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live ensure_live_ready reason={}",
+            reason,
+        )
+        return await self._ensure_live_open_for_audio()
+
     async def _ensure_live_open_for_audio(self):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
-            # In LESSON mode only an interactive (non-passive) step warrants
-            # opening a Live session for the child's spoken answer; passive steps
-            # stay TTS-only.
+            # LESSON: only interactive steps need Live; passive steps stay TTS-only.
             if not self._active_lesson_step_is_interactive():
                 return False
+        if self._is_live_client_ready():
+            return True
         timeout = self._get_live_open_timeout_sec()
         try:
             if timeout is None:
@@ -651,6 +715,193 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except asyncio.TimeoutError:
             await self._handle_live_open_timeout(timeout)
             return False
+
+    def _prewarm_live_on_connect_enabled(self):
+        return bool(self._get_live_config().get("prewarm_live_on_connect", True))
+
+    def _prewarm_live_on_connect_delay_sec(self):
+        delay = self._as_float(
+            self._get_live_config().get("prewarm_live_on_connect_delay_sec", 0.0),
+            0.0,
+        )
+        return max(0.0, min(delay, 5.0))
+
+    def _wake_greeting_enabled(self):
+        return bool(self._get_live_config().get("wake_greeting_enabled", True))
+
+    def _wake_greeting_text(self):
+        text = self._get_live_config().get("wake_greeting_text")
+        if text is None or str(text).strip() == "":
+            return "Dạ, mình nghe đây ạ."
+        return str(text).strip()
+
+    async def _send_wake_greeting(self, reason):
+        await self._await_live_prewarm_if_running()
+        if not self._is_live_client_ready():
+            if not await self._ensure_live_open_for_audio():
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "Google Live wake_greeting_skipped reason=live_not_open trigger={}",
+                    reason,
+                )
+                return False
+        if time.monotonic() < float(self._wake_greeting_sent_until or 0.0):
+            return False
+        client = self._client
+        if client is None or not hasattr(client, "send_text"):
+            return False
+        greeting = self._wake_greeting_text()
+        try:
+            if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
+                self._bridge.allow_model_output()
+            self.conn.client_abort = False
+            self.conn.google_live_turn_started_at = time.monotonic()
+            await client.send_text(f"{self._WAKE_GREETING_LIVE_INSTRUCTION}{greeting}")
+            self._wake_greeting_sent_until = time.monotonic() + 4.0
+            self._touch_live_activity()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live wake_greeting_sent reason={} chars={} text_preview={!r}",
+                reason,
+                len(greeting),
+                greeting[:40],
+            )
+            return True
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live wake_greeting_failed reason={} error={}",
+                reason,
+                self._safe_error_message(exc),
+            )
+            return False
+
+    def _schedule_wake_greeting(self, reason="wake"):
+        """One-shot Live text greeting after Hi ESP so cold start is not silent."""
+        if not self._wake_greeting_enabled() or self._closing:
+            return
+        if time.monotonic() < float(self._wake_greeting_sent_until or 0.0):
+            return
+        task = self._wake_greeting_task
+        if task is not None and not task.done():
+            return
+        self._wake_greeting_task = asyncio.get_running_loop().create_task(
+            self._send_wake_greeting(reason)
+        )
+        self._wake_greeting_task.add_done_callback(
+            lambda done: self._log_background_task_failure(
+                done, "wake_greeting", reason
+            )
+        )
+
+    def _prewarm_live_on_wake_enabled(self):
+        return bool(self._get_live_config().get("prewarm_live_on_wake", True))
+
+    def _get_wake_transcript_tail_suppress_sec(self):
+        value = self._as_float(
+            self._get_live_config().get(
+                "wake_transcript_tail_suppress_sec",
+                self._WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC,
+            ),
+            self._WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC,
+        )
+        return max(0.0, min(value, 2.0))
+
+    def _default_idle_timeout_sec(self):
+        # Keep prewarmed Live hot so first Hi ESP after idle skips reconnect.
+        return 180.0 if self._prewarm_live_on_connect_enabled() else 45.0
+
+    def _idle_timeout_sec(self):
+        config = getattr(self.conn, "config", {}) or {}
+        live_admission = (
+            config.get("live_admission", {}) if isinstance(config, Mapping) else {}
+        )
+        timeout = (
+            live_admission.get("idle_timeout_sec")
+            if isinstance(live_admission, Mapping)
+            else None
+        )
+        if timeout is None:
+            google_live = (
+                config.get("google_live", {}) if isinstance(config, Mapping) else {}
+            )
+            default_idle = self._default_idle_timeout_sec()
+            timeout = (
+                google_live.get("idle_timeout_sec", default_idle)
+                if isinstance(google_live, Mapping)
+                else default_idle
+            )
+        return max(0.0, self._as_float(timeout, self._default_idle_timeout_sec()))
+
+    def _log_background_task_failure(self, done, task_name, reason):
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live {} task failed reason={} error={}",
+                task_name,
+                reason,
+                self._safe_error_message(exc),
+            )
+
+    def _schedule_live_prewarm(self, reason, delay_sec=0.0):
+        """Open Live in the background so first wake avoids cold-connect latency."""
+        if reason == "wake_word" and not self._prewarm_live_on_wake_enabled():
+            return
+        if reason == "connect" and not self._prewarm_live_on_connect_enabled():
+            return
+        if self._closing or self._is_live_client_ready():
+            return
+        task = self._live_prewarm_task
+        if task is not None and not task.done():
+            return
+        delay = max(0.0, self._as_float(delay_sec, 0.0))
+
+        async def _run():
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self._closing:
+                return False
+            if normalize_session_mode(
+                getattr(self.conn, "session_mode", SessionMode.DORMANT)
+            ) == SessionMode.LESSON and not self._active_lesson_step_is_interactive():
+                return False
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live live_prewarm_start reason={}",
+                reason,
+            )
+            try:
+                ok = await self._ensure_live_open_for_audio()
+            except Exception as exc:
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "Google Live live_prewarm_failed reason={} error={}",
+                    reason,
+                    self._safe_error_message(exc),
+                )
+                return False
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live live_prewarm_done reason={} ok={}",
+                reason,
+                bool(ok),
+            )
+            return bool(ok)
+
+        self._live_prewarm_task = asyncio.get_running_loop().create_task(_run())
+        self._live_prewarm_task.add_done_callback(
+            lambda done: self._log_background_task_failure(
+                done, "live_prewarm", reason
+            )
+        )
+
+    async def _await_live_prewarm_if_running(self):
+        """Return True when Live is ready after any in-flight prewarm finishes."""
+        task = self._live_prewarm_task
+        if task is None:
+            return self._is_live_client_ready()
+        try:
+            ok = bool(task.result()) if task.done() else bool(await task)
+        except Exception:
+            ok = False
+        return ok and self._bridge is not None
 
     async def _open_live_for_audio(self):
         decision = await self._admit_live_open()
@@ -905,18 +1156,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await self.conn.enter_dormant_mode(reason="idle_timeout")
         return True
 
-    def _idle_timeout_sec(self):
-        config = getattr(self.conn, "config", {}) or {}
-        live_admission = config.get("live_admission", {}) if isinstance(config, Mapping) else {}
-        timeout = live_admission.get("idle_timeout_sec") if isinstance(live_admission, Mapping) else None
-        if timeout is None:
-            google_live = config.get("google_live", {}) if isinstance(config, Mapping) else {}
-            timeout = google_live.get("idle_timeout_sec", 45) if isinstance(google_live, Mapping) else 45
-        try:
-            return max(0.0, float(timeout))
-        except (TypeError, ValueError):
-            return 45.0
-
     def _ensure_required_aec_ready(self):
         config = self._get_live_config()
         if not bool(config.get("aec_enabled", False)):
@@ -1008,19 +1247,52 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._safe_error_message(exc),
             )
 
+    def _suppress_user_transcript_as_model_echo(self, transcript_text):
+        bridge = self._bridge
+        if bridge is None or not hasattr(bridge, "looks_like_model_echo"):
+            return False
+        try:
+            if not bridge.looks_like_model_echo(transcript_text):
+                return False
+        except Exception:
+            return False
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live user_transcript_suppressed_as_model_echo "
+            "chars={} text_preview={!r}",
+            len(transcript_text or ""),
+            str(transcript_text or "")[:40],
+        )
+        return True
+
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_audio.clear()
+        if self._suppress_user_transcript_as_model_echo(transcript_text):
+            return True
         if await self._dispatch_lesson_child_response(transcript_text):
             return True
         if self._is_live_wake_transcript_only(transcript_text):
-            await self._begin_user_interrupt("wake_word")
-            self._wake_transcript_tail_suppress_until = (
-                time.monotonic() + self._WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC
-            )
+            # Firmware often already opened wake via listen:detect; ignore Live STT duplicate.
+            if time.monotonic() < float(self._wake_audio_window_until or 0.0):
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live wake_transcript_ignored_duplicate "
+                    "text_preview={!r} window_ms_left={:.0f}",
+                    str(transcript_text or "")[:40],
+                    max(0.0, (self._wake_audio_window_until - time.monotonic()) * 1000),
+                )
+                return True
+            if self._has_active_output() or self._has_music_session():
+                await self._begin_user_interrupt("wake_word")
+            suppress_sec = self._get_wake_transcript_tail_suppress_sec()
+            if suppress_sec > 0:
+                self._wake_transcript_tail_suppress_until = (
+                    time.monotonic() + suppress_sec
+                )
             await self._send_wake_listening_feedback(transcript_text)
             await self._open_user_audio_window("wake_word")
-            await self._reset_conversation_live_context("wake_transcript")
+            if self._user_stream_started_at is None:
+                await self._reset_conversation_live_context("wake_transcript")
+            self._schedule_live_prewarm("wake_transcript", delay_sec=0.0)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live wake_transcript_only text_preview={!r}",
                 str(transcript_text or "")[:40],
@@ -1848,6 +2120,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         proactive_task = self._proactive_reconnect_task
         idle_task = self._idle_close_task
         func_handler_bootstrap_task = self._func_handler_bootstrap_task
+        live_prewarm_task = self._live_prewarm_task
+        wake_greeting_task = self._wake_greeting_task
         self._receive_task = None
         self._input_flush_task = None
         self._forced_interrupt_flush_task = None
@@ -1858,8 +2132,27 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         self._func_handler_bootstrap_task = None
+        # Do not clear/cancel prewarm/greeting when they are the current closer —
+        # open failures cancel themselves via exception paths already.
+        if live_prewarm_task is not current_task:
+            self._live_prewarm_task = None
+        if wake_greeting_task is not current_task:
+            self._wake_greeting_task = None
         self._wake_audio_window_until = 0.0
         self._wake_transcript_tail_suppress_until = 0.0
+        for background_task in (live_prewarm_task, wake_greeting_task):
+            if (
+                background_task is not None
+                and background_task is not current_task
+                and not background_task.done()
+            ):
+                background_task.cancel()
+                try:
+                    await background_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
         if receive_task is not None and receive_task is not current_task:
             receive_task.cancel()
             try:
@@ -3598,9 +3891,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         merged["native_voice"] = True
         merged["aec_enabled"] = True
         try:
-            waiting_timeout = float(merged.get("waiting_model_timeout_sec", 4.0))
+            waiting_timeout = float(merged.get("waiting_model_timeout_sec", 3.0))
         except (TypeError, ValueError):
-            waiting_timeout = 4.0
+            waiting_timeout = 3.0
         merged["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 4.0)
         merged["interruption_min_output_age_sec"] = 0.0
         merged["barge_in_transcript_min_output_age_sec"] = 0.0
@@ -4096,6 +4389,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if reason == "robot_speaking" and self._can_forward_aec_audio_for_live_vad(config):
             self._log_aec_live_vad_forward(pcm_audio, reason)
             return False
+        # Keep the gate closed while residual speaker energy is still present
+        # after tts:stop. Without this, rooms with long acoustic tails reopen
+        # mic early and Gemini treats the robot's own voice as a new user turn.
+        if reason in {"echo_tail", "robot_speaking", "music_playing"}:
+            self._maybe_extend_echo_tail_for_residual(config, rms, reason)
         # Throttle echo_suppressed log to once per second per reason.
         # Without throttling, during music playback this fires every 60ms
         # (16 lines/sec), causing logger IO contention that delays audio
@@ -4111,6 +4409,53 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 rms,
         )
         return True
+
+    def _maybe_extend_echo_tail_for_residual(self, config, rms, reason):
+        """Extend post-output mic suppression while residual energy remains."""
+        if not isinstance(rms, (int, float)):
+            return
+        threshold = self._as_int(config.get("echo_tail_extend_rms_threshold", 700), 700)
+        extend_ms = self._as_float(config.get("echo_tail_extend_ms", 350), 350.0)
+        max_total_ms = self._as_float(config.get("echo_tail_max_total_ms", 1400), 1400.0)
+        if threshold <= 0 or rms < threshold or extend_ms <= 0 or max_total_ms <= 0:
+            return
+
+        now = time.monotonic()
+        started_at = getattr(self.conn, "google_live_echo_suppress_started_at", None)
+        if started_at is None:
+            # Seed only after stop (echo_tail); speaking/music wait for tts:stop anchor.
+            if reason != "echo_tail":
+                return
+            self.conn.google_live_echo_suppress_started_at = now
+            started_at = now
+        started_at = self._as_float(started_at, None)
+        if started_at is None:
+            return
+
+        elapsed_ms = max(0.0, (now - started_at) * 1000.0)
+        if elapsed_ms >= max_total_ms:
+            return
+        apply_ms = min(extend_ms, max_total_ms - elapsed_ms)
+        until = now + apply_ms / 1000.0
+        current_until = self._conn_float("google_live_echo_suppress_until", 0.0)
+        if until <= current_until:
+            return
+        self.conn.google_live_echo_suppress_until = until
+        self.conn.google_live_audible_output_until = max(
+            self._conn_float("google_live_audible_output_until", 0.0),
+            until,
+        )
+        last_at = self._last_echo_suppressed_log_at.get("echo_tail_extend", 0.0)
+        if now - last_at >= 1.0:
+            self._last_echo_suppressed_log_at["echo_tail_extend"] = now
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live echo_tail_extended reason={} rms={} "
+                "extend_ms={:.0f} total_elapsed_ms={:.0f}",
+                reason,
+                rms,
+                apply_ms,
+                elapsed_ms,
+            )
 
     def _log_aec_live_vad_forward(self, pcm_audio=None, reason="robot_speaking"):
         log_key = "aec_live_vad_forward"

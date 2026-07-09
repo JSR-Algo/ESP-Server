@@ -153,44 +153,49 @@ google_live:
   disable_server_side_interruptions: false
   activity_handling: START_OF_ACTIVITY_INTERRUPTS
   turn_coverage: TURN_INCLUDES_ALL_INPUT
-  # Giảm độ nhạy VAD để echo loa không kích hoạt ngắt nhầm.
+  # Start low to ignore room noise; end HIGH so turn closes faster (lab latency).
   start_of_speech_sensitivity: START_SENSITIVITY_LOW
-  end_of_speech_sensitivity: END_SENSITIVITY_LOW
-  prefix_padding_ms: 300
-  silence_duration_ms: 1200
+  end_of_speech_sensitivity: END_SENSITIVITY_HIGH
+  prefix_padding_ms: 200
+  # Keep input_speech_tail_ms >= this (lesson coupling); lower = snappier turn-close.
+  silence_duration_ms: 500
   log_audio_diagnostics: true
   connect_timeout_sec: 10
   recv_timeout_sec: 60
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
   # ── Child-speech capture tuning ("robot can't hear the child / con nói lại") ──
-  # Previously absent -> ran on code defaults (tail 900ms, min 360, max 8000).
-  # The 900ms tail finalized a still-talking child on any
-  # mid-sentence pause ≥0.9s, then the WAITING_MODEL branch hard-dropped the
-  # continuation → child unheard. Starting values below; TUNE ON-DEVICE using
-  # log_audio_diagnostics (measure mid-utterance pause distribution + model
-  # first-audio p95). COUPLING (must hold): input_speech_tail_ms >=
-  # silence_duration_ms (1200) and input_flush_delay_sec >= input_speech_tail_ms,
-  # so the local + Gemini server-side turn-enders don't compete and the idle
-  # safety-net doesn't re-introduce the early cut.
-  input_flush_delay_sec: 1.4
-  # Faster normal conversation turn-close. Lesson mode keeps the longer values
-  # above so a child pause does not cut the answer early.
-  conversation_input_flush_delay_sec: 0.45
-  input_speech_tail_ms: 1300
-  conversation_input_speech_tail_ms: 420
-  input_min_capture_ms: 400
+  # Lesson keeps longer tails so a child pause does not cut the answer early.
+  # Conversation uses the faster conversation_* knobs below for snappier reply.
+  # COUPLING: input_speech_tail_ms >= silence_duration_ms and
+  # input_flush_delay_sec >= input_speech_tail_ms/1000.
+  input_flush_delay_sec: 0.8
+  # Faster normal conversation turn-close (first reply after wake).
+  conversation_input_flush_delay_sec: 0.18
+  input_speech_tail_ms: 600
+  conversation_input_speech_tail_ms: 180
+  input_min_capture_ms: 250
   input_max_capture_ms: 8000
-  conversation_input_max_capture_ms: 2500
-  input_speech_rms_threshold: 500
+  conversation_input_max_capture_ms: 4000
+  # Higher floor drops ambient office noise that was STT'd as garbage Vietnamese.
+  input_speech_rms_threshold: 900
   lesson_child_input_speech_rms_threshold: 2000
-  input_gain: 6.0
+  # Lower gain reduces speaker->mic residual that feeds monologue loops.
+  input_gain: 2.8
   # Hold a pending Live turn long enough for real first audio before reopening
   # the mic. Too low makes the UI look like listening while Gemini is still
   # preparing audio and stacks ambient-noise turns.
-  waiting_model_timeout_sec: 4.0
+  waiting_model_timeout_sec: 3.0
   waiting_model_retry_prompt_after_sec: 12.0
   live_open_timeout_sec: 12.0
+  # Pre-open Live on connect/wake so first utterance skips cold-connect latency.
+  prewarm_live_on_connect: true
+  prewarm_live_on_connect_delay_sec: 0.0
+  prewarm_live_on_wake: true
+  wake_greeting_enabled: true
+  wake_greeting_text: "Dạ, mình nghe đây ạ."
+  idle_timeout_sec: 180
+  wake_transcript_tail_suppress_sec: 0.15
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
   # risk of clipping the trailing syllable; higher = safer transcript
@@ -223,12 +228,16 @@ google_live:
   interrupt_min_output_age_sec: 0.25
   interruption_min_output_age_sec: 0.0
   interrupt_suppress_audio_sec: 0.25
-  mute_input_after_audio_start_sec: 0.25
-  echo_tail_suppression_ms: 400
+  mute_input_after_audio_start_sec: 0.28
+  # Post-tts residual gate + adaptive extend while speaker energy remains.
+  echo_tail_suppression_ms: 550
+  echo_tail_extend_rms_threshold: 700
+  echo_tail_extend_ms: 350
+  echo_tail_max_total_ms: 1400
+  echo_tail_audible_ms: 400
   suppress_robot_output_echo: true
   wake_audio_allow_window_sec: 15.0
-  # Cho phép user nói đủ lớn/ngắt thật sự lọt qua echo gate khi firmware
-  # không gửi wake event trong lúc robot đang nói. Echo loa thường thấp hơn.
+  # Thresholds kept for rollback; production forces echo_bypass_interrupt_enabled=false.
   robot_output_echo_bypass_rms_threshold: 650
   robot_output_echo_bypass_min_duration_sec: 0.06
   echo_bypass_interrupt_enabled: false

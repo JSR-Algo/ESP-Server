@@ -29,19 +29,28 @@ GOOGLE_LIVE_DEFAULTS = {
     "input_live_chunk_ms": 20,
     "interrupt_policy": "wake_or_transcript",
     "raw_audio_barge_in_enabled": False,
-    "input_flush_delay_sec": 1.4,
-    "conversation_input_flush_delay_sec": 0.45,
-    "input_speech_tail_ms": 1300,
-    "conversation_input_speech_tail_ms": 420,
-    "input_min_capture_ms": 400,
+    "input_flush_delay_sec": 0.8,
+    "conversation_input_flush_delay_sec": 0.18,
+    "input_speech_tail_ms": 600,
+    "conversation_input_speech_tail_ms": 180,
+    "input_min_capture_ms": 250,
     "input_max_capture_ms": 8000,
-    "conversation_input_max_capture_ms": 2500,
-    "input_speech_rms_threshold": 500,
+    "conversation_input_max_capture_ms": 4000,
+    "input_speech_rms_threshold": 900,
     "lesson_child_input_speech_rms_threshold": 2000,
-    "input_gain": 6.0,
-    "waiting_model_timeout_sec": 4.0,
+    "input_gain": 2.8,
+    "waiting_model_timeout_sec": 3.0,
     "waiting_model_retry_prompt_after_sec": 12.0,
     "live_open_timeout_sec": 12.0,
+    # Open Live soon after robot websocket connect / on Hi ESP so the first
+    # spoken turn does not pay cold Google connect latency (~0.6–1.2s).
+    "prewarm_live_on_connect": True,
+    "prewarm_live_on_connect_delay_sec": 0.0,
+    "prewarm_live_on_wake": True,
+    "wake_greeting_enabled": True,
+    "wake_greeting_text": "Dạ, mình nghe đây ạ.",
+    "idle_timeout_sec": 180,
+    "wake_transcript_tail_suppress_sec": 0.15,
     "lesson_prompt_output_guard_timeout_sec": 30.0,
     "lesson_prompt_playback_guard_timeout_sec": 12.0,
     "interrupt_forced_flush_delay_sec": 0.8,
@@ -50,7 +59,14 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_max_capture_ms": 1200,
     "interrupt_replay_buffer_ms": 900,
     "reconnect_buffer_ms": 2000,
-    "echo_tail_suppression_ms": 400,
+    # Post-tts residual (device still drains playback after server tts:stop).
+    # Too short reopens monologue loops; too long feels deaf after robot speaks.
+    "echo_tail_suppression_ms": 550,
+    "echo_tail_extend_rms_threshold": 700,
+    "echo_tail_extend_ms": 350,
+    "echo_tail_max_total_ms": 1400,
+    # Latch audible briefly so residual frames stay under the echo gate.
+    "echo_tail_audible_ms": 400,
     "music_auto_pause_on_user_speech": True,
     "disable_server_side_interruptions": False,
     "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
@@ -62,7 +78,8 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_min_output_age_sec": 0.25,
     "interruption_min_output_age_sec": 0.0,
     "interrupt_suppress_audio_sec": 0.25,
-    "mute_input_after_audio_start_sec": 0.25,
+    # First model-audio frames often leak residual energy before AEC converges.
+    "mute_input_after_audio_start_sec": 0.28,
     "suppress_robot_output_echo": True,
     "wake_audio_allow_window_sec": 15.0,
     "robot_output_echo_bypass_rms_threshold": 650,
@@ -258,9 +275,10 @@ def _apply_google_live_runtime_safety_policy(google_live):
     google_live["interruption_min_output_age_sec"] = 0.0
     google_live["barge_in_transcript_min_output_age_sec"] = 0.0
     try:
-        waiting_timeout = float(google_live.get("waiting_model_timeout_sec", 4.0))
+        waiting_timeout = float(google_live.get("waiting_model_timeout_sec", 3.0))
     except (TypeError, ValueError):
-        waiting_timeout = 4.0
+        waiting_timeout = 3.0
+    # Cap at 4.0 so private configs cannot stall listening forever; prefer 3.0.
     google_live["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 4.0)
     google_live["echo_bypass_interrupt_enabled"] = False
     google_live["server_side_vad_enabled"] = True

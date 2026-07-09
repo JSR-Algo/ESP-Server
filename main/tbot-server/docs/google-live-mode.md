@@ -41,11 +41,15 @@ google_live:
   recv_timeout_sec: 60               # PR2: raised from 30 to give native-audio model headroom
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
-  conversation_input_flush_delay_sec: 0.45
-  conversation_input_speech_tail_ms: 420
-  input_flush_delay_sec: 1.4
-  input_speech_tail_ms: 1300
-  waiting_model_timeout_sec: 1.2
+  conversation_input_flush_delay_sec: 0.18
+  conversation_input_speech_tail_ms: 180
+  input_flush_delay_sec: 0.8
+  input_speech_tail_ms: 600
+  waiting_model_timeout_sec: 3.0     # runtime safety policy caps private configs at 4.0
+  prewarm_live_on_connect: true
+  prewarm_live_on_wake: true
+  wake_greeting_enabled: true
+  idle_timeout_sec: 180
   reconnect_buffer_ms: 2000          # current-turn mic packets preserved across reconnect
   interrupt_replay_buffer_ms: 900
   interrupt_on_input_while_speaking: false
@@ -54,12 +58,17 @@ google_live:
   interrupt_min_output_age_sec: 0.25
   interruption_min_output_age_sec: 0.0
   interrupt_suppress_audio_sec: 0.25
-  echo_tail_suppression_ms: 400
+  mute_input_after_audio_start_sec: 0.28
+  echo_tail_suppression_ms: 550
+  echo_tail_extend_rms_threshold: 700
+  echo_tail_extend_ms: 350
+  echo_tail_max_total_ms: 1400
+  echo_tail_audible_ms: 400
   interrupt_debounce_sec: 0.2
   model_output_unblock_timeout_sec: 1.5
   drop_input_while_speaking: false
   barge_in: false
-  barge_in_rms_threshold: 4500       # legacy rollback knob; not active by default
+  barge_in_rms_threshold: 4500       # legacy rollback knobs; not active by default
   barge_in_min_input_duration_sec: 0.30
   barge_in_min_output_age_sec: 0.25
   barge_in_transcript_min_output_age_sec: 0.0
@@ -92,14 +101,21 @@ google_live:
 | `context_window_compression_enabled` | true | keep long sessions alive with sliding-window compression | US-004 |
 | `tool_timeout_sec` | 10 | bound manual Live tool execution; late cancelled tool results are dropped | US-004 |
 | `interrupt_policy` | `wake_or_transcript` | only wake/listen, user transcript, or deterministic music command can interrupt production output | US-004 |
-| `conversation_input_flush_delay_sec` | 0.45 | normal conversation turn-close safety net; faster than lesson timing | US-004 |
-| `conversation_input_speech_tail_ms` | 420 | normal conversation silence tail before finalising input | US-004 |
-| `waiting_model_timeout_sec` | 1.2 | reopen listening if Live returns no model audio, so the robot does not stay stuck in waiting state | US-004 |
-| `input_flush_delay_sec` / `input_speech_tail_ms` | 1.4 / 1300 | lesson/child speech timing; longer to avoid cutting a paused child | US-006 |
+| `conversation_input_flush_delay_sec` | 0.18 | normal conversation turn-close safety net; faster than lesson timing | US-004 |
+| `conversation_input_speech_tail_ms` | 180 | normal conversation silence tail before finalising input | US-004 |
+| `waiting_model_timeout_sec` | 3.0 (cap 4.0) | reopen listening if Live returns no model audio, so the robot does not stay stuck in waiting state | US-004 |
+| `input_flush_delay_sec` / `input_speech_tail_ms` | 0.8 / 600 | lesson/child speech timing; longer than conversation to avoid cutting a paused child | US-006 |
 | `interruption_min_output_age_sec` | 0.0 | honor Live interruption immediately when robot output has just started | US-004 |
 | `barge_in_transcript_min_output_age_sec` | 0.0 | confirmed user transcript can stop output immediately instead of waiting for a minimum output age | US-004 |
 | `raw_audio_barge_in_enabled` | false | raw/RMS barge-in is disabled unless an explicit tested rollout enables it | US-004 |
-| `echo_tail_suppression_ms` | 400 | suppress mic frames briefly after robot output stops | US-004 |
+| `echo_tail_suppression_ms` | 550 | suppress mic frames after robot output stops (covers device playout drain) | US-004 |
+| `echo_tail_extend_rms_threshold` / `echo_tail_extend_ms` | 700 / 350 | while residual mic energy stays high, extend the echo gate (capped) | echo-loop fix |
+| `echo_tail_max_total_ms` | 1400 | hard cap on continuous adaptive echo suppression | echo-loop fix |
+| `echo_tail_audible_ms` | 400 | keep output-active latch after stop so residual stays under echo gate | echo-loop fix |
+| `mute_input_after_audio_start_sec` | 0.28 | drop mic right after model audio starts so AEC can converge | US-004 |
+| `prewarm_live_on_connect` / `prewarm_live_on_wake` | true | open Live before first utterance to remove cold-connect hang | latency |
+| `wake_greeting_enabled` | true | short spoken line after Hi ESP so cold start is not silent | latency |
+| `idle_timeout_sec` | 180 | keep prewarmed Live hot longer after idle | latency |
 | `reconnect_buffer_ms` | 2000 | how much current-turn mic audio to preserve across reconnect | US-004 |
 | `interrupt_replay_buffer_ms` | 900 | short user-audio replay window after a valid interrupt gate | US-004 |
 | `reconnect.max_retries` / `backoff_ms` | 6 / 250 | new reconnect budget; `auth`/`quota`/`invalid_config` skip retries and fall back | PR2 |
@@ -317,7 +333,12 @@ voice_mode:
     activity_handling: START_OF_ACTIVITY_INTERRUPTS
     barge_in: false
     interrupt_on_input_while_speaking: false
-    echo_tail_suppression_ms: 400
+    mute_input_after_audio_start_sec: 0.28
+    echo_tail_suppression_ms: 550
+    echo_tail_extend_rms_threshold: 700
+    echo_tail_extend_ms: 350
+    echo_tail_max_total_ms: 1400
+    echo_tail_audible_ms: 400
     interrupt_replay_buffer_ms: 900
     barge_in_transcript_min_output_age_sec: 0.0
     interrupt_debounce_sec: 0.2              # PR4: prevents double-fire on audio_input
@@ -334,7 +355,7 @@ voice_mode:
 | `activity_handling: START_OF_ACTIVITY_INTERRUPTS` | User speech can interrupt model output through official Live VAD; queue clear handles stale playback | US-004 |
 | `aec_enabled: true` | lets AEC-cleaned mic audio reach Live VAD while robot speech is active, without enabling local raw/RMS barge-in | US-004 |
 | `barge_in: false` / `interrupt_on_input_while_speaking: false` | raw mic frames must not interrupt robot output | US-004 |
-| `echo_tail_suppression_ms: 400` | stale echo immediately after `tts stop` leaking upstream | US-004 |
+| `echo_tail_suppression_ms: 550` + residual extend | stale echo after `tts stop` leaking upstream and self-answer loops | US-004 |
 | `barge_in_transcript_min_output_age_sec: 0.0` | User transcript arrives while robot has just started speaking but output is not stopped | US-004 |
 | `interrupt_debounce_sec: 0.2` | Double-fire on short audio burst; two interrupts sent in quick succession | PR4 |
 | `model_output_unblock_timeout_sec: 1.5` | Model output stuck after interrupt when user utterance is too short to produce transcript | PR4 |

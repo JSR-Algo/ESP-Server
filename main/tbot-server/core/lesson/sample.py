@@ -244,28 +244,28 @@ def build_sample_manifest(asset_base: str = "", dwell_sec: float = DEFAULT_SAMPL
     steps: List[Dict[str, Any]] = [
         _step(
             "s1", "greeting",
-            "Xin chào! Mình là TeeBot. Hôm nay mình cùng nhau học một bài mẫu nhé!",
+            "Xin chào! Mình là TeeBot. Hôm nay mình nghe chậm, nói rõ cùng nhau nhé!",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s2", "focus",
-            "Đây là cái kho — barn. Con nhìn ngôi nhà đỏ trên cánh đồng xanh nhé!",
+            "Đây là cái kho — barn. Nghe chậm: barn. barn. Con nhìn nhà đỏ nhé!",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s3", "review",
-            "Giỏi lắm! Mình vừa học từ mới: barn. Con nhớ chưa nào?",
+            "Giỏi lắm! Từ mới là barn. Con thì thầm barn theo mình nhé!",
             _scene(asset_base, expression="thinking", overlay_file=_OVERLAY_THINK_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s4", "celebrate",
-            "Tuyệt vời! Con đã hoàn thành bài học mẫu. Hoan hô con!",
+            "Tuyệt vời! Con đã nghe và nói barn rõ hơn. Hoàn thành bài học mẫu!",
             _scene(asset_base, expression="celebrating", overlay_file=_OVERLAY_CELEBRATE_FILE,
                    primary_word="barn", glyph="🎉"),
             dwell_sec=dwell_sec,
@@ -291,11 +291,23 @@ def build_interactive_sample_manifest(asset_base: str = "",
     """A short SPEAKING-practice demo: greeting → focus → SAY-IT (interactive)
     → recall (interactive) → complete.
 
+    Pedagogy (age ~3–6, low pressure):
+    1. Warm greeting sets the listen-first rule.
+    2. Focus double-models the target word slowly so the child hears the shape twice.
+    3. Repeat: TeeBot models once more, then invites the child to shadow.
+    4. Recall: child retrieves the English name without the word in the prompt.
+
+    Child-answer feedback is NOT canned sample lines. After each spoken attempt the
+    runtime builds short adaptive coaching from the child's intent (help, L1 label,
+    near-miss, wrong, correct) and always remodels the target word — never raw-echoes
+    free-form child speech. Mid/final ``successPrompt`` only covers ceremony
+    (advance / lesson complete).
+
     The interactive steps narrate the question, open a child-response window over Google
     Live (the provider waits for narration TTS to finish, then opens the mic), and only
     advance once the child says the target word (``runtime.on_child_response`` via the
-    recognised Live transcript). Wrong attempts stay on the same step and get a retry
-    prompt so a child with no backend assignment can still practise vocabulary and hear
+    recognised Live transcript). Wrong attempts stay on the same step and get adaptive
+    coaching so a child with no backend assignment can still practise vocabulary and hear
     the happy ending after saying the word. The final completion announcement is a Live
     text successPrompt on the last interactive step rather than a separate passive
     ``celebrate`` render frame, keeping production devices out of the crash-prone final
@@ -303,52 +315,46 @@ def build_interactive_sample_manifest(asset_base: str = "",
     steps: List[Dict[str, Any]] = [
         _step(
             "s1", "greeting",
-            "Chào con! Nhìn hình, nghe TeeBot, rồi nói khi mình mời nhé.",
+            "Chào con! Nhìn hình, nghe TeeBot nói chậm, rồi nói khi mình mời nhé.",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s2", "focus",
-            "Đây là cái kho. Tiếng Anh là barn. Con nhìn nhà đỏ nhé!",
+            "Đây là cái kho. Nghe chậm: barn. barn. Con nhìn nhà đỏ nhé!",
             _scene(asset_base, expression="teaching", overlay_file=_OVERLAY_TEACH_FILE,
                    primary_word="barn", glyph="🏠"),
             dwell_sec=dwell_sec,
         ),
         _step(
             "s3", "repeat",
-            "Đến lượt con. Con nói theo mình: barn!",
+            "Mình nói chậm: barn. Con nói theo mình: barn!",
             _scene(asset_base, expression="listening", overlay_file=_OVERLAY_LISTEN_FILE,
                    primary_word="barn", glyph="🗣️", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Không sao. Nhìn hình cái kho, nói chậm: barn.",
-            interaction_prompts={
-                "helpOrRepeat": "Mình nhắc lại: nhìn hình cái kho và nói barn.",
-                "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
-                "vietnameseObject": "Đúng rồi, đó là cái kho. Bây giờ nói tiếng Anh: barn.",
-                "alreadyInLesson": "Mình đang học rồi. Con nhìn hình và nói barn nhé.",
+            # Ceremony only — wrong/help/L1 feedback is runtime-adaptive, not these lines.
+            success_prompt="Giỏi lắm! Con nói được barn. Tiếp theo nhé!",
+            story_beat={
+                "ask": "Mình nói chậm: barn. Con nói theo mình: barn!",
+                "waitForChild": True,
             },
-            story_beat={"ask": "Đến lượt con. Con nói theo mình: barn!", "waitForChild": True},
             response_timeout_sec=10.0,
             max_no_answer_attempts=1,
         ),
         _step(
             "s4", "recall",
-            "Con thấy gì trong hình? Nói tên tiếng Anh của cái kho.",
+            "Giỏi lắm! Con thấy gì? Nói rõ tên tiếng Anh của cái kho.",
             _scene(asset_base, expression="listening", overlay_file=_OVERLAY_LISTEN_FILE,
                    primary_word="barn", glyph="🏠", robot_state="listening", pose="listen"),
             completion_class="interactive",
             expected_responses=["barn"],
-            retry_prompt="Không sao. Nhìn hình cái kho, nói chậm: barn.",
-            interaction_prompts={
-                "helpOrRepeat": "Mình nhắc lại: cái kho tiếng Anh là barn.",
-                "unknownOrFrustrated": "Không sao. Nhìn hình cái kho: tiếng Anh là barn.",
-                "vietnameseObject": "Đúng rồi, con thấy cái kho. Con nói tiếng Anh: barn.",
-                "alreadyInLesson": "Mình đang học rồi. Con trả lời bằng barn nhé.",
+            story_beat={
+                "ask": "Giỏi lắm! Con thấy gì? Nói rõ tên tiếng Anh của cái kho.",
+                "waitForChild": True,
             },
-            story_beat={"ask": "Con thấy gì trong hình? Nói tên tiếng Anh của cái kho.", "waitForChild": True},
-            success_prompt="Tuyệt vời! Con nói được barn và hoàn thành bài học mẫu.",
+            success_prompt="Hay quá! Con nói barn rất rõ và hoàn thành bài học mẫu.",
             response_timeout_sec=10.0,
             max_no_answer_attempts=1,
         ),

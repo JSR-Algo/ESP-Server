@@ -996,8 +996,66 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_wake_transcript_ignored_when_wake_window_already_open(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._wake_audio_window_until = time.monotonic() + 10.0
+        interrupts = []
+
+        async def _interrupt(reason):
+            interrupts.append(reason)
+
+        provider._begin_user_interrupt = _interrupt
+        handled = await provider._on_user_transcript("high speed")
+        self.assertTrue(handled)
+        self.assertEqual(interrupts, [])
+        self.assertTrue(
+            any("wake_transcript_ignored_duplicate" in str(args)
+                for _, args, _ in conn.logger.messages)
+        )
+
+    async def test_wake_word_schedules_live_prewarm_when_live_closed(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = None
+        provider._bridge = None
+        scheduled = []
+
+        def _schedule(reason, delay_sec=0.0):
+            scheduled.append((reason, delay_sec))
+
+        provider._schedule_live_prewarm = _schedule
+        handled = await provider.handle_text_message(
+            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+        )
+        self.assertTrue(handled)
+        self.assertEqual(scheduled, [("wake_word", 0.0)])
+
+    async def test_start_session_schedules_connect_prewarm_when_dormant(self):
+        conn = _Conn()
+        conn.session_mode = "DORMANT"
+        provider = self.make_provider(conn)
+        scheduled = []
+
+        def _schedule(reason, delay_sec=0.0):
+            scheduled.append((reason, float(delay_sec)))
+
+        provider._schedule_live_prewarm = _schedule
+        # Orchestrator present -> dormant init path
+        conn.session_mode = type("M", (), {"value": "DORMANT"})()
+        # Force has orchestrator
+        provider._has_session_orchestrator = lambda: True
+        await provider.start_session()
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], "connect")
+        self.assertGreaterEqual(scheduled[0][1], 0.0)
+
     async def test_wake_word_detect_opens_listening_without_greeting(self):
         conn = _Conn()
+        # Unit test: disable spoken wake greeting (production enables it).
+        conn.config.setdefault("google_live", {})["wake_greeting_enabled"] = False
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()
@@ -1015,6 +1073,125 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1]["type"], "tts")
         self.assertEqual(sent[1]["state"], "stop")
         self.assertEqual(provider._client.text, [])
+
+    async def test_wake_word_detect_schedules_wake_greeting_when_enabled(self):
+        conn = _Conn()
+        conn.config.setdefault("google_live", {})["wake_greeting_enabled"] = True
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        scheduled = []
+
+        def _schedule(reason="wake"):
+            scheduled.append(reason)
+
+        provider._schedule_wake_greeting = _schedule
+        handled = await provider.handle_text_message(
+            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+        )
+        self.assertTrue(handled)
+        self.assertEqual(scheduled, ["wake_detect"])
+
+    async def test_send_wake_greeting_sends_configured_text_when_live_ready(self):
+        conn = _Conn()
+        conn.config.setdefault("google_live", {})["wake_greeting_enabled"] = True
+        conn.config["google_live"]["wake_greeting_text"] = "Xin chào con."
+        provider = self.make_provider(conn)
+        client = _Client()
+        bridge = _Bridge()
+        provider._client = client
+        provider._bridge = bridge
+
+        ok = await provider._send_wake_greeting("unit_test")
+        self.assertTrue(ok)
+        self.assertEqual(bridge.allow_calls, 1)
+        self.assertEqual(len(client.text), 1)
+        self.assertIn("Xin chào con.", client.text[0])
+        self.assertGreater(provider._wake_greeting_sent_until, time.monotonic())
+        self.assertTrue(
+            any("wake_greeting_sent" in str(args) for _, args, _ in conn.logger.messages)
+        )
+
+    async def test_close_live_resources_cancels_in_flight_wake_greeting_task(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def _slow_greeting(_reason):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return False
+
+        provider._send_wake_greeting = _slow_greeting
+        provider._schedule_wake_greeting("unit_test")
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task = provider._wake_greeting_task
+        self.assertIsNotNone(task)
+        self.assertFalse(task.done())
+
+        await provider._close_live_resources()
+        self.assertIsNone(provider._wake_greeting_task)
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
+
+    async def test_user_transcript_suppressed_when_bridge_detects_model_echo(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        bridge = _Bridge()
+        bridge.looks_like_model_echo = lambda _text: True
+        provider._bridge = bridge
+        lesson_calls = []
+        interrupts = []
+
+        async def _lesson(_text):
+            lesson_calls.append(_text)
+            return True
+
+        async def _interrupt(reason):
+            interrupts.append(reason)
+
+        provider._dispatch_lesson_child_response = _lesson
+        provider._begin_user_interrupt = _interrupt
+        handled = await provider._on_user_transcript("Hôm nay chúng ta học màu đỏ")
+        self.assertTrue(handled)
+        self.assertEqual(lesson_calls, [])
+        self.assertEqual(interrupts, [])
+        self.assertTrue(
+            any(
+                "user_transcript_suppressed_as_model_echo" in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
+    async def test_ensure_live_ready_opens_when_client_missing(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = None
+        provider._bridge = None
+        opens = []
+
+        async def _open():
+            opens.append(True)
+            provider._client = _Client()
+            provider._bridge = _Bridge()
+            return True
+
+        provider._open_live_for_audio = _open
+        ok = await provider.ensure_live_ready(reason="conversation")
+        self.assertTrue(ok)
+        self.assertEqual(opens, [True])
+        self.assertTrue(
+            any("ensure_live_ready" in str(args) for _, args, _ in conn.logger.messages)
+        )
 
     async def test_wake_word_detect_opens_next_live_session_without_stale_lesson_resumption(self):
         conn = _Conn()
@@ -1091,7 +1268,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(lesson_calls, [])
-        self.assertEqual(interrupts, ["wake_word"])
+        # No active robot/music output => bare wake must open listening without
+        # cancelling a turn (cold-start hang fix).
+        self.assertEqual(interrupts, [])
         self.assertGreater(provider._user_audio_allowed_until, time.monotonic())
         sent = [json.loads(payload) for payload in conn.websocket.sent]
         self.assertEqual(sent[0]["type"], "stt")
@@ -1379,15 +1558,15 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn = _Conn()
         provider = self.make_provider(conn)
 
-        self.assertEqual(provider._get_input_flush_delay(), 0.45)
-        self.assertEqual(provider._get_user_speech_tail_sec(), 0.42)
-        self.assertEqual(provider._get_user_max_capture_sec(), 2.5)
+        self.assertEqual(provider._get_input_flush_delay(), 0.18)
+        self.assertEqual(provider._get_user_speech_tail_sec(), 0.18)
+        self.assertEqual(provider._get_user_max_capture_sec(), 4.0)
 
         conn.session_mode = SessionMode.LESSON
         conn.lesson_runtime = SimpleNamespace(state="RUNNING")
 
-        self.assertEqual(provider._get_input_flush_delay(), 1.4)
-        self.assertEqual(provider._get_user_speech_tail_sec(), 1.3)
+        self.assertEqual(provider._get_input_flush_delay(), 0.8)
+        self.assertEqual(provider._get_user_speech_tail_sec(), 0.6)
         self.assertEqual(provider._get_user_max_capture_sec(), 8.0)
 
     async def test_model_audio_end_reopens_input_after_waiting_model(self):
@@ -3077,6 +3256,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         async def _open_failure():
             raise RuntimeError("open failed")
 
+        # Ready client short-circuits open; clear it to exercise the failure path.
+        provider._client = None
+        provider._bridge = None
         provider._open_live_session = _open_failure
         provider._close_live_resources = lambda: _false(None)
         self.assertFalse(await provider._ensure_live_open_for_audio())
@@ -3086,7 +3268,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider = self.make_provider(conn)
 
         conn.config["google_live"]["idle_timeout_sec"] = "bad"
-        self.assertEqual(provider._idle_timeout_sec(), 45.0)
+        # Malformed idle falls back to prewarm-aware default (180s keeps Live hot).
+        self.assertEqual(provider._idle_timeout_sec(), 180.0)
         conn.session_mode = SessionMode.CONVERSATION
         provider._idle_close_task = object()
         provider._schedule_idle_close_task()
@@ -3628,6 +3811,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             "barge_in_transcript_min_output_age_sec": 2.0,
         }
         live_config = GoogleLiveProvider._get_live_config(provider)
+        # Safety policy caps oversized private values at 4.0s (preferred default is 3.0).
         self.assertEqual(live_config["waiting_model_timeout_sec"], 4.0)
         self.assertEqual(live_config["interruption_min_output_age_sec"], 0.0)
         self.assertEqual(live_config["barge_in_transcript_min_output_age_sec"], 0.0)
