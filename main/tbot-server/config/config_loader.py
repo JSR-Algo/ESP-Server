@@ -423,6 +423,17 @@ def _parse_bool_env(name):
         return None
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+def _parse_strict_bool_env(name):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    normalized = raw.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
 def _parse_positive_int_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -472,6 +483,9 @@ def _apply_lesson_env_overrides(config):
         return config
 
     flag = _parse_bool_env("LESSON_RUNTIME_ENABLED")
+    motion_presets_flag = _parse_strict_bool_env("LESSON_MOTION_PRESETS_ENABLED")
+    playful_interactions_flag = _parse_strict_bool_env("LESSON_PLAYFUL_INTERACTIONS_ENABLED")
+    rollout_allowlist_raw = _clean_env("LESSON_ROLLOUT_DEVICE_ALLOWLIST")
     course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
     asset_origin = _clean_env("LESSON_ASSET_ORIGIN_BASE")
     asset_public_base = _clean_env("LESSON_ASSET_PUBLIC_BASE_URL")
@@ -527,7 +541,17 @@ def _apply_lesson_env_overrides(config):
         and not sample_asset_base
         and not sample_step_dwell
         and not sample_mode
+        and motion_presets_flag is None
+        and playful_interactions_flag is None
+        and rollout_allowlist_raw is None
     ):
+        lesson_cfg = config.get("lesson")
+        if not isinstance(lesson_cfg, Mapping):
+            lesson_cfg = {}
+            config["lesson"] = lesson_cfg
+        lesson_cfg.setdefault("motion_presets_enabled", False)
+        lesson_cfg.setdefault("playful_interactions_enabled", False)
+        lesson_cfg.setdefault("rollout_device_allowlist", [])
         return config
 
     lesson_cfg = config.get("lesson")
@@ -536,6 +560,29 @@ def _apply_lesson_env_overrides(config):
         config["lesson"] = lesson_cfg
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
+    lesson_cfg["motion_presets_enabled"] = (
+        motion_presets_flag
+        if motion_presets_flag is not None
+        else bool(lesson_cfg.get("motion_presets_enabled", False))
+    )
+    lesson_cfg["playful_interactions_enabled"] = (
+        playful_interactions_flag
+        if playful_interactions_flag is not None
+        else bool(lesson_cfg.get("playful_interactions_enabled", False))
+    )
+    if rollout_allowlist_raw is not None:
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in rollout_allowlist_raw.split(",") if item.strip()}
+        )
+    else:
+        configured_allowlist = lesson_cfg.get("rollout_device_allowlist", [])
+        if not isinstance(configured_allowlist, list) or not all(
+            isinstance(item, str) for item in configured_allowlist
+        ):
+            raise ValueError("lesson.rollout_device_allowlist must be a list of device identifiers")
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in configured_allowlist if item.strip()}
+        )
     if asset_origin:
         lesson_cfg["asset_origin_base"] = asset_origin.rstrip("/")
     if asset_public_base:
@@ -814,6 +861,9 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "sd_cache_quota_bytes",
     "sd_gc_free_percent",
     "sd_preload_min_free_percent",
+    "motion_presets_enabled",
+    "playful_interactions_enabled",
+    "rollout_device_allowlist",
 )
 
 

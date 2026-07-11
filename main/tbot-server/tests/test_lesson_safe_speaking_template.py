@@ -40,7 +40,12 @@ class _Conn:
     def __init__(self):
         self.session_id = "session-1"
         self.features = {"lesson": True, "renderer": ["teebot-lesson-renderer.v1"]}
-        self.config = {}
+        self.config = {
+            "lesson": {
+                "motion_presets_enabled": True,
+                "playful_interactions_enabled": True,
+            }
+        }
         self.voice_provider = _Voice()
         self.mcp_client = None
         self.lesson_runtime = None

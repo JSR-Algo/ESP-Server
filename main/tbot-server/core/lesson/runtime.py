@@ -1156,7 +1156,22 @@ class LessonRuntime:
 
     def _uses_safe_speaking(self) -> bool:
         interaction = (self._step or {}).get("interaction")
-        return isinstance(interaction, dict) and interaction.get("template") == "safeSpeaking"
+        return (
+            self._lesson_rollout_control_enabled("playful_interactions_enabled")
+            and isinstance(interaction, dict)
+            and interaction.get("template") == "safeSpeaking"
+        )
+
+    def _lesson_rollout_control_enabled(self, key: str) -> bool:
+        config = getattr(self.conn, "config", {})
+        lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+        if not isinstance(lesson_cfg, dict) or lesson_cfg.get(key) is not True:
+            return False
+        allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+        if not allowlist:
+            return True
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
+        return device_id in allowlist
 
     def _safe_speaking(self) -> SafeSpeakingSession:
         if self._safe_speaking_session is None:
@@ -1246,6 +1261,9 @@ class LessonRuntime:
         preset = motion.get(slot)
         if not isinstance(preset, str):
             return
+        if not self._lesson_rollout_control_enabled("motion_presets_enabled"):
+            self._log("info", f"lesson_motion_dispatch outcome=disabled preset={preset}")
+            return
         self._motion_generation += 1
         generation = self._motion_generation
         step_id = self._step_id
@@ -1265,11 +1283,18 @@ class LessonRuntime:
             ):
                 return
             try:
-                await dispatch_motion_preset(self.conn, preset)
+                dispatched = await dispatch_motion_preset(self.conn, preset)
+                if dispatched:
+                    self._log("info", f"lesson_motion_dispatch outcome=applied preset={preset}")
+                else:
+                    self._log("warning", f"lesson_motion_dispatch outcome=failed preset={preset}")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._log("warning", f"lesson motion degraded: {type(exc).__name__}")
+                self._log(
+                    "warning",
+                    f"lesson_motion_dispatch outcome=failed preset={preset} error={type(exc).__name__}",
+                )
 
         self._motion_task = asyncio.create_task(run_serialized_motion())
 
@@ -2262,6 +2287,13 @@ class LessonRuntime:
             "criticalAssets": self._critical_assets_payload(),
             "preloadTimeoutSec": int(self.asset_cache.preload_timeout_sec),
         }
+        motion_enabled = self._lesson_rollout_control_enabled("motion_presets_enabled")
+        playful_enabled = self._lesson_rollout_control_enabled("playful_interactions_enabled")
+        if motion_enabled or playful_enabled:
+            body["runtimeControls"] = {
+                "motionPresetsEnabled": motion_enabled,
+                "playfulInteractionsEnabled": playful_enabled,
+            }
         if self._use_sd_asset_pack():
             pack = getattr(self.asset_cache, "asset_pack_manifest", None)
             if callable(pack):

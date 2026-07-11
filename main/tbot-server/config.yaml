@@ -456,6 +456,11 @@ selected_module:
 # LESSON_RUNTIME_ENABLED=false still wins.
 lesson:
   runtime_enabled: false
+  # Rollout controls stay dark until explicitly enabled. When allowlist is non-empty,
+  # both controls apply only to listed device IDs/MACs.
+  motion_presets_enabled: false
+  playful_interactions_enabled: false
+  rollout_device_allowlist: []
   # Spoken start_lesson demo path: when true, start_lesson ignores backend assignment
   # and starts the built-in sample lesson. Interactive mode waits for child speech
   # through Google Live child-response windows.
