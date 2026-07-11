@@ -16,7 +16,7 @@ def _sha(data: bytes) -> str:
 
 def _hold_atomic_write(root, started, release):
     def hold(stage, _path):
-        if stage == "before_replace":
+        if stage == "after_temp_create":
             started.set()
             release.wait(10)
 
@@ -30,6 +30,27 @@ def _commit_generation(root, cache_key, key, content, start):
     store.put_bytes(content, digest)
     start.wait(10)
     store.commit_pack(cache_key, {key: digest})
+
+
+def _crash_after_backup(root, cache_key, digest):
+    def crash(stage, _path):
+        if stage == "after_backup":
+            os._exit(71)
+
+    SharedAssetStore(root, failure_hook=crash).commit_pack(cache_key, {"asset": digest})
+
+
+def _swap_pack_while_paused(root, cache_key, digest, swapped, release):
+    def pause(stage, _path):
+        if stage == "after_backup":
+            swapped.set()
+            release.wait(10)
+
+    SharedAssetStore(root, failure_hook=pause).commit_pack(cache_key, {"asset": digest})
+
+
+def _read_pack_ready(root, cache_key, result):
+    result.put(SharedAssetStore(root).is_pack_ready(cache_key))
 
 
 def test_equal_sha_is_stored_once_and_reused_across_lesson_packs(tmp_path):
@@ -91,7 +112,7 @@ def test_second_store_cleanup_does_not_delete_an_active_atomic_temp(tmp_path):
     observed = []
 
     def inspect_during_commit(stage, _path):
-        if stage != "before_replace":
+        if stage != "after_temp_create":
             return
         active = list(root.rglob("*.part"))
         assert len(active) == 1
@@ -296,3 +317,63 @@ def test_concurrent_cross_process_pack_commits_publish_one_complete_generation(t
         (store.pack_root / "lesson/v1-race/pack.json").read_text(encoding="utf-8")
     )
     assert set(manifest["assets"]) in ({"first"}, {"second"})
+
+
+def test_restart_restores_valid_backup_after_crash_between_pack_renames(tmp_path):
+    root = tmp_path / "tbot"
+    cache_key = "lesson/v1-crash"
+    store = SharedAssetStore(root)
+    old = b"old-ready"
+    new = b"new-generation"
+    old_digest = _sha(old)
+    new_digest = _sha(new)
+    store.put_bytes(old, old_digest)
+    store.put_bytes(new, new_digest)
+    store.commit_pack(cache_key, {"asset": old_digest})
+
+    context = multiprocessing.get_context("spawn")
+    writer = context.Process(
+        target=_crash_after_backup, args=(str(root), cache_key, new_digest)
+    )
+    writer.start()
+    writer.join(10)
+    assert writer.exitcode == 71
+    assert not (store.pack_root / cache_key).exists()
+
+    restarted = SharedAssetStore(root)
+
+    assert restarted.is_pack_ready(cache_key)
+    assert (restarted.pack_root / cache_key / "asset").read_bytes() == old
+
+
+def test_reader_blocks_during_live_swap_and_never_observes_nonready(tmp_path):
+    root = tmp_path / "tbot"
+    cache_key = "lesson/v1-reader"
+    store = SharedAssetStore(root)
+    old_digest = _sha(b"old")
+    new_digest = _sha(b"new")
+    store.put_bytes(b"old", old_digest)
+    store.put_bytes(b"new", new_digest)
+    store.commit_pack(cache_key, {"asset": old_digest})
+    context = multiprocessing.get_context("spawn")
+    swapped = context.Event()
+    release = context.Event()
+    result = context.Queue()
+    writer = context.Process(
+        target=_swap_pack_while_paused,
+        args=(str(root), cache_key, new_digest, swapped, release),
+    )
+    writer.start()
+    assert swapped.wait(10)
+    reader = context.Process(target=_read_pack_ready, args=(str(root), cache_key, result))
+    reader.start()
+    reader.join(0.2)
+    assert reader.is_alive()
+
+    release.set()
+    writer.join(10)
+    reader.join(10)
+
+    assert writer.exitcode == 0
+    assert reader.exitcode == 0
+    assert result.get(timeout=1) is True
