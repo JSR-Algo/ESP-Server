@@ -223,8 +223,14 @@ class SampleManifestTest(unittest.TestCase):
 
         for step in interactive_steps:
             self.assertEqual(step.get("expectedResponses"), ["barn"], step["id"])
-            self.assertLessEqual(step.get("responseTimeoutSec", 0), 10.0, step["id"])
-            self.assertLessEqual(step.get("maxNoAnswerAttempts", 0), 1, step["id"])
+            # Patient quiet windows for age ~3–6; final recall is the longest.
+            self.assertGreaterEqual(step.get("responseTimeoutSec", 0), 10.0, step["id"])
+            self.assertLessEqual(step.get("responseTimeoutSec", 0), 18.0, step["id"])
+            self.assertEqual(step.get("maxNoAnswerAttempts"), 2, step["id"])
+
+        final = interactive_steps[-1]
+        self.assertGreaterEqual(final.get("responseTimeoutSec", 0), 14.0, final["id"])
+        self.assertIn("hoàn thành bài học mẫu", final.get("successPrompt", ""))
 
         passive_dwells = [
             step.get("dwellSec", 0)

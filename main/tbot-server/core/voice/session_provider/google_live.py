@@ -47,10 +47,15 @@ LIVE_WAKE_WORD_ALIASES = {
 class GoogleLiveProvider(VoiceSessionProvider):
     """Google Live session provider for production robot speech."""
 
-    _SILENT_LIVE_REOPEN_TIMEOUTS = 2
-    _SILENT_LIVE_REOPEN_COOLDOWN_SEC = 60.0
-    _START_LESSON_DUPLICATE_TOOL_WINDOW_SEC = 2.0
-    _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC = 1.5
+    # Only hard-reopen Live after several silent timeouts (2 was too aggressive mid-chat).
+    _SILENT_LIVE_REOPEN_TIMEOUTS = 5
+    _SILENT_LIVE_REOPEN_COOLDOWN_SEC = 120.0
+    # Live often re-emits "bắt đầu bài học" 2–5s later; 2s was too short and
+    # restarted the sample mid-greeting (silent / cut introduction).
+    _START_LESSON_DUPLICATE_TOOL_WINDOW_SEC = 12.0
+    # Residual noise while waiting for model: 2.8s felt laggy; 1.6s still
+    # covers first audio arrival without long deaf windows.
+    _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC = 1.6
     # Short: Live STT often re-emits the wake alias after firmware already handled Hi ESP.
     _WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC = 0.15
     _WAKE_GREETING_LIVE_INSTRUCTION = (
@@ -97,6 +102,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._live_prewarm_task = None
         self._wake_greeting_task = None
         self._wake_greeting_sent_until = 0.0
+        # While True until this timestamp: drop mic + skip interrupt so the first
+        # spoken wake greeting is not cancelled by firmware listen:start / residual.
+        self._wake_greeting_protect_until = 0.0
+        # After model TTS ends, hold residual/echo so it does not open a fake user turn
+        # (that left the robot deaf while WAITING_MODEL on garbage).
+        self._post_reply_hold_until = 0.0
         self._fallback_provider = None
         self._fallback_activating = False
         self._reconnect_attempts = 0
@@ -150,6 +161,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # user audio stream so a WAITING_MODEL frame is forwarded (not dropped)
         # while the lesson listening window is open.
         self._last_lesson_prompt_len = 0
+        self._last_lesson_prompt_text = ""
+        self._lesson_prompt_resend_count = 0
         self._lesson_prompt_reopen_fast = False
         self._lesson_prompt_output_last_activity_at = None
         self._lesson_child_audio_pending_transcript = False
@@ -430,6 +443,36 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             self.conn.client_abort = False
             return True
+        # Protect first spoken wake greeting: firmware often opens listen:start and
+        # streams residual frames that interrupt the greeting before it plays.
+        # After a short hard-protect, allow strong deliberate speech so "bắt đầu
+        # bài học" right after Hi ESP is not swallowed for 2–3s.
+        if self._is_wake_greeting_protected():
+            protect_remaining = float(self._wake_greeting_protect_until or 0.0) - time.monotonic()
+            hard_protect = protect_remaining > max(0.0, self._wake_greeting_protect_sec() - 0.55)
+            if hard_protect or not self._is_strong_user_speech(decoded_audio, multiplier=2.2):
+                self._log_audio_decision(
+                    "drop_input",
+                    "wake_greeting_protect",
+                    decoded_audio,
+                )
+                self.conn.client_abort = False
+                return True
+            self._wake_greeting_protect_until = 0.0
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live wake_greeting_protect_released reason=strong_user_speech"
+            )
+        # Right after robot TTS: residual/echo must not open a fake user turn.
+        if self._is_post_reply_hold_active() and not self._is_strong_user_speech(
+            decoded_audio, multiplier=2.2, floor=1800
+        ):
+            self._log_audio_decision(
+                "drop_input",
+                "post_reply_hold",
+                decoded_audio,
+            )
+            self.conn.client_abort = False
+            return True
         # Conversation-side WAITING_MODEL handling. While waiting for the model to
         # respond, mic frames are normally dropped (the model is "speaking"). But
         # if the model returns nothing within waiting_model_timeout_sec, reopen the
@@ -492,6 +535,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 and self._can_forward_aec_audio_for_live_vad(self._get_live_config())
             )
             interrupted = False
+            if self._is_wake_greeting_protected():
+                self._log_audio_decision(
+                    "drop_input", "wake_greeting_protect", decoded_audio
+                )
+                self.conn.client_abort = False
+                return True
             if self._should_interrupt_for_input(decoded_audio):
                 await self._begin_user_interrupt("audio_input")
                 interrupted = True
@@ -645,14 +694,29 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._lesson_child_audio_pending_transcript = False
             self._clear_lesson_child_speech_start_frames()
             self._cancel_lesson_child_transcript_timeout_task()
+            # Mic is re-opened by child-response windows / lesson_start intent.
+            # Keep 0 here so prepare stays deterministic for unit tests.
             self._user_audio_allowed_until = 0.0
             self._wake_audio_window_until = 0.0
             self._wake_transcript_tail_suppress_until = 0.0
+            self._wake_greeting_protect_until = 0.0
             self._clear_user_stream()
             self._pending_reconnect_audio.clear()
             self._pending_interrupt_audio.clear()
+            self.conn.client_abort = False
             self.conn.google_live_turn_started_at = None
             self.conn.google_live_audio_out_started_at = None
+            self._suppress_start_lesson_tool_call_until = (
+                time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
+            )
+            if self._interaction.state in (
+                InteractionState.WAITING_MODEL,
+                InteractionState.INTERRUPTING,
+                InteractionState.USER_STREAMING,
+            ):
+                self._interaction.transition(InteractionState.LISTENING)
+            if self._bridge is not None and hasattr(self._bridge, "force_allow_model_output"):
+                self._bridge.force_allow_model_output()
             client_connected = self._client is not None and (
                 not hasattr(self._client, "connected") or self._client.connected
             )
@@ -735,7 +799,75 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return "Dạ, mình nghe đây ạ."
         return str(text).strip()
 
+    def _wake_greeting_protect_sec(self):
+        """How long mic must not interrupt the spoken wake greeting."""
+        try:
+            value = float(
+                self._get_live_config().get("wake_greeting_protect_sec", 1.2)
+            )
+        except (TypeError, ValueError):
+            value = 1.2
+        return max(0.4, min(value, 3.0))
+
+    def _is_wake_greeting_protected(self):
+        return time.monotonic() < float(self._wake_greeting_protect_until or 0.0)
+
+    def _post_reply_hold_sec(self):
+        config = self._get_live_config()
+        try:
+            value = float(config.get("post_reply_hold_sec", 0.55))
+        except (TypeError, ValueError):
+            value = 0.55
+        return max(0.2, min(value, 1.5))
+
+    def _is_post_reply_hold_active(self):
+        return time.monotonic() < float(self._post_reply_hold_until or 0.0)
+
+    def _arm_post_reply_hold(self, reason="audio_end"):
+        hold = self._post_reply_hold_sec()
+        now = time.monotonic()
+        self._post_reply_hold_until = now + hold
+        # Also seed echo gate so suppress_robot_output_echo covers residual.
+        echo_ms = 500.0
+        try:
+            echo_ms = float(
+                self._get_live_config().get("echo_tail_suppression_ms", 500)
+            )
+        except (TypeError, ValueError):
+            echo_ms = 500.0
+        until = now + max(hold, max(0.3, echo_ms / 1000.0))
+        current = float(getattr(self.conn, "google_live_echo_suppress_until", 0.0) or 0.0)
+        if until > current:
+            self.conn.google_live_echo_suppress_until = until
+            self.conn.google_live_echo_suppress_started_at = now
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live post_reply_hold_armed reason={} hold_ms={:.0f}",
+            reason,
+            hold * 1000.0,
+        )
+
+    def _input_rms_value(self, decoded_audio):
+        if decoded_audio is None or self._bridge is None:
+            return None
+        if not hasattr(self._bridge, "input_rms"):
+            return None
+        try:
+            rms = self._bridge.input_rms(decoded_audio)
+        except Exception:
+            return None
+        return rms if isinstance(rms, (int, float)) else None
+
+    def _is_strong_user_speech(self, decoded_audio, *, multiplier=1.8, floor=1500):
+        """True for deliberate speech (not residual speaker energy)."""
+        rms = self._input_rms_value(decoded_audio)
+        if rms is None:
+            return False
+        threshold = self._get_user_speech_rms_threshold() or 650
+        return rms >= max(int(floor), int(threshold * multiplier))
+
     async def _send_wake_greeting(self, reason):
+        # Let firmware listen:start / tts:stop settle before speaking.
+        await asyncio.sleep(0.25)
         await self._await_live_prewarm_if_running()
         if not self._is_live_client_ready():
             if not await self._ensure_live_open_for_audio():
@@ -754,18 +886,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
                 self._bridge.allow_model_output()
             self.conn.client_abort = False
-            self.conn.google_live_turn_started_at = time.monotonic()
+            protect_sec = self._wake_greeting_protect_sec()
+            # Arm protect BEFORE send so concurrent mic frames cannot interrupt.
+            now = time.monotonic()
+            self._wake_greeting_protect_until = now + protect_sec
+            self._wake_greeting_sent_until = now + max(4.0, protect_sec + 1.0)
+            self.conn.google_live_turn_started_at = now
             await client.send_text(f"{self._WAKE_GREETING_LIVE_INSTRUCTION}{greeting}")
-            self._wake_greeting_sent_until = time.monotonic() + 4.0
             self._touch_live_activity()
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live wake_greeting_sent reason={} chars={} text_preview={!r}",
+                "Google Live wake_greeting_sent reason={} chars={} protect_ms={:.0f} "
+                "text_preview={!r}",
                 reason,
                 len(greeting),
+                protect_sec * 1000,
                 greeting[:40],
             )
             return True
         except Exception as exc:
+            self._wake_greeting_protect_until = 0.0
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live wake_greeting_failed reason={} error={}",
                 reason,
@@ -805,8 +944,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return max(0.0, min(value, 2.0))
 
     def _default_idle_timeout_sec(self):
-        # Keep prewarmed Live hot so first Hi ESP after idle skips reconnect.
-        return 180.0 if self._prewarm_live_on_connect_enabled() else 45.0
+        # Long multi-turn chats: keep Live hot through pauses (15 min).
+        return 900.0 if self._prewarm_live_on_connect_enabled() else 120.0
 
     def _idle_timeout_sec(self):
         config = getattr(self.conn, "config", {}) or {}
@@ -1309,6 +1448,27 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if payload is None:
             self._log_lesson_start_intent_miss(transcript_text)
             return False
+        # Delayed / re-emitted STT after a successful start must not restart the lesson
+        # (that cancelled s1 greeting and left the robot silent).
+        if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_start_intent_suppressed reason=duplicate_window "
+                "text_preview={!r}",
+                (transcript_text or "")[:40],
+            )
+            return True
+        if self._lesson_runtime_active():
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_start_intent_suppressed reason=lesson_already_active "
+                "text_preview={!r}",
+                (transcript_text or "")[:40],
+            )
+            self._suppress_start_lesson_tool_call_until = (
+                time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
+            )
+            return True
+        # User asked to start lesson: stop shielding residual mic from wake greeting.
+        self._wake_greeting_protect_until = 0.0
         await self._begin_user_interrupt("lesson_start_intent")
         # In dormant live mode the tool handler may not be bootstrapped yet. Only
         # bootstrap when the classified tool is actually admitted for this product
@@ -1333,8 +1493,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             # The local tool dispatch finished: release the realtime busy/interrupt
             # latch set by _begin_user_interrupt so the controller does not stay
             # stuck in INTERRUPTING with client_abort latched.
-            self._interaction.transition(InteractionState.IDLE)
+            self._interaction.transition(InteractionState.LISTENING)
             self.conn.client_abort = False
+            # Keep mic open so the child can answer after greeting without re-wake.
+            try:
+                await self._open_user_audio_window("lesson_start")
+            except Exception:
+                pass
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_start_intent tool={} text_preview={!r}",
                 payload.get("name"),
@@ -1387,7 +1552,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # Remember the prompt length so the subsequent child-response window can
         # wait for this narration's TTS to finish before opening the mic.
         self._last_lesson_prompt_len = len(text)
+        self._last_lesson_prompt_text = text
         self._lesson_prompt_reopen_fast = bool(continue_listening)
+        self._lesson_prompt_resend_count = 0
         if await self._send_live_text_ack(
             text,
             log_label="lesson_step_prompt",
@@ -1397,10 +1564,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return False
 
     async def wait_lesson_step_prompt_idle(self):
-        return await self._wait_for_lesson_prompt_output_idle(
-            self._get_live_config(),
-            timeout_log_label="lesson_passive_prompt_output_guard_timeout",
-        )
+        config = self._get_live_config()
+        estimate = self._lesson_prompt_duration_estimate_sec(config)
+        # Cap wait to spoken length + small margin. A hard 30s hang after a Live
+        # interrupt made start_lesson feel broken and skipped the greeting.
+        adaptive_timeout = min(9.0, max(3.0, estimate + 1.0))
+        for attempt in range(2):
+            await self._wait_for_lesson_prompt_output_idle(
+                config,
+                output_timeout_override=adaptive_timeout,
+                timeout_log_label="lesson_passive_prompt_output_guard_timeout",
+            )
+            needs_resend = bool(
+                getattr(self.conn, "google_live_lesson_prompt_needs_resend", False)
+            )
+            if not needs_resend:
+                return True
+            if attempt >= 1:
+                self.conn.google_live_lesson_prompt_needs_resend = False
+                return True
+            # Live stopped generation mid-prompt; re-speak introduction once.
+            self.conn.google_live_lesson_prompt_needs_resend = False
+            if not await self._resend_last_lesson_prompt(reason="interrupted"):
+                return True
+            self._lesson_prompt_resend_count = int(
+                getattr(self, "_lesson_prompt_resend_count", 0) or 0
+            ) + 1
+        return True
 
     async def open_lesson_child_response_window(self):
         """Open the listening window during which the child's voice/text is
@@ -1422,11 +1612,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except (TypeError, ValueError):
                 return default
 
-        open_delay = _read_float("lesson_child_response_open_delay_sec", 0.0)
+        open_delay = _read_float("lesson_child_response_open_delay_sec", 0.15)
         chars_per_sec = _read_float("lesson_prompt_tts_chars_per_sec", 12.0)
         max_open_delay = _read_float("lesson_child_response_max_open_delay_sec", 8.0)
-        fast_reopen_sec = _read_float("lesson_child_response_fast_reopen_sec", 1.2)
-        window_sec = _read_float("lesson_child_response_window_sec", 25.0)
+        # Coaching / no-answer reopens should re-open the mic soon after TTS.
+        fast_reopen_sec = _read_float("lesson_child_response_fast_reopen_sec", 1.0)
+        # Cover patient final-question windows (sample s4 ~22s) with margin.
+        window_sec = _read_float("lesson_child_response_window_sec", 30.0)
 
         prompt_estimate = 0.0
         if chars_per_sec > 0 and self._last_lesson_prompt_len > 0:
@@ -1496,19 +1688,35 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         poll_sec = max(0.01, poll_sec)
         output_timeout = self._read_lesson_guard_float(
-            config, "lesson_prompt_output_guard_timeout_sec", 30.0
+            config, "lesson_prompt_output_guard_timeout_sec", 12.0
         )
         if output_timeout_override is not None:
             output_timeout = min(output_timeout, max(0.0, output_timeout_override))
+        # Never wait longer than spoken estimate + small buffer for passive steps.
+        estimate_cap = min(9.0, max(3.0, self._lesson_prompt_duration_estimate_sec(config) + 1.2))
+        output_timeout = min(output_timeout, estimate_cap)
         playback_timeout = self._read_lesson_guard_float(
-            config, "lesson_prompt_playback_guard_timeout_sec", 12.0
+            config, "lesson_prompt_playback_guard_timeout_sec", 6.0
         )
         playback_tail = self._read_lesson_guard_float(
-            config, "lesson_prompt_playback_tail_sec", 0.6
+            config, "lesson_prompt_playback_tail_sec", 0.5
         )
 
         remaining = max(0.0, output_timeout)
+        wait_started = time.monotonic()
+        # If Live never starts audio (common when interruption races text prompts),
+        # fail fast instead of waiting the full spoken estimate.
+        no_audio_deadline = min(2.5, max(1.0, output_timeout * 0.35))
         while getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+            if getattr(self.conn, "google_live_lesson_prompt_needs_resend", False):
+                # Interruption cut the prompt before/while speaking — exit so caller
+                # can resend instead of burning the full timeout mute.
+                self.conn.google_live_lesson_prompt_output_allowed = False
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_wait_interrupted_for_resend remaining_sec={:.1f}",
+                    remaining,
+                )
+                return False
             if self._lesson_prompt_output_inferred_idle(config):
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.google_live_lesson_prompt_output_inferred_idle = True
@@ -1517,6 +1725,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._get_lesson_prompt_inferred_idle_sec(config),
                 )
                 break
+            if (
+                not self._lesson_prompt_heard_audio()
+                and (time.monotonic() - wait_started) >= no_audio_deadline
+            ):
+                self.conn.google_live_lesson_prompt_output_allowed = False
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_no_audio_deadline_sec={:.1f}",
+                    no_audio_deadline,
+                )
+                return False
             if remaining <= 0:
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.google_live_lesson_prompt_output_inferred_idle = False
@@ -1579,7 +1797,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return max(
             0.0,
             self._read_lesson_guard_float(
-                config, "lesson_prompt_inferred_idle_sec", 2.0
+                config, "lesson_prompt_inferred_idle_sec", 1.6
             ),
         )
 
@@ -1790,13 +2008,44 @@ class GoogleLiveProvider(VoiceSessionProvider):
         response = str(getattr(action_response, "response", "") or "").strip()
         if action == Action.ERROR:
             return response or "Xin lỗi, robot chưa bắt đầu bài học được."
+        # Successful schedule: stay silent. Sample s1 greeting is the introduction;
+        # speaking "Bắt đầu bài học nhé" here races Live and cuts the greeting.
         if action == Action.RECORD and "lesson start scheduled" in result:
-            return "Bắt đầu bài học nhé."
+            return ""
         if action == Action.RESPONSE and any(
             marker in result for marker in ("disabled", "busy", "failed", "error")
         ):
             return response or "Robot chưa bắt đầu bài học được."
         return ""
+
+    def _lesson_prompt_duration_estimate_sec(self, config=None):
+        config = config if isinstance(config, Mapping) else self._get_live_config()
+        chars_per_sec = self._read_lesson_guard_float(
+            config, "lesson_prompt_tts_chars_per_sec", 12.0
+        )
+        if chars_per_sec <= 0:
+            chars_per_sec = 12.0
+        prompt_len = max(1, int(self._last_lesson_prompt_len or 0))
+        # Spoken Vietnamese + device drain headroom.
+        return (prompt_len / chars_per_sec) + 1.5
+
+    def _lesson_prompt_heard_audio(self):
+        return self._lesson_prompt_output_last_activity_at is not None
+
+    async def _resend_last_lesson_prompt(self, *, reason="interruption"):
+        text = str(getattr(self, "_last_lesson_prompt_text", "") or "").strip()
+        if not text:
+            return False
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live lesson_prompt_resend reason={} chars={}",
+            reason,
+            len(text),
+        )
+        return await self._send_live_text_ack(
+            text,
+            log_label="lesson_step_prompt_resend",
+            allow_lesson_output=True,
+        )
 
     async def _send_live_text_ack(self, text, *, log_label="lesson_start_ack", allow_lesson_output=False):
         if not await self._ensure_live_open_for_lesson_text():
@@ -1809,6 +2058,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.google_live_lesson_prompt_output_allowed = True
                 self.conn.google_live_lesson_prompt_output_inferred_idle = False
                 self._lesson_prompt_output_last_activity_at = None
+                self._last_lesson_prompt_text = str(text or "").strip()
+                self._last_lesson_prompt_len = len(self._last_lesson_prompt_text)
+                self.conn.google_live_lesson_prompt_needs_resend = False
             if self._bridge is not None:
                 if allow_lesson_output and hasattr(self._bridge, "force_allow_model_output"):
                     self._bridge.force_allow_model_output()
@@ -3058,7 +3310,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
         value = None
         if isinstance(config, Mapping):
             if self._uses_lesson_input_timing():
-                value = config.get("input_speech_tail_ms")
+                # Short single-word answers should finalize faster than full phrases.
+                if self._lesson_child_response_window_active(require_audio_window=False):
+                    value = config.get(
+                        "lesson_child_input_speech_tail_ms",
+                        config.get("input_speech_tail_ms"),
+                    )
+                else:
+                    value = config.get("input_speech_tail_ms")
             else:
                 value = self._conversation_timing_value(
                     config,
@@ -3077,7 +3336,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
         value = None
         if isinstance(config, Mapping):
             if self._uses_lesson_input_timing():
-                value = config.get("input_max_capture_ms")
+                if self._lesson_child_response_window_active(require_audio_window=False):
+                    value = config.get(
+                        "lesson_child_input_max_capture_ms",
+                        config.get("input_max_capture_ms"),
+                    )
+                else:
+                    value = config.get("input_max_capture_ms")
             else:
                 value = self._conversation_timing_value(
                     config,
@@ -3209,11 +3474,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if self._has_active_output() or self._has_music_session():
             return False
-        threshold = self._get_user_speech_rms_threshold()
-        if decoded_audio is None or threshold is None:
+        if self._is_post_reply_hold_active():
             return False
-        rms = self._input_rms(decoded_audio)
-        return isinstance(rms, (int, float)) and rms >= threshold
+        # Require stronger than ambient/residual so echo does not steal the turn.
+        return self._is_strong_user_speech(decoded_audio, multiplier=1.8)
 
     def _record_start_lesson_asr_fallback_audio(self, audio_bytes, decoded_audio):
         if not self._start_lesson_asr_fallback_enabled():
@@ -3475,11 +3739,41 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._cancel_input_flush_task()
             self._cancel_forced_interrupt_flush_task()
             self._clear_user_stream()
-        if event_type == "audio_end":
-            if self._interaction.state == InteractionState.WAITING_MODEL:
-                self._cancel_waiting_model_timeout_task()
+            self._waiting_model_since = None
+            # Residual mic from waiting_model_retry must not keep streaming into Live
+            # once the model starts speaking — that path was cutting replies mid-sentence.
+            if self._interaction.state == InteractionState.USER_STREAMING:
                 self._interaction.transition(InteractionState.LISTENING)
-                self._waiting_model_since = None
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live model_audio_start_hold_input response_id={}",
+                self._response_generation,
+            )
+        if event_type == "audio_end":
+            self._cancel_waiting_model_timeout_task()
+            self._cancel_input_flush_task()
+            self._clear_user_stream()
+            self._waiting_model_since = None
+            self._arm_post_reply_hold("audio_end")
+            # Always re-open listen after model speech so the next user turn is heard.
+            if self._interaction.state in (
+                InteractionState.WAITING_MODEL,
+                InteractionState.USER_STREAMING,
+                InteractionState.INTERRUPTING,
+            ):
+                self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
+            try:
+                # Refresh conversation listen window without forcing another Hi ESP.
+                self._user_audio_allowed_until = max(
+                    self._user_audio_allowed_until,
+                    time.monotonic() + self._get_user_audio_window_sec("audio_end"),
+                )
+            except Exception:
+                pass
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live model_audio_end_ready_to_listen response_id={}",
+                self._response_generation,
+            )
 
     def _is_model_output_event(self, event_type, event):
         if event_type in {"audio_start", "audio", "audio_chunk", "audio_end", "tool_call"}:
@@ -3739,7 +4033,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _get_input_flush_delay(self):
         config = self._get_live_config()
         if self._uses_lesson_input_timing():
-            flush_delay = config.get("input_flush_delay_sec")
+            if self._lesson_child_response_window_active(require_audio_window=False):
+                flush_delay = config.get(
+                    "lesson_child_input_flush_delay_sec",
+                    config.get("input_flush_delay_sec"),
+                )
+            else:
+                flush_delay = config.get("input_flush_delay_sec")
         else:
             flush_delay = self._conversation_timing_value(
                 config,
@@ -3891,12 +4191,65 @@ class GoogleLiveProvider(VoiceSessionProvider):
         merged["native_voice"] = True
         merged["aec_enabled"] = True
         try:
-            waiting_timeout = float(merged.get("waiting_model_timeout_sec", 3.0))
+            waiting_timeout = float(merged.get("waiting_model_timeout_sec", 5.0))
         except (TypeError, ValueError):
-            waiting_timeout = 3.0
-        merged["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 4.0)
-        merged["interruption_min_output_age_sec"] = 0.0
-        merged["barge_in_transcript_min_output_age_sec"] = 0.0
+            waiting_timeout = 5.0
+        # Floor 5s for production agent values (>=1s). Keep sub-second timeouts for
+        # unit tests; agent private 3s still becomes 5s so tools are not dropped early.
+        if waiting_timeout >= 1.0:
+            merged["waiting_model_timeout_sec"] = min(max(5.0, waiting_timeout), 6.0)
+        else:
+            merged["waiting_model_timeout_sec"] = max(0.0, waiting_timeout)
+        # Patient end-of-speech so short Vietnamese pauses do not cut turns.
+        merged["end_of_speech_sensitivity"] = "END_SENSITIVITY_LOW"
+        try:
+            silence_ms = float(merged.get("silence_duration_ms", 600))
+        except (TypeError, ValueError):
+            silence_ms = 600.0
+        # 600–800ms: complete enough for STT; under 550 cut mid-phrase (mishears).
+        merged["silence_duration_ms"] = max(600.0, min(silence_ms, 800.0))
+        # Residual gate after tts:stop — shorter = snappier re-listen.
+        try:
+            echo_tail = float(merged.get("echo_tail_suppression_ms", 500))
+        except (TypeError, ValueError):
+            echo_tail = 500.0
+        merged["echo_tail_suppression_ms"] = max(400.0, min(echo_tail, 700.0))
+        try:
+            mute_after = float(merged.get("mute_input_after_audio_start_sec", 0.4))
+        except (TypeError, ValueError):
+            mute_after = 0.4
+        # First model-audio frames: protect AEC converge without long mute.
+        merged["mute_input_after_audio_start_sec"] = max(0.28, min(mute_after, 0.6))
+        # Long multi-turn: keep listen windows open (floor 120s for production values).
+        # Sub-second values stay as-is for unit tests that need quick expiry.
+        for key, default in (
+            ("wake_audio_allow_window_sec", 900.0),
+            ("conversation_audio_allow_window_sec", 900.0),
+            ("idle_timeout_sec", 900.0),
+        ):
+            try:
+                value = float(merged.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            if value >= 1.0:
+                merged[key] = max(120.0, min(value, 1800.0))
+            else:
+                merged[key] = max(0.0, value)
+        try:
+            min_output_age = float(merged.get("interruption_min_output_age_sec", 0.7))
+        except (TypeError, ValueError):
+            min_output_age = 0.7
+        # Floor 0.7s: false barge-in under ~0.5s; above 1s felt laggy.
+        merged["interruption_min_output_age_sec"] = max(0.7, min(min_output_age, 2.0))
+        try:
+            transcript_min_age = float(
+                merged.get("barge_in_transcript_min_output_age_sec", 0.6)
+            )
+        except (TypeError, ValueError):
+            transcript_min_age = 0.6
+        merged["barge_in_transcript_min_output_age_sec"] = max(
+            0.4, min(transcript_min_age, 2.0)
+        )
         merged["disable_server_side_interruptions"] = False
         merged["activity_handling"] = "START_OF_ACTIVITY_INTERRUPTS"
         merged["barge_in"] = False
@@ -4084,9 +4437,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._active_lesson_step_is_interactive():
             window_key = "lesson_child_response_window_sec"
             window_default = 25.0
+        elif (
+            normalize_session_mode(
+                getattr(self.conn, "session_mode", SessionMode.DORMANT)
+            )
+            == SessionMode.CONVERSATION
+            or reason in {"listen_start", "inbound_audio", "audio_end", "lesson_start"}
+        ):
+            # Multi-turn talk: do not expire back to "need Hi ESP" after 15s.
+            window_key = "conversation_audio_allow_window_sec"
+            window_default = 900.0
         else:
             window_key = "wake_audio_allow_window_sec"
-            window_default = 15.0
+            window_default = 900.0
         try:
             return float(config.get(window_key, window_default))
         except (TypeError, ValueError):
@@ -4165,13 +4528,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
         websocket = getattr(self.conn, "websocket", None)
         if websocket is None:
             return
-        payload = {
-            "type": "tts",
-            "state": "stop",
-            "session_id": getattr(self.conn, "session_id", None),
-            "continue_listening": False,
-            "listen_mode": "manual",
-        }
+        # In conversation mode keep firmware listening so long chats do not
+        # force another wake word after a pause (continue_listening=false was
+        # the main "văng khỏi giao tiếp" symptom on the robot).
+        in_conversation = (
+            normalize_session_mode(
+                getattr(self.conn, "session_mode", SessionMode.DORMANT)
+            )
+            == SessionMode.CONVERSATION
+        )
+        if in_conversation:
+            # Soft refresh: stay in realtime listen instead of dropping to manual.
+            await self._open_user_audio_window("conversation_keep_alive")
+            payload = {
+                "type": "tts",
+                "state": "stop",
+                "session_id": getattr(self.conn, "session_id", None),
+                "continue_listening": True,
+                "listen_mode": "realtime",
+            }
+        else:
+            payload = {
+                "type": "tts",
+                "state": "stop",
+                "session_id": getattr(self.conn, "session_id", None),
+                "continue_listening": False,
+                "listen_mode": "manual",
+            }
         await websocket.send(json.dumps(payload))
 
     async def _dispatch_music_control_intent(self, transcript_text):
@@ -4572,9 +4955,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _get_wake_audio_allow_window_sec(self):
         config = self._get_live_config()
         try:
-            window_sec = float(config.get("wake_audio_allow_window_sec", 15.0))
+            window_sec = float(config.get("wake_audio_allow_window_sec", 900.0))
         except (TypeError, ValueError):
-            window_sec = 15.0
+            window_sec = 900.0
         return max(0.1, window_sec)
 
     def _extract_listen_control(self, message):

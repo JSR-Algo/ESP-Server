@@ -160,7 +160,7 @@ def _scene(asset_base: str, *, expression: str, overlay_file: str, primary_word:
     }
 
 
-DEFAULT_SAMPLE_STEP_DWELL_SEC = 0.3
+DEFAULT_SAMPLE_STEP_DWELL_SEC = 0.5
 DEFAULT_SAMPLE_STEP_TIMEOUT_SEC = 75.0
 
 
@@ -340,8 +340,9 @@ def build_interactive_sample_manifest(asset_base: str = "",
                 "ask": "Mình nói chậm: barn. Con nói theo mình: barn!",
                 "waitForChild": True,
             },
-            response_timeout_sec=10.0,
-            max_no_answer_attempts=1,
+            # Quiet window after model: patient enough for kids, not a long hang.
+            response_timeout_sec=12.0,
+            max_no_answer_attempts=2,
         ),
         _step(
             "s4", "recall",
@@ -354,9 +355,13 @@ def build_interactive_sample_manifest(asset_base: str = "",
                 "ask": "Giỏi lắm! Con thấy gì? Nói rõ tên tiếng Anh của cái kho.",
                 "waitForChild": True,
             },
-            success_prompt="Hay quá! Con nói barn rất rõ và hoàn thành bài học mẫu.",
-            response_timeout_sec=10.0,
-            max_no_answer_attempts=1,
+            # Final question: a bit more time + warm ceremony (spoken before lesson_stop).
+            success_prompt=(
+                "Hay quá! Con nói barn rất rõ. "
+                "Con đã hoàn thành bài học mẫu. Giỏi lắm!"
+            ),
+            response_timeout_sec=16.0,
+            max_no_answer_attempts=2,
         ),
     ]
     manifest = {
@@ -597,6 +602,8 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
 
     existing = getattr(conn, "lesson_runtime", None)
     if _is_active_sample_runtime(existing, lesson_id):
+        # Intent/tool layer suppresses accidental STT duplicates. An explicit second
+        # start_sample_lesson call still replaces the active runtime cleanly.
         _log("info", f"sample lesson restart requested; replacing active lessonId={lesson_id}")
 
     assignment = {

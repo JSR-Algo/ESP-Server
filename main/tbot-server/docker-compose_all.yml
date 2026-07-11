@@ -21,9 +21,25 @@ services:
       - seccomp:unconfined
     environment:
       - TZ=Asia/Shanghai
+      # Google Live voice (Hi ESP). Without these the robot opens mic but never speaks.
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - TBOT_GOOGLE_LIVE_API_KEY=${TBOT_GOOGLE_LIVE_API_KEY:-}
+      - TBOT_GOOGLE_LIVE_ENABLED=${TBOT_GOOGLE_LIVE_ENABLED:-true}
+      - TBOT_GOOGLE_LIVE_MODEL=${TBOT_GOOGLE_LIVE_MODEL:-gemini-3.1-flash-live-preview}
+      - TBOT_GOOGLE_LIVE_VOICE_NAME=${TBOT_GOOGLE_LIVE_VOICE_NAME:-Kore}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_GEMINI_API_KEY=${GOOGLE_GEMINI_API_KEY:-}
+      - LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-true}
+      - LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-interactive}
     volumes:
       # 配置文件目录
       - ./data:/opt/tbot-esp32-server/data
+      # Lab: mount app code so wake_greeting / prewarm land without full image rebuild.
+      - ./core:/opt/tbot-esp32-server/core
+      - ./config:/opt/tbot-esp32-server/config
+      - ./config.yaml:/opt/tbot-esp32-server/config.yaml
+      - ./plugins_func:/opt/tbot-esp32-server/plugins_func
+      - ./app.py:/opt/tbot-esp32-server/app.py
       # 模型文件挂接，很重要
       - ./models/SenseVoiceSmall/model.pt:/opt/tbot-esp32-server/models/SenseVoiceSmall/model.pt
 
@@ -45,6 +61,9 @@ services:
     ports:
       # 智控台
       - "8002:8002"
+    extra_hosts:
+      # Reach host-run tbot-backend (NestJS course/learner/monitoring API) on macOS/Linux Docker.
+      - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - SPRING_DATASOURCE_DRUID_URL=jdbc:mysql://tbot-esp32-server-db:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
@@ -53,6 +72,12 @@ services:
       - SPRING_DATA_REDIS_HOST=tbot-esp32-server-redis
       - SPRING_DATA_REDIS_PASSWORD=
       - SPRING_DATA_REDIS_PORT=6379
+      # Course / Learner / Lesson Monitoring pages proxy to NestJS via /nestjs.
+      # Default: local tbot-backend on the host:3000 (start with ADMIN_AUTH_DISABLED=true for lab use).
+      # Include :port because nginx proxy_pass has no separate port field.
+      - NESTJS_UPSTREAM_HOST=${NESTJS_UPSTREAM_HOST:-host.docker.internal:3000}
+      - NESTJS_UPSTREAM_SCHEME=${NESTJS_UPSTREAM_SCHEME:-http}
+      - NESTJS_TOKEN=${NESTJS_TOKEN:-}
     volumes:
       # 配置文件目录
       - ./uploadfile:/uploadfile
@@ -80,6 +105,9 @@ services:
   # redis模块
   tbot-esp32-server-redis:
     image: redis:8.0
+    # Publish for host-run tbot-backend (REDIS_URL=redis://localhost:6379).
+    ports:
+      - "6379:6379"
     expose:
       - 6379
     container_name: tbot-esp32-server-redis

@@ -917,7 +917,7 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.client_abort)
         self.assertEqual(conn.clear_queue_calls, 0)
 
-    async def test_lesson_prompt_live_output_is_allowed_once_and_closes_on_audio_end(self):
+    async def test_lesson_prompt_live_output_allows_multi_segment_before_idle_close(self):
         from core.voice.session_orchestrator import SessionMode
 
         conn = _DummyConn()
@@ -948,8 +948,12 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent_json[0]["state"], "start")
         self.assertEqual(sent_json[-1]["state"], "stop")
         self.assertTrue(sent_json[-1]["continue_listening"])
-        self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
+        # First segment end must NOT close the gate (intro multi-segment).
+        self.assertTrue(conn.google_live_lesson_prompt_output_allowed)
 
+        # Second Live segment (real greeting) is not dropped while gate is open.
+        binary_before = sum(1 for m in conn.websocket.sent_messages if isinstance(m, (bytes, bytearray)))
+        self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
         self.assertTrue(
             await bridge.handle_event(
                 {
@@ -959,7 +963,26 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        self.assertEqual(conn.websocket.sent_messages.count(b"opus-tail"), 1)
+        binary_after = sum(1 for m in conn.websocket.sent_messages if isinstance(m, (bytes, bytearray)))
+        self.assertGreater(
+            binary_after,
+            binary_before,
+            "second lesson-prompt segment audio must still be forwarded",
+        )
+
+        # After idle/wait closes the gate, further free-model audio is dropped.
+        conn.google_live_lesson_prompt_output_allowed = False
+        before = len(conn.websocket.sent_messages)
+        self.assertTrue(
+            await bridge.handle_event(
+                {
+                    "type": "audio_chunk",
+                    "audio": b"\x03\x00" * 100,
+                    "mime_type": "audio/pcm;rate=24000",
+                }
+            )
+        )
+        self.assertEqual(len(conn.websocket.sent_messages), before)
 
     async def test_lesson_prompt_model_transcript_does_not_duplicate_display_text(self):
         from core.voice.session_orchestrator import SessionMode
@@ -998,6 +1021,40 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await bridge.handle_event({"type": "audio_end"}))
 
         self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
+
+    async def test_lesson_prompt_audio_end_keeps_gate_for_multi_segment_intro(self):
+        """Live often ends a short filler turn before the real greeting TTS.
+
+        Closing the lesson-prompt gate on that first audio_end drops the intro
+        with reason=lesson_mode_model_output (observed on sample-lesson s1).
+        """
+        from core.voice.session_orchestrator import SessionMode
+
+        conn = _DummyConn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        bridge = self._build_bridge(
+            conn,
+            response_id_getter=lambda: 0,
+            response_cancelled_checker=lambda _rid: False,
+        )
+        bridge._active_response_id = 0
+
+        # Short filler segment completes.
+        self.assertTrue(await bridge.handle_event({"type": "audio_end"}))
+        self.assertTrue(
+            conn.google_live_lesson_prompt_output_allowed,
+            "gate must stay open after first lesson-prompt audio_end",
+        )
+
+        # Real introduction audio must still play.
+        self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
+        self.assertTrue(
+            await bridge.handle_event(
+                {"type": "audio_chunk", "audio": b"\x01\x00" * 240}
+            )
+        )
+        self.assertTrue(conn.google_live_lesson_prompt_output_allowed)
 
     async def test_lesson_prompt_inferred_idle_allows_late_audio_end_stop(self):
         from core.voice.session_orchestrator import SessionMode

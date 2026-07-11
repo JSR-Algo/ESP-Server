@@ -8,6 +8,7 @@ from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 
 TAG = __name__
 
@@ -29,6 +30,10 @@ class SimpleHttpServer:
             self.lesson_connections,
         )
         self.device_mcp_admin_handler = DeviceMCPAdminHandler(
+            config,
+            self.lesson_connections,
+        )
+        self.lesson_sd_fanout_handler = LessonSdFanoutHandler(
             config,
             self.lesson_connections,
         )
@@ -106,6 +111,16 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/devices/{deviceId}/mcp-call",
                             self.device_mcp_admin_handler.handle_post,
+                        ),
+                        # Admin/backend: after lesson pack lands in ESP cache, fan-out
+                        # self.lesson_assets.sync_to_sd to online robots (queue offline).
+                        web.post(
+                            "/internal/lesson-assets/sd-fanout",
+                            self.lesson_sd_fanout_handler.handle_post,
+                        ),
+                        web.get(
+                            "/internal/lesson-assets/sd-fanout/pending",
+                            self.lesson_sd_fanout_handler.handle_get_pending,
                         ),
                         web.get(
                             "/internal/lesson-runtime/preload-voice-alarm",

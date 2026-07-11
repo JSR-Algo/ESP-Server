@@ -218,9 +218,10 @@ def test_voice_env_accepts_google_gemini_api_key_alias(monkeypatch):
 
 
 def test_gemini_tts_inherits_google_live_api_key_when_config_key_is_placeholder():
+    agent_key = "live-key-from-agent-xxxxxxxx"  # >=20 chars = non-placeholder
     config = {
         "voice_mode": {"type": "google_live"},
-        "google_live": {"api_key": "live-key-from-agent"},
+        "google_live": {"api_key": agent_key},
         "selected_module": {"TTS": "TTS_Gemini25ProTTS"},
         "TTS": {
             "TTS_Gemini25ProTTS": {
@@ -233,19 +234,32 @@ def test_gemini_tts_inherits_google_live_api_key_when_config_key_is_placeholder(
 
     result = config_loader.normalize_voice_config(config)
 
-    assert result["TTS"]["TTS_Gemini25ProTTS"]["api_key"] == "live-key-from-agent"
+    assert result["TTS"]["TTS_Gemini25ProTTS"]["api_key"] == agent_key
 
 
-def test_gemini_tts_keeps_explicit_non_placeholder_api_key():
-    explicit_key = "AIza" + ("x" * 35)
+def test_all_gemini_modules_forced_to_agent_google_live_api_key():
+    """Role-tab google_live.api_key wins over per-module ASR/LLM/TTS secrets."""
+    agent_key = "AQ." + ("y" * 40)
+    stale_asr = "AIza" + ("a" * 35)
+    stale_tts = "AIza" + ("t" * 35)
     config = {
         "voice_mode": {"type": "google_live"},
-        "google_live": {"api_key": "live-key-from-agent"},
-        "selected_module": {"TTS": "GeminiTTS"},
+        "google_live": {"api_key": agent_key},
+        "selected_module": {
+            "ASR": "ASR_GeminiASR",
+            "LLM": "LLM_GeminiProLLM",
+            "TTS": "TTS_Gemini25ProTTS",
+        },
+        "ASR": {
+            "ASR_GeminiASR": {"type": "gemini_asr", "api_key": stale_asr},
+        },
+        "LLM": {
+            "LLM_GeminiProLLM": {"type": "gemini", "api_key": "??api_key"},
+        },
         "TTS": {
-            "GeminiTTS": {
+            "TTS_Gemini25ProTTS": {
                 "type": "gemini",
-                "api_key": explicit_key,
+                "api_key": stale_tts,
                 "model_name": "gemini-2.5-pro-preview-tts",
             }
         },
@@ -253,7 +267,25 @@ def test_gemini_tts_keeps_explicit_non_placeholder_api_key():
 
     result = config_loader.normalize_voice_config(config)
 
-    assert result["TTS"]["GeminiTTS"]["api_key"] == explicit_key
+    assert result["google_live"]["api_key"] == agent_key
+    assert result["ASR"]["ASR_GeminiASR"]["api_key"] == agent_key
+    assert result["LLM"]["LLM_GeminiProLLM"]["api_key"] == agent_key
+    assert result["TTS"]["TTS_Gemini25ProTTS"]["api_key"] == agent_key
+
+
+def test_gemini_modules_backfill_live_key_when_agent_live_key_missing():
+    module_key = "AIza" + ("m" * 35)
+    config = {
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"api_key": "${GOOGLE_API_KEY}"},
+        "ASR": {"ASR_GeminiASR": {"type": "gemini_asr", "api_key": module_key}},
+        "TTS": {"GeminiTTS": {"type": "gemini", "api_key": "??api_key"}},
+    }
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["api_key"] == module_key
+    assert result["TTS"]["GeminiTTS"]["api_key"] == module_key
 
 
 def test_gemini_tts_gets_edge_fallback_by_default(monkeypatch):

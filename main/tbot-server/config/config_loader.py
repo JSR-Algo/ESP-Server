@@ -29,17 +29,31 @@ GOOGLE_LIVE_DEFAULTS = {
     "input_live_chunk_ms": 20,
     "interrupt_policy": "wake_or_transcript",
     "raw_audio_barge_in_enabled": False,
-    "input_flush_delay_sec": 0.8,
-    "conversation_input_flush_delay_sec": 0.18,
-    "input_speech_tail_ms": 600,
-    "conversation_input_speech_tail_ms": 180,
-    "input_min_capture_ms": 250,
+    "input_flush_delay_sec": 0.75,
+    # Conversation: slightly patient end so STT gets full phrases (less mishear).
+    "conversation_input_flush_delay_sec": 0.36,
+    "input_speech_tail_ms": 650,
+    "conversation_input_speech_tail_ms": 360,
+    "input_min_capture_ms": 280,
     "input_max_capture_ms": 8000,
-    "conversation_input_max_capture_ms": 4000,
-    "input_speech_rms_threshold": 900,
+    "conversation_input_max_capture_ms": 5000,
+    # Lesson say-it turns are short (one word); finalize faster than full phrases.
+    "lesson_child_input_speech_tail_ms": 280,
+    "lesson_child_input_flush_delay_sec": 0.32,
+    "lesson_child_input_max_capture_ms": 4000,
+    "lesson_child_response_window_sec": 22.0,
+    "lesson_child_response_open_delay_sec": 0.1,
+    "lesson_child_response_fast_reopen_sec": 0.8,
+    "lesson_prompt_playback_tail_sec": 0.5,
+    # Soft speech still needs to pass start-noise gate; 900 was dropping quiet asks.
+    "input_speech_rms_threshold": 650,
     "lesson_child_input_speech_rms_threshold": 2000,
-    "input_gain": 2.8,
-    "waiting_model_timeout_sec": 3.0,
+    "input_gain": 3.5,
+    # Live/TTS PCM is often under-normalized; boost before Opus→robot.
+    # 2.0 clipped/distorted on ES8311+PA; 1.35 is a safer loudness tradeoff.
+    "output_gain": 1.35,
+    # Floor enforced in provider; agent private 3.0 was dropping tool replies.
+    "waiting_model_timeout_sec": 5.0,
     "waiting_model_retry_prompt_after_sec": 12.0,
     "live_open_timeout_sec": 12.0,
     # Open Live soon after robot websocket connect / on Hi ESP so the first
@@ -49,10 +63,19 @@ GOOGLE_LIVE_DEFAULTS = {
     "prewarm_live_on_wake": True,
     "wake_greeting_enabled": True,
     "wake_greeting_text": "Dạ, mình nghe đây ạ.",
-    "idle_timeout_sec": 180,
+    "wake_greeting_protect_sec": 1.1,
+    "post_reply_hold_sec": 0.55,
+    # Keep Live + conversation open through long multi-turn chats (pauses OK).
+    "idle_timeout_sec": 900,
+    # After Hi ESP / listen:start, allow continuous talk without re-wake for 15 min.
+    "wake_audio_allow_window_sec": 900,
+    "conversation_audio_allow_window_sec": 900,
     "wake_transcript_tail_suppress_sec": 0.15,
-    "lesson_prompt_output_guard_timeout_sec": 30.0,
-    "lesson_prompt_playback_guard_timeout_sec": 12.0,
+    # Passive steps use adaptive caps (~spoken length); 30s hung after Live interrupts.
+    "lesson_prompt_output_guard_timeout_sec": 10.0,
+    "lesson_prompt_playback_guard_timeout_sec": 6.0,
+    # After model audio, advance passive steps once speech has settled.
+    "lesson_prompt_inferred_idle_sec": 1.6,
     "interrupt_forced_flush_delay_sec": 0.8,
     "interrupt_min_capture_ms": 360,
     "interrupt_speech_tail_ms": 240,
@@ -61,12 +84,12 @@ GOOGLE_LIVE_DEFAULTS = {
     "reconnect_buffer_ms": 2000,
     # Post-tts residual (device still drains playback after server tts:stop).
     # Too short reopens monologue loops; too long feels deaf after robot speaks.
-    "echo_tail_suppression_ms": 550,
+    "echo_tail_suppression_ms": 500,
     "echo_tail_extend_rms_threshold": 700,
-    "echo_tail_extend_ms": 350,
-    "echo_tail_max_total_ms": 1400,
+    "echo_tail_extend_ms": 300,
+    "echo_tail_max_total_ms": 1200,
     # Latch audible briefly so residual frames stay under the echo gate.
-    "echo_tail_audible_ms": 400,
+    "echo_tail_audible_ms": 350,
     "music_auto_pause_on_user_speech": True,
     "disable_server_side_interruptions": False,
     "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
@@ -76,12 +99,12 @@ GOOGLE_LIVE_DEFAULTS = {
     "interrupt_rms_threshold": 5000,
     "interrupt_min_input_duration_sec": 0.42,
     "interrupt_min_output_age_sec": 0.25,
-    "interruption_min_output_age_sec": 0.0,
-    "interrupt_suppress_audio_sec": 0.25,
+    # Ignore Live false barge-in for the first ~0.7s of robot speech.
+    "interruption_min_output_age_sec": 0.7,
+    "interrupt_suppress_audio_sec": 0.28,
     # First model-audio frames often leak residual energy before AEC converges.
-    "mute_input_after_audio_start_sec": 0.28,
+    "mute_input_after_audio_start_sec": 0.4,
     "suppress_robot_output_echo": True,
-    "wake_audio_allow_window_sec": 15.0,
     "robot_output_echo_bypass_rms_threshold": 650,
     "robot_output_echo_bypass_min_duration_sec": 0.06,
     "hard_reconnect_on_interrupt": False,
@@ -92,7 +115,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "barge_in_rms_threshold": 4500,
     "barge_in_min_input_duration_sec": 0.30,
     "barge_in_min_output_age_sec": 0.25,
-    "barge_in_transcript_min_output_age_sec": 0.0,
+    "barge_in_transcript_min_output_age_sec": 0.6,
     # When False, RMS-based loud-input bypass of the echo gate cannot fire a
     # mid-sentence interrupt — for hardware where speaker echo crosses the
     # bypass threshold and would otherwise cut the model off.
@@ -154,7 +177,10 @@ def normalize_voice_config(config):
     elif not isinstance(google_live, Mapping):
         config["google_live"] = {}
     _apply_tts_runtime_overrides(config)
-    _inherit_google_live_api_key_for_gemini_tts(config)
+    # Single source of truth: Agent Role tab → google_live.api_key (then env fallback).
+    # Push that one key onto every Gemini ASR/LLM/TTS/VLLM module so providers do not
+    # diverge (ASR had its own AIza key while Live used agent AQ./AIza key).
+    _apply_single_agent_gemini_api_key(config)
     return config
 
 def _apply_base_google_live_policy(config, base_config):
@@ -207,13 +233,15 @@ def _apply_tts_runtime_overrides(config):
     edge_config.setdefault("output_dir", "tmp/")
     tts_configs["EdgeTTS"] = edge_config
 
-    # Inject a real Gemini TTS key when provided (overrides the config ${...} placeholder
-    # and blocks _inherit_google_live_api_key_for_gemini_tts from using the Live token).
+    # Dedicated TTS env keys are folded into google_live.api_key later by
+    # _apply_single_agent_gemini_api_key — do not keep a second TTS-only secret.
     if gemini_tts_key:
-        gemini_cfg = tts_configs.get("GeminiTTS")
-        gemini_cfg = dict(gemini_cfg) if isinstance(gemini_cfg, Mapping) else {"type": "gemini"}
-        gemini_cfg["api_key"] = gemini_tts_key
-        tts_configs["GeminiTTS"] = gemini_cfg
+        google_live = config.get("google_live")
+        if not isinstance(google_live, Mapping):
+            google_live = {}
+            config["google_live"] = google_live
+        if _looks_like_placeholder_api_key(google_live.get("api_key")):
+            google_live["api_key"] = gemini_tts_key
 
     if force_edge:
         selected_module["TTS"] = "EdgeTTS"
@@ -239,28 +267,104 @@ def _looks_like_placeholder_api_key(value):
     key = str(value or "").strip()
     if not key:
         return True
+    # Unresolved env template or manager console placeholders.
+    if key.startswith("${") and key.endswith("}"):
+        return True
+    if key.startswith("??"):
+        return True
     if len(key) < 20:
         return True
     lowered = key.casefold()
-    return any(marker in lowered for marker in ("placeholder", "your_key", "your-key", "test-key", "dummy"))
+    return any(
+        marker in lowered
+        for marker in ("placeholder", "your_key", "your-key", "test-key", "dummy")
+    )
 
-def _inherit_google_live_api_key_for_gemini_tts(config):
-    google_live = config.get("google_live") if isinstance(config, Mapping) else None
-    live_api_key = google_live.get("api_key") if isinstance(google_live, Mapping) else None
-    if not live_api_key:
+def _first_usable_gemini_module_api_key(config):
+    """Migration fallback only: scan agent ASR/LLM/TTS Gemini modules for a real key."""
+    if not isinstance(config, Mapping):
+        return None
+    for section in ("ASR", "LLM", "TTS", "VLLM"):
+        modules = config.get(section)
+        if not isinstance(modules, Mapping):
+            continue
+        for name, provider_config in modules.items():
+            if not isinstance(provider_config, Mapping):
+                continue
+            provider_type = str(provider_config.get("type") or name).casefold()
+            if "gemini" not in provider_type and "gemini" not in str(name).casefold():
+                continue
+            key = provider_config.get("api_key")
+            if not _looks_like_placeholder_api_key(key):
+                return str(key).strip()
+    return None
+
+
+def _env_gemini_api_key():
+    return (
+        _clean_env("GOOGLE_API_KEY")
+        or _clean_env("TBOT_GOOGLE_LIVE_API_KEY")
+        or _clean_env("GEMINI_API_KEY")
+        or _clean_env("GOOGLE_GEMINI_API_KEY")
+        or _clean_env("TBOT_GEMINI_TTS_API_KEY")
+    )
+
+
+def _is_gemini_provider(name, provider_config):
+    provider_type = str(provider_config.get("type") or name or "").casefold()
+    name_l = str(name or "").casefold()
+    return "gemini" in provider_type or "gemini" in name_l
+
+
+def _resolve_canonical_gemini_api_key(config):
+    """One key only: Agent Role tab google_live.api_key, then env, then module migration."""
+    if not isinstance(config, Mapping):
+        return None
+    google_live = config.get("google_live")
+    if isinstance(google_live, Mapping):
+        live_key = google_live.get("api_key")
+        if not _looks_like_placeholder_api_key(live_key):
+            return str(live_key).strip()
+    env_key = _env_gemini_api_key()
+    if env_key and not _looks_like_placeholder_api_key(env_key):
+        return env_key
+    return _first_usable_gemini_module_api_key(config)
+
+
+def _apply_single_agent_gemini_api_key(config):
+    """Force every Gemini module to use the same key as Agent Role → Google Live API.
+
+    Source of truth (in order):
+      1. google_live.api_key from agent private config (manager Role Config tab)
+      2. env GOOGLE_API_KEY / TBOT_GOOGLE_LIVE_API_KEY / GEMINI_API_KEY (deploy override)
+      3. first non-placeholder key found on ASR/LLM/TTS modules (legacy migration only)
+
+    Then overwrite api_key on all Gemini ASR/LLM/TTS/VLLM providers so ASR can no
+    longer run a different AIza key than Live/LLM/TTS.
+    """
+    if not isinstance(config, Mapping):
+        return
+    canonical = _resolve_canonical_gemini_api_key(config)
+    if not canonical:
         return
 
-    tts_configs = config.get("TTS")
-    if not isinstance(tts_configs, Mapping):
-        return
-    for provider_name, provider_config in tts_configs.items():
-        if not isinstance(provider_config, Mapping):
+    google_live = config.get("google_live")
+    if not isinstance(google_live, Mapping):
+        google_live = {}
+        config["google_live"] = google_live
+    google_live["api_key"] = canonical
+
+    for section in ("ASR", "LLM", "TTS", "VLLM"):
+        modules = config.get(section)
+        if not isinstance(modules, Mapping):
             continue
-        provider_type = str(provider_config.get("type") or provider_name).casefold()
-        if provider_type != "gemini" and "gemini" not in str(provider_name).casefold():
-            continue
-        if _looks_like_placeholder_api_key(provider_config.get("api_key")):
-            provider_config["api_key"] = live_api_key
+        for name, provider_config in list(modules.items()):
+            if not isinstance(provider_config, Mapping):
+                continue
+            if not _is_gemini_provider(name, provider_config):
+                continue
+            # Mutate in place (provider configs are expected to be dicts after merge).
+            provider_config["api_key"] = canonical
 
 def _apply_google_live_runtime_safety_policy(google_live):
     """Keep manager/private configs from re-enabling unsafe Live interrupts."""
@@ -272,14 +376,37 @@ def _apply_google_live_runtime_safety_policy(google_live):
     google_live["barge_in"] = False
     google_live["interrupt_on_input_while_speaking"] = False
     google_live["drop_input_while_speaking"] = False
-    google_live["interruption_min_output_age_sec"] = 0.0
-    google_live["barge_in_transcript_min_output_age_sec"] = 0.0
     try:
-        waiting_timeout = float(google_live.get("waiting_model_timeout_sec", 3.0))
+        min_output_age = float(google_live.get("interruption_min_output_age_sec", 0.7))
     except (TypeError, ValueError):
-        waiting_timeout = 3.0
-    # Cap at 4.0 so private configs cannot stall listening forever; prefer 3.0.
-    google_live["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 4.0)
+        min_output_age = 0.7
+    # Floor 0.7s: false barge-in cuts clustered under ~0.5s; 1.0s felt laggy.
+    google_live["interruption_min_output_age_sec"] = max(0.7, min(min_output_age, 2.0))
+    try:
+        transcript_min_age = float(
+            google_live.get("barge_in_transcript_min_output_age_sec", 0.6)
+        )
+    except (TypeError, ValueError):
+        transcript_min_age = 0.6
+    google_live["barge_in_transcript_min_output_age_sec"] = max(
+        0.4, min(transcript_min_age, 2.0)
+    )
+    try:
+        mute_after = float(google_live.get("mute_input_after_audio_start_sec", 0.4))
+    except (TypeError, ValueError):
+        mute_after = 0.4
+    google_live["mute_input_after_audio_start_sec"] = max(0.28, min(mute_after, 0.6))
+    try:
+        silence_ms = float(google_live.get("silence_duration_ms", 600))
+    except (TypeError, ValueError):
+        silence_ms = 600.0
+    google_live["silence_duration_ms"] = max(600.0, min(silence_ms, 800.0))
+    try:
+        waiting_timeout = float(google_live.get("waiting_model_timeout_sec", 5.0))
+    except (TypeError, ValueError):
+        waiting_timeout = 5.0
+    # Cap at 6.0 so private configs cannot stall forever; prefer ~5s for first audio.
+    google_live["waiting_model_timeout_sec"] = min(max(0.0, waiting_timeout), 6.0)
     google_live["echo_bypass_interrupt_enabled"] = False
     google_live["server_side_vad_enabled"] = True
     google_live["aec_enabled"] = True
@@ -635,6 +762,51 @@ def _assert_production_google_live_aec_ready(config):
         reason = processor.reason or "unknown"
         raise RuntimeError(f"production boot requires active AEC; bypassed={reason}")
 
+_LOCAL_LESSON_ASSET_PACK_KEYS = (
+    "asset_delivery_mode",
+    "sd_asset_pack_enabled",
+    "asset_public_base_url",
+    "asset_public_base",
+    "asset_pack_local_root",
+    "asset_pack_mount_root",
+    "asset_cache_root",
+    "asset_origin_base",
+)
+
+
+def _merge_local_lesson_asset_pack_settings(api_config, local_config):
+    """Overlay local lesson asset-pack settings onto manager-api config.
+
+    Manager-api is the voice/agent source of truth, but lesson SD pack delivery is
+    an ops/runtime concern often configured only via data/.config.yaml or env.
+    Without this merge, fan-out reports ``sd_pack_disabled`` even when local YAML
+    has ``asset_delivery_mode: sd_pack``.
+    """
+    if not isinstance(api_config, Mapping):
+        return api_config
+    local_lesson = local_config.get("lesson") if isinstance(local_config, Mapping) else None
+    if not isinstance(local_lesson, Mapping):
+        return api_config
+
+    api_lesson = api_config.get("lesson")
+    if not isinstance(api_lesson, Mapping):
+        api_lesson = {}
+        api_config["lesson"] = api_lesson
+    elif not isinstance(api_lesson, dict):
+        api_lesson = dict(api_lesson)
+        api_config["lesson"] = api_lesson
+
+    for key in _LOCAL_LESSON_ASSET_PACK_KEYS:
+        if key not in local_lesson:
+            continue
+        value = local_lesson.get(key)
+        if value is None or value == "":
+            continue
+        # Local/ops value wins for pack delivery knobs (API rarely sets them).
+        api_lesson[key] = value
+    return api_config
+
+
 def _apply_server_endpoint_env_overrides(config):
     """Let Docker/.env repair public OTA endpoints without editing volumes."""
     if not isinstance(config, Mapping):
@@ -804,6 +976,10 @@ async def get_config_from_api_async(config):
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
     config_data = _apply_base_google_live_policy(config_data, config)
+    # Manager-api payloads often omit lesson SD-pack / public asset knobs. Preserve
+    # local data/.config.yaml (and later env overrides) so production lab/prod can
+    # enable sd_pack + correct asset_public_base_url without forking the API config.
+    config_data = _merge_local_lesson_asset_pack_settings(config_data, config)
     config_data = _apply_server_endpoint_env_overrides(config_data)
     config_data = normalize_voice_config(config_data)
     _assert_production_boot_safe(config_data)

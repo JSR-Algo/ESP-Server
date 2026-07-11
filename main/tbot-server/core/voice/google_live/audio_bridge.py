@@ -330,10 +330,12 @@ class GoogleLiveAudioBridge:
                 self._clear_lesson_prompt_output_gate()
                 return True
             flushed_packets = await self._flush_output_audio()
+            chunks = self._output_chunk_count
+            byte_count = self._output_byte_count
             self.logger.bind(tag="GoogleLive").info(
                 "Google Live audio_end chunks={} bytes={} flushed_packets={}",
-                self._output_chunk_count,
-                self._output_byte_count,
+                chunks,
+                byte_count,
                 flushed_packets,
             )
             self._output_chunk_count = 0
@@ -341,7 +343,19 @@ class GoogleLiveAudioBridge:
             self.conn.google_live_audio_out_started_at = None
             self._active_response_id = None
             await self._send_tts_message("stop")
-            self._clear_lesson_prompt_output_gate()
+            # Lesson step prompts can span multiple Live turn segments (e.g. a
+            # short filler "Tuyệt vời!" then the real greeting). Clearing the
+            # gate on the first audio_end drops the introduction audio with
+            # reason=lesson_mode_model_output. Keep the gate open and let
+            # wait_lesson_step_prompt_idle close it via inferred idle / timeout.
+            if self._is_lesson_prompt_output_allowed():
+                self.logger.bind(tag="GoogleLive").info(
+                    "Google Live lesson_prompt_audio_end_keep_gate chunks={} bytes={}",
+                    chunks,
+                    byte_count,
+                )
+            else:
+                self._clear_lesson_prompt_output_gate()
             return True
 
         if event_type == "tool_call":
@@ -378,8 +392,17 @@ class GoogleLiveAudioBridge:
 
         if event_type == "interruption":
             if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+                # Live already stopped generation. Do not tts:stop (keeps gate path),
+                # but request a prompt resend so introduction is not silently dropped.
+                had_audio = (
+                    getattr(self.conn, "google_live_audio_out_started_at", None) is not None
+                    or self._output_chunk_count > 0
+                    or self._output_byte_count > 0
+                )
+                self.conn.google_live_lesson_prompt_needs_resend = True
                 self.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_interruption_ignored"
+                    "Google Live lesson_prompt_interruption_ignored had_audio={} resend=1",
+                    int(bool(had_audio)),
                 )
                 return True
             if self._server_side_interruptions_disabled():
@@ -1039,14 +1062,14 @@ class GoogleLiveAudioBridge:
     def _encode_output_audio(self, audio_bytes, mime_type=None):
         source_rate = self._extract_sample_rate_from_mime(mime_type)
         target_rate = int(getattr(self.conn, "sample_rate", 24000))
-        # Push the reference signal into the AEC stage BEFORE encoding so
-        # the mic-side echo cancellation has up-to-date far-end audio. We
-        # resample the model output once more to the AEC sample rate
-        # because mic processing happens after the input-side resample.
-        self._push_aec_reference(audio_bytes, source_rate)
         pcm_bytes = self._resample_pcm16(
             audio_bytes, source_rate, target_rate, direction="output"
         )
+        # Boost after resample so AEC reference matches what the robot plays.
+        pcm_bytes = self._apply_output_gain(pcm_bytes)
+        # Push the reference signal into the AEC stage BEFORE encoding so
+        # the mic-side echo cancellation has up-to-date far-end audio.
+        self._push_aec_reference(pcm_bytes, target_rate)
         packets = []
         self._get_output_encoder(target_rate).encode_pcm_to_opus_stream(
             pcm_bytes,
@@ -1538,6 +1561,29 @@ class GoogleLiveAudioBridge:
         if gain <= 0 or gain == 1.0:
             return pcm_bytes
         return audioop.mul(pcm_bytes, 2, gain)
+
+    def _apply_output_gain(self, pcm_bytes):
+        """Raise Live/TTS level so device volume=100 can sound near max speaker.
+
+        Device volume control alone is not enough: ESP codec maps 100→~0 dB
+        while Google Live PCM is often well below full scale.
+        """
+        if not pcm_bytes:
+            return pcm_bytes
+        client_config = self._google_live_config()
+        try:
+            gain = float(client_config.get("output_gain", 1.0))
+        except (TypeError, ValueError):
+            gain = 1.0
+        if gain <= 0 or abs(gain - 1.0) < 1e-6:
+            return pcm_bytes
+        # Clamp extremes; >4x is almost always clipping on 16-bit TTS peaks.
+        if gain > 4.0:
+            gain = 4.0
+        try:
+            return audioop.mul(pcm_bytes, 2, gain)
+        except Exception:
+            return pcm_bytes
 
     def _push_aec_reference(self, pcm_bytes, source_rate):
         if (

@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Set
 from urllib.parse import quote
 
 from core.utils.util import get_vision_url
@@ -65,7 +65,11 @@ def cached_asset_packs(config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
             }
 
 
-async def sync_cached_lesson_assets_to_sd(conn: Any) -> Dict[str, Any]:
+async def sync_cached_lesson_assets_to_sd(
+    conn: Any,
+    *,
+    only_cache_keys: Optional[set] = None,
+) -> Dict[str, Any]:
     config = getattr(conn, "config", {}) or {}
     if not _sd_pack_enabled(config):
         return {"skipped": "sd_pack_disabled"}
@@ -77,6 +81,12 @@ async def sync_cached_lesson_assets_to_sd(conn: Any) -> Dict[str, Any]:
         return {"skipped": "mcp_not_ready"}
     synced = failed = 0
     packs = list(cached_asset_packs(config))
+    if only_cache_keys is not None and len(only_cache_keys) > 0:
+        packs = [
+            pack
+            for pack in packs
+            if str(pack.get("cacheKey") or "") in only_cache_keys
+        ]
     for pack in packs:
         try:
             result = await call_sd_pack_sync_tool(conn, mcp_client, pack)

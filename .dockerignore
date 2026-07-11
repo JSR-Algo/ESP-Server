@@ -14,6 +14,8 @@ data/
 **/target
 !main/manager-web/dist/
 !main/manager-web/dist/**
+!main/manager-mobile/dist/
+!main/manager-mobile/dist/**
 !main/manager-api/target/
 !main/manager-api/target/tbot-esp32-api.jar
 **/.webpack_cache

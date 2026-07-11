@@ -94,36 +94,40 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(merged["google_live"]["language_code"], "vi-VN")
         self.assertEqual(merged["google_live"]["interrupt_policy"], "wake_or_transcript")
         self.assertFalse(merged["google_live"]["raw_audio_barge_in_enabled"])
-        self.assertEqual(merged["google_live"]["input_flush_delay_sec"], 0.8)
-        self.assertEqual(merged["google_live"]["conversation_input_flush_delay_sec"], 0.18)
-        self.assertEqual(merged["google_live"]["input_speech_tail_ms"], 600)
-        self.assertEqual(merged["google_live"]["conversation_input_speech_tail_ms"], 180)
-        self.assertEqual(merged["google_live"]["input_min_capture_ms"], 250)
+        self.assertEqual(merged["google_live"]["input_flush_delay_sec"], 0.75)
+        self.assertEqual(merged["google_live"]["conversation_input_flush_delay_sec"], 0.36)
+        self.assertEqual(merged["google_live"]["input_speech_tail_ms"], 650)
+        self.assertEqual(merged["google_live"]["conversation_input_speech_tail_ms"], 360)
+        self.assertEqual(merged["google_live"]["lesson_child_input_speech_tail_ms"], 280)
+        self.assertEqual(merged["google_live"]["lesson_child_input_flush_delay_sec"], 0.32)
+        self.assertEqual(merged["google_live"]["lesson_child_response_window_sec"], 22.0)
+        self.assertEqual(merged["google_live"]["input_min_capture_ms"], 280)
         self.assertEqual(merged["google_live"]["input_max_capture_ms"], 8000)
-        self.assertEqual(merged["google_live"]["conversation_input_max_capture_ms"], 4000)
-        self.assertEqual(merged["google_live"]["input_speech_rms_threshold"], 900)
+        self.assertEqual(merged["google_live"]["conversation_input_max_capture_ms"], 5000)
+        self.assertEqual(merged["google_live"]["input_speech_rms_threshold"], 650)
         self.assertEqual(merged["google_live"]["lesson_child_input_speech_rms_threshold"], 2000)
-        self.assertEqual(merged["google_live"]["input_gain"], 2.8)
-        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 3.0)
+        self.assertEqual(merged["google_live"]["input_gain"], 3.5)
+        self.assertEqual(merged["google_live"]["output_gain"], 1.35)
+        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 5.0)
         self.assertEqual(merged["google_live"]["waiting_model_retry_prompt_after_sec"], 12.0)
-        self.assertEqual(merged["google_live"]["lesson_prompt_output_guard_timeout_sec"], 30.0)
-        self.assertEqual(merged["google_live"]["lesson_prompt_playback_guard_timeout_sec"], 12.0)
+        self.assertEqual(merged["google_live"]["lesson_prompt_output_guard_timeout_sec"], 10.0)
+        self.assertEqual(merged["google_live"]["lesson_prompt_playback_guard_timeout_sec"], 6.0)
         self.assertEqual(merged["google_live"]["interrupt_rms_threshold"], 5000)
         self.assertEqual(
             merged["google_live"]["interrupt_min_input_duration_sec"],
             0.42,
         )
         self.assertEqual(merged["google_live"]["interrupt_min_output_age_sec"], 0.25)
-        self.assertEqual(merged["google_live"]["interruption_min_output_age_sec"], 0.0)
+        self.assertEqual(merged["google_live"]["interruption_min_output_age_sec"], 0.7)
         self.assertFalse(merged["google_live"]["interrupt_on_input_while_speaking"])
         self.assertFalse(merged["google_live"]["drop_input_while_speaking"])
         self.assertFalse(merged["google_live"]["barge_in"])
         self.assertTrue(merged["google_live"]["music_auto_pause_on_user_speech"])
-        self.assertEqual(merged["google_live"]["echo_tail_suppression_ms"], 550)
+        self.assertEqual(merged["google_live"]["echo_tail_suppression_ms"], 500)
         self.assertEqual(merged["google_live"]["echo_tail_extend_rms_threshold"], 700)
-        self.assertEqual(merged["google_live"]["echo_tail_extend_ms"], 350)
-        self.assertEqual(merged["google_live"]["echo_tail_max_total_ms"], 1400)
-        self.assertEqual(merged["google_live"]["mute_input_after_audio_start_sec"], 0.28)
+        self.assertEqual(merged["google_live"]["echo_tail_extend_ms"], 300)
+        self.assertEqual(merged["google_live"]["echo_tail_max_total_ms"], 1200)
+        self.assertEqual(merged["google_live"]["mute_input_after_audio_start_sec"], 0.4)
         self.assertEqual(merged["google_live"]["interrupt_replay_buffer_ms"], 900)
         self.assertEqual(merged["google_live"]["reconnect_buffer_ms"], 2000)
         # PR4 P4.5: tuned defaults per baseline data (max echo RMS 8310).
@@ -135,7 +139,7 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(merged["google_live"]["barge_in_min_output_age_sec"], 0.25)
         self.assertEqual(
             merged["google_live"]["barge_in_transcript_min_output_age_sec"],
-            0.0,
+            0.6,
         )
         self.assertFalse(merged["google_live"]["disable_server_side_interruptions"])
         self.assertEqual(
@@ -168,33 +172,36 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertFalse(google_live["echo_bypass_interrupt_enabled"])
         self.assertTrue(google_live["suppress_robot_output_echo"])
         self.assertTrue(google_live["music_auto_pause_on_user_speech"])
-        self.assertEqual(google_live["echo_tail_suppression_ms"], 550)
+        self.assertEqual(google_live["echo_tail_suppression_ms"], 500)
         self.assertEqual(google_live["echo_tail_extend_rms_threshold"], 700)
-        self.assertEqual(google_live["echo_tail_extend_ms"], 350)
-        self.assertEqual(google_live["echo_tail_max_total_ms"], 1400)
-        self.assertEqual(google_live["mute_input_after_audio_start_sec"], 0.28)
+        self.assertEqual(google_live["echo_tail_extend_ms"], 300)
+        self.assertEqual(google_live["echo_tail_max_total_ms"], 1200)
+        self.assertEqual(google_live["mute_input_after_audio_start_sec"], 0.4)
         # Tuned up from the 1.0 code default (child-speech capture fix); must stay
         # >= input_speech_tail_ms so the idle safety-net doesn't re-cut a paused child.
-        self.assertEqual(google_live["input_flush_delay_sec"], 0.8)
-        self.assertEqual(google_live["conversation_input_flush_delay_sec"], 0.18)
-        self.assertEqual(google_live["waiting_model_timeout_sec"], 3.0)
-        self.assertEqual(google_live["interruption_min_output_age_sec"], 0.0)
-        self.assertEqual(google_live["barge_in_transcript_min_output_age_sec"], 0.0)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_flush_delay_sec"], 0.8)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_flush_delay_sec"], 0.18)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_tail_ms"], 600)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_speech_tail_ms"], 180)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_min_capture_ms"], 250)
+        self.assertEqual(google_live["input_flush_delay_sec"], 0.75)
+        self.assertEqual(google_live["conversation_input_flush_delay_sec"], 0.36)
+        self.assertEqual(google_live["waiting_model_timeout_sec"], 5.0)
+        self.assertEqual(google_live["interruption_min_output_age_sec"], 0.7)
+        self.assertEqual(google_live["barge_in_transcript_min_output_age_sec"], 0.6)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_flush_delay_sec"], 0.75)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_flush_delay_sec"], 0.36)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_tail_ms"], 650)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_speech_tail_ms"], 360)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["lesson_child_input_speech_tail_ms"], 280)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["lesson_child_response_window_sec"], 22.0)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_min_capture_ms"], 280)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_max_capture_ms"], 8000)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_max_capture_ms"], 4000)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_rms_threshold"], 900)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["conversation_input_max_capture_ms"], 5000)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_speech_rms_threshold"], 650)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["lesson_child_input_speech_rms_threshold"], 2000)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_gain"], 2.8)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 3.0)
-        self.assertEqual(GOOGLE_LIVE_DEFAULTS["interruption_min_output_age_sec"], 0.0)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_gain"], 3.5)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["output_gain"], 1.35)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 5.0)
+        self.assertEqual(GOOGLE_LIVE_DEFAULTS["interruption_min_output_age_sec"], 0.7)
         self.assertEqual(
             GOOGLE_LIVE_DEFAULTS["barge_in_transcript_min_output_age_sec"],
-            0.0,
+            0.6,
         )
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["raw_audio_barge_in_enabled"])
         self.assertFalse(GOOGLE_LIVE_DEFAULTS["disable_server_side_interruptions"])
@@ -250,14 +257,15 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
             "START_OF_ACTIVITY_INTERRUPTS",
         )
         self.assertTrue(merged["google_live"]["server_side_vad_enabled"])
-        self.assertEqual(merged["google_live"]["interruption_min_output_age_sec"], 0.0)
+        # Floor protects first ~0.7s; private 2.0 stays within [0.7, 2.0].
+        self.assertEqual(merged["google_live"]["interruption_min_output_age_sec"], 2.0)
         self.assertEqual(
             merged["google_live"]["barge_in_transcript_min_output_age_sec"],
-            0.0,
+            2.0,
         )
-        # Runtime policy caps oversized private-config values at 4.0s (not the
-        # preferred 3.0 default) so a bad agent config cannot stall forever.
-        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 4.0)
+        # Runtime policy caps oversized private-config values at 6.0s so a bad
+        # agent config cannot stall forever (preferred default is 5.0).
+        self.assertEqual(merged["google_live"]["waiting_model_timeout_sec"], 6.0)
         self.assertEqual(
             merged["google_live"]["voice_name"],
             DEFAULT_GOOGLE_LIVE_VOICE_NAME,

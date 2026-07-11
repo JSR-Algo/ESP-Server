@@ -15,9 +15,17 @@ java -jar /app/tbot-esp32-api.jar \
 : "${NESTJS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"
 : "${NESTJS_UPSTREAM_SCHEME:=https}"
 : "${NESTJS_TOKEN:=}"
+# Only emit "Bearer …" when a shared token is configured. An empty "Bearer " header
+# is treated as missing auth by NestJS and confuses debugging.
+NESTJS_AUTH_HEADER=""
+if [ -n "${NESTJS_TOKEN}" ]; then
+  NESTJS_AUTH_HEADER="Bearer ${NESTJS_TOKEN}"
+fi
+# Escape sed replacement metacharacters in the token header (&, \, |).
+NESTJS_AUTH_HEADER_ESCAPED=$(printf '%s' "${NESTJS_AUTH_HEADER}" | sed -e 's/[&|\\]/\\&/g')
 sed -e "s|__NESTJS_UPSTREAM_HOST__|${NESTJS_UPSTREAM_HOST}|g" \
     -e "s|__NESTJS_UPSTREAM_SCHEME__|${NESTJS_UPSTREAM_SCHEME}|g" \
-    -e "s|__NESTJS_TOKEN__|${NESTJS_TOKEN}|g" \
+    -e "s|__NESTJS_AUTH_HEADER__|${NESTJS_AUTH_HEADER_ESCAPED}|g" \
     /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 # 启动Nginx（前台运行保持容器存活）

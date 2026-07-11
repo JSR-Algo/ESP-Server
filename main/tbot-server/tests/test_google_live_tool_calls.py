@@ -991,10 +991,8 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(handler.calls[-1], {"name": "start_lesson", "arguments": {}})
         self.assertNotIn("bắt đầu bài học", provider._client.sent_texts)
-        self.assertEqual(
-            provider._client.sent_texts,
-            [LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé."],
-        )
+        # Success path stays silent so sample s1 greeting is the introduction.
+        self.assertEqual(provider._client.sent_texts, [])
 
     async def test_user_transcript_wake_as_i_spy_opens_listening_window_not_chat(self):
         provider, handler = self._make_provider()

@@ -1168,7 +1168,7 @@ export default {
   'roleConfig.voiceMode': 'Chế độ giọng nói',
   'roleConfig.classicPipeline': 'Pipeline cổ điển',
   'roleConfig.googleLiveApi': 'Google Live API',
-  'roleConfig.googleLiveApiKey': 'API key Google Live',
+  'roleConfig.googleLiveApiKey': 'API key Gemini (duy nhất cho Live/ASR/LLM/TTS)',
   'roleConfig.googleLiveModel': 'Model Google Live',
   'roleConfig.googleLiveVoiceName': 'Tên giọng Google Live',
   'roleConfig.googleLiveConnectTimeoutSec': 'Timeout kết nối (giây)',

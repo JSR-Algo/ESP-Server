@@ -746,10 +746,10 @@ class ConnectionHandler:
             google_cfg = self.config.get("google_live", {}) if isinstance(self.config, dict) else {}
             if not isinstance(google_cfg, dict):
                 google_cfg = {}
-            timeout = google_cfg.get("idle_timeout_sec", 45)
+            timeout = google_cfg.get("idle_timeout_sec", 900)
         timeout = _float_or_none(timeout)
         if timeout is None:
-            timeout = 45.0
+            timeout = 900.0
         now = time.monotonic() if now is None else float(now)
         last_activity = self.last_live_activity_at
         if last_activity is None:

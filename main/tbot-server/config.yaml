@@ -91,7 +91,7 @@ log:
 # Delete audio file after use(Delete the sound file when you are done using it)
 delete_audio: true
 # Disconnect duration after no voice input(Seconds)，Default 2 minutes (120 seconds)
-close_connection_no_voice_time: 120
+close_connection_no_voice_time: 900
 # TTSRequest timeout(Seconds)
 tts_timeout: 10
 # Tool call timeout(Seconds)
@@ -153,39 +153,46 @@ google_live:
   disable_server_side_interruptions: false
   activity_handling: START_OF_ACTIVITY_INTERRUPTS
   turn_coverage: TURN_INCLUDES_ALL_INPUT
-  # Start low to ignore room noise; end HIGH so turn closes faster (lab latency).
+  # Start low to ignore room noise; end LOW so short pauses do not cut Vietnamese turns.
   start_of_speech_sensitivity: START_SENSITIVITY_LOW
-  end_of_speech_sensitivity: END_SENSITIVITY_HIGH
-  prefix_padding_ms: 200
-  # Keep input_speech_tail_ms >= this (lesson coupling); lower = snappier turn-close.
-  silence_duration_ms: 500
+  end_of_speech_sensitivity: END_SENSITIVITY_LOW
+  prefix_padding_ms: 250
+  # Keep input_speech_tail_ms >= this (lesson coupling).
+  # 600ms: complete enough for VN phrases, snappier model turn-around than 700.
+  silence_duration_ms: 650
   log_audio_diagnostics: true
   connect_timeout_sec: 10
   recv_timeout_sec: 60
   interrupt_policy: wake_or_transcript
   raw_audio_barge_in_enabled: false
-  # ── Child-speech capture tuning ("robot can't hear the child / con nói lại") ──
-  # Lesson keeps longer tails so a child pause does not cut the answer early.
-  # Conversation uses the faster conversation_* knobs below for snappier reply.
+  # ── Capture tuning: prefer complete phrases over ultra-low latency ──
   # COUPLING: input_speech_tail_ms >= silence_duration_ms and
   # input_flush_delay_sec >= input_speech_tail_ms/1000.
-  input_flush_delay_sec: 0.8
-  # Faster normal conversation turn-close (first reply after wake).
-  conversation_input_flush_delay_sec: 0.18
-  input_speech_tail_ms: 600
-  conversation_input_speech_tail_ms: 180
-  input_min_capture_ms: 250
+  input_flush_delay_sec: 0.75
+  # Chat: keep phrases whole enough for STT (too short → AI understands wrong).
+  conversation_input_flush_delay_sec: 0.36
+  input_speech_tail_ms: 650
+  conversation_input_speech_tail_ms: 360
+  input_min_capture_ms: 280
   input_max_capture_ms: 8000
-  conversation_input_max_capture_ms: 4000
-  # Higher floor drops ambient office noise that was STT'd as garbage Vietnamese.
-  input_speech_rms_threshold: 900
+  conversation_input_max_capture_ms: 5000
+  # Interactive lesson say-it: single-word answers finalize faster.
+  lesson_child_input_speech_tail_ms: 280
+  lesson_child_input_flush_delay_sec: 0.32
+  lesson_child_input_max_capture_ms: 4000
+  # Child-answer window after question TTS.
+  lesson_child_response_window_sec: 22.0
+  lesson_child_response_open_delay_sec: 0.1
+  lesson_child_response_fast_reopen_sec: 0.8
+  lesson_prompt_playback_tail_sec: 0.5
+  # Soft speech still starts a turn; ambient under ~650 stays out.
+  input_speech_rms_threshold: 650
   lesson_child_input_speech_rms_threshold: 2000
-  # Lower gain reduces speaker->mic residual that feeds monologue loops.
-  input_gain: 2.8
-  # Hold a pending Live turn long enough for real first audio before reopening
-  # the mic. Too low makes the UI look like listening while Gemini is still
-  # preparing audio and stacks ambient-noise turns.
-  waiting_model_timeout_sec: 3.0
+  input_gain: 3.5
+  # Boost model→robot PCM. Keep moderate — 2.0 caused clipping/distortion on lab robots.
+  output_gain: 1.35
+  # Wait for tool+first audio; agent must not force this below 5s.
+  waiting_model_timeout_sec: 5.0
   waiting_model_retry_prompt_after_sec: 12.0
   live_open_timeout_sec: 12.0
   # Pre-open Live on connect/wake so first utterance skips cold-connect latency.
@@ -194,7 +201,15 @@ google_live:
   prewarm_live_on_wake: true
   wake_greeting_enabled: true
   wake_greeting_text: "Dạ, mình nghe đây ạ."
-  idle_timeout_sec: 180
+  # Short protect so the user can talk right after the greeting; strong speech can release early.
+  wake_greeting_protect_sec: 1.1
+  # After robot finishes speaking, ignore residual/echo briefly so next user turn is clean.
+  post_reply_hold_sec: 0.55
+  # Keep Google Live open through long multi-turn chats (15 minutes of silence).
+  idle_timeout_sec: 900
+  # After wake/listen, stay in continuous talk without forcing another Hi ESP.
+  wake_audio_allow_window_sec: 900
+  conversation_audio_allow_window_sec: 900
   wake_transcript_tail_suppress_sec: 0.15
   # Hard-cap fallback if speech-aware finalisation never satisfies its
   # invariants (e.g. mic stays loud forever). Lower = faster stop, but
@@ -223,20 +238,20 @@ google_live:
   # Transcript barge-in stays enabled as the safe Live-recognized speech gate.
   barge_in_via_transcript: true
   barge_in_transcript_min_chars: 4
-  barge_in_transcript_min_output_age_sec: 0.0
+  barge_in_transcript_min_output_age_sec: 0.6
   drop_input_while_speaking: false
   interrupt_min_output_age_sec: 0.25
-  interruption_min_output_age_sec: 0.0
-  interrupt_suppress_audio_sec: 0.25
-  mute_input_after_audio_start_sec: 0.28
+  # Protect first ~0.7s of robot speech (cuts clustered at <0.5s; 1.0 felt laggy).
+  interruption_min_output_age_sec: 0.7
+  interrupt_suppress_audio_sec: 0.28
+  mute_input_after_audio_start_sec: 0.4
   # Post-tts residual gate + adaptive extend while speaker energy remains.
-  echo_tail_suppression_ms: 550
+  echo_tail_suppression_ms: 500
   echo_tail_extend_rms_threshold: 700
-  echo_tail_extend_ms: 350
-  echo_tail_max_total_ms: 1400
-  echo_tail_audible_ms: 400
+  echo_tail_extend_ms: 300
+  echo_tail_max_total_ms: 1200
+  echo_tail_audible_ms: 350
   suppress_robot_output_echo: true
-  wake_audio_allow_window_sec: 15.0
   # Thresholds kept for rollback; production forces echo_bypass_interrupt_enabled=false.
   robot_output_echo_bypass_rms_threshold: 650
   robot_output_echo_bypass_min_duration_sec: 0.06
@@ -316,12 +331,21 @@ plugins:
   get_news_from_newsnow:
     url: "https://newsnow.busiyi.world/api/s?id="
     news_sources: "BBC;Reuters;TechCrunch"
-  # Web search plugin config.
-  # Supported providers: metaso / tavily.
+  # Web search plugin (child-safe). Works WITHOUT any API key by default via
+  # DuckDuckGo Instant Answer + Wikipedia. Optional paid: metaso / tavily when
+  # api_key (or metaso_api_key / tavily_api_key) is set.
+  # provider: free | auto | duckduckgo | wikipedia | metaso | tavily
   web_search:
-    provider: "metaso"
-    description: "Search the web when the user explicitly needs current online information."
-    max_results: 5
+    provider: "free"
+    description: "Child-safe web search for learning facts and current kid-appropriate info."
+    max_results: 4
+    timeout_sec: 12
+    # Prefer Vietnamese Wikipedia when the child asks in Vietnamese.
+    language: "vi"
+    fallback_providers:
+      - duckduckgo
+      - wikipedia
+    # Optional only — leave empty for fully keyless search.
     api_key: ${TBOT_PLUGINS_WEB_SEARCH_API_KEY:}
   home_assistant:
     devices:
@@ -437,6 +461,9 @@ lesson:
   # through Google Live child-response windows.
   sample_lesson: true
   sample_mode: interactive
+  # Default child quiet-window when a step omits responseTimeoutSec (sample overrides).
+  child_response_timeout_sec: 12.0
+  max_no_answer_attempts: 2
   api_base: "https://tbot-backend-8wmh.onrender.com/v1"
   # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim
   # Device-renderer profile gate: profiles this firmware can actually render. Current

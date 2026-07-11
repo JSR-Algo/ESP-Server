@@ -18,6 +18,8 @@ class DeviceProfileMigrationTest {
 
     private static final Path MIGRATION = Path.of(
             "src/main/resources/db/changelog/202606191145.sql");
+    private static final Path MASTER = Path.of(
+            "src/main/resources/db/changelog/db.changelog-master.yaml");
 
     @Test
     @DisplayName("device child-profile migration adds expected columns in idempotent guarded blocks")
@@ -44,6 +46,20 @@ class DeviceProfileMigrationTest {
         assertEquals(4, count(sql, "PREPARE stmt FROM @sql;"));
         assertEquals(4, count(sql, "EXECUTE stmt;"));
         assertEquals(4, count(sql, "DEALLOCATE PREPARE stmt;"));
+    }
+
+    @Test
+    @DisplayName("device child-profile migration is registered in liquibase master changelog")
+    void deviceChildProfileMigrationIsRegisteredInMasterChangelog() throws IOException {
+        String master = Files.readString(MASTER, StandardCharsets.UTF_8);
+        // Entity fields must never ship without a master-registered changeset, or
+        // MyBatis SELECT lists fail with "Unknown column 'child_interests'".
+        assertTrue(master.contains("id: 202606191145"),
+                "changeSet id 202606191145 must be registered");
+        assertTrue(master.contains("classpath:db/changelog/202606191145.sql"),
+                "sqlFile path for 202606191145 must be registered");
+        assertTrue(master.indexOf("id: 202606191030") < master.indexOf("id: 202606191145"),
+                "202606191145 must run after 202606191030 (child_name/child_age)");
     }
 
     private static int count(String source, String needle) {

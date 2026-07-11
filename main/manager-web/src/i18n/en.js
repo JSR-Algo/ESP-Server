@@ -1168,7 +1168,7 @@ export default {
   'roleConfig.voiceMode': 'Voice Mode',
   'roleConfig.classicPipeline': 'Classic Pipeline',
   'roleConfig.googleLiveApi': 'Google Live API',
-  'roleConfig.googleLiveApiKey': 'Google Live API Key',
+  'roleConfig.googleLiveApiKey': 'Gemini API Key (single key for Live/ASR/LLM/TTS)',
   'roleConfig.googleLiveModel': 'Google Live Model',
   'roleConfig.googleLiveVoiceName': 'Google Live Voice Name',
   'roleConfig.googleLiveConnectTimeoutSec': 'Connect Timeout (sec)',

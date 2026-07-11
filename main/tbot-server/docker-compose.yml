@@ -14,6 +14,10 @@ services:
       - COURSE_BACKEND_URL=${COURSE_BACKEND_URL:-}
       - LESSON_ASSET_ORIGIN_BASE=${LESSON_ASSET_ORIGIN_BASE:-}
       - TBOT_DEVICE_MINT_SECRET=${TBOT_DEVICE_MINT_SECRET:-}
+      # Public base robots use to download lesson packs (must match real cache bytes).
+      - LESSON_ASSET_PUBLIC_BASE_URL=${LESSON_ASSET_PUBLIC_BASE_URL:-}
+      - LESSON_ASSET_DELIVERY_MODE=${LESSON_ASSET_DELIVERY_MODE:-}
+      - LESSON_SD_FANOUT_CONCURRENCY=${LESSON_SD_FANOUT_CONCURRENCY:-4}
       # Built-in interactive "say the word" speaking lesson (start_lesson loads it with
       # no backend assignment). Defaults match config.yaml so Docker does not silently
       # disable the spoken sample flow.

@@ -1380,7 +1380,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = _Bridge()
         provider._bridge.rms = 2200
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
-        provider._waiting_model_since = time.monotonic() - 2.0
+        # Must exceed _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC (2.8s) so residual noise
+        # does not reopen mid-reply, but intentional loud retry still recovers.
+        provider._waiting_model_since = time.monotonic() - 3.2
         provider._schedule_waiting_model_timeout_task()
 
         handled = await provider.handle_audio_bytes(b"bat-dau-bai-hoc")
@@ -1412,7 +1414,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = _Bridge()
         provider._bridge.rms = 1800
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
-        provider._waiting_model_since = time.monotonic() - 2.0
+        provider._waiting_model_since = time.monotonic() - 3.2
         original_product_tool_names = google_live_module.product_tool_names
         google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
         try:
@@ -1445,13 +1447,13 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = _Bridge()
         provider._bridge.rms = 1800
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
-        provider._waiting_model_since = time.monotonic() - 2.0
+        provider._waiting_model_since = time.monotonic() - 3.2
         original_product_tool_names = google_live_module.product_tool_names
         google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
         try:
             self.assertTrue(await provider.handle_audio_bytes(b"first"))
             await asyncio.sleep(0.05)
-            provider._waiting_model_since = time.monotonic() - 2.0
+            provider._waiting_model_since = time.monotonic() - 3.2
             self.assertTrue(await provider.handle_audio_bytes(b"second"))
             await asyncio.sleep(0.05)
         finally:
@@ -1558,16 +1560,32 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn = _Conn()
         provider = self.make_provider(conn)
 
-        self.assertEqual(provider._get_input_flush_delay(), 0.18)
-        self.assertEqual(provider._get_user_speech_tail_sec(), 0.18)
-        self.assertEqual(provider._get_user_max_capture_sec(), 4.0)
+        self.assertEqual(provider._get_input_flush_delay(), 0.36)
+        self.assertEqual(provider._get_user_speech_tail_sec(), 0.36)
+        self.assertEqual(provider._get_user_max_capture_sec(), 5.0)
 
         conn.session_mode = SessionMode.LESSON
         conn.lesson_runtime = SimpleNamespace(state="RUNNING")
 
-        self.assertEqual(provider._get_input_flush_delay(), 0.8)
-        self.assertEqual(provider._get_user_speech_tail_sec(), 0.6)
+        self.assertEqual(provider._get_input_flush_delay(), 0.75)
+        self.assertEqual(provider._get_user_speech_tail_sec(), 0.65)
         self.assertEqual(provider._get_user_max_capture_sec(), 8.0)
+
+        # Say-it child window uses shorter single-word finalization than passive lesson.
+        async def _on_child_response(_text, **_kwargs):
+            return True
+
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            _child_response_window_open=True,
+            _step_passive=False,
+            _step_acked=True,
+            _step_completed=False,
+            on_child_response=_on_child_response,
+        )
+        self.assertEqual(provider._get_input_flush_delay(), 0.32)
+        self.assertEqual(provider._get_user_speech_tail_sec(), 0.28)
+        self.assertEqual(provider._get_user_max_capture_sec(), 4.0)
 
     async def test_model_audio_end_reopens_input_after_waiting_model(self):
         conn = _Conn()
@@ -1947,7 +1965,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = _Bridge()
 
         await provider._finalize_user_audio_input("listen_stop")
-        await asyncio.sleep(4.3)
+        # Default waiting_model_timeout_sec floors to 5.0s in production policy.
+        await asyncio.sleep(5.3)
 
         self.assertEqual(
             provider._interaction.state,
@@ -1977,7 +1996,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._session_generation = 1
 
         with patch.object(google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()):
-            for _ in range(2):
+            for _ in range(google_live_module.GoogleLiveProvider._SILENT_LIVE_REOPEN_TIMEOUTS):
                 provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
                 provider._waiting_model_since = time.monotonic() - 1
                 await provider._release_waiting_model_after_timeout(0)
@@ -2017,7 +2036,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._session_generation = 1
 
         with patch.object(google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()):
-            for _ in range(2):
+            reopen_n = google_live_module.GoogleLiveProvider._SILENT_LIVE_REOPEN_TIMEOUTS
+            for _ in range(reopen_n):
                 provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
                 provider._waiting_model_since = time.monotonic() - 1
                 await provider._release_waiting_model_after_timeout(0)
@@ -2025,7 +2045,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(new_clients), 1)
             first_reopened_client = provider._client
 
-            for _ in range(2):
+            for _ in range(reopen_n):
                 provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
                 provider._waiting_model_since = time.monotonic() - 1
                 await provider._release_waiting_model_after_timeout(0)
@@ -2187,6 +2207,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
             }
         )
         conn.lesson_runtime = SimpleNamespace(
@@ -2224,6 +2247,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "lesson_child_input_speech_rms_threshold": 2000,
             }
         )
@@ -2264,6 +2290,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "lesson_child_input_speech_rms_threshold": 2000,
             }
         )
@@ -2294,6 +2323,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "lesson_child_input_speech_rms_threshold": 2000,
             }
         )
@@ -2325,6 +2357,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "waiting_model_timeout_sec": 0.01,
             }
         )
@@ -2362,6 +2397,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "lesson_child_transcript_timeout_sec": 0.01,
             }
         )
@@ -2403,6 +2441,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "lesson_child_transcript_timeout_sec": 0.01,
             }
         )
@@ -2469,6 +2510,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_speech_tail_ms": 0,
                 "input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_flush_delay_sec": 0.01,
                 "waiting_model_timeout_sec": 0.01,
             }
         )
@@ -2752,6 +2796,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._lesson_start_ack_text(None), "")
         self.assertIn("chưa", provider._lesson_start_ack_text(SimpleNamespace(action=Action.ERROR, response="", result="")))
         self.assertIn("chưa", provider._lesson_start_ack_text(SimpleNamespace(action=Action.RESPONSE, response="", result="failed")))
+        self.assertEqual(
+            provider._lesson_start_ack_text(
+                SimpleNamespace(action=Action.RECORD, response="", result="lesson start scheduled")
+            ),
+            "",
+        )
         self.assertFalse(await provider.speak_lesson_step_prompt("   "))
         self.assertTrue(await provider._send_live_text_ack("hello"))
         provider._client.send_text = lambda _text: (_ for _ in ()).throw(RuntimeError("text failed"))
@@ -3268,8 +3318,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider = self.make_provider(conn)
 
         conn.config["google_live"]["idle_timeout_sec"] = "bad"
-        # Malformed idle falls back to prewarm-aware default (180s keeps Live hot).
-        self.assertEqual(provider._idle_timeout_sec(), 180.0)
+        # Malformed idle falls back to prewarm-aware default (15 min keeps Live hot).
+        self.assertEqual(provider._idle_timeout_sec(), 900.0)
         conn.session_mode = SessionMode.CONVERSATION
         provider._idle_close_task = object()
         provider._schedule_idle_close_task()
@@ -3811,13 +3861,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             "barge_in_transcript_min_output_age_sec": 2.0,
         }
         live_config = GoogleLiveProvider._get_live_config(provider)
-        # Safety policy caps oversized private values at 4.0s (preferred default is 3.0).
-        self.assertEqual(live_config["waiting_model_timeout_sec"], 4.0)
-        self.assertEqual(live_config["interruption_min_output_age_sec"], 0.0)
-        self.assertEqual(live_config["barge_in_transcript_min_output_age_sec"], 0.0)
+        # Safety policy caps oversized private values at 6.0s (preferred default is 5.0).
+        self.assertEqual(live_config["waiting_model_timeout_sec"], 6.0)
+        # Floor 1.0s / cap 2.5s keeps mid-sentence cuts out while allowing real barge-in later.
+        self.assertEqual(live_config["interruption_min_output_age_sec"], 2.0)
+        self.assertEqual(live_config["barge_in_transcript_min_output_age_sec"], 2.0)
 
         provider._get_live_config = lambda: {"wake_audio_allow_window_sec": "bad"}
-        self.assertEqual(provider._get_wake_audio_allow_window_sec(), 15.0)
+        self.assertEqual(provider._get_wake_audio_allow_window_sec(), 900.0)
         self.assertIsNone(provider._classify_lesson_start_intent("không bắt đầu bài học"))
         self.assertIsNone(provider._classify_music_control_intent(""))
         self.assertIsNone(provider._extract_strict_music_title(""))

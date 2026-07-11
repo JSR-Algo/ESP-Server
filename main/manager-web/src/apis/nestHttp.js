@@ -1,7 +1,5 @@
 import { getNestUrl } from './api';
 import RequestService from './httpRequest';
-import Constant from '../utils/constant';
-import { goToPage } from '../utils/index';
 
 /**
  * Shared helpers for talking to the NestJS tbot-backend authoring API
@@ -81,11 +79,10 @@ export function normalizeStepType(raw) {
   };
 }
 
-// Clear the per-user NestJS session token and bounce to the manager-web login,
-// mirroring httpRequest.js's manager-api 401 handling (store clearAuth +
-// goToPage(LOGIN, replace)). Called when the /nestjs AdminSessionGuard rejects an
-// expired/invalid nestjs_session_token with a real HTTP 401. Without this the page
-// keeps an unusable token and every authoring request fails behind a generic toast.
+// Clear the per-user NestJS session token when AdminSessionGuard rejects it
+// (expired/invalid/missing). Do NOT bounce to manager-api login — that logs the
+// operator out of the console even though manager-api auth is still valid.
+// Instead emit a UI event so App.vue can open NestLoginDialog ("Author sign-in").
 // NOTE: we clear localStorage directly (not nestAuth.setNestToken) to avoid a
 // circular import — nestAuth.js already imports from this module.
 export function clearNestSession() {
@@ -94,7 +91,9 @@ export function clearNestSession() {
   } catch (e) {
     /* ignore */
   }
-  goToPage(Constant.PAGE.LOGIN, true);
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('tbot:nest-auth-required'));
+  }
 }
 
 // `handle401` (default true) lets data-fetch callers (nestRequest/nestUpload) opt

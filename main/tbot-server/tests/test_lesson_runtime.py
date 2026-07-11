@@ -7382,10 +7382,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(rt)
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
-        self.assertEqual(
-            provider._client.sent_texts,
-            [LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé."],
-        )
+        # No competing "Bắt đầu bài học nhé" ack — step prompts own the spoken intro.
+        self.assertEqual(provider._client.sent_texts, [])
 
         rt.asset_cache = _FakeAssetCache(ready=True)
         forwarder = _FakeForwarder()
@@ -7436,13 +7434,18 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_step_body["storyText"], "TeeBot and the child visit a barn.")
         self.assertEqual(first_step_body["storyBeat"], {"ask": "What animal do you see?", "waitForChild": True})
         self.assertEqual(first_step_body["vocab"], {"word": "barn", "partOfSpeech": "noun"})
-        lesson_prompt_texts = provider._client.sent_texts[1:]
-        self.assertEqual(len(lesson_prompt_texts), 9)
+        # No schedule-ack TTS; first Live text is the first spoken step prompt.
+        lesson_prompt_texts = list(provider._client.sent_texts)
+        self.assertGreaterEqual(len(lesson_prompt_texts), 9)
         self.assertEqual(
             lesson_prompt_texts[0],
             LESSON_LIVE_TEXT_INSTRUCTION + "What animal do you see?",
         )
         self.assertNotIn("Look at the picture on the screen.", lesson_prompt_texts[0])
+        self.assertNotIn(
+            LESSON_LIVE_TEXT_INSTRUCTION + "Bắt đầu bài học nhé.",
+            lesson_prompt_texts,
+        )
         for prompt in lesson_prompt_texts:
             _assert_guided_speaking_practice_prompt(self, prompt)
         self.assertEqual(len(opened_windows), 5)

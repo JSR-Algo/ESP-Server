@@ -10,7 +10,8 @@ RUN npm run build
 FROM node:20 AS mobile-builder
 WORKDIR /app
 RUN corepack enable
-COPY main/manager-mobile/package.json main/manager-mobile/pnpm-lock.yaml ./
+COPY main/manager-mobile/package.json main/manager-mobile/pnpm-lock.yaml main/manager-mobile/.npmrc ./
+COPY main/manager-mobile/patches ./patches
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile
 COPY main/manager-mobile .
 RUN pnpm build:h5

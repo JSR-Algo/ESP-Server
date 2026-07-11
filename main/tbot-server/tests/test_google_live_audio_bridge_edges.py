@@ -525,6 +525,27 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.input_rms(decoded), 600)
 
+    def test_apply_output_gain_boosts_pcm(self):
+        bridge = self.make_bridge(
+            client=_Client(
+                {
+                    "output_gain": 2.0,
+                    "log_audio_diagnostics": False,
+                }
+            )
+        )
+        # 100 samples of amplitude 1000
+        pcm = (1000).to_bytes(2, "little", signed=True) * 40
+        boosted = bridge._apply_output_gain(pcm)
+        self.assertEqual(bridge.input_rms(boosted), 2000)
+
+    def test_apply_output_gain_default_is_noop(self):
+        bridge = self.make_bridge(
+            client=_Client({"log_audio_diagnostics": False})
+        )
+        pcm = (500).to_bytes(2, "little", signed=True) * 20
+        self.assertEqual(bridge._apply_output_gain(pcm), pcm)
+
     async def test_aec_build_import_and_invalid_numeric_edges(self):
         original_import = builtins.__import__
 

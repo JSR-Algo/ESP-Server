@@ -1101,6 +1101,8 @@ class LessonRuntime:
                 step_id=self._step_id,
                 continue_listening=False,
             )
+            # Let the cheer / end-of-lesson ceremony finish before advancing or stop.
+            await self._wait_lesson_prompt_idle()
         await self._maybe_finish_step()
         return True
 
@@ -1764,7 +1766,12 @@ class LessonRuntime:
         self._close_child_response_window()
         if self._child_response_timeout_count < self._max_child_response_timeouts():
             self._log("info", f"child response inactive; reprompt stepId={step_id}")
-            await self._speak_lesson_prompt_text("Con thử nói lại nhé.", step_id=step_id)
+            reprompt = self._child_response_timeout_reprompt()
+            await self._speak_lesson_prompt_text(
+                reprompt,
+                step_id=step_id,
+                continue_listening=True,
+            )
             if not self._is_active_runtime():
                 return
             await self._open_child_response_window()
@@ -1831,7 +1838,22 @@ class LessonRuntime:
             await self._speak_lesson_prompt_text(
                 success_prompt, step_id=step_id, continue_listening=False
             )
+            await self._wait_lesson_prompt_idle()
         await self._maybe_finish_step()
+
+    def _child_response_timeout_reprompt(self) -> str:
+        """Warm, low-pressure nudge when the child stays quiet after a question."""
+        expected = _coerce_expected_child_responses(self._step)
+        target = expected[0] if expected else ""
+        last_step = self._step_index + 1 >= len(self._steps)
+        if target and last_step:
+            return (
+                f"Không sao, con từ từ nhé. "
+                f"Nhìn hình, nói chậm tên tiếng Anh: {target}."
+            )
+        if target:
+            return f"Không sao, con từ từ nhé. Nói chậm theo mình: {target}."
+        return "Không sao, con từ từ nhé. Thử nói lại khi con sẵn sàng."
 
     def _child_response_window_still_current(
         self,
