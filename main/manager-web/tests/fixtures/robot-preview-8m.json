@@ -1,0 +1,27 @@
+{
+  "stepIndex": 2,
+  "path": "incorrect",
+  "manifest": {
+    "manifestVersion": "teebot-lesson-renderer.v1",
+    "lessonId": "eight-minute-ocean",
+    "lessonVersion": 2,
+    "profile": "espTft",
+    "durationMinutes": 8,
+    "steps": [
+      { "id": "hello", "prompt": "Welcome underwater.", "scene": {} },
+      { "id": "listen", "prompt": "Listen: turtle.", "scene": {} },
+      {
+        "id": "recall-turtle",
+        "prompt": "Who swims slowly?",
+        "motionPreset": "curious-tilt",
+        "scene": {
+          "backgroundScene": { "mode": "poster", "poster": { "src": "/fixtures/ocean.jpg", "fit": "cover" }, "video": null },
+          "teachingObject": { "primaryWord": "turtle", "asset": { "src": "/fixtures/turtle.png" } },
+          "robotOverlay": { "pose": "curious", "anchor": "bottomLeft", "asset": { "src": "/fixtures/robot-curious.png" } }
+        },
+        "responsePaths": { "incorrect": { "prompt": "That was a brave try. Turtle.", "motionPreset": "encourage" } }
+      },
+      { "id": "ending", "prompt": "Ocean mission complete.", "scene": {} }
+    ]
+  }
+}

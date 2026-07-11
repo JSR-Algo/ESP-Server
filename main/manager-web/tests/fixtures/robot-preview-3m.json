@@ -1,0 +1,22 @@
+{
+  "stepIndex": 0,
+  "path": "correct",
+  "manifest": {
+    "manifestVersion": "teebot-lesson-renderer.v1",
+    "lessonId": "three-minute-barn",
+    "lessonVersion": 4,
+    "profile": "espTft",
+    "durationMinutes": 3,
+    "steps": [{
+      "id": "say-barn",
+      "prompt": "Say barn with TeeBot.",
+      "motionPreset": "happy-nod",
+      "scene": {
+        "backgroundScene": { "mode": "poster", "poster": { "src": "/fixtures/barn-field.jpg", "fit": "cover" }, "video": null },
+        "teachingObject": { "primaryWord": "barn", "asset": { "src": "/fixtures/barn.png" } },
+        "robotOverlay": { "pose": "teach", "anchor": "bottomLeft", "asset": { "src": "/fixtures/robot-teach.png" } }
+      },
+      "responsePaths": { "correct": { "prompt": "Great barn!", "motionPreset": "celebrate" } }
+    }]
+  }
+}

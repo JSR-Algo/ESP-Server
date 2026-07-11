@@ -1,0 +1,19 @@
+{
+  "stage": { "width": 480, "height": 320 },
+  "safeZones": { "top": 24, "right": 12, "bottom": 82, "left": 12 },
+  "step": { "index": 0, "count": 1, "id": "name-apple" },
+  "path": "nearMiss",
+  "layers": [
+    { "id": "background", "z": 0, "bounds": { "x": 0, "y": 0, "width": 480, "height": 320, "fit": "cover" }, "visible": true },
+    { "id": "teachingObject", "z": 10, "bounds": { "x": 129, "y": 53, "width": 221, "height": 160, "fit": "contain" }, "visible": true },
+    { "id": "robotOverlay", "z": 20, "bounds": { "x": 20, "y": 158, "width": 154, "height": 109, "fit": "contain" }, "visible": true },
+    { "id": "wordPill", "z": 30, "bounds": { "x": 166, "y": 26, "width": 148, "height": 42 }, "visible": true, "text": "apple" },
+    { "id": "progress", "z": 40, "bounds": { "x": 188, "y": 218, "width": 104, "height": 12 }, "visible": true, "active": 1, "total": 1 },
+    { "id": "prompt", "z": 50, "bounds": { "x": 19, "y": 238, "width": 442, "height": 77 }, "visible": true, "text": "Almost. Listen: apple." }
+  ],
+  "timeline": [
+    { "atMs": 0, "label": "Render step: name-apple" },
+    { "atMs": 120, "label": "Slave command: encourage" },
+    { "atMs": 240, "label": "Response path: nearMiss" }
+  ]
+}
