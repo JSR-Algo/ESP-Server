@@ -10,6 +10,9 @@
     "test:course-robot-e2e-ui": "node scripts/check-course-robot-e2e-ui-contracts.mjs",
     "test:lesson-visual-library-ui": "node scripts/check-lesson-visual-library-ui.mjs",
     "test:lesson-visual-library-browser": "node scripts/check-lesson-visual-library-browser.mjs",
+    "test:lesson-builder-logic": "node scripts/check-lesson-builder-logic.cjs",
+    "test:lesson-builder-browser": "node scripts/check-lesson-builder-browser.mjs",
+    "test:lesson-studio": "npm run test:lesson-visual-library-ui && npm run test:lesson-visual-library-browser && npm run test:lesson-builder-logic && npm run test:lesson-builder-browser && node scripts/check-robot-lesson-preview.mjs && node scripts/check-robot-preview-screenshots.mjs",
     "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs"
   },
   "dependencies": {

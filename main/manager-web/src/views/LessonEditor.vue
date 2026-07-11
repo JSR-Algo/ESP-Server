@@ -50,7 +50,7 @@
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingSelectedStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
               Save step
             </el-button>
           </div>
@@ -364,7 +364,9 @@ export default {
       selectedStepDrafts: {},
       selectedAssetDrafts: {},
       dirtyStepKeys: {},
-      savingStep: false,
+      savingStepKeys: {},
+      studioRevision: 0,
+      stepDraftRevisions: {},
       previewManifest: null,
       previewPath: null,
       renameVisible: false,
@@ -403,6 +405,12 @@ export default {
     selectedStepDirty() {
       return Boolean(this.selectedStep && this.dirtyStepKeys[this.selectedStep.stepKey]);
     },
+    savingSelectedStep() {
+      return Boolean(this.selectedStep && this.savingStepKeys[this.selectedStep.stepKey]);
+    },
+    hasUnsavedDrafts() {
+      return Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]);
+    },
     selectedAuthoring: {
       get() {
         if (!this.selectedStep) return mergeAuthoringFields({}, {});
@@ -413,7 +421,7 @@ export default {
         if (!this.selectedStep) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
-        this.validationResult = null;
+        this.markStudioChanged(this.selectedStep.stepKey);
       },
     },
     selectedObjectKey() {
@@ -494,7 +502,13 @@ export default {
     },
     onAssetsLoaded(assets) {
       this.bundleAssets = Array.isArray(assets) ? assets : [];
+      this.markStudioChanged();
+    },
+    markStudioChanged(stepKey) {
+      this.studioRevision += 1;
+      if (stepKey) this.$set(this.stepDraftRevisions, stepKey, Number(this.stepDraftRevisions[stepKey] || 0) + 1);
       this.validationResult = null;
+      this.previewManifest = null;
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -669,7 +683,7 @@ export default {
       if (!this.selectedStep || !this.isDraft) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
-      this.validationResult = null;
+      this.markStudioChanged(this.selectedStep.stepKey);
     },
     inspectSharedAsset(asset) {
       this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
@@ -686,24 +700,28 @@ export default {
       const authored = this.selectedAuthoring;
       const stepBody = { ...(step.stepBody || {}), ...authored };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
-      this.savingStep = true;
+      const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
+      this.$set(this.savingStepKeys, step.stepKey, true);
       this.validationResult = null;
+      this.previewManifest = null;
       const visualRefs = selectedAsset
         ? [{ slot: 'teachingObject', assetVersionId: selectedAsset.versionId }]
         : undefined;
       Api.lesson.updateStep(
         this.lessonId, step.stepKey, { ...step, stepBody, visualRefs },
         (updated) => {
-          this.savingStep = false;
-          this.$delete(this.selectedStepDrafts, step.stepKey);
-          this.$delete(this.selectedAssetDrafts, step.stepKey);
-          this.$delete(this.dirtyStepKeys, step.stepKey);
+          this.$delete(this.savingStepKeys, step.stepKey);
+          if (Number(this.stepDraftRevisions[step.stepKey] || 0) === savedRevision) {
+            this.$delete(this.selectedStepDrafts, step.stepKey);
+            this.$delete(this.selectedAssetDrafts, step.stepKey);
+            this.$delete(this.dirtyStepKeys, step.stepKey);
+          }
           this.previewManifest = null;
           this.validationResult = null;
           this.fetchSteps();
           this.$message.success('Step saved to the lesson draft.');
         },
-        (msg) => { this.savingStep = false; this.validationResult = null; this.$message.error(msg); },
+        (msg) => { this.$delete(this.savingStepKeys, step.stepKey); this.validationResult = null; this.previewManifest = null; this.$message.error(msg); },
       );
     },
     moveStep(index, delta) {
@@ -717,14 +735,14 @@ export default {
       Api.lesson.reorderSteps(
         this.lessonId,
         order,
-        (rows) => { this.reordering = false; this.steps = rows; this.validationResult = null; },
+        (rows) => { this.reordering = false; this.steps = rows; this.markStudioChanged(); },
         (msg) => { this.reordering = false; this.$message.error(msg); },
       );
     },
     deleteStep(row) {
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
-          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; this.validationResult = null; }, (msg) => this.$message.error(msg));
+          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; this.markStudioChanged(); }, (msg) => this.$message.error(msg));
         })
         .catch(() => {});
     },
@@ -799,7 +817,7 @@ export default {
           this.addingStep = false;
           this.stepDialogVisible = false;
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
-          this.validationResult = null;
+          this.markStudioChanged();
           this.fetchSteps();
         },
         (msg) => { this.addingStep = false; this.$message.error(msg); },
@@ -820,29 +838,42 @@ export default {
       );
     },
     doValidate() {
+      const requestedRevision = this.studioRevision;
       this.validating = true;
       Api.lesson.validate(
         this.lessonId,
         (res) => {
           this.validating = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
           this.validationResult = res || null;
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
         },
-        (msg) => { this.validating = false; this.validationResult = null; this.$message.error(msg); },
+        (msg) => {
+          this.validating = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
+          this.validationResult = null;
+          this.$message.error(msg);
+        },
       );
     },
     doPreview() {
+      const requestedRevision = this.studioRevision;
       this.previewing = true;
       Api.lesson.manifestPreview(
         this.lessonId,
         'espTft',
         (res) => {
           this.previewing = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
           this.preview = { checksum: res.checksum, etag: res.etag };
           this.previewManifest = res.manifest || null;
         },
-        (msg) => { this.previewing = false; this.$message.error(msg); },
+        (msg) => {
+          this.previewing = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
+          this.$message.error(msg);
+        },
       );
     },
     doPublish() {

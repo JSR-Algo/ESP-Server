@@ -58,16 +58,27 @@ try {
     const preview=e.$children.find(c=>c.$options.name==='RobotLessonPreview');
     [...document.querySelectorAll('.preview-toolbar button')].find(x=>x.textContent.trim()==='Near miss').click();await tick();
     setInput(formItem('English teaching word').querySelector('input'),'barns');await tick();
+    const previewClearedOnEdit=e.previewManifest===null;
     [...document.querySelectorAll('.right-operations button')].find(x=>x.textContent.includes('lesson.validate')).click();await tick();
     t.calls.failNextUpdate=true;document.querySelector('.lesson-studio__toolbar .el-button').click();await tick();
     const staleAfterFailure=e.validationResult===null&&readiness.metrics.estimateOnly;
-    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath,e.previewPath.path],readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors}
+    document.querySelector('.lesson-studio__toolbar .el-button').click();await tick();
+    t.calls.deferNextValidate=true;[...document.querySelectorAll('.right-operations button')].find(x=>x.textContent.includes('lesson.validate')).click();await tick();
+    setInput(formItem('English teaching word').querySelector('input'),'race');await tick();
+    t.calls.pendingValidations.shift().ok(t.validation);await tick();
+    const deferredValidationIgnored=e.validationResult===null;
+    t.calls.deferNextUpdate=true;document.querySelector('.lesson-studio__toolbar .el-button').click();await tick();
+    setInput(formItem('English teaching word').querySelector('input'),'race new');await tick();
+    const pending=t.calls.pendingUpdates.shift();pending.ok({...pending.payload,stepKey:pending.stepKey});await tick();
+    const newerDraftPreserved=e.selectedStepDirty&&e.selectedAuthoring.teachingWord.text==='RACE NEW';
+    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath,e.previewPath.path],readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors,previewClearedOnEdit,deferredValidationIgnored,newerDraftPreserved}
   })()`);
   assert.equal(result.selected, 1); assert.deepEqual(result.filters, [{ category: 'teachingObject', profile: 'espTft' }]);
   assert.deepEqual(result.patch, { lessonId: 'lesson-1', stepKey: 's2', payload: { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', visualRefs: [{ slot: 'teachingObject', assetVersionId: '00000000-0000-4000-8000-000000000002' }], stepBody: { durationSec: 12, durationPreset: 8, teachingWord: { text: 'BARN', style: 'wordPill', position: 'objectSide', highlightMode: 'wholeWord' }, interaction: { template: 'safeSpeaking', maxAttempts: 3, listenTimeoutSec: 6, correctThreshold: 0.85, braveTryThreshold: 0.7, funPattern: 'miniStoryRescue' }, motion: { present: 'presentLeft', listen: 'listen', correct: 'celebrate', nearMiss: 'encourage', incorrect: 'tryAgain' }, storyBeat: { goal: 'Help Pip find a home', successReaction: 'pet.entersBarn', nextTease: 'What comes next?' } } } });
-  assert.equal(result.updateCount, 2); assert.equal(result.failedPatch.payload.visualRefs, undefined); assert.equal(result.failedPatch.payload.stepBody.teachingWord.text, 'BARNS');
+  assert.equal(result.updateCount, 4); assert.equal(result.failedPatch.payload.visualRefs, undefined); assert.equal(result.failedPatch.payload.stepBody.teachingWord.text, 'BARNS');
   assert.equal(result.metrics.packBytes, 222000); assert.equal(result.metrics.uniqueAssetCount, 7); assert.equal(result.metrics.sharedAssetCount, 2); assert.equal(result.metrics.estimatedVisualPeakBytes, 640000); assert.equal(result.metrics.offlineReady, true); assert.equal(result.metrics.allPathsTerminate, true); assert.deepEqual(result.preview, [1, 'espTft', 'correct', 'nearMiss']);
   assert.equal(result.readyBeforeEdit, true); assert.equal(result.staleAfterEdit, true); assert.equal(result.staleAfterFailure, true); assert.equal(result.selectedAfterReload, 'object.barn'); assert.equal(result.selectedTilePersisted, true); assert.deepEqual(result.errors, ['forced update failure']);
+  assert.equal(result.previewClearedOnEdit, true); assert.equal(result.deferredValidationIgnored, true); assert.equal(result.newerDraftPreserved, true);
   console.log('mounted visual LessonEditor selection, authoring PATCH, readiness, and preview props PASS');
 } finally {
   if (socket) socket.close(); await stopChild(chrome); if (server) await new Promise((resolve) => server.close(resolve)); if (temp) await rm(temp, { recursive: true, force: true });

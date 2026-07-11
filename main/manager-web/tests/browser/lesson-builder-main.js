@@ -8,7 +8,7 @@ Vue.use(ElementUI);
 Vue.use(VueRouter);
 Vue.config.productionTip = false;
 
-const calls = { update: [], visualFilters: [], validate: 0, preview: 0, errors: [], failNextUpdate: false };
+const calls = { update: [], visualFilters: [], validate: 0, preview: 0, errors: [], failNextUpdate: false, deferNextUpdate: false, deferNextValidate: false, pendingUpdates: [], pendingValidations: [] };
 let steps = [
   { stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 } },
   { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12 } },
@@ -24,12 +24,13 @@ Object.assign(Api.lesson, {
   listVisualAssets(filters, ok) { calls.visualFilters.push(filters); ok(sharedAssets); },
   updateStep(lessonId, stepKey, payload, ok, fail) {
     calls.update.push({ lessonId, stepKey, payload: JSON.parse(JSON.stringify(payload)) });
+    if (calls.deferNextUpdate) { calls.deferNextUpdate = false; calls.pendingUpdates.push({ lessonId, stepKey, payload, ok, fail }); return; }
     if (calls.failNextUpdate) { calls.failNextUpdate = false; fail('forced update failure'); return; }
     const visualRefs = (payload.visualRefs || []).map((ref) => ({ ...ref, assetKey: sharedAssets.find((asset) => asset.versionId === ref.assetVersionId)?.assetKey || '' }));
     steps = steps.map((step) => step.stepKey === stepKey ? { ...step, ...payload, visualRefs } : step);
     ok({ ...payload, stepKey, visualRefs });
   },
-  validate(id, ok) { calls.validate += 1; ok(validation); },
+  validate(id, ok, fail) { calls.validate += 1; if (calls.deferNextValidate) { calls.deferNextValidate = false; calls.pendingValidations.push({ ok, fail }); return; } ok(validation); },
   manifestPreview(id, profile, ok) { calls.preview += 1; ok({ manifest, checksum: 'checksum-1', etag: 'etag-1' }); },
   reorderSteps() {}, deleteStep() {}, publish() {}, updateLesson() {}, createStep() {},
 });
