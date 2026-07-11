@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed evidence collector; it never injects a fault or contacts production."""
-import argparse, hashlib, json, re, struct, zlib
+import argparse, hashlib, json, re
 from datetime import datetime, timezone
 from pathlib import Path
+from PIL import Image, UnidentifiedImageError
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
 REQUIRED=('serial.log','server.log','command.txt','result.json')
@@ -48,43 +49,16 @@ def _evidence_path(path,base_dir=None):
     return candidate if candidate.is_absolute() or base_dir is None else Path(base_dir)/candidate
 
 def _image_dimensions(path):
-    with path.open('rb') as handle:
-        header=handle.read(24)
-        if header.startswith(b'\x89PNG\r\n\x1a\n') and len(header)>=24:
-            if header[12:16] != b'IHDR':return None,None
-            dimensions=struct.unpack('>II',header[16:24])
-            handle.seek(8)
-            found_iend=False
-            while True:
-                length_data=handle.read(4)
-                if len(length_data)!=4:break
-                length=struct.unpack('>I',length_data)[0]
-                kind=handle.read(4)
-                if len(kind)!=4 or length>MAX_SCREENSHOT_BYTES:break
-                data=handle.read(length); checksum=handle.read(4)
-                if len(data)!=length or len(checksum)!=4:break
-                if struct.unpack('>I',checksum)[0] != (zlib.crc32(kind+data)&0xffffffff):break
-                if kind == b'IEND':found_iend=True; break
-            return ('png',dimensions) if found_iend else (None,None)
-        if not header.startswith(b'\xff\xd8'):
-            return None,None
-        handle.seek(2)
-        while True:
-            prefix=handle.read(1)
-            if not prefix:return None,None
-            if prefix != b'\xff':continue
-            marker=handle.read(1)
-            while marker == b'\xff':marker=handle.read(1)
-            if marker in (b'\xd8',b'\xd9'):continue
-            length_data=handle.read(2)
-            if len(length_data)!=2:return None,None
-            length=struct.unpack('>H',length_data)[0]
-            if marker and marker[0] in range(0xC0,0xC4):
-                data=handle.read(5)
-                if len(data)!=5:return None,None
-                height,width=struct.unpack('>HH',data[1:5])
-                return 'jpeg',(width,height)
-            handle.seek(max(0,length-2),1)
+    try:
+        with Image.open(path) as image:
+            image_type=(image.format or '').lower()
+            dimensions=image.size
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+        return (image_type,dimensions) if image_type in ('png','jpeg') else (None,None)
+    except (IndexError,OSError,SyntaxError,UnidentifiedImageError,ValueError):
+        return None,None
 
 def _inspect_screenshots(entries,base_dir=None):
     errors=[]; inspected=[]
@@ -110,7 +84,7 @@ def _inspect_screenshots(entries,base_dir=None):
             if image_type not in ('png','jpeg') or not dimensions:
                 errors.append('screenshots must be valid PNG or JPEG images'); continue
             inspected.append({'role':entry['role'],'path':resolved,'type':image_type,'dimensions':dimensions,'bytes':stat.st_size})
-        except (OSError,ValueError,struct.error):
+        except (OSError,ValueError):
             errors.append('screenshots must reference non-empty regular files')
     return inspected,errors
 

@@ -183,6 +183,17 @@ def test_screenshot_paths_are_confined_regular_bounded_images(tmp_path):
     assert "screenshot exceeds maximum size" in fault.validate_result(
         "cold", result, "lesson_preload_ready checksum_verified", tmp_path
     )
+    no_pixels = tmp_path / "no-pixels.png"
+    no_pixels.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13) + b"IHDR" + struct.pack(">IIBBBBB", 480, 320, 8, 2, 0, 0, 0)
+        + struct.pack(">I", zlib.crc32(b"IHDR" + struct.pack(">IIBBBBB", 480, 320, 8, 2, 0, 0, 0)))
+        + struct.pack(">I", 0) + b"IEND" + struct.pack(">I", zlib.crc32(b"IEND"))
+    )
+    result["screenshots"] = [{"role": "hardware", "path": "no-pixels.png"}]
+    assert "screenshots must be valid PNG or JPEG images" in fault.validate_result(
+        "cold", result, "lesson_preload_ready checksum_verified", tmp_path
+    )
 
 
 def test_malformed_structured_json_never_crashes_progress_audit():
@@ -203,6 +214,23 @@ def test_progress_identity_distinguishes_event_type_and_sequence():
     assert report["status"] == "NOT_PASS"
     assert report["duplicateProgress"][0]["eventType"] == "lesson_progress_completed"
     assert report["duplicateProgress"][0]["identity"] == "sequence:7"
+
+
+def test_progress_identity_uses_real_envelope_and_text_semantic_event():
+    envelopes = [
+        {"type": "lesson_progress", "sessionId": "s", "stepId": "a", "body": {"event": "step_started"}},
+        {"type": "lesson_progress", "sessionId": "s", "stepId": "a", "body": {"event": "step_completed"}},
+    ]
+    assert audit.audit("\n".join(map(json.dumps, envelopes)))["status"] == "PASS"
+    text_logs = "\n".join([
+        "lesson_progress event=step_started session_id=s step_id=a",
+        "lesson_progress event=step_completed session_id=s step_id=a",
+    ])
+    assert audit.audit(text_logs)["status"] == "PASS"
+    duplicate = "\n".join([json.dumps(envelopes[1]), json.dumps(envelopes[1])])
+    report = audit.audit(duplicate)
+    assert report["status"] == "NOT_PASS"
+    assert report["duplicateProgress"][0]["eventType"] == "step_completed"
 
 
 def test_soak_rejects_duplicate_or_out_of_order_transition_identity():

@@ -7,6 +7,7 @@ SESSION=re.compile(r'(?i)session(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)'
 STEP=re.compile(r'(?i)step(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 SEQUENCE=re.compile(r'(?i)(?:sequence|seq)["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 IDEMPOTENCY=re.compile(r'(?i)(?:idempotency[_ ]?key|event[_ ]?id)["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
+SEMANTIC_EVENT=re.compile(r'(?i)\bevent["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 def progress_events(text):
     events=[]
     for line in text.splitlines():
@@ -17,9 +18,13 @@ def progress_events(text):
         except json.JSONDecodeError:
             payload={}
         if not isinstance(payload,dict):payload={}
-        event_type=str(payload.get('type') or event_match.group(1)).lower()
-        session=payload.get('session_id') or payload.get('session')
-        step=payload.get('step_id') or payload.get('step')
+        body=payload.get('body') if isinstance(payload.get('body'),dict) else {}
+        semantic_event=body.get('event') or payload.get('event')
+        semantic_match=SEMANTIC_EVENT.search(line)
+        semantic_event=semantic_event or (semantic_match.group(1) if semantic_match else None)
+        event_type=str(semantic_event or payload.get('type') or event_match.group(1)).lower()
+        session=payload.get('session_id') or payload.get('sessionId') or payload.get('session')
+        step=payload.get('step_id') or payload.get('stepId') or payload.get('step')
         sequence=payload.get('sequence') if payload.get('sequence') is not None else payload.get('seq')
         idempotency=payload.get('idempotency_key') or payload.get('idempotencyKey') or payload.get('event_id')
         session_match=SESSION.search(line); step_match=STEP.search(line)
