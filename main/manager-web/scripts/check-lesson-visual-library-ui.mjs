@@ -37,6 +37,9 @@ assert.deepEqual(buildReplacementRequest('source', 'target', 'cloneForLesson', [
   sourceVersionId: 'source', targetVersionId: 'target', mode: 'cloneForLesson', lessonIds: ['lesson-1'],
 });
 assert.throws(() => buildReplacementRequest('source', 'source', 'global'), /different/);
+assert.deepEqual(buildReplacementRequest('source', 'source', 'cloneForLesson', ['draft-1']), {
+  sourceVersionId: 'source', targetVersionId: 'source', mode: 'cloneForLesson', lessonIds: ['draft-1'],
+});
 assert.throws(() => buildReplacementRequest('source', 'target', 'cloneForLesson', ['one', 'two']), /exactly one/);
 
 const usages = [
