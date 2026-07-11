@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Set
 from urllib.parse import quote
 
 
@@ -21,6 +22,9 @@ class SharedAssetStore:
     are hard links, so legacy lesson-pack paths remain valid without duplicating
     the underlying asset bytes.
     """
+
+    _active_parts: Set[str] = set()
+    _active_parts_lock = threading.RLock()
 
     def __init__(
         self,
@@ -145,16 +149,21 @@ class SharedAssetStore:
         if not self.root.exists():
             return removed
         for path in self.root.rglob("*.part"):
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                continue
+            resolved = str(path.resolve())
+            with self._active_parts_lock:
+                if resolved in self._active_parts:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
         return removed
 
     def _atomic_write(self, target: Path, content: bytes) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = self._temp_path(target)
+        self._claim_part(temp)
         try:
             with temp.open("xb") as handle:
                 handle.write(content)
@@ -167,10 +176,13 @@ class SharedAssetStore:
         except Exception:
             # Preserve interrupted temp files for deterministic boot cleanup.
             raise
+        finally:
+            self._release_part(temp)
 
     def _atomic_copy(self, target: Path, source: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = self._temp_path(target)
+        self._claim_part(temp)
         try:
             with source.open("rb") as src, temp.open("xb") as dst:
                 for block in iter(lambda: src.read(64 * 1024), b""):
@@ -183,18 +195,23 @@ class SharedAssetStore:
             self._notify("after_replace", target)
         except Exception:
             raise
+        finally:
+            self._release_part(temp)
 
     def _atomic_link(self, target: Path, source: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = self._temp_path(target)
-        os.link(str(source), str(temp))
+        self._claim_part(temp)
         try:
+            os.link(str(source), str(temp))
             self._notify("before_replace", target)
             os.replace(str(temp), str(target))
             self._fsync_dir(target.parent)
             self._notify("after_replace", target)
         except Exception:
             raise
+        finally:
+            self._release_part(temp)
 
     def _pack_dir(self, cache_key: str) -> Path:
         candidate = (self.pack_root / cache_key).resolve()
@@ -249,3 +266,13 @@ class SharedAssetStore:
     def _notify(self, stage: str, path: Path) -> None:
         if self._failure_hook is not None:
             self._failure_hook(stage, path)
+
+    @classmethod
+    def _claim_part(cls, path: Path) -> None:
+        with cls._active_parts_lock:
+            cls._active_parts.add(str(path.resolve()))
+
+    @classmethod
+    def _release_part(cls, path: Path) -> None:
+        with cls._active_parts_lock:
+            cls._active_parts.discard(str(path.resolve()))

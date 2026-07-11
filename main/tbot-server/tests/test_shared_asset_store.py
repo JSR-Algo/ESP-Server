@@ -66,6 +66,27 @@ def test_restart_automatically_cleans_interrupted_parts(tmp_path):
     assert not list(root.rglob("*.part"))
 
 
+def test_second_store_cleanup_does_not_delete_an_active_atomic_temp(tmp_path):
+    root = tmp_path / "tbot"
+    observed = []
+
+    def inspect_during_commit(stage, _path):
+        if stage != "before_replace":
+            return
+        active = list(root.rglob("*.part"))
+        assert len(active) == 1
+        SharedAssetStore(root)
+        observed.append(active[0].exists())
+
+    store = SharedAssetStore(root, failure_hook=inspect_during_commit)
+    data = b"active write"
+    target = store.put_bytes(data, _sha(data))
+
+    assert observed == [True]
+    assert target.read_bytes() == data
+    assert not list(root.rglob("*.part"))
+
+
 def test_checksum_mismatch_never_commits_asset(tmp_path):
     store = SharedAssetStore(tmp_path / "tbot")
     expected = _sha(b"expected")
