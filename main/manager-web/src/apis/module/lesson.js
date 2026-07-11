@@ -37,10 +37,25 @@ export default {
     nestRequest({ url: `${getNestUrl()}/lesson-visual-assets${query.toString() ? `?${query}` : ''}`, method: 'GET', onSuccess: (p) => onSuccess((Array.isArray(p) ? p : []).map(normalizeVisualAsset)), onError });
   },
 
-  // The backend exposes the immutable versions as one collection; detail is a
-  // stable client projection of every version sharing the requested asset key.
-  getVisualAssetDetail(assetKey, onSuccess, onError) {
-    this.listVisualAssets({}, (rows) => onSuccess({ assetKey, versions: rows.filter((row) => row.assetKey === assetKey) }), onError);
+  getVisualAssetDetail(assetKey, filters, onSuccess, onError) {
+    const query = new URLSearchParams();
+    if (filters && filters.sourceVersionId) query.set('sourceVersionId', filters.sourceVersionId);
+    if (filters && filters.profile) query.set('profile', filters.profile);
+    nestRequest({
+      url: `${getNestUrl()}/lesson-visual-assets/${encodeURIComponent(assetKey)}${query.toString() ? `?${query}` : ''}`,
+      method: 'GET',
+      onSuccess: (payload) => {
+        const p = payload || {};
+        const asset = p.asset || {};
+        onSuccess({
+          asset: { assetId: asset.id || '', assetKey: asset.asset_key || asset.assetKey || assetKey, category: asset.category || '', title: asset.title || '' },
+          sourceVersionId: p.sourceVersionId || p.source_version_id || '',
+          versions: (Array.isArray(p.versions) ? p.versions : []).map((row) => normalizeVisualAsset({ ...row, id: asset.id, asset_key: asset.asset_key, category: asset.category, title: asset.title })),
+          usages: Array.isArray(p.usages) ? p.usages : [],
+        });
+      },
+      onError,
+    });
   },
 
   visualReplacementImpact(data, onSuccess, onError) {

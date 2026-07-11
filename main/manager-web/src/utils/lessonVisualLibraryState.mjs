@@ -40,3 +40,24 @@ export function buildReplacementRequest(sourceVersionId, targetVersionId, mode, 
   if (mode === 'cloneForLesson' && ids.length !== 1) throw new Error('clone-for-current-lesson requires exactly one lesson');
   return { sourceVersionId, targetVersionId, mode, lessonIds: mode === 'global' ? [] : ids };
 }
+
+export function uniqueAffectedLessons(usages = []) {
+  const lessons = new Map();
+  usages.forEach((usage) => {
+    if (!lessons.has(usage.lessonId)) lessons.set(usage.lessonId, usage);
+  });
+  return [...lessons.values()];
+}
+
+export function lessonReplacementOptions(usages, mode) {
+  const lessons = uniqueAffectedLessons(usages);
+  return mode === 'cloneForLesson' ? lessons.filter((usage) => usage.lessonStatus === 'draft') : lessons;
+}
+
+export function replacementSelectionIsValid(usages, mode, lessonIds = []) {
+  if (mode === 'global') return true;
+  const selected = new Set((lessonIds || []).filter(Boolean));
+  const allowed = lessonReplacementOptions(usages, mode);
+  if (mode === 'cloneForLesson') return selected.size === 1 && allowed.some((usage) => selected.has(usage.lessonId));
+  return selected.size > 0 && [...selected].every((id) => allowed.some((usage) => usage.lessonId === id));
+}

@@ -42,6 +42,7 @@ export default {
   'visual.reviewImpact': 'Review replacement', 'visual.impactTitle': 'Confirm lesson impact', 'visual.impactWarning': 'Published lessons will branch to new drafts. Review active assignments before continuing.',
   'visual.courses': 'Courses', 'visual.lessons': 'Lessons', 'visual.publishedVersions': 'Published versions', 'visual.activeAssignments': 'Active assignments',
   'visual.impactMode': 'Mode', 'visual.confirmReplace': 'Replace versions', 'visual.replaced': 'Visual references updated', 'visual.affectedLessonsCount': '{count} lesson references use this pinned version.',
+  'visual.course': 'Course', 'visual.lesson': 'Lesson',
 
   // Course customization (NestJS authoring API via /nestjs proxy)
   'course.pageTitle': 'Courses',

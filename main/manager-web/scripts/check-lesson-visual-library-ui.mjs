@@ -7,6 +7,9 @@ import {
   compareAssetVersions,
   filterVisualAssets,
   groupVisualAssets,
+  lessonReplacementOptions,
+  replacementSelectionIsValid,
+  uniqueAffectedLessons,
   replacementNeedsImpact,
 } from '../src/utils/lessonVisualLibraryState.mjs';
 
@@ -35,6 +38,17 @@ assert.deepEqual(buildReplacementRequest('source', 'target', 'cloneForLesson', [
 });
 assert.throws(() => buildReplacementRequest('source', 'target', 'cloneForLesson', ['one', 'two']), /exactly one/);
 
+const usages = [
+  { lessonId: 'draft-1', lessonKey: 'apple-draft', lessonVersion: 2, lessonStatus: 'draft', activeAssignmentCount: 0, stepKey: 'one' },
+  { lessonId: 'draft-1', lessonKey: 'apple-draft', lessonVersion: 2, lessonStatus: 'draft', activeAssignmentCount: 0, stepKey: 'two' },
+  { lessonId: 'published-1', lessonKey: 'apple-live', lessonVersion: 1, lessonStatus: 'published', activeAssignmentCount: 3, stepKey: 'one' },
+];
+assert.equal(uniqueAffectedLessons(usages).length, 2, 'affected lessons are de-duplicated across slots');
+assert.deepEqual(lessonReplacementOptions(usages, 'selectedLessons').map((item) => item.lessonId), ['draft-1', 'published-1']);
+assert.deepEqual(lessonReplacementOptions(usages, 'cloneForLesson').map((item) => item.lessonId), ['draft-1'], 'clone only offers current draft usages');
+assert.equal(replacementSelectionIsValid(usages, 'cloneForLesson', ['draft-1']), true);
+assert.equal(replacementSelectionIsValid(usages, 'cloneForLesson', ['published-1']), false, 'published lessons cannot be clone targets');
+
 for (const file of [
   'src/views/LessonVisualLibrary.vue',
   'src/views/LessonVisualAssetDetail.vue',
@@ -43,9 +57,11 @@ for (const file of [
 
 assert.match(read('src/apis/module/lesson.js'), /listVisualAssets/);
 assert.match(read('src/apis/module/lesson.js'), /getVisualAssetDetail/);
+assert.match(read('src/apis/module/lesson.js'), /sourceVersionId/);
 assert.match(read('src/apis/module/lesson.js'), /visualReplacementImpact/);
 assert.match(read('src/apis/module/lesson.js'), /replaceVisualAsset/);
 assert.match(read('src/views/LessonVisualAssetDetail.vue'), /activeAssignments/);
+assert.match(read('src/views/LessonVisualAssetDetail.vue'), /lessonStatus/);
 assert.match(read('src/views/LessonVisualAssetDetail.vue'), /cloneForLesson/);
 assert.match(read('src/components/lesson/AssetImpactDialog.vue'), /publishedVersions/);
 assert.match(read('src/router/index.js'), /LessonVisualLibrary/);

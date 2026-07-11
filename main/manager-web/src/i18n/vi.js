@@ -42,6 +42,7 @@ export default {
   'visual.reviewImpact': 'Kiểm tra ảnh hưởng', 'visual.impactTitle': 'Xác nhận ảnh hưởng', 'visual.impactWarning': 'Bài đã xuất bản sẽ được tách thành bản nháp mới. Hãy kiểm tra các lượt giao bài đang hoạt động.',
   'visual.courses': 'Khoá học', 'visual.lessons': 'Bài học', 'visual.publishedVersions': 'Bản đã xuất bản', 'visual.activeAssignments': 'Lượt giao đang chạy',
   'visual.impactMode': 'Chế độ', 'visual.confirmReplace': 'Thay phiên bản', 'visual.replaced': 'Đã cập nhật tham chiếu hình ảnh', 'visual.affectedLessonsCount': '{count} tham chiếu bài học đang dùng phiên bản này.',
+  'visual.course': 'Khoá học', 'visual.lesson': 'Bài học',
 
   // Course customization (NestJS authoring API qua proxy /nestjs)
   'course.pageTitle': 'Khoá học',
