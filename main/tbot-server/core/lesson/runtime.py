@@ -40,6 +40,8 @@ from core.lesson.errors import (
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
+from core.lesson.interaction_templates import SafeSpeakingSession, fun_pattern_prompt
+from core.lesson.motion_presets import dispatch_motion_preset
 
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
@@ -554,6 +556,14 @@ def _spoken_step_prompt(step: Dict[str, Any]) -> Optional[str]:
         ask = story_beat.get("ask")
         if isinstance(ask, str) and ask.strip():
             return ask.strip()
+
+    interaction = step.get("interaction")
+    if isinstance(interaction, dict) and interaction.get("template") == "safeSpeaking":
+        return fun_pattern_prompt(
+            interaction.get("funPattern"),
+            _target_vocab_word(_coerce_expected_child_responses(step), step),
+        )
+    if uses_guided_ask:
         return "What do you see?"
 
     prompt = step.get("prompt")
@@ -788,6 +798,8 @@ class LessonRuntime:
         self._passive_dwell_task: Optional[asyncio.Task] = None
         self._child_response_timeout_task: Optional[asyncio.Task] = None
         self._child_response_timeout_count = 0
+        self._safe_speaking_session: Optional[SafeSpeakingSession] = None
+        self._motion_tasks: set = set()
         self._step_seq: Optional[int] = None
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
@@ -879,9 +891,15 @@ class LessonRuntime:
         for task in list(self._preload_status_report_tasks):
             if not task.done():
                 task.cancel()
+        for task in list(self._motion_tasks):
+            if not task.done():
+                task.cancel()
         if self._preload_status_report_tasks:
             await asyncio.gather(*self._preload_status_report_tasks, return_exceptions=True)
             self._preload_status_report_tasks.clear()
+        if self._motion_tasks:
+            await asyncio.gather(*self._motion_tasks, return_exceptions=True)
+            self._motion_tasks.clear()
         if self.forwarder is not None:
             await self.forwarder.aclose()
         if self.asset_cache is not None:
@@ -1049,6 +1067,14 @@ class LessonRuntime:
 
         expected_responses = _coerce_expected_child_responses(self._step)
         response_intent = _classify_child_response_intent(response, expected_responses)
+        if self._uses_safe_speaking():
+            branch = {
+                CHILD_RESPONSE_INTENT_CORRECT: "correct",
+                CHILD_RESPONSE_INTENT_NEAR_MISS: "brave_try",
+                CHILD_RESPONSE_INTENT_HELP_OR_REPEAT: "help_or_repeat",
+                CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT: "vietnamese_object",
+            }.get(response_intent, "incorrect")
+            return await self._handle_safe_speaking_branch(branch)
         if response_intent != CHILD_RESPONSE_INTENT_CORRECT:
             self._cancel_child_response_timeout()
             self._close_child_response_window()
@@ -1105,6 +1131,98 @@ class LessonRuntime:
             await self._wait_lesson_prompt_idle()
         await self._maybe_finish_step()
         return True
+
+    async def on_child_response_failure(self, reason: str = "stt_failure") -> bool:
+        """Typed no-transcript hook for voice providers and timeout integrations."""
+        if not self._uses_safe_speaking() or not self._child_response_window_still_current(
+            self._step_id, self._step_seq
+        ):
+            return False
+        branch = "silence" if str(reason or "").lower() in {"silence", "no_speech", "timeout"} else "stt_failure"
+        return await self._handle_safe_speaking_branch(branch)
+
+    def _uses_safe_speaking(self) -> bool:
+        interaction = (self._step or {}).get("interaction")
+        return isinstance(interaction, dict) and interaction.get("template") == "safeSpeaking"
+
+    def _safe_speaking(self) -> SafeSpeakingSession:
+        if self._safe_speaking_session is None:
+            interaction = (self._step or {}).get("interaction") or {}
+            expected = _coerce_expected_child_responses(self._step)
+            self._safe_speaking_session = SafeSpeakingSession(
+                max_attempts=interaction.get("maxAttempts", 3),
+                target_word=_target_vocab_word(expected, self._step),
+            )
+        return self._safe_speaking_session
+
+    async def _handle_safe_speaking_branch(self, branch: str) -> bool:
+        self._cancel_child_response_timeout()
+        self._close_child_response_window()
+        decision = self._safe_speaking().decide(branch)
+        self._dispatch_step_motion(decision.motion_slot)
+        await self._speak_lesson_prompt_text(
+            decision.prompt,
+            step_id=self._step_id,
+            continue_listening=not decision.advance,
+        )
+        if not decision.advance:
+            await self._open_child_response_window()
+            if self._child_response_window_still_current(self._step_id, self._step_seq):
+                self._start_child_response_timeout()
+            return True
+
+        self._forward_safe_speaking_completion(decision.outcome)
+        self._forward_story_progress()
+        self._step_completed = True
+        await self._wait_lesson_prompt_idle()
+        await self._maybe_finish_step()
+        return True
+
+    def _forward_safe_speaking_completion(self, outcome: str) -> None:
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": self._step_id,
+                "stepType": (self._step or {}).get("type"),
+                "result": outcome,
+                "detail": {"outcome": outcome},
+            }
+        )
+
+    def _forward_story_progress(self) -> None:
+        story = (self._step or {}).get("storyBeat")
+        if not isinstance(story, dict):
+            return
+        event = {
+            "type": "story_progress",
+            "stepId": self._step_id,
+            "petReaction": story.get("successReaction"),
+            "unitGrowth": story.get("unitGrowth") or story.get("unitProgress"),
+            "nextTease": story.get("nextTease"),
+        }
+        if any(value is not None for key, value in event.items() if key not in {"type", "stepId"}):
+            self._forward(event)
+
+    def _dispatch_step_motion(self, slot: str) -> None:
+        motion = (self._step or {}).get("motion")
+        if not isinstance(motion, dict):
+            return
+        preset = motion.get(slot)
+        if not isinstance(preset, str):
+            return
+        task = asyncio.create_task(dispatch_motion_preset(self.conn, preset))
+        self._motion_tasks.add(task)
+        task.add_done_callback(self._motion_done)
+
+    def _motion_done(self, task: asyncio.Task) -> None:
+        self._motion_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self._log("warning", f"lesson motion degraded: {type(exc).__name__}")
 
     async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
@@ -1170,6 +1288,7 @@ class LessonRuntime:
             # TeeBot starts teaching or listening for the child's reply.
             prompt_handed_off = False
             if self._step is not None:
+                self._dispatch_step_motion("present")
                 prompt_handed_off = await self._speak_step_prompt(self._step)
             if not self._is_active_runtime():
                 return
@@ -1200,6 +1319,7 @@ class LessonRuntime:
                     return
                 self._step_completed = True
             else:
+                self._dispatch_step_motion("listen")
                 await self._open_child_response_window()
                 if self._child_response_window_still_current(self._step_id, self._step_seq):
                     self._start_child_response_timeout()
@@ -1422,6 +1542,7 @@ class LessonRuntime:
         self._step_completed = False
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
+        self._safe_speaking_session = None
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
@@ -1761,6 +1882,9 @@ class LessonRuntime:
 
     async def _handle_child_response_timeout(self, step_id: Optional[str]) -> None:
         if not self._is_active_runtime():
+            return
+        if self._uses_safe_speaking():
+            await self.on_child_response_failure("silence")
             return
         self._child_response_timeout_count += 1
         self._close_child_response_window()
@@ -2160,7 +2284,10 @@ class LessonRuntime:
         prompt = step.get("prompt")
         if prompt is not None:
             body["prompt"] = prompt
-        for key in ("subject", "helperText", "l1TransferHint", "choices", *STEP_METADATA_KEYS):
+        for key in (
+            "subject", "helperText", "l1TransferHint", "choices", "teachingWord",
+            "interaction", "motion", *STEP_METADATA_KEYS,
+        ):
             value = step.get(key)
             if value is not None:
                 body[key] = value
