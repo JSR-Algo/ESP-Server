@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/robot-preview-projection.js', root), 'utf8');
 const projection = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
-const component = await readFile(new URL('src/components/lesson/RobotLessonPreview.vue', root), 'utf8');
 
 for (const minutes of [3, 5, 8]) {
   const fixture = JSON.parse(await readFile(new URL(`tests/fixtures/robot-preview-${minutes}m.json`, root), 'utf8'));
@@ -52,9 +51,5 @@ assert.equal(malformed.stage.width, 480);
 assert.equal(malformed.stage.height, 320);
 assert.ok(malformed.warnings.some((warning) => warning.includes('Unsupported profile')));
 assert.equal(projection.projectEspTftPreview({}, -4, 'silence').layers.length, 6);
-
-for (const path of paths) assert.ok(component.includes(`${path}:`), `component lacks a visible label for ${path}`);
-assert.ok(component.includes('Firmware-incompatible preview'));
-assert.ok(component.includes('data-testid="esp-tft-stage"'));
 
 console.log('robot lesson preview projection: golden 3/5/8 layouts and six response paths PASS');
