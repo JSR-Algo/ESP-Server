@@ -110,12 +110,14 @@ function calculateReadiness({ steps, assets, manifest, validation } = {}) {
   const authoritativePeak = metrics && Number(metrics.estimatedVisualPeakBytes);
   const authoritativePackBytes = metrics && Number(metrics.packBytes);
   const authoritativeAssetCount = metrics && Number(metrics.assetCount);
+  const authoritativeUniqueCount = metrics && Number(metrics.uniqueAssetCount);
+  const authoritativeSharedCount = metrics && Number(metrics.sharedAssetCount);
   const explicitOffline = metrics && typeof metrics.offlineReady === 'boolean' ? metrics.offlineReady : null;
   const explicitTermination = metrics && typeof metrics.allPathsTerminate === 'boolean' ? metrics.allPathsTerminate : null;
   return {
     downloadBytes: Number.isFinite(authoritativePackBytes) ? authoritativePackBytes : uniqueAssets.reduce((sum, asset) => sum + Number(asset.bytes || 0), 0),
-    uniqueAssetCount: Number.isFinite(authoritativeAssetCount) ? authoritativeAssetCount : uniqueAssets.length,
-    sharedReferenceCount: Math.max(0, rows.length - uniqueAssets.length),
+    uniqueAssetCount: Number.isFinite(authoritativeUniqueCount) ? authoritativeUniqueCount : (Number.isFinite(authoritativeAssetCount) ? authoritativeAssetCount : uniqueAssets.length),
+    sharedReferenceCount: Number.isFinite(authoritativeSharedCount) ? authoritativeSharedCount : Math.max(0, rows.length - uniqueAssets.length),
     estimatedPeakPsram: Number.isFinite(authoritativePeak) ? authoritativePeak : estimatedPeakPsram,
     estimateOnly: !validationKnown,
     offlineReady: explicitOffline == null ? false : explicitOffline,

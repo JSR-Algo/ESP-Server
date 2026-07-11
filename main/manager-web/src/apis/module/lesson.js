@@ -192,6 +192,17 @@ export default {
     });
   },
 
+  // PUT /v1/admin/lessons/:lessonId/steps/:stepKey/visual-refs/:slot
+  setStepVisualRef(lessonId, stepKey, slot, assetVersionId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/steps/${encodeURIComponent(stepKey)}/visual-refs/${encodeURIComponent(slot)}`,
+      method: 'PUT',
+      data: { assetVersionId: assetVersionId || null },
+      onSuccess,
+      onError,
+    });
+  },
+
   // POST /v1/admin/lessons/:lessonId/steps/reorder { order: stepKey[] }
   reorderSteps(lessonId, order, onSuccess, onError) {
     nestRequest({

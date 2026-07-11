@@ -679,24 +679,9 @@ export default {
       const authored = this.selectedAuthoring;
       const stepBody = { ...(step.stepBody || {}), ...authored };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
-      if (selectedAsset) {
-        stepBody.teachingObject = {
-          ...(stepBody.teachingObject || {}),
-          primaryWord: authored.teachingWord.text || step.subject,
-          asset: {
-            key: selectedAsset.assetKey,
-            src: selectedAsset.storagePath || selectedAsset.path || selectedAsset.url,
-            sha256: selectedAsset.sha256,
-            version: selectedAsset.version,
-            bytes: selectedAsset.bytes,
-          },
-        };
-      }
       this.savingStep = true;
-      Api.lesson.updateStep(
-        this.lessonId,
-        step.stepKey,
-        { ...step, stepBody },
+      const saveAuthoring = () => Api.lesson.updateStep(
+        this.lessonId, step.stepKey, { ...step, stepBody },
         (updated) => {
           this.savingStep = false;
           this.$set(this.steps, this.selectedStepIndex, updated);
@@ -708,6 +693,14 @@ export default {
         },
         (msg) => { this.savingStep = false; this.$message.error(msg); },
       );
+      if (selectedAsset) {
+        Api.lesson.setStepVisualRef(
+          this.lessonId, step.stepKey, 'teachingObject', selectedAsset.versionId, saveAuthoring,
+          (msg) => { this.savingStep = false; this.$message.error(msg); },
+        );
+      } else {
+        saveAuthoring();
+      }
     },
     moveStep(index, delta) {
       const target = index + delta;

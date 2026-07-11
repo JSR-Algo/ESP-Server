@@ -32,10 +32,32 @@ try {
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   for (let i = 0; i < 100 && !(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)')); i += 1) await new Promise((r) => setTimeout(r, 50));
   assert.equal(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)'), true, `mounted LessonEditor did not become ready: ${runtimeErrors.join('; ')}`);
-  const result = await evaluate(`(async()=>{const t=window.__LESSON_BUILDER_TEST__,e=t.editor;e.selectedStepIndex=1;await e.$nextTick();e.selectSharedAsset(t.sharedAssets[0]);e.selectedAuthoring={durationPreset:8,teachingWord:{text:'BARN',style:'wordPill',position:'objectSide',highlightMode:'wholeWord'},interaction:{template:'safeSpeaking',maxAttempts:3,listenTimeoutSec:6,correctThreshold:.85,braveTryThreshold:.7,funPattern:'miniStoryRescue'},storyBeat:{goal:'Help Pip find a home',successReaction:'pet.entersBarn',nextTease:'What comes next?'},motion:{present:'presentLeft',listen:'listen',correct:'celebrate',nearMiss:'encourage',incorrect:'tryAgain'}};await e.$nextTick();document.querySelector('.lesson-studio__toolbar .el-button').click();await e.$nextTick();e.doValidate();e.doPreview();await e.$nextTick();const readiness=e.$children.find(c=>c.$options.name==='LessonPublishReadiness');const preview=e.$children.find(c=>c.$options.name==='RobotLessonPreview');return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],metrics:readiness.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath]}})()`);
+  const result = await evaluate(`(async()=>{
+    const t=window.__LESSON_BUILDER_TEST__,e=t.editor, tick=()=>new Promise(r=>setTimeout(r,0));
+    const setInput=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
+    const formItem=(label)=>[...document.querySelectorAll('.interaction-panel .el-form-item')].find(x=>x.querySelector('.el-form-item__label')?.textContent.trim()===label);
+    const choose=async(label,text)=>{const item=formItem(label);if(!item)throw new Error('missing form item '+label);item.querySelector('.el-select input').click();await tick();const options=[...document.querySelectorAll('body .el-select-dropdown__item')].filter(x=>x.textContent.trim()===text);const option=options.at(-1);if(!option)throw new Error('missing option '+label+':'+text);option.click();await tick()};
+    document.querySelectorAll('.step-nav__item')[1].click();await tick();
+    document.querySelector('.asset-tile__select').click();await tick();
+    [...document.querySelectorAll('.interaction-panel .el-radio-button')].find(x=>x.textContent.includes('8 min')).click();await tick();
+    setInput(formItem('English teaching word').querySelector('input'),'barn');await tick();
+    await choose('Fun pattern','Mini Story Rescue');
+    setInput(formItem('Goal').querySelector('input'),'Help Pip find a home');await tick();
+    setInput(formItem('Success reaction').querySelector('input'),'pet.entersBarn');await tick();
+    setInput(formItem('Next tease').querySelector('input'),'What comes next?');await tick();
+    await choose('Present','Present Left');
+    document.querySelector('.lesson-studio__toolbar .el-button').click();await tick();
+    [...document.querySelectorAll('.right-operations button')].find(x=>x.textContent.includes('lesson.validate')).click();await tick();
+    [...document.querySelectorAll('.right-operations button')].find(x=>x.textContent.includes('lesson.previewManifest')).click();await tick();
+    const preview=e.$children.find(c=>c.$options.name==='RobotLessonPreview');
+    [...document.querySelectorAll('.preview-toolbar button')].find(x=>x.textContent.trim()==='Near miss').click();await tick();
+    const readiness=e.$children.find(c=>c.$options.name==='LessonPublishReadiness');
+    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,visualRef:t.calls.visualRefs[0],patch:t.calls.update[0],metrics:readiness.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath,e.previewPath.path]}
+  })()`);
   assert.equal(result.selected, 1); assert.deepEqual(result.filters, [{ category: 'teachingObject', profile: 'espTft' }]);
-  assert.deepEqual(result.patch, { lessonId: 'lesson-1', stepKey: 's2', payload: { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12, durationPreset: 8, teachingWord: { text: 'BARN', style: 'wordPill', position: 'objectSide', highlightMode: 'wholeWord' }, interaction: { template: 'safeSpeaking', maxAttempts: 3, listenTimeoutSec: 6, correctThreshold: 0.85, braveTryThreshold: 0.7, funPattern: 'miniStoryRescue' }, motion: { present: 'presentLeft', listen: 'listen', correct: 'celebrate', nearMiss: 'encourage', incorrect: 'tryAgain' }, storyBeat: { goal: 'Help Pip find a home', successReaction: 'pet.entersBarn', nextTease: 'What comes next?' }, teachingObject: { primaryWord: 'BARN', asset: { key: 'object.barn', src: 'sd://shared/barn.png', sha256: 'abc123', version: 2, bytes: 60000 } } } } });
-  assert.equal(result.metrics.downloadBytes, 222000); assert.equal(result.metrics.uniqueAssetCount, 7); assert.equal(result.metrics.estimatedPeakPsram, 640000); assert.equal(result.metrics.estimateOnly, false); assert.equal(result.metrics.offlineReady, true); assert.equal(result.metrics.allPathsTerminate, true); assert.deepEqual(result.preview, [1, 'espTft', 'correct']);
+  assert.deepEqual(result.visualRef, { lessonId: 'lesson-1', stepKey: 's2', slot: 'teachingObject', body: { assetVersionId: '00000000-0000-4000-8000-000000000002' } });
+  assert.deepEqual(result.patch, { lessonId: 'lesson-1', stepKey: 's2', payload: { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12, durationPreset: 8, teachingWord: { text: 'BARN', style: 'wordPill', position: 'objectSide', highlightMode: 'wholeWord' }, interaction: { template: 'safeSpeaking', maxAttempts: 3, listenTimeoutSec: 6, correctThreshold: 0.85, braveTryThreshold: 0.7, funPattern: 'miniStoryRescue' }, motion: { present: 'presentLeft', listen: 'listen', correct: 'celebrate', nearMiss: 'encourage', incorrect: 'tryAgain' }, storyBeat: { goal: 'Help Pip find a home', successReaction: 'pet.entersBarn', nextTease: 'What comes next?' } } } });
+  assert.equal(result.metrics.downloadBytes, 222000); assert.equal(result.metrics.uniqueAssetCount, 7); assert.equal(result.metrics.sharedReferenceCount, 2); assert.equal(result.metrics.estimatedPeakPsram, 640000); assert.equal(result.metrics.estimateOnly, false); assert.equal(result.metrics.offlineReady, true); assert.equal(result.metrics.allPathsTerminate, true); assert.deepEqual(result.preview, [1, 'espTft', 'correct', 'nearMiss']);
   console.log('mounted visual LessonEditor selection, authoring PATCH, readiness, and preview props PASS');
 } finally {
   if (socket) socket.close(); await stopChild(chrome); if (server) await new Promise((resolve) => server.close(resolve)); if (temp) await rm(temp, { recursive: true, force: true });

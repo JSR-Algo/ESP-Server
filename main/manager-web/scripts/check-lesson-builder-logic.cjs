@@ -46,7 +46,7 @@ const assets = [
   { assetKey: 'scene.farm', sha256: 'a', bytes: 120000, decodedBytes: 460800 },
   { assetKey: 'object.barn', sha256: 'b', bytes: 60000, decodedBytes: 160000 },
 ];
-const readiness = calculateReadiness({ steps, assets, validation: { budgets: { espTft: { errors: [], warnings: [], metrics: { assetCount: 2, packBytes: 180000, estimatedVisualPeakBytes: 620800, offlineReady: true, allPathsTerminate: true } } } } });
+const readiness = calculateReadiness({ steps, assets, validation: { budgets: { espTft: { errors: [], warnings: [], metrics: { assetCount: 3, uniqueAssetCount: 2, sharedAssetCount: 1, packBytes: 180000, estimatedVisualPeakBytes: 620800, offlineReady: true, allPathsTerminate: true } } } } });
 assert.strictEqual(readiness.downloadBytes, 180000);
 assert.strictEqual(readiness.uniqueAssetCount, 2);
 assert.strictEqual(readiness.sharedReferenceCount, 1);
