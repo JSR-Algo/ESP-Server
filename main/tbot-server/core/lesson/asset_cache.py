@@ -790,9 +790,8 @@ class AssetCache:
             return
         if self._shared_asset_store is not None:
             digest = self._hash_file(src)
-            self._shared_asset_store.put_file(src, digest)
-            self._shared_asset_store.materialize_pack_asset(
-                self.cache_key, asset.key, digest
+            self._shared_asset_store.put_file_and_materialize(
+                src, digest, self.cache_key, asset.key
             )
             return
         tmp = f"{dest}.{os.getpid()}.{id(self):x}.part"
@@ -813,10 +812,9 @@ class AssetCache:
             if not os.path.exists(source):
                 return
             digest = self._hash_file(source)
-            self._shared_asset_store.put_file(source, digest)
-            assets[asset.key] = digest
+            assets[asset.key] = (source, digest)
         if assets:
-            self._shared_asset_store.commit_pack(self.cache_key, assets)
+            self._shared_asset_store.put_files_and_commit_pack(self.cache_key, assets)
 
     def _asset_pack_source_path(self, asset: AssetState) -> str:
         if self._requires_render_safe_derivative(asset):

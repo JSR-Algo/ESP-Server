@@ -217,14 +217,36 @@ class SharedAssetStore:
     def materialize_pack_asset(self, cache_key: str, key: str, digest: str) -> Path:
         """Expose partial first-generation assets without mutating a valid pack."""
         with self._gc_lock(exclusive=False):
-            digest = self._validate_digest(digest)
-            if not self._attest_unlocked(digest):
-                raise ValueError("cannot materialize unattested asset")
-            target = self._pack_dir(cache_key) / self._pack_asset_name(key)
-            with self._pack_lock(cache_key, exclusive=True):
-                self._recover_pack_unlocked(cache_key)
-                if not self._is_pack_ready_unlocked(cache_key):
-                    self._atomic_link(target, self.asset_path(digest))
+            return self._materialize_pack_asset_locked(cache_key, key, digest)
+
+    def put_file_and_materialize(
+        self, source: Any, digest: str, cache_key: str, key: str
+    ) -> Path:
+        """Hold the GC lease continuously from CAS write through pack hardlink."""
+        with self._gc_lock(exclusive=False):
+            self._put_file_locked(source, digest)
+            return self._materialize_pack_asset_locked(cache_key, key, digest)
+
+    def put_files_and_commit_pack(
+        self, cache_key: str, assets: Mapping[str, tuple[Any, str]]
+    ) -> Path:
+        """Atomically lease all CAS inputs until the READY pack is committed."""
+        with self._gc_lock(exclusive=False):
+            digests: Dict[str, str] = {}
+            for key, (source, digest) in assets.items():
+                self._put_file_locked(source, digest)
+                digests[key] = digest
+            return self._commit_pack_locked(cache_key, digests)
+
+    def _materialize_pack_asset_locked(self, cache_key: str, key: str, digest: str) -> Path:
+        digest = self._validate_digest(digest)
+        if not self._attest_unlocked(digest):
+            raise ValueError("cannot materialize unattested asset")
+        target = self._pack_dir(cache_key) / self._pack_asset_name(key)
+        with self._pack_lock(cache_key, exclusive=True):
+            self._recover_pack_unlocked(cache_key)
+            if not self._is_pack_ready_unlocked(cache_key):
+                self._atomic_link(target, self.asset_path(digest))
         return target
 
     def is_pack_ready(self, cache_key: str) -> bool:
@@ -269,7 +291,13 @@ class SharedAssetStore:
         with self._parts_lock(exclusive=True, blocking=False) as acquired:
             if not acquired:
                 return removed
-            for path in self.root.rglob("*.part"):
+            parts = (
+                Path(dirpath) / name
+                for dirpath, _dirnames, filenames in os.walk(self.root)
+                for name in filenames
+                if name.endswith(".part")
+            )
+            for path in parts:
                 resolved = str(path.resolve())
                 with self._active_parts_lock:
                     if resolved in self._active_parts:

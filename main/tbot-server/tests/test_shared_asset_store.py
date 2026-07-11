@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import errno
+import threading
 from pathlib import Path
 
 import pytest
@@ -436,3 +437,42 @@ def test_commit_reader_and_gc_are_cross_process_serialized(tmp_path):
     assert read_result.get(timeout=1) is True
     assert gc_result.get(timeout=1)["deleted"] == "lesson/v1-old"
     assert SharedAssetStore(root).is_pack_ready(cache_key)
+
+
+def test_sweep_blocks_between_put_and_materialize_until_hardlink_exists(tmp_path):
+    root = tmp_path / "tbot"
+    source = tmp_path / "asset.bin"
+    source.write_bytes(b"leased-cas")
+    digest = _sha(source.read_bytes())
+    put_finished = threading.Event()
+    release = threading.Event()
+    sweep_finished = threading.Event()
+
+    def pause(stage, path):
+        if stage == "after_replace" and path.name == digest:
+            put_finished.set()
+            release.wait(10)
+
+    store = SharedAssetStore(root, failure_hook=pause)
+
+    writer = threading.Thread(
+        target=store.put_file_and_materialize,
+        args=(source, digest, "lesson/v1-race", "asset"),
+    )
+    sweeper = threading.Thread(
+        target=lambda: (
+            store.sweep_unreferenced_cas(),
+            sweep_finished.set(),
+        )
+    )
+    writer.start()
+    assert put_finished.wait(10)
+    sweeper.start()
+    assert not sweep_finished.wait(0.2)
+    release.set()
+    writer.join(10)
+    sweeper.join(10)
+
+    assert sweep_finished.is_set()
+    assert store.asset_path(digest).exists()
+    assert (store.pack_root / "lesson/v1-race/asset").read_bytes() == b"leased-cas"
