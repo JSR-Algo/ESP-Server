@@ -454,7 +454,10 @@ def _apply_lesson_env_overrides(config):
     LESSON_STEP_TIMEOUT_FLOOR_SEC -> lesson.step_timeout_floor_sec.
     LESSON_VOICE_RT_P95_DISABLE_MS -> lesson.voice_rt_p95_disable_ms.
     LESSON_MAX_ASSET_BYTES -> lesson.max_asset_bytes.
-    LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes."""
+    LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes.
+    LESSON_SD_CACHE_QUOTA_BYTES -> lesson.sd_cache_quota_bytes.
+    LESSON_SD_GC_FREE_PERCENT -> lesson.sd_gc_free_percent.
+    LESSON_SD_PRELOAD_MIN_FREE_PERCENT -> lesson.sd_preload_min_free_percent."""
     if not isinstance(config, Mapping):
         return config
 
@@ -469,6 +472,9 @@ def _apply_lesson_env_overrides(config):
     voice_rt_p95_disable_ms = _clean_env("LESSON_VOICE_RT_P95_DISABLE_MS")
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
     max_total_asset_bytes = _parse_positive_int_env("LESSON_MAX_TOTAL_ASSET_BYTES")
+    sd_cache_quota_bytes = _parse_positive_int_env("LESSON_SD_CACHE_QUOTA_BYTES")
+    sd_gc_free_percent = _parse_positive_int_env("LESSON_SD_GC_FREE_PERCENT")
+    sd_preload_min_free_percent = _parse_positive_int_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
     # Built-in sample-lesson DEMO flag (independent of runtime_enabled; NEVER coupled to
     # the production auto-enable below). LESSON_SAMPLE_ENABLED -> lesson.sample_lesson;
     # LESSON_SAMPLE_ASSET_BASE -> lesson.sample_asset_base_url (optional image host).
@@ -489,6 +495,9 @@ def _apply_lesson_env_overrides(config):
         and not voice_rt_p95_disable_ms
         and max_asset_bytes is None
         and max_total_asset_bytes is None
+        and sd_cache_quota_bytes is None
+        and sd_gc_free_percent is None
+        and sd_preload_min_free_percent is None
         and sample_flag is None
         and not sample_asset_base
         and not sample_step_dwell
@@ -526,6 +535,12 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["max_asset_bytes"] = max_asset_bytes
     if max_total_asset_bytes is not None:
         lesson_cfg["max_total_asset_bytes"] = max_total_asset_bytes
+    if sd_cache_quota_bytes is not None:
+        lesson_cfg["sd_cache_quota_bytes"] = sd_cache_quota_bytes
+    if sd_gc_free_percent is not None:
+        lesson_cfg["sd_gc_free_percent"] = sd_gc_free_percent
+    if sd_preload_min_free_percent is not None:
+        lesson_cfg["sd_preload_min_free_percent"] = sd_preload_min_free_percent
     if sample_flag is not None:
         lesson_cfg["sample_lesson"] = sample_flag
     if sample_asset_base:
@@ -771,6 +786,9 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "asset_pack_mount_root",
     "asset_cache_root",
     "asset_origin_base",
+    "sd_cache_quota_bytes",
+    "sd_gc_free_percent",
+    "sd_preload_min_free_percent",
 )
 
 

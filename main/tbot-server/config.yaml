@@ -476,6 +476,10 @@ lesson:
   asset_delivery_mode: sd_pack
   asset_pack_local_root: sd://tbot/lesson-assets
   asset_pack_mount_root: /sdcard/tbot/lesson-assets
+  # Delete one unattached READY pack per GC pass below 20% free or above 700 MiB.
+  sd_cache_quota_bytes: 734003200
+  sd_gc_free_percent: 20
+  sd_preload_min_free_percent: 5
   # The ESP server writes verified bytes under the mount root; firmware reads the
   # matching sd:// localPath and refuses start until those files exist.
 

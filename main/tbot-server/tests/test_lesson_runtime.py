@@ -6929,9 +6929,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         finally:
             undo()
 
-        # Old cache evicted + old runtime closed; a FRESH runtime is pinned and it
-        # already emitted lesson_prepare for the new version (no reconnect needed).
-        self.assertTrue(pinned.asset_cache.evicted)
+        # Old exact cache remains rollback-safe; the old runtime closes only after
+        # the fresh candidate emitted lesson_prepare for the new version.
+        self.assertFalse(pinned.asset_cache.evicted)
         self.assertTrue(pinned.closed)
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
@@ -6968,7 +6968,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         finally:
             undo()
 
-        self.assertTrue(pinned.asset_cache.evicted)
+        self.assertFalse(pinned.asset_cache.evicted)
         self.assertTrue(pinned.closed)
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)

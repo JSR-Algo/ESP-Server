@@ -22,6 +22,7 @@ import json
 import math
 import time
 import unicodedata
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from core.lesson.errors import (
@@ -2822,6 +2823,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"assetCount={len(manifest.get('assets', []) or [])} "
         f"storyBeat={_compact_json(_manifest_story_log_summary(manifest))}",
     )
+    republish_previous = None
     if existing is not None and getattr(existing, "assignment_id", None) == assignment.get("assignmentId"):
         unchanged = (
             existing.lesson_version == new_lesson_version
@@ -2866,18 +2868,40 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 f"v{existing.lesson_version}/a{existing.assignment_version}/m{getattr(existing, 'manifest_checksum', '')[:8]} -> "
                 f"v{new_lesson_version}/a{new_assignment_version}/m{new_manifest_checksum[:8]}; tearing down + re-pulling",
             )
-            old_cache = getattr(existing, "asset_cache", None)
-            try:
-                # Republish EVICTS the old version's bytes (disjoint version-scoped dir),
-                # unlike a plain reconnect close() which keeps verified bytes for
-                # re-attest. evict() reuses aclose() for client teardown.
-                if old_cache is not None and hasattr(old_cache, "evict"):
-                    await old_cache.evict()
-                await existing.close()  # forwarder + (idempotent) asset client teardown
-            except Exception as exc:  # pragma: no cover - teardown is best-effort
-                _log("warning", f"old lesson runtime teardown failed: {type(exc).__name__}")
-            conn.lesson_runtime = None
-            # fall through to a fresh pull of the republished version below.
+            # Keep the exact old version/checksum alive until the candidate has
+            # completed preload and READY attestation. GC protects this runtime's
+            # cache key as previous-known-good after candidate activation.
+            republish_previous = existing
+
+    gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
+    if gc is not None:
+        if not gc.can_preload():
+            _set_lesson_start_status(
+                conn,
+                "SD_PRELOAD_SPACE_LOW",
+                "Thẻ nhớ còn dưới ngưỡng an toàn để tải bài học mới.",
+            )
+            _log("warning", "lesson preload refused: SD free space below preload floor")
+            return republish_previous
+        candidate_cache_key = AssetCache._compose_cache_key(
+            str(assignment.get("lessonId") or "lesson"),
+            int(assignment.get("lessonVersion", 1)),
+            new_manifest_checksum,
+        )
+        result = gc.collect_one(
+            active_cache_key=getattr(
+                getattr(getattr(conn, "lesson_runtime", None), "asset_cache", None),
+                "cache_key",
+                None,
+            ),
+            preloading_cache_key=candidate_cache_key,
+            current_cache_key=getattr(conn, "lesson_current_cache_key", None),
+            previous_known_good_cache_key=getattr(
+                conn, "lesson_previous_known_good_cache_key", None
+            ),
+        )
+        if result.get("deleted"):
+            _log("info", f"lesson SD GC deleted cacheKey={result['deleted']}")
 
     asset_cache = AssetCache(
         assets=[
@@ -2964,7 +2988,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # same-assignment republish path above already closed + nulled it (prior is None
     # there); this catches the new-assignment case that fell straight through.
     prior = getattr(conn, "lesson_runtime", None)
-    if prior is not None and prior is not runtime:
+    if prior is not None and prior is not runtime and prior is not republish_previous:
         try:
             await prior.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
@@ -2978,13 +3002,23 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         if runtime.state == S_FAILED:
             _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
             if getattr(conn, "lesson_runtime", None) is runtime:
-                conn.lesson_runtime = None
+                conn.lesson_runtime = republish_previous
             try:
                 await runtime.close()
             except Exception as exc:  # pragma: no cover - teardown is best-effort
                 _log("warning", f"failed lesson runtime teardown failed: {type(exc).__name__}")
-            return None
+            return republish_previous
         _set_lesson_start_status(conn, "STARTED")
+        if republish_previous is not None:
+            old_cache = getattr(republish_previous, "asset_cache", None)
+            old_cache_key = getattr(old_cache, "cache_key", None)
+            if isinstance(old_cache_key, str) and old_cache_key:
+                conn.lesson_previous_known_good_cache_key = old_cache_key
+            conn.lesson_current_cache_key = getattr(asset_cache, "cache_key", None)
+            try:
+                await republish_previous.close()
+            except Exception as exc:  # pragma: no cover - teardown is best-effort
+                _log("warning", f"old lesson runtime teardown failed: {type(exc).__name__}")
     except LessonError as err:
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson start refused: {err.code}")
@@ -2992,10 +3026,40 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         if callable(release_lesson):
             await release_lesson(reason="lesson_start_refused")
         if getattr(conn, "lesson_runtime", None) is runtime:
-            conn.lesson_runtime = None
+            conn.lesson_runtime = republish_previous
         try:
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"refused lesson runtime teardown failed: {type(exc).__name__}")
-        return None
+        return republish_previous
     return runtime
+
+
+def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
+    mount_root = lesson_cfg.get("asset_pack_mount_root")
+    if not mount_root:
+        return None
+    try:
+        from core.lesson.sd_pack_gc import SdPackGarbageCollector
+        from core.lesson.shared_asset_store import SharedAssetStore
+
+        mounted = Path(str(mount_root)).resolve()
+        store = SharedAssetStore(mounted.parent, pack_root=mounted)
+        runtime = getattr(conn, "lesson_runtime", None)
+        render_busy = lambda: getattr(runtime, "state", None) in (S_RUNNING, S_PAUSED)
+        return SdPackGarbageCollector(
+            mounted,
+            shared_store=store,
+            quota_bytes=_positive_int_or_default(lesson_cfg.get("sd_cache_quota_bytes", 0), 0),
+            gc_free_percent=_positive_float_or_default(lesson_cfg.get("sd_gc_free_percent", 20), 20.0),
+            preload_min_free_percent=_positive_float_or_default(
+                lesson_cfg.get("sd_preload_min_free_percent", 5), 5.0
+            ),
+            voice_busy=getattr(conn, "is_realtime_busy", None),
+            render_busy=render_busy,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        logger = getattr(conn, "logger", None)
+        if logger is not None:
+            logger.warning(f"lesson SD GC unavailable: {type(exc).__name__}")
+        return None
