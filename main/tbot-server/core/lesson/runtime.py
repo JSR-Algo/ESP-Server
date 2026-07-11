@@ -103,6 +103,7 @@ S_PRELOADING = "PRELOADING"
 S_READY = "READY"
 S_RUNNING = "RUNNING"
 S_PAUSED = "PAUSED"
+_SD_PACK_BOOT_CLEANED_ROOTS: set[Path] = set()
 S_COMPLETED = "COMPLETED"
 S_FAILED = "FAILED"
 
@@ -2866,14 +2867,21 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 "info",
                 "lesson republish-on-connect: version/checksum changed "
                 f"v{existing.lesson_version}/a{existing.assignment_version}/m{getattr(existing, 'manifest_checksum', '')[:8]} -> "
-                f"v{new_lesson_version}/a{new_assignment_version}/m{new_manifest_checksum[:8]}; tearing down + re-pulling",
+                f"v{new_lesson_version}/a{new_assignment_version}/m{new_manifest_checksum[:8]}; preparing candidate",
             )
             # Keep the exact old version/checksum alive until the candidate has
             # completed preload and READY attestation. GC protects this runtime's
             # cache key as previous-known-good after candidate activation.
             republish_previous = existing
 
+    # A different assignment is also a candidate transition: the currently
+    # running lesson remains usable until the new assignment reaches READY.
+    if republish_previous is None and getattr(conn, "lesson_runtime", None) is existing:
+        republish_previous = existing
+
     gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
+    activation = None
+    candidate_identity = None
     if gc is not None:
         if not gc.can_preload():
             _set_lesson_start_status(
@@ -2888,6 +2896,26 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             int(assignment.get("lessonVersion", 1)),
             new_manifest_checksum,
         )
+        candidate_identity = {
+            "cacheKey": candidate_cache_key,
+            "lessonVersion": new_lesson_version,
+            "manifestChecksum": new_manifest_checksum,
+        }
+        activation = _sd_pack_activation_for_connection(conn, gc)
+        if activation is not None:
+            old_cache = getattr(republish_previous, "asset_cache", None)
+            old_cache_key = getattr(old_cache, "cache_key", None)
+            if isinstance(old_cache_key, str) and old_cache_key:
+                activation.set_current_if_empty(
+                    {
+                        "cacheKey": old_cache_key,
+                        "lessonVersion": int(getattr(republish_previous, "lesson_version", 0)),
+                        "manifestChecksum": str(
+                            getattr(republish_previous, "manifest_checksum", "")
+                        ),
+                    }
+                )
+            activation.begin_candidate(candidate_identity)
         result = gc.collect_one(
             active_cache_key=getattr(
                 getattr(getattr(conn, "lesson_runtime", None), "asset_cache", None),
@@ -2895,9 +2923,15 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 None,
             ),
             preloading_cache_key=candidate_cache_key,
-            current_cache_key=getattr(conn, "lesson_current_cache_key", None),
-            previous_known_good_cache_key=getattr(
-                conn, "lesson_previous_known_good_cache_key", None
+            current_cache_key=(
+                activation.current_cache_key
+                if activation is not None
+                else getattr(conn, "lesson_current_cache_key", None)
+            ),
+            previous_known_good_cache_key=(
+                activation.previous_known_good_cache_key
+                if activation is not None
+                else getattr(conn, "lesson_previous_known_good_cache_key", None)
             ),
         )
         if result.get("deleted"):
@@ -2983,10 +3017,9 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         alarm=alarm,
         preload_status_reporter=_report_preload_status,
     )
-    # Close any prior runtime for a DIFFERENT assignment before replacing it, so its
-    # forwarder worker task + asset httpx client are not leaked (deep-audit #7). The
-    # same-assignment republish path above already closed + nulled it (prior is None
-    # there); this catches the new-assignment case that fell straight through.
+    # Terminal same-assignment rebuilds may already have closed their runtime. Live
+    # current runtimes, including a different assignment, stay open as the fallback
+    # until the candidate passes READY attestation below.
     prior = getattr(conn, "lesson_runtime", None)
     if prior is not None and prior is not runtime and prior is not republish_previous:
         try:
@@ -3007,7 +3040,19 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 await runtime.close()
             except Exception as exc:  # pragma: no cover - teardown is best-effort
                 _log("warning", f"failed lesson runtime teardown failed: {type(exc).__name__}")
+            if activation is not None:
+                activation.abort_candidate()
             return republish_previous
+        if activation is not None and candidate_identity is not None:
+            if not activation.verify_for_activation(candidate_identity) or not activation.activate_candidate(
+                candidate_identity
+            ):
+                _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
+                if getattr(conn, "lesson_runtime", None) is runtime:
+                    conn.lesson_runtime = republish_previous
+                activation.abort_candidate()
+                await runtime.close()
+                return republish_previous
         _set_lesson_start_status(conn, "STARTED")
         if republish_previous is not None:
             old_cache = getattr(republish_previous, "asset_cache", None)
@@ -3027,6 +3072,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await release_lesson(reason="lesson_start_refused")
         if getattr(conn, "lesson_runtime", None) is runtime:
             conn.lesson_runtime = republish_previous
+        if activation is not None:
+            activation.abort_candidate()
         try:
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
@@ -3044,10 +3091,10 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
         from core.lesson.shared_asset_store import SharedAssetStore
 
         mounted = Path(str(mount_root)).resolve()
-        store = SharedAssetStore(mounted.parent, pack_root=mounted)
+        store = SharedAssetStore(mounted.parent, pack_root=mounted, cleanup_on_init=False)
         runtime = getattr(conn, "lesson_runtime", None)
         render_busy = lambda: getattr(runtime, "state", None) in (S_RUNNING, S_PAUSED)
-        return SdPackGarbageCollector(
+        gc = SdPackGarbageCollector(
             mounted,
             shared_store=store,
             quota_bytes=_positive_int_or_default(lesson_cfg.get("sd_cache_quota_bytes", 0), 0),
@@ -3058,8 +3105,52 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
             voice_busy=getattr(conn, "is_realtime_busy", None),
             render_busy=render_busy,
         )
+        if mounted not in _SD_PACK_BOOT_CLEANED_ROOTS:
+            gc.boot_cleanup()
+            _SD_PACK_BOOT_CLEANED_ROOTS.add(mounted)
+        return gc
     except (OSError, ValueError, TypeError) as exc:
         logger = getattr(conn, "logger", None)
         if logger is not None:
             logger.warning(f"lesson SD GC unavailable: {type(exc).__name__}")
         return None
+
+
+def _sd_pack_activation_for_connection(conn: Any, gc: Any) -> Any:
+    activation = getattr(conn, "lesson_sd_pack_activation", None)
+    if activation is not None:
+        return activation
+    try:
+        from core.lesson.sd_pack_gc import SdPackActivationState
+
+        activation = SdPackActivationState(gc.shared_store)
+        conn.lesson_sd_pack_activation = activation
+        return activation
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def rollback_sd_pack_assignment(conn: Any, assignment: Dict[str, Any]) -> bool:
+    """Re-attest and activate only the exact backend rollback identity."""
+    activation = getattr(conn, "lesson_sd_pack_activation", None)
+    if activation is None or not isinstance(assignment, dict):
+        return False
+    lesson_id = assignment.get("lessonId")
+    lesson_version = assignment.get("lessonVersion")
+    checksum = assignment.get("manifestChecksum")
+    if not isinstance(lesson_id, str) or not isinstance(lesson_version, int):
+        return False
+    if not isinstance(checksum, str) or not checksum:
+        return False
+    from core.lesson.asset_cache import AssetCache
+
+    identity = {
+        "cacheKey": AssetCache._compose_cache_key(lesson_id, lesson_version, checksum),
+        "lessonVersion": lesson_version,
+        "manifestChecksum": checksum,
+    }
+    if not activation.rollback(identity):
+        return False
+    conn.lesson_current_cache_key = activation.current_cache_key
+    conn.lesson_previous_known_good_cache_key = activation.previous_known_good_cache_key
+    return True

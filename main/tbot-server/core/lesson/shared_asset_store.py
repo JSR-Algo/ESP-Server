@@ -36,13 +36,15 @@ class SharedAssetStore:
         *,
         pack_root: Any = None,
         failure_hook: Optional[FailureHook] = None,
+        cleanup_on_init: bool = True,
     ) -> None:
         self.root = Path(root).resolve()
         self.shared_root = self.root / "shared-assets" / "sha256"
         self.pack_root = Path(pack_root).resolve() if pack_root else self.root / "lesson-assets"
         self._failure_hook = failure_hook
         # A process restart must never inherit an interrupted write as valid state.
-        self.cleanup_parts()
+        if cleanup_on_init:
+            self.cleanup_parts()
         self._recover_pack_backups()
 
     def asset_path(self, digest: str) -> Path:

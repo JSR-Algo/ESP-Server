@@ -44,7 +44,8 @@ def test_gc_protects_exact_runtime_keys_and_deletes_only_one_lru_pack(tmp_path):
         previous_known_good_cache_key=keys["previous"],
     )
 
-    assert result == {"deleted": keys["oldest"], "reason": "quota"}
+    assert result["deleted"] == keys["oldest"]
+    assert result["reason"] == "quota"
     assert not packs["oldest"].exists()
     assert packs["newer"].exists()
     assert all(packs[name].exists() for name in ("active", "preloading", "current", "previous"))
@@ -73,7 +74,9 @@ def test_gc_thresholds_and_busy_guards(tmp_path):
     assert gc.collect_one() == {"skipped": "lesson_render_busy"}
     assert pack.exists()
     busy["render"] = False
-    assert gc.collect_one() == {"deleted": "lesson/v1-old", "reason": "low_free_space"}
+    result = gc.collect_one()
+    assert result["deleted"] == "lesson/v1-old"
+    assert result["reason"] == "low_free_space"
 
 
 def test_preload_is_refused_below_five_percent_free(tmp_path):
@@ -148,4 +151,124 @@ def test_gc_never_deletes_shared_cas_blobs(tmp_path):
     )
 
     assert gc.collect_one()["deleted"] == "lesson/v1-old"
-    assert shared.exists()
+    assert not shared.exists()
+
+
+def test_gc_counts_physical_bytes_and_sweeps_only_unreferenced_cas(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    shared_content = b"shared-physical"
+    shared_digest = hashlib.sha256(shared_content).hexdigest()
+    old_content = b"old-only-physical"
+    old_digest = hashlib.sha256(old_content).hexdigest()
+    store.put_bytes(shared_content, shared_digest)
+    store.put_bytes(old_content, old_digest)
+    old_pack = store.commit_pack(
+        "lesson/v1-old", {"shared": shared_digest, "old": old_digest}
+    )
+    new_pack = store.commit_pack("lesson/v2-current", {"shared": shared_digest})
+    os.utime(old_pack, (1, 1))
+    os.utime(new_pack, (2, 2))
+    gc = SdPackGarbageCollector(
+        store.pack_root,
+        shared_store=store,
+        quota_bytes=1,
+        disk_usage=lambda _path: _disk(100, 50),
+    )
+    before = gc.physical_usage_bytes()
+
+    result = gc.collect_one(current_cache_key="lesson/v2-current")
+
+    after = gc.physical_usage_bytes()
+    assert result["deleted"] == "lesson/v1-old"
+    assert result["deletedCas"] == [old_digest]
+    assert after < before
+    assert not store.asset_path(old_digest).exists()
+    assert store.asset_path(shared_digest).exists()
+    assert store.is_pack_ready("lesson/v2-current")
+
+
+def test_activation_state_persists_exact_identity_and_reloads_for_rollback(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    old_key = "lesson/v3-aaaaaaaa"
+    new_key = "lesson/v4-bbbbbbbb"
+    _ready_pack(store, old_key, b"old")
+    _ready_pack(store, new_key, b"new")
+    state_file = tmp_path / "activation.json"
+    state = SdPackActivationState(
+        store,
+        state_path=state_file,
+        current={"cacheKey": old_key, "lessonVersion": 3, "manifestChecksum": "aaaaaaaa"},
+    )
+    candidate = {"cacheKey": new_key, "lessonVersion": 4, "manifestChecksum": "bbbbbbbb"}
+
+    state.begin_candidate(
+        {"cacheKey": new_key, "lessonVersion": 3, "manifestChecksum": "bbbbbbbb"}
+    )
+    assert not state.verify_for_activation()
+    state.begin_candidate(candidate)
+    assert state.verify_for_activation(candidate)
+    assert state.activate_candidate(candidate)
+    restarted = SdPackActivationState(store, state_path=state_file)
+
+    assert restarted.current == candidate
+    assert restarted.previous_known_good == {
+        "cacheKey": old_key,
+        "lessonVersion": 3,
+        "manifestChecksum": "aaaaaaaa",
+    }
+    assert not restarted.rollback(
+        {"cacheKey": old_key, "lessonVersion": 3, "manifestChecksum": "wrong"}
+    )
+    assert restarted.rollback(restarted.previous_known_good)
+    assert restarted.current["cacheKey"] == old_key
+
+
+def test_runtime_gc_boot_cleanup_runs_once_per_pack_root(monkeypatch, tmp_path):
+    from core.lesson import runtime
+
+    calls = []
+    original = SdPackGarbageCollector.boot_cleanup
+
+    def record(self):
+        calls.append(self.pack_root)
+        return original(self)
+
+    monkeypatch.setattr(SdPackGarbageCollector, "boot_cleanup", record)
+    runtime._SD_PACK_BOOT_CLEANED_ROOTS.clear()
+    config = {"asset_pack_mount_root": str(tmp_path / "tbot/lesson-assets")}
+    conn = type("Conn", (), {"lesson_runtime": None, "is_realtime_busy": lambda self: False})()
+
+    runtime._sd_pack_gc_for_connection(conn, config)
+    runtime._sd_pack_gc_for_connection(conn, config)
+
+    assert calls == [(tmp_path / "tbot/lesson-assets").resolve()]
+
+
+def test_backend_rollback_requires_exact_old_version_and_checksum(tmp_path):
+    from core.lesson import runtime
+
+    store = SharedAssetStore(tmp_path / "tbot")
+    old_key = "lesson-a/v3-aaaaaaaa"
+    new_key = "lesson-a/v4-bbbbbbbb"
+    _ready_pack(store, old_key, b"old")
+    _ready_pack(store, new_key, b"new")
+    state = SdPackActivationState(
+        store,
+        current={"cacheKey": old_key, "lessonVersion": 3, "manifestChecksum": "aaaaaaaa"},
+    )
+    state.begin_candidate(
+        {"cacheKey": new_key, "lessonVersion": 4, "manifestChecksum": "bbbbbbbb"}
+    )
+    assert state.activate_candidate()
+    conn = type("Conn", (), {"lesson_sd_pack_activation": state})()
+
+    assert not runtime.rollback_sd_pack_assignment(
+        conn,
+        {"lessonId": "lesson-a", "lessonVersion": 3, "manifestChecksum": "wrong"},
+    )
+    assert runtime.rollback_sd_pack_assignment(
+        conn,
+        {"lessonId": "lesson-a", "lessonVersion": 3, "manifestChecksum": "aaaaaaaa"},
+    )
+    assert conn.lesson_current_cache_key == old_key
+    assert conn.lesson_previous_known_good_cache_key == new_key

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -65,13 +66,13 @@ class SdPackGarbageCollector:
         current_cache_key: Optional[str] = None,
         previous_known_good_cache_key: Optional[str] = None,
         protected_cache_keys: Iterable[str] = (),
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         if self._voice_busy():
             return {"skipped": "voice_busy"}
         if self._render_busy():
             return {"skipped": "lesson_render_busy"}
 
-        usage = self._pack_usage_bytes()
+        usage = self.physical_usage_bytes()
         low_free = self._free_percent() < self.gc_free_percent
         above_quota = self.quota_bytes > 0 and usage > self.quota_bytes
         if not low_free and not above_quota:
@@ -106,8 +107,10 @@ class SdPackGarbageCollector:
             shutil.rmtree(tombstone)
         except OSError:
             return {"skipped": "delete_failed"}
+        deleted_cas = self._sweep_unreferenced_cas(protected)
         return {
             "deleted": cache_key,
+            "deletedCas": deleted_cas,
             "reason": "low_free_space" if low_free else "quota",
         }
 
@@ -117,16 +120,60 @@ class SdPackGarbageCollector:
         free = int(getattr(usage, "free", 0) or 0)
         return 100.0 if total <= 0 else (free * 100.0 / total)
 
-    def _pack_usage_bytes(self) -> int:
+    def physical_usage_bytes(self) -> int:
+        """Count physical inodes once so lesson-pack hardlinks do not inflate quota."""
         total = 0
-        for _cache_key, pack in self._pack_directories():
-            for path in pack.rglob("*"):
+        seen = set()
+        roots = [self.pack_root]
+        if self.shared_store is not None:
+            roots.append(self.shared_store.shared_root)
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
                 try:
                     if path.is_file():
-                        total += path.stat().st_size
+                        stat = path.stat()
+                        inode = (stat.st_dev, stat.st_ino)
+                        if inode not in seen:
+                            seen.add(inode)
+                            total += stat.st_size
                 except OSError:
                     continue
         return total
+
+    def _sweep_unreferenced_cas(self, protected: Set[str]) -> list[str]:
+        if self.shared_store is None:
+            return []
+        reachable = set()
+        for cache_key, path in self._pack_directories():
+            if cache_key not in protected and not self._is_ready(cache_key):
+                continue
+            try:
+                manifest = json.loads((path / "pack.json").read_text(encoding="utf-8"))
+                assets = manifest.get("assets")
+                if isinstance(assets, dict):
+                    reachable.update(
+                        digest for digest in assets.values() if isinstance(digest, str)
+                    )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        deleted = []
+        if not self.shared_store.shared_root.exists():
+            return deleted
+        for path in self.shared_store.shared_root.rglob("*"):
+            if not path.is_file() or path.name in reachable:
+                continue
+            try:
+                # A remaining hardlink means some malformed/incomplete pack still
+                # owns these bytes. Preserve the CAS name rather than guessing.
+                if path.stat().st_nlink > 1:
+                    continue
+                path.unlink()
+                deleted.append(path.name)
+            except OSError:
+                continue
+        return sorted(deleted)
 
     def _pack_directories(self) -> Iterable[Tuple[str, Path]]:
         if not self.pack_root.is_dir():
@@ -154,35 +201,139 @@ class SdPackGarbageCollector:
 
 
 class SdPackActivationState:
-    """Keep the old exact cache identity until a verified candidate is activated."""
+    """Atomically persist exact current/candidate/previous pack identities."""
 
-    def __init__(self, store: SharedAssetStore, *, current_cache_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        store: SharedAssetStore,
+        *,
+        state_path: Any = None,
+        current: Any = None,
+        current_cache_key: Optional[str] = None,
+    ) -> None:
         self.store = store
-        self.current_cache_key = current_cache_key
-        self.previous_known_good_cache_key: Optional[str] = None
-        self.candidate_cache_key: Optional[str] = None
+        self.state_path = Path(state_path or (store.root / "lesson-pack-activation.json"))
+        loaded = self._load()
+        self.current = self._identity(current) or self._identity(loaded.get("current"))
+        if self.current is None and current_cache_key:
+            self.current = self._identity(current_cache_key)
+        self.previous_known_good = self._identity(loaded.get("previousKnownGood"))
+        self.candidate = self._identity(loaded.get("candidate"))
+        if current is not None or current_cache_key is not None:
+            self._persist()
 
-    def begin_candidate(self, cache_key: str) -> None:
-        self.candidate_cache_key = cache_key
+    @property
+    def current_cache_key(self) -> Optional[str]:
+        return self.current.get("cacheKey") if self.current else None
 
-    def activate_candidate(self) -> bool:
-        candidate = self.candidate_cache_key
-        if not candidate or not self.store.is_pack_ready(candidate):
+    @property
+    def previous_known_good_cache_key(self) -> Optional[str]:
+        return self.previous_known_good.get("cacheKey") if self.previous_known_good else None
+
+    @property
+    def candidate_cache_key(self) -> Optional[str]:
+        return self.candidate.get("cacheKey") if self.candidate else None
+
+    def begin_candidate(self, identity: Any) -> None:
+        self.candidate = self._identity(identity)
+        self._persist()
+
+    def set_current_if_empty(self, identity: Any) -> None:
+        if self.current is None:
+            self.current = self._identity(identity)
+            self._persist()
+
+    def verify_for_activation(self, identity: Any = None) -> bool:
+        expected = self._identity(identity) if identity is not None else self.candidate
+        return bool(
+            expected
+            and expected == self.candidate
+            and self.store.is_pack_ready(expected["cacheKey"])
+        )
+
+    def activate_candidate(self, identity: Any = None) -> bool:
+        expected = self._identity(identity) if identity is not None else self.candidate
+        if not self.verify_for_activation(expected):
             return False
-        old = self.current_cache_key
-        self.current_cache_key = candidate
-        self.candidate_cache_key = None
-        if old and old != candidate:
-            self.previous_known_good_cache_key = old
+        old = self.current
+        self.current = expected
+        self.candidate = None
+        if old and old != expected:
+            self.previous_known_good = old
+        self._persist()
         return True
 
-    def rollback(self, exact_cache_key: str) -> bool:
-        if exact_cache_key != self.previous_known_good_cache_key:
+    def abort_candidate(self) -> None:
+        self.candidate = None
+        self._persist()
+
+    def rollback(self, exact_identity: Any) -> bool:
+        expected = self._identity(exact_identity)
+        if not expected or expected != self.previous_known_good:
             return False
-        if not self.store.is_pack_ready(exact_cache_key):
+        if not self.store.is_pack_ready(expected["cacheKey"]):
             return False
-        old = self.current_cache_key
-        self.current_cache_key = exact_cache_key
-        self.previous_known_good_cache_key = old
-        self.candidate_cache_key = None
+        old = self.current
+        self.current = expected
+        self.previous_known_good = old
+        self.candidate = None
+        self._persist()
         return True
+
+    @staticmethod
+    def _identity(value: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(value, str) and value:
+            tail = value.rsplit("/", 1)[-1]
+            version = 0
+            checksum = ""
+            if tail.startswith("v") and "-" in tail:
+                raw_version, checksum = tail[1:].split("-", 1)
+                try:
+                    version = int(raw_version)
+                except ValueError:
+                    version = 0
+            return {"cacheKey": value, "lessonVersion": version, "manifestChecksum": checksum}
+        if not isinstance(value, dict):
+            return None
+        cache_key = value.get("cacheKey")
+        checksum = value.get("manifestChecksum")
+        version = value.get("lessonVersion")
+        if not isinstance(cache_key, str) or not cache_key:
+            return None
+        if not isinstance(checksum, str) or not isinstance(version, int):
+            return None
+        tail = cache_key.rsplit("/", 1)[-1]
+        if tail.startswith("v") and "-" in tail:
+            raw_version, key_checksum = tail[1:].split("-", 1)
+            try:
+                if int(raw_version) != version or key_checksum != checksum:
+                    return None
+            except ValueError:
+                return None
+        return {"cacheKey": cache_key, "lessonVersion": version, "manifestChecksum": checksum}
+
+    def _load(self) -> Dict[str, Any]:
+        try:
+            value = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {}
+
+    def _persist(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.state_path.with_name(self.state_path.name + ".part")
+        content = json.dumps(
+            {
+                "current": self.current,
+                "previousKnownGood": self.previous_known_good,
+                "candidate": self.candidate,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with temp.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temp), str(self.state_path))
+        self.store._fsync_dir(self.state_path.parent)

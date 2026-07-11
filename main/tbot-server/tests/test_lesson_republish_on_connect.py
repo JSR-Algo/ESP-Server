@@ -326,6 +326,31 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(existing.closed)
         self.assertEqual(calls, [])
 
+    async def test_failed_candidate_for_different_assignment_keeps_old_runtime(self):
+        _FailingCandidateRuntime.instances = []
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        assignment = _assignment(lesson_version=4, assignment_version=2)
+        assignment["assignmentId"] = "asg-2"
+        patches = self._patches(assignment=assignment, manifest=_manifest(), etag=ETAG_V2)
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_FailingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertFalse(existing.closed)
+        self.assertEqual(calls, [])
+
     async def test_republish_refuses_candidate_below_five_percent_sd_free(self):
         _FakeNewRuntime.instances = []
         calls = []
