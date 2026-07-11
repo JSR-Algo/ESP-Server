@@ -107,6 +107,68 @@ async def test_sync_cached_lesson_assets_to_sd_skips_when_sd_pack_disabled(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v1-a"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "poster").write_bytes(b"a")
+    busy = [True, False]
+    sleeps = []
+    calls = []
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, pack):
+        calls.append(pack["cacheKey"])
+        return {"ready": True}
+
+    async def fake_sleep(_delay):
+        sleeps.append("paused")
+
+    def busy_check():
+        return busy.pop(0) if busy else False
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(
+        Conn(), busy_check=busy_check, sleep=fake_sleep
+    )
+
+    assert result["synced"] == 1
+    assert sleeps == ["paused"]
+    assert calls == ["lesson-a/v1-a"]
+
+
+def test_cached_asset_packs_ignore_configured_sd_pack_without_valid_ready(tmp_path):
+    cache_root = tmp_path / "cache"
+    cached = cache_root / "lesson-a" / "v1-a"
+    cached.mkdir(parents=True)
+    (cached / "poster").write_bytes(b"a")
+    sd_root = tmp_path / "sd" / "lesson-assets"
+    (sd_root / "lesson-a" / "v1-a").mkdir(parents=True)
+    config = {
+        "lesson": {
+            "asset_cache_root": str(cache_root),
+            "asset_pack_mount_root": str(sd_root),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    assert list(sd_pack_sync.cached_asset_packs(config)) == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_ready_schedules_cached_lesson_sd_sync():
     client = mcp_handler.MCPClient()
     scheduled = []
