@@ -169,6 +169,16 @@ def test_screenshot_paths_are_confined_regular_bounded_images(tmp_path):
     assert "screenshots must be valid PNG or JPEG images" in fault.validate_result(
         "cold", result, "lesson_preload_ready checksum_verified", tmp_path
     )
+    huge = tmp_path / "huge.png"
+    write_png(huge, 1, 1)
+    data = bytearray(huge.read_bytes())
+    data[16:24] = struct.pack(">II", 100_000, 100_000)
+    data[29:33] = struct.pack(">I", zlib.crc32(bytes(data[12:29])))
+    huge.write_bytes(data)
+    result["screenshots"] = [{"role": "hardware", "path": "huge.png"}]
+    assert "screenshots must be valid PNG or JPEG images" in fault.validate_result(
+        "cold", result, "lesson_preload_ready checksum_verified", tmp_path
+    )
     link = tmp_path / "linked.png"
     link.symlink_to(outside)
     result["screenshots"] = [{"role": "hardware", "path": "linked.png"}]

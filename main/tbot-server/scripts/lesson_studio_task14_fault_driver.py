@@ -57,7 +57,7 @@ def _image_dimensions(path):
         with Image.open(path) as image:
             image.load()
         return (image_type,dimensions) if image_type in ('png','jpeg') else (None,None)
-    except (IndexError,OSError,SyntaxError,UnidentifiedImageError,ValueError):
+    except (Image.DecompressionBombError,IndexError,OSError,SyntaxError,UnidentifiedImageError,ValueError):
         return None,None
 
 def _inspect_screenshots(entries,base_dir=None):
