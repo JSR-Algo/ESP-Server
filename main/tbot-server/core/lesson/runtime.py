@@ -1213,7 +1213,13 @@ class LessonRuntime:
 
         event = {
             "type": "story_progress",
-            "sequence": -self._step_seq if isinstance(self._step_seq, int) else -(self._step_index + 1),
+            # Backend dedupe keys include event sequence. Keep storyline beats in a
+            # stable negative namespace that cannot collide with step_completed's
+            # legacy ``-step_seq`` synthetic sequence.
+            "sequence": -(
+                1_000_000
+                + (self._step_seq if isinstance(self._step_seq, int) else self._step_index + 1)
+            ),
             "stepId": self._step_id,
             "petReaction": bounded(story.get("successReaction")),
             "unitGrowth": bounded(story.get("unitGrowth") or story.get("unitProgress")),

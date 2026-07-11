@@ -169,13 +169,14 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
             story,
             {
                 "type": "story_progress",
-                "sequence": -3,
+                "sequence": -1_000_003,
                 "stepId": "s1",
                 "petReaction": "pet.entersBarn",
                 "unitGrowth": "farm.friendship.1",
                 "nextTease": "What will the pet eat tomorrow?",
             },
         )
+        self.assertNotEqual(story["sequence"], completed["sequence"])
         self.assertNotIn("attendance", repr(story).lower())
 
     async def test_three_incorrect_answers_model_then_advance(self):
