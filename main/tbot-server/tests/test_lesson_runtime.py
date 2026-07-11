@@ -32,35 +32,41 @@ from core.lesson.runtime import (
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
 
-FIXTURE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "docs",
-    "stories",
-    "US-006-learning-course-runtime",
-    "fixtures",
-    "lesson-protocol.v1.json",
+def _robot_repo_candidates():
+    candidates = []
+    configured = os.environ.get("TBOT_ROBOT_REPO")
+    if configured:
+        candidates.append(os.path.abspath(configured))
+    worktree_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    candidates.extend([worktree_root, os.path.dirname(worktree_root)])
+    git_file = os.path.join(worktree_root, ".git")
+    if os.path.isfile(git_file):
+        with open(git_file) as fh:
+            gitdir = fh.read().strip().removeprefix("gitdir:").strip()
+        marker = os.sep + "esp32-server" + os.sep + ".git" + os.sep
+        if marker in gitdir:
+            esp_repo = gitdir.split(marker, 1)[0] + os.sep + "esp32-server"
+            candidates.append(os.path.dirname(esp_repo))
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_robot_fixture(relative_path):
+    tried = [os.path.join(repo, relative_path) for repo in _robot_repo_candidates()]
+    resolved = next((path for path in tried if os.path.isfile(path)), None)
+    if resolved is None:
+        raise AssertionError("required robot fixture missing; searched: " + ", ".join(tried))
+    return resolved
+
+
+FIXTURE_PATH = _resolve_robot_fixture(
+    os.path.join("docs", "stories", "US-006-learning-course-runtime", "fixtures", "lesson-protocol.v1.json")
 )
-if not os.path.exists(FIXTURE_PATH):
-    raise unittest.SkipTest("lesson protocol fixture lives in sibling robot/docs checkout")
 
 FIX = json.load(open(FIXTURE_PATH))
 
-SEED_LESSON_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "TBOT-Firmware",
-    "lesson",
-    "lesson.json",
+SEED_LESSON_PATH = _resolve_robot_fixture(
+    os.path.join("TBOT-Firmware", "lesson", "lesson.json")
 )
-if not os.path.exists(SEED_LESSON_PATH):
-    raise unittest.SkipTest("packaged firmware lesson lives in sibling TBOT-Firmware checkout")
 
 SEED_LESSON = json.load(open(SEED_LESSON_PATH))["lesson"]
 
@@ -967,6 +973,12 @@ class _RecordingAlarm:
 
 
 class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    def test_robot_fixture_resolver_finds_docs_and_firmware_from_feature_worktree(self):
+        self.assertTrue(os.path.isfile(FIXTURE_PATH))
+        self.assertTrue(os.path.isfile(SEED_LESSON_PATH))
+        self.assertIn(os.path.join("robot", "docs"), FIXTURE_PATH)
+        self.assertIn(os.path.join("robot", "TBOT-Firmware"), SEED_LESSON_PATH)
+
     def test_backend_canonical_fixture_resolver_finds_complete_worktree_manifest(self):
         self.assertIsNotNone(BACKEND_CANONICAL_MANIFEST_PATH)
         self.assertTrue(os.path.isfile(BACKEND_CANONICAL_MANIFEST_PATH))

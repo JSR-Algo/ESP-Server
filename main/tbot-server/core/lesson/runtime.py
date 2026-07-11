@@ -40,7 +40,7 @@ from core.lesson.errors import (
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
-from core.lesson.interaction_templates import SafeSpeakingSession, fun_pattern_prompt
+from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
 from core.lesson.motion_presets import dispatch_motion_preset
 
 TAG = "LessonRuntime"
@@ -799,7 +799,8 @@ class LessonRuntime:
         self._child_response_timeout_task: Optional[asyncio.Task] = None
         self._child_response_timeout_count = 0
         self._safe_speaking_session: Optional[SafeSpeakingSession] = None
-        self._motion_tasks: set = set()
+        self._motion_task: Optional[asyncio.Task] = None
+        self._motion_generation = 0
         self._step_seq: Optional[int] = None
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
@@ -891,15 +892,16 @@ class LessonRuntime:
         for task in list(self._preload_status_report_tasks):
             if not task.done():
                 task.cancel()
-        for task in list(self._motion_tasks):
-            if not task.done():
-                task.cancel()
+        self._motion_generation += 1
+        motion_task = self._motion_task
+        self._motion_task = None
+        if motion_task is not None and not motion_task.done():
+            motion_task.cancel()
         if self._preload_status_report_tasks:
             await asyncio.gather(*self._preload_status_report_tasks, return_exceptions=True)
             self._preload_status_report_tasks.clear()
-        if self._motion_tasks:
-            await asyncio.gather(*self._motion_tasks, return_exceptions=True)
-            self._motion_tasks.clear()
+        if motion_task is not None:
+            await asyncio.gather(motion_task, return_exceptions=True)
         if self.forwarder is not None:
             await self.forwarder.aclose()
         if self.asset_cache is not None:
@@ -1072,7 +1074,7 @@ class LessonRuntime:
                 CHILD_RESPONSE_INTENT_CORRECT: "correct",
                 CHILD_RESPONSE_INTENT_NEAR_MISS: "brave_try",
                 CHILD_RESPONSE_INTENT_HELP_OR_REPEAT: "help_or_repeat",
-                CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT: "vietnamese_object",
+                CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT: "supported",
             }.get(response_intent, "incorrect")
             return await self._handle_safe_speaking_branch(branch)
         if response_intent != CHILD_RESPONSE_INTENT_CORRECT:
@@ -1171,22 +1173,31 @@ class LessonRuntime:
                 self._start_child_response_timeout()
             return True
 
-        self._forward_safe_speaking_completion(decision.outcome)
+        self._forward_safe_speaking_completion(decision.result, decision.outcome)
         self._forward_story_progress()
         self._step_completed = True
         await self._wait_lesson_prompt_idle()
         await self._maybe_finish_step()
         return True
 
-    def _forward_safe_speaking_completion(self, outcome: str) -> None:
+    def _forward_safe_speaking_completion(self, result: str, response_class: str) -> None:
+        interaction = (self._step or {}).get("interaction") or {}
+        pattern = interaction.get("funPattern")
+        if pattern not in FUN_PATTERN_PROMPTS:
+            pattern = "copyMyMove"
         self._forward(
             {
                 "type": "step_completed",
                 "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
                 "stepId": self._step_id,
                 "stepType": (self._step or {}).get("type"),
-                "result": outcome,
-                "detail": {"outcome": outcome},
+                "result": result if result in {"success", "miss", "timeout"} else "miss",
+                "detail": {
+                    "responseClass": response_class,
+                    "interactionTemplate": "safeSpeaking",
+                    "attempts": self._safe_speaking().attempts,
+                    "funPattern": pattern,
+                },
             }
         )
 
@@ -1194,12 +1205,19 @@ class LessonRuntime:
         story = (self._step or {}).get("storyBeat")
         if not isinstance(story, dict):
             return
+        def bounded(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value[:128] if value else None
+
         event = {
             "type": "story_progress",
+            "sequence": -self._step_seq if isinstance(self._step_seq, int) else -(self._step_index + 1),
             "stepId": self._step_id,
-            "petReaction": story.get("successReaction"),
-            "unitGrowth": story.get("unitGrowth") or story.get("unitProgress"),
-            "nextTease": story.get("nextTease"),
+            "petReaction": bounded(story.get("successReaction")),
+            "unitGrowth": bounded(story.get("unitGrowth") or story.get("unitProgress")),
+            "nextTease": bounded(story.get("nextTease")),
         }
         if any(value is not None for key, value in event.items() if key not in {"type", "stepId"}):
             self._forward(event)
@@ -1211,18 +1229,32 @@ class LessonRuntime:
         preset = motion.get(slot)
         if not isinstance(preset, str):
             return
-        task = asyncio.create_task(dispatch_motion_preset(self.conn, preset))
-        self._motion_tasks.add(task)
-        task.add_done_callback(self._motion_done)
+        self._motion_generation += 1
+        generation = self._motion_generation
+        step_id = self._step_id
+        step_seq = self._step_seq
+        previous = self._motion_task
+        if previous is not None and not previous.done():
+            previous.cancel()
 
-    def _motion_done(self, task: asyncio.Task) -> None:
-        self._motion_tasks.discard(task)
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            self._log("warning", f"lesson motion degraded: {type(exc).__name__}")
+        async def run_serialized_motion() -> None:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            if (
+                self._closed
+                or generation != self._motion_generation
+                or step_id != self._step_id
+                or step_seq != self._step_seq
+            ):
+                return
+            try:
+                await dispatch_motion_preset(self.conn, preset)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log("warning", f"lesson motion degraded: {type(exc).__name__}")
+
+        self._motion_task = asyncio.create_task(run_serialized_motion())
 
     async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():

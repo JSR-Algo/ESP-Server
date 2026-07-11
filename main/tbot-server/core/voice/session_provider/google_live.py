@@ -2000,6 +2000,30 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         return routed is True
 
+    async def _dispatch_lesson_child_response_failure(self, reason):
+        """Route a finalized child-audio turn that produced no usable transcript."""
+        if not self._lesson_child_response_route_active():
+            return False
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        handler = getattr(runtime, "on_child_response_failure", None)
+        if not callable(handler):
+            return False
+        self._lesson_child_audio_pending_transcript = False
+        self._clear_lesson_child_speech_start_frames()
+        self._cancel_lesson_child_transcript_timeout_task()
+        self._force_lesson_session_mode("lesson_child_response_failure")
+        try:
+            await self._begin_user_interrupt("lesson_child_response_failure")
+            await self._hard_reconnect_after_interrupt(
+                "lesson_child_response_failure_prompt",
+                restore_session_resumption=False,
+            )
+            self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
+            return bool(await handler(str(reason or "stt_unavailable")))
+        except Exception:
+            return False
+
     def _lesson_start_ack_text(self, action_response):
         if action_response is None:
             return ""
@@ -3997,10 +4021,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._force_lesson_session_mode("lesson_child_transcript_timeout")
             if self._bridge is not None and hasattr(self._bridge, "stop_output"):
                 await self._bridge.stop_output()
+            reprompted = await self._dispatch_lesson_child_response_failure(
+                "stt_unavailable"
+            )
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_child_transcript_timeout reopened_audio timeout_sec={} reprompted={}",
                 timeout,
-                False,
+                reprompted,
             )
         except asyncio.CancelledError:
             raise

@@ -21,6 +21,7 @@ FUN_PATTERN_PROMPTS: Dict[str, str] = {
 @dataclass(frozen=True)
 class SafeSpeakingDecision:
     outcome: str
+    result: str
     prompt: str
     motion_slot: str
     advance: bool
@@ -40,16 +41,21 @@ class SafeSpeakingSession:
 
     def decide(self, branch: str) -> SafeSpeakingDecision:
         if branch == "correct":
-            return SafeSpeakingDecision("correct", f"You found it! {self.target_word}!", "correct", True)
+            return SafeSpeakingDecision("correct", "success", f"You found it! {self.target_word}!", "correct", True)
         if branch == "brave_try":
             return SafeSpeakingDecision(
-                "brave_try", f"Brave try! Let's keep {self.target_word} for our story.", "nearMiss", True
+                "brave_try", "miss", f"Brave try! Let's keep {self.target_word} for our story.", "nearMiss", True
+            )
+        if branch == "supported":
+            return SafeSpeakingDecision(
+                "supported", "success", f"Yes, in English we say {self.target_word}. Let's continue!", "correct", True
             )
 
         self.attempts += 1
         if self.attempts >= self.max_attempts:
             return SafeSpeakingDecision(
-                "modeled_fallback",
+                "modeled",
+                "timeout" if branch in {"silence", "stt_failure"} else "miss",
                 f"Great teamwork. TeeBot will model it: {self.target_word}. Let's continue!",
                 "nearMiss",
                 True,
@@ -63,6 +69,7 @@ class SafeSpeakingSession:
         }
         return SafeSpeakingDecision(
             branch if branch in prompts else "incorrect",
+            "miss",
             prompts.get(branch, prompts["incorrect"]),
             "incorrect",
             False,

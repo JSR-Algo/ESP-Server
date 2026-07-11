@@ -95,6 +95,11 @@ class SafeSpeakingTemplateTests(unittest.TestCase):
             self.assertTrue(decision.advance)
             self.assertNotRegex(decision.prompt.lower(), r"\b(wrong|sai|không đúng)\b")
 
+    def test_vietnamese_object_is_supported_without_transcript_scoring(self):
+        decision = SafeSpeakingSession(max_attempts=3, target_word="barn").decide("supported")
+        self.assertTrue(decision.advance)
+        self.assertEqual((decision.result, decision.outcome), ("success", "supported"))
+
     def test_incorrect_silence_help_vietnamese_and_stt_failure_reach_fallback_by_three(self):
         for branch in ("incorrect", "silence", "help_or_repeat", "vietnamese_object", "stt_failure"):
             session = SafeSpeakingSession(max_attempts=99, target_word="barn")
@@ -103,7 +108,7 @@ class SafeSpeakingTemplateTests(unittest.TestCase):
             self.assertFalse(decisions[1].advance, branch)
             self.assertTrue(decisions[2].advance, branch)
             self.assertEqual(session.attempts, 3)
-            self.assertEqual(decisions[2].outcome, "modeled_fallback")
+            self.assertEqual(decisions[2].outcome, "modeled")
             for decision in decisions:
                 self.assertNotRegex(decision.prompt.lower(), r"\b(wrong|sai|không đúng)\b")
 
@@ -147,12 +152,30 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         events = [event for batch in forwarder.batches for event in batch["events"]]
         completed = next(event for event in events if event["type"] == "step_completed")
         serialized = repr(completed).lower()
-        self.assertEqual(completed["result"], "correct")
+        self.assertEqual(completed["result"], "success")
+        self.assertEqual(
+            completed["detail"],
+            {
+                "responseClass": "correct",
+                "interactionTemplate": "safeSpeaking",
+                "attempts": 0,
+                "funPattern": "copyMyMove",
+            },
+        )
         for forbidden in ("barn", "transcript", "recognizedtext", "confidence", "score"):
             self.assertNotIn(forbidden, serialized)
         story = next(event for event in events if event["type"] == "story_progress")
-        self.assertEqual(story["petReaction"], "pet.entersBarn")
-        self.assertEqual(story["unitGrowth"], "farm.friendship.1")
+        self.assertEqual(
+            story,
+            {
+                "type": "story_progress",
+                "sequence": -3,
+                "stepId": "s1",
+                "petReaction": "pet.entersBarn",
+                "unitGrowth": "farm.friendship.1",
+                "nextTease": "What will the pet eat tomorrow?",
+            },
+        )
         self.assertNotIn("attendance", repr(story).lower())
 
     async def test_three_incorrect_answers_model_then_advance(self):
@@ -172,15 +195,22 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
             event for batch in forwarder.batches for event in batch["events"]
             if event["type"] == "step_completed"
         ]
-        self.assertEqual(completed[0]["result"], "modeled_fallback")
+        self.assertEqual(completed[0]["result"], "miss")
+        self.assertEqual(completed[0]["detail"]["responseClass"], "modeled")
 
     async def test_typed_stt_failure_uses_same_bounded_state_machine(self):
-        rt, _conn, _forwarder = self._runtime()
+        rt, _conn, forwarder = self._runtime()
         rt._maybe_finish_step = lambda: asyncio.sleep(0)
         for _ in range(3):
             rt._child_response_window_open = True
             self.assertTrue(await rt.on_child_response_failure("stt_failure"))
         self.assertTrue(rt._step_completed)
+        completed = next(
+            event for batch in forwarder.batches for event in batch["events"]
+            if event["type"] == "step_completed"
+        )
+        self.assertEqual(completed["result"], "timeout")
+        self.assertEqual(completed["detail"]["responseClass"], "modeled")
 
     async def test_motion_dispatch_is_nonblocking_and_failure_does_not_fail_lesson(self):
         rt, _conn, _forwarder = self._runtime()
@@ -194,11 +224,51 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
             rt._dispatch_step_motion("listen")
             await asyncio.sleep(0)
             self.assertEqual(rt.state, S_RUNNING)
-            self.assertEqual(len(rt._motion_tasks), 1)
+            self.assertIsNotNone(rt._motion_task)
             blocked.set()
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             self.assertEqual(rt.state, S_RUNNING)
+
+    async def test_new_motion_supersedes_stale_motion_without_interleaving(self):
+        rt, _conn, _forwarder = self._runtime()
+        started = []
+        released = asyncio.Event()
+
+        async def motion(_conn, preset):
+            started.append(preset)
+            await released.wait()
+            return True
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            rt._dispatch_step_motion("listen")
+            await asyncio.sleep(0)
+            rt._dispatch_step_motion("correct")
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if len(started) == 2:
+                    break
+            self.assertEqual(started, ["listen", "celebrate"])
+            self.assertFalse(rt._motion_task.done())
+            released.set()
+            await rt._motion_task
+
+    async def test_close_cancels_and_drains_active_motion_worker(self):
+        rt, _conn, _forwarder = self._runtime()
+        blocked = asyncio.Event()
+
+        async def motion(_conn, _preset):
+            await blocked.wait()
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            rt._dispatch_step_motion("listen")
+            await asyncio.sleep(0)
+            task = rt._motion_task
+            rt.forwarder = None
+            rt.asset_cache = None
+            await rt.close()
+            self.assertTrue(task.done())
+            self.assertIsNone(rt._motion_task)
 
     async def test_legacy_step_keeps_existing_unbounded_retry_behavior(self):
         rt, _conn, _forwarder = self._runtime()

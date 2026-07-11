@@ -2434,7 +2434,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(provider._waiting_model_since)
 
-    async def test_lesson_child_transcript_timeout_reopens_without_runtime_reprompt(self):
+    async def test_lesson_child_transcript_timeout_routes_stt_unavailable_to_runtime(self):
         conn = _Conn()
         conn.config["google_live"].update(
             {
@@ -2448,9 +2448,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         handled = []
+        failures = []
 
         async def _on_child_response(text, **kwargs):
             handled.append((text, kwargs))
+            return True
+
+        async def _on_child_response_failure(reason):
+            failures.append(reason)
             return True
 
         conn.lesson_runtime = SimpleNamespace(
@@ -2459,10 +2464,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             _step_completed=False,
             _child_response_window_open=True,
             on_child_response=_on_child_response,
+            on_child_response_failure=_on_child_response_failure,
         )
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()
+        old_bridge = provider._bridge
         provider._bridge.rms = 2200
         provider._user_audio_allowed_until = time.monotonic() + 5
 
@@ -2471,8 +2478,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(handled, [])
+        self.assertEqual(failures, ["stt_unavailable"])
         self.assertFalse(provider._lesson_child_audio_pending_transcript)
-        self.assertEqual(provider._bridge.stop_calls, 1)
+        self.assertEqual(old_bridge.stop_calls, 2)
 
     async def test_lesson_child_listen_stop_does_not_wait_for_model_audio(self):
         conn = _Conn()
