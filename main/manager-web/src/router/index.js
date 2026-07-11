@@ -259,6 +259,18 @@ const routes = [
     }
   },
   {
+    path: '/lesson-visual-library',
+    name: 'LessonVisualLibrary',
+    component: function () { return import('../views/LessonVisualLibrary.vue') },
+    meta: { requiresAuth: true, requiresSuperAdmin: true, title: 'Lesson visual library' }
+  },
+  {
+    path: '/lesson-visual-library/:assetKey',
+    name: 'LessonVisualAssetDetail',
+    component: function () { return import('../views/LessonVisualAssetDetail.vue') },
+    meta: { requiresAuth: true, requiresSuperAdmin: true, title: 'Lesson visual asset' }
+  },
+  {
     path: '/course-insights',
     name: 'CourseInsights',
     component: function () {
@@ -291,7 +303,7 @@ VueRouter.prototype.push = function push(location) {
 }
 
 // NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights']
+const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights', 'LessonVisualLibrary', 'LessonVisualAssetDetail']
 
 // Route Guard
 router.beforeEach((to, from, next) => {

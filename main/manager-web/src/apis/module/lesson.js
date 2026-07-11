@@ -19,7 +19,37 @@ import {
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
 
+function normalizeVisualAsset(raw) {
+  const r = raw || {};
+  return {
+    assetId: r.id ?? r.assetId ?? '', assetKey: r.asset_key ?? r.assetKey ?? '', category: r.category ?? '', title: r.title ?? '',
+    versionId: r.version_id ?? r.versionId ?? '', version: Number(r.version ?? 0), profile: r.profile ?? '', storagePath: r.storage_path ?? r.storagePath ?? '',
+    sha256: r.sha256 ?? '', mimeType: r.mime_type ?? r.mimeType ?? '', bytes: Number(r.bytes ?? 0), width: Number(r.width ?? 0), height: Number(r.height ?? 0),
+    publicationState: r.publication_state ?? r.publicationState ?? 'draft', usageCount: Number(r.usage_count ?? r.usageCount ?? 0),
+  };
+}
+
 export default {
+  listVisualAssets(filters, onSuccess, onError) {
+    const query = new URLSearchParams();
+    if (filters && filters.category) query.set('category', filters.category);
+    if (filters && filters.profile) query.set('profile', filters.profile);
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets${query.toString() ? `?${query}` : ''}`, method: 'GET', onSuccess: (p) => onSuccess((Array.isArray(p) ? p : []).map(normalizeVisualAsset)), onError });
+  },
+
+  // The backend exposes the immutable versions as one collection; detail is a
+  // stable client projection of every version sharing the requested asset key.
+  getVisualAssetDetail(assetKey, onSuccess, onError) {
+    this.listVisualAssets({}, (rows) => onSuccess({ assetKey, versions: rows.filter((row) => row.assetKey === assetKey) }), onError);
+  },
+
+  visualReplacementImpact(data, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets/replacements/impact`, method: 'POST', data, onSuccess, onError });
+  },
+
+  replaceVisualAsset(data, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets/replacements`, method: 'POST', data, onSuccess, onError });
+  },
   // GET /v1/admin/courses/:courseId/lessons -> Lesson[]
   listLessons(courseId, onSuccess, onError) {
     nestRequest({

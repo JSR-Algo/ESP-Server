@@ -8,6 +8,7 @@
     "analyze": "cross-env ANALYZE=true vue-cli-service build",
     "test:course-admin-ui": "node scripts/check-course-admin-ui.mjs",
     "test:course-robot-e2e-ui": "node scripts/check-course-robot-e2e-ui-contracts.mjs",
+    "test:lesson-visual-library-ui": "node scripts/check-lesson-visual-library-ui.mjs",
     "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs"
   },
   "dependencies": {

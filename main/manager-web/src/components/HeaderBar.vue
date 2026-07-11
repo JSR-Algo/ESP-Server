@@ -93,7 +93,8 @@
             $route.path === '/feature-management' ||
             $route.path === '/course-management' ||
             $route.path === '/course-insights' ||
-            $route.path === '/lesson-monitoring',
+            $route.path === '/lesson-monitoring' ||
+            $route.path.startsWith('/lesson-visual-library'),
         }" @visible-change="handleParamDropdownVisibleChange">
           <span class="el-dropdown-link">
             <img loading="lazy" alt="" src="@/assets/header/param_management.png" :style="{
@@ -109,6 +110,7 @@
                   $route.path === '/course-management' ||
                   $route.path === '/course-insights' ||
                   $route.path === '/lesson-monitoring'
+                  || $route.path.startsWith('/lesson-visual-library')
                   ? 'brightness(0) invert(1)'
                   : 'None',
             }" />
@@ -151,6 +153,9 @@
             </el-dropdown-item>
             <el-dropdown-item @click.native="handleRouter('lessonMonitoring')">
               {{ $t("header.lessonMonitoring") }}
+            </el-dropdown-item>
+            <el-dropdown-item @click.native="handleRouter('lessonVisualLibrary')">
+              {{ $t("header.lessonVisualLibrary") }}
             </el-dropdown-item>
           </el-dropdown-menu>
         </el-dropdown>
@@ -257,6 +262,7 @@ export default {
         courseManagement: "/course-management",
         courseInsights: "/course-insights",
         lessonMonitoring: "/lesson-monitoring",
+        lessonVisualLibrary: "/lesson-visual-library",
       }
     };
   },

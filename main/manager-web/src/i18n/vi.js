@@ -27,8 +27,21 @@ export default {
   'header.courseManagement': 'Khoá học',
   'header.courseInsights': 'Trẻ em & chất lượng',
   'header.lessonMonitoring': 'Theo dõi bài học',
+  'header.lessonVisualLibrary': 'Thư viện hình ảnh',
   'header.changePassword': 'Đổi mật khẩu',
   'header.logout': 'Đăng xuất',
+
+  'visual.libraryTitle': 'Thư viện hình ảnh dùng chung',
+  'visual.libraryHint': 'Kiểm tra các phiên bản bất biến và cập nhật an toàn mọi bài học đang ghim tài nguyên.',
+  'visual.search': 'Tìm mã hoặc tiêu đề', 'visual.category': 'Danh mục', 'visual.profile': 'Thiết bị', 'visual.profiles': 'Thiết bị',
+  'visual.assetKey': 'Mã tài nguyên', 'visual.pinnedVersion': 'Phiên bản ghim', 'visual.usageCount': 'Lượt dùng', 'visual.inspect': 'Xem',
+  'visual.loadFail': 'Tải thư viện hình ảnh thất bại', 'visual.dimensions': 'Kích thước', 'visual.bytes': 'Dung lượng',
+  'visual.derivativeComparison': 'So sánh nguồn / bản robot', 'visual.metric': 'Chỉ số', 'visual.source': 'Nguồn', 'visual.robotDerivative': 'Bản robot',
+  'visual.replaceTitle': 'Thay phiên bản đang ghim', 'visual.sourceVersion': 'Phiên bản cần thay', 'visual.targetVersion': 'Phiên bản thay thế', 'visual.mode': 'Phạm vi thay thế',
+  'visual.affectedLessons': 'Bài học bị ảnh hưởng', 'visual.lessonIdsHint': 'Dán UUID bài học', 'visual.cloneHint': 'Tạo tài nguyên nháp riêng cho đúng một bài học nháp hiện tại. Nguồn dùng chung không bị thay đổi.',
+  'visual.reviewImpact': 'Kiểm tra ảnh hưởng', 'visual.impactTitle': 'Xác nhận ảnh hưởng', 'visual.impactWarning': 'Bài đã xuất bản sẽ được tách thành bản nháp mới. Hãy kiểm tra các lượt giao bài đang hoạt động.',
+  'visual.courses': 'Khoá học', 'visual.lessons': 'Bài học', 'visual.publishedVersions': 'Bản đã xuất bản', 'visual.activeAssignments': 'Lượt giao đang chạy',
+  'visual.impactMode': 'Chế độ', 'visual.confirmReplace': 'Thay phiên bản', 'visual.replaced': 'Đã cập nhật tham chiếu hình ảnh', 'visual.affectedLessonsCount': '{count} tham chiếu bài học đang dùng phiên bản này.',
 
   // Course customization (NestJS authoring API qua proxy /nestjs)
   'course.pageTitle': 'Khoá học',
