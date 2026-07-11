@@ -20,6 +20,7 @@ services:
       # Public base robots use to download lesson packs (must match real cache bytes).
       - LESSON_ASSET_PUBLIC_BASE_URL=${LESSON_ASSET_PUBLIC_BASE_URL:-}
       - LESSON_ASSET_DELIVERY_MODE=${LESSON_ASSET_DELIVERY_MODE:-}
+      - LESSON_ASSET_PACK_MOUNT_ROOT=${LESSON_ASSET_PACK_MOUNT_ROOT:-}
       - LESSON_SD_FANOUT_CONCURRENCY=${LESSON_SD_FANOUT_CONCURRENCY:-4}
       # Built-in interactive "say the word" speaking lesson (start_lesson loads it with
       # no backend assignment). Defaults match config.yaml so Docker does not silently

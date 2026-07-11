@@ -1,7 +1,9 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from config.config_loader import _apply_lesson_env_overrides
 from core.lesson.runtime import LessonRuntime
@@ -33,6 +35,56 @@ def test_invalid_rollout_boolean_is_rejected(monkeypatch):
     monkeypatch.setenv("LESSON_MOTION_PRESETS_ENABLED", "sometimes")
     with pytest.raises(ValueError, match="LESSON_MOTION_PRESETS_ENABLED"):
         _apply_lesson_env_overrides({"lesson": {}})
+
+
+@pytest.mark.parametrize("yaml_value", ['"false"', '"true"', "0", "1", "null", '"invalid"'])
+@pytest.mark.parametrize("key", ["motion_presets_enabled", "playful_interactions_enabled"])
+def test_yaml_rollout_flags_reject_non_boolean_scalars(monkeypatch, key, yaml_value):
+    monkeypatch.delenv("LESSON_MOTION_PRESETS_ENABLED", raising=False)
+    monkeypatch.delenv("LESSON_PLAYFUL_INTERACTIONS_ENABLED", raising=False)
+    config = yaml.safe_load(f"lesson:\n  {key}: {yaml_value}\n")
+    with pytest.raises(ValueError, match=key):
+        _apply_lesson_env_overrides(config)
+
+
+@pytest.mark.parametrize("yaml_value, expected", [("false", False), ("true", True)])
+def test_yaml_rollout_flags_accept_actual_booleans(monkeypatch, yaml_value, expected):
+    monkeypatch.delenv("LESSON_MOTION_PRESETS_ENABLED", raising=False)
+    monkeypatch.delenv("LESSON_PLAYFUL_INTERACTIONS_ENABLED", raising=False)
+    config = yaml.safe_load(
+        "lesson:\n"
+        f"  motion_presets_enabled: {yaml_value}\n"
+        f"  playful_interactions_enabled: {yaml_value}\n"
+        "  rollout_device_allowlist: []\n"
+    )
+    result = _apply_lesson_env_overrides(config)
+    assert result["lesson"]["motion_presets_enabled"] is expected
+    assert result["lesson"]["playful_interactions_enabled"] is expected
+
+
+def test_empty_allowlist_does_not_block_an_explicitly_enabled_control():
+    runtime = _runtime(
+        device_id="any-robot",
+        lesson={"motion_presets_enabled": True, "rollout_device_allowlist": []},
+    )
+    assert runtime._lesson_rollout_control_enabled("motion_presets_enabled") is True
+
+
+def test_compose_variants_forward_documented_lesson_rollout_environment():
+    root = Path(__file__).resolve().parents[1]
+    required = {
+        "LESSON_RUNTIME_ENABLED",
+        "LESSON_ASSET_DELIVERY_MODE",
+        "LESSON_ASSET_PACK_MOUNT_ROOT",
+        "LESSON_MOTION_PRESETS_ENABLED",
+        "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
+        "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
+    }
+    for name in ("docker-compose.yml", "docker-compose_all.yml"):
+        compose = yaml.safe_load((root / name).read_text(encoding="utf-8"))
+        environment = compose["services"]["tbot-esp32-server"]["environment"]
+        forwarded = {entry.split("=", 1)[0] for entry in environment}
+        assert required <= forwarded, f"{name} missing {sorted(required - forwarded)}"
 
 
 def _runtime(*, device_id="robot-01", lesson=None):

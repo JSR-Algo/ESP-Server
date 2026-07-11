@@ -454,6 +454,11 @@ def _parse_percent_env(name):
         return None
     return value if 0 <= value <= 100 else None
 
+def _validate_lesson_rollout_file_config(lesson_cfg):
+    for key in ("motion_presets_enabled", "playful_interactions_enabled"):
+        if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
+            raise ValueError(f"lesson.{key} must be a boolean")
+
 def _apply_lesson_env_overrides(config):
     """LESSON_RUNTIME_ENABLED dark-rollout flag + lesson endpoints, so an operator
     can enable/point the lesson runtime via env without editing config volumes.
@@ -501,6 +506,7 @@ def _apply_lesson_env_overrides(config):
     sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
     existing_lesson = config.get("lesson")
     existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
+    _validate_lesson_rollout_file_config(existing_lesson)
     effective_gc = sd_gc_free_percent if sd_gc_free_percent is not None else existing_lesson.get("sd_gc_free_percent", 20)
     effective_preload = (
         sd_preload_min_free_percent
@@ -546,29 +552,33 @@ def _apply_lesson_env_overrides(config):
         and rollout_allowlist_raw is None
     ):
         lesson_cfg = config.get("lesson")
-        if not isinstance(lesson_cfg, Mapping):
-            lesson_cfg = {}
+        if not isinstance(lesson_cfg, dict):
+            lesson_cfg = dict(lesson_cfg) if isinstance(lesson_cfg, Mapping) else {}
             config["lesson"] = lesson_cfg
+        _validate_lesson_rollout_file_config(lesson_cfg)
         lesson_cfg.setdefault("motion_presets_enabled", False)
         lesson_cfg.setdefault("playful_interactions_enabled", False)
         lesson_cfg.setdefault("rollout_device_allowlist", [])
         return config
 
     lesson_cfg = config.get("lesson")
-    if not isinstance(lesson_cfg, Mapping):
-        lesson_cfg = {}
+    if not isinstance(lesson_cfg, dict):
+        lesson_cfg = dict(lesson_cfg) if isinstance(lesson_cfg, Mapping) else {}
         config["lesson"] = lesson_cfg
+    _validate_lesson_rollout_file_config(lesson_cfg)
+    lesson_cfg.setdefault("motion_presets_enabled", False)
+    lesson_cfg.setdefault("playful_interactions_enabled", False)
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
     lesson_cfg["motion_presets_enabled"] = (
         motion_presets_flag
         if motion_presets_flag is not None
-        else bool(lesson_cfg.get("motion_presets_enabled", False))
+        else lesson_cfg["motion_presets_enabled"]
     )
     lesson_cfg["playful_interactions_enabled"] = (
         playful_interactions_flag
         if playful_interactions_flag is not None
-        else bool(lesson_cfg.get("playful_interactions_enabled", False))
+        else lesson_cfg["playful_interactions_enabled"]
     )
     if rollout_allowlist_raw is not None:
         lesson_cfg["rollout_device_allowlist"] = sorted(
