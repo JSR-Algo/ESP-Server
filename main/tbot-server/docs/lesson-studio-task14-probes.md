@@ -26,6 +26,13 @@ schema, confirms declared markers occur in `serial.log` or `server.log`, and
 records SHA-256 hashes for logs, commands, results, and screenshots. It does
 not convert synthetic or operator-authored fields into hardware proof.
 
+Screenshot entries use `{"role": "preview", "path": "preview.png"}` and
+`{"role": "hardware", "path": "hardware.png"}` objects. Paths must resolve
+inside the evidence directory without symlinks, must be real PNG/JPEG files,
+and are capped at 10 MiB. `preview-parity` requires exactly those two roles,
+both images at 480x320, and different file content. Relative paths are resolved
+from the scenario evidence directory.
+
 `logMarkers` must include the canonical markers enforced for its scenario:
 `lesson_step_started` + `motion_preset` (preview), `lesson_preload_ready` +
 `checksum_verified` (cold), `asset_cache_hit` (warm), `offline_replay` +
