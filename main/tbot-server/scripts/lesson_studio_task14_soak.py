@@ -10,7 +10,8 @@ RESET = re.compile(r'(?i)(?:rst:0x|guru meditation|watchdog.*reset|brownout|firm
 def analyze(text, count=100, gate=20*1024, tolerance=64*1024):
     steps=[int(x) for x in TRANSITION.findall(text)]; ps=[int(x) for x in PSRAM.findall(text)]; sr=[int(x) for x in SRAM.findall(text)]
     leak=len(ps)>=3 and all(a>=b for a,b in zip(ps,ps[1:])) and ps[0]-ps[-1]>tolerance
-    checks={'at_least_100_transitions':len(steps)>=count,'psram_samples_present':len(ps)>=3,'no_monotonic_psram_loss':not leak,'internal_sram_above_gate':bool(sr) and min(sr)>=gate,'no_firmware_reset':not RESET.search(text)}
+    ordered=bool(steps) and all(current>previous for previous,current in zip(steps,steps[1:]))
+    checks={'at_least_100_transitions':len(steps)>=count,'transition_sequence_strictly_increasing':ordered,'psram_samples_present':len(ps)>=3,'no_monotonic_psram_loss':not leak,'internal_sram_above_gate':bool(sr) and min(sr)>=gate,'no_firmware_reset':not RESET.search(text)}
     return {'status':'PASS' if all(checks.values()) else 'NOT_PASS','checks':checks,'metrics':{'transitions':len(steps),'psramFirst':ps[0] if ps else None,'psramLast':ps[-1] if ps else None,'internalSramMin':min(sr) if sr else None}}
 
 def main():

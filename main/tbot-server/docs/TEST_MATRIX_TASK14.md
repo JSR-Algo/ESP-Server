@@ -7,6 +7,7 @@ and operator timestamps.
 
 | Scenario | Probe | Status |
 |---|---|---|
+| preview-parity | `scripts/lesson_studio_task14_fault_driver.py preview-parity --evidence-dir <dir>` | NOT PASS - live evidence required |
 | cold, warm, offline | `scripts/lesson_studio_task14_fault_driver.py <scenario> --evidence-dir <dir>` | NOT PASS - live evidence required |
 | checksum, interrupted, power-loss | same driver; scenario-specific recovery fields required | NOT PASS - live evidence required |
 | missing-optional, sd-full, slave-unavailable, rollback | same driver; fail-closed invariants required | NOT PASS - live evidence required |
