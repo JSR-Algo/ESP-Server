@@ -209,8 +209,11 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         # independently per kind so a swapped emit order fails as a clean assertion,
         # not a lookup error.
         prompt_rows = [i for i, r in enumerate(log) if r[0] == "prompt"]
-        # one prompt per step (every seed step authors a prompt).
-        self.assertEqual(len(prompt_rows), len(expected_steps))
+        # Every step has one authored prompt; current adaptive coaching also adds a
+        # safe success cheer after each interactive response.
+        self.assertEqual(len(prompt_rows), len(expected_steps) + len(interactive))
+        success_rows = [i for i in prompt_rows if log[i][1] == "Đúng rồi! barn!"]
+        self.assertEqual(len(success_rows), len(interactive))
         for sid in expected_steps:
             frame_idxs = [i for i, r in enumerate(log) if r == ("frame", "lesson_step", sid)]
             ack_idxs = [i for i, r in enumerate(log) if r == ("ack", "lesson_step", sid)]

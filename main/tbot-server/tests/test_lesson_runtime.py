@@ -64,7 +64,10 @@ if not os.path.exists(SEED_LESSON_PATH):
 
 SEED_LESSON = json.load(open(SEED_LESSON_PATH))["lesson"]
 
-BACKEND_CANONICAL_MANIFEST_PATH = os.path.join(
+_BACKEND_CANONICAL_RELATIVE_PATH = os.path.join(
+    "scripts", "seed", "076_canonical-manifest.espTft.json"
+)
+_LEGACY_BACKEND_REPO_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
     "..",
     "..",
@@ -72,10 +75,38 @@ BACKEND_CANONICAL_MANIFEST_PATH = os.path.join(
     "..",
     "..",
     "tbot-backend",
-    "scripts",
-    "seed",
-    "076_canonical-manifest.espTft.json",
-)
+))
+
+
+def _backend_canonical_manifest_candidates():
+    explicit_manifest = os.environ.get("TBOT_BACKEND_CANONICAL_MANIFEST")
+    configured_repo = os.environ.get("TBOT_BACKEND_REPO")
+    candidates = []
+    if explicit_manifest:
+        candidates.append(os.path.abspath(explicit_manifest))
+    if configured_repo:
+        candidates.append(os.path.join(os.path.abspath(configured_repo), _BACKEND_CANONICAL_RELATIVE_PATH))
+    candidates.extend(
+        [
+            os.path.join(_LEGACY_BACKEND_REPO_PATH, _BACKEND_CANONICAL_RELATIVE_PATH),
+            os.path.join(
+                _LEGACY_BACKEND_REPO_PATH,
+                "production-lesson-studio",
+                _BACKEND_CANONICAL_RELATIVE_PATH,
+            ),
+        ]
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_backend_canonical_manifest_path():
+    return next(
+        (path for path in _backend_canonical_manifest_candidates() if os.path.isfile(path)),
+        None,
+    )
+
+
+BACKEND_CANONICAL_MANIFEST_PATH = _resolve_backend_canonical_manifest_path()
 
 GUIDED_SPEAKING_FORBIDDEN_PROMPT_TERMS = (
     "watch my mouth",
@@ -771,10 +802,7 @@ def _build_full_seed_story_manifest():
     firmware receives a real three-layer image stack throughout the lesson."""
     base = _build_manifest()
     frame_step = FIX["frames"]["lesson_step"]
-    backend = None
-    if os.path.exists(BACKEND_CANONICAL_MANIFEST_PATH):
-        with open(BACKEND_CANONICAL_MANIFEST_PATH) as fh:
-            backend = json.load(fh)
+    backend = _load_backend_canonical_manifest_for_test()
 
     story = [
         {"id": "s1", "type": "greeting", "completionClass": "passive", "pose": "teach"},
@@ -787,21 +815,20 @@ def _build_full_seed_story_manifest():
         {"id": "s8", "type": "feedback", "completionClass": "passive", "pose": "teach"},
         {"id": "s9", "type": "celebrate", "completionClass": "passive", "pose": "celebrate"},
     ]
-    if backend is not None:
-        assets = []
-        for asset in backend["assets"]:
-            row = copy.deepcopy(asset)
-            row.setdefault("url", "http://assets.test/" + row["path"])
-            assets.append(row)
-        base["assets"] = assets
-        story_by_id = {row["id"]: row for row in story}
-        story = [
-            {
-                **copy.deepcopy(step),
-                "completionClass": story_by_id[step["id"]]["completionClass"],
-            }
-            for step in backend["steps"]
-        ]
+    assets = []
+    for asset in backend["assets"]:
+        row = copy.deepcopy(asset)
+        row.setdefault("url", "http://assets.test/" + row["path"])
+        assets.append(row)
+    base["assets"] = assets
+    story_by_id = {row["id"]: row for row in story}
+    story = [
+        {
+            **copy.deepcopy(step),
+            "completionClass": story_by_id[step["id"]]["completionClass"],
+        }
+        for step in backend["steps"]
+    ]
     expression_by_pose = {
         "teach": "teaching",
         "listening": "listening",
@@ -864,8 +891,11 @@ def _build_full_seed_story_manifest():
     return base
 
 def _load_backend_canonical_manifest_for_test():
-    if not os.path.exists(BACKEND_CANONICAL_MANIFEST_PATH):
-        raise unittest.SkipTest("backend canonical espTft manifest lives in sibling tbot-backend checkout")
+    if BACKEND_CANONICAL_MANIFEST_PATH is None:
+        raise AssertionError(
+            "backend canonical espTft manifest is required; searched: "
+            + ", ".join(_backend_canonical_manifest_candidates())
+        )
     with open(BACKEND_CANONICAL_MANIFEST_PATH) as fh:
         return json.load(fh)
 
@@ -937,6 +967,13 @@ class _RecordingAlarm:
 
 
 class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    def test_backend_canonical_fixture_resolver_finds_complete_worktree_manifest(self):
+        self.assertIsNotNone(BACKEND_CANONICAL_MANIFEST_PATH)
+        self.assertTrue(os.path.isfile(BACKEND_CANONICAL_MANIFEST_PATH))
+        backend = _load_backend_canonical_manifest_for_test()
+        self.assertEqual(len(backend["steps"]), 9)
+        self.assertTrue(all(step.get("prompt") for step in backend["steps"]))
+
     def test_full_seed_story_fixture_stays_in_parity_with_backend_canonical_manifest(self):
         backend = _load_backend_canonical_manifest_for_test()
         manifest = _build_full_seed_story_manifest()
@@ -3673,7 +3710,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         step_ids = [f["stepId"] for f in self._sent_frames(conn) if f["type"] == "lesson_step"]
         self.assertEqual(step_ids, [step["id"] for step in manifest["steps"]])
         self.assertEqual(conn.voice_provider.child_response_windows, [True, True, True, True])
-        self.assertEqual(conn.voice_provider.prompts, [step["prompt"] for step in manifest["steps"]])
+        expected_prompts = []
+        for step in manifest["steps"]:
+            expected_prompts.append(step["prompt"])
+            if step["completionClass"] == "interactive":
+                expected_prompts.append("Đúng rồi! barn!")
+        self.assertEqual(conn.voice_provider.prompts, expected_prompts)
+        for prompt in conn.voice_provider.prompts:
+            self.assertNotRegex(prompt.lower(), r"\b(wrong|sai|không đúng)\b")
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_stop")
         self.assertEqual(rt._steps_completed, 9)
 
@@ -4508,8 +4552,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lesson_stop", [f["type"] for f in self._sent_frames(conn)])
         self.assertEqual(
             provider.prompts,
-            [manifest["steps"][0]["prompt"]],
+            [manifest["steps"][0]["prompt"], "Đúng rồi! barn!"],
         )
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
 
         completed_events = [
             event
@@ -4574,9 +4619,10 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await rt.on_child_response("barn", source="internal_dev_endpoint"))
 
         self.assertEqual(provider.closed_child_response_windows, 1)
-        self.assertEqual(provider.prompts, ["Say barn."])
+        self.assertEqual(provider.prompts, ["Say barn.", "Đúng rồi! barn!"])
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
         await rt.on_lesson_ack(_ack(4, 4, step_id="s5"))
-        self.assertEqual(provider.prompts, ["Say barn.", "Now say barn again."])
+        self.assertEqual(provider.prompts, ["Say barn.", "Đúng rồi! barn!", "Now say barn again."])
         self.assertLess(
             provider.events.index(("close", None)),
             provider.events.index(("prompt", "Now say barn again.")),
@@ -4994,7 +5040,11 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.state, "RUNNING")
         self.assertIsNone(rt.last_error)
         self.assertEqual(provider.child_response_windows, [True, True])
-        self.assertEqual(provider.prompts[-1], "Con thử nói lại nhé.")
+        self.assertEqual(
+            provider.prompts[-1],
+            "Không sao, con từ từ nhé. Thử nói lại khi con sẵn sàng.",
+        )
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
         self.assertNotIn("lesson_error", [f["type"] for f in self._sent_frames(conn)])
         event_types = [event.get("type") for batch in forwarder.batches for event in batch.get("events", [])]
         self.assertNotIn("lesson_failed", event_types)
