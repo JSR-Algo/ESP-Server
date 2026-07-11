@@ -913,7 +913,8 @@ class LessonRuntime:
         if self._closed:
             return False
         current = getattr(self.conn, "lesson_runtime", None)
-        return current is None or current is self
+        candidate = getattr(self.conn, "lesson_runtime_candidate", None)
+        return current is None or current is self or candidate is self
 
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
@@ -3026,7 +3027,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await prior.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
-    conn.lesson_runtime = runtime
+    conn.lesson_runtime_candidate = runtime
     try:
         enter_lesson = getattr(conn, "enter_lesson_mode", None)
         if callable(enter_lesson):
@@ -3034,8 +3035,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         await runtime.start()
         if runtime.state == S_FAILED:
             _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
-            if getattr(conn, "lesson_runtime", None) is runtime:
-                conn.lesson_runtime = republish_previous
+            if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                conn.lesson_runtime_candidate = None
             try:
                 await runtime.close()
             except Exception as exc:  # pragma: no cover - teardown is best-effort
@@ -3048,11 +3049,13 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 candidate_identity
             ):
                 _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
-                if getattr(conn, "lesson_runtime", None) is runtime:
-                    conn.lesson_runtime = republish_previous
+                if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                    conn.lesson_runtime_candidate = None
                 activation.abort_candidate()
                 await runtime.close()
                 return republish_previous
+        conn.lesson_runtime = runtime
+        conn.lesson_runtime_candidate = None
         _set_lesson_start_status(conn, "STARTED")
         if republish_previous is not None:
             old_cache = getattr(republish_previous, "asset_cache", None)
@@ -3070,14 +3073,26 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         release_lesson = getattr(conn, "release_lesson_mode", None)
         if callable(release_lesson):
             await release_lesson(reason="lesson_start_refused")
-        if getattr(conn, "lesson_runtime", None) is runtime:
-            conn.lesson_runtime = republish_previous
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
         if activation is not None:
             activation.abort_candidate()
         try:
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"refused lesson runtime teardown failed: {type(exc).__name__}")
+        return republish_previous
+    except Exception as exc:  # noqa: BLE001 - candidate failure must preserve active runtime
+        _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
+        _log("warning", f"lesson candidate crashed: {type(exc).__name__}")
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
+        if activation is not None:
+            activation.abort_candidate()
+        try:
+            await runtime.close()
+        except Exception as close_exc:  # pragma: no cover - teardown is best-effort
+            _log("warning", f"crashed lesson runtime teardown failed: {type(close_exc).__name__}")
         return republish_previous
     return runtime
 

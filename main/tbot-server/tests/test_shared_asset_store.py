@@ -53,6 +53,28 @@ def _read_pack_ready(root, cache_key, result):
     result.put(SharedAssetStore(root).is_pack_ready(cache_key))
 
 
+def _commit_with_gc_pause(root, cache_key, digest, started, release):
+    def pause(stage, path):
+        if stage == "after_replace" and path.name == "pack.json":
+            started.set()
+            release.wait(10)
+
+    SharedAssetStore(root, failure_hook=pause).commit_pack(cache_key, {"asset": digest})
+
+
+def _gc_during_commit(root, cache_key, started, result):
+    from core.lesson.sd_pack_gc import SdPackGarbageCollector
+
+    started.wait(10)
+    store = SharedAssetStore(root, cleanup_on_init=False)
+    usage = lambda _path: type("Usage", (), {"total": 100, "free": 50})()
+    result.put(
+        SdPackGarbageCollector(
+            store.pack_root, shared_store=store, quota_bytes=1, disk_usage=usage
+        ).collect_one(preloading_cache_key=cache_key)
+    )
+
+
 def test_equal_sha_is_stored_once_and_reused_across_lesson_packs(tmp_path):
     store = SharedAssetStore(tmp_path / "tbot")
     content = b"shared lesson asset"
@@ -377,3 +399,40 @@ def test_reader_blocks_during_live_swap_and_never_observes_nonready(tmp_path):
     assert writer.exitcode == 0
     assert reader.exitcode == 0
     assert result.get(timeout=1) is True
+
+
+def test_commit_reader_and_gc_are_cross_process_serialized(tmp_path):
+    root = tmp_path / "tbot"
+    store = SharedAssetStore(root)
+    old_digest = _sha(b"old-gc")
+    new_digest = _sha(b"new-gc")
+    store.put_bytes(b"old-gc", old_digest)
+    store.put_bytes(b"new-gc", new_digest)
+    store.commit_pack("lesson/v1-old", {"asset": old_digest})
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    release = context.Event()
+    read_result = context.Queue()
+    gc_result = context.Queue()
+    cache_key = "lesson/v2-new"
+    writer = context.Process(
+        target=_commit_with_gc_pause,
+        args=(str(root), cache_key, new_digest, started, release),
+    )
+    writer.start()
+    assert started.wait(10)
+    reader = context.Process(target=_read_pack_ready, args=(str(root), cache_key, read_result))
+    collector = context.Process(
+        target=_gc_during_commit, args=(str(root), cache_key, started, gc_result)
+    )
+    reader.start()
+    collector.start()
+    release.set()
+    writer.join(10)
+    reader.join(10)
+    collector.join(10)
+
+    assert writer.exitcode == reader.exitcode == collector.exitcode == 0
+    assert read_result.get(timeout=1) is True
+    assert gc_result.get(timeout=1)["deleted"] == "lesson/v1-old"
+    assert SharedAssetStore(root).is_pack_ready(cache_key)

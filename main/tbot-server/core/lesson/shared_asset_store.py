@@ -90,6 +90,10 @@ class SharedAssetStore:
             return False
 
     def commit_pack(self, cache_key: str, assets: Mapping[str, str]) -> Path:
+        with self._gc_lock(exclusive=False):
+            return self._commit_pack_locked(cache_key, assets)
+
+    def _commit_pack_locked(self, cache_key: str, assets: Mapping[str, str]) -> Path:
         pack_dir = self._pack_dir(cache_key)
         with self._pack_lock(cache_key, exclusive=True):
             self._recover_pack_unlocked(cache_key)
@@ -136,6 +140,67 @@ class SharedAssetStore:
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
         return pack_dir
+
+    def delete_pack(
+        self,
+        cache_key: str,
+        *,
+        sweep: bool = False,
+        protected_cache_keys: Set[str] = frozenset(),
+    ) -> list[str]:
+        """Delete one pack under cross-process GC + per-pack exclusion."""
+        with self._gc_lock(exclusive=True):
+            with self._pack_lock(cache_key, exclusive=True):
+                pack_dir = self._pack_dir(cache_key)
+                if not pack_dir.exists():
+                    return []
+                tombstone = pack_dir.with_name(
+                    ".{}.{}.gc".format(pack_dir.name, uuid.uuid4().hex)
+                )
+                os.replace(str(pack_dir), str(tombstone))
+                self._fsync_dir(pack_dir.parent)
+                shutil.rmtree(tombstone)
+            if sweep:
+                return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
+        return []
+
+    def sweep_unreferenced_cas(self, protected_cache_keys: Set[str] = frozenset()) -> list[str]:
+        with self._gc_lock(exclusive=True):
+            return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
+
+    def _sweep_unreferenced_cas_unlocked(self, protected: Set[str]) -> list[str]:
+        reachable = set()
+        if self.pack_root.exists():
+            for manifest_path in self.pack_root.rglob("pack.json"):
+                pack = manifest_path.parent
+                if any(part.startswith(".") for part in pack.relative_to(self.pack_root).parts):
+                    continue
+                cache_key = pack.relative_to(self.pack_root).as_posix()
+                if cache_key not in protected and not self._is_pack_dir_ready(pack, cache_key):
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    assets = manifest.get("assets")
+                    if isinstance(assets, dict):
+                        reachable.update(
+                            digest for digest in assets.values() if isinstance(digest, str)
+                        )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+        deleted = []
+        if not self.shared_root.exists():
+            return deleted
+        for path in self.shared_root.rglob("*"):
+            if not path.is_file() or path.name in reachable:
+                continue
+            try:
+                if path.stat().st_nlink > 1:
+                    continue
+                path.unlink()
+                deleted.append(path.name)
+            except OSError:
+                continue
+        return sorted(deleted)
 
     def materialize_pack_asset(self, cache_key: str, key: str, digest: str) -> Path:
         """Expose partial first-generation assets without mutating a valid pack."""
@@ -321,6 +386,16 @@ class SharedAssetStore:
                 return
             try:
                 yield True
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _gc_lock(self, *, exclusive: bool):
+        self.root.mkdir(parents=True, exist_ok=True)
+        with (self.root / ".gc.lock").open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 

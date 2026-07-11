@@ -433,6 +433,16 @@ def _parse_positive_int_env(name):
         return None
     return value if value > 0 else None
 
+def _parse_percent_env(name):
+    raw = _clean_env(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if 0 <= value <= 100 else None
+
 def _apply_lesson_env_overrides(config):
     """LESSON_RUNTIME_ENABLED dark-rollout flag + lesson endpoints, so an operator
     can enable/point the lesson runtime via env without editing config volumes.
@@ -473,8 +483,15 @@ def _apply_lesson_env_overrides(config):
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
     max_total_asset_bytes = _parse_positive_int_env("LESSON_MAX_TOTAL_ASSET_BYTES")
     sd_cache_quota_bytes = _parse_positive_int_env("LESSON_SD_CACHE_QUOTA_BYTES")
-    sd_gc_free_percent = _parse_positive_int_env("LESSON_SD_GC_FREE_PERCENT")
-    sd_preload_min_free_percent = _parse_positive_int_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
+    sd_gc_free_percent = _parse_percent_env("LESSON_SD_GC_FREE_PERCENT")
+    sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
+    if (
+        sd_gc_free_percent is not None
+        and sd_preload_min_free_percent is not None
+        and sd_preload_min_free_percent > sd_gc_free_percent
+    ):
+        sd_gc_free_percent = None
+        sd_preload_min_free_percent = None
     # Built-in sample-lesson DEMO flag (independent of runtime_enabled; NEVER coupled to
     # the production auto-enable below). LESSON_SAMPLE_ENABLED -> lesson.sample_lesson;
     # LESSON_SAMPLE_ASSET_BASE -> lesson.sample_asset_base_url (optional image host).

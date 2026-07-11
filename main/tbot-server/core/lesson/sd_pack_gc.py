@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import fcntl
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple
 
@@ -34,8 +37,14 @@ class SdPackGarbageCollector:
         self.pack_root = Path(pack_root).resolve()
         self.shared_store = shared_asset_store or shared_store
         self.quota_bytes = max(0, int(quota_bytes or 0))
-        self.gc_free_percent = max(0.0, float(gc_free_percent))
-        self.preload_min_free_percent = max(0.0, float(preload_min_free_percent))
+        self.gc_free_percent = float(gc_free_percent)
+        self.preload_min_free_percent = float(preload_min_free_percent)
+        if not 0 <= self.gc_free_percent <= 100:
+            raise ValueError("sd_gc_free_percent must be between 0 and 100")
+        if not 0 <= self.preload_min_free_percent <= 100:
+            raise ValueError("sd_preload_min_free_percent must be between 0 and 100")
+        if self.preload_min_free_percent > self.gc_free_percent:
+            raise ValueError("sd_preload_min_free_percent must not exceed sd_gc_free_percent")
         self._disk_usage = disk_usage
         self._voice_busy = voice_busy or (lambda: False)
         self._render_busy = render_busy or (lambda: False)
@@ -101,13 +110,20 @@ class SdPackGarbageCollector:
             return {"skipped": "no_evictable_pack"}
 
         _mtime, cache_key, path = min(candidates, key=lambda item: (item[0], item[1]))
-        tombstone = path.with_name(".{}.gc".format(path.name))
         try:
-            os.replace(str(path), str(tombstone))
-            shutil.rmtree(tombstone)
+            if self.shared_store is not None:
+                deleted_cas = self.shared_store.delete_pack(
+                    cache_key,
+                    sweep=True,
+                    protected_cache_keys=protected,
+                )
+            else:
+                tombstone = path.with_name(".{}.gc".format(path.name))
+                os.replace(str(path), str(tombstone))
+                shutil.rmtree(tombstone)
+                deleted_cas = []
         except OSError:
             return {"skipped": "delete_failed"}
-        deleted_cas = self._sweep_unreferenced_cas(protected)
         return {
             "deleted": cache_key,
             "deletedCas": deleted_cas,
@@ -141,39 +157,6 @@ class SdPackGarbageCollector:
                 except OSError:
                     continue
         return total
-
-    def _sweep_unreferenced_cas(self, protected: Set[str]) -> list[str]:
-        if self.shared_store is None:
-            return []
-        reachable = set()
-        for cache_key, path in self._pack_directories():
-            if cache_key not in protected and not self._is_ready(cache_key):
-                continue
-            try:
-                manifest = json.loads((path / "pack.json").read_text(encoding="utf-8"))
-                assets = manifest.get("assets")
-                if isinstance(assets, dict):
-                    reachable.update(
-                        digest for digest in assets.values() if isinstance(digest, str)
-                    )
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                continue
-        deleted = []
-        if not self.shared_store.shared_root.exists():
-            return deleted
-        for path in self.shared_store.shared_root.rglob("*"):
-            if not path.is_file() or path.name in reachable:
-                continue
-            try:
-                # A remaining hardlink means some malformed/incomplete pack still
-                # owns these bytes. Preserve the CAS name rather than guessing.
-                if path.stat().st_nlink > 1:
-                    continue
-                path.unlink()
-                deleted.append(path.name)
-            except OSError:
-                continue
-        return sorted(deleted)
 
     def _pack_directories(self) -> Iterable[Tuple[str, Path]]:
         if not self.pack_root.is_dir():
@@ -213,14 +196,15 @@ class SdPackActivationState:
     ) -> None:
         self.store = store
         self.state_path = Path(state_path or (store.root / "lesson-pack-activation.json"))
-        loaded = self._load()
-        self.current = self._identity(current) or self._identity(loaded.get("current"))
-        if self.current is None and current_cache_key:
-            self.current = self._identity(current_cache_key)
-        self.previous_known_good = self._identity(loaded.get("previousKnownGood"))
-        self.candidate = self._identity(loaded.get("candidate"))
-        if current is not None or current_cache_key is not None:
-            self._persist()
+        with self._state_lock():
+            loaded = self._load()
+            self.current = self._identity(current) or self._identity(loaded.get("current"))
+            if self.current is None and current_cache_key:
+                self.current = self._identity(current_cache_key)
+            self.previous_known_good = self._identity(loaded.get("previousKnownGood"))
+            self.candidate = self._identity(loaded.get("candidate"))
+            if current is not None or current_cache_key is not None:
+                self._persist_unlocked()
 
     @property
     def current_cache_key(self) -> Optional[str]:
@@ -235,50 +219,62 @@ class SdPackActivationState:
         return self.candidate.get("cacheKey") if self.candidate else None
 
     def begin_candidate(self, identity: Any) -> None:
-        self.candidate = self._identity(identity)
-        self._persist()
+        with self._state_lock():
+            self._reload_unlocked()
+            self.candidate = self._identity(identity)
+            self._persist_unlocked()
 
     def set_current_if_empty(self, identity: Any) -> None:
-        if self.current is None:
-            self.current = self._identity(identity)
-            self._persist()
+        with self._state_lock():
+            self._reload_unlocked()
+            if self.current is None:
+                self.current = self._identity(identity)
+                self._persist_unlocked()
 
     def verify_for_activation(self, identity: Any = None) -> bool:
-        expected = self._identity(identity) if identity is not None else self.candidate
-        return bool(
-            expected
-            and expected == self.candidate
-            and self.store.is_pack_ready(expected["cacheKey"])
-        )
+        with self._state_lock():
+            self._reload_unlocked()
+            expected = self._identity(identity) if identity is not None else self.candidate
+            return bool(
+                expected
+                and expected == self.candidate
+                and self.store.is_pack_ready(expected["cacheKey"])
+            )
 
     def activate_candidate(self, identity: Any = None) -> bool:
-        expected = self._identity(identity) if identity is not None else self.candidate
-        if not self.verify_for_activation(expected):
-            return False
-        old = self.current
-        self.current = expected
-        self.candidate = None
-        if old and old != expected:
-            self.previous_known_good = old
-        self._persist()
-        return True
+        with self._state_lock():
+            self._reload_unlocked()
+            expected = self._identity(identity) if identity is not None else self.candidate
+            if not expected or expected != self.candidate or not self.store.is_pack_ready(expected["cacheKey"]):
+                return False
+            old = self.current
+            self.current = expected
+            self.candidate = None
+            if old and old != expected:
+                self.previous_known_good = old
+            self._persist_unlocked()
+            return True
 
     def abort_candidate(self) -> None:
-        self.candidate = None
-        self._persist()
+        with self._state_lock():
+            self._reload_unlocked()
+            self.candidate = None
+            self._persist_unlocked()
 
     def rollback(self, exact_identity: Any) -> bool:
-        expected = self._identity(exact_identity)
-        if not expected or expected != self.previous_known_good:
-            return False
-        if not self.store.is_pack_ready(expected["cacheKey"]):
-            return False
-        old = self.current
-        self.current = expected
-        self.previous_known_good = old
-        self.candidate = None
-        self._persist()
-        return True
+        with self._state_lock():
+            self._reload_unlocked()
+            expected = self._identity(exact_identity)
+            if not expected or expected != self.previous_known_good:
+                return False
+            if not self.store.is_pack_ready(expected["cacheKey"]):
+                return False
+            old = self.current
+            self.current = expected
+            self.previous_known_good = old
+            self.candidate = None
+            self._persist_unlocked()
+            return True
 
     @staticmethod
     def _identity(value: Any) -> Optional[Dict[str, Any]]:
@@ -319,9 +315,17 @@ class SdPackActivationState:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
 
-    def _persist(self) -> None:
+    def _reload_unlocked(self) -> None:
+        loaded = self._load()
+        self.current = self._identity(loaded.get("current"))
+        self.previous_known_good = self._identity(loaded.get("previousKnownGood"))
+        self.candidate = self._identity(loaded.get("candidate"))
+
+    def _persist_unlocked(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.state_path.with_name(self.state_path.name + ".part")
+        temp = self.state_path.with_name(
+            "{}.{}.{}.part".format(self.state_path.name, os.getpid(), uuid.uuid4().hex)
+        )
         content = json.dumps(
             {
                 "current": self.current,
@@ -337,3 +341,14 @@ class SdPackActivationState:
             os.fsync(handle.fileno())
         os.replace(str(temp), str(self.state_path))
         self.store._fsync_dir(self.state_path.parent)
+
+    @contextmanager
+    def _state_lock(self):
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

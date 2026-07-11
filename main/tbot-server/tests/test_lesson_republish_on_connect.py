@@ -189,6 +189,21 @@ class _FailingCandidateRuntime(_FakeNewRuntime):
         self.state = rt_mod.S_FAILED
 
 
+class _ObservingCandidateRuntime(_FakeNewRuntime):
+    active_during_start = None
+    candidate_during_start = None
+
+    async def start(self):
+        type(self).active_during_start = self.conn.lesson_runtime
+        type(self).candidate_during_start = getattr(self.conn, "lesson_runtime_candidate", None)
+        self.started = True
+
+
+class _CrashingCandidateRuntime(_FakeNewRuntime):
+    async def start(self):
+        raise RuntimeError("candidate preload crashed")
+
+
 class _NoSpaceGc:
     def can_preload(self):
         return False
@@ -350,6 +365,58 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(conn.lesson_runtime, existing)
         self.assertFalse(existing.closed)
         self.assertEqual(calls, [])
+
+    async def test_candidate_does_not_take_active_routing_slot_until_start_succeeds(self):
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_ObservingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(_ObservingCandidateRuntime.active_during_start, existing)
+        self.assertIs(_ObservingCandidateRuntime.candidate_during_start, result)
+        self.assertIs(conn.lesson_runtime, result)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+
+    async def test_candidate_exception_clears_candidate_and_preserves_active_runtime(self):
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_CrashingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertFalse(existing.closed)
 
     async def test_republish_refuses_candidate_below_five_percent_sd_free(self):
         _FakeNewRuntime.instances = []

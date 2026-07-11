@@ -1,10 +1,18 @@
 import hashlib
 import json
 import os
+import multiprocessing
 from pathlib import Path
 
 from core.lesson.sd_pack_gc import SdPackActivationState, SdPackGarbageCollector
 from core.lesson.shared_asset_store import SharedAssetStore
+
+
+def _write_candidate_state(root, state_path, identity, start):
+    store = SharedAssetStore(root, cleanup_on_init=False)
+    state = SdPackActivationState(store, state_path=state_path)
+    start.wait(10)
+    state.begin_candidate(identity)
 
 
 def _ready_pack(store: SharedAssetStore, cache_key: str, content: bytes) -> Path:
@@ -272,3 +280,51 @@ def test_backend_rollback_requires_exact_old_version_and_checksum(tmp_path):
     )
     assert conn.lesson_current_cache_key == old_key
     assert conn.lesson_previous_known_good_cache_key == new_key
+
+
+def test_activation_state_concurrent_writers_leave_one_valid_atomic_record(tmp_path):
+    root = tmp_path / "tbot"
+    SharedAssetStore(root)
+    state_path = root / "activation.json"
+    identities = [
+        {"cacheKey": "lesson/v1-aaaaaaaa", "lessonVersion": 1, "manifestChecksum": "aaaaaaaa"},
+        {"cacheKey": "lesson/v2-bbbbbbbb", "lessonVersion": 2, "manifestChecksum": "bbbbbbbb"},
+    ]
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    writers = [
+        context.Process(
+            target=_write_candidate_state,
+            args=(str(root), str(state_path), identity, start),
+        )
+        for identity in identities
+    ]
+    for writer in writers:
+        writer.start()
+    start.set()
+    for writer in writers:
+        writer.join(10)
+
+    assert [writer.exitcode for writer in writers] == [0, 0]
+    restarted = SdPackActivationState(SharedAssetStore(root), state_path=state_path)
+    assert restarted.candidate in identities
+    assert not list(root.glob("activation.json.*.part"))
+
+
+def test_activation_state_restart_ignores_crash_temp_and_keeps_last_commit(tmp_path):
+    root = tmp_path / "tbot"
+    store = SharedAssetStore(root)
+    state_path = tmp_path / "activation.json"
+    current = {
+        "cacheKey": "lesson/v1-aaaaaaaa",
+        "lessonVersion": 1,
+        "manifestChecksum": "aaaaaaaa",
+    }
+    SdPackActivationState(store, state_path=state_path, current=current)
+    crash_part = root / "activation.json.999.crash.part"
+    crash_part.write_text("truncated", encoding="utf-8")
+
+    restarted = SdPackActivationState(SharedAssetStore(root), state_path=state_path)
+
+    assert restarted.current == current
+    assert not crash_part.exists()
