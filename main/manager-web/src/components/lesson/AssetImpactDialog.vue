@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :visible.sync="shown" :title="$t('visual.impactTitle')" width="560px" :close-on-click-modal="false">
+  <el-dialog :visible.sync="shown" :title="$t('visual.impactTitle')" width="min(560px, calc(100vw - 24px))" custom-class="asset-impact-dialog" :close-on-click-modal="false">
     <el-alert :title="$t('visual.impactWarning')" type="warning" show-icon :closable="false" />
     <div class="impact-grid">
       <div><strong>{{ impact.courses || 0 }}</strong><span>{{ $t('visual.courses') }}</span></div>

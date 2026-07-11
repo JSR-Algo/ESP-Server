@@ -36,6 +36,7 @@ assert.equal(replacementNeedsImpact('cloneForLesson'), false);
 assert.deepEqual(buildReplacementRequest('source', 'target', 'cloneForLesson', ['lesson-1']), {
   sourceVersionId: 'source', targetVersionId: 'target', mode: 'cloneForLesson', lessonIds: ['lesson-1'],
 });
+assert.throws(() => buildReplacementRequest('source', 'source', 'global'), /different/);
 assert.throws(() => buildReplacementRequest('source', 'target', 'cloneForLesson', ['one', 'two']), /exactly one/);
 
 const usages = [

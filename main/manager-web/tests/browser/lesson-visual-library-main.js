@@ -37,6 +37,6 @@ const detail = new Vue({ render: (h) => h(LessonVisualAssetDetail) }).$mount('#d
 const impact = new Vue({ render: (h) => h(AssetImpactDialog, { props: { visible: true, mode: 'selectedLessons', impact: { courses: 1, lessons: 1, publishedVersions: 1, activeAssignments: 4 } } }) }).$mount('#impact');
 
 Vue.nextTick(() => {
-  window.__LESSON_VISUAL_TEST__ = { library: library.$children[0], detail: detail.$children[0], impact: impact.$children[0], calls, versions, usages };
+  window.__LESSON_VISUAL_TEST__ = { library: library.$children[0], detail: detail.$children[0], impact: impact.$children[0], calls, versions, usages, Api };
   window.__LESSON_VISUAL_READY__ = true;
 });

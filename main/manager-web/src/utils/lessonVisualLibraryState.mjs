@@ -35,6 +35,7 @@ export function replacementNeedsImpact(mode) {
 
 export function buildReplacementRequest(sourceVersionId, targetVersionId, mode, lessonIds = []) {
   if (!REPLACEMENT_MODES.includes(mode)) throw new Error('invalid replacement mode');
+  if (!sourceVersionId || !targetVersionId || sourceVersionId === targetVersionId) throw new Error('source and target versions must be different');
   const ids = [...new Set((lessonIds || []).filter(Boolean))];
   if (mode === 'selectedLessons' && !ids.length) throw new Error('selected replacement requires lessons');
   if (mode === 'cloneForLesson' && ids.length !== 1) throw new Error('clone-for-current-lesson requires exactly one lesson');
