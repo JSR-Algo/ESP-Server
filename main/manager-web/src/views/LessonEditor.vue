@@ -702,6 +702,9 @@ export default {
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
       this.$set(this.savingStepKeys, step.stepKey, true);
+      // A commit changes persisted lesson truth even when it clears the last dirty
+      // draft, so every validation/preview launched before this point is stale.
+      this.studioRevision += 1;
       this.validationResult = null;
       this.previewManifest = null;
       const visualRefs = selectedAsset
