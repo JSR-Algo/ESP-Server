@@ -42,9 +42,49 @@
         <div class="kv"><span class="muted">etag</span><span class="mono">{{ preview.etag }}</span></div>
       </el-card>
 
+      <section v-if="lesson" class="lesson-studio">
+        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
+        <main class="lesson-studio__canvas">
+          <div class="lesson-studio__toolbar">
+            <div>
+              <span class="eyebrow">VISUAL LESSON BUILDER</span>
+              <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
+            </div>
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
+              Save step
+            </el-button>
+          </div>
+          <div v-if="selectedStep" class="lesson-studio__workbench">
+            <div>
+              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
+              <SharedAssetPicker
+                :assets="bundleAssets"
+                :selected-key="selectedObjectKey"
+                category="teachingObject"
+                @select="selectSharedAsset"
+              />
+            </div>
+            <RobotLessonPreview
+              v-if="previewManifest"
+              :manifest="previewManifest"
+              :step-index="selectedStepIndex"
+              initial-path="correct"
+              @path-change="onPreviewPathChange"
+            />
+            <div v-else class="preview-empty">
+              <strong>Robot preview</strong>
+              <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
+              <el-button size="small" @click="doPreview">Generate preview</el-button>
+            </div>
+          </div>
+          <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
+          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest || {}" />
+        </main>
+      </section>
+
       <!-- Steps -->
       <el-card shadow="never" class="content-area">
-        <div slot="header" class="card-header">{{ $t('lesson.steps') }} ({{ steps.length }})</div>
+        <div slot="header" class="card-header">Advanced step structure · {{ steps.length }} steps</div>
         <el-table :data="steps" stripe style="width: 100%">
           <el-table-column :label="'#'" width="60" align="center">
             <template slot-scope="scope">{{ scope.$index + 1 }}</template>
@@ -266,11 +306,27 @@
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
 import LessonAssetManager from '@/components/LessonAssetManager.vue';
+import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
+import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
+import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
+import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
+import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
+import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
+import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
 
 export default {
   name: 'LessonEditor',
-  components: { HeaderBar, LessonAssetManager },
+  components: {
+    HeaderBar,
+    LessonAssetManager,
+    LessonEngagementTrack,
+    LessonInteractionPanel,
+    LessonPublishReadiness,
+    LessonStepNavigator,
+    RobotLessonPreview,
+    SharedAssetPicker,
+  },
   data() {
     return {
       lesson: null,
@@ -300,6 +356,13 @@ export default {
       ],
       preview: null,
       publishMessage: '',
+      selectedStepIndex: 0,
+      selectedStepDrafts: {},
+      selectedAssetDrafts: {},
+      dirtyStepKeys: {},
+      savingStep: false,
+      previewManifest: null,
+      previewPath: null,
       renameVisible: false,
       titleDraft: '',
     };
@@ -329,6 +392,39 @@ export default {
     },
     hasBundleAssets() {
       return this.backgroundAssets.length > 0 || this.teachingObjectAssets.length > 0;
+    },
+    selectedStep() {
+      return this.steps[this.selectedStepIndex] || null;
+    },
+    selectedStepDirty() {
+      return Boolean(this.selectedStep && this.dirtyStepKeys[this.selectedStep.stepKey]);
+    },
+    selectedAuthoring: {
+      get() {
+        if (!this.selectedStep) return mergeAuthoringFields({}, {});
+        return this.selectedStepDrafts[this.selectedStep.stepKey]
+          || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
+      },
+      set(value) {
+        if (!this.selectedStep) return;
+        this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
+        this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+      },
+    },
+    selectedObjectKey() {
+      if (this.selectedStep && this.selectedAssetDrafts[this.selectedStep.stepKey]) {
+        return this.selectedAssetDrafts[this.selectedStep.stepKey].assetKey;
+      }
+      const body = this.selectedStep && this.selectedStep.stepBody;
+      return body && body.teachingObject && body.teachingObject.asset
+        ? body.teachingObject.asset.key
+        : '';
+    },
+    studioSteps() {
+      return this.steps.map((step) => {
+        const authored = this.selectedStepDrafts[step.stepKey];
+        return authored ? { ...step, stepBody: { ...(step.stepBody || {}), ...authored } } : step;
+      });
     },
   },
   watch: {
@@ -549,7 +645,54 @@ export default {
       );
     },
     fetchSteps() {
-      Api.lesson.listSteps(this.lessonId, (rows) => { this.steps = rows; }, (msg) => this.$message.error(msg));
+      Api.lesson.listSteps(this.lessonId, (rows) => {
+        this.steps = rows;
+        if (this.selectedStepIndex >= rows.length) this.selectedStepIndex = Math.max(0, rows.length - 1);
+      }, (msg) => this.$message.error(msg));
+    },
+    selectSharedAsset(asset) {
+      if (!this.selectedStep || !this.isDraft) return;
+      this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
+      this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+    },
+    onPreviewPathChange(payload) {
+      this.previewPath = payload;
+    },
+    saveSelectedStep() {
+      const step = this.selectedStep;
+      if (!step || !this.isDraft) return;
+      const authored = this.selectedAuthoring;
+      const stepBody = { ...(step.stepBody || {}), ...authored };
+      const selectedAsset = this.selectedAssetDrafts[step.stepKey];
+      if (selectedAsset) {
+        stepBody.teachingObject = {
+          ...(stepBody.teachingObject || {}),
+          primaryWord: authored.teachingWord.text || step.subject,
+          asset: {
+            key: selectedAsset.assetKey,
+            src: selectedAsset.path || selectedAsset.url,
+            sha256: selectedAsset.sha256,
+            version: selectedAsset.version,
+            bytes: selectedAsset.bytes,
+          },
+        };
+      }
+      this.savingStep = true;
+      Api.lesson.updateStep(
+        this.lessonId,
+        step.stepKey,
+        { ...step, stepBody },
+        (updated) => {
+          this.savingStep = false;
+          this.$set(this.steps, this.selectedStepIndex, updated);
+          this.$delete(this.selectedStepDrafts, step.stepKey);
+          this.$delete(this.selectedAssetDrafts, step.stepKey);
+          this.$delete(this.dirtyStepKeys, step.stepKey);
+          this.previewManifest = null;
+          this.$message.success('Step saved to the lesson draft.');
+        },
+        (msg) => { this.savingStep = false; this.$message.error(msg); },
+      );
     },
     moveStep(index, delta) {
       const target = index + delta;
@@ -630,6 +773,9 @@ export default {
       if (scene) Object.assign(stepBody, scene);
       const vocab = this.buildVocab(f.subject);
       if (vocab) stepBody.vocab = vocab;
+      Object.assign(stepBody, mergeAuthoringFields({}, {
+        teachingWord: { text: (f.scene.primaryWord || f.subject || '').trim().toUpperCase() },
+      }));
       if (Object.keys(stepBody).length) payload.stepBody = stepBody;
       // Per-step robot-face override (server validates against firmware-supported set).
       if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
@@ -677,7 +823,11 @@ export default {
       Api.lesson.manifestPreview(
         this.lessonId,
         'espTft',
-        (res) => { this.previewing = false; this.preview = { checksum: res.checksum, etag: res.etag }; },
+        (res) => {
+          this.previewing = false;
+          this.preview = { checksum: res.checksum, etag: res.etag };
+          this.previewManifest = res.manifest || null;
+        },
         (msg) => { this.previewing = false; this.$message.error(msg); },
       );
     },
@@ -730,4 +880,14 @@ export default {
 .focus-title { margin: 6px 0; font-weight: 600; }
 .focus-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .focus-row .el-input-number { width: 110px; }
+.lesson-studio { align-items:start; background:linear-gradient(135deg,#f3ead5 0%,#edf3ea 55%,#f8dfb5 100%); border:1px solid #e5d7bd; border-radius:24px; display:grid; gap:16px; grid-template-columns:210px minmax(0,1fr); margin-bottom:18px; padding:16px; }
+.lesson-studio__canvas { display:grid; gap:14px; min-width:0; }
+.lesson-studio__toolbar { align-items:center; display:flex; justify-content:space-between; }
+.lesson-studio__toolbar h3 { color:#17312d; font-family:Georgia,serif; font-size:24px; margin:3px 0 0; }
+.eyebrow { color:#9a6820; font-size:10px; font-weight:800; letter-spacing:.16em; }
+.lesson-studio__workbench { display:grid; gap:14px; grid-template-columns:minmax(330px,1fr) minmax(360px,1fr); }
+.preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
+.preview-empty span { color:#b9cbc5; max-width:320px; }
+@media (max-width:1100px) { .lesson-studio__workbench { grid-template-columns:1fr; } }
+@media (max-width:760px) { .lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
 </style>

@@ -171,6 +171,27 @@ export default {
     });
   },
 
+  // PATCH /v1/admin/lessons/:lessonId/steps/:stepKey — draft step authoring fields.
+  updateStep(lessonId, stepKey, input, onSuccess, onError) {
+    const data = {
+      stepType: input.stepType,
+      prompt: input.prompt,
+      subject: input.subject,
+      helperText: input.helperText || undefined,
+      l1TransferHint: input.l1TransferHint || undefined,
+      choices: input.choices || undefined,
+      stepBody: input.stepBody || {},
+    };
+    if (input.renderOverride && input.renderOverride.expression) data.renderOverride = input.renderOverride;
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/steps/${encodeURIComponent(stepKey)}`,
+      method: 'PATCH',
+      data,
+      onSuccess: (p) => onSuccess(normalizeStep(p)),
+      onError,
+    });
+  },
+
   // POST /v1/admin/lessons/:lessonId/steps/reorder { order: stepKey[] }
   reorderSteps(lessonId, order, onSuccess, onError) {
     nestRequest({
