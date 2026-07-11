@@ -830,9 +830,12 @@ class LessonRuntime:
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Validate gates, then send ``lesson_prepare`` (seq 1). Raises a
-        ``LessonError`` for any pre-send gate failure (capability / protocol /
-        profile) so the caller logs it and NEVER puts a frame on the wire."""
+        """Preload/attest first, then publish the first protocol frame."""
+        if await self.preload_only():
+            await self.start_protocol(preloaded=True)
+
+    async def preload_only(self) -> bool:
+        """Validate and materialize assets without sending ``lesson_prepare``."""
         features = getattr(self.conn, "features", None)
         if not lesson_capability_ok(features):
             # D-CAP-FLAG: absence = no support; MUST NOT send lesson_prepare.
@@ -880,7 +883,12 @@ class LessonRuntime:
         if self._use_sd_asset_pack():
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
-                return
+                return False
+        return True
+
+    async def start_protocol(self, *, preloaded: bool = False) -> None:
+        if not preloaded and not await self.preload_only():
+            return
         await self._emit("lesson_prepare", body=self._prepare_body())
 
     async def close(self) -> None:
@@ -3032,8 +3040,17 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         enter_lesson = getattr(conn, "enter_lesson_mode", None)
         if callable(enter_lesson):
             await enter_lesson(reason="lesson_start")
-        await runtime.start()
-        if runtime.state == S_FAILED:
+        preload_only = getattr(runtime, "preload_only", None)
+        start_protocol = getattr(runtime, "start_protocol", None)
+        split_start = callable(preload_only) and callable(start_protocol)
+        if split_start:
+            preloaded = await preload_only()
+        else:  # Compatibility for injected/legacy runtime implementations.
+            conn.lesson_runtime = runtime
+            conn.lesson_runtime_candidate = None
+            await runtime.start()
+            preloaded = True
+        if not preloaded or runtime.state == S_FAILED:
             _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
             if getattr(conn, "lesson_runtime_candidate", None) is runtime:
                 conn.lesson_runtime_candidate = None
@@ -3054,8 +3071,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 activation.abort_candidate()
                 await runtime.close()
                 return republish_previous
-        conn.lesson_runtime = runtime
-        conn.lesson_runtime_candidate = None
+        if split_start:
+            conn.lesson_runtime = runtime
+            conn.lesson_runtime_candidate = None
+            await start_protocol(preloaded=True)
         _set_lesson_start_status(conn, "STARTED")
         if republish_previous is not None:
             old_cache = getattr(republish_previous, "asset_cache", None)
@@ -3075,8 +3094,12 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await release_lesson(reason="lesson_start_refused")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
+        if getattr(conn, "lesson_runtime", None) is runtime:
+            conn.lesson_runtime = republish_previous
         if activation is not None:
-            activation.abort_candidate()
+            previous = activation.previous_known_good
+            if previous is None or not activation.rollback(previous):
+                activation.abort_candidate()
         try:
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
@@ -3087,8 +3110,12 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         _log("warning", f"lesson candidate crashed: {type(exc).__name__}")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
+        if getattr(conn, "lesson_runtime", None) is runtime:
+            conn.lesson_runtime = republish_previous
         if activation is not None:
-            activation.abort_candidate()
+            previous = activation.previous_known_good
+            if previous is None or not activation.rollback(previous):
+                activation.abort_candidate()
         try:
             await runtime.close()
         except Exception as close_exc:  # pragma: no cover - teardown is best-effort
@@ -3113,10 +3140,8 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
             mounted,
             shared_store=store,
             quota_bytes=_positive_int_or_default(lesson_cfg.get("sd_cache_quota_bytes", 0), 0),
-            gc_free_percent=_positive_float_or_default(lesson_cfg.get("sd_gc_free_percent", 20), 20.0),
-            preload_min_free_percent=_positive_float_or_default(
-                lesson_cfg.get("sd_preload_min_free_percent", 5), 5.0
-            ),
+            gc_free_percent=lesson_cfg.get("sd_gc_free_percent", 20),
+            preload_min_free_percent=lesson_cfg.get("sd_preload_min_free_percent", 5),
             voice_busy=getattr(conn, "is_realtime_busy", None),
             render_busy=render_busy,
         )
@@ -3124,7 +3149,7 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
             gc.boot_cleanup()
             _SD_PACK_BOOT_CLEANED_ROOTS.add(mounted)
         return gc
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, TypeError) as exc:
         logger = getattr(conn, "logger", None)
         if logger is not None:
             logger.warning(f"lesson SD GC unavailable: {type(exc).__name__}")

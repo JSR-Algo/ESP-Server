@@ -39,10 +39,10 @@ class SdPackGarbageCollector:
         self.quota_bytes = max(0, int(quota_bytes or 0))
         self.gc_free_percent = float(gc_free_percent)
         self.preload_min_free_percent = float(preload_min_free_percent)
-        if not 0 <= self.gc_free_percent <= 100:
-            raise ValueError("sd_gc_free_percent must be between 0 and 100")
-        if not 0 <= self.preload_min_free_percent <= 100:
-            raise ValueError("sd_preload_min_free_percent must be between 0 and 100")
+        if not 0 < self.gc_free_percent <= 100:
+            raise ValueError("sd_gc_free_percent must be greater than 0 and at most 100")
+        if not 0 < self.preload_min_free_percent <= 100:
+            raise ValueError("sd_preload_min_free_percent must be greater than 0 and at most 100")
         if self.preload_min_free_percent > self.gc_free_percent:
             raise ValueError("sd_preload_min_free_percent must not exceed sd_gc_free_percent")
         self._disk_usage = disk_usage

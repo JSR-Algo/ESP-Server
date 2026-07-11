@@ -52,37 +52,49 @@ class SharedAssetStore:
         return self.shared_root / digest[:2] / digest
 
     def put_bytes(self, content: bytes, digest: str) -> Path:
+        with self._gc_lock(exclusive=False):
+            return self._put_bytes_locked(content, digest)
+
+    def _put_bytes_locked(self, content: bytes, digest: str) -> Path:
         digest = self._validate_digest(digest)
         if hashlib.sha256(content).hexdigest() != digest:
             raise ValueError("asset checksum mismatch")
         target = self.asset_path(digest)
-        if self.attest(digest):
+        if self._attest_unlocked(digest):
             return target
         if target.exists():
             target.unlink()
         self._atomic_write(target, content)
-        if not self.attest(digest):
+        if not self._attest_unlocked(digest):
             self._safe_unlink(target)
             raise ValueError("asset checksum mismatch after commit")
         return target
 
     def put_file(self, source: Any, digest: str) -> Path:
+        with self._gc_lock(exclusive=False):
+            return self._put_file_locked(source, digest)
+
+    def _put_file_locked(self, source: Any, digest: str) -> Path:
         source_path = Path(source)
         digest = self._validate_digest(digest)
         if self._hash_file(source_path) != digest:
             raise ValueError("asset checksum mismatch")
         target = self.asset_path(digest)
-        if self.attest(digest):
+        if self._attest_unlocked(digest):
             return target
         if target.exists():
             target.unlink()
         self._atomic_copy(target, source_path)
-        if not self.attest(digest):
+        if not self._attest_unlocked(digest):
             self._safe_unlink(target)
             raise ValueError("asset checksum mismatch after commit")
         return target
 
     def attest(self, digest: str) -> bool:
+        with self._gc_lock(exclusive=False):
+            return self._attest_unlocked(digest)
+
+    def _attest_unlocked(self, digest: str) -> bool:
         try:
             path = self.asset_path(digest)
             return path.is_file() and self._hash_file(path) == digest
@@ -105,7 +117,7 @@ class SharedAssetStore:
                 normalized: Dict[str, str] = {}
                 for key, digest in assets.items():
                     digest = self._validate_digest(digest)
-                    if not self.attest(digest):
+                    if not self._attest_unlocked(digest):
                         raise ValueError("cannot commit pack with unattested asset")
                     name = self._pack_asset_name(key)
                     self._atomic_link(staging / name, self.asset_path(digest))
@@ -204,17 +216,22 @@ class SharedAssetStore:
 
     def materialize_pack_asset(self, cache_key: str, key: str, digest: str) -> Path:
         """Expose partial first-generation assets without mutating a valid pack."""
-        digest = self._validate_digest(digest)
-        if not self.attest(digest):
-            raise ValueError("cannot materialize unattested asset")
-        target = self._pack_dir(cache_key) / self._pack_asset_name(key)
-        with self._pack_lock(cache_key, exclusive=True):
-            self._recover_pack_unlocked(cache_key)
-            if not self._is_pack_ready_unlocked(cache_key):
-                self._atomic_link(target, self.asset_path(digest))
+        with self._gc_lock(exclusive=False):
+            digest = self._validate_digest(digest)
+            if not self._attest_unlocked(digest):
+                raise ValueError("cannot materialize unattested asset")
+            target = self._pack_dir(cache_key) / self._pack_asset_name(key)
+            with self._pack_lock(cache_key, exclusive=True):
+                self._recover_pack_unlocked(cache_key)
+                if not self._is_pack_ready_unlocked(cache_key):
+                    self._atomic_link(target, self.asset_path(digest))
         return target
 
     def is_pack_ready(self, cache_key: str) -> bool:
+        with self._gc_lock(exclusive=False):
+            return self._is_pack_ready_locked(cache_key)
+
+    def _is_pack_ready_locked(self, cache_key: str) -> bool:
         with self._pack_lock(cache_key, exclusive=False):
             if self._is_pack_ready_unlocked(cache_key):
                 return True
@@ -238,7 +255,7 @@ class SharedAssetStore:
             if not isinstance(assets, dict) or ready.get("assetCount") != len(assets):
                 return False
             for key, digest in assets.items():
-                if not self.attest(digest):
+                if not self._attest_unlocked(digest):
                     return False
                 pack_asset = pack_dir / self._pack_asset_name(key)
                 if not pack_asset.is_file() or self._hash_file(pack_asset) != digest:

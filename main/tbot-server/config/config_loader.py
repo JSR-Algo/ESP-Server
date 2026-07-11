@@ -485,13 +485,21 @@ def _apply_lesson_env_overrides(config):
     sd_cache_quota_bytes = _parse_positive_int_env("LESSON_SD_CACHE_QUOTA_BYTES")
     sd_gc_free_percent = _parse_percent_env("LESSON_SD_GC_FREE_PERCENT")
     sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
-    if (
-        sd_gc_free_percent is not None
-        and sd_preload_min_free_percent is not None
-        and sd_preload_min_free_percent > sd_gc_free_percent
-    ):
-        sd_gc_free_percent = None
-        sd_preload_min_free_percent = None
+    existing_lesson = config.get("lesson")
+    existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
+    effective_gc = sd_gc_free_percent if sd_gc_free_percent is not None else existing_lesson.get("sd_gc_free_percent", 20)
+    effective_preload = (
+        sd_preload_min_free_percent
+        if sd_preload_min_free_percent is not None
+        else existing_lesson.get("sd_preload_min_free_percent", 5)
+    )
+    try:
+        effective_gc = float(effective_gc)
+        effective_preload = float(effective_preload)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("lesson SD free-space percentages must be numeric")
+    if not 0 < effective_preload <= effective_gc <= 100:
+        raise ValueError("lesson SD percentages require 0 < preload_min <= gc_trigger <= 100")
     # Built-in sample-lesson DEMO flag (independent of runtime_enabled; NEVER coupled to
     # the production auto-enable below). LESSON_SAMPLE_ENABLED -> lesson.sample_lesson;
     # LESSON_SAMPLE_ASSET_BASE -> lesson.sample_asset_base_url (optional image host).

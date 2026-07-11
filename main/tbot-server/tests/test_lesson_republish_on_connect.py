@@ -179,29 +179,50 @@ class _FakeNewRuntime:
     async def start(self):
         self.started = True
 
+    async def preload_only(self):
+        self.started = True
+        return self.state != rt_mod.S_FAILED
+
+    async def start_protocol(self, *, preloaded=False):
+        return None
+
     async def close(self):
         self.closed = True
 
 
 class _FailingCandidateRuntime(_FakeNewRuntime):
-    async def start(self):
+    async def preload_only(self):
         self.started = True
         self.state = rt_mod.S_FAILED
+        return False
 
 
 class _ObservingCandidateRuntime(_FakeNewRuntime):
     active_during_start = None
     candidate_during_start = None
 
-    async def start(self):
+    async def preload_only(self):
         type(self).active_during_start = self.conn.lesson_runtime
         type(self).candidate_during_start = getattr(self.conn, "lesson_runtime_candidate", None)
         self.started = True
+        return True
 
 
 class _CrashingCandidateRuntime(_FakeNewRuntime):
-    async def start(self):
+    async def preload_only(self):
         raise RuntimeError("candidate preload crashed")
+
+
+class _SynchronousAckCandidateRuntime(_FakeNewRuntime):
+    ack_count = 0
+
+    async def on_lesson_ack(self, _message):
+        type(self).ack_count += 1
+
+    async def start_protocol(self, *, preloaded=False):
+        from core.handle.textHandler.lessonMessageHandler import _dispatch
+
+        await _dispatch(self.conn, {"type": "lesson_ack", "body": {"acks": 1}}, "on_lesson_ack")
 
 
 class _NoSpaceGc:
@@ -417,6 +438,34 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(conn.lesson_runtime, existing)
         self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
         self.assertFalse(existing.closed)
+
+    async def test_synchronous_prepare_ack_routes_to_candidate_after_atomic_swap(self):
+        _SynchronousAckCandidateRuntime.ack_count = 0
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(
+            rt_mod, "LessonRuntime", new=_SynchronousAckCandidateRuntime
+        )
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertEqual(_SynchronousAckCandidateRuntime.ack_count, 1)
+        self.assertIs(conn.lesson_runtime, result)
+        self.assertTrue(existing.closed)
 
     async def test_republish_refuses_candidate_below_five_percent_sd_free(self):
         _FakeNewRuntime.instances = []
