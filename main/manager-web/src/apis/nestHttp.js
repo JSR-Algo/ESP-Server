@@ -62,6 +62,7 @@ export function normalizeStep(raw) {
     l1TransferHint: r.l1_transfer_hint ?? r.l1TransferHint ?? '',
     choices: Array.isArray(r.choices) ? r.choices : (r.choices ?? null),
     stepBody: r.step_body ?? r.stepBody ?? {},
+    visualRefs: Array.isArray(r.visual_refs ?? r.visualRefs) ? (r.visual_refs ?? r.visualRefs) : [],
     robotState: r.robot_state ?? r.robotState ?? '',
     pose: r.pose ?? '',
     expression: r.expression ?? '',

@@ -413,12 +413,17 @@ export default {
         if (!this.selectedStep) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+        this.validationResult = null;
       },
     },
     selectedObjectKey() {
       if (this.selectedStep && this.selectedAssetDrafts[this.selectedStep.stepKey]) {
         return this.selectedAssetDrafts[this.selectedStep.stepKey].assetKey;
       }
+      const visualRef = this.selectedStep && Array.isArray(this.selectedStep.visualRefs)
+        ? this.selectedStep.visualRefs.find((ref) => ref.slot === 'teachingObject')
+        : null;
+      if (visualRef) return visualRef.assetKey || visualRef.asset_key || '';
       const body = this.selectedStep && this.selectedStep.stepBody;
       return body && body.teachingObject && body.teachingObject.asset
         ? body.teachingObject.asset.key
@@ -489,6 +494,7 @@ export default {
     },
     onAssetsLoaded(assets) {
       this.bundleAssets = Array.isArray(assets) ? assets : [];
+      this.validationResult = null;
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -663,6 +669,7 @@ export default {
       if (!this.selectedStep || !this.isDraft) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+      this.validationResult = null;
     },
     inspectSharedAsset(asset) {
       this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
@@ -680,27 +687,24 @@ export default {
       const stepBody = { ...(step.stepBody || {}), ...authored };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       this.savingStep = true;
-      const saveAuthoring = () => Api.lesson.updateStep(
-        this.lessonId, step.stepKey, { ...step, stepBody },
+      this.validationResult = null;
+      const visualRefs = selectedAsset
+        ? [{ slot: 'teachingObject', assetVersionId: selectedAsset.versionId }]
+        : undefined;
+      Api.lesson.updateStep(
+        this.lessonId, step.stepKey, { ...step, stepBody, visualRefs },
         (updated) => {
           this.savingStep = false;
-          this.$set(this.steps, this.selectedStepIndex, updated);
           this.$delete(this.selectedStepDrafts, step.stepKey);
           this.$delete(this.selectedAssetDrafts, step.stepKey);
           this.$delete(this.dirtyStepKeys, step.stepKey);
           this.previewManifest = null;
+          this.validationResult = null;
+          this.fetchSteps();
           this.$message.success('Step saved to the lesson draft.');
         },
-        (msg) => { this.savingStep = false; this.$message.error(msg); },
+        (msg) => { this.savingStep = false; this.validationResult = null; this.$message.error(msg); },
       );
-      if (selectedAsset) {
-        Api.lesson.setStepVisualRef(
-          this.lessonId, step.stepKey, 'teachingObject', selectedAsset.versionId, saveAuthoring,
-          (msg) => { this.savingStep = false; this.$message.error(msg); },
-        );
-      } else {
-        saveAuthoring();
-      }
     },
     moveStep(index, delta) {
       const target = index + delta;
@@ -713,14 +717,14 @@ export default {
       Api.lesson.reorderSteps(
         this.lessonId,
         order,
-        (rows) => { this.reordering = false; this.steps = rows; },
+        (rows) => { this.reordering = false; this.steps = rows; this.validationResult = null; },
         (msg) => { this.reordering = false; this.$message.error(msg); },
       );
     },
     deleteStep(row) {
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
-          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; }, (msg) => this.$message.error(msg));
+          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; this.validationResult = null; }, (msg) => this.$message.error(msg));
         })
         .catch(() => {});
     },
@@ -795,6 +799,7 @@ export default {
           this.addingStep = false;
           this.stepDialogVisible = false;
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
+          this.validationResult = null;
           this.fetchSteps();
         },
         (msg) => { this.addingStep = false; this.$message.error(msg); },
@@ -824,7 +829,7 @@ export default {
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
         },
-        (msg) => { this.validating = false; this.$message.error(msg); },
+        (msg) => { this.validating = false; this.validationResult = null; this.$message.error(msg); },
       );
     },
     doPreview() {

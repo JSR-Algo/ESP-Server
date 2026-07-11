@@ -181,6 +181,7 @@ export default {
       l1TransferHint: input.l1TransferHint || undefined,
       choices: input.choices || undefined,
       stepBody: input.stepBody || {},
+      visualRefs: Array.isArray(input.visualRefs) ? input.visualRefs : undefined,
     };
     if (input.renderOverride && input.renderOverride.expression) data.renderOverride = input.renderOverride;
     nestRequest({
@@ -192,16 +193,6 @@ export default {
     });
   },
 
-  // PUT /v1/admin/lessons/:lessonId/steps/:stepKey/visual-refs/:slot
-  setStepVisualRef(lessonId, stepKey, slot, assetVersionId, onSuccess, onError) {
-    nestRequest({
-      url: `${getNestUrl()}/lessons/${lessonId}/steps/${encodeURIComponent(stepKey)}/visual-refs/${encodeURIComponent(slot)}`,
-      method: 'PUT',
-      data: { assetVersionId: assetVersionId || null },
-      onSuccess,
-      onError,
-    });
-  },
 
   // POST /v1/admin/lessons/:lessonId/steps/reorder { order: stepKey[] }
   reorderSteps(lessonId, order, onSuccess, onError) {

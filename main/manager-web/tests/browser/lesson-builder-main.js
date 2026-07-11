@@ -8,8 +8,8 @@ Vue.use(ElementUI);
 Vue.use(VueRouter);
 Vue.config.productionTip = false;
 
-const calls = { update: [], visualRefs: [], visualFilters: [], validate: 0, preview: 0 };
-const steps = [
+const calls = { update: [], visualFilters: [], validate: 0, preview: 0, errors: [], failNextUpdate: false };
+let steps = [
   { stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 } },
   { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12 } },
 ];
@@ -19,11 +19,16 @@ const manifest = { profile: 'espTft', pathsTerminate: true, steps: [{ stepKey: '
 
 Object.assign(Api.lesson, {
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi' }); },
-  listSteps(id, ok) { ok(steps.map((step) => ({ ...step }))); },
+  listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
   listVisualAssets(filters, ok) { calls.visualFilters.push(filters); ok(sharedAssets); },
-  setStepVisualRef(lessonId, stepKey, slot, assetVersionId, ok) { calls.visualRefs.push({ lessonId, stepKey, slot, body: { assetVersionId } }); ok({}); },
-  updateStep(lessonId, stepKey, payload, ok) { calls.update.push({ lessonId, stepKey, payload: JSON.parse(JSON.stringify(payload)) }); ok({ ...payload, stepKey }); },
+  updateStep(lessonId, stepKey, payload, ok, fail) {
+    calls.update.push({ lessonId, stepKey, payload: JSON.parse(JSON.stringify(payload)) });
+    if (calls.failNextUpdate) { calls.failNextUpdate = false; fail('forced update failure'); return; }
+    const visualRefs = (payload.visualRefs || []).map((ref) => ({ ...ref, assetKey: sharedAssets.find((asset) => asset.versionId === ref.assetVersionId)?.assetKey || '' }));
+    steps = steps.map((step) => step.stepKey === stepKey ? { ...step, ...payload, visualRefs } : step);
+    ok({ ...payload, stepKey, visualRefs });
+  },
   validate(id, ok) { calls.validate += 1; ok(validation); },
   manifestPreview(id, profile, ok) { calls.preview += 1; ok({ manifest, checksum: 'checksum-1', etag: 'etag-1' }); },
   reorderSteps() {}, deleteStep() {}, publish() {}, updateLesson() {}, createStep() {},
@@ -35,7 +40,7 @@ LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
 router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
 Vue.prototype.$t = (key) => key;
-Vue.prototype.$message = { success() {}, error(message) { throw new Error(message); }, warning() {} };
+Vue.prototype.$message = { success() {}, error(message) { calls.errors.push(message); }, warning() {} };
 Vue.prototype.$confirm = () => Promise.resolve();
 const vm = new Vue({ router, render: (h) => h(LessonEditor) }).$mount('#app');
 
