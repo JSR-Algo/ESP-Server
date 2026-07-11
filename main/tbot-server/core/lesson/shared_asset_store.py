@@ -33,6 +33,8 @@ class SharedAssetStore:
         self.shared_root = self.root / "shared-assets" / "sha256"
         self.pack_root = Path(pack_root).resolve() if pack_root else self.root / "lesson-assets"
         self._failure_hook = failure_hook
+        # A process restart must never inherit an interrupted write as valid state.
+        self.cleanup_parts()
 
     def asset_path(self, digest: str) -> Path:
         digest = self._validate_digest(digest)

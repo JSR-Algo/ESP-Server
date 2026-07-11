@@ -79,6 +79,7 @@ async def sync_cached_lesson_assets_to_sd(
     only_cache_keys: Optional[set] = None,
     busy_check: Optional[Callable[[], bool]] = None,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+    poll_interval: float = 0.1,
 ) -> Dict[str, Any]:
     config = getattr(conn, "config", {}) or {}
     if not _sd_pack_enabled(config):
@@ -101,9 +102,16 @@ async def sync_cached_lesson_assets_to_sd(
         ]
     for pack in packs:
         while is_busy():
-            await pause(0.1)
+            await pause(poll_interval)
         try:
-            result = await call_sd_pack_sync_tool(conn, mcp_client, pack)
+            result = await _call_sd_pack_sync_with_voice_guard(
+                conn,
+                mcp_client,
+                pack,
+                busy_check=is_busy,
+                sleep=pause,
+                poll_interval=poll_interval,
+            )
             if _sync_result_ready(result):
                 synced += 1
             else:
@@ -119,6 +127,37 @@ async def sync_cached_lesson_assets_to_sd(
         await asyncio.sleep(0)
     _log(conn, "info", f"cached SD pack sync complete packs={len(packs)} synced={synced} failed={failed}")
     return {"packs": len(packs), "synced": synced, "failed": failed}
+
+
+async def _call_sd_pack_sync_with_voice_guard(
+    conn: Any,
+    mcp_client: Any,
+    pack: Dict[str, Any],
+    *,
+    busy_check: Callable[[], bool],
+    sleep: Callable[[float], Awaitable[None]],
+    poll_interval: float,
+) -> Any:
+    """Cancel an idempotent pack sync when voice wins, then retry from READY state."""
+    interval = max(0.001, float(poll_interval))
+    while True:
+        while busy_check():
+            await sleep(poll_interval)
+        transfer = asyncio.create_task(call_sd_pack_sync_tool(conn, mcp_client, pack))
+        try:
+            while not transfer.done():
+                await asyncio.sleep(0)
+                if busy_check():
+                    transfer.cancel()
+                    await asyncio.gather(transfer, return_exceptions=True)
+                    break
+                await asyncio.wait({transfer}, timeout=interval)
+            else:
+                return await transfer
+        except asyncio.CancelledError:
+            transfer.cancel()
+            await asyncio.gather(transfer, return_exceptions=True)
+            raise
 
 
 async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: Dict[str, Any]) -> Any:
