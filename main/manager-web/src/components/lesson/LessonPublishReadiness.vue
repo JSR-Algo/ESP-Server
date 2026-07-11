@@ -4,7 +4,7 @@
     <div class="readiness__grid">
       <div><span>Download</span><strong>{{ formatBytes(metrics.downloadBytes) }}</strong></div>
       <div><span>Assets</span><strong>{{ metrics.uniqueAssetCount }} unique / {{ metrics.sharedReferenceCount }} shared</strong></div>
-      <div><span>Peak PSRAM</span><strong>{{ formatBytes(metrics.estimatedPeakPsram) }}</strong></div>
+      <div><span>Peak PSRAM</span><strong>{{ formatBytes(metrics.estimatedPeakPsram) }}{{ metrics.estimateOnly ? ' estimated' : '' }}</strong></div>
       <div><span>Offline</span><strong>{{ metrics.offlineReady ? 'Ready' : 'Remote dependency' }}</strong></div>
       <div><span>All paths</span><strong>{{ metrics.allPathsTerminate ? 'Terminate' : 'Review branches' }}</strong></div>
     </div>
@@ -14,8 +14,8 @@
 import { calculateReadiness } from './lesson-builder-logic';
 export default {
   name: 'LessonPublishReadiness',
-  props: { steps: { type: Array, default: () => [] }, assets: { type: Array, default: () => [] }, manifest: { type: Object, default: () => ({}) } },
-  computed: { metrics() { return calculateReadiness({ steps: this.steps, assets: this.assets, manifest: this.manifest }); }, ready() { return this.metrics.offlineReady && this.metrics.allPathsTerminate && this.metrics.estimatedPeakPsram <= 1572864; } },
+  props: { steps: { type: Array, default: () => [] }, assets: { type: Array, default: () => [] }, manifest: { type: Object, default: () => ({}) }, validation: { type: Object, default: null } },
+  computed: { metrics() { return calculateReadiness({ steps: this.steps, assets: this.assets, manifest: this.manifest, validation: this.validation }); }, ready() { return !this.metrics.estimateOnly && this.metrics.errors.length === 0 && this.metrics.offlineReady && this.metrics.allPathsTerminate && this.metrics.estimatedPeakPsram <= 1572864; } },
   methods: { formatBytes(bytes) { const n = Number(bytes || 0); return n < 1024 ? `${n} B` : `${(n / 1048576).toFixed(n >= 1048576 ? 2 : 3)} MiB`; } },
 };
 </script>

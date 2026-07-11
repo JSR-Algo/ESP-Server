@@ -58,10 +58,12 @@
             <div>
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
               <SharedAssetPicker
-                :assets="bundleAssets"
+                :assets="sharedVisualAssets"
                 :selected-key="selectedObjectKey"
                 category="teachingObject"
                 @select="selectSharedAsset"
+                @inspect="inspectSharedAsset"
+                @clone="cloneSharedAsset"
               />
             </div>
             <RobotLessonPreview
@@ -78,7 +80,7 @@
             </div>
           </div>
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
-          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest || {}" />
+          <LessonPublishReadiness :steps="studioSteps" :assets="sharedVisualAssets" :manifest="previewManifest || {}" :validation="validationResult" />
         </main>
       </section>
 
@@ -345,6 +347,8 @@ export default {
       lastSubject: '',
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
+      sharedVisualAssets: [],
+      validationResult: null,
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
       partsOfSpeech: ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'determiner'],
@@ -643,6 +647,11 @@ export default {
         },
         () => {},
       );
+      Api.lesson.listVisualAssets(
+        { category: 'teachingObject', profile: 'espTft' },
+        (assets) => { this.sharedVisualAssets = assets; },
+        (msg) => this.$message.error(msg),
+      );
     },
     fetchSteps() {
       Api.lesson.listSteps(this.lessonId, (rows) => {
@@ -654,6 +663,12 @@ export default {
       if (!this.selectedStep || !this.isDraft) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+    },
+    inspectSharedAsset(asset) {
+      this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
+    },
+    cloneSharedAsset(asset) {
+      this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey }, query: { mode: 'cloneForLesson', lessonId: this.lessonId } });
     },
     onPreviewPathChange(payload) {
       this.previewPath = payload;
@@ -670,7 +685,7 @@ export default {
           primaryWord: authored.teachingWord.text || step.subject,
           asset: {
             key: selectedAsset.assetKey,
-            src: selectedAsset.path || selectedAsset.url,
+            src: selectedAsset.storagePath || selectedAsset.path || selectedAsset.url,
             sha256: selectedAsset.sha256,
             version: selectedAsset.version,
             bytes: selectedAsset.bytes,
@@ -812,6 +827,7 @@ export default {
         this.lessonId,
         (res) => {
           this.validating = false;
+          this.validationResult = res || null;
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
         },
