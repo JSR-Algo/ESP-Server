@@ -2,27 +2,38 @@
 import argparse, json, re
 from pathlib import Path
 MARKERS={'allocationFailure':r'alloc(?:ation)? failed|out of memory|malloc failed','watchdog':r'watchdog|task wdt','decodeFailure':r'decode failed|image decode error','audioUnderrun':r'audio underrun|i2s.*underrun','sequenceDivergence':r'lesson sequence divergence|sequence mismatch'}
-EVENT=re.compile(r'(?i)(?:lesson_progress|progress_posted)')
+EVENT=re.compile(r'(?i)(lesson_progress(?:_[a-z]+)?|progress_posted(?:_[a-z]+)?)')
 SESSION=re.compile(r'(?i)session(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 STEP=re.compile(r'(?i)step(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
+SEQUENCE=re.compile(r'(?i)(?:sequence|seq)["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
+IDEMPOTENCY=re.compile(r'(?i)(?:idempotency[_ ]?key|event[_ ]?id)["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 def progress_events(text):
     events=[]
     for line in text.splitlines():
-        if not EVENT.search(line):continue
+        event_match=EVENT.search(line)
+        if not event_match:continue
         try:
             payload=json.loads(line)
         except json.JSONDecodeError:
             payload={}
+        if not isinstance(payload,dict):payload={}
+        event_type=str(payload.get('type') or event_match.group(1)).lower()
         session=payload.get('session_id') or payload.get('session')
         step=payload.get('step_id') or payload.get('step')
+        sequence=payload.get('sequence') if payload.get('sequence') is not None else payload.get('seq')
+        idempotency=payload.get('idempotency_key') or payload.get('idempotencyKey') or payload.get('event_id')
         session_match=SESSION.search(line); step_match=STEP.search(line)
         session=session or (session_match.group(1) if session_match else None)
         step=step or (step_match.group(1) if step_match else None)
-        if session and step:events.append((str(session),str(step)))
+        sequence_match=SEQUENCE.search(line); idempotency_match=IDEMPOTENCY.search(line)
+        sequence=sequence if sequence is not None else (sequence_match.group(1) if sequence_match else None)
+        idempotency=idempotency or (idempotency_match.group(1) if idempotency_match else None)
+        identity=f'sequence:{sequence}' if sequence is not None else f'idempotency:{idempotency}' if idempotency else 'identity:missing'
+        if session and step:events.append((event_type,str(session),str(step),identity))
     return events
 def audit(text):
     findings={k:len(re.findall(v,text,re.I)) for k,v in MARKERS.items()}; events=progress_events(text); duplicates=sorted({x for x in events if events.count(x)>1}); ok=not any(findings.values()) and not duplicates
-    return {'status':'PASS' if ok else 'NOT_PASS','findings':findings,'duplicateProgress':[{'session':x[0],'step':x[1]} for x in duplicates]}
+    return {'status':'PASS' if ok else 'NOT_PASS','findings':findings,'duplicateProgress':[{'eventType':x[0],'session':x[1],'step':x[2],'identity':x[3]} for x in duplicates]}
 def main():
     p=argparse.ArgumentParser(); p.add_argument('logs',nargs='*',type=Path); p.add_argument('--output',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
     if a.self_test: assert audit('lesson_progress session_id=s step_id=a')['status']=='PASS'; assert audit('malloc failed')['status']=='NOT_PASS'; print('self-test PASS'); return 0

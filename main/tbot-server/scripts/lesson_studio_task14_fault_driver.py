@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail-closed evidence collector; it never injects a fault or contacts production."""
-import argparse, hashlib, json, re
+import argparse, hashlib, json, re, struct, zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +8,7 @@ SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','po
 REQUIRED=('serial.log','server.log','command.txt','result.json')
 SHA256=re.compile(r'^[0-9a-f]{64}$')
 COMMIT=re.compile(r'^[0-9a-f]{7,40}$')
+MAX_SCREENSHOT_BYTES=10*1024*1024
 COMMON_FIELDS=(
     'utcStart','utcEnd','backendCommit','espServerCommit','firmwareCommit',
     'firmwareVersion','deviceId','assignmentId','assignmentVersion','lessonId',
@@ -44,9 +45,77 @@ def scenario_valid(s,r):
 
 def _evidence_path(path,base_dir=None):
     candidate=Path(path)
-    return candidate if candidate.is_absolute() or base_dir is None else base_dir/candidate
+    return candidate if candidate.is_absolute() or base_dir is None else Path(base_dir)/candidate
+
+def _image_dimensions(path):
+    with path.open('rb') as handle:
+        header=handle.read(24)
+        if header.startswith(b'\x89PNG\r\n\x1a\n') and len(header)>=24:
+            if header[12:16] != b'IHDR':return None,None
+            dimensions=struct.unpack('>II',header[16:24])
+            handle.seek(8)
+            found_iend=False
+            while True:
+                length_data=handle.read(4)
+                if len(length_data)!=4:break
+                length=struct.unpack('>I',length_data)[0]
+                kind=handle.read(4)
+                if len(kind)!=4 or length>MAX_SCREENSHOT_BYTES:break
+                data=handle.read(length); checksum=handle.read(4)
+                if len(data)!=length or len(checksum)!=4:break
+                if struct.unpack('>I',checksum)[0] != (zlib.crc32(kind+data)&0xffffffff):break
+                if kind == b'IEND':found_iend=True; break
+            return ('png',dimensions) if found_iend else (None,None)
+        if not header.startswith(b'\xff\xd8'):
+            return None,None
+        handle.seek(2)
+        while True:
+            prefix=handle.read(1)
+            if not prefix:return None,None
+            if prefix != b'\xff':continue
+            marker=handle.read(1)
+            while marker == b'\xff':marker=handle.read(1)
+            if marker in (b'\xd8',b'\xd9'):continue
+            length_data=handle.read(2)
+            if len(length_data)!=2:return None,None
+            length=struct.unpack('>H',length_data)[0]
+            if marker and marker[0] in range(0xC0,0xC4):
+                data=handle.read(5)
+                if len(data)!=5:return None,None
+                height,width=struct.unpack('>HH',data[1:5])
+                return 'jpeg',(width,height)
+            handle.seek(max(0,length-2),1)
+
+def _inspect_screenshots(entries,base_dir=None):
+    errors=[]; inspected=[]
+    if not isinstance(entries,list) or not entries:
+        return [],['screenshots must contain at least one image entry']
+    base=Path(base_dir).resolve() if base_dir is not None else None
+    for entry in entries:
+        if not isinstance(entry,dict) or not isinstance(entry.get('role'),str) or not isinstance(entry.get('path'),str) or not entry['role'].strip() or not entry['path'].strip():
+            errors.append('malformed screenshot entry'); continue
+        path=_evidence_path(entry['path'],base_dir)
+        try:
+            if path.is_symlink():
+                errors.append('screenshot paths must not be symlinks'); continue
+            resolved=path.resolve(strict=True)
+            if base is not None and resolved != base and base not in resolved.parents:
+                errors.append('screenshot path escapes evidence directory'); continue
+            stat=path.stat()
+            if not path.is_file() or stat.st_size <= 0:
+                errors.append('screenshots must reference non-empty regular files'); continue
+            if stat.st_size > MAX_SCREENSHOT_BYTES:
+                errors.append('screenshot exceeds maximum size'); continue
+            image_type,dimensions=_image_dimensions(path)
+            if image_type not in ('png','jpeg') or not dimensions:
+                errors.append('screenshots must be valid PNG or JPEG images'); continue
+            inspected.append({'role':entry['role'],'path':resolved,'type':image_type,'dimensions':dimensions,'bytes':stat.st_size})
+        except (OSError,ValueError,struct.error):
+            errors.append('screenshots must reference non-empty regular files')
+    return inspected,errors
 
 def validate_result(scenario,result,raw_logs,base_dir=None):
+    if not isinstance(result,dict):return ['result.json must contain an object']
     errors=[f'missing common metadata: {name}' for name in COMMON_FIELDS if name not in result]
     if errors:return errors
     for name in ('backendCommit','espServerCommit','firmwareCommit'):
@@ -64,9 +133,16 @@ def validate_result(scenario,result,raw_logs,base_dir=None):
     for name in ('assignmentVersion','lessonVersion','internalSramMin','psramFirst','psramLast'):
         if not isinstance(result[name],int) or isinstance(result[name],bool) or result[name] <= 0:errors.append(f'invalid {name}')
     if result.get('commandExitCode') != 0:errors.append('commandExitCode must be zero')
-    screenshots=result.get('screenshots')
-    if not isinstance(screenshots,list) or not screenshots or any(not _evidence_path(path,base_dir).is_file() or _evidence_path(path,base_dir).stat().st_size == 0 for path in screenshots):
-        errors.append('screenshots must reference at least one non-empty existing file')
+    screenshots,screenshot_errors=_inspect_screenshots(result.get('screenshots'),base_dir)
+    errors.extend(screenshot_errors)
+    if scenario == 'preview-parity' and not screenshot_errors:
+        roles={item['role']:item for item in screenshots}
+        if set(roles) != {'preview','hardware'} or len(screenshots) != 2:
+            errors.append('preview-parity requires exactly preview and hardware screenshots')
+        elif any(item['dimensions'] != (480,320) for item in screenshots):
+            errors.append('preview-parity screenshots must be exactly 480x320')
+        elif _stream_sha256(roles['preview']['path']) == _stream_sha256(roles['hardware']['path']):
+            errors.append('preview and hardware screenshots must not have identical content')
     markers=result.get('logMarkers')
     if not isinstance(markers,list) or not markers or any(not isinstance(marker,str) or not marker for marker in markers):
         errors.append('logMarkers must be a non-empty string list')
@@ -81,16 +157,23 @@ def validate_result(scenario,result,raw_logs,base_dir=None):
     if not scenario_valid(scenario,result):errors.append(f'{scenario} decisive signals are incomplete')
     return errors
 
+def _stream_sha256(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda:handle.read(1024*1024),b''):digest.update(block)
+    return digest.hexdigest()
+
 def _hash_file(path):
-    return {'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    return {'path':str(path),'sha256':_stream_sha256(path)}
 
 def build_evidence_report(scenario,result,files,raw_logs,base_dir=None):
     errors=validate_result(scenario,result,raw_logs,base_dir)
+    screenshots,_=_inspect_screenshots(result.get('screenshots') if isinstance(result,dict) else None,base_dir)
     return {
       'scenario':scenario,'status':'PASS' if not errors else 'NOT_PASS',
       'capturedAt':datetime.now(timezone.utc).isoformat(),'validationErrors':errors,
       'files':{name:_hash_file(path) for name,path in files.items() if path.is_file()},
-      'screenshots':[_hash_file(_evidence_path(path,base_dir)) for path in result.get('screenshots',[]) if _evidence_path(path,base_dir).is_file()],
+      'screenshots':[{**_hash_file(item['path']),'role':item['role'],'type':item['type'],'width':item['dimensions'][0],'height':item['dimensions'][1]} for item in screenshots],
     }
 
 def main():
