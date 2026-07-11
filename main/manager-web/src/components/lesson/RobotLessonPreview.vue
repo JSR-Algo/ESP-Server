@@ -62,6 +62,7 @@
         :key="path"
         type="button"
         :class="{ selected: selectedPath === path }"
+        :aria-pressed="selectedPath === path ? 'true' : 'false'"
         @click="selectPath(path)"
       >{{ pathLabels[path] }}</button>
       <label><input v-model="showSafeZones" type="checkbox" /> Safe zones</label>
