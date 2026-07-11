@@ -1,6 +1,8 @@
 import hashlib
 import json
+import multiprocessing
 import os
+import errno
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,24 @@ from core.lesson.shared_asset_store import SharedAssetStore
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _hold_atomic_write(root, started, release):
+    def hold(stage, _path):
+        if stage == "before_replace":
+            started.set()
+            release.wait(10)
+
+    data = b"cross-process-active"
+    SharedAssetStore(root, failure_hook=hold).put_bytes(data, _sha(data))
+
+
+def _commit_generation(root, cache_key, key, content, start):
+    store = SharedAssetStore(root)
+    digest = _sha(content)
+    store.put_bytes(content, digest)
+    start.wait(10)
+    store.commit_pack(cache_key, {key: digest})
 
 
 def test_equal_sha_is_stored_once_and_reused_across_lesson_packs(tmp_path):
@@ -84,6 +104,27 @@ def test_second_store_cleanup_does_not_delete_an_active_atomic_temp(tmp_path):
 
     assert observed == [True]
     assert target.read_bytes() == data
+    assert not list(root.rglob("*.part"))
+
+
+def test_cross_process_cleanup_preserves_active_temp_then_cleans_orphan(tmp_path):
+    root = tmp_path / "tbot"
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    release = context.Event()
+    writer = context.Process(target=_hold_atomic_write, args=(str(root), started, release))
+    writer.start()
+    assert started.wait(10)
+    active = list(root.rglob("*.part"))
+    assert len(active) == 1
+
+    SharedAssetStore(root)
+    assert active[0].exists()
+
+    writer.terminate()
+    writer.join(10)
+    assert writer.exitcode is not None
+    SharedAssetStore(root)
     assert not list(root.rglob("*.part"))
 
 
@@ -184,10 +225,74 @@ def test_interruption_between_pack_json_and_ready_recovers_on_restart(tmp_path):
         store.commit_pack("lesson/v1-sum", {"asset": digest})
 
     pack = store.pack_root / "lesson/v1-sum"
-    assert (pack / "pack.json").is_file()
+    assert not (pack / "pack.json").exists()
     assert not (pack / "READY").exists()
     restarted = SharedAssetStore(root)
     assert not list(root.rglob("*.part"))
     assert not restarted.is_pack_ready("lesson/v1-sum")
     restarted.commit_pack("lesson/v1-sum", {"asset": digest})
     assert restarted.is_pack_ready("lesson/v1-sum")
+
+
+def test_hardlink_unsupported_falls_back_to_atomic_copy(monkeypatch, tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    data = b"copy fallback"
+    digest = _sha(data)
+    shared = store.put_bytes(data, digest)
+
+    def no_hardlinks(_source, _target):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "link", no_hardlinks)
+    pack = store.commit_pack("lesson/v1-copy", {"asset": digest})
+
+    assert store.is_pack_ready("lesson/v1-copy")
+    assert (pack / "asset").read_bytes() == data
+    assert os.stat(pack / "asset").st_ino != os.stat(shared).st_ino
+
+
+def test_failed_pack_refresh_preserves_previous_valid_ready(tmp_path):
+    root = tmp_path / "tbot"
+    old = b"old"
+    new = b"new"
+    old_digest = _sha(old)
+    new_digest = _sha(new)
+    store = SharedAssetStore(root)
+    store.put_bytes(old, old_digest)
+    store.commit_pack("lesson/v1-refresh", {"asset": old_digest})
+
+    def fail_staging(stage, path):
+        if stage == "before_replace" and path.name == "asset":
+            raise RuntimeError("staging failed")
+
+    refreshing = SharedAssetStore(root, failure_hook=fail_staging)
+    refreshing.put_bytes(new, new_digest)
+    with pytest.raises(RuntimeError, match="staging failed"):
+        refreshing.commit_pack("lesson/v1-refresh", {"asset": new_digest})
+
+    restarted = SharedAssetStore(root)
+    assert restarted.is_pack_ready("lesson/v1-refresh")
+    assert (restarted.pack_root / "lesson/v1-refresh/asset").read_bytes() == old
+
+
+def test_concurrent_cross_process_pack_commits_publish_one_complete_generation(tmp_path):
+    root = tmp_path / "tbot"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    args = str(root), "lesson/v1-race"
+    first = context.Process(target=_commit_generation, args=(*args, "first", b"one", start))
+    second = context.Process(target=_commit_generation, args=(*args, "second", b"two", start))
+    first.start()
+    second.start()
+    start.set()
+    first.join(10)
+    second.join(10)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    store = SharedAssetStore(root)
+    assert store.is_pack_ready("lesson/v1-race")
+    manifest = json.loads(
+        (store.pack_root / "lesson/v1-race/pack.json").read_text(encoding="utf-8")
+    )
+    assert set(manifest["assets"]) in ({"first"}, {"second"})
