@@ -5,6 +5,7 @@ scenario run the exact subcommand named by the row and retain the emitted JSON.
 
 | Subcommand | Required decisive signal | Status |
 |---|---|---|
+| `preview-parity` | exact layer rectangles, word text, selected path outcome, motion timeline equal | NOT PASS |
 | `cold` | bytes downloaded, checksum verified, READY | NOT PASS |
 | `warm` | cache hit, zero download, READY | NOT PASS |
 | `offline` | network unavailable, SD source, completion | NOT PASS |
