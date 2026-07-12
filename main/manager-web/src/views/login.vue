@@ -66,7 +66,7 @@
             <template v-if="!isMobileLogin">
               <div class="input-box">
                 <img loading="lazy" alt="" class="input-icon" src="@/assets/login/username.png" />
-                <el-input v-model="form.username" :placeholder="$t('login.usernamePlaceholder')" />
+                <el-input data-testid="manager-login-username" v-model="form.username" :placeholder="$t('login.usernamePlaceholder')" />
               </div>
             </template>
 
@@ -85,7 +85,7 @@
 
             <div class="input-box">
               <img loading="lazy" alt="" class="input-icon" src="@/assets/login/password.png" />
-              <el-input v-model="form.password" :placeholder="$t('login.passwordPlaceholder')" type="password"
+              <el-input data-testid="manager-login-password" v-model="form.password" :placeholder="$t('login.passwordPlaceholder')" type="password"
                 show-password />
             </div>
             <div style="
@@ -97,7 +97,7 @@
               ">
               <div class="input-box" style="width: calc(100% - 130px); margin-top: 0">
                 <img loading="lazy" alt="" class="input-icon" src="@/assets/login/shield.png" />
-                <el-input v-model="form.captcha" :placeholder="$t('login.captchaPlaceholder')" style="flex: 1" />
+                <el-input data-testid="manager-login-captcha" v-model="form.captcha" :placeholder="$t('login.captchaPlaceholder')" style="flex: 1" />
               </div>
               <img loading="lazy" v-if="captchaUrl" :src="captchaUrl" alt="Verification code"
                 style="width: 150px; height: 40px; cursor: pointer" @click="fetchCaptcha" />
@@ -119,7 +119,7 @@
               </div>
             </div>
           </div>
-          <div class="login-btn" @click="login">{{ $t("login.login") }}</div>
+          <div class="login-btn" data-testid="manager-login-submit" @click="login">{{ $t("login.login") }}</div>
 
           <!-- Login method switch button -->
           <div class="login-type-container" v-if="enableMobileRegister">

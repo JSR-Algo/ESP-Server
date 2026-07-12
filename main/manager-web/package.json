@@ -13,7 +13,8 @@
     "test:lesson-builder-logic": "node scripts/check-lesson-builder-logic.cjs",
     "test:lesson-builder-browser": "node scripts/check-lesson-builder-browser.mjs",
     "test:lesson-studio": "node scripts/check-lesson-rollout-capabilities.mjs && npm run test:lesson-visual-library-ui && npm run test:lesson-visual-library-browser && npm run test:lesson-builder-logic && npm run test:lesson-builder-browser && node scripts/check-robot-lesson-preview.mjs && node scripts/check-robot-preview-screenshots.mjs",
-    "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs"
+    "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs",
+    "test:e2e:lesson-studio": "playwright test --config=playwright.config.js"
   },
   "dependencies": {
     "core-js": "^3.41.0",
@@ -25,16 +26,17 @@
     "opus-decoder": "^0.7.7",
     "opus-recorder": "^8.0.5",
     "sm-crypto": "^0.3.13",
+    "tbot": "file:",
     "vue": "^2.6.14",
     "vue-axios": "^3.5.2",
     "vue-i18n": "^8.28.2",
     "vue-router": "^3.6.5",
-    "vuex": "^3.6.2",
-    "tbot": "file:"
+    "vuex": "^3.6.2"
   },
   "devDependencies": {
     "@babel/plugin-syntax-dynamic-import": "^7.8.3",
     "@babel/plugin-transform-runtime": "^7.26.10",
+    "@playwright/test": "^1.55.0",
     "@vue/cli-plugin-router": "~5.0.0",
     "@vue/cli-plugin-vuex": "~5.0.0",
     "@vue/cli-service": "~5.0.0",
