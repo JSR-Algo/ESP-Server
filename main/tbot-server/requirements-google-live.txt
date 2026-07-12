@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+# Requires Python >=3.10.
 # Fast Google Live runtime profile. Local ASR/VAD/model packages are omitted.
 numpy==1.26.4
 speexdsp==0.1.1
