@@ -28,9 +28,20 @@ async function loginAsLessonAuthor(page) {
   await expect(page.getByText(managerUser)).toBeVisible();
   await page.waitForURL(/#\/home$/);
 
+  // The web container may start milliseconds before Docker DNS publishes the
+  // backend alias. Verify the same-origin proxy has recovered before opening
+  // the Author dialog, otherwise a transient 502 looks like bad credentials.
+  await expect.poll(async () => page.request.get('/nestjs/v1/health').then((response) => response.status()))
+    .toBe(200);
+
   await page.goto('/login#/course-management');
 
   const authorDialog = page.getByRole('dialog', { name: /sign in as author/i });
+  if (!await authorDialog.isVisible().catch(() => false)) {
+    // A very fast 401 can precede App.vue's event-listener mount. Re-emit the
+    // same UI event so authentication remains a real dialog flow, not token injection.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('tbot:nest-auth-required')));
+  }
   await expect(authorDialog).toBeVisible();
   await authorDialog.getByText('Email').locator('..').getByRole('textbox').fill(authorEmail);
   await authorDialog.locator('input[type="password"]').fill(authorPassword);

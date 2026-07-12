@@ -43,6 +43,8 @@ export default {
     const query = new URLSearchParams();
     if (filters && filters.category) query.set('category', filters.category);
     if (filters && filters.profile) query.set('profile', filters.profile);
+    // Force authoring refreshes past intermediary/browser validation caches.
+    query.set('_', String(Date.now()));
     nestRequest({ url: `${getNestUrl()}/lesson-visual-assets${query.toString() ? `?${query}` : ''}`, method: 'GET', onSuccess: (p) => onSuccess((Array.isArray(p) ? p : []).map(normalizeVisualAsset)), onError });
   },
 

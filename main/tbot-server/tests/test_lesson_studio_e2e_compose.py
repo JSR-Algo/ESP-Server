@@ -25,6 +25,14 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "http://127.0.0.1:8002/login" in compose
 
 
+def test_nestjs_proxy_recovers_quickly_from_docker_dns_startup_races():
+    nginx = (ROOT / "docs/docker/nginx.conf").read_text()
+    assert "resolver 127.0.0.11 valid=5s ipv6=off;" in nginx
+    assert "8.8.8.8" not in nginx
+    assert "1.1.1.1" not in nginx
+    assert "resolver_timeout 2s;" in nginx
+
+
 def test_lesson_studio_seed_assets_are_idempotent_and_use_fixed_accounts():
     postgres = (ROOT / "docs/docker/lesson-studio-e2e/seed-postgres.sql").read_text()
     mysql = (ROOT / "docs/docker/lesson-studio-e2e/seed-mysql.sql").read_text()

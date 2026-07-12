@@ -70,6 +70,11 @@ for (const file of [
 ]) assert.ok(fs.existsSync(path.join(root, file)), `${file} must exist`);
 
 assert.match(read('src/apis/module/lesson.js'), /listVisualAssets/);
+assert.match(
+  read('src/apis/module/lesson.js'),
+  /listVisualAssets[\s\S]*?query\.set\('_', String\(Date\.now\(\)\)\)[\s\S]*?lesson-visual-assets/,
+  'visual asset list requests must use a cache-busting query parameter',
+);
 assert.match(read('src/apis/module/lesson.js'), /getVisualAssetDetail/);
 assert.match(read('src/apis/module/lesson.js'), /sourceVersionId/);
 assert.match(read('src/apis/module/lesson.js'), /visualReplacementImpact/);
