@@ -1,4 +1,5 @@
 const { expect } = require('@playwright/test');
+const { resetLessonStudioE2EState } = require('../../../scripts/reset-lesson-studio-e2e-state.cjs');
 
 const managerUser = process.env.LESSON_STUDIO_E2E_MANAGER_USER || 'lesson_admin_e2e';
 const managerPassword = process.env.LESSON_STUDIO_E2E_MANAGER_PASSWORD || 'TbotE2E!2026';
@@ -7,6 +8,7 @@ const authorEmail = process.env.LESSON_STUDIO_E2E_AUTHOR_EMAIL || 'lesson-author
 const authorPassword = process.env.LESSON_STUDIO_E2E_AUTHOR_PASSWORD || 'TbotAuthorE2E!2026';
 
 async function loginAsLessonAuthor(page) {
+  resetLessonStudioE2EState();
   await page.goto('/login');
   await expect(page.getByRole('img', { name: 'Verification code' })).toHaveAttribute('src', /^blob:/);
   await expect.poll(() => page.evaluate(() => {
