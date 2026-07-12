@@ -32,4 +32,3 @@ Python 3.10 is the required minimum because CI, production images, and `mcp==1.2
 - Audio controller synchronous construction, loop rebind, active-loop rejection, reset, cancellation, and existing timing tests.
 - Python version guard tests plus existing CI/Docker contract tests.
 - Full Lesson Studio gates, bounded broad ESP suite, manager production build, backend lint/typecheck/build, and clean-worktree checks.
-
