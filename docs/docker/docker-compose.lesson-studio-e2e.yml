@@ -93,10 +93,17 @@ services:
         condition: service_healthy
     environment:
       PGPASSWORD: tbot
-    command: ["psql", "-v", "ON_ERROR_STOP=1", "-h", "postgres", "-U", "tbot", "-d", "tbot", "-f", "/seed/seed-postgres.sql"]
+    command:
+      - sh
+      - -c
+      - psql -v ON_ERROR_STOP=1 -h postgres -U tbot -d tbot -f /seed/seed-postgres.sql && touch /tmp/seed-complete && exec sleep infinity
     volumes:
       - ./lesson-studio-e2e/seed-postgres.sql:/seed/seed-postgres.sql:ro
-    restart: "no"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/seed-complete"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
     networks: [lesson-studio-e2e]
 
   web:
@@ -106,7 +113,7 @@ services:
       backend:
         condition: service_healthy
       seed-postgres:
-        condition: service_completed_successfully
+        condition: service_healthy
       mysql:
         condition: service_healthy
       redis:
@@ -142,10 +149,17 @@ services:
         condition: service_healthy
     environment:
       MYSQL_PWD: "123456"
-    command: ["mysql", "-h", "mysql", "-u", "root", "tbot_esp32_server", "-e", "source /seed/seed-mysql.sql"]
+    command:
+      - sh
+      - -c
+      - mysql -h mysql -u root tbot_esp32_server -e 'source /seed/seed-mysql.sql' && touch /tmp/seed-complete && exec sleep infinity
     volumes:
       - ./lesson-studio-e2e/seed-mysql.sql:/seed/seed-mysql.sql:ro
-    restart: "no"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/seed-complete"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
     networks: [lesson-studio-e2e]
 
 networks:

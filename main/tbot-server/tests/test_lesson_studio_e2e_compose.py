@@ -21,7 +21,6 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert 'TBOT_E2E_CAPTCHA_ENABLED: "true"' in compose
     assert "TBOT_E2E_CAPTCHA_CODE: E2E42" in compose
     assert "condition: service_healthy" in compose
-    assert "condition: service_completed_successfully" in compose
     assert "/tbot/user/captcha" not in compose
     assert "http://127.0.0.1:8002/login" in compose
 
@@ -37,3 +36,12 @@ def test_lesson_studio_seed_assets_are_idempotent_and_use_fixed_accounts():
     assert "lesson_admin_e2e" in mysql
     assert "9000001" in mysql
     assert "ON DUPLICATE KEY UPDATE" in mysql
+
+
+def test_seed_services_remain_healthy_for_compose_wait():
+    compose = COMPOSE.read_text()
+
+    assert compose.count("condition: service_healthy") >= 6
+    assert compose.count("test: [\"CMD\", \"test\", \"-f\", \"/tmp/seed-complete\"]") == 2
+    assert compose.count("touch /tmp/seed-complete && exec sleep infinity") == 2
+    assert "condition: service_completed_successfully" not in compose
