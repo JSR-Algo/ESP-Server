@@ -36,6 +36,25 @@ for (const path of paths) {
   assert.ok(result.timeline.some((item) => item.label.startsWith('Slave command: ')), `${path} lacks slave command timeline`);
 }
 
+const servedManifest = structuredClone(fixture.manifest);
+delete servedManifest.steps[0].scene.teachingObject.primaryWord;
+servedManifest.steps[0].teachingWord = { text: 'APPLE', style: 'wordPill' };
+servedManifest.steps[0].motion = {
+  present: 'presentLeft',
+  listen: 'listen',
+  correct: 'goodbye',
+  nearMiss: 'thinking',
+  incorrect: 'presentRight'
+};
+delete servedManifest.steps[0].responsePaths;
+delete servedManifest.steps[0].motionPreset;
+
+const servedCorrect = projection.projectEspTftPreview(servedManifest, 0, 'correct');
+assert.equal(servedCorrect.layers.find((layer) => layer.id === 'wordPill').text, 'APPLE');
+assert.ok(servedCorrect.timeline.some((item) => item.label === 'Slave command: goodbye'));
+assert.ok(projection.projectEspTftPreview(servedManifest, 0, 'nearMiss').timeline.some((item) => item.label === 'Slave command: thinking'));
+assert.ok(projection.projectEspTftPreview(servedManifest, 0, 'incorrect').timeline.some((item) => item.label === 'Slave command: presentRight'));
+
 const hostile = structuredClone(fixture.manifest);
 hostile.steps[0].scene.backgroundScene.video = { src: 'https://bad.test/movie.mp4' };
 hostile.steps[0].scene.robotOverlay.asset.src = 'https://bad.test/raw-servo.GIF';

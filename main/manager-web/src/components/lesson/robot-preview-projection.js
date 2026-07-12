@@ -74,9 +74,12 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const background = asObject(scene.backgroundScene);
   const object = asObject(scene.teachingObject);
   const robot = asObject(scene.robotOverlay);
+  const teachingWord = asObject(step.teachingWord);
+  const motion = asObject(step.motion);
   const path = RESPONSE_PATHS.includes(requestedPath) ? requestedPath : 'correct';
-  const response = { ...DEFAULT_PATHS[path], ...asObject(asObject(step.responsePaths)[path]) };
-  const motionPreset = String(response.motionPreset || step.motionPreset || robot.pose || 'neutral');
+  const responseOverride = asObject(asObject(step.responsePaths)[path]);
+  const response = { ...DEFAULT_PATHS[path], ...responseOverride };
+  const motionPreset = String(responseOverride.motionPreset || motion[path] || response.motionPreset || step.motionPreset || robot.pose || 'neutral');
   const optionalVisualMissing = path === 'missingOptionalVisual';
 
   return {
@@ -91,7 +94,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
       { id: 'background', z: 0, bounds: ESP_TFT_GEOMETRY.background, src: mediaSource(background.poster), visible: Boolean(mediaSource(background.poster)) },
       { id: 'teachingObject', z: 10, bounds: ESP_TFT_GEOMETRY.teachingObject, src: optionalVisualMissing ? '' : mediaSource(object.asset), visible: !optionalVisualMissing && Boolean(mediaSource(object.asset)) },
       { id: 'robotOverlay', z: 20, bounds: ESP_TFT_GEOMETRY.robotOverlay, src: mediaSource(robot.asset) || mediaSource(robot.atlas), visible: Boolean(mediaSource(robot.asset) || mediaSource(robot.atlas)) },
-      { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: String(object.primaryWord || ''), visible: Boolean(object.primaryWord) },
+      { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: String(teachingWord.text || object.primaryWord || ''), visible: Boolean(teachingWord.text || object.primaryWord) },
       { id: 'progress', z: 40, bounds: ESP_TFT_GEOMETRY.progress, active: safeIndex + 1, total: steps.length, visible: steps.length > 0 },
       { id: 'prompt', z: 50, bounds: ESP_TFT_GEOMETRY.prompt, text: String(response.prompt || step.prompt || ''), visible: Boolean(response.prompt || step.prompt) }
     ],
