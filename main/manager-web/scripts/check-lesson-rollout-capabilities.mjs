@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   advanceLessonRolloutSessionGeneration,
+  buildLessonRolloutSessionKey,
   createLessonRolloutCapabilitiesLoader,
   getLessonRolloutSessionGeneration,
   isLessonCapabilityNavigationCurrent,
@@ -10,6 +11,12 @@ import {
 
 const disabled = { sharedVisualAuthoring: false, exactEspTftPreview: false };
 const enabled = { sharedVisualAuthoring: true, exactEspTftPreview: true };
+
+assert.notEqual(
+  buildLessonRolloutSessionKey('manager-token', '', 0),
+  buildLessonRolloutSessionKey('manager-token', 'nest-token', 0),
+  'Nest author login must invalidate capabilities cached before author authentication',
+);
 
 const initialGeneration = getLessonRolloutSessionGeneration();
 advanceLessonRolloutSessionGeneration();

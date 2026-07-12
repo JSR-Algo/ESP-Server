@@ -13,6 +13,10 @@ export function getLessonRolloutSessionGeneration() {
   return authSessionGeneration;
 }
 
+export function buildLessonRolloutSessionKey(managerToken, nestToken, generation) {
+  return managerToken ? `${generation}:${managerToken}:${nestToken || ''}` : '';
+}
+
 export function normalizeLessonRolloutCapabilities(payload) {
   const value = payload && typeof payload === 'object' ? payload : {};
   return {

@@ -1,6 +1,7 @@
 import Api from '@/apis/api';
 import {
   createLessonRolloutCapabilitiesLoader,
+  buildLessonRolloutSessionKey,
   getLessonRolloutSessionGeneration,
 } from './lessonRolloutCapabilitiesCore.mjs';
 
@@ -32,6 +33,9 @@ export function resetLessonRolloutCapabilities() {
 }
 
 export function getLessonRolloutSessionKey() {
-  const token = localStorage.getItem('token');
-  return token ? `${getLessonRolloutSessionGeneration()}:${token}` : '';
+  return buildLessonRolloutSessionKey(
+    localStorage.getItem('token'),
+    localStorage.getItem('nestjs_session_token'),
+    getLessonRolloutSessionGeneration(),
+  );
 }
