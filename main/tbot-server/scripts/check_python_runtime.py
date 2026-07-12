@@ -17,6 +17,13 @@ def validate_version(version: Sequence[int]) -> Optional[str]:
     return f"Python 3.10 or newer is required; detected {detected}."
 
 
+def require_supported_runtime(version: Optional[Sequence[int]] = None) -> None:
+    """Stop application bootstrap before importing unsupported dependencies."""
+    message = validate_version(sys.version_info if version is None else version)
+    if message is not None:
+        raise SystemExit(message)
+
+
 def main() -> int:
     message = validate_version(sys.version_info)
     if message is not None:

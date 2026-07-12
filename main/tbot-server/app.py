@@ -1,3 +1,8 @@
+from scripts.check_python_runtime import require_supported_runtime
+
+if __name__ == "__main__":
+    require_supported_runtime()
+
 import sys
 import uuid
 import signal

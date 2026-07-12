@@ -52,6 +52,34 @@ def test_cli_uses_running_interpreter_and_has_no_third_party_dependencies():
         assert "Python 3.10 or newer is required" in result.stderr
 
 
+def test_app_bootstrap_rejects_unsupported_python_before_third_party_imports():
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import runpy, sys; "
+                "sys.version_info = (3, 9, 19); "
+                "runpy.run_path('app.py', run_name='__main__')"
+            ),
+        ],
+        cwd=SERVER_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert probe.returncode != 0
+    assert "Python 3.10 or newer is required; detected 3.9.19." in probe.stderr
+    assert "ModuleNotFoundError" not in probe.stderr
+
+
+def test_app_remains_importable_for_test_discovery_on_the_host_interpreter():
+    source = (SERVER_ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert 'if __name__ == "__main__":\n    require_supported_runtime()' in source
+
+
 def test_requirement_profiles_state_the_mandatory_runtime_floor():
     required_comment = "# Requires Python >=3.10."
 
