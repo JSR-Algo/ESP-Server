@@ -8,9 +8,9 @@
       </div>
       <el-card shadow="never" class="library-card">
         <div class="filters">
-          <el-input data-testid="visual-library-search" v-model="filters.keyword" clearable prefix-icon="el-icon-search" :placeholder="$t('visual.search')" />
-          <el-select data-testid="visual-library-category" v-model="filters.category" clearable :placeholder="$t('visual.category')"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
-          <el-select data-testid="visual-library-profile" v-model="filters.profile" clearable :placeholder="$t('visual.profile')"><el-option v-for="item in profiles" :key="item" :label="item" :value="item" /></el-select>
+          <div data-testid="visual-library-search"><el-input v-model="filters.keyword" clearable prefix-icon="el-icon-search" :placeholder="$t('visual.search')" /></div>
+          <div data-testid="visual-library-category"><el-select v-model="filters.category" clearable :placeholder="$t('visual.category')"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select></div>
+          <div data-testid="visual-library-profile"><el-select v-model="filters.profile" clearable :placeholder="$t('visual.profile')"><el-option v-for="item in profiles" :key="item" :label="item" :value="item" /></el-select></div>
         </div>
         <el-table data-testid="visual-library-table" v-loading="loading" :data="assets" stripe>
           <el-table-column prop="assetKey" :label="$t('visual.assetKey')" min-width="200" />
