@@ -358,7 +358,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         )
 
         await provider.start_session()
-        bridge = _AsyncDecodedBridge(client, b"async-pcm", rms=100)
+        bridge = _AsyncDecodedBridge(client, b"async-pcm", rms=2500)
         provider._bridge = bridge
         handled = await provider.handle_audio_bytes(b"opus-frame")
         await provider.close()
@@ -775,7 +775,7 @@ class GoogleLiveProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.interrupt_calls, 0)
-        self.assertEqual(client.audio_packets, [b"decoded-pcm"])
+        self.assertEqual(client.audio_packets, [])
 
     async def test_barge_in_ignores_echo_at_start_of_assistant_audio(self):
         conn = _DummyConn()
