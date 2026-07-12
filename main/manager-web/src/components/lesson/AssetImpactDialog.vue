@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :visible.sync="shown" :title="$t('visual.impactTitle')" width="min(560px, calc(100vw - 24px))" custom-class="asset-impact-dialog" :close-on-click-modal="false">
+  <el-dialog data-testid="visual-impact-dialog" :visible.sync="shown" :title="$t('visual.impactTitle')" width="min(560px, calc(100vw - 24px))" custom-class="asset-impact-dialog" :close-on-click-modal="false">
     <el-alert :title="$t('visual.impactWarning')" type="warning" show-icon :closable="false" />
     <div class="impact-grid">
       <div><strong>{{ impact.courses || 0 }}</strong><span>{{ $t('visual.courses') }}</span></div>
@@ -9,8 +9,8 @@
     </div>
     <p class="muted">{{ $t('visual.impactMode') }}: <b>{{ mode }}</b></p>
     <span slot="footer">
-      <el-button @click="$emit('cancel')">{{ $t('course.cancel') }}</el-button>
-      <el-button type="danger" :loading="confirming" @click="$emit('confirm')">{{ $t('visual.confirmReplace') }}</el-button>
+      <el-button data-testid="visual-impact-cancel" @click="$emit('cancel')">{{ $t('course.cancel') }}</el-button>
+      <el-button data-testid="visual-impact-confirm" type="danger" :loading="confirming" @click="$emit('confirm')">{{ $t('visual.confirmReplace') }}</el-button>
     </span>
   </el-dialog>
 </template>

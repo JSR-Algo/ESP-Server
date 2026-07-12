@@ -4,21 +4,21 @@
     <main>
       <div class="hero">
         <div><p class="eyebrow">LESSON STUDIO</p><h1>{{ $t('visual.libraryTitle') }}</h1><p>{{ $t('visual.libraryHint') }}</p></div>
-        <el-button icon="el-icon-refresh" :loading="loading" @click="fetchAssets">{{ $t('course.refresh') }}</el-button>
+        <el-button data-testid="visual-library-refresh" icon="el-icon-refresh" :loading="loading" @click="fetchAssets">{{ $t('course.refresh') }}</el-button>
       </div>
       <el-card shadow="never" class="library-card">
         <div class="filters">
-          <el-input v-model="filters.keyword" clearable prefix-icon="el-icon-search" :placeholder="$t('visual.search')" />
-          <el-select v-model="filters.category" clearable :placeholder="$t('visual.category')"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
-          <el-select v-model="filters.profile" clearable :placeholder="$t('visual.profile')"><el-option v-for="item in profiles" :key="item" :label="item" :value="item" /></el-select>
+          <el-input data-testid="visual-library-search" v-model="filters.keyword" clearable prefix-icon="el-icon-search" :placeholder="$t('visual.search')" />
+          <el-select data-testid="visual-library-category" v-model="filters.category" clearable :placeholder="$t('visual.category')"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
+          <el-select data-testid="visual-library-profile" v-model="filters.profile" clearable :placeholder="$t('visual.profile')"><el-option v-for="item in profiles" :key="item" :label="item" :value="item" /></el-select>
         </div>
-        <el-table v-loading="loading" :data="assets" stripe>
+        <el-table data-testid="visual-library-table" v-loading="loading" :data="assets" stripe>
           <el-table-column prop="assetKey" :label="$t('visual.assetKey')" min-width="200" />
           <el-table-column prop="category" :label="$t('visual.category')" width="160"><template slot-scope="s"><el-tag effect="plain">{{ s.row.category }}</el-tag></template></el-table-column>
           <el-table-column prop="pinnedVersion" :label="$t('visual.pinnedVersion')" width="110" align="center" />
           <el-table-column :label="$t('visual.profiles')" min-width="160"><template slot-scope="s"><el-tag v-for="p in uniqueProfiles(s.row)" :key="p" size="mini" class="profile-tag">{{ p }}</el-tag></template></el-table-column>
           <el-table-column prop="usageCount" :label="$t('visual.usageCount')" width="110" align="right" />
-          <el-table-column :label="$t('course.colActions')" width="120"><template slot-scope="s"><el-button type="text" @click="openDetail(s.row)">{{ $t('visual.inspect') }}</el-button></template></el-table-column>
+          <el-table-column :label="$t('course.colActions')" width="120"><template slot-scope="s"><el-button :data-testid="`visual-library-inspect-${s.row.assetKey}`" type="text" @click="openDetail(s.row)">{{ $t('visual.inspect') }}</el-button></template></el-table-column>
         </el-table>
       </el-card>
     </main>

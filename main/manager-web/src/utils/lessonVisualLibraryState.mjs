@@ -33,6 +33,14 @@ export function replacementNeedsImpact(mode) {
   return mode === 'global' || mode === 'selectedLessons';
 }
 
+export function replacementTargetVersions(versions = [], source = {}, mode = 'global') {
+  return versions.filter((version) =>
+    version.category === source.category &&
+    version.profile === source.profile &&
+    (mode === 'cloneForLesson' || version.versionId !== source.versionId)
+  );
+}
+
 export function buildReplacementRequest(sourceVersionId, targetVersionId, mode, lessonIds = []) {
   if (!REPLACEMENT_MODES.includes(mode)) throw new Error('invalid replacement mode');
   if (!sourceVersionId || !targetVersionId || (mode !== 'cloneForLesson' && sourceVersionId === targetVersionId)) throw new Error('source and target versions must be different');

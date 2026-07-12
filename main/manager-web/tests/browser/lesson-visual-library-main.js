@@ -19,6 +19,7 @@ LessonVisualAssetDetail.computed.assetKey = () => 'object.apple';
 
 const versions = [
   { assetId: 'asset-1', assetKey: 'object.apple', category: 'teachingObject', title: 'Apple master', versionId: '00000000-0000-4000-8000-000000000002', version: 2, profile: 'mobile', width: 640, height: 480, bytes: 9200, sha256: 'b'.repeat(64), publicationState: 'published', usageCount: 2 },
+  { assetId: 'asset-1', assetKey: 'object.apple', category: 'teachingObject', title: 'Apple alternate', versionId: '00000000-0000-4000-8000-000000000004', version: 3, profile: 'mobile', width: 640, height: 480, bytes: 9300, sha256: 'd'.repeat(64), publicationState: 'published', usageCount: 0 },
   { assetId: 'asset-1', assetKey: 'object.apple', category: 'teachingObject', title: 'Apple robot', versionId: '00000000-0000-4000-8000-000000000001', version: 1, profile: 'espTft', width: 160, height: 120, bytes: 1200, sha256: 'a'.repeat(64), publicationState: 'published', usageCount: 3 },
   { assetId: 'asset-2', assetKey: 'scene.park', category: 'scene', title: 'Park', versionId: '00000000-0000-4000-8000-000000000003', version: 1, profile: 'espTft', width: 480, height: 320, bytes: 4200, sha256: 'c'.repeat(64), publicationState: 'published', usageCount: 1 },
 ];
@@ -28,7 +29,7 @@ const usages = [
 ];
 const calls = { list: [], detail: [], impact: [], replace: [] };
 Api.lesson.listVisualAssets = (filters, success) => { calls.list.push(filters); success(versions); };
-Api.lesson.getVisualAssetDetail = (assetKey, filters, success) => { calls.detail.push({ assetKey, filters }); success({ asset: { assetKey, category: 'teachingObject', title: 'Apple' }, sourceVersionId: filters.sourceVersionId || versions[0].versionId, versions: versions.slice(0, 2), usages }); };
+Api.lesson.getVisualAssetDetail = (assetKey, filters, success) => { calls.detail.push({ assetKey, filters }); success({ asset: { assetKey, category: 'teachingObject', title: 'Apple' }, sourceVersionId: filters.sourceVersionId || versions[0].versionId, versions: versions.slice(0, 3), usages }); };
 Api.lesson.visualReplacementImpact = (payload, success) => { calls.impact.push(structuredClone(payload)); success({ courses: 1, lessons: payload.mode === 'global' ? 2 : payload.lessonIds.length, publishedVersions: 1, activeAssignments: 4 }); };
 Api.lesson.replaceVisualAsset = (payload, success) => { calls.replace.push(structuredClone(payload)); success({ targetVersionId: payload.targetVersionId, clonedAssetKey: payload.mode === 'cloneForLesson' ? 'clone.private' : undefined }); };
 

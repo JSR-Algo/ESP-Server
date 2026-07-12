@@ -9,6 +9,7 @@ import {
   groupVisualAssets,
   lessonReplacementOptions,
   replacementSelectionIsValid,
+  replacementTargetVersions,
   uniqueAffectedLessons,
   replacementNeedsImpact,
 } from '../src/utils/lessonVisualLibraryState.mjs';
@@ -53,6 +54,15 @@ assert.deepEqual(lessonReplacementOptions(usages, 'cloneForLesson').map((item) =
 assert.equal(replacementSelectionIsValid(usages, 'cloneForLesson', ['draft-1']), true);
 assert.equal(replacementSelectionIsValid(usages, 'cloneForLesson', ['published-1']), false, 'published lessons cannot be clone targets');
 
+const replacementVersions = [
+  { versionId: 'source', category: 'teachingObject', profile: 'espTft' },
+  { versionId: 'compatible', category: 'teachingObject', profile: 'espTft' },
+  { versionId: 'mobile', category: 'teachingObject', profile: 'mobile' },
+  { versionId: 'scene', category: 'scene', profile: 'espTft' },
+];
+assert.deepEqual(replacementTargetVersions(replacementVersions, replacementVersions[0], 'global').map((item) => item.versionId), ['compatible']);
+assert.deepEqual(replacementTargetVersions(replacementVersions, replacementVersions[0], 'cloneForLesson').map((item) => item.versionId), ['source', 'compatible']);
+
 for (const file of [
   'src/views/LessonVisualLibrary.vue',
   'src/views/LessonVisualAssetDetail.vue',
@@ -68,6 +78,12 @@ assert.match(read('src/views/LessonVisualAssetDetail.vue'), /activeAssignments/)
 assert.match(read('src/views/LessonVisualAssetDetail.vue'), /lessonStatus/);
 assert.match(read('src/views/LessonVisualAssetDetail.vue'), /cloneForLesson/);
 assert.match(read('src/components/lesson/AssetImpactDialog.vue'), /publishedVersions/);
+for (const testId of [
+  'visual-library-search', 'visual-library-category', 'visual-library-profile', 'visual-library-table',
+  'visual-detail-source-version', 'visual-detail-target-version', 'visual-detail-replacement-mode',
+  'visual-detail-lessons', 'visual-detail-review-replacement', 'visual-detail-usage-table',
+  'visual-impact-cancel', 'visual-impact-confirm',
+]) assert.match(`${read('src/views/LessonVisualLibrary.vue')}\n${read('src/views/LessonVisualAssetDetail.vue')}\n${read('src/components/lesson/AssetImpactDialog.vue')}`, new RegExp(testId));
 assert.match(read('src/router/index.js'), /LessonVisualLibrary/);
 assert.match(read('src/components/HeaderBar.vue'), /lessonVisualLibrary/);
 
