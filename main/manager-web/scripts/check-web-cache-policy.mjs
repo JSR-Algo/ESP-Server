@@ -30,6 +30,11 @@ expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/service-worker\.js\s*{[\
 expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/manifest\.json\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"/m, 'manifest should not pin stale app metadata');
 expectRegex('docs/docker/nginx.conf', /location\s+~\*\s+\^\/\(js\|css\|img\|fonts\)\/[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m, 'hashed static assets should be cached immutably');
 expectRegex('docs/docker/nginx.conf', /location\s+\/\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"[\s\S]*try_files\s+\$uri\s+\$uri\/\s+\/index\.html;/m, 'SPA fallback must serve fresh shell');
+expectRegex(
+  'docs/docker/nginx.conf',
+  /set\s+\$nest_auth\s+"__NESTJS_AUTH_HEADER__";[\s\S]*if\s*\(\$http_x_nest_authorization\)[\s\S]*rewrite\s+\^\/nestjs\/\(\.\*\)\$\s+\/\$1\s+break;/m,
+  'Nest auth selection must run before the terminating rewrite break',
+);
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');
