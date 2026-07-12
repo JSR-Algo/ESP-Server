@@ -74,7 +74,10 @@ try {
     setInput(formItem('English teaching word').querySelector('input'),'race new');await tick();
     const pending=t.calls.pendingUpdates.shift();pending.ok({...pending.payload,stepKey:pending.stepKey});await tick();
     const newerDraftPreserved=e.selectedStepDirty&&e.selectedAuthoring.teachingWord.text==='RACE NEW';
-    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath,e.previewPath.path],readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors,previewClearedOnEdit,deferredValidationIgnored,newerDraftPreserved,validateBeforeSaveIgnored}
+    e.validationResult={budgets:{espTft:{errors:[{code:'branch-termination',message:'Step s2 has a non-terminating branch',stepKey:'s2'}],warnings:[{code:'background-budget',message:'Background exceeds recommendation',assetKey:'scene.farm'}],metrics:t.validation.budgets.espTft.metrics}}};await tick();
+    const readinessText=document.querySelector('.readiness').textContent;
+    const validationIssuesRendered=readinessText.includes('branch-termination')&&readinessText.includes('Step s2 has a non-terminating branch')&&readinessText.includes('background-budget')&&readinessText.includes('scene.farm');
+    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.profile,preview.initialPath,e.previewPath.path],readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors,previewClearedOnEdit,deferredValidationIgnored,newerDraftPreserved,validateBeforeSaveIgnored,validationIssuesRendered}
   })()`);
   assert.equal(result.selected, 1); assert.deepEqual(result.filters, [{ category: 'teachingObject', profile: 'espTft' }]);
   assert.deepEqual(result.patch, { lessonId: 'lesson-1', stepKey: 's2', payload: { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', visualRefs: [{ slot: 'teachingObject', assetVersionId: '00000000-0000-4000-8000-000000000002' }], stepBody: { durationSec: 12, durationPreset: 8, teachingWord: { text: 'BARN', style: 'wordPill', position: 'objectSide', highlightMode: 'wholeWord' }, interaction: { template: 'safeSpeaking', maxAttempts: 3, listenTimeoutSec: 6, correctThreshold: 0.85, braveTryThreshold: 0.7, funPattern: 'miniStoryRescue' }, motion: { present: 'presentLeft', listen: 'listen', correct: 'celebrate', nearMiss: 'encourage', incorrect: 'tryAgain' }, storyBeat: { goal: 'Help Pip find a home', successReaction: 'pet.entersBarn', nextTease: 'What comes next?' } } } });
@@ -83,6 +86,7 @@ try {
   assert.equal(result.readyBeforeEdit, true); assert.equal(result.staleAfterEdit, true); assert.equal(result.staleAfterFailure, true); assert.equal(result.selectedAfterReload, 'object.barn'); assert.equal(result.selectedTilePersisted, true); assert.deepEqual(result.errors, ['forced update failure']);
   assert.equal(result.previewClearedOnEdit, true); assert.equal(result.deferredValidationIgnored, true); assert.equal(result.newerDraftPreserved, true);
   assert.equal(result.validateBeforeSaveIgnored, true);
+  assert.equal(result.validationIssuesRendered, true);
 
   const disabledResult = await evaluate('window.__MOUNT_DISABLED_LESSON_EDITOR__()');
   assert.deepEqual(disabledResult, {

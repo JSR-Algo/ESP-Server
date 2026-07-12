@@ -71,4 +71,15 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
     'Celebrate learning lantern.',
     'What will we discover about lantern next?',
   ]));
+
+  const validateLesson = page.waitForResponse((response) =>
+    response.url().includes('/nestjs/v1/admin/lessons/')
+      && response.url().endsWith('/validate')
+      && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Validate' }).click();
+  const validationResponse = await validateLesson;
+  expect(validationResponse.status()).toBe(422);
+  const validationBody = await validationResponse.json();
+  expect(validationBody.code).toBe('ASSET_PROFILE_UNAVAILABLE');
+  await expect(page.getByText(validationBody.message)).toBeVisible();
 });

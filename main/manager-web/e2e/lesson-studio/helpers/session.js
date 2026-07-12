@@ -24,6 +24,7 @@ async function loginAsLessonAuthor(page) {
   expect(managerResponse.status()).toBe(200);
   expect((await managerResponse.json()).code).toBe(0);
   await expect(page.getByText(managerUser)).toBeVisible();
+  await page.waitForURL(/#\/home$/);
 
   await page.goto('/login#/course-management');
 
