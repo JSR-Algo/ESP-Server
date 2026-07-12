@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
+const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 
 async function nestApi(page, path, { method = 'GET', body } = {}) {
   return page.evaluate(async ({ path, method, body }) => {
@@ -18,6 +19,7 @@ async function nestApi(page, path, { method = 'GET', body } = {}) {
 }
 
 test('real admin previews the exact espTft scene and all response paths', async ({ page }) => {
+  const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   await loginAsLessonAuthor(page);
 
@@ -105,4 +107,5 @@ test('real admin previews the exact espTft scene and all response paths', async 
   }
   await expect(stage.locator('.missing-visual')).toContainText('MOON');
   await expect(stage.locator('img.layer-teachingObject')).toHaveCount(0);
+  assertNoUnexpectedPageErrors();
 });

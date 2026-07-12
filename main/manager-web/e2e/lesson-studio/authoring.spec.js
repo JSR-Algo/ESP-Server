@@ -1,7 +1,9 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
+const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 
 test('admin creates and persists an eight-minute safe-speaking lesson draft', async ({ page }) => {
+  const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   const runId = Date.now().toString(36);
   const courseKey = `e2e-ls-${runId}`;
   const lessonKey = `e2e-8m-${runId}`;
@@ -82,4 +84,5 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   const validationBody = await validationResponse.json();
   expect(validationBody.code).toBe('ASSET_PROFILE_UNAVAILABLE');
   await expect(page.getByText(validationBody.message)).toBeVisible();
+  assertNoUnexpectedPageErrors();
 });

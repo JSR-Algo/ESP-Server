@@ -2,6 +2,7 @@ const { existsSync, readFileSync } = require('fs');
 const { resolve } = require('path');
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
+const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 
 const apiRoot = '/nestjs/v1/admin';
 
@@ -121,16 +122,26 @@ async function importCanonicalDraft(page, source, runId) {
 }
 
 function interactionItem(page, label) {
-  return page.locator('.interaction-panel .el-form-item').filter({ has: page.locator('.el-form-item__label', { hasText: label }) });
+  return page.locator('.interaction-panel .el-form-item').filter({
+    has: page.locator('.el-form-item__label', { hasText: new RegExp(`^${label}$`) }),
+  });
 }
 
 async function chooseSelect(page, item, label) {
-  await item.locator('.el-select input').click();
-  await page.locator('body .el-select-dropdown__item:visible').filter({ hasText: label }).last().click();
+  const input = item.locator('.el-select input');
+  await input.click();
+  const option = page.locator('body .el-select-dropdown__item:visible').filter({ hasText: new RegExp(`^${label}$`) }).last();
+  await expect(option).toBeVisible();
+  // Element UI animates and re-parents the shared dropdown while Vue updates the
+  // authoring model. A DOM click targets the visible option before that repaint.
+  await option.evaluate((element) => element.click());
+  await expect(input).toHaveValue(label);
+  await expect(option).toBeHidden();
 }
 
 test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }) => {
-  test.setTimeout(90_000);
+  const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
+  test.setTimeout(120_000);
   const source = loadCanonicalSource();
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   await loginAsLessonAuthor(page);
@@ -143,6 +154,16 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
 
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
   await expect(page.getByRole('heading', { name: new RegExp(source.lesson.title) })).toBeVisible();
+  const customizedTitle = `${source.lesson.title} UI ${runId}`;
+  await page.getByRole('button', { name: 'Rename' }).click();
+  const renameDialog = page.getByRole('dialog', { name: 'Rename' });
+  await renameDialog.getByRole('textbox').fill(customizedTitle);
+  const renameResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}`)
+    && response.request().method() === 'PATCH' && response.status() === 200);
+  await renameDialog.getByRole('button', { name: 'Save' }).click();
+  await renameResponse;
+  await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
+
   await page.locator('.step-nav__item').nth(3).click();
   await page.getByTestId('lesson-step-prompt').fill('Listen carefully, then greet the cow.');
   await page.getByTestId('lesson-step-subject').fill('cow');
@@ -152,12 +173,53 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await interactionItem(page, 'Goal').locator('input').fill('Help Pip remember the cow greeting.');
   await interactionItem(page, 'Success reaction').locator('input').fill('pet.greetsCowAgain');
   await interactionItem(page, 'Next tease').locator('input').fill('Can Pip remember the corn too?');
-  await chooseSelect(page, interactionItem(page, 'Present'), 'Present Right');
-  await page.locator('.asset-tile__select').first().click();
+  await interactionItem(page, 'Duration').locator('label[role="radio"]').filter({ hasText: /^5 min$/ }).click();
+  for (const [slot, motion] of [
+    ['Present', 'Teach'],
+    ['Listen', 'Rest'],
+    ['Correct', 'Goodbye'],
+    ['Near Miss', 'Thinking'],
+    ['Incorrect', 'Present Left'],
+  ]) await chooseSelect(page, interactionItem(page, slot), motion);
+  const selectedAssetKey = `canonical.${runId}.${source.teachingObjects.corn}`;
+  await page.locator('.asset-tile').filter({ hasText: selectedAssetKey }).locator('.asset-tile__select').click();
 
   const saveResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`) && response.request().method() === 'PATCH' && response.status() === 200);
   await page.getByRole('button', { name: 'Save step' }).click();
   await saveResponse;
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
+  await page.locator('.step-nav__item').nth(3).click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
+  await expect(interactionItem(page, 'English teaching word').locator('input')).toHaveValue('BARN');
+  await expect(interactionItem(page, 'Duration').locator('input[type="radio"][value="5"]')).toBeChecked();
+  for (const [slot, motion] of [
+    ['Present', 'Teach'],
+    ['Listen', 'Rest'],
+    ['Correct', 'Goodbye'],
+    ['Near Miss', 'Thinking'],
+    ['Incorrect', 'Present Left'],
+  ]) await expect(interactionItem(page, slot).locator('.el-select input')).toHaveValue(motion);
+  await expect(page.locator('.asset-tile').filter({ hasText: selectedAssetKey })).toHaveClass(/selected/);
+
+  const persisted = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+  const customizedStep = persisted.manifest.steps[3];
+  const persistedSteps = await api(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
+  expect(persisted.manifest.title).toBe(customizedTitle);
+  expect(customizedStep.prompt).toBe('Listen carefully, then greet the cow.');
+  expect((persistedSteps[3].step_body || persistedSteps[3].stepBody).durationPreset).toBe(5);
+  expect(customizedStep.teachingWord.text).toBe('BARN');
+  expect(customizedStep.interaction.funPattern).toBe('robotForgot');
+  expect(customizedStep.storyBeat).toEqual({
+    goal: 'Help Pip remember the cow greeting.',
+    successReaction: 'pet.greetsCowAgain',
+    nextTease: 'Can Pip remember the corn too?',
+  });
+  expect(customizedStep.motion).toMatchObject({
+    present: 'teach', listen: 'rest', correct: 'goodbye', nearMiss: 'thinking', incorrect: 'presentLeft',
+  });
+  expect(customizedStep.scene.teachingObject.asset.assetKey).toBe(selectedAssetKey);
 
   const validateResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/validate`) && response.status() === 200);
   await page.getByRole('button', { name: /validate/i }).click();
@@ -189,4 +251,5 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   });
   const originalAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(originalAfterDraftEdit.manifest_checksum || originalAfterDraftEdit.manifestChecksum).toBe(published.checksum);
+  assertNoUnexpectedPageErrors();
 });

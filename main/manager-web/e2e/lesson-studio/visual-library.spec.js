@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
+const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 
 const apiRoot = '/nestjs/v1/admin';
 
@@ -86,6 +87,7 @@ function visibleOption(page, text) {
 }
 
 test('admin manages disposable shared visuals across clone, selected, global, and published versions', async ({ page }) => {
+  const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   test.setTimeout(120_000);
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const assetKey = `e2e.visual.${runId}`;
@@ -185,4 +187,5 @@ test('admin manages disposable shared visuals across clone, selected, global, an
     selectedResult.branchedLessonIds[0],
     globalResult.branchedLessonIds[0],
   ]));
+  assertNoUnexpectedPageErrors();
 });
