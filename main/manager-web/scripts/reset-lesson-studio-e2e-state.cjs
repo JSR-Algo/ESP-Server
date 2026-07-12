@@ -25,7 +25,13 @@ function buildResetCommands({ composeFile = DEFAULT_COMPOSE_FILE, projectName = 
   ];
 }
 
-function resetLessonStudioE2EState(options = {}) {
+function resetOptionsFromEnvironment(env = process.env) {
+  return env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
+    ? { projectName: env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME }
+    : {};
+}
+
+function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   for (const [command, ...args] of buildResetCommands(options)) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
@@ -47,4 +53,4 @@ if (require.main === module) {
   resetLessonStudioE2EState();
 }
 
-module.exports = { buildResetCommands, resetLessonStudioE2EState };
+module.exports = { buildResetCommands, resetLessonStudioE2EState, resetOptionsFromEnvironment };

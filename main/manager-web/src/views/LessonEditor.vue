@@ -334,7 +334,16 @@ import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.v
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
-import { createInitialAuthoringFields, mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import {
+  addChoice as appendStepChoice,
+  buildCreateStepPayload,
+  buildSaveStepRequest,
+  createLessonStepEditorState,
+  createStepDialogState,
+  removeChoice as removeStepChoice,
+  resolveSaveSuccess,
+} from '@/components/lesson/lesson-step-editor-state';
 import Api from '@/apis/api';
 import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
 
@@ -351,21 +360,18 @@ export default {
     SharedAssetPicker,
   },
   data() {
+    const stepEditor = createLessonStepEditorState();
     return {
       lesson: null,
       lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
       steps: [],
       stepTypes: [],
       loading: false,
-      reordering: false,
-      addingStep: false,
+      stepEditor,
       validating: false,
       previewing: false,
       publishing: false,
       renaming: false,
-      stepDialogVisible: false,
-      stepForm: this.blankStepForm(),
-      correctChoiceId: '',
       lastSubject: '',
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
@@ -382,14 +388,7 @@ export default {
       ],
       preview: null,
       publishMessage: '',
-      selectedStepIndex: 0,
-      selectedStepDrafts: {},
-      selectedContentDrafts: {},
-      selectedAssetDrafts: {},
-      dirtyStepKeys: {},
-      savingStepKeys: {},
       studioRevision: 0,
-      stepDraftRevisions: {},
       previewManifest: null,
       previewPath: null,
       renameVisible: false,
@@ -397,6 +396,36 @@ export default {
     };
   },
   computed: {
+    selectedStepIndex: {
+      get() { return this.stepEditor.selectedStepIndex; },
+      set(value) { this.stepEditor.selectedStepIndex = value; },
+    },
+    stepDialogVisible: {
+      get() { return this.stepEditor.dialogVisible; },
+      set(value) { this.stepEditor.dialogVisible = value; },
+    },
+    stepForm: {
+      get() { return this.stepEditor.form; },
+      set(value) { this.stepEditor.form = value; },
+    },
+    correctChoiceId: {
+      get() { return this.stepEditor.correctChoiceId; },
+      set(value) { this.stepEditor.correctChoiceId = value; },
+    },
+    addingStep: {
+      get() { return this.stepEditor.adding; },
+      set(value) { this.stepEditor.adding = value; },
+    },
+    reordering: {
+      get() { return this.stepEditor.reordering; },
+      set(value) { this.stepEditor.reordering = value; },
+    },
+    selectedStepDrafts() { return this.stepEditor.authoringDrafts; },
+    selectedContentDrafts() { return this.stepEditor.contentDrafts; },
+    selectedAssetDrafts() { return this.stepEditor.assetDrafts; },
+    dirtyStepKeys() { return this.stepEditor.dirtyKeys; },
+    savingStepKeys() { return this.stepEditor.savingKeys; },
+    stepDraftRevisions() { return this.stepEditor.draftRevisions; },
     lessonId() {
       return this.$route.query.lessonId;
     },
@@ -515,39 +544,6 @@ export default {
       if (status === 'archived') return 'info';
       return 'warning';
     },
-    // Fresh step-form skeleton incl. scene + vocab + expression-override state.
-    blankStepForm() {
-      return {
-        stepType: '',
-        prompt: '',
-        subject: '',
-        helperText: '',
-        l1TransferHint: '',
-        choices: [],
-        renderExpression: '',
-        vocab: {
-          word: '',
-          ipa: '',
-          partOfSpeech: '',
-          translationVi: '',
-          definition: '',
-          examples: [],
-        },
-        scene: {
-          backgroundKey: '',
-          altCaption: '',
-          fit: 'cover',
-          objectKey: '',
-          primaryWord: '',
-          placementAnchor: 'center',
-          supportWords: [],
-          activeWindows: [],
-          successUtterance: '',
-          missUtterance: '',
-          timeoutSec: 12,
-        },
-      };
-    },
     onAssetsLoaded(assets) {
       this.bundleAssets = Array.isArray(assets) ? assets : [];
       this.markStudioChanged();
@@ -585,118 +581,6 @@ export default {
     },
     removeWindow(i) {
       this.stepForm.scene.activeWindows.splice(i, 1);
-    },
-    assetByKey(key) {
-      return this.bundleAssets.find((a) => a.assetKey === key) || null;
-    },
-    // Build the stepBody.vocab object, dropping empty sub-fields. Returns null when
-    // nothing was authored. locale = lesson locale (default 'vi').
-    buildVocab(subject) {
-      const v = this.stepForm.vocab;
-      const word = (v.word || subject || '').trim();
-      const out = {};
-      if (word) out.word = word;
-      if ((v.ipa || '').trim()) out.ipa = v.ipa.trim();
-      if (v.partOfSpeech) out.partOfSpeech = v.partOfSpeech;
-      const tr = (v.translationVi || '').trim();
-      if (tr) {
-        const loc = (this.lesson && this.lesson.locale) || 'vi';
-        out.translation = { [loc]: tr };
-      }
-      if ((v.definition || '').trim()) out.definition = v.definition.trim();
-      const examples = (v.examples || [])
-        .filter((e) => (e.text || '').trim())
-        .map((e) => {
-          const ex = { text: e.text.trim() };
-          if ((e.translation || '').trim()) ex.translation = e.translation.trim();
-          return ex;
-        });
-      if (examples.length) out.examples = examples;
-      // Only emit when more than the auto-mirrored word is present.
-      return Object.keys(out).length > (out.word ? 1 : 0) || out.word ? out : null;
-    },
-    // Build the stepBody.scene object from the lifted bundle assets, matching the
-    // 076 seed shape. Returns null when nothing was authored.
-    buildScene(subject) {
-      const s = this.stepForm.scene;
-      const scene = {};
-      const bg = this.assetByKey(s.backgroundKey);
-      if (bg) {
-        scene.backgroundScene = {
-          mode: 'poster',
-          poster: { key: bg.assetKey, src: bg.path || bg.url, fit: s.fit || 'cover', sha256: bg.sha256 },
-          video: null,
-          altCaption: (s.altCaption || '').trim(),
-        };
-      }
-      const obj = this.assetByKey(s.objectKey);
-      if (obj) {
-        const teachingObject = {
-          primaryWord: (s.primaryWord || subject || '').trim(),
-          supportWords: Array.isArray(s.supportWords) ? s.supportWords.filter(Boolean) : [],
-          placement: { anchor: s.placementAnchor || 'center', paddingTopPercent: 8 },
-          asset: { key: obj.assetKey, src: obj.path || obj.url, sha256: obj.sha256 },
-        };
-        // focusTarget: model step only; clamp [0,1] + enforce tStart<tEnd here so a
-        // bad window cannot 400 the lesson at publish.
-        if (this.stepForm.stepType === 'model' && s.activeWindows.length) {
-          const clamp = (n) => Math.min(1, Math.max(0, Number(n) || 0));
-          const windows = s.activeWindows
-            .map((w) => ({
-              tStart: Math.max(0, Number(w.tStart) || 0),
-              tEnd: Math.max(0, Number(w.tEnd) || 0),
-              x: clamp(w.x), y: clamp(w.y), w: clamp(w.w), h: clamp(w.h),
-            }))
-            .filter((w) => w.tStart < w.tEnd);
-          if (windows.length) {
-            teachingObject.focusTarget = {
-              activeWindows: windows,
-              successUtterance: (s.successUtterance || '').trim(),
-              missUtterance: (s.missUtterance || '').trim(),
-            };
-          }
-        }
-        scene.teachingObject = teachingObject;
-      }
-      if (Object.keys(scene).length) {
-        const expressionByType = {
-          greeting: 'teaching',
-          review: 'teaching',
-          focus: 'teaching',
-          model: 'teaching',
-          listen: 'listening',
-          repeat: 'listening',
-          fillBlank: 'thinking',
-          feedback: 'teaching',
-          celebrate: 'celebrating',
-        };
-        const poseByExpression = {
-          teaching: 'teach',
-          listening: 'listening',
-          thinking: 'thinking',
-          celebrating: 'celebrate',
-        };
-        const expression = this.stepForm.renderExpression || expressionByType[this.stepForm.stepType] || 'teaching';
-        const pose = poseByExpression[expression] || 'teach';
-        const overlay = this.assetByKey('robotOverlay.' + pose);
-        const overlaySrc = overlay && (overlay.path || overlay.url);
-        if (overlaySrc) {
-          scene.robotOverlay = {
-            robotState: pose === 'celebrate' ? 'celebrating' : (pose === 'listening' || pose === 'thinking' ? pose : 'talking'),
-            pose,
-            expression,
-            anchor: 'bottomLeft',
-            pivot: { x: 0.5, y: 1.0 },
-            asset: { key: overlay.assetKey, src: overlaySrc, sha256: overlay.sha256 },
-            atlas: { image: overlaySrc, cell: 0 },
-            pointerEvents: 'none',
-          };
-        }
-        scene.audio = { via: 'tts' };
-        scene.timeoutSec = Number(s.timeoutSec) || 12;
-        return scene;
-      }
-      return null;
     },
     fetchAll() {
       this.loading = true;
@@ -754,25 +638,28 @@ export default {
     saveSelectedStep() {
       const step = this.selectedStep;
       if (!step || !this.isDraft) return;
-      const authored = this.selectedAuthoring;
-      const content = this.selectedContent;
-      const stepBody = { ...(step.stepBody || {}), ...authored };
-      const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
+      const request = buildSaveStepRequest({
+        step,
+        authoring: this.selectedAuthoring,
+        content: this.selectedContent,
+        selectedAsset: this.selectedAssetDrafts[step.stepKey],
+        savedRevision,
+      });
       this.$set(this.savingStepKeys, step.stepKey, true);
       // A commit changes persisted lesson truth even when it clears the last dirty
       // draft, so every validation/preview launched before this point is stale.
       this.studioRevision += 1;
       this.validationResult = null;
       this.previewManifest = null;
-      const visualRefs = selectedAsset
-        ? [{ slot: 'teachingObject', assetVersionId: selectedAsset.versionId }]
-        : undefined;
       Api.lesson.updateStep(
-        this.lessonId, step.stepKey, { ...step, ...content, stepBody, visualRefs },
+        this.lessonId, request.stepKey, request.payload,
         (updated) => {
           this.$delete(this.savingStepKeys, step.stepKey);
-          if (Number(this.stepDraftRevisions[step.stepKey] || 0) === savedRevision) {
+          if (resolveSaveSuccess({
+            currentRevision: this.stepDraftRevisions[step.stepKey],
+            savedRevision: request.savedRevision,
+          }).clearDraft) {
             this.$delete(this.selectedStepDrafts, step.stepKey);
             this.$delete(this.selectedContentDrafts, step.stepKey);
             this.$delete(this.selectedAssetDrafts, step.stepKey);
@@ -809,74 +696,35 @@ export default {
         .catch(() => {});
     },
     openStepDialog() {
-      const firstId = 'c1';
-      const form = this.blankStepForm();
-      form.stepType = this.stepTypes.length ? this.stepTypes[0].stepType : '';
-      form.subject = this.lastSubject || '';
-      form.choices = [{ id: firstId, label: '' }, { id: 'c2', label: '' }];
-      // Prefill vocab.word + scene.primaryWord from the carried subject.
-      form.vocab.word = this.lastSubject || '';
-      form.scene.primaryWord = this.lastSubject || '';
-      this.stepForm = form;
-      this.correctChoiceId = firstId;
-      this.stepDialogVisible = true;
+      const dialog = createStepDialogState({ stepTypes: this.stepTypes, lastSubject: this.lastSubject });
+      this.stepForm = dialog.form;
+      this.correctChoiceId = dialog.correctChoiceId;
+      this.stepDialogVisible = dialog.visible;
     },
     addChoice() {
-      const id = 'c' + (this.stepForm.choices.length + 1);
-      this.stepForm.choices.push({ id, label: '' });
+      this.stepForm = appendStepChoice(this.stepForm);
     },
     removeChoice(index) {
-      const removed = this.stepForm.choices[index];
-      this.stepForm.choices.splice(index, 1);
-      if (removed && removed.id === this.correctChoiceId) {
-        this.correctChoiceId = this.stepForm.choices.length ? this.stepForm.choices[0].id : '';
-      }
+      const result = removeStepChoice(this.stepForm, index, this.correctChoiceId);
+      this.stepForm = result.form;
+      this.correctChoiceId = result.correctChoiceId;
     },
     addStep() {
       const f = this.stepForm;
-      if (!f.stepType || !f.prompt || !f.subject) {
-        this.$message.warning(this.$t('lesson.stepRequired'));
+      const result = buildCreateStepPayload({
+        form: f,
+        correctChoiceId: this.correctChoiceId,
+        assets: this.bundleAssets,
+        locale: (this.lesson && this.lesson.locale) || 'vi',
+      });
+      if (!result.ok) {
+        this.$message.warning(this.$t(`lesson.${result.reason}`));
         return;
       }
-      const payload = {
-        stepType: f.stepType,
-        prompt: f.prompt,
-        subject: f.subject,
-        helperText: f.helperText,
-        l1TransferHint: f.l1TransferHint,
-      };
-      // fillBlank: build {id,label,isCorrect} with single-correct enforced client-side
-      if (this.isChoiceStep) {
-        const rows = f.choices.filter((c) => (c.label || '').trim());
-        if (rows.length < 2 || !rows.some((c) => c.id === this.correctChoiceId)) {
-          this.$message.warning(this.$t('lesson.fillBlankNeedsChoices'));
-          return;
-        }
-        payload.choices = rows.map((c, i) => ({
-          id: c.id || ('c' + (i + 1)),
-          label: c.label.trim(),
-          isCorrect: c.id === this.correctChoiceId,
-        }));
-      }
-      // Assemble stepBody from the Scene composer + structured Vocabulary. Both are
-      // optional; only send a non-empty stepBody (the server defaults to {}).
-      const stepBody = {};
-      const scene = this.buildScene(f.subject);
-      if (scene) Object.assign(stepBody, scene);
-      const vocab = this.buildVocab(f.subject);
-      if (vocab) stepBody.vocab = vocab;
-      Object.assign(stepBody, createInitialAuthoringFields({
-        teachingWord: f.scene.primaryWord,
-        prompt: f.prompt,
-        subject: f.subject,
-      }));
-      if (Object.keys(stepBody).length) payload.stepBody = stepBody;
-      // Per-step robot-face override (server validates against firmware-supported set).
-      if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
       this.addingStep = true;
       Api.lesson.createStep(
         this.lessonId,
-        payload,
+        result.payload,
         () => {
           this.addingStep = false;
           this.stepDialogVisible = false;

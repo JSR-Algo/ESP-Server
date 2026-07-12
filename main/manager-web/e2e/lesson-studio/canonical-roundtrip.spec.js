@@ -127,6 +127,22 @@ function interactionItem(page, label) {
   });
 }
 
+function pinnedVisualIdentity(manifest) {
+  return manifest.steps.flatMap((step) => Object.entries(step.scene || {}).flatMap(([slot, visual]) => [
+    ['poster', visual && visual.poster],
+    ['asset', visual && visual.asset],
+  ].filter(([, pinned]) => pinned && pinned.assetKey)
+    .map(([kind, pinned]) => ({
+      stepId: step.id,
+      slot: `${slot}.${kind}`,
+      assetKey: pinned.assetKey,
+      version: pinned.version,
+      sha256: pinned.sha256,
+      src: pinned.src,
+    }))))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
 async function chooseSelect(page, item, label) {
   const input = item.locator('.el-select input');
   await input.click();
@@ -141,7 +157,7 @@ async function chooseSelect(page, item, label) {
 
 test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
-  test.setTimeout(120_000);
+  test.setTimeout(240_000);
   const source = loadCanonicalSource();
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   await loginAsLessonAuthor(page);
@@ -203,6 +219,52 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   ]) await expect(interactionItem(page, slot).locator('.el-select input')).toHaveValue(motion);
   await expect(page.locator('.asset-tile').filter({ hasText: selectedAssetKey })).toHaveClass(/selected/);
 
+  // Exercise the complete step lifecycle and prove drafts stay scoped to their
+  // own selected step across selection, route navigation, reload, and reorder.
+  const originalStepCount = await page.locator('.step-nav__item').count();
+  const lifecyclePrompt = `Temporary lifecycle step ${runId}`;
+  await page.getByRole('button', { name: '+ Add step' }).click();
+  const stepDialog = page.getByRole('dialog', { name: 'Add step' });
+  await stepDialog.getByRole('textbox', { name: 'Prompt' }).fill(lifecyclePrompt);
+  await stepDialog.getByRole('textbox', { name: 'Vocab word / subject' }).fill('temporary');
+  const addStepResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/steps`)
+    && response.request().method() === 'POST' && response.status() === 201);
+  await stepDialog.getByRole('button', { name: 'Save' }).click();
+  await addStepResponse;
+  await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
+
+  await page.locator('.step-nav__item').last().click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
+  await page.locator('.step-nav__item').nth(3).click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
+  await page.locator('.step-nav__item').last().click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
+
+  await page.goto('/login#/lesson-visual-library');
+  await expect(page.getByRole('heading', { name: 'Shared visual library' })).toBeVisible();
+  await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
+  await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
+  await page.locator('.step-nav__item').last().click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
+  await page.reload();
+  await page.locator('.step-nav__item').last().click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
+
+  const lifecycleRow = page.getByRole('row').filter({ hasText: lifecyclePrompt });
+  const reorderResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/steps/reorder`)
+    && response.request().method() === 'POST' && response.status() === 200);
+  await lifecycleRow.getByRole('button', { name: '↑' }).click();
+  await reorderResponse;
+  await expect(page.locator('.step-nav__item').nth(originalStepCount - 1)).toContainText(lifecyclePrompt);
+  const deleteResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`)
+    && response.request().method() === 'DELETE' && response.status() === 200);
+  await page.getByRole('row').filter({ hasText: lifecyclePrompt }).getByRole('button', { name: 'Delete' }).click();
+  await page.getByRole('button', { name: /ok|confirm/i }).last().click();
+  await deleteResponse;
+  await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount);
+  await page.locator('.step-nav__item').nth(3).click();
+  await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
+
   const persisted = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   const customizedStep = persisted.manifest.steps[3];
   const persistedSteps = await api(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
@@ -224,13 +286,28 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const validateResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/validate`) && response.status() === 200);
   await page.getByRole('button', { name: /validate/i }).click();
   await validateResponse;
+  await expect(page.locator('.readiness')).toContainText('READY');
+  await expect(page.locator('.readiness')).toContainText('All pathsTerminate');
 
   const previewResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`) && response.status() === 200);
   await page.getByRole('button', { name: /^preview$/i }).click();
   await previewResponse;
+  const screenshotDir = resolve(process.cwd(), 'output/playwright');
+  for (const minutes of [3, 5, 8]) {
+    await page.locator('label[role="radio"]').filter({ hasText: new RegExp(`^${minutes} min$`) }).click();
+    const durationSave = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`)
+      && response.request().method() === 'PATCH' && response.status() === 200);
+    await page.getByRole('button', { name: 'Save step' }).click();
+    await durationSave;
+    const durationPreview = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`) && response.status() === 200);
+    await page.getByRole('button', { name: /^preview$/i }).click();
+    await durationPreview;
+    await page.getByTestId('esp-tft-stage').screenshot({ path: resolve(screenshotDir, `canonical-preview-${minutes}m.png`) });
+  }
   for (const label of ['Correct', 'Near miss', 'Incorrect', 'Retry', 'Timeout', 'Brave try', 'Completion']) {
     await page.getByRole('button', { name: label, exact: true }).click();
     await expect(page.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('list', { name: 'Robot command timeline' })).toContainText(`Response path: ${label === 'Near miss' ? 'nearMiss' : label === 'Brave try' ? 'braveTry' : label.toLowerCase()}`);
   }
 
   const publishResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/publish`) && response.status() === 200);
@@ -242,14 +319,38 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const original = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(original.status).toBe('published');
   expect(original.manifest_checksum || original.manifestChecksum).toBe(published.checksum);
-  const nextDraft = await api(page, 'POST', `/lessons/${fixture.lesson.id}/new-version`);
-  const [nextStep] = await api(page, 'GET', `/lessons/${nextDraft.id}/steps`);
-  await api(page, 'PATCH', `/lessons/${nextDraft.id}/steps/${encodeURIComponent(nextStep.step_key || nextStep.stepKey)}`, {
-    prompt: 'A new draft must not mutate published v1.',
-    subject: nextStep.subject,
-    stepBody: nextStep.step_body || nextStep.stepBody,
-  });
+  await expect(page.getByRole('button', { name: 'Rename' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Publish' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '+ Add step' })).toHaveCount(0);
+  await expect(page.getByTestId('lesson-step-prompt')).toBeDisabled();
+  const publishedProjection = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+  const publishedPinnedVisuals = pinnedVisualIdentity(publishedProjection.manifest);
+
+  await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
+  await expect(page.getByRole('row').filter({ hasText: customizedTitle }).first()).toContainText('published');
+  const newVersionButton = page.getByRole('button', { name: 'New version' });
+  await expect(newVersionButton).toHaveCount(1);
+  const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
+    && response.request().method() === 'POST' && response.status() === 201);
+  await newVersionButton.click();
+  await page.getByRole('button', { name: /ok|confirm/i }).last().click();
+  const nextDraft = (await (await nextDraftResponse).json()).data;
+  await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
+  await expect(page.getByRole('button', { name: 'Publish' })).toBeVisible();
+  const childVisualKey = selectedAssetKey;
+  const childVisualTile = page.locator('.asset-tile').filter({ hasText: childVisualKey });
+  await childVisualTile.locator('.asset-tile__select').click();
+  const childVisualSave = page.waitForResponse((response) => response.url().includes(`/lessons/${nextDraft.id}/steps/`)
+    && response.request().method() === 'PATCH' && response.status() === 200);
+  await page.getByRole('button', { name: 'Save step' }).click();
+  await childVisualSave;
+  const childProjection = await api(page, 'GET', `/lessons/${nextDraft.id}/manifest-preview?profile=espTft`);
+  const childPinnedVisuals = pinnedVisualIdentity(childProjection.manifest);
+  expect(childPinnedVisuals).not.toEqual(publishedPinnedVisuals);
+  expect(childProjection.manifest.steps[0].scene.teachingObject.asset.assetKey).toBe(childVisualKey);
   const originalAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(originalAfterDraftEdit.manifest_checksum || originalAfterDraftEdit.manifestChecksum).toBe(published.checksum);
+  const originalProjectionAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+  expect(pinnedVisualIdentity(originalProjectionAfterDraftEdit.manifest)).toEqual(publishedPinnedVisuals);
   assertNoUnexpectedPageErrors();
 });

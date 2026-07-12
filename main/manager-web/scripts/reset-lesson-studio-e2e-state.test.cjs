@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { buildResetCommands } = require('./reset-lesson-studio-e2e-state.cjs');
+const { buildResetCommands, resetOptionsFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
 test('resets auth throttling through compose service names', () => {
   const commands = buildResetCommands({
@@ -25,4 +25,12 @@ test('resets auth throttling through compose service names', () => {
       "DELETE FROM admin_login_attempts WHERE email='lesson-author-e2e@local.invalid';",
     ],
   ]);
+});
+
+test('allows the Compose project to follow a combined local E2E stack', () => {
+  assert.deepEqual(resetOptionsFromEnvironment({
+    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'tbot-rewards-e2e',
+  }), {
+    projectName: 'tbot-rewards-e2e',
+  });
 });
