@@ -40,6 +40,7 @@ class AudioRateController:
         self.queue_empty_event = None
         self.queue_has_data_event = None
         self._primitives_loop = None
+        self._active_empty_waiters = 0
         self._last_queue_empty_time = 0  # Last queue clear time (seconds)
 
     def _ensure_loop_primitives(self):
@@ -52,6 +53,11 @@ class AudioRateController:
                 raise RuntimeError(
                     "AudioRateController active sender belongs to a different event loop"
                 )
+
+        if self._active_empty_waiters and self._primitives_loop is not loop:
+            raise RuntimeError(
+                "AudioRateController active waiter belongs to a different event loop"
+            )
 
         if self._primitives_loop is loop:
             return
@@ -79,7 +85,11 @@ class AudioRateController:
         self._ensure_loop_primitives()
         if not self.queue:
             return
-        await self.queue_empty_event.wait()
+        self._active_empty_waiters += 1
+        try:
+            await self.queue_empty_event.wait()
+        finally:
+            self._active_empty_waiters -= 1
 
     def reset(self):
         """Reset controller state"""

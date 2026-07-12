@@ -78,6 +78,34 @@ def test_controller_rejects_rebind_while_sender_is_owned_by_another_loop():
         owner_loop.close()
 
 
+def test_controller_rejects_rebind_while_empty_waiter_is_owned_by_another_loop():
+    controller = _controller()
+    controller.add_audio(b"queued")
+    owner_loop = asyncio.new_event_loop()
+
+    async def bind_waiter():
+        task = asyncio.create_task(controller.wait_until_empty())
+        await asyncio.sleep(0)
+        return task
+
+    async def attempt_rebind():
+        controller._ensure_loop_primitives()
+
+    waiter = owner_loop.run_until_complete(bind_waiter())
+    owner_empty_event = controller.queue_empty_event
+    try:
+        assert not waiter.done()
+        with pytest.raises(RuntimeError, match="active waiter.*different event loop"):
+            asyncio.run(attempt_rebind())
+    finally:
+        owner_loop.call_soon(owner_empty_event.set)
+        owner_loop.run_until_complete(waiter)
+        owner_loop.close()
+
+    asyncio.run(attempt_rebind())
+    assert controller.queue_empty_event is not owner_empty_event
+
+
 async def _start_controller(controller, send_audio):
     task = controller.start_sending(send_audio)
     await asyncio.sleep(0)
