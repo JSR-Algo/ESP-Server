@@ -2,6 +2,7 @@ const { defineConfig, devices } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: './e2e/lesson-studio',
+  globalSetup: './e2e/lesson-studio/global-setup.cjs',
   outputDir: './output/playwright-e2e/results',
   timeout: 60_000,
   expect: { timeout: 10_000 },

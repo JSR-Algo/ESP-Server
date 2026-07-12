@@ -14,6 +14,8 @@
     "test:lesson-builder-browser": "node scripts/check-lesson-builder-browser.mjs",
     "test:lesson-studio": "node scripts/check-lesson-rollout-capabilities.mjs && npm run test:lesson-visual-library-ui && npm run test:lesson-visual-library-browser && npm run test:lesson-builder-logic && npm run test:lesson-builder-browser && node scripts/check-robot-lesson-preview.mjs && node scripts/check-robot-preview-screenshots.mjs",
     "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs",
+    "test:e2e:lesson-studio:reset": "node scripts/reset-lesson-studio-e2e-state.cjs",
+    "test:e2e:lesson-studio:reset:test": "node --test scripts/reset-lesson-studio-e2e-state.test.cjs",
     "test:e2e:lesson-studio": "playwright test --config=playwright.config.js"
   },
   "dependencies": {
