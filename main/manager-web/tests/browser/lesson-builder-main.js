@@ -81,11 +81,24 @@ window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__ = async () => {
   let resolveCapabilities;
   Api.lesson.getRolloutCapabilities = (ok) => { resolveCapabilities = ok; };
   resetLessonRolloutCapabilities();
+  const redirectedToLogin = new Promise((resolve) => {
+    const removeHook = applicationRouter.afterEach((to) => {
+      if (to.name !== 'login') return;
+      removeHook();
+      resolve();
+    });
+  });
   const navigation = applicationRouter.push({ name: 'LessonVisualLibrary' });
   for (let i = 0; i < 20 && !resolveCapabilities; i += 1) await Promise.resolve();
   applicationStore.commit('clearAuth');
   resolveCapabilities({ sharedVisualAuthoring: true, exactEspTftPreview: true });
-  await navigation;
+  try {
+    await navigation;
+  } catch (error) {
+    // Vue Router rejects the original push when the guard intentionally redirects.
+    if (!VueRouter.isNavigationFailure(error, VueRouter.NavigationFailureType.redirected)) throw error;
+  }
+  await redirectedToLogin;
   return {
     route: applicationRouter.currentRoute.name,
     visualLibraryLoaded: applicationRouter.currentRoute.name === 'LessonVisualLibrary',
