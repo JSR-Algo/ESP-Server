@@ -346,6 +346,7 @@ import {
 } from '@/components/lesson/lesson-step-editor-state';
 import Api from '@/apis/api';
 import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
+import { createAuthoringDirtyHandle } from '@/utils/serviceWorkerUpdateSafety.mjs';
 
 export default {
   name: 'LessonEditor',
@@ -361,6 +362,7 @@ export default {
   },
   data() {
     const stepEditor = createLessonStepEditorState();
+    const lessonUpdateSafety = createAuthoringDirtyHandle();
     return {
       lesson: null,
       lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
@@ -368,6 +370,7 @@ export default {
       stepTypes: [],
       loading: false,
       stepEditor,
+      lessonUpdateSafety,
       validating: false,
       previewing: false,
       publishing: false,
@@ -463,6 +466,16 @@ export default {
     hasUnsavedDrafts() {
       return Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]);
     },
+    hasPendingAuthoringChanges() {
+      return this.hasUnsavedDrafts
+        || this.stepDialogVisible
+        || this.renameVisible
+        || this.addingStep
+        || this.reordering
+        || this.renaming
+        || this.publishing
+        || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key]);
+    },
     selectedAuthoring: {
       get() {
         if (!this.selectedStep) return mergeAuthoringFields({}, {});
@@ -517,6 +530,12 @@ export default {
     },
   },
   watch: {
+    hasPendingAuthoringChanges: {
+      immediate: true,
+      handler(value) {
+        this.lessonUpdateSafety.setDirty(value);
+      },
+    },
     // Mirror subject into vocab.word + scene.primaryWord while they track it
     // (don't clobber an author-edited value).
     'stepForm.subject'(val, old) {
@@ -533,6 +552,9 @@ export default {
     }
     this.loadLessonCapabilities();
     this.fetchAll();
+  },
+  beforeDestroy() {
+    this.lessonUpdateSafety.release();
   },
   methods: {
     async loadLessonCapabilities() {

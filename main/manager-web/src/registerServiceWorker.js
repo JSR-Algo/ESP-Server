@@ -1,10 +1,15 @@
 /* eslint-disable no-console */
 
+import {
+  scheduleAuthoringSafeCallback,
+  scheduleServiceWorkerActivation,
+} from './utils/serviceWorkerUpdateSafety.mjs';
+
 let controllerReloaded = false;
 
 function activateWaitingWorker(registration) {
   if (registration && registration.waiting) {
-    registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    scheduleServiceWorkerActivation(registration.waiting);
   }
 }
 
@@ -18,7 +23,7 @@ export const register = () => {
           return;
         }
         controllerReloaded = true;
-        window.location.reload();
+        scheduleAuthoringSafeCallback(() => window.location.reload());
       });
       
       console.info(`[TBOT] Trying to register Service Worker, URL: ${swUrl}`);
@@ -50,7 +55,7 @@ export const register = () => {
                 if (installingWorker.state === 'installed') {
                   if (navigator.serviceWorker.controller) {
                     console.log('[TBOT] New content available, activating Service Worker');
-                    installingWorker.postMessage({ type: 'SKIP_WAITING' });
+                    scheduleServiceWorkerActivation(installingWorker);
                   } else {
                     // All normal,Service WorkerSuccessfully installed
                     console.log('[TBOT] Content cached for offline use');

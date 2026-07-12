@@ -24,6 +24,7 @@ const CDN_JS = [
 
 // whenService WorkerInjectedmanifestAuto execute after
 const manifest = self.__WB_MANIFEST || [];
+const precacheManifest = manifest.filter(entry => entry.url !== 'cdn-mode');
 
 // CheckEnabledCDNMode
 const isCDNEnabled = manifest.some(entry => 
@@ -40,46 +41,11 @@ workbox.setConfig({ debug: false });
 workbox.core.skipWaiting();
 workbox.core.clientsClaim();
 
-// Precache offline page
+// Precache the revisioned admin shell and lazy routes. The optional firmware
+// generator payloads are excluded by webpack and remain available on demand.
 const OFFLINE_URL = '/offline.html';
-workbox.precaching.precacheAndRoute([
-  { url: OFFLINE_URL, revision: null }
-]);
-
-// Add install completeEventHandler, show installation in consoleMessage
-self.addEventListener('install', event => {
-  if (isCDNEnabled) {
-    console.log('Service Worker installed, start caching CDN resources');
-  } else {
-    console.log('Service Worker installed, CDN mode disabled, only local resources cached');
-  }
-  
-  // Ensure offline page cached
-  event.waitUntil(
-    caches.open('offline-cache').then((cache) => {
-      return cache.add(OFFLINE_URL);
-    })
-  );
-});
-
-// Add activationEventHandler
-self.addEventListener('activate', event => {
-  console.log('Service Worker activated, now controlling page');
-  
-  // Clean old version cache
-  event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.filter(cacheName => {
-          // Clean cache except current version
-          return cacheName.startsWith('workbox-') && !workbox.core.cacheNames.runtime.includes(cacheName);
-        }).map(cacheName => {
-          return caches.delete(cacheName);
-        })
-      );
-    })
-  );
-});
+workbox.precaching.precacheAndRoute(precacheManifest);
+workbox.precaching.cleanupOutdatedCaches();
 
 // AddfetchEventInterceptor, used to viewCDNWhether resource hits cache
 self.addEventListener('fetch', event => {
@@ -171,4 +137,4 @@ workbox.routing.setCatchHandler(async ({ event }) => {
       // All other requests returnError
       return Response.error();
   }
-}); 
+});
