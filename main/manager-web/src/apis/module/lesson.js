@@ -30,6 +30,15 @@ function normalizeVisualAsset(raw) {
 }
 
 export default {
+  getRolloutCapabilities(onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lesson-rollout-capabilities`,
+      method: 'GET',
+      onSuccess,
+      onError,
+    });
+  },
+
   listVisualAssets(filters, onSuccess, onError) {
     const query = new URLSearchParams();
     if (filters && filters.category) query.set('category', filters.category);

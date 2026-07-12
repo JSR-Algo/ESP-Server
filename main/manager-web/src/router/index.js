@@ -1,5 +1,6 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
+import { loadLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities'
 
 Vue.use(VueRouter)
 
@@ -262,13 +263,13 @@ const routes = [
     path: '/lesson-visual-library',
     name: 'LessonVisualLibrary',
     component: function () { return import('../views/LessonVisualLibrary.vue') },
-    meta: { requiresAuth: true, requiresSuperAdmin: true, title: 'Lesson visual library' }
+    meta: { requiresAuth: true, requiresSuperAdmin: true, requiredLessonCapability: 'sharedVisualAuthoring', title: 'Lesson visual library' }
   },
   {
     path: '/lesson-visual-library/:assetKey',
     name: 'LessonVisualAssetDetail',
     component: function () { return import('../views/LessonVisualAssetDetail.vue') },
-    meta: { requiresAuth: true, requiresSuperAdmin: true, title: 'Lesson visual asset' }
+    meta: { requiresAuth: true, requiresSuperAdmin: true, requiredLessonCapability: 'sharedVisualAuthoring', title: 'Lesson visual asset' }
   },
   {
     path: '/course-insights',
@@ -306,7 +307,7 @@ VueRouter.prototype.push = function push(location) {
 const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights', 'LessonVisualLibrary', 'LessonVisualAssetDetail']
 
 // Route Guard
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   // Check whether route needs protection
   if (protectedRoutes.includes(to.name)) {
     // fromlocalStorageGettoken
@@ -331,6 +332,16 @@ router.beforeEach((to, from, next) => {
     }
     if (!isSuperAdmin) {
       // Logged-in non-super-admin: deny access, send to home
+      next({ name: 'home' })
+      return
+    }
+  }
+
+  const capabilityRecord = to.matched.find(record => record.meta && record.meta.requiredLessonCapability)
+  if (capabilityRecord) {
+    const requiredCapability = capabilityRecord.meta.requiredLessonCapability
+    const capabilities = await loadLessonRolloutCapabilities()
+    if (!capabilities[requiredCapability]) {
       next({ name: 'home' })
       return
     }

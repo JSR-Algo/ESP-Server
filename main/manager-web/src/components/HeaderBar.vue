@@ -154,7 +154,7 @@
             <el-dropdown-item @click.native="handleRouter('lessonMonitoring')">
               {{ $t("header.lessonMonitoring") }}
             </el-dropdown-item>
-            <el-dropdown-item @click.native="handleRouter('lessonVisualLibrary')">
+            <el-dropdown-item v-if="lessonCapabilities.sharedVisualAuthoring" @click.native="handleRouter('lessonVisualLibrary')">
               {{ $t("header.lessonVisualLibrary") }}
             </el-dropdown-item>
           </el-dropdown-menu>
@@ -215,6 +215,7 @@ import i18n, { changeLanguage } from "@/i18n";
 import { mapActions, mapState } from "vuex";
 import ChangePasswordDialog from "./ChangePasswordDialog.vue"; // Import change password popup component
 import featureManager from "@/utils/featureManager"; // Import feature management utility class
+import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from "@/utils/lessonRolloutCapabilities";
 
 export default {
   name: "HeaderBar",
@@ -236,6 +237,7 @@ export default {
       showHistory: false,
       SEARCH_HISTORY_KEY: "tbot_search_history",
       MAX_HISTORY_COUNT: 3,
+      lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
       // Cascader Config
       cascaderProps: {
         expandTrigger: "click",
@@ -349,6 +351,7 @@ export default {
     this.loadSearchHistory();
     // WaitfeatureManagerLoad features after initialization completeStatus
     await this.loadFeatureStatus();
+    this.lessonCapabilities = await loadLessonRolloutCapabilities();
   },
   //RemoveEventListener
   beforeDestroy() {

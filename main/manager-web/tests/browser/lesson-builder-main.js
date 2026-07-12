@@ -18,6 +18,7 @@ const validation = { valid: true, profiles: ['espTft'], budgets: { espTft: { err
 const manifest = { profile: 'espTft', pathsTerminate: true, steps: [{ stepKey: 's1', prompt: 'Meet Pip', scene: {}, teachingWord: { text: 'PET' } }, { stepKey: 's2', prompt: 'Say barn', scene: {}, teachingWord: { text: 'BARN' } }] };
 
 Object.assign(Api.lesson, {
+  getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi' }); },
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },

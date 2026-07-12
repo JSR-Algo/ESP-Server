@@ -20,7 +20,7 @@
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
         <el-button size="small" @click="doValidate" :loading="validating">{{ $t('lesson.validate') }}</el-button>
-        <el-button size="small" @click="doPreview" :loading="previewing">{{ $t('lesson.previewManifest') }}</el-button>
+        <el-button v-if="lessonCapabilities.exactEspTftPreview" size="small" @click="doPreview" :loading="previewing">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing">
           {{ $t('lesson.publish') }}
         </el-button>
@@ -58,6 +58,7 @@
             <div>
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
               <SharedAssetPicker
+                v-if="lessonCapabilities.sharedVisualAuthoring"
                 :assets="sharedVisualAssets"
                 :selected-key="selectedObjectKey"
                 category="teachingObject"
@@ -67,13 +68,13 @@
               />
             </div>
             <RobotLessonPreview
-              v-if="previewManifest"
+              v-if="lessonCapabilities.exactEspTftPreview && previewManifest"
               :manifest="previewManifest"
               :step-index="selectedStepIndex"
               initial-path="correct"
               @path-change="onPreviewPathChange"
             />
-            <div v-else class="preview-empty">
+            <div v-else-if="lessonCapabilities.exactEspTftPreview" class="preview-empty">
               <strong>Robot preview</strong>
               <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
               <el-button size="small" @click="doPreview">Generate preview</el-button>
@@ -316,6 +317,7 @@ import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
 import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
+import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
 
 export default {
   name: 'LessonEditor',
@@ -332,6 +334,7 @@ export default {
   data() {
     return {
       lesson: null,
+      lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
       steps: [],
       stepTypes: [],
       loading: false,
@@ -459,9 +462,14 @@ export default {
       this.$router.replace('/course-management');
       return;
     }
+    this.loadLessonCapabilities();
     this.fetchAll();
   },
   methods: {
+    async loadLessonCapabilities() {
+      this.lessonCapabilities = await loadLessonRolloutCapabilities();
+      if (this.lessonCapabilities.sharedVisualAuthoring) this.fetchSharedVisualAssets();
+    },
     statusType(status) {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
@@ -667,6 +675,8 @@ export default {
         },
         () => {},
       );
+    },
+    fetchSharedVisualAssets() {
       Api.lesson.listVisualAssets(
         { category: 'teachingObject', profile: 'espTft' },
         (assets) => { this.sharedVisualAssets = assets; },
@@ -680,15 +690,18 @@ export default {
       }, (msg) => this.$message.error(msg));
     },
     selectSharedAsset(asset) {
+      if (!this.lessonCapabilities.sharedVisualAuthoring) return;
       if (!this.selectedStep || !this.isDraft) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
       this.markStudioChanged(this.selectedStep.stepKey);
     },
     inspectSharedAsset(asset) {
+      if (!this.lessonCapabilities.sharedVisualAuthoring) return;
       this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
     },
     cloneSharedAsset(asset) {
+      if (!this.lessonCapabilities.sharedVisualAuthoring) return;
       this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey }, query: { mode: 'cloneForLesson', lessonId: this.lessonId } });
     },
     onPreviewPathChange(payload) {
@@ -861,6 +874,7 @@ export default {
       );
     },
     doPreview() {
+      if (!this.lessonCapabilities.exactEspTftPreview) return;
       const requestedRevision = this.studioRevision;
       this.previewing = true;
       Api.lesson.manifestPreview(
