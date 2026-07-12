@@ -105,6 +105,20 @@ def test_common_metadata_rejects_invalid_time_identity_and_heap_types(tmp_path):
     assert "invalid internalSramMin" in errors
 
 
+def test_malformed_scenario_fields_fail_closed_instead_of_crashing(tmp_path):
+    malformed = {
+        "cold": {"bytesDownloaded": "100"},
+        "warm": {"elapsedMs": []},
+        "sd-full": {"freeRatio": "0.04"},
+    }
+    for scenario, fields in malformed.items():
+        result = complete_result(tmp_path)
+        result["scenario"] = scenario
+        result.update(fields)
+        errors = fault.validate_result(scenario, result, "lesson_preload_ready checksum_verified")
+        assert f"{scenario} decisive signals are incomplete" in errors
+
+
 def test_evidence_report_hashes_screenshots(tmp_path):
     result = complete_result(tmp_path)
     evidence = fault.build_evidence_report("cold", result, {}, "lesson_preload_ready checksum_verified")
@@ -251,6 +265,34 @@ def test_soak_rejects_duplicate_or_out_of_order_transition_identity():
     report = soak.analyze(duplicate)
     assert report["status"] == "NOT_PASS"
     assert report["checks"]["transition_sequence_strictly_increasing"] is False
+
+
+def test_soak_rejects_large_psram_loss_with_small_recovery_blips():
+    lines = []
+    for index in range(100):
+        psram = 8_000_000 - index * 2_048
+        if index == 50:
+            psram += 4_096
+        lines.append(
+            f"lesson_step_transition sequence={index} psram_free={psram} "
+            "internal_min_free=32768"
+        )
+    report = soak.analyze("\n".join(lines))
+    assert report["status"] == "NOT_PASS"
+    assert report["checks"]["no_psram_loss_above_tolerance"] is False
+
+
+def test_log_audit_rejects_firmware_crash_and_heap_corruption_markers():
+    for marker in (
+        "assert failed: runtime.cpp:42",
+        "stack overflow in task lesson",
+        "CORRUPT HEAP: bad tail",
+        "abort() was called at PC 0x1234",
+        "LoadProhibited exception",
+    ):
+        report = audit.audit(marker)
+        assert report["status"] == "NOT_PASS", marker
+        assert report["findings"]["firmwareCrash"] == 1
 
 
 def test_log_audit_detects_duplicate_progress_regardless_of_field_order():

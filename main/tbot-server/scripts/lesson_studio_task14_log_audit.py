@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 import argparse, json, re
+from collections import Counter
 from pathlib import Path
-MARKERS={'allocationFailure':r'alloc(?:ation)? failed|out of memory|malloc failed','watchdog':r'watchdog|task wdt','decodeFailure':r'decode failed|image decode error','audioUnderrun':r'audio underrun|i2s.*underrun','sequenceDivergence':r'lesson sequence divergence|sequence mismatch'}
+MARKERS={
+    'allocationFailure':r'alloc(?:ation)? failed|out of memory|malloc failed',
+    'watchdog':r'watchdog|task wdt',
+    'decodeFailure':r'decode failed|image decode error',
+    'audioUnderrun':r'audio underrun|i2s.*underrun',
+    'sequenceDivergence':r'lesson sequence divergence|sequence mismatch',
+    'firmwareCrash':r'assert failed|stack overflow|corrupt heap|abort\(\) was called|loadprohibited|storeprohibited|illegalinstruction',
+}
 EVENT=re.compile(r'(?i)(lesson_progress(?:_[a-z]+)?|progress_posted(?:_[a-z]+)?)')
 SESSION=re.compile(r'(?i)session(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
 STEP=re.compile(r'(?i)step(?:[_ ]?id)?["\']?\s*[:=]\s*["\']?([^,\s"\'}]+)')
@@ -37,11 +45,15 @@ def progress_events(text):
         if session and step:events.append((event_type,str(session),str(step),identity))
     return events
 def audit(text):
-    findings={k:len(re.findall(v,text,re.I)) for k,v in MARKERS.items()}; events=progress_events(text); duplicates=sorted({x for x in events if events.count(x)>1}); ok=not any(findings.values()) and not duplicates
+    findings={k:len(re.findall(v,text,re.I)) for k,v in MARKERS.items()}; events=progress_events(text); duplicates=sorted(x for x,count in Counter(events).items() if count>1); ok=not any(findings.values()) and not duplicates
     return {'status':'PASS' if ok else 'NOT_PASS','findings':findings,'duplicateProgress':[{'eventType':x[0],'session':x[1],'step':x[2],'identity':x[3]} for x in duplicates]}
 def main():
     p=argparse.ArgumentParser(); p.add_argument('logs',nargs='*',type=Path); p.add_argument('--output',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
-    if a.self_test: assert audit('lesson_progress session_id=s step_id=a')['status']=='PASS'; assert audit('malloc failed')['status']=='NOT_PASS'; print('self-test PASS'); return 0
+    if a.self_test:
+        assert audit('lesson_progress session_id=s step_id=a')['status']=='PASS'
+        for marker in ('malloc failed','stack overflow in task lesson','CORRUPT HEAP'):
+            assert audit(marker)['status']=='NOT_PASS'
+        print('self-test PASS'); return 0
     if not a.logs:p.error('logs required')
     r=audit('\n'.join(x.read_text(errors='replace') for x in a.logs)); data=json.dumps(r,indent=2)+'\n'; print(data,end=''); a.output and a.output.write_text(data); return 0 if r['status']=='PASS' else 1
 if __name__=='__main__': raise SystemExit(main())
