@@ -107,13 +107,17 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
       ['Correct', 'Slave command: celebrate', 'motion-nod'],
       ['Near miss', 'Slave command: encourage', 'motion-nod'],
       ['Incorrect', 'Slave command: gentle-shake', 'motion-shake'],
+      ['Retry', 'Slave command: tryAgain', 'motion-breathe'],
+      ['Timeout', 'Slave command: encourage', 'motion-nod'],
+      ['Brave try', 'Slave command: encourage', 'motion-nod'],
+      ['Completion', 'Slave command: celebrate', 'motion-nod'],
       ['Silence', 'Slave command: patient-wait', 'motion-breathe'],
       ['STT unavailable', 'Slave command: calm-idle', 'motion-breathe'],
       ['Missing visual', 'Slave command: teach', 'motion-tilt']
     ];
     for (const minutes of [3, 5, 8]) {
       await cdp('Page.navigate', { url: `http://127.0.0.1:${port}/?minutes=${minutes}` }); await waitReady();
-      assert.deepEqual(await evaluate(`(() => { const stage=document.querySelector('[data-testid="esp-tft-stage"]'); const r=stage.getBoundingClientRect(); const images=[...stage.querySelectorAll('img')]; return [r.width,r.height,document.querySelectorAll('.preview-toolbar button').length,images.length,images.every(img=>img.src.startsWith('data:image/svg+xml')&&img.complete&&img.naturalWidth>0)]; })()`), [480, 320, 6, 3, true]);
+      assert.deepEqual(await evaluate(`(() => { const stage=document.querySelector('[data-testid="esp-tft-stage"]'); const r=stage.getBoundingClientRect(); const images=[...stage.querySelectorAll('img')]; return [r.width,r.height,document.querySelectorAll('.preview-toolbar button').length,images.length,images.every(img=>img.src.startsWith('data:image/svg+xml')&&img.complete&&img.naturalWidth>0)]; })()`), [480, 320, 10, 3, true]);
       const states = await evaluate(`(async()=>{const out=[];for(const b of document.querySelectorAll('.preview-toolbar button')){b.click();await new Promise(r=>setTimeout(r,0));const robot=document.querySelector('.layer-robotOverlay');out.push([b.textContent.trim(),b.getAttribute('aria-pressed'),[...document.querySelectorAll('.preview-toolbar button')].filter(x=>x.getAttribute('aria-pressed')==='true').length,document.querySelector('.motion-timeline li:nth-child(2) span').textContent,robot?.className||'missing',robot?.getAnimations().some(animation=>animation.playState==='running')||false]);}return out})()`);
       assert.equal(states.length, expectedPaths.length);
       states.forEach(([label, pressed, pressedCount, timeline, motion, animating], index) => { const expected = expectedPaths[index]; assert.equal(label, expected[0]); assert.equal(pressed, 'true'); assert.equal(pressedCount, 1); assert.equal(timeline, expected[1]); assert.match(motion, new RegExp(`(?:^|\\s)${expected[2]}(?:\\s|$)`)); assert.equal(animating, true); });

@@ -13,6 +13,10 @@ export const RESPONSE_PATHS = Object.freeze([
   'correct',
   'nearMiss',
   'incorrect',
+  'retry',
+  'timeout',
+  'braveTry',
+  'completion',
   'silence',
   'sttUnavailable',
   'missingOptionalVisual'
@@ -22,6 +26,10 @@ const DEFAULT_PATHS = Object.freeze({
   correct: { prompt: 'Correct. Continue.', motionPreset: 'celebrate' },
   nearMiss: { prompt: 'Almost. Try once more.', motionPreset: 'encourage' },
   incorrect: { prompt: 'Let us try together.', motionPreset: 'gentle-shake' },
+  retry: { prompt: 'Let us try once more.', motionPreset: 'tryAgain' },
+  timeout: { prompt: 'Time is up. We can continue together.', motionPreset: 'encourage' },
+  braveTry: { prompt: 'That was a brave try. Keep going!', motionPreset: 'encourage' },
+  completion: { prompt: 'Lesson complete. Wonderful helping!', motionPreset: 'celebrate' },
   silence: { prompt: 'Take your time.', motionPreset: 'patient-wait' },
   sttUnavailable: { prompt: 'Listening is unavailable. Follow along.', motionPreset: 'calm-idle' },
   missingOptionalVisual: { prompt: 'The optional visual is unavailable.', motionPreset: 'teach' }
@@ -29,6 +37,7 @@ const DEFAULT_PATHS = Object.freeze({
 
 const FORBIDDEN_KEYS = /(?:rawServo|servoAngle|servoCommand|firmwareCommand|motorCommand)/i;
 const FORBIDDEN_MEDIA = /\.(?:gif|webm|mp4|mov|m4v)(?:[?#].*)?$/i;
+const MOTION_PATH_KEY = Object.freeze({ retry: 'incorrect', timeout: 'listen', braveTry: 'nearMiss', completion: 'correct' });
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -79,7 +88,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const path = RESPONSE_PATHS.includes(requestedPath) ? requestedPath : 'correct';
   const responseOverride = asObject(asObject(step.responsePaths)[path]);
   const response = { ...DEFAULT_PATHS[path], ...responseOverride };
-  const motionPreset = String(responseOverride.motionPreset || motion[path] || response.motionPreset || step.motionPreset || robot.pose || 'neutral');
+  const motionPreset = String(responseOverride.motionPreset || motion[MOTION_PATH_KEY[path] || path] || response.motionPreset || step.motionPreset || robot.pose || 'neutral');
   const optionalVisualMissing = path === 'missingOptionalVisual';
 
   return {

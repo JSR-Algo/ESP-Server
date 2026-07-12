@@ -379,7 +379,7 @@ export default {
 
       // Get againVerification code
       setTimeout(() => {
-        this.fetchCaptcha();
+        if (this.$route.name === "login") this.fetchCaptcha();
       }, 1000);
     },
 

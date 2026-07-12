@@ -29,7 +29,7 @@ for (const minutes of [3, 5, 8]) {
 }
 
 const fixture = JSON.parse(await readFile(new URL('tests/fixtures/robot-preview-5m.json', root), 'utf8'));
-const paths = ['correct', 'nearMiss', 'incorrect', 'silence', 'sttUnavailable', 'missingOptionalVisual'];
+const paths = ['correct', 'nearMiss', 'incorrect', 'retry', 'timeout', 'braveTry', 'completion', 'silence', 'sttUnavailable', 'missingOptionalVisual'];
 for (const path of paths) {
   const result = projection.projectEspTftPreview(fixture.manifest, fixture.stepIndex, path);
   assert.equal(result.path, path);
@@ -71,4 +71,4 @@ assert.equal(malformed.stage.height, 320);
 assert.ok(malformed.warnings.some((warning) => warning.includes('Unsupported profile')));
 assert.equal(projection.projectEspTftPreview({}, -4, 'silence').layers.length, 6);
 
-console.log('robot lesson preview projection: golden 3/5/8 layouts and six response paths PASS');
+console.log('robot lesson preview projection: golden 3/5/8 layouts and ten response paths PASS');

@@ -96,6 +96,10 @@ export default {
         correct: 'Correct',
         nearMiss: 'Near miss',
         incorrect: 'Incorrect',
+        retry: 'Retry',
+        timeout: 'Timeout',
+        braveTry: 'Brave try',
+        completion: 'Completion',
         silence: 'Silence',
         sttUnavailable: 'STT unavailable',
         missingOptionalVisual: 'Missing visual'

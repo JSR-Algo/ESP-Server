@@ -56,6 +56,25 @@
           </div>
           <div v-if="selectedStep" class="lesson-studio__workbench">
             <div>
+              <el-card shadow="never" class="step-content-panel">
+                <div slot="header"><strong>Step content</strong></div>
+                <el-form label-position="top" size="small">
+                  <el-form-item :label="$t('lesson.prompt')" required>
+                    <el-input :value="selectedContent.prompt" data-testid="lesson-step-prompt" type="textarea" :rows="2" :disabled="!isDraft" @input="updateSelectedContent('prompt', $event)" />
+                  </el-form-item>
+                  <div class="grid-2">
+                    <el-form-item :label="$t('lesson.subjectLabel')" required>
+                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft" @input="updateSelectedContent('subject', $event)" />
+                    </el-form-item>
+                    <el-form-item :label="$t('lesson.helperText')">
+                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft" @input="updateSelectedContent('helperText', $event)" />
+                    </el-form-item>
+                  </div>
+                  <el-form-item :label="$t('lesson.l1TransferHint')">
+                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft" @input="updateSelectedContent('l1TransferHint', $event)" />
+                  </el-form-item>
+                </el-form>
+              </el-card>
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
               <SharedAssetPicker
                 v-if="lessonCapabilities.sharedVisualAuthoring"
@@ -365,6 +384,7 @@ export default {
       publishMessage: '',
       selectedStepIndex: 0,
       selectedStepDrafts: {},
+      selectedContentDrafts: {},
       selectedAssetDrafts: {},
       dirtyStepKeys: {},
       savingStepKeys: {},
@@ -427,6 +447,23 @@ export default {
         this.markStudioChanged(this.selectedStep.stepKey);
       },
     },
+    selectedContent: {
+      get() {
+        if (!this.selectedStep) return { prompt: '', subject: '', helperText: '', l1TransferHint: '' };
+        return this.selectedContentDrafts[this.selectedStep.stepKey] || {
+          prompt: this.selectedStep.prompt || '',
+          subject: this.selectedStep.subject || '',
+          helperText: this.selectedStep.helperText || '',
+          l1TransferHint: this.selectedStep.l1TransferHint || '',
+        };
+      },
+      set(value) {
+        if (!this.selectedStep) return;
+        this.$set(this.selectedContentDrafts, this.selectedStep.stepKey, value);
+        this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+        this.markStudioChanged(this.selectedStep.stepKey);
+      },
+    },
     selectedObjectKey() {
       if (this.selectedStep && this.selectedAssetDrafts[this.selectedStep.stepKey]) {
         return this.selectedAssetDrafts[this.selectedStep.stepKey].assetKey;
@@ -443,7 +480,10 @@ export default {
     studioSteps() {
       return this.steps.map((step) => {
         const authored = this.selectedStepDrafts[step.stepKey];
-        return authored ? { ...step, stepBody: { ...(step.stepBody || {}), ...authored } } : step;
+        const content = this.selectedContentDrafts[step.stepKey];
+        return authored || content
+          ? { ...step, ...(content || {}), stepBody: { ...(step.stepBody || {}), ...(authored || {}) } }
+          : step;
       });
     },
   },
@@ -517,6 +557,10 @@ export default {
       if (stepKey) this.$set(this.stepDraftRevisions, stepKey, Number(this.stepDraftRevisions[stepKey] || 0) + 1);
       this.validationResult = null;
       this.previewManifest = null;
+    },
+    updateSelectedContent(field, value) {
+      if (!this.selectedStep || !this.isDraft) return;
+      this.selectedContent = { ...this.selectedContent, [field]: value };
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -711,6 +755,7 @@ export default {
       const step = this.selectedStep;
       if (!step || !this.isDraft) return;
       const authored = this.selectedAuthoring;
+      const content = this.selectedContent;
       const stepBody = { ...(step.stepBody || {}), ...authored };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
@@ -724,11 +769,12 @@ export default {
         ? [{ slot: 'teachingObject', assetVersionId: selectedAsset.versionId }]
         : undefined;
       Api.lesson.updateStep(
-        this.lessonId, step.stepKey, { ...step, stepBody, visualRefs },
+        this.lessonId, step.stepKey, { ...step, ...content, stepBody, visualRefs },
         (updated) => {
           this.$delete(this.savingStepKeys, step.stepKey);
           if (Number(this.stepDraftRevisions[step.stepKey] || 0) === savedRevision) {
             this.$delete(this.selectedStepDrafts, step.stepKey);
+            this.$delete(this.selectedContentDrafts, step.stepKey);
             this.$delete(this.selectedAssetDrafts, step.stepKey);
             this.$delete(this.dirtyStepKeys, step.stepKey);
           }
