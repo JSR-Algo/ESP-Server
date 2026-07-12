@@ -42,7 +42,8 @@ export default {
   },
   methods: {
     open() {
-      this.reset();
+      // Parallel authoring requests can all report the same missing session.
+      // Reset on close, not here, so repeated challenges cannot erase input.
       this.visible = true;
     },
     reset() {
