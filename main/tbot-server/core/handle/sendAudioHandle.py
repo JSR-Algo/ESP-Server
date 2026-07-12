@@ -92,7 +92,7 @@ async def _wait_for_audio_completion(conn: "ConnectionHandler"):
         conn.logger.bind(tag=TAG).debug(
             f"Waiting for audio sending to finish, {len(rate_controller.queue)} packets still in queue"
         )
-        await rate_controller.queue_empty_event.wait()
+        await rate_controller.wait_until_empty()
 
         # Wait for pre-buffered packets playback complete
         # beforeNSend packets directly, add2network jitter packets, need extra wait for them to finish playing on client

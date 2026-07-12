@@ -88,6 +88,9 @@ class _RateController:
     def add_audio(self, packet):
         self.audio.append(packet)
 
+    async def wait_until_empty(self):
+        await self.queue_empty_event.wait()
+
     def reset(self):
         self.reset_calls += 1
         self.pending_send_task = _DoneTask(False)

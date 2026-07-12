@@ -37,10 +37,49 @@ class AudioRateController:
         self.start_timestamp = None  # StartTimestamp(read-only, noModify)
         self.pending_send_task = None
         self.logger = logger
-        self.queue_empty_event = asyncio.Event()  # Queue ClearEvent
-        self.queue_empty_event.set()  # Initially EmptyStatus
-        self.queue_has_data_event = asyncio.Event()  # Queue DataEvent
+        self.queue_empty_event = None
+        self.queue_has_data_event = None
+        self._primitives_loop = None
         self._last_queue_empty_time = 0  # Last queue clear time (seconds)
+
+    def _ensure_loop_primitives(self):
+        """Bind asyncio primitives to the active loop when they are needed."""
+        loop = asyncio.get_running_loop()
+        active_task = self.pending_send_task
+        if active_task is not None and not active_task.done():
+            owner_loop = active_task.get_loop()
+            if owner_loop is not loop:
+                raise RuntimeError(
+                    "AudioRateController active sender belongs to a different event loop"
+                )
+
+        if self._primitives_loop is loop:
+            return
+
+        self.queue_empty_event = asyncio.Event()
+        self.queue_has_data_event = asyncio.Event()
+        if self.queue:
+            self.queue_has_data_event.set()
+        else:
+            self.queue_empty_event.set()
+        self._primitives_loop = loop
+
+    def _sync_queue_events(self):
+        """Mirror queue state without creating loop-bound primitives."""
+        if self.queue_empty_event is None or self.queue_has_data_event is None:
+            return
+        if self.queue:
+            self.queue_empty_event.clear()
+            self.queue_has_data_event.set()
+        else:
+            self.queue_empty_event.set()
+            self.queue_has_data_event.clear()
+
+    async def wait_until_empty(self):
+        self._ensure_loop_primitives()
+        if not self.queue:
+            return
+        await self.queue_empty_event.wait()
 
     def reset(self):
         """Reset controller state"""
@@ -53,13 +92,11 @@ class AudioRateController:
         self.start_timestamp = None  # Set by first audio packet
         self._last_queue_empty_time = 0  # Reset Time
         # RelatedEventProcess
-        self.queue_empty_event.set()
-        self.queue_has_data_event.clear()
+        self._sync_queue_events()
 
     def _drain_queue(self):
         self.queue.clear()
-        self.queue_empty_event.set()
-        self.queue_has_data_event.clear()
+        self._sync_queue_events()
         self._last_queue_empty_time = time.monotonic()
 
     def add_audio(self, opus_packet):
@@ -78,8 +115,7 @@ class AudioRateController:
 
         self.queue.append(("audio", opus_packet))
         # RelatedEventProcess
-        self.queue_empty_event.clear()
-        self.queue_has_data_event.set()
+        self._sync_queue_events()
 
     def add_message(self, message_callback):
         """
@@ -98,8 +134,7 @@ class AudioRateController:
 
         self.queue.append(("message", message_callback))
         # RelatedEventProcess
-        self.queue_empty_event.clear()
-        self.queue_has_data_event.set()
+        self._sync_queue_events()
 
     def _get_elapsed_ms(self):
         """Get elapsed time (ms)"""
@@ -185,6 +220,8 @@ class AudioRateController:
         Returns:
             asyncio.Task: send task
         """
+
+        self._ensure_loop_primitives()
 
         async def _send_loop():
             current_task = asyncio.current_task()

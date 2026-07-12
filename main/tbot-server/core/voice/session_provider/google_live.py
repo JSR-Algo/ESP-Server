@@ -1767,9 +1767,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             remaining -= sleep_for
 
         rate_controller = getattr(self.conn, "audio_rate_controller", None)
-        queue_empty_event = getattr(rate_controller, "queue_empty_event", None)
+        wait_until_empty = getattr(rate_controller, "wait_until_empty", None)
         queue_obj = getattr(rate_controller, "queue", None)
-        if queue_empty_event is None or queue_obj is None:
+        if wait_until_empty is None or queue_obj is None:
             return True
         try:
             queue_len = len(queue_obj)
@@ -1780,7 +1780,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         try:
             await asyncio.wait_for(
-                queue_empty_event.wait(),
+                wait_until_empty(),
                 timeout=max(0.01, playback_timeout),
             )
             if playback_tail > 0:
