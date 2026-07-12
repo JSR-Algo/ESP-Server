@@ -3,6 +3,7 @@ const {
   buildEngagementTrack,
   calculateReadiness,
   createAuthoringFields,
+  createInitialAuthoringFields,
   DURATION_PRESETS,
   NAMED_MOTIONS,
   mergeAuthoringFields,
@@ -17,6 +18,18 @@ assert.deepStrictEqual(DURATION_PRESETS, [3, 5, 8]);
 assert.ok(['teach', 'listen', 'celebrate', 'encourage', 'tryAgain'].every((motion) => NAMED_MOTIONS.includes(motion)));
 assert.strictEqual(mergeAuthoringFields({}, { durationPreset: 7 }).durationPreset, 5);
 assert.strictEqual(mergeAuthoringFields({}, { motion: { correct: 'servo:180' } }).motion.correct, 'celebrate');
+
+const initial = createInitialAuthoringFields({
+  teachingWord: ' barn ',
+  prompt: ' Help Pip find the barn. ',
+  subject: ' barn ',
+});
+assert.strictEqual(initial.teachingWord.text, 'BARN');
+assert.deepStrictEqual(initial.storyBeat, {
+  goal: 'Help Pip find the barn.',
+  successReaction: 'Celebrate learning barn.',
+  nextTease: 'What will we discover about barn next?',
+});
 
 const edited = mergeAuthoringFields({}, {
   teachingWord: { text: 'BARN' },

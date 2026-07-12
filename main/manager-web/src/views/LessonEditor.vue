@@ -315,7 +315,7 @@ import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.v
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
-import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import { createInitialAuthoringFields, mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
 import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
 
@@ -819,8 +819,10 @@ export default {
       if (scene) Object.assign(stepBody, scene);
       const vocab = this.buildVocab(f.subject);
       if (vocab) stepBody.vocab = vocab;
-      Object.assign(stepBody, mergeAuthoringFields({}, {
-        teachingWord: { text: (f.scene.primaryWord || f.subject || '').trim().toUpperCase() },
+      Object.assign(stepBody, createInitialAuthoringFields({
+        teachingWord: f.scene.primaryWord,
+        prompt: f.prompt,
+        subject: f.subject,
       }));
       if (Object.keys(stepBody).length) payload.stepBody = stepBody;
       // Per-step robot-face override (server validates against firmware-supported set).

@@ -29,6 +29,20 @@ function createAuthoringFields() {
   return clone(DEFAULT_AUTHORING_FIELDS);
 }
 
+function createInitialAuthoringFields({ teachingWord, prompt, subject } = {}) {
+  const word = String(teachingWord || subject || '').trim();
+  const topic = String(subject || word).trim();
+  const goal = String(prompt || '').trim();
+  return mergeAuthoringFields({}, {
+    teachingWord: { text: word.toUpperCase() },
+    storyBeat: {
+      goal,
+      successReaction: `Celebrate learning ${topic}.`,
+      nextTease: `What will we discover about ${topic} next?`,
+    },
+  });
+}
+
 function mergeAuthoringFields(body, patch) {
   const source = body && typeof body === 'object' ? body : {};
   const next = patch && typeof patch === 'object' ? patch : {};
@@ -134,5 +148,6 @@ module.exports = {
   buildEngagementTrack,
   calculateReadiness,
   createAuthoringFields,
+  createInitialAuthoringFields,
   mergeAuthoringFields,
 };
