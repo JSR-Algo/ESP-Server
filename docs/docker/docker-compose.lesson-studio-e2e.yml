@@ -127,7 +127,7 @@ services:
     ports:
       - "8102:8002"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/tbot/user/captcha?uuid=compose-health'"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
       interval: 3s
       timeout: 5s
       retries: 40

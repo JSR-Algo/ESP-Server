@@ -22,6 +22,8 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "TBOT_E2E_CAPTCHA_CODE: E2E42" in compose
     assert "condition: service_healthy" in compose
     assert "condition: service_completed_successfully" in compose
+    assert "/tbot/user/captcha" not in compose
+    assert "http://127.0.0.1:8002/login" in compose
 
 
 def test_lesson_studio_seed_assets_are_idempotent_and_use_fixed_accounts():
