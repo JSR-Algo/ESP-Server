@@ -3,6 +3,7 @@ import Vue from 'vue';
 import Vuex from 'vuex';
 import Api from '../apis/api';
 import Constant from '../utils/constant';
+import { advanceLessonRolloutSessionGeneration } from '../utils/lessonRolloutCapabilitiesCore.mjs';
 
 Vue.use(Vuex)
 
@@ -34,6 +35,7 @@ export default new Vuex.Store({
   },
   mutations: {
     setToken(state, token) {
+      advanceLessonRolloutSessionGeneration()
       state.token = token
       localStorage.setItem('token', token)
     },
@@ -46,6 +48,7 @@ export default new Vuex.Store({
       localStorage.setItem('pubConfig', JSON.stringify(config))
     },
     clearAuth(state) {
+      advanceLessonRolloutSessionGeneration()
       state.token = ''
       state.userInfo = {}
       localStorage.removeItem('token')

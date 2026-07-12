@@ -3,10 +3,14 @@ import ElementUI from 'element-ui';
 import VueRouter from 'vue-router';
 import LessonEditor from '@/views/LessonEditor.vue';
 import Api from '@/apis/api';
+import { resetLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities';
+import applicationRouter from '@/router';
+import applicationStore from '@/store';
 
 Vue.use(ElementUI);
 Vue.use(VueRouter);
 Vue.config.productionTip = false;
+localStorage.setItem('token', 'lesson-builder-test-session');
 
 const calls = { update: [], visualFilters: [], validate: 0, preview: 0, errors: [], failNextUpdate: false, deferNextUpdate: false, deferNextValidate: false, pendingUpdates: [], pendingValidations: [] };
 let steps = [
@@ -44,8 +48,47 @@ router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
 Vue.prototype.$t = (key) => key;
 Vue.prototype.$message = { success() {}, error(message) { calls.errors.push(message); }, warning() {} };
 Vue.prototype.$confirm = () => Promise.resolve();
-const vm = new Vue({ router, render: (h) => h(LessonEditor) }).$mount('#app');
+let vm = new Vue({ router, render: (h) => h(LessonEditor) }).$mount('#app');
 
 const editor = vm.$children[0];
 window.__LESSON_BUILDER_TEST__ = { editor, calls, sharedAssets, validation, manifest };
+window.__MOUNT_DISABLED_LESSON_EDITOR__ = async () => {
+  vm.$destroy();
+  vm.$el.remove();
+  const root = document.createElement('div');
+  root.id = 'disabled-app';
+  document.body.appendChild(root);
+  Api.lesson.getRolloutCapabilities = (ok) => ok({ sharedVisualAuthoring: false, exactEspTftPreview: false });
+  resetLessonRolloutCapabilities();
+  const visualBefore = calls.visualFilters.length;
+  const previewBefore = calls.preview;
+  vm = new Vue({ router, render: (h) => h(LessonEditor) }).$mount(root);
+  const disabledEditor = vm.$children[0];
+  await new Promise((resolve) => disabledEditor.$nextTick(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  disabledEditor.doPreview();
+  await disabledEditor.$nextTick();
+  return {
+    visualCalls: calls.visualFilters.length - visualBefore,
+    previewCalls: calls.preview - previewBefore,
+    sharedPickerVisible: Boolean(vm.$el.querySelector('.asset-picker')),
+    previewButtonVisible: [...vm.$el.querySelectorAll('button')].some((button) => button.textContent.includes('lesson.previewManifest')),
+  };
+};
+window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__ = async () => {
+  localStorage.setItem('token', 'route-session-a');
+  localStorage.setItem('userInfo', JSON.stringify({ superAdmin: true }));
+  let resolveCapabilities;
+  Api.lesson.getRolloutCapabilities = (ok) => { resolveCapabilities = ok; };
+  resetLessonRolloutCapabilities();
+  const navigation = applicationRouter.push({ name: 'LessonVisualLibrary' });
+  for (let i = 0; i < 20 && !resolveCapabilities; i += 1) await Promise.resolve();
+  applicationStore.commit('clearAuth');
+  resolveCapabilities({ sharedVisualAuthoring: true, exactEspTftPreview: true });
+  await navigation;
+  return {
+    route: applicationRouter.currentRoute.name,
+    visualLibraryLoaded: applicationRouter.currentRoute.name === 'LessonVisualLibrary',
+  };
+};
 editor.$nextTick(() => { window.__LESSON_BUILDER_READY__ = true; });

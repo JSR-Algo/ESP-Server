@@ -83,6 +83,18 @@ try {
   assert.equal(result.readyBeforeEdit, true); assert.equal(result.staleAfterEdit, true); assert.equal(result.staleAfterFailure, true); assert.equal(result.selectedAfterReload, 'object.barn'); assert.equal(result.selectedTilePersisted, true); assert.deepEqual(result.errors, ['forced update failure']);
   assert.equal(result.previewClearedOnEdit, true); assert.equal(result.deferredValidationIgnored, true); assert.equal(result.newerDraftPreserved, true);
   assert.equal(result.validateBeforeSaveIgnored, true);
+
+  const disabledResult = await evaluate('window.__MOUNT_DISABLED_LESSON_EDITOR__()');
+  assert.deepEqual(disabledResult, {
+    visualCalls: 0,
+    previewCalls: 0,
+    sharedPickerVisible: false,
+    previewButtonVisible: false,
+  });
+  assert.deepEqual(await evaluate('window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__()'), {
+    route: 'login',
+    visualLibraryLoaded: false,
+  });
   console.log('mounted visual LessonEditor selection, authoring PATCH, readiness, and preview props PASS');
 } finally {
   if (socket) socket.close(); await stopChild(chrome); if (server) await new Promise((resolve) => server.close(resolve)); if (temp) await rm(temp, { recursive: true, force: true });

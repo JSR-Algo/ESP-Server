@@ -1,6 +1,7 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
-import { loadLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities'
+import { getLessonRolloutSessionKey, loadLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities'
+import { isLessonCapabilityNavigationCurrent } from '@/utils/lessonRolloutCapabilitiesCore.mjs'
 
 Vue.use(VueRouter)
 
@@ -340,7 +341,24 @@ router.beforeEach(async (to, from, next) => {
   const capabilityRecord = to.matched.find(record => record.meta && record.meta.requiredLessonCapability)
   if (capabilityRecord) {
     const requiredCapability = capabilityRecord.meta.requiredLessonCapability
+    const capabilitySessionKey = getLessonRolloutSessionKey()
     const capabilities = await loadLessonRolloutCapabilities()
+    let remainsAuthorized = true
+    if (to.matched.some(record => record.meta && record.meta.requiresSuperAdmin)) {
+      try {
+        remainsAuthorized = !!JSON.parse(localStorage.getItem('userInfo') || '{}').superAdmin
+      } catch (e) {
+        remainsAuthorized = false
+      }
+    }
+    if (!isLessonCapabilityNavigationCurrent(
+      capabilitySessionKey,
+      getLessonRolloutSessionKey(),
+      remainsAuthorized,
+    )) {
+      next({ name: getLessonRolloutSessionKey() ? 'home' : 'login' })
+      return
+    }
     if (!capabilities[requiredCapability]) {
       next({ name: 'home' })
       return
