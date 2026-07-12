@@ -559,6 +559,19 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.setdefault("motion_presets_enabled", False)
         lesson_cfg.setdefault("playful_interactions_enabled", False)
         lesson_cfg.setdefault("rollout_device_allowlist", [])
+        configured_allowlist = lesson_cfg["rollout_device_allowlist"]
+        if not isinstance(configured_allowlist, list) or not all(
+            isinstance(item, str) for item in configured_allowlist
+        ):
+            raise ValueError("lesson.rollout_device_allowlist must be a list of device identifiers")
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in configured_allowlist if item.strip()}
+        )
+        if (
+            lesson_cfg.get("motion_presets_enabled") is True
+            or lesson_cfg.get("playful_interactions_enabled") is True
+        ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
+            raise ValueError("enabled lesson rollout controls require exactly one device")
         return config
 
     lesson_cfg = config.get("lesson")
@@ -646,6 +659,11 @@ def _apply_lesson_env_overrides(config):
         # production backend and MUST win over any shipped/stale committed
         # lesson.api_base default, so the runtime never pulls from a stale endpoint.
         lesson_cfg["api_base"] = normalized
+    if (
+        lesson_cfg.get("motion_presets_enabled") is True
+        or lesson_cfg.get("playful_interactions_enabled") is True
+    ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
+        raise ValueError("enabled lesson rollout controls require exactly one device")
     # Auto-enable ONLY when an EXPLICIT backend URL env (course_url) is present — the
     # shipped lesson.api_base / server.api_url default is deliberately never enough to
     # arm production lessons (dark-by-default; see docstring + boot-guard).

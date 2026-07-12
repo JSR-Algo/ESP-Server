@@ -115,15 +115,15 @@ def test_empty_boolean_env_is_absent_not_false(monkeypatch):
     assert _parse_bool_env("LESSON_SAMPLE_ENABLED") is None
 
 
-def test_docker_compose_defaults_do_not_disable_interactive_sample():
-    """Docker defaults must preserve the config.yaml interactive sample start_lesson path."""
+def test_production_compose_disables_sample_while_local_compose_preserves_demo():
+    """Production must not expose the assignment-bypassing sample lesson by default."""
     project_dir = Path(get_project_dir())
     local_compose = (project_dir / "docker-compose.yml").read_text()
     prod_compose = (project_dir.parents[1] / "deploy" / "docker-compose.prod.yml").read_text()
 
     assert "LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}" not in local_compose
     assert "LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-passive}" not in local_compose
-    assert "LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}" not in prod_compose
+    assert "LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}" in prod_compose
     assert "LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-passive}" not in prod_compose
 
 
@@ -133,6 +133,8 @@ def test_prod_env_example_declares_shared_lesson_runtime_secrets():
 
     for key in (
         "LESSON_RUNTIME_ENABLED",
+        "LESSON_ASSET_PACK_LOCAL_ROOT",
+        "LESSON_ASSET_PACK_MOUNT_ROOT",
         "COURSE_BACKEND_URL",
         "TBOT_DEVICE_MINT_SECRET",
         "TBOT_REQUIRE_DEVICE_TOKEN",

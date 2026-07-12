@@ -24,11 +24,11 @@ def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
 
     monkeypatch.setenv("LESSON_MOTION_PRESETS_ENABLED", "true")
     monkeypatch.setenv("LESSON_PLAYFUL_INTERACTIONS_ENABLED", "1")
-    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", " robot-01,AA:BB:CC ,robot-01 ")
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", " robot-01,robot-01 ")
     config = _apply_lesson_env_overrides({"lesson": {}})
     assert config["lesson"]["motion_presets_enabled"] is True
     assert config["lesson"]["playful_interactions_enabled"] is True
-    assert config["lesson"]["rollout_device_allowlist"] == ["aa:bb:cc", "robot-01"]
+    assert config["lesson"]["rollout_device_allowlist"] == ["robot-01"]
 
 
 def test_invalid_rollout_boolean_is_rejected(monkeypatch):
@@ -51,23 +51,34 @@ def test_yaml_rollout_flags_reject_non_boolean_scalars(monkeypatch, key, yaml_va
 def test_yaml_rollout_flags_accept_actual_booleans(monkeypatch, yaml_value, expected):
     monkeypatch.delenv("LESSON_MOTION_PRESETS_ENABLED", raising=False)
     monkeypatch.delenv("LESSON_PLAYFUL_INTERACTIONS_ENABLED", raising=False)
+    allowlist = '["robot-01"]' if expected else "[]"
     config = yaml.safe_load(
         "lesson:\n"
         f"  motion_presets_enabled: {yaml_value}\n"
         f"  playful_interactions_enabled: {yaml_value}\n"
-        "  rollout_device_allowlist: []\n"
+        f"  rollout_device_allowlist: {allowlist}\n"
     )
     result = _apply_lesson_env_overrides(config)
     assert result["lesson"]["motion_presets_enabled"] is expected
     assert result["lesson"]["playful_interactions_enabled"] is expected
 
 
-def test_empty_allowlist_does_not_block_an_explicitly_enabled_control():
+def test_empty_allowlist_blocks_an_explicitly_enabled_control():
     runtime = _runtime(
         device_id="any-robot",
         lesson={"motion_presets_enabled": True, "rollout_device_allowlist": []},
     )
-    assert runtime._lesson_rollout_control_enabled("motion_presets_enabled") is True
+    assert runtime._lesson_rollout_control_enabled("motion_presets_enabled") is False
+
+
+def test_enabled_rollout_control_requires_exactly_one_device(monkeypatch):
+    monkeypatch.setenv("LESSON_MOTION_PRESETS_ENABLED", "true")
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {}})
+
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", "robot-01,robot-02")
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {}})
 
 
 def test_compose_variants_forward_documented_lesson_rollout_environment():
@@ -85,6 +96,22 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
         environment = compose["services"]["tbot-esp32-server"]["environment"]
         forwarded = {entry.split("=", 1)[0] for entry in environment}
         assert required <= forwarded, f"{name} missing {sorted(required - forwarded)}"
+
+    production_compose = yaml.safe_load(
+        (root.parents[1] / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    )
+    production_environment = production_compose["services"]["tbot-esp32-server"]["environment"]
+    assert required <= set(production_environment), (
+        "production compose missing "
+        f"{sorted(required - set(production_environment))}"
+    )
+    assert production_environment["LESSON_RUNTIME_ENABLED"].endswith(":-false}")
+    assert production_environment["LESSON_MOTION_PRESETS_ENABLED"].endswith(":-false}")
+    assert production_environment["LESSON_PLAYFUL_INTERACTIONS_ENABLED"].endswith(":-false}")
+
+    healthcheck = production_compose["services"]["tbot-esp32-server"]["healthcheck"]
+    assert healthcheck["test"][0] == "CMD"
+    assert "/tbot/ota/" in healthcheck["test"][-1]
 
 
 def _runtime(*, device_id="robot-01", lesson=None):
@@ -110,7 +137,7 @@ def test_playful_runtime_gate_preserves_legacy_interaction_path():
     disabled = _runtime(lesson={"playful_interactions_enabled": False})
     assert disabled._uses_safe_speaking() is False
 
-    enabled = _runtime(lesson={"playful_interactions_enabled": True})
+    enabled = _runtime(lesson={"playful_interactions_enabled": True, "rollout_device_allowlist": ["robot-01"]})
     assert enabled._uses_safe_speaking() is True
 
     not_allowlisted = _runtime(
@@ -155,7 +182,7 @@ def test_prepare_control_manifest_and_motion_disabled_metric(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_motion_dispatch_false_is_counted_as_failed(monkeypatch):
-    runtime = _runtime(lesson={"motion_presets_enabled": True})
+    runtime = _runtime(lesson={"motion_presets_enabled": True, "rollout_device_allowlist": ["robot-01"]})
     logs = []
     runtime._log = lambda level, message: logs.append((level, message))
 

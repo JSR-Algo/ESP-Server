@@ -1169,7 +1169,7 @@ class LessonRuntime:
             return False
         allowlist = lesson_cfg.get("rollout_device_allowlist") or []
         if not allowlist:
-            return True
+            return False
         device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
         return device_id in allowlist
 

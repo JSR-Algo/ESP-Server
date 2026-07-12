@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 
+import pytest
 import yaml
 
 
@@ -80,6 +81,31 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "TBOT_DEVICE_MINT_SECRET=REPLACE_WITH_SHARED_DEVICE_MINT_SECRET" in env_example
     assert "JWT_PUBLIC_KEY=REPLACE_WITH_BACKEND_JWT_PUBLIC_KEY" in env_example
     assert "LESSON_VOICE_RT_P95_DISABLE_MS=1500" in env_example
+    assert "LESSON_ASSET_PACK_LOCAL_ROOT=sd://tbot/lesson-assets" in env_example
+    assert "LESSON_ASSET_PACK_MOUNT_ROOT=/opt/tbot-esp32-server/data/lesson-packs" in env_example
+
+
+def test_server_healthcheck_proves_both_http_and_websocket_listeners():
+    compose = yaml.safe_load((REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text())
+    command = compose["services"]["tbot-esp32-server"]["healthcheck"]["test"][-1]
+    assert "create_connection(('127.0.0.1', 8000)" in command
+    assert "http://127.0.0.1:8003/tbot/ota/" in command
+
+
+def test_deploy_waits_for_every_server_replica_to_be_healthy():
+    script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(encoding="utf-8")
+    assert "wait_for_remote_stack" in script
+    assert "TBOT_SERVER_REPLICAS" in script
+    assert ".State.Health.Status" in script
+    assert "healthy server replicas" in script
+
+
+def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
+    readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+    assert '-e "REDIS_URL=$REDIS_URL"' in readme
+    assert '-e "LESSON_ASSET_PACK_LOCAL_ROOT=$LESSON_ASSET_PACK_LOCAL_ROOT"' in readme
+    assert '-e "LESSON_ASSET_PACK_MOUNT_ROOT=$LESSON_ASSET_PACK_MOUNT_ROOT"' in readme
+    assert '-v "$TBOT_REMOTE_ROOT/data/lesson-packs:$LESSON_ASSET_PACK_MOUNT_ROOT"' in readme
 
 def test_managed_render_blueprint_declares_lesson_runtime_production_posture():
     blueprint_path = REPO_ROOT / "render.yaml"
@@ -203,3 +229,74 @@ def test_deploy_vps_preflight_rejects_missing_production_boot_env(tmp_path):
 
     assert result.returncode == 1
     assert "JWT_PUBLIC_KEY" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_error",
+    [
+        ({"LESSON_SAMPLE_ENABLED": "true"}, "LESSON_SAMPLE_ENABLED must be false"),
+        ({"LESSON_RUNTIME_ENABLED": "true"}, "LESSON_ROLLOUT_DEVICE_ALLOWLIST must contain exactly one"),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "true",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01,robot-02",
+            },
+            "LESSON_ROLLOUT_DEVICE_ALLOWLIST must contain exactly one",
+        ),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "false",
+                "LESSON_MOTION_PRESETS_ENABLED": "true",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
+            },
+            "cannot be true while LESSON_RUNTIME_ENABLED is false",
+        ),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "true",
+                "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
+            },
+            "LESSON_ASSET_PACK_LOCAL_ROOT is required",
+        ),
+    ],
+)
+def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides, expected_error):
+    values = {
+        "TBOT_REMOTE_ROOT": "/opt/tbot",
+        "TBOT_PUBLIC_WEBSOCKET_URL": "wss://esp.tjbot.vn/tbot/v1/",
+        "TBOT_BACKEND_API_URL": "https://backend.example.com/v1",
+        "NODE_ENV": "production",
+        "TBOT_REQUIRE_DEVICE_TOKEN": "true",
+        "JWT_PUBLIC_KEY": "public-key",
+        "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+        "TBOT_SERVER_AUTH_KEY": "server-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://assets.example.com",
+        "LESSON_SAMPLE_ENABLED": "false",
+        "LESSON_RUNTIME_ENABLED": "false",
+        "LESSON_MOTION_PRESETS_ENABLED": "false",
+        "LESSON_PLAYFUL_INTERACTIONS_ENABLED": "false",
+        "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "",
+        "LESSON_ASSET_DELIVERY_MODE": "",
+        "LESSON_ASSET_PACK_LOCAL_ROOT": "",
+        "LESSON_ASSET_PACK_MOUNT_ROOT": "",
+    }
+    values.update(overrides)
+    env_file = tmp_path / ".env"
+    env_file.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n")
+
+    result = subprocess.run(
+        [
+            "bash", str(REPO_ROOT / "deploy" / "deploy-vps.sh"),
+            "--host", "127.0.0.1", "--user", "root", "--tag", "test",
+            "--env-file", str(env_file), "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
