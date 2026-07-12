@@ -1052,6 +1052,113 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled[0][0], "connect")
         self.assertGreaterEqual(scheduled[0][1], 0.0)
 
+    async def test_external_close_still_cancels_in_flight_live_prewarm(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        started = asyncio.Event()
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            self.assertTrue(preserve_live_prewarm)
+            started.set()
+            await asyncio.sleep(30)
+
+        provider._ensure_live_open_for_audio = _slow_open
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await provider._close_live_resources()
+
+        self.assertIsNone(provider._live_prewarm_task)
+        self.assertTrue(prewarm.cancelled())
+
+    async def test_foreground_budget_degrade_still_cancels_in_flight_prewarm(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        started = asyncio.Event()
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            self.assertTrue(preserve_live_prewarm)
+            started.set()
+            await asyncio.sleep(30)
+
+        provider._ensure_live_open_for_audio = _slow_open
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await provider._activate_budget_degrade(
+            AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED
+        )
+
+        self.assertIsNone(provider._live_prewarm_task)
+        self.assertTrue(prewarm.cancelled())
+
+    async def test_live_open_timeout_uses_external_cleanup_semantics(self):
+        conn = _Conn()
+        conn.config["google_live"]["live_open_timeout_sec"] = 0.01
+        provider = self.make_provider(conn)
+        cleanup_flags = []
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            await asyncio.sleep(30)
+
+        async def _record_cleanup(*, preserve_live_prewarm=False):
+            cleanup_flags.append(preserve_live_prewarm)
+
+        provider._open_live_for_audio = _slow_open
+        provider._close_live_resources = _record_cleanup
+
+        self.assertFalse(await provider._ensure_live_open_for_audio())
+        self.assertEqual(cleanup_flags, [False])
+
+    async def test_completed_budget_degrade_allows_replacement_prewarm(self):
+        conn = _Conn()
+        conn.live_admission_gate = _Gate(
+            SimpleNamespace(
+                decision=AdmissionDecision.DEGRADE_TTS_ONLY,
+                reason=AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED,
+            )
+        )
+        provider = self.make_provider(conn)
+
+        provider._schedule_live_prewarm("first")
+        first = provider._live_prewarm_task
+        self.assertFalse(await asyncio.wait_for(first, timeout=1))
+
+        provider._schedule_live_prewarm("second")
+        second = provider._live_prewarm_task
+        self.assertIsNot(second, first)
+        self.assertFalse(await asyncio.wait_for(second, timeout=1))
+        self.assertFalse(second.cancelled())
+
+    async def test_owned_prewarm_cleanup_preserves_only_live_prewarm_task(self):
+        conn = _Conn()
+        conn.live_admission_gate = _Gate(
+            SimpleNamespace(
+                decision=AdmissionDecision.DEGRADE_TTS_ONLY,
+                reason=AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED,
+            )
+        )
+        provider = self.make_provider(conn)
+        greeting_started = asyncio.Event()
+
+        async def _greeting():
+            greeting_started.set()
+            await asyncio.sleep(30)
+
+        greeting = asyncio.create_task(_greeting())
+        provider._wake_greeting_task = greeting
+        await asyncio.wait_for(greeting_started.wait(), timeout=1)
+
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+
+        self.assertFalse(await asyncio.wait_for(prewarm, timeout=1))
+        self.assertFalse(prewarm.cancelled())
+        self.assertTrue(greeting.cancelled())
+        self.assertIsNone(provider._wake_greeting_task)
+
     async def test_wake_word_detect_opens_listening_without_greeting(self):
         conn = _Conn()
         # Unit test: disable spoken wake greeting (production enables it).
@@ -1179,7 +1286,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = None
         opens = []
 
-        async def _open():
+        async def _open(*, preserve_live_prewarm=False):
+            self.assertFalse(preserve_live_prewarm)
             opens.append(True)
             provider._client = _Client()
             provider._bridge = _Bridge()
@@ -3321,7 +3429,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._client = None
         provider._bridge = None
         provider._open_live_session = _open_failure
-        provider._close_live_resources = lambda: _false(None)
+        provider._close_live_resources = (
+            lambda *, preserve_live_prewarm=False: _false(None)
+        )
         self.assertFalse(await provider._ensure_live_open_for_audio())
 
     async def test_idle_loop_aec_resumption_and_reconnect_accounting_edges(self):

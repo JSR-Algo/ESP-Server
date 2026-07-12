@@ -761,7 +761,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         return await self._ensure_live_open_for_audio()
 
-    async def _ensure_live_open_for_audio(self):
+    async def _ensure_live_open_for_audio(self, *, preserve_live_prewarm=False):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
             # LESSON: only interactive steps need Live; passive steps stay TTS-only.
             if not self._active_lesson_step_is_interactive():
@@ -771,9 +771,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
         timeout = self._get_live_open_timeout_sec()
         try:
             if timeout is None:
-                return await self._open_live_for_audio()
+                return await self._open_live_for_audio(
+                    preserve_live_prewarm=preserve_live_prewarm
+                )
             return await asyncio.wait_for(
-                self._open_live_for_audio(),
+                self._open_live_for_audio(
+                    preserve_live_prewarm=preserve_live_prewarm
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -1009,7 +1013,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 reason,
             )
             try:
-                ok = await self._ensure_live_open_for_audio()
+                ok = await self._ensure_live_open_for_audio(
+                    preserve_live_prewarm=True
+                )
             except Exception as exc:
                 self.conn.logger.bind(tag="GoogleLive").warning(
                     "Google Live live_prewarm_failed reason={} error={}",
@@ -1042,13 +1048,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
             ok = False
         return ok and self._bridge is not None
 
-    async def _open_live_for_audio(self):
+    async def _open_live_for_audio(self, *, preserve_live_prewarm=False):
         decision = await self._admit_live_open()
         if decision.decision == AdmissionDecision.FRIENDLY_BREAK:
             await self._send_live_unavailable(decision.reason)
             return False
         if decision.decision == AdmissionDecision.DEGRADE_TTS_ONLY:
-            await self._activate_budget_degrade(decision.reason)
+            await self._activate_budget_degrade(
+                decision.reason,
+                preserve_live_prewarm=preserve_live_prewarm,
+            )
             return False
         try:
             await self._open_live_session()
@@ -1057,7 +1066,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._voice_consent_denied = False
             return True
         except Exception as exc:
-            await self._close_live_resources()
+            await self._close_live_resources(
+                preserve_live_prewarm=preserve_live_prewarm
+            )
             handled = await self._activate_classic_fallback(exc)
             if not handled and self._should_raise_without_fallback(exc):
                 raise
@@ -1147,8 +1158,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
             getattr(self.conn, "household_id", None),
         )
 
-    async def _activate_budget_degrade(self, reason: AdmissionReason):
-        await self._close_live_resources()
+    async def _activate_budget_degrade(
+        self,
+        reason: AdmissionReason,
+        *,
+        preserve_live_prewarm=False,
+    ):
+        await self._close_live_resources(
+            preserve_live_prewarm=preserve_live_prewarm
+        )
         if self._has_session_orchestrator():
             self.conn._set_session_mode(SessionMode.CONVERSATION, reason=reason.value)
         await self._activate_classic_fallback(RuntimeError(reason.value))
@@ -2384,7 +2402,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         finally:
             self._fallback_activating = False
 
-    async def _close_live_resources(self):
+    async def _close_live_resources(self, *, preserve_live_prewarm=False):
         current_task = asyncio.current_task()
         receive_task = self._receive_task
         flush_task = self._input_flush_task
@@ -2408,9 +2426,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         self._func_handler_bootstrap_task = None
-        # Do not clear/cancel prewarm/greeting when they are the current closer —
-        # open failures cancel themselves via exception paths already.
-        if live_prewarm_task is not current_task:
+        # wait_for runs the Live open in a child task, so owned prewarm cleanup
+        # must preserve the parent explicitly as well as by current-task identity.
+        if not preserve_live_prewarm and live_prewarm_task is not current_task:
             self._live_prewarm_task = None
         if wake_greeting_task is not current_task:
             self._wake_greeting_task = None
@@ -2420,6 +2438,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if (
                 background_task is not None
                 and background_task is not current_task
+                and not (
+                    preserve_live_prewarm and background_task is live_prewarm_task
+                )
                 and not background_task.done()
             ):
                 background_task.cancel()

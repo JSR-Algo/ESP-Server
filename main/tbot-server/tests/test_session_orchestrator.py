@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import unittest
@@ -442,6 +443,35 @@ class RedisLiveStateStoreTest(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleLiveProviderOrchestratorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_over_budget_prewarm_completes_without_cancelling_its_owner(self):
+        gate = _DecisionGate(
+            type(
+                "Decision",
+                (),
+                {
+                    "decision": AdmissionDecision.DEGRADE_TTS_ONLY,
+                    "reason": AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED,
+                },
+            )()
+        )
+        conn = _ProviderConn(gate=gate)
+        provider = GoogleLiveProvider(conn)
+        fallback_completed = asyncio.Event()
+
+        async def activate_fallback(_exc):
+            await asyncio.sleep(0)
+            fallback_completed.set()
+            return False
+
+        provider._activate_classic_fallback = activate_fallback
+        provider._schedule_live_prewarm("test", delay_sec=0)
+        prewarm = provider._live_prewarm_task
+
+        self.assertFalse(await asyncio.wait_for(prewarm, timeout=1))
+        self.assertTrue(fallback_completed.is_set())
+        self.assertFalse(prewarm.cancelled())
+        self.assertIs(provider._live_prewarm_task, prewarm)
+
     async def test_reconnect_to_new_replica_loads_redis_resumption_handle(self):
         redis = _FakeAsyncRedis()
         store = RedisLiveStateStore(redis, namespace="test")
