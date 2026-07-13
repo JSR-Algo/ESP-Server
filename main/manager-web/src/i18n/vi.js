@@ -338,6 +338,11 @@ export default {
   'lesson.sharedImpactBusyRetry': 'Hình ảnh đã được nhân bản khi một lần ghi bước khác đang chạy. Hãy thử gắn lại sau khi tác vụ đó hoàn tất.',
   'lesson.sharedImpactSelectAffectedStep': 'Hình ảnh này không được dùng trong bước đang chọn. Hãy chọn một bước bị ảnh hưởng, hoặc giữ ghim dùng chung và huỷ.',
   'lesson.sharedImpactInvalidCloneResponse': 'Máy chủ trả về kết quả nhân bản không đầy đủ. Bản nháp chưa được gắn lại.',
+  'lesson.sharedImpactCloneUncertain': 'Kết quả nhân bản không đầy đủ. Máy chủ có thể đã tạo {key}; đang kiểm tra tài nguyên chính thức.',
+  'lesson.sharedImpactRetryDiscovery': 'Thử tìm lại bản sao',
+  'lesson.sharedImpactReconciling': 'Đang kiểm tra tài nguyên đã tạo…',
+  'lesson.sharedImpactCloneNotFound': 'Chưa thấy bản sao {key}. Hãy thử tìm lại; hệ thống sẽ không tạo bản sao thứ hai.',
+  'lesson.sharedImpactDiscoveryFailed': 'Không thể kiểm tra tài nguyên đã tạo: {reason}. Hãy thử tìm lại mà không nhân bản lần nữa.',
   // Ghi đè biểu cảm robot
   'lesson.renderExpression': 'Biểu cảm robot (ghi đè)',
   'lesson.renderExpressionAuto': 'Tự động theo loại bước',

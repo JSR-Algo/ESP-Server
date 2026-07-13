@@ -6,8 +6,8 @@
     append-to-body
     custom-class="shared-impact-dialog"
     :close-on-click-modal="false"
-    :close-on-press-escape="!cloning && !rebindPending && !clonedAsset"
-    :show-close="!cloning && !rebindPending && !clonedAsset"
+    :close-on-press-escape="!cloning && !cloneUncertain && !reconciling && !rebindPending && !clonedAsset"
+    :show-close="!cloning && !cloneUncertain && !reconciling && !rebindPending && !clonedAsset"
     @open="loadImpact"
     @close="handleClose"
   >
@@ -62,9 +62,12 @@
     </div>
 
     <span slot="footer">
-      <el-button size="small" :disabled="!impactLoaded || loading || cloning || rebindPending || !!clonedAsset" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
+      <el-button size="small" :disabled="!impactLoaded || loading || cloning || cloneUncertain || reconciling || rebindPending || !!clonedAsset" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
       <el-button v-if="clonedAsset" type="primary" size="small" :loading="rebindPending" :disabled="rebindPending" @click="retryRebind">
         {{ rebindPending ? $t('lesson.sharedImpactRebinding') : $t('lesson.sharedImpactRetryRebind') }}
+      </el-button>
+      <el-button v-else-if="cloneUncertain || uncertainCloneKey" type="primary" size="small" :loading="reconciling" :disabled="reconciling" @click="retryDiscovery">
+        {{ reconciling ? $t('lesson.sharedImpactReconciling') : $t('lesson.sharedImpactRetryDiscovery') }}
       </el-button>
       <el-button v-else type="primary" size="small" :loading="cloning" :disabled="!canClone" @click="confirmClone">
         {{ $t('lesson.sharedImpactClone') }}
@@ -91,9 +94,11 @@ export default {
     rebindError: { type: String, default: '' },
     intentType: { type: String, default: 'select' },
     layer: { type: String, default: 'teachingObject' },
+    uncertainCloneKey: { type: String, default: '' },
+    reconciling: { type: Boolean, default: false },
   },
   data() {
-    return { impact: null, impactLoaded: false, loading: false, cloning: false, loadError: '', cloneError: '', cloneKey: '' };
+    return { impact: null, impactLoaded: false, loading: false, cloning: false, cloneUncertain: false, loadError: '', cloneError: '', cloneKey: '' };
   },
   computed: {
     authoritativeAsset() {
@@ -117,7 +122,7 @@ export default {
     },
     canClone() {
       return Boolean(this.impactLoaded && !this.loading && !this.cloning && !this.rebindPending
-        && !this.clonedAsset && this.cloneKey
+        && !this.cloneUncertain && !this.uncertainCloneKey && !this.reconciling && !this.clonedAsset && this.cloneKey
         && (!this.requiresCurrentReference || this.currentStepReferencesSource));
     },
   },
@@ -159,7 +164,7 @@ export default {
       );
     },
     keepShared() {
-      if (!this.impactLoaded || this.cloning || this.clonedAsset || this.rebindPending) return;
+      if (!this.impactLoaded || this.cloning || this.cloneUncertain || this.reconciling || this.clonedAsset || this.rebindPending) return;
       this.$emit('keep-shared', { asset: this.asset, currentStep: this.currentStep });
       this.$emit('close');
     },
@@ -173,8 +178,9 @@ export default {
       }, (result) => {
         if (!this.validCloneResponse(result)) {
           this.cloning = false;
-          this.cloneError = this.$t('lesson.sharedImpactInvalidCloneResponse');
-          this.$emit('error', this.cloneError);
+          this.cloneUncertain = true;
+          this.cloneError = this.$t('lesson.sharedImpactCloneUncertain', { key: this.cloneKey });
+          this.$emit('clone-uncertain', { assetKey: this.cloneKey });
           return;
         }
         this.$emit('cloned', result);
@@ -187,12 +193,16 @@ export default {
       if (!this.clonedAsset || this.rebindPending) return;
       this.$emit('retry-rebind', this.clonedAsset);
     },
+    retryDiscovery() {
+      if ((!this.cloneUncertain && !this.uncertainCloneKey) || this.reconciling) return;
+      this.$emit('retry-discovery');
+    },
     validCloneResponse(result) {
       return Boolean(result && !Array.isArray(result) && ['assetId', 'assetKey', 'path', 'sha256']
         .every((key) => typeof result[key] === 'string' && result[key].trim()));
     },
     handleClose() {
-      if (this.cloning || this.rebindPending || this.clonedAsset) return;
+      if (this.cloning || this.cloneUncertain || this.reconciling || this.rebindPending || this.clonedAsset) return;
       this.$emit('close');
     },
   },

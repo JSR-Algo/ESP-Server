@@ -338,6 +338,11 @@ export default {
   'lesson.sharedImpactBusyRetry': 'The visual was cloned while another step write was active. Retry the rebind when it finishes.',
   'lesson.sharedImpactSelectAffectedStep': 'This visual is not used by the selected step. Select an affected step, or keep the shared pin and cancel.',
   'lesson.sharedImpactInvalidCloneResponse': 'The server returned an incomplete clone result. No draft rebind was attempted.',
+  'lesson.sharedImpactCloneUncertain': 'The clone response was incomplete. The server may have committed {key}; checking authoritative assets now.',
+  'lesson.sharedImpactRetryDiscovery': 'Retry clone discovery',
+  'lesson.sharedImpactReconciling': 'Checking committed assets…',
+  'lesson.sharedImpactCloneNotFound': 'Clone {key} is not visible yet. Retry discovery; no second clone will be created.',
+  'lesson.sharedImpactDiscoveryFailed': 'Could not check committed assets: {reason}. Retry discovery without cloning again.',
   // Robot expression override
   'lesson.renderExpression': 'Robot expression (override)',
   'lesson.renderExpressionAuto': 'Auto from step type',

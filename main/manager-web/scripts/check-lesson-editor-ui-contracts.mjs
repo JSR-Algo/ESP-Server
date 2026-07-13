@@ -143,6 +143,9 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'requiresCu
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'currentStepReferencesSource', 'clone eligibility must use layer-specific current-step analysis');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'handleClose', 'dialog close attempts need an in-flight operation guard');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'validCloneResponse', 'clone callbacks must be validated before recovery state is emitted');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneUncertain', 'malformed success must latch a possibly committed state');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'retryDiscovery', 'uncertain clone recovery must retry discovery, not cloning');
+expectContains('src/views/LessonEditor.vue', 'discoverUncertainClone', 'parent must reconcile uncertain clone commits through authoritative assets');
 expectNotContains('src/components/lesson/SharedVisualImpactDialog.vue', 'result.asset || result.clone', 'unsupported clone response wrappers must be rejected');
 expectRegex(
   'src/components/lesson/SharedVisualImpactDialog.vue',
@@ -263,6 +266,8 @@ if (retryRebindSource.includes('cloneSharedVisual')) {
 const handleCloseSource = extractObjectMethod(dialogSource, 'handleClose');
 const keepSharedSource = extractObjectMethod(dialogSource, 'keepShared');
 const validCloneResponseSource = extractObjectMethod(dialogSource, 'validCloneResponse');
+const retryDiscoverySource = extractObjectMethod(dialogSource, 'retryDiscovery');
+if (retryDiscoverySource.includes('cloneSharedVisual')) throw new Error('uncertain recovery must never reissue clone');
 let cloneRequests = 0;
 const dialogEvents = [];
 let deferredCloneSuccess;
@@ -336,12 +341,50 @@ for (const malformed of [undefined, { assetId: 'clone-b' }, { asset: { assetId: 
     Api: { lesson: { cloneSharedVisual: (lessonId, assetId, payload, success) => success(malformed) } },
     malformed,
   });
-  const context = { ...dialogContext, cloning: false, clonedAsset: null, cloneError: '', $emit: (...args) => events.push(args) };
+  const context = { ...dialogContext, cloning: false, cloneUncertain: false, clonedAsset: null, cloneError: '', $emit: (...args) => events.push(args) };
   malformedConfirm.call(context);
-  if (context.cloning || !context.cloneError || events.some(([event]) => event === 'cloned')) {
-    throw new Error('malformed clone callbacks must remain actionable without assuming a committed clone');
+  handleClose.call(context);
+  if (context.cloning || !context.cloneUncertain || !context.cloneError
+    || events.some(([event]) => event === 'cloned') || events.some(([event]) => event === 'close')
+    || !events.some(([event]) => event === 'clone-uncertain')) {
+    throw new Error('malformed clone success must reconcile a possibly committed clone without allowing close');
   }
 }
+
+const discoverSource = extractObjectMethod(editorSource, 'discoverUncertainClone');
+if (discoverSource.includes('cloneSharedVisual')) throw new Error('parent discovery retry must never reissue clone');
+const discover = vm.runInNewContext(`(${discoverSource})`);
+let discoveryReloads = 0;
+const discovered = [];
+const discoveryContext = {
+  sharedImpactUncertainCloneKey: 'teachingObject.b.v2',
+  sharedImpactReconciling: false,
+  sharedImpactRebindError: '',
+  reloadAssets(success) {
+    discoveryReloads += 1;
+    success([{ assetId: 'clone-b', assetKey: 'teachingObject.b.v2', path: '/clone-b.png', sha256: 'clone-b-sha' }]);
+  },
+  validClonedAsset: (asset) => Boolean(asset),
+  applyClonedVisual: (asset) => discovered.push(asset),
+  $t: (key) => key,
+};
+discover.call(discoveryContext);
+if (discoveryReloads !== 1 || discovered.length !== 1) throw new Error('malformed success must discover and rebind the committed clone');
+
+let missingReloads = 0;
+const missingContext = {
+  ...discoveryContext,
+  sharedImpactUncertainCloneKey: 'teachingObject.b.v2',
+  sharedImpactReconciling: false,
+  reloadAssets(success) { missingReloads += 1; success([]); },
+  applyClonedVisual: () => { throw new Error('missing clone must not rebind'); },
+};
+discover.call(missingContext);
+discover.call(missingContext);
+if (missingReloads !== 2 || !missingContext.sharedImpactRebindError) {
+  throw new Error('failed discovery retry must only reload assets and keep actionable uncertainty');
+}
+if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries must not create another clone');
 
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   for (const key of [
@@ -353,6 +396,8 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
     'lesson.sharedImpactCloneKey',
     'lesson.sharedImpactRetryRebind',
     'lesson.sharedImpactRebindFailed',
+    'lesson.sharedImpactCloneUncertain',
+    'lesson.sharedImpactRetryDiscovery',
   ]) expectContains(locale, `'${key}'`, 'shared visual review must be localized');
 }
 

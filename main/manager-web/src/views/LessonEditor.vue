@@ -328,9 +328,13 @@
       :rebind-error="sharedImpactRebindError"
       :intent-type="sharedImpactIntent.intent"
       :layer="sharedImpactIntent.layer"
+      :uncertain-clone-key="sharedImpactUncertainCloneKey"
+      :reconciling="sharedImpactReconciling"
       @keep-shared="keepSharedVisual"
       @cloned="applyClonedVisual"
       @retry-rebind="retryClonedVisual"
+      @clone-uncertain="onCloneUncertain"
+      @retry-discovery="discoverUncertainClone"
       @error="onSharedImpactError"
       @close="closeSharedImpact"
     />
@@ -419,6 +423,8 @@ export default {
       rebindingSharedVisual: false,
       sharedImpactClonedAsset: null,
       sharedImpactRebindError: '',
+      sharedImpactUncertainCloneKey: '',
+      sharedImpactReconciling: false,
     };
   },
   computed: {
@@ -790,6 +796,8 @@ export default {
       };
       this.sharedImpactClonedAsset = null;
       this.sharedImpactRebindError = '';
+      this.sharedImpactUncertainCloneKey = '';
+      this.sharedImpactReconciling = false;
       this.sharedImpactVisible = true;
     },
     reviewSharedAssetSelection(asset) {
@@ -807,14 +815,44 @@ export default {
       this.closeSharedImpact();
     },
     closeSharedImpact(force = false) {
-      if (!force && (this.rebindingSharedVisual || this.sharedImpactClonedAsset)) return;
+      if (!force && (this.rebindingSharedVisual || this.sharedImpactClonedAsset || this.sharedImpactUncertainCloneKey || this.sharedImpactReconciling)) return;
       this.sharedImpactVisible = false;
       this.sharedImpactIntent = null;
       this.sharedImpactClonedAsset = null;
       this.sharedImpactRebindError = '';
+      this.sharedImpactUncertainCloneKey = '';
+      this.sharedImpactReconciling = false;
     },
     onSharedImpactError(msg) {
       this.$message.error(msg || this.$t('lesson.sharedImpactCloneError'));
+    },
+    onCloneUncertain(payload) {
+      const key = payload && payload.assetKey;
+      if (!key) {
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
+        return;
+      }
+      this.sharedImpactUncertainCloneKey = key;
+      this.discoverUncertainClone();
+    },
+    discoverUncertainClone() {
+      const key = this.sharedImpactUncertainCloneKey;
+      if (!key || this.sharedImpactReconciling) return;
+      this.sharedImpactReconciling = true;
+      this.sharedImpactRebindError = '';
+      this.reloadAssets((assets) => {
+        const clone = (Array.isArray(assets) ? assets : []).find((asset) => asset.assetKey === key);
+        this.sharedImpactReconciling = false;
+        if (!this.validClonedAsset(clone)) {
+          this.sharedImpactRebindError = this.$t('lesson.sharedImpactCloneNotFound', { key });
+          return;
+        }
+        this.sharedImpactUncertainCloneKey = '';
+        this.applyClonedVisual(clone);
+      }, (msg) => {
+        this.sharedImpactReconciling = false;
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactDiscoveryFailed', { reason: msg || key });
+      });
     },
     reloadAssets(onSuccess, onError) {
       if (this.$refs.assetManager) this.$refs.assetManager.reload(onSuccess, onError);
