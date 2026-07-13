@@ -155,6 +155,7 @@
         :subject-hint="lastSubject"
         :disabled="savingStep || rebindingSharedVisual || assetMutating"
         :mutation-settler="settleAssetMutation"
+        :refresh-handler="retryFailedAssetReconciliation"
         @assets-loaded="onAssetsLoaded"
         @asset-mutated="onAssetMutated"
         @asset-mutation-uncertain="onAssetMutationUncertain"
@@ -438,6 +439,8 @@ export default {
       assetProofFingerprint: null,
       assetRefreshIsProofRecovery: false,
       assetMutationTokens: {},
+      assetReconciliationEpoch: 0,
+      assetReconciliationRequests: {},
       editorDestroying: false,
       renameVisible: false,
       titleDraft: '',
@@ -601,9 +604,6 @@ export default {
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
-      Object.keys(this.assetMutationTokens || {}).forEach((id) => {
-        if (this.assetMutationTokens[id] === 'reconcile-failed') this.$delete(this.assetMutationTokens, id);
-      });
     },
     buildAssetProofFingerprint(assets) {
       return (Array.isArray(assets) ? assets : [])
@@ -658,24 +658,47 @@ export default {
         return true;
       }
       this.invalidatePreview();
+      return this.reconcileAssetMutation(id);
+    },
+    reconcileAssetMutation(id) {
+      if (this.editorDestroying || typeof id !== 'string') return false;
+      if (this.assetMutationTokens[id] !== 'settling' && this.assetMutationTokens[id] !== 'reconcile-failed') return false;
+      const requestId = this.assetReconciliationEpoch + 1;
+      this.assetReconciliationEpoch = requestId;
+      this.$set(this.assetReconciliationRequests, id, requestId);
+      this.$set(this.assetMutationTokens, id, 'settling');
+      const currentManager = this.$refs && this.$refs.assetManager;
+      if (currentManager && typeof currentManager.invalidateAssetReads === 'function') currentManager.invalidateAssetReads();
       Api.lesson.listAssets(
         this.lessonId,
         'espTft',
         (result) => {
           if (this.editorDestroying) return;
+          if (this.assetReconciliationRequests[id] !== requestId) return;
           const assets = result && result.assets;
           const manager = this.$refs && this.$refs.assetManager;
           if (manager && typeof manager.applyServerAssets === 'function') manager.applyServerAssets(assets);
           else this.onAssetsLoaded(assets);
+          this.$delete(this.assetReconciliationRequests, id);
           this.$delete(this.assetMutationTokens, id);
         },
         (message) => {
           if (this.editorDestroying) return;
+          if (this.assetReconciliationRequests[id] !== requestId) return;
+          this.$delete(this.assetReconciliationRequests, id);
           this.$set(this.assetMutationTokens, id, 'reconcile-failed');
           this.$message.error(message);
         },
       );
       return true;
+    },
+    retryAssetReconciliation(id) {
+      if (this.editorDestroying || this.assetMutationTokens[id] !== 'reconcile-failed') return false;
+      return this.reconcileAssetMutation(id);
+    },
+    retryFailedAssetReconciliation() {
+      const id = Object.keys(this.assetMutationTokens).find((key) => this.assetMutationTokens[key] === 'reconcile-failed');
+      return id ? this.retryAssetReconciliation(id) : false;
     },
     hasUnsafeProofState() {
       return Boolean(

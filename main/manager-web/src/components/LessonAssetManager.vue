@@ -64,7 +64,7 @@
     <div class="asset-list">
       <div class="list-toolbar">
         <span class="list-title muted small">{{ $t('lesson.assetList') }}</span>
-        <el-button type="text" size="mini" icon="el-icon-refresh" :loading="loadingList" @click="reload">{{ $t('lesson.refresh') }}</el-button>
+        <el-button type="text" size="mini" icon="el-icon-refresh" :loading="loadingList" @click="refreshAssets">{{ $t('lesson.refresh') }}</el-button>
       </div>
       <div v-if="!loadingList && !serverAssets.length" class="muted small">{{ $t('lesson.assetListEmpty') }}</div>
       <div v-for="layerName in layerOrder" :key="layerName">
@@ -125,6 +125,7 @@ export default {
     // Optional vocab/subject to prefill teachingObject.<subject> assetKey
     subjectHint: { type: String, default: '' },
     mutationSettler: { type: Function, required: true },
+    refreshHandler: { type: Function, default: null },
   },
   data() {
     return {
@@ -181,9 +182,13 @@ export default {
       };
       return map[layer] ? this.$t(map[layer]) : layer;
     },
-    applyServerAssets(assets) {
+    invalidateAssetReads() {
       this.assetListRequestId = Number(this.assetListRequestId || 0) + 1;
       this.loadingList = false;
+      return this.assetListRequestId;
+    },
+    applyServerAssets(assets) {
+      this.invalidateAssetReads();
       this.serverAssets = Array.isArray(assets) ? assets : [];
       this.$emit('assets-loaded', this.serverAssets);
       return this.serverAssets;
@@ -207,6 +212,10 @@ export default {
           if (typeof onError === 'function') onError(msg);
         },
       );
+    },
+    refreshAssets() {
+      if (this.refreshHandler && this.refreshHandler() === true) return;
+      this.reload();
     },
     openPreview(a) {
       this.previewAsset = a;
