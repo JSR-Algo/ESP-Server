@@ -327,6 +327,7 @@ export default {
   'lesson.sharedImpactKeep': 'Giữ ghim dùng chung / huỷ',
   'lesson.sharedImpactClone': 'Nhân bản cho bản nháp này',
   'lesson.sharedImpactLoadError': 'Không tải được ảnh hưởng của hình ảnh dùng chung.',
+  'lesson.sharedImpactInvalidResponse': 'Máy chủ trả về dữ liệu ảnh hưởng hình ảnh dùng chung không hợp lệ.',
   'lesson.sharedImpactCloneError': 'Không thể nhân bản hình ảnh dùng chung.',
   'lesson.sharedImpactCloned': 'Đã nhân bản hình ảnh và chỉ gắn lại bước nháp đang chọn.',
   // Ghi đè biểu cảm robot

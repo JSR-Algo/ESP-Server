@@ -179,6 +179,31 @@ assert.notStrictEqual(replacedBody, originalBody);
 assert.notStrictEqual(replacedBody.scene, originalBody.scene);
 assert.notStrictEqual(replacedBody.scene.layers, originalBody.scene.layers);
 
+const realSchemaBody = {
+  teachingObject: {
+    primaryWord: 'SEED',
+    asset: { key: referencedAssetKey, src: '/old.png', sha256: 'old-sha', fit: 'contain' },
+  },
+  robotOverlay: {
+    asset: { key: 'robotOverlay.teach', src: '/robot.png', sha256: 'robot-sha' },
+  },
+  choiceMetadata: { key: referencedAssetKey, label: 'must not be treated as an asset' },
+};
+assert.deepStrictEqual(
+  collectAssetReferences([{ stepKey: 'real-s2', stepBody: realSchemaBody }], referencedAssetKey),
+  ['real-s2'],
+);
+assert.deepStrictEqual(replaceStepAssetReference(realSchemaBody, referencedAssetKey, clonedAsset), {
+  teachingObject: {
+    primaryWord: 'SEED',
+    asset: { key: clonedAsset.assetKey, src: clonedAsset.path, sha256: clonedAsset.sha256, fit: 'contain', assetId: clonedAsset.assetId },
+  },
+  robotOverlay: {
+    asset: { key: 'robotOverlay.teach', src: '/robot.png', sha256: 'robot-sha' },
+  },
+  choiceMetadata: { key: referencedAssetKey, label: 'must not be treated as an asset' },
+});
+
 const cyclicArray = [];
 cyclicArray.push(cyclicArray);
 assert.throws(

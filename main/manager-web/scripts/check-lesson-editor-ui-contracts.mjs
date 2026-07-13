@@ -132,6 +132,19 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'scope.row.
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'scope.row.lessonVersion', 'every backend lesson version must be rendered');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'localAffectedStepKeys', 'the current draft step references must be visible');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneKey', 'the collision-free clone key must be visible');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'authoritativeAsset.assetKey', 'source key must come from the impact response');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'authoritativeAsset.sha256', 'source checksum must come from the impact response');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', '!impactLoaded', 'actions must remain gated until authoritative impact succeeds');
+expectRegex(
+  'src/components/lesson/SharedVisualImpactDialog.vue',
+  /keepShared\(\)\s*\{[\s\S]*?if\s*\(!this\.impactLoaded\)\s*return/m,
+  'keep-shared must not bypass a failed impact request',
+);
+expectRegex(
+  'src/components/lesson/SharedVisualImpactDialog.vue',
+  /confirmClone\(\)\s*\{[\s\S]*?!this\.impactLoaded/m,
+  'clone must not bypass a failed impact request',
+);
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-review-request'", 'shared replacement must request review first');
 expectContains('src/components/LessonAssetManager.vue', 'confirmReplace', 'replacement mode needs an explicit parent confirmation gate');
 expectRegex(
@@ -144,6 +157,28 @@ expectRegex(
   /Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?reloadAssets[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null/m,
   'clone rebind must wait for server confirmation before refetch and preview invalidation',
 );
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /Api\.lesson\.updateStep\([\s\S]*?fetchSteps\([\s\S]*?reloadAssets\(\)[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null[\s\S]*?doValidate\(\)[\s\S]*?doPreview\(\)/m,
+  'server-confirmed clone rebind must refetch validation and manifest preview',
+);
+const cloneRebindSource = extractObjectMethod(editorSource, 'applyClonedVisual');
+const cloneRebindOrder = [
+  'Api.lesson.updateStep(',
+  'this.fetchSteps({',
+  'this.reloadAssets();',
+  'this.preview = null;',
+  'this.previewManifest = null;',
+  'this.doValidate();',
+  'this.doPreview();',
+].map((needle) => {
+  const index = cloneRebindSource.indexOf(needle);
+  if (index === -1) throw new Error(`applyClonedVisual missing ${needle}`);
+  return index;
+});
+if (!cloneRebindOrder.every((index, position) => position === 0 || index > cloneRebindOrder[position - 1])) {
+  throw new Error('applyClonedVisual must update one step, then refetch steps/assets and authoritative validation/preview in order');
+}
 
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   for (const key of [

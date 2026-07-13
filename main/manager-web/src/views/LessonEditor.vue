@@ -811,6 +811,8 @@ export default {
               this.reloadAssets();
               this.preview = null;
               this.previewManifest = null;
+              this.doValidate();
+              this.doPreview();
               this.$delete(this.selectedAssetDrafts, step.stepKey);
               if (!this.selectedStepDrafts[step.stepKey] && !this.promptDirty) {
                 this.$delete(this.dirtyStepKeys, step.stepKey);

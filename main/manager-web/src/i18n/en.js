@@ -327,6 +327,7 @@ export default {
   'lesson.sharedImpactKeep': 'Keep shared pin / cancel',
   'lesson.sharedImpactClone': 'Clone for this draft',
   'lesson.sharedImpactLoadError': 'Could not load shared visual impact.',
+  'lesson.sharedImpactInvalidResponse': 'The server returned an invalid shared visual impact response.',
   'lesson.sharedImpactCloneError': 'Could not clone the shared visual.',
   'lesson.sharedImpactCloned': 'Cloned the visual and rebound only the selected draft step.',
   // Robot expression override

@@ -104,11 +104,12 @@ function assertJsonTree(value, label, ancestors = new Set()) {
   ancestors.delete(value);
 }
 
-function containsAssetKey(value, assetKey) {
-  if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey));
+function containsAssetKey(value, assetKey, propertyName = '') {
+  if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey, propertyName));
   if (!value || typeof value !== 'object') return false;
   if (value.assetKey === assetKey) return true;
-  return Object.values(value).some((item) => containsAssetKey(item, assetKey));
+  if (propertyName === 'asset' && value.key === assetKey) return true;
+  return Object.entries(value).some(([key, item]) => containsAssetKey(item, assetKey, key));
 }
 
 /** Finds references in authoring bodies, which must be acyclic JSON trees. */
@@ -137,18 +138,27 @@ function nextClonedAssetKey(assetKey, assets) {
   return `${base}.v${maxVersion + 1}`;
 }
 
-function replaceAssetReference(value, fromKey, clonedAsset) {
+function replaceAssetReference(value, fromKey, clonedAsset, propertyName = '') {
   if (Array.isArray(value)) {
-    return value.map((item) => replaceAssetReference(item, fromKey, clonedAsset));
+    return value.map((item) => replaceAssetReference(item, fromKey, clonedAsset, propertyName));
   }
   if (!value || typeof value !== 'object') return value;
 
   const replaced = Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      replaceAssetReference(item, fromKey, clonedAsset),
+      replaceAssetReference(item, fromKey, clonedAsset, key),
     ]),
   );
+  if (propertyName === 'asset' && value.key === fromKey) {
+    return {
+      ...replaced,
+      assetId: clonedAsset.assetId,
+      key: clonedAsset.assetKey,
+      src: clonedAsset.path || clonedAsset.src,
+      sha256: clonedAsset.sha256,
+    };
+  }
   if (value.assetKey !== fromKey) return replaced;
   return {
     ...replaced,

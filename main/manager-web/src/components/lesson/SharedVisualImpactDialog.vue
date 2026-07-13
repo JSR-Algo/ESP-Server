@@ -18,8 +18,8 @@
       />
 
       <dl v-if="asset" class="impact-review__source">
-        <dt>{{ $t('lesson.sharedImpactSourceKey') }}</dt><dd class="mono">{{ asset.assetKey }}</dd>
-        <dt>{{ $t('lesson.sharedImpactChecksum') }}</dt><dd class="mono">{{ asset.sha256 || asset.checksum || '—' }}</dd>
+        <dt>{{ $t('lesson.sharedImpactSourceKey') }}</dt><dd class="mono">{{ authoritativeAsset.assetKey || '—' }}</dd>
+        <dt>{{ $t('lesson.sharedImpactChecksum') }}</dt><dd class="mono">{{ authoritativeAsset.sha256 || authoritativeAsset.checksum || '—' }}</dd>
         <dt>{{ $t('lesson.sharedImpactCloneKey') }}</dt><dd><el-input v-model="cloneKey" size="small" :aria-label="$t('lesson.sharedImpactCloneKey')" /></dd>
       </dl>
 
@@ -50,8 +50,8 @@
     </div>
 
     <span slot="footer">
-      <el-button size="small" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
-      <el-button type="primary" size="small" :loading="cloning" :disabled="loading || !cloneKey" @click="confirmClone">
+      <el-button size="small" :disabled="!impactLoaded || loading || cloning" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
+      <el-button type="primary" size="small" :loading="cloning" :disabled="!impactLoaded || loading || cloning || !cloneKey" @click="confirmClone">
         {{ $t('lesson.sharedImpactClone') }}
       </el-button>
     </span>
@@ -73,9 +73,13 @@ export default {
     currentStep: { type: Object, default: null },
   },
   data() {
-    return { impact: null, loading: false, cloning: false, loadError: '', cloneKey: '' };
+    return { impact: null, impactLoaded: false, loading: false, cloning: false, loadError: '', cloneKey: '' };
   },
   computed: {
+    authoritativeAsset() {
+      if (!this.impact) return {};
+      return this.impact.sourceAsset || this.impact.asset || this.impact.source || this.impact;
+    },
     backendUsages() {
       if (!this.impact) return [];
       const usages = this.impact.usages || this.impact.references || this.impact.usage || this.impact.affectedUsages || [];
@@ -97,19 +101,37 @@ export default {
     loadImpact() {
       if (!this.asset || !this.asset.assetId) return;
       this.loading = true;
+      this.impactLoaded = false;
+      this.impact = null;
       this.loadError = '';
       Api.lesson.reviewSharedVisualImpact(
         this.asset.assetId,
-        (impact) => { this.loading = false; this.impact = impact || {}; },
-        (msg) => { this.loading = false; this.loadError = String(msg || this.$t('lesson.sharedImpactLoadError')); this.$emit('error', msg); },
+        (impact) => {
+          this.loading = false;
+          this.impact = impact || {};
+          if (!this.authoritativeAsset.assetKey) {
+            this.loadError = this.$t('lesson.sharedImpactInvalidResponse');
+            return;
+          }
+          this.cloneKey = nextClonedAssetKey(this.authoritativeAsset.assetKey, this.assets);
+          this.impactLoaded = true;
+        },
+        (msg) => {
+          this.loading = false;
+          this.impactLoaded = false;
+          this.impact = null;
+          this.loadError = String(msg || this.$t('lesson.sharedImpactLoadError'));
+          this.$emit('error', msg);
+        },
       );
     },
     keepShared() {
+      if (!this.impactLoaded) return;
       this.$emit('keep-shared', { asset: this.asset, currentStep: this.currentStep });
       this.$emit('close');
     },
     confirmClone() {
-      if (!this.asset || !this.asset.assetId || !this.cloneKey || this.cloning) return;
+      if (!this.impactLoaded || !this.asset || !this.asset.assetId || !this.cloneKey || this.cloning) return;
       this.cloning = true;
       Api.lesson.cloneSharedVisual(this.lessonId, this.asset.assetId, {
         profile: 'espTft',
@@ -117,6 +139,7 @@ export default {
       }, (result) => {
         this.cloning = false;
         this.$emit('cloned', result && (result.asset || result.clone) ? (result.asset || result.clone) : result);
+        this.$emit('close');
       }, (msg) => {
         this.cloning = false;
         this.$emit('error', msg);
