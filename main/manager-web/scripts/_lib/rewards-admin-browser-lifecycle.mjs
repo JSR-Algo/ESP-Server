@@ -1,9 +1,11 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { once } from 'node:events';
-import { readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export function buildBrowserEnvironment({ baseEnv, backendUrl, managerPort }) {
   const environment = {
@@ -107,7 +109,7 @@ export function isExpectedBrowserHttpFailure({ url, status, traceStarted }) {
 }
 
 export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_000 }) {
-  const children = new Set();
+  const children = new Map();
   let cleanupPromise;
 
   function spawnTracked(command, args, options = {}) {
@@ -115,55 +117,131 @@ export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_
       ...options,
       detached: process.platform !== 'win32',
     });
-    children.add(child);
-    const release = () => children.delete(child);
+    const tracked = { child, pid: child.pid, retainUntilSettled: false };
+    children.set(child, tracked);
+    const release = () => {
+      if (!tracked.retainUntilSettled) children.delete(child);
+    };
     child.once('error', release);
     child.once('exit', release);
     return child;
   }
 
-  function signalProcessGroup(child, signal) {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  function signalProcessGroup(tracked, signal) {
+    if (!tracked?.pid) return;
     try {
-      if (process.platform === 'win32') child.kill(signal);
-      else process.kill(-child.pid, signal);
+      if (process.platform === 'win32') tracked.child.kill(signal);
+      else process.kill(-tracked.pid, signal);
     } catch (error) {
       if (error?.code !== 'ESRCH') throw error;
     }
   }
 
-  async function terminate(child) {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const gracefulExit = once(child, 'exit').catch(() => undefined);
-    signalProcessGroup(child, 'SIGTERM');
-    await Promise.race([
-      gracefulExit,
-      new Promise((resolveWait) => setTimeout(resolveWait, cleanupTimeoutMs)),
-    ]);
-    if (child.exitCode === null && child.signalCode === null) {
-      const forcedExit = once(child, 'exit').catch(() => undefined);
-      signalProcessGroup(child, 'SIGKILL');
-      await Promise.race([
-        forcedExit,
-        new Promise((resolveWait) => setTimeout(resolveWait, cleanupTimeoutMs)),
-      ]);
+  function processGroupExists(tracked) {
+    if (!tracked?.pid) return false;
+    if (process.platform === 'win32') {
+      return tracked.child.exitCode === null && tracked.child.signalCode === null;
     }
+    try {
+      process.kill(-tracked.pid, 0);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ESRCH') return false;
+      throw error;
+    }
+  }
+
+  async function waitForProcessGroupExit(tracked) {
+    const deadline = Date.now() + cleanupTimeoutMs;
+    while (Date.now() < deadline) {
+      if (!processGroupExists(tracked)) return true;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    return !processGroupExists(tracked);
+  }
+
+  async function terminateProcessGroup(tracked) {
+    if (!processGroupExists(tracked)) return;
+    signalProcessGroup(tracked, 'SIGTERM');
+    if (await waitForProcessGroupExit(tracked)) return;
+    signalProcessGroup(tracked, 'SIGKILL');
+    await waitForProcessGroupExit(tracked);
+  }
+
+  function runTrackedCommand(command, args, options = {}) {
+    return new Promise((resolveRun, reject) => {
+      const { captureOutput = false, timeout, ...spawnOptions } = options;
+      const child = spawnTracked(command, args, spawnOptions);
+      const tracked = children.get(child);
+      tracked.retainUntilSettled = true;
+      let stdout = '';
+      let stderr = '';
+      if (captureOutput) {
+        child.stdout?.setEncoding('utf8');
+        child.stderr?.setEncoding('utf8');
+        child.stdout?.on('data', (chunk) => { stdout += chunk; });
+        child.stderr?.on('data', (chunk) => { stderr += chunk; });
+      }
+      let settled = false;
+      let timedOut = false;
+      let timer;
+
+      const settle = (callback) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        children.delete(child);
+        callback();
+      };
+      child.once('error', (error) => {
+        if (!timedOut) settle(() => reject(error));
+      });
+      child.once('exit', (code, signal) => {
+        if (timedOut) return;
+        settle(() => {
+          if (code === 0) resolveRun({ child, code, signal, stdout, stderr });
+          else reject(new Error(`${command} exited with ${code ?? signal ?? 'unknown status'}${stderr ? `: ${stderr.trim()}` : ''}`));
+        });
+      });
+      if (Number.isFinite(timeout) && timeout > 0) {
+        timer = setTimeout(async () => {
+          if (settled) return;
+          timedOut = true;
+          try {
+            await terminateProcessGroup(tracked);
+            settle(() => reject(new Error(`${command} timed out after ${timeout}ms`)));
+          } catch (error) {
+            settle(() => reject(error));
+          }
+        }, timeout);
+        timer.unref();
+      }
+    });
   }
 
   function cleanup() {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
-      for (const child of [...children].reverse()) await terminate(child);
+      for (const tracked of [...children.values()].reverse()) {
+        await terminateProcessGroup(tracked);
+        children.delete(tracked.child);
+      }
       await cleanupContainer();
     })();
     return cleanupPromise;
   }
 
-  return { cleanup, spawnTracked };
+  return { cleanup, runTrackedCommand, spawnTracked, trackedCount: () => children.size };
 }
 
 async function listFiles(directory, root = directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT' && directory === root) return [];
+    throw error;
+  }
   const files = [];
   for (const entry of entries) {
     const path = resolve(directory, entry.name);
@@ -173,20 +251,141 @@ async function listFiles(directory, root = directory) {
   return files;
 }
 
+async function privacyBuffers(file) {
+  const buffers = [await readFile(file.path)];
+  if (!file.name.toLowerCase().endsWith('.zip')) return buffers;
+  const { stdout } = await execFileAsync('unzip', ['-Z1', file.path], { encoding: 'utf8' });
+  const entries = stdout.split(/\r?\n/).filter((entry) => entry && !entry.endsWith('/'));
+  for (const entry of entries) {
+    const extracted = await execFileAsync('unzip', ['-p', file.path, entry], {
+      encoding: 'buffer',
+      maxBuffer: 100 * 1024 * 1024,
+    });
+    buffers.push(extracted.stdout);
+  }
+  return buffers;
+}
+
 export async function scanArtifactPrivacy(directory, { forbiddenValues = [], forbiddenPatterns = [] } = {}) {
   const flagged = [];
   for (const file of await listFiles(directory)) {
-    const buffer = await readFile(file.path);
-    const text = buffer.toString('utf8');
-    const hasForbiddenValue = forbiddenValues
-      .filter((value) => typeof value === 'string' && value.length > 0)
-      .some((value) => buffer.includes(Buffer.from(value)));
-    const hasForbiddenPattern = forbiddenPatterns.some((pattern) => {
-      pattern.lastIndex = 0;
-      return pattern.test(text);
-    });
-    if (hasForbiddenValue || hasForbiddenPattern) flagged.push(file.name);
+    try {
+      const buffers = await privacyBuffers(file);
+      const hasForbiddenValue = forbiddenValues
+        .filter((value) => typeof value === 'string' && value.length > 0)
+        .some((value) => buffers.some((buffer) => buffer.includes(Buffer.from(value))));
+      const hasForbiddenPattern = forbiddenPatterns.some((pattern) => buffers.some((buffer) => {
+        pattern.lastIndex = 0;
+        return pattern.test(buffer.toString('utf8'));
+      }));
+      if (hasForbiddenValue || hasForbiddenPattern) flagged.push(file.name);
+    } catch {
+      flagged.push(file.name);
+    }
   }
   flagged.sort();
   return { pass: flagged.length === 0, files: flagged };
+}
+
+export function sanitizeArtifactBuffer(buffer, forbiddenValues = []) {
+  let text = buffer.toString('utf8');
+  let changed = false;
+  for (const value of forbiddenValues.filter((item) => typeof item === 'string' && item.length > 0)) {
+    if (!text.includes(value)) continue;
+    text = text.split(value).join('[REDACTED]');
+    changed = true;
+  }
+  const replacements = [
+    [/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer [REDACTED]'],
+    [/nestjs_session_token/gi, 'redacted_session_key'],
+    [/"(?:parent|household)_id"\s*:/gi, '"redacted_identifier":'],
+    [
+      /"(?:transcript|score|reward_timestamp|password|mfa_secret)"\s*:\s*(?:"(?:\\.|[^"\\])*"|[^,}\]]+)/gi,
+      '"redacted_field":"[REDACTED]"',
+    ],
+  ];
+  for (const [pattern, replacement] of replacements) {
+    pattern.lastIndex = 0;
+    if (!pattern.test(text)) continue;
+    pattern.lastIndex = 0;
+    text = text.replace(pattern, replacement);
+    changed = true;
+  }
+  return changed ? Buffer.from(text) : buffer;
+}
+
+function redactError(error, forbiddenValues) {
+  let message = error instanceof Error ? error.message : String(error);
+  for (const value of forbiddenValues.filter((item) => typeof item === 'string' && item.length > 0)) {
+    message = message.split(value).join('[REDACTED]');
+  }
+  return message;
+}
+
+export async function executeWithArtifactFinalization({
+  runWorkflow,
+  finalizeArtifacts,
+  forbiddenValues = [],
+}) {
+  let result;
+  let workflowError;
+  let artifactError;
+  try {
+    result = await runWorkflow();
+  } catch (error) {
+    workflowError = error;
+  }
+  try {
+    await finalizeArtifacts({ workflowSucceeded: !workflowError });
+  } catch (error) {
+    artifactError = error;
+  }
+  if (workflowError || artifactError) {
+    const messages = [];
+    if (workflowError) messages.push(`Workflow failed: ${redactError(workflowError, forbiddenValues)}`);
+    if (artifactError) messages.push(`Artifact finalization failed: ${redactError(artifactError, forbiddenValues)}`);
+    throw new Error(messages.join('\n'));
+  }
+  return result;
+}
+
+export async function finalizeArtifactPrivacy(directory, {
+  workflowSucceeded,
+  scanPrivacy,
+  allowedSuccessImages = ['final-original-immutable.png'],
+}) {
+  let files = [];
+  try {
+    files = await listFiles(directory);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const allowedImages = new Set(allowedSuccessImages);
+  for (const file of files) {
+    const lowerName = file.name.toLowerCase();
+    const unsafeBinary = lowerName.endsWith('.zip') || lowerName.endsWith('.png');
+    const allowedSuccessImage = workflowSucceeded && allowedImages.has(file.name);
+    if (unsafeBinary && !allowedSuccessImage && !(workflowSucceeded && lowerName.endsWith('.zip'))) {
+      await rm(file.path, { force: true });
+    }
+  }
+  try {
+    const result = await scanPrivacy();
+    if (!result.pass) throw new Error(`Artifact privacy scan failed: ${result.files.join(', ')}`);
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function sanitizeTraceToDeliverable({ rawTrace, deliverableTrace, sanitize }) {
+  try {
+    await sanitize(rawTrace, deliverableTrace);
+    await access(deliverableTrace);
+  } catch (error) {
+    await rm(deliverableTrace, { force: true });
+    throw error;
+  } finally {
+    await rm(rawTrace, { force: true });
+  }
 }

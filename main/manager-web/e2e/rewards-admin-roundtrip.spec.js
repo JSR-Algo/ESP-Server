@@ -98,6 +98,7 @@ function normalizePins(payload) {
 }
 
 async function redactDirectory(directory, forbiddenValues) {
+  const { sanitizeArtifactBuffer } = await lifecycleModulePromise;
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name);
     if (entry.isDirectory()) {
@@ -105,25 +106,19 @@ async function redactDirectory(directory, forbiddenValues) {
       continue;
     }
     if (!entry.isFile()) continue;
-    let buffer = await readFile(target);
-    let changed = false;
-    for (const forbidden of forbiddenValues.filter(Boolean)) {
-      const needle = Buffer.from(forbidden);
-      if (!buffer.includes(needle)) continue;
-      buffer = Buffer.from(buffer.toString('utf8').split(forbidden).join('[REDACTED]'));
-      changed = true;
-    }
-    if (changed) await writeFile(target, buffer);
+    const buffer = await readFile(target);
+    const sanitized = sanitizeArtifactBuffer(buffer, forbiddenValues);
+    if (sanitized !== buffer) await writeFile(target, sanitized);
   }
 }
 
-async function sanitizeTraceArchive(tracePath, forbiddenValues) {
+async function sanitizeTraceArchive(rawTracePath, deliverableTracePath, forbiddenValues) {
   const directory = await mkdtemp(path.join(tmpdir(), 'rewards-admin-trace-'));
   try {
-    await execFileAsync('unzip', ['-qq', tracePath, '-d', directory]);
+    await execFileAsync('unzip', ['-qq', rawTracePath, '-d', directory]);
     await redactDirectory(directory, forbiddenValues);
-    await rm(tracePath, { force: true });
-    await execFileAsync('zip', ['-qr', tracePath, '.'], { cwd: directory });
+    await rm(deliverableTracePath, { force: true });
+    await execFileAsync('zip', ['-qr', deliverableTracePath, '.'], { cwd: directory });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -171,7 +166,8 @@ async function loginWithRealAdminSession(page, fixture) {
   expect(login.payload).toMatchObject({ mfa_required: true });
   expect(login.payload.mfa_token).toEqual(expect.any(String));
 
-  await dialog.getByPlaceholder('6-digit code').fill(fixture.totp);
+  const totp = process.env.REWARDS_ADMIN_FAILURE_INJECTION === 'mfa' ? '000000' : fixture.totp;
+  await dialog.getByPlaceholder('6-digit code').fill(totp);
   const mfa = await waitForAdminResponse(page, {
     method: 'POST',
     pathPattern: /\/v1\/admin\/auth\/mfa-verify$/,
@@ -413,11 +409,34 @@ test('admin customizes the canonical lesson without mutating v1', async ({ page,
     await page.screenshot({ path: path.join(artifactDir, 'final-original-immutable.png'), fullPage: true });
   } finally {
     if (traceStarted) {
-      const tracePath = path.join(artifactDir, 'trace.zip');
-      await context.tracing.stop({ path: tracePath });
-      await sanitizeTraceArchive(tracePath, [sessionToken, 'nestjs_session_token']);
+      const { sanitizeTraceToDeliverable } = await lifecycleModulePromise;
+      const rawTraceDirectory = process.env.REWARDS_ADMIN_RAW_TRACE_DIR;
+      if (!rawTraceDirectory) throw new Error('Missing runner-owned raw trace directory');
+      await mkdir(rawTraceDirectory, { recursive: true });
+      const rawTracePath = path.join(rawTraceDirectory, 'trace.zip');
+      const deliverableTracePath = path.join(artifactDir, 'trace.zip');
+      try {
+        await context.tracing.stop({ path: rawTracePath });
+        await sanitizeTraceToDeliverable({
+          rawTrace: rawTracePath,
+          deliverableTrace: deliverableTracePath,
+          sanitize: async (rawTrace, deliverableTrace) => {
+            if (process.env.REWARDS_ADMIN_FAILURE_INJECTION === 'trace-sanitizer') {
+              throw new Error('Injected trace sanitizer failure');
+            }
+            await sanitizeTraceArchive(rawTrace, deliverableTrace, [
+              sessionToken,
+              fixture.email,
+              fixture.password,
+              fixture.totp,
+              'nestjs_session_token',
+            ]);
+          },
+        });
+      } finally {
+        await rm(rawTracePath, { force: true });
+      }
     }
-    await page.screenshot({ path: path.join(artifactDir, 'last-state.png'), fullPage: true }).catch(() => undefined);
     await writeFile(path.join(artifactDir, 'request-summary.json'), JSON.stringify({ requests, failures }, null, 2));
     await writeFile(path.join(artifactDir, 'console-summary.json'), JSON.stringify({ entries: consoleEntries }, null, 2));
     await writeFile(path.join(artifactDir, 'checksums.json'), JSON.stringify({

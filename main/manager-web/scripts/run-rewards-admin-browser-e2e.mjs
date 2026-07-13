@@ -1,4 +1,5 @@
-import { rm } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -6,7 +7,9 @@ import {
   buildBackendEnvironment,
   computeTotp,
   createProcessLifecycle,
+  executeWithArtifactFinalization,
   extractListeningPort,
+  finalizeArtifactPrivacy,
   findFreePort,
   scanArtifactPrivacy,
 } from './_lib/rewards-admin-browser-lifecycle.mjs';
@@ -17,12 +20,14 @@ const backendRoot = resolve(
     ?? resolve(managerRoot, '../../../tbot-backend-rewards-final'),
 );
 const artifactDir = resolve(managerRoot, 'output/playwright/rewards-admin-roundtrip');
+const rawTraceDir = resolve(tmpdir(), `tbot-rewards-admin-raw-trace-${process.pid}`);
 const containerName = `tbot-rewards-admin-browser-${process.pid}`;
 const postgresImage = process.env.TBOT_REWARDS_POSTGRES_IMAGE ?? 'postgres:16-alpine';
 const adminEmail = 'rewards-admin-browser@invalid.test';
 const adminPassword = 'RewardsAdminBrowser-E2E-Only-93!';
 const adminMfaSecret = 'JBSWY3DPEHPK3PXP';
 const childLogs = new Map();
+let browserTotp = '';
 
 async function removeContainer() {
   try {
@@ -49,41 +54,23 @@ function captureLogs(child, label) {
 }
 
 function runCommand(command, args, options = {}) {
-  return new Promise((resolveRun, reject) => {
-    const child = lifecycle.spawnTracked(command, args, {
-      cwd: options.cwd,
-      env: options.env ?? process.env,
-      stdio: options.stdio ?? 'inherit',
-      timeout: options.timeout ?? 180_000,
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (code === 0) resolveRun();
-      else reject(new Error(`${command} exited with ${code ?? signal ?? 'unknown status'}`));
-    });
+  return lifecycle.runTrackedCommand(command, args, {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: options.stdio ?? 'inherit',
+    timeout: options.timeout ?? 180_000,
   });
 }
 
-function outputCommand(command, args, options = {}) {
-  return new Promise((resolveOutput, reject) => {
-    const child = lifecycle.spawnTracked(command, args, {
-      cwd: options.cwd,
-      env: options.env ?? process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: options.timeout ?? 30_000,
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (code === 0) resolveOutput(stdout.trim());
-      else reject(new Error(`${command} exited with ${code ?? signal ?? 'unknown status'}: ${stderr.trim()}`));
-    });
+async function outputCommand(command, args, options = {}) {
+  const result = await lifecycle.runTrackedCommand(command, args, {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    captureOutput: true,
+    timeout: options.timeout ?? 30_000,
   });
+  return result.stdout.trim();
 }
 
 async function waitForDatabase() {
@@ -204,8 +191,11 @@ async function startManager(backendUrl, port) {
 }
 
 async function runPrivacyScan() {
+  if (process.env.REWARDS_ADMIN_FAILURE_INJECTION === 'privacy-scanner') {
+    throw new Error('Injected artifact privacy scanner failure');
+  }
   const result = await scanArtifactPrivacy(artifactDir, {
-    forbiddenValues: [adminEmail, adminPassword, adminMfaSecret, computeTotp(adminMfaSecret)],
+    forbiddenValues: [adminEmail, adminPassword, adminMfaSecret, browserTotp],
     forbiddenPatterns: [
       /Bearer\s+[A-Za-z0-9._-]{16,}/i,
       /nestjs_session_token/i,
@@ -214,6 +204,15 @@ async function runPrivacyScan() {
     ],
   });
   if (!result.pass) throw new Error(`Artifact privacy scan failed: ${result.files.join(', ')}`);
+  return result;
+}
+
+function redactText(value) {
+  let text = String(value);
+  for (const secret of [adminEmail, adminPassword, adminMfaSecret, browserTotp].filter(Boolean)) {
+    text = text.split(secret).join('[REDACTED]');
+  }
+  return text;
 }
 
 let handlingSignal = false;
@@ -229,52 +228,72 @@ for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
   });
 }
 
+const forbiddenArtifactValues = [adminEmail, adminPassword, adminMfaSecret];
+
 try {
-  await rm(artifactDir, { recursive: true, force: true });
-  await outputCommand('docker', [
-    'run', '--rm', '-d', '--name', containerName,
-    '-e', 'POSTGRES_USER=tbot',
-    '-e', 'POSTGRES_PASSWORD=tbot',
-    '-e', 'POSTGRES_DB=tbot',
-    '-p', '127.0.0.1::5432',
-    postgresImage,
-  ], { timeout: 30_000 });
-  await waitForDatabase();
-  const portOutput = await outputCommand('docker', ['port', containerName, '5432/tcp']);
-  const postgresPort = portOutput.match(/:(\d+)$/)?.[1];
-  if (!postgresPort) throw new Error(`Unable to parse disposable PostgreSQL port: ${portOutput}`);
-  const databaseUrl = `postgresql://tbot:tbot@127.0.0.1:${postgresPort}/tbot`;
+  await executeWithArtifactFinalization({
+    runWorkflow: async () => {
+      await rm(artifactDir, { recursive: true, force: true });
+      await rm(rawTraceDir, { recursive: true, force: true });
+      await mkdir(rawTraceDir, { recursive: true });
+      await outputCommand('docker', [
+        'run', '--rm', '-d', '--name', containerName,
+        '-e', 'POSTGRES_USER=tbot',
+        '-e', 'POSTGRES_PASSWORD=tbot',
+        '-e', 'POSTGRES_DB=tbot',
+        '-p', '127.0.0.1::5432',
+        postgresImage,
+      ], { timeout: 30_000 });
+      await waitForDatabase();
+      const portOutput = await outputCommand('docker', ['port', containerName, '5432/tcp']);
+      const postgresPort = portOutput.match(/:(\d+)$/)?.[1];
+      if (!postgresPort) throw new Error(`Unable to parse disposable PostgreSQL port: ${portOutput}`);
+      const databaseUrl = `postgresql://tbot:tbot@127.0.0.1:${postgresPort}/tbot`;
 
-  await runCommand('npm', ['run', 'migrate'], {
-    cwd: backendRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    timeout: 180_000,
-  });
-  await seedAdmin(databaseUrl);
-  await runCommand('npm', ['run', 'build'], { cwd: backendRoot, timeout: 180_000 });
-  const backend = await startBackend(databaseUrl);
-  const managerPort = await findFreePort();
-  await startManager(backend.url, managerPort);
+      await runCommand('npm', ['run', 'migrate'], {
+        cwd: backendRoot,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+        timeout: 180_000,
+      });
+      await seedAdmin(databaseUrl);
+      await runCommand('npm', ['run', 'build'], { cwd: backendRoot, timeout: 180_000 });
+      const backend = await startBackend(databaseUrl);
+      const managerPort = await findFreePort();
+      await startManager(backend.url, managerPort);
+      browserTotp = computeTotp(adminMfaSecret);
+      forbiddenArtifactValues.push(browserTotp);
 
-  await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.config.js'], {
-    cwd: managerRoot,
-    env: {
-      ...buildBrowserEnvironment({ baseEnv: process.env, backendUrl: backend.url, managerPort }),
-      REWARDS_ADMIN_BASE_URL: `http://127.0.0.1:${managerPort}`,
-      REWARDS_ADMIN_ARTIFACT_DIR: artifactDir,
-      REWARDS_ADMIN_EMAIL: adminEmail,
-      REWARDS_ADMIN_PASSWORD: adminPassword,
-      REWARDS_ADMIN_TOTP: computeTotp(adminMfaSecret),
+      await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.config.js'], {
+        cwd: managerRoot,
+        env: {
+          ...buildBrowserEnvironment({ baseEnv: process.env, backendUrl: backend.url, managerPort }),
+          REWARDS_ADMIN_BASE_URL: `http://127.0.0.1:${managerPort}`,
+          REWARDS_ADMIN_ARTIFACT_DIR: artifactDir,
+          REWARDS_ADMIN_RAW_TRACE_DIR: rawTraceDir,
+          REWARDS_ADMIN_EMAIL: adminEmail,
+          REWARDS_ADMIN_PASSWORD: adminPassword,
+          REWARDS_ADMIN_TOTP: browserTotp,
+          REWARDS_ADMIN_FAILURE_INJECTION: process.env.REWARDS_ADMIN_FAILURE_INJECTION ?? '',
+        },
+        timeout: 240_000,
+      });
     },
-    timeout: 240_000,
+    finalizeArtifacts: ({ workflowSucceeded }) => finalizeArtifactPrivacy(artifactDir, {
+      workflowSucceeded,
+      scanPrivacy: runPrivacyScan,
+    }),
+    forbiddenValues: forbiddenArtifactValues,
   });
-  await runPrivacyScan();
   console.info('Authenticated rewards admin browser round-trip passed with sanitized artifacts.');
 } catch (error) {
   for (const [label, logs] of childLogs) {
-    if (logs.length) process.stderr.write(`\n${label} log tail:\n${logs.join('')}`);
+    if (logs.length) process.stderr.write(`\n${label} log tail:\n${redactText(logs.join(''))}`);
   }
   throw error;
 } finally {
-  await lifecycle.cleanup();
+  try {
+    await lifecycle.cleanup();
+  } finally {
+    await rm(rawTraceDir, { recursive: true, force: true });
+  }
 }
