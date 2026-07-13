@@ -201,6 +201,38 @@ export default {
     });
   },
 
+  // GET /v1/admin/assets/:assetId/impact -> authoritative shared usage details
+  reviewSharedVisualImpact(assetId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/assets/${assetId}/impact`,
+      method: 'GET',
+      onSuccess,
+      onError,
+    });
+  },
+
+  // POST /v1/admin/lessons/:lessonId/assets/:assetId/clone
+  cloneSharedVisual(lessonId, assetId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/assets/${assetId}/clone`,
+      method: 'POST',
+      data,
+      onSuccess,
+      onError,
+    });
+  },
+
+  // POST /v1/admin/lessons/:lessonId/simulate?profile=espTft
+  simulate(lessonId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/simulate?profile=espTft`,
+      method: 'POST',
+      data,
+      onSuccess,
+      onError,
+    });
+  },
+
   // DELETE /v1/admin/lessons/:lessonId/assets/:assetKey?profile= (draft only)
   // Removes the assets row (NOT the content-addressed blob); returns nothing useful.
   deleteAsset(lessonId, assetKey, profile, onSuccess, onError) {

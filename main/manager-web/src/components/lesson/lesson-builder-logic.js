@@ -80,6 +80,51 @@ function assetIdentity(asset) {
   return asset.sha256 || asset.versionId || asset.path || asset.src || asset.assetKey;
 }
 
+function containsAssetKey(value, assetKey) {
+  if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey));
+  if (!value || typeof value !== 'object') return false;
+  if (value.assetKey === assetKey) return true;
+  return Object.values(value).some((item) => containsAssetKey(item, assetKey));
+}
+
+function collectAssetReferences(steps, assetKey) {
+  return (Array.isArray(steps) ? steps : [])
+    .filter((step) => containsAssetKey(step, assetKey))
+    .map((step) => step.stepKey || step.stepId)
+    .filter(Boolean);
+}
+
+function nextClonedAssetKey(assetKey, assets) {
+  const match = String(assetKey || '').match(/^(.*)\.v(\d+)$/);
+  const base = match ? match[1] : String(assetKey || '');
+  const used = new Set((Array.isArray(assets) ? assets : []).map((asset) => asset.assetKey));
+  let version = match ? Number(match[2]) + 1 : 2;
+  while (used.has(`${base}.v${version}`)) version += 1;
+  return `${base}.v${version}`;
+}
+
+function replaceStepAssetReference(value, fromKey, clonedAsset) {
+  if (Array.isArray(value)) {
+    return value.map((item) => replaceStepAssetReference(item, fromKey, clonedAsset));
+  }
+  if (!value || typeof value !== 'object') return value;
+
+  const replaced = Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      replaceStepAssetReference(item, fromKey, clonedAsset),
+    ]),
+  );
+  if (value.assetKey !== fromKey) return replaced;
+  return {
+    ...replaced,
+    assetId: clonedAsset.assetId,
+    assetKey: clonedAsset.assetKey,
+    path: clonedAsset.path,
+    sha256: clonedAsset.sha256,
+  };
+}
+
 function calculateReadiness({ steps, assets, manifest } = {}) {
   const rows = Array.isArray(assets) ? assets : [];
   const unique = new Map();
@@ -124,6 +169,9 @@ module.exports = {
   NAMED_MOTIONS,
   buildEngagementTrack,
   calculateReadiness,
+  collectAssetReferences,
   createAuthoringFields,
   mergeAuthoringFields,
+  nextClonedAssetKey,
+  replaceStepAssetReference,
 };

@@ -2,10 +2,13 @@ const assert = require('assert');
 const {
   buildEngagementTrack,
   calculateReadiness,
+  collectAssetReferences,
   createAuthoringFields,
   DURATION_PRESETS,
   NAMED_MOTIONS,
   mergeAuthoringFields,
+  nextClonedAssetKey,
+  replaceStepAssetReference,
 } = require('../src/components/lesson/lesson-builder-logic');
 
 const fields = createAuthoringFields();
@@ -61,5 +64,88 @@ const unsafe = calculateReadiness({
 });
 assert.strictEqual(unsafe.offlineReady, false);
 assert.strictEqual(unsafe.allPathsTerminate, false);
+
+const referencedAssetKey = 'teachingObject.glowSeed.v1';
+const referenceSteps = [
+  {
+    stepKey: 's1',
+    stepBody: { scene: { background: { assetKey: 'scene.forest.v1' } } },
+  },
+  {
+    stepKey: 's2',
+    stepBody: { scene: { teachingObject: { assetKey: referencedAssetKey } } },
+  },
+  {
+    stepId: 'step-id-3',
+    visual: { foreground: { assetKey: referencedAssetKey } },
+  },
+  {
+    stepKey: 's4',
+    stepBody: { overlays: [{ assetKey: 'sparkle.v1' }, { assetKey: referencedAssetKey }] },
+  },
+  {
+    stepKey: 's5',
+    stepBody: { scene: null },
+  },
+];
+assert.deepStrictEqual(
+  collectAssetReferences(referenceSteps, referencedAssetKey),
+  ['s2', 'step-id-3', 's4'],
+);
+assert.deepStrictEqual(collectAssetReferences(referenceSteps, 'missing.v1'), []);
+assert.deepStrictEqual(collectAssetReferences(null, referencedAssetKey), []);
+
+const clonedAssets = [
+  { assetKey: 'teachingObject.glowSeed.v1' },
+  { assetKey: 'teachingObject.glowSeed.v2' },
+  { assetKey: 'teachingObject.glowSeed.v3' },
+  { assetKey: 'character.owl.v7' },
+  { assetKey: 'character.owl.v8' },
+];
+assert.strictEqual(
+  nextClonedAssetKey('scene.forest', clonedAssets),
+  'scene.forest.v2',
+);
+assert.strictEqual(
+  nextClonedAssetKey('character.owl.v7', clonedAssets),
+  'character.owl.v9',
+);
+assert.strictEqual(
+  nextClonedAssetKey('teachingObject.glowSeed.v1', clonedAssets),
+  'teachingObject.glowSeed.v4',
+);
+
+const originalBody = {
+  scene: {
+    background: { assetKey: 'scene.forest.v1', opacity: 0.7 },
+    layers: [
+      { kind: 'teachingObject', assetId: 'asset-old', assetKey: referencedAssetKey, path: '/old.png', sha256: 'old-sha', x: 24 },
+      { kind: 'caption', text: 'Glow seed' },
+    ],
+  },
+  fallback: { assetKey: referencedAssetKey, role: 'fallback' },
+};
+const clonedAsset = {
+  assetId: 'asset-clone',
+  assetKey: 'teachingObject.glowSeed.v2',
+  path: '/clone.png',
+  sha256: 'clone-sha',
+};
+const originalSnapshot = JSON.parse(JSON.stringify(originalBody));
+const replacedBody = replaceStepAssetReference(originalBody, referencedAssetKey, clonedAsset);
+assert.deepStrictEqual(replacedBody, {
+  scene: {
+    background: { assetKey: 'scene.forest.v1', opacity: 0.7 },
+    layers: [
+      { kind: 'teachingObject', assetId: 'asset-clone', assetKey: 'teachingObject.glowSeed.v2', path: '/clone.png', sha256: 'clone-sha', x: 24 },
+      { kind: 'caption', text: 'Glow seed' },
+    ],
+  },
+  fallback: { assetId: 'asset-clone', assetKey: 'teachingObject.glowSeed.v2', path: '/clone.png', sha256: 'clone-sha', role: 'fallback' },
+});
+assert.deepStrictEqual(originalBody, originalSnapshot);
+assert.notStrictEqual(replacedBody, originalBody);
+assert.notStrictEqual(replacedBody.scene, originalBody.scene);
+assert.notStrictEqual(replacedBody.scene.layers, originalBody.scene.layers);
 
 console.log('lesson builder logic checks passed');
