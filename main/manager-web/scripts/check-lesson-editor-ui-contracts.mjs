@@ -118,6 +118,33 @@ for (const changed of [
   }
 }
 
+const clearSavedStepDraft = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'clearSavedStepDraft')})`);
+const saveCleanupContext = {
+  promptSaveRequestId: 12,
+  stepEditRevisions: { A: 4, B: 9 },
+  selectedStepDrafts: { A: { durationPreset: 5 }, B: { durationPreset: 8 } },
+  selectedAssetDrafts: { A: { assetKey: 'asset-a' }, B: { assetKey: 'asset-b' } },
+  dirtyStepKeys: { A: true, B: true },
+  $delete(target, key) { delete target[key]; },
+};
+clearSavedStepDraft.call(saveCleanupContext, { requestId: 12, stepKey: 'A', stepRevision: 4 });
+if (saveCleanupContext.selectedStepDrafts.A || saveCleanupContext.selectedAssetDrafts.A || saveCleanupContext.dirtyStepKeys.A) {
+  throw new Error('server-confirmed save must clean step A even after navigation');
+}
+if (!saveCleanupContext.selectedStepDrafts.B || !saveCleanupContext.selectedAssetDrafts.B || !saveCleanupContext.dirtyStepKeys.B) {
+  throw new Error('step A save cleanup must preserve selected step B drafts');
+}
+const staleCleanupContext = {
+  ...saveCleanupContext,
+  selectedStepDrafts: { A: { durationPreset: 3 }, B: { durationPreset: 8 } },
+  dirtyStepKeys: { A: true, B: true },
+  stepEditRevisions: { A: 5, B: 9 },
+};
+clearSavedStepDraft.call(staleCleanupContext, { requestId: 12, stepKey: 'A', stepRevision: 4 });
+if (!staleCleanupContext.selectedStepDrafts.A || !staleCleanupContext.dirtyStepKeys.A) {
+  throw new Error('stale save callback must not clear a newer step A draft');
+}
+
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   expectContains(locale, "'lesson.promptEditorLabel'", 'prompt editor label must be localized');
   expectContains(locale, "'lesson.promptEditorHint'", 'prompt editor hint must be localized');
@@ -145,6 +172,8 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'handleClos
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'validCloneResponse', 'clone callbacks must be validated before recovery state is emitted');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneUncertain', 'malformed success must latch a possibly committed state');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'retryDiscovery', 'uncertain clone recovery must retry discovery, not cloning');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'submittedCloneKey', 'clone dispatch must snapshot the immutable requested key');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', ':disabled="cloning || cloneUncertain || reconciling || rebindPending', 'clone key input must lock during async clone/recovery');
 expectContains('src/views/LessonEditor.vue', 'discoverUncertainClone', 'parent must reconcile uncertain clone commits through authoritative assets');
 expectNotContains('src/components/lesson/SharedVisualImpactDialog.vue', 'result.asset || result.clone', 'unsupported clone response wrappers must be rejected');
 expectRegex(
@@ -306,6 +335,34 @@ const retryRebind = vm.runInNewContext(`(${retryRebindSource})`);
 retryRebind.call(dialogContext);
 if (cloneRequests !== 1) throw new Error('rebind retry must not create a second clone');
 if (!dialogEvents.some(([event]) => event === 'retry-rebind')) throw new Error('failed rebind must expose a retry event');
+
+let raceCloneRequests = 0;
+let raceSuccess;
+const raceEvents = [];
+const raceConfirm = vm.runInNewContext(`(${confirmCloneSource})`, {
+  Api: { lesson: { cloneSharedVisual: (lessonId, assetId, payload, success) => {
+    raceCloneRequests += 1;
+    raceSuccess = success;
+  } } },
+});
+const raceContext = {
+  ...dialogContext,
+  cloning: false,
+  cloneUncertain: false,
+  clonedAsset: null,
+  cloneKey: 'teachingObject.submittedA.v2',
+  submittedCloneKey: '',
+  canClone: true,
+  cloneError: '',
+  $emit: (...args) => raceEvents.push(args),
+};
+raceConfirm.call(raceContext);
+raceContext.cloneKey = 'teachingObject.editedB.v9';
+raceSuccess(undefined);
+const raceUncertain = raceEvents.find(([event]) => event === 'clone-uncertain');
+if (raceCloneRequests !== 1 || !raceUncertain || raceUncertain[1].assetKey !== 'teachingObject.submittedA.v2') {
+  throw new Error('deferred malformed success must reconcile the immutable submitted key with one clone request');
+}
 
 let blockedCloneRequests = 0;
 const blockedConfirm = vm.runInNewContext(`(${confirmCloneSource})`, {

@@ -755,6 +755,15 @@ export default {
         && guard.stepRevision === (this.stepEditRevisions[guard.stepKey] || 0),
       );
     },
+    clearSavedStepDraft(guard) {
+      if (!guard || guard.requestId !== this.promptSaveRequestId
+        || guard.stepRevision !== (this.stepEditRevisions[guard.stepKey] || 0)) return false;
+      this.$delete(this.selectedStepDrafts, guard.stepKey);
+      this.$delete(this.selectedAssetDrafts, guard.stepKey);
+      this.$delete(this.dirtyStepKeys, guard.stepKey);
+      this.$delete(this.stepEditRevisions, guard.stepKey);
+      return true;
+    },
     syncPromptDraftAfterFetch(step, guard) {
       if (this.shouldApplySavedStepState(guard)) {
         this.resetPromptDraft(step);
@@ -994,15 +1003,10 @@ export default {
           if (saveGuard.requestId !== this.promptSaveRequestId) return;
           this.fetchSteps({
             promptGuard: saveGuard,
-            onSuccess: (rows, promptStateApplied) => {
+            onSuccess: () => {
               if (saveGuard.requestId !== this.promptSaveRequestId) return;
               this.savingStep = false;
-              if (promptStateApplied) {
-                this.$delete(this.selectedStepDrafts, step.stepKey);
-                this.$delete(this.selectedAssetDrafts, step.stepKey);
-                this.$delete(this.dirtyStepKeys, step.stepKey);
-                this.$delete(this.stepEditRevisions, step.stepKey);
-              }
+              this.clearSavedStepDraft(saveGuard);
               this.preview = null;
               this.previewManifest = null;
               this.$message.success(this.$t('lesson.stepSaved'));

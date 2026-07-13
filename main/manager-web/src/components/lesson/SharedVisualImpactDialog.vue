@@ -32,7 +32,7 @@
       <dl v-if="asset" class="impact-review__source">
         <dt>{{ $t('lesson.sharedImpactSourceKey') }}</dt><dd class="mono">{{ authoritativeAsset.assetKey || '—' }}</dd>
         <dt>{{ $t('lesson.sharedImpactChecksum') }}</dt><dd class="mono">{{ authoritativeAsset.sha256 || authoritativeAsset.checksum || '—' }}</dd>
-        <dt>{{ $t('lesson.sharedImpactCloneKey') }}</dt><dd><el-input v-model="cloneKey" size="small" :aria-label="$t('lesson.sharedImpactCloneKey')" /></dd>
+        <dt>{{ $t('lesson.sharedImpactCloneKey') }}</dt><dd><el-input v-model="cloneKey" size="small" :disabled="cloning || cloneUncertain || reconciling || rebindPending || !!clonedAsset" :aria-label="$t('lesson.sharedImpactCloneKey')" /></dd>
       </dl>
 
       <h4>{{ $t('lesson.sharedImpactUsages') }}</h4>
@@ -98,7 +98,7 @@ export default {
     reconciling: { type: Boolean, default: false },
   },
   data() {
-    return { impact: null, impactLoaded: false, loading: false, cloning: false, cloneUncertain: false, loadError: '', cloneError: '', cloneKey: '' };
+    return { impact: null, impactLoaded: false, loading: false, cloning: false, cloneUncertain: false, submittedCloneKey: '', loadError: '', cloneError: '', cloneKey: '' };
   },
   computed: {
     authoritativeAsset() {
@@ -142,6 +142,7 @@ export default {
       this.impact = null;
       this.loadError = '';
       this.cloneError = '';
+      this.submittedCloneKey = '';
       Api.lesson.reviewSharedVisualImpact(
         this.asset.assetId,
         (impact) => {
@@ -170,22 +171,25 @@ export default {
     },
     confirmClone() {
       if (!this.canClone || !this.asset || !this.asset.assetId) return;
+      const submittedCloneKey = this.cloneKey;
+      this.submittedCloneKey = submittedCloneKey;
       this.cloning = true;
       this.cloneError = '';
       Api.lesson.cloneSharedVisual(this.lessonId, this.asset.assetId, {
         profile: 'espTft',
-        assetKey: this.cloneKey,
+        assetKey: submittedCloneKey,
       }, (result) => {
-        if (!this.validCloneResponse(result)) {
+        if (!this.validCloneResponse(result, submittedCloneKey)) {
           this.cloning = false;
           this.cloneUncertain = true;
-          this.cloneError = this.$t('lesson.sharedImpactCloneUncertain', { key: this.cloneKey });
-          this.$emit('clone-uncertain', { assetKey: this.cloneKey });
+          this.cloneError = this.$t('lesson.sharedImpactCloneUncertain', { key: submittedCloneKey });
+          this.$emit('clone-uncertain', { assetKey: submittedCloneKey });
           return;
         }
         this.$emit('cloned', result);
       }, (msg) => {
         this.cloning = false;
+        this.submittedCloneKey = '';
         this.$emit('error', msg);
       });
     },
@@ -197,9 +201,10 @@ export default {
       if ((!this.cloneUncertain && !this.uncertainCloneKey) || this.reconciling) return;
       this.$emit('retry-discovery');
     },
-    validCloneResponse(result) {
+    validCloneResponse(result, expectedKey) {
       return Boolean(result && !Array.isArray(result) && ['assetId', 'assetKey', 'path', 'sha256']
-        .every((key) => typeof result[key] === 'string' && result[key].trim()));
+        .every((key) => typeof result[key] === 'string' && result[key].trim())
+        && (!expectedKey || result.assetKey === expectedKey));
     },
     handleClose() {
       if (this.cloning || this.cloneUncertain || this.reconciling || this.rebindPending || this.clonedAsset) return;
