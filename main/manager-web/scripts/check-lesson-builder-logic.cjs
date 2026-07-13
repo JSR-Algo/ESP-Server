@@ -21,7 +21,14 @@ const simulationIdentity = {
   checksum: 'checksum-a',
   etag: 'etag-a',
   preview: { profile: 'espTft', width: 480, height: 320 },
+  manifest: {
+    steps: [
+      { id: 's1', type: 'greeting', completionClass: 'passive', timeoutSec: 10 },
+      { id: 's2', type: 'listen', completionClass: 'interactive', timeoutSec: 20 },
+    ],
+  },
 };
+const simulationAuthoringSteps = [{ stepKey: 's2', stepBody: { interaction: { maxAttempts: 3 } } }];
 const validSimulation = {
   ...simulationIdentity,
   simulation: {
@@ -35,7 +42,43 @@ const validSimulation = {
     ],
   },
 };
-assert.strictEqual(validSimulationEvidence(validSimulation, simulationIdentity), true);
+assert.strictEqual(validSimulationEvidence(validSimulation, simulationIdentity, simulationAuthoringSteps), true);
+const passiveTrace = { stepKey: 's1', stepType: 'greeting', completionClass: 'passive', timeoutSec: 10, action: 'auto_advance' };
+const completionTrace = { stepKey: 'lesson', action: 'lesson_completed' };
+const interactiveTrace = (outcome, attempt, action) => ({
+  stepKey: 's2', stepType: 'listen', completionClass: 'interactive', timeoutSec: 20,
+  ...(outcome === undefined ? {} : { outcome }), attempt, action,
+});
+const legitimatePresetTraces = [
+  [interactiveTrace('correct', 1, 'advance')],
+  [interactiveTrace('near_miss', 1, 'advance')],
+  [interactiveTrace('brave_try', 1, 'advance')],
+  [interactiveTrace('incorrect', 1, 'retry'), interactiveTrace('incorrect', 2, 'retry'), interactiveTrace('incorrect', 3, 'fallback_advance')],
+  [interactiveTrace('retry', 1, 'retry'), interactiveTrace('correct', 2, 'advance')],
+  [interactiveTrace('timeout', 1, 'fallback_advance')],
+  [interactiveTrace(undefined, 1, 'fallback_advance')],
+];
+legitimatePresetTraces.forEach((interactive, index) => {
+  assert.strictEqual(validSimulationEvidence({
+    ...simulationIdentity,
+    simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [passiveTrace, ...interactive, completionTrace] },
+  }, simulationIdentity, simulationAuthoringSteps), true, `legitimate preset trace ${index} must be accepted`);
+});
+const impossibleBranchTraces = [
+  [interactiveTrace('correct', 1, 'retry')],
+  [interactiveTrace('timeout', 1, 'advance')],
+  [interactiveTrace(undefined, 1, 'retry')],
+  [interactiveTrace('incorrect', 1, 'fallback_advance')],
+  [interactiveTrace('retry', 1, 'fallback_advance')],
+  [interactiveTrace('incorrect', 1, 'retry'), interactiveTrace('incorrect', 2, 'retry'), interactiveTrace('incorrect', 3, 'retry')],
+  [interactiveTrace('correct', 1, 'fallback_advance')],
+];
+impossibleBranchTraces.forEach((interactive, index) => {
+  assert.strictEqual(validSimulationEvidence({
+    ...simulationIdentity,
+    simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [passiveTrace, ...interactive, completionTrace] },
+  }, simulationIdentity, simulationAuthoringSteps), false, `impossible outcome/action trace ${index} must be rejected`);
+});
 const malformedSimulations = [
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: 'true' } },
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminationReason: null } },
@@ -50,10 +93,11 @@ const malformedSimulations = [
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: false, terminationReason: 'lesson_completed' } },
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: true, terminationReason: 'max_transitions' } },
   { ...validSimulation, simulation: { ...validSimulation.simulation, trace: validSimulation.simulation.trace.slice(0, -1) } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [validSimulation.simulation.trace[1], validSimulation.simulation.trace[0], validSimulation.simulation.trace[2], completionTrace] } },
   { ...validSimulation, preview: { profile: 'espTft', width: 480, height: 320 }, etag: 'different' },
 ];
 malformedSimulations.forEach((candidate, index) => {
-  assert.strictEqual(validSimulationEvidence(candidate, simulationIdentity), false, `malformed simulation ${index} must be rejected`);
+  assert.strictEqual(validSimulationEvidence(candidate, simulationIdentity, simulationAuthoringSteps), false, `malformed simulation ${index} must be rejected`);
 });
 
 const fields = createAuthoringFields();

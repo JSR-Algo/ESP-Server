@@ -21,7 +21,7 @@
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="savingStep || rebindingSharedVisual">{{ $t('lesson.validate') }}</el-button>
         <el-button size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
-        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing">
+        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing" :disabled="assetMutating">
           {{ $t('lesson.publish') }}
         </el-button>
       </div>
@@ -157,6 +157,7 @@
         @assets-loaded="onAssetsLoaded"
         @asset-mutated="onAssetMutated"
         @asset-mutation-uncertain="onAssetMutationUncertain"
+        @asset-mutation-detached="onAssetMutationDetached"
         @mutation-state="onAssetMutationState"
         @impact-review-request="reviewAssetReplacement"
       />
@@ -628,6 +629,24 @@ export default {
       if (payload.active === true) this.$set(this.assetMutationTokens, payload.id, true);
       else this.$delete(this.assetMutationTokens, payload.id);
     },
+    onAssetMutationDetached(payload) {
+      const id = payload && payload.id;
+      if (typeof id !== 'string' || !id) return;
+      this.$set(this.assetMutationTokens, id, true);
+      this.invalidatePreview();
+      Api.lesson.listAssets(
+        this.lessonId,
+        'espTft',
+        (result) => {
+          this.onAssetsLoaded(result && result.assets);
+          this.$delete(this.assetMutationTokens, id);
+        },
+        (message) => {
+          this.$delete(this.assetMutationTokens, id);
+          this.$message.error(message);
+        },
+      );
+    },
     hasUnsafeProofState() {
       return Boolean(
         this.promptDirty
@@ -670,7 +689,7 @@ export default {
       this.simulationEvidence = result;
     },
     validSimulationEvidence(result, expectedPreview) {
-      return validateSimulationEvidence(result, expectedPreview);
+      return validateSimulationEvidence(result, expectedPreview, this.steps);
     },
     previewIdentityMatches(result, preview) {
       return Boolean(
@@ -1337,6 +1356,7 @@ export default {
       return true;
     },
     doPublish() {
+      if (this.assetMutating) return false;
       this.$confirm(this.$t('lesson.publishConfirm'), this.$t('lesson.publish'), { type: 'warning' })
         .then(() => {
           this.publishing = true;
@@ -1351,6 +1371,7 @@ export default {
           );
         })
         .catch(() => {});
+      return true;
     },
   },
 };

@@ -121,7 +121,7 @@ export default {
         && left.profile === right.profile && left.width === right.width && left.height === right.height);
     },
     validSimulationEvidence(result, expectedPreview) {
-      return validateSimulationEvidence(result, expectedPreview);
+      return validateSimulationEvidence(result, expectedPreview, this.steps);
     },
     maxAttemptsFor(stepKey) {
       const source = this.steps.find((step) => step.stepKey === stepKey) || {};

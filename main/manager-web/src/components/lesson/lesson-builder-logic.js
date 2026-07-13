@@ -307,7 +307,7 @@ function sameSimulationPreviewIdentity(left, right) {
     && left.profile === right.profile && left.width === right.width && left.height === right.height);
 }
 
-function validSimulationEvidence(result, expectedPreview) {
+function validSimulationEvidence(result, expectedPreview, authoringSteps = []) {
   const expectedIdentity = simulationPreviewIdentity(expectedPreview);
   const resultIdentity = simulationPreviewIdentity(result);
   if (!sameSimulationPreviewIdentity(expectedIdentity, resultIdentity)) return false;
@@ -319,6 +319,15 @@ function validSimulationEvidence(result, expectedPreview) {
   if (simulation.terminated !== (simulation.terminationReason === 'lesson_completed')) return false;
 
   const attempts = new Map();
+  const completedSteps = new Set();
+  const manifestSteps = expectedPreview && expectedPreview.manifest && expectedPreview.manifest.steps;
+  if (!Array.isArray(manifestSteps)) return false;
+  let manifestCursor = 0;
+  const maxAttemptsByStep = new Map((Array.isArray(authoringSteps) ? authoringSteps : []).map((step) => {
+    const interaction = step && step.stepBody && step.stepBody.interaction;
+    const requested = Number(interaction && interaction.maxAttempts);
+    return [step && step.stepKey, Number.isInteger(requested) && requested > 0 ? requested : 3];
+  }));
   let completionEvents = 0;
   for (let index = 0; index < simulation.trace.length; index += 1) {
     const event = simulation.trace[index];
@@ -330,14 +339,17 @@ function validSimulationEvidence(result, expectedPreview) {
     if (action === 'lesson_completed') {
       completionEvents += 1;
       if (event.stepKey !== 'lesson' || index !== simulation.trace.length - 1
+        || manifestCursor !== manifestSteps.length
         || Object.prototype.hasOwnProperty.call(event, 'attempt')
         || Object.prototype.hasOwnProperty.call(event, 'outcome')) return false;
       continue;
     }
-    if (event.stepKey === 'lesson'
-      || typeof event.stepType !== 'string' || !event.stepType
-      || !['passive', 'interactive'].includes(event.completionClass)
-      || !Number.isFinite(event.timeoutSec) || event.timeoutSec <= 0) return false;
+    const expectedStep = manifestSteps[manifestCursor];
+    if (!expectedStep || event.stepKey !== expectedStep.id
+      || event.stepType !== expectedStep.type
+      || event.completionClass !== expectedStep.completionClass
+      || !Number.isFinite(event.timeoutSec) || event.timeoutSec <= 0
+      || Number(event.timeoutSec) !== Number(expectedStep.timeoutSec)) return false;
 
     if (Object.prototype.hasOwnProperty.call(event, 'outcome')
       && !['correct', 'near_miss', 'brave_try', 'incorrect', 'retry', 'timeout'].includes(event.outcome)) return false;
@@ -345,13 +357,28 @@ function validSimulationEvidence(result, expectedPreview) {
       if (event.completionClass !== 'passive'
         || Object.prototype.hasOwnProperty.call(event, 'attempt')
         || Object.prototype.hasOwnProperty.call(event, 'outcome')) return false;
+      manifestCursor += 1;
       continue;
     }
     if (event.completionClass !== 'interactive'
       || !Number.isInteger(event.attempt) || event.attempt < 1) return false;
+    if (completedSteps.has(event.stepKey)) return false;
     const previousAttempt = attempts.get(event.stepKey) || 0;
     if (event.attempt !== previousAttempt + 1) return false;
     attempts.set(event.stepKey, event.attempt);
+    const maxAttempts = maxAttemptsByStep.get(event.stepKey) || 3;
+    const hasOutcome = Object.prototype.hasOwnProperty.call(event, 'outcome');
+    const supportive = ['correct', 'near_miss', 'brave_try'].includes(event.outcome);
+    const retryable = ['incorrect', 'retry'].includes(event.outcome);
+    if (action === 'advance' && !supportive) return false;
+    if (action === 'retry' && (!retryable || event.attempt >= maxAttempts)) return false;
+    if (action === 'fallback_advance') {
+      const validFallback = !hasOutcome || event.outcome === 'timeout'
+        || (retryable && event.attempt >= maxAttempts);
+      if (!validFallback) return false;
+    }
+    if (action === 'advance' || action === 'fallback_advance') completedSteps.add(event.stepKey);
+    if (action === 'advance' || action === 'fallback_advance') manifestCursor += 1;
   }
 
   if (simulation.terminated) return completionEvents === 1;

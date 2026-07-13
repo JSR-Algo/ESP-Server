@@ -109,10 +109,15 @@ expectContains('src/views/LessonEditor.vue', 'acceptSimulationEvidence', 'parent
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'beforeDestroy', 'destroyed simulation panels must cancel pending callbacks');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'ResizeObserver', 'responsive preview needs a non-container-query resize path');
 expectContains('src/views/LessonEditor.vue', 'beforeDestroy', 'destroyed editors must invalidate proof request tokens');
+expectRegex('src/views/LessonEditor.vue', /@click="doPublish"[^>]*:disabled="assetMutating"/m, 'publish must lock during asset mutation');
 expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors must expose definitive status to mutation callers');
 expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
 
 const editorSource = read('src/views/LessonEditor.vue');
+let publishConfirmCalls = 0;
+const guardedPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPublish')})`, { Api: { lesson: {} } });
+guardedPublish.call({ assetMutating: true, $confirm: () => { publishConfirmCalls += 1; } });
+if (publishConfirmCalls !== 0) throw new Error('programmatic publish must reject active asset mutations');
 const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
 const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);
 const currentPreview = {
@@ -610,6 +615,7 @@ expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutat
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutation-uncertain'", 'ambiguous asset writes must invalidate proof and reconcile');
 expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 'the editor must subscribe to committed asset mutations');
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-uncertain="onAssetMutationUncertain"', 'the editor must subscribe to ambiguous asset mutations');
+expectContains('src/views/LessonEditor.vue', '@asset-mutation-detached="onAssetMutationDetached"', 'the editor must reconcile active mutations detached during unmount');
 expectContains('src/views/LessonEditor.vue', ':disabled="savingStep || rebindingSharedVisual || assetMutating"', 'asset manager must lock while any asset mutation token is active');
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -870,7 +876,12 @@ if (missingReloads !== 2 || !missingContext.sharedImpactRebindError) {
 if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries must not create another clone');
 
 const assetManagerSource = read('src/components/LessonAssetManager.vue');
-const beginAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'beginMutation')})`);
+expectContains('src/components/LessonAssetManager.vue', 'nextAssetMutationId', 'asset mutation ids must be unique across component remounts');
+expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutation-detached'", 'unmounting an active mutation must notify the parent');
+let testMutationSequence = 0;
+const beginAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'beginMutation')})`, {
+  nextAssetMutationId: () => `asset-test-${testMutationSequence += 1}`,
+});
 const finishAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'finishMutation')})`);
 const mutationEvents = [];
 const assetSingleFlight = {
@@ -888,6 +899,31 @@ if (!finishAssetMutation.call(assetSingleFlight, firstMutationId) || assetSingle
   throw new Error('matching asset completion must release single-flight state');
 }
 
+let globalMutationSequence = 0;
+const globallyUniqueBegin = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'beginMutation')})`, {
+  nextAssetMutationId: () => `asset-global-${globalMutationSequence += 1}`,
+});
+const remountedA = { disabled: false, mutationPending: false, activeMutationId: null, $emit() {} };
+const remountedB = { disabled: false, mutationPending: false, activeMutationId: null, $emit() {} };
+const remountIdA = globallyUniqueBegin.call(remountedA);
+const remountIdB = globallyUniqueBegin.call(remountedB);
+if (remountIdA === remountIdB) throw new Error('asset mutation ids must not collide after remount');
+
+const detachAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'detachActiveMutation')})`);
+const detachedEvents = [];
+const detachingChild = {
+  mutationPending: true, activeMutationId: remountIdA, uploading: true,
+  $emit: (...args) => detachedEvents.push(args),
+};
+detachAssetMutation.call(detachingChild);
+if (detachingChild.mutationPending || detachingChild.activeMutationId
+  || !detachedEvents.some(([event, payload]) => event === 'asset-mutation-detached' && payload.id === remountIdA)) {
+  throw new Error('active mutation teardown must detach its exact token as uncertain');
+}
+if (finishAssetMutation.call(detachingChild, remountIdA)) {
+  throw new Error('late completion from a detached instance must be ignored');
+}
+
 const onAssetMutationState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationState')})`);
 const parentMutationTokens = {
   assetMutationTokens: {},
@@ -903,6 +939,41 @@ if (!parentMutationTokens.assetMutationTokens.new || Object.keys(parentMutationT
 onAssetMutationState.call(parentMutationTokens, { id: 'new', active: false });
 if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
   throw new Error('preview and simulation may unlock only after every mutation token completes');
+}
+
+let detachedReconcileRequest;
+const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`, {
+  Api: { lesson: { listAssets: (...args) => { detachedReconcileRequest = args; } } },
+});
+const detachedParent = {
+  lessonId: 'lesson-1', assetMutationTokens: { [remountIdA]: true, [remountIdB]: true },
+  proofVersion: 1, previewRequestId: 1, preview: {}, previewManifest: {}, simulationEvidence: {},
+  invalidatePreview, onAssetsLoaded() { this.assetsReconciled = true; },
+  $set(target, key, value) { target[key] = value; }, $delete(target, key) { delete target[key]; },
+  $message: { error() {} },
+};
+onAssetMutationDetached.call(detachedParent, { id: remountIdA });
+if (detachedParent.preview || !detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB]) {
+  throw new Error('detached mutation must invalidate proof while keeping all active tokens locked');
+}
+detachedReconcileRequest[2]({ assets: [] });
+if (detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB]
+  || !detachedParent.assetsReconciled) {
+  throw new Error('detached reconciliation must clear only its matching token after authoritative success');
+}
+onAssetMutationState.call(detachedParent, { id: remountIdB, active: false });
+if (Object.keys(detachedParent.assetMutationTokens).length) {
+  throw new Error('parent must not remain permanently disabled after detached reconciliation and newer completion');
+}
+const failedDetachedParent = {
+  ...detachedParent,
+  assetMutationTokens: { [remountIdA]: true },
+  preview: null,
+};
+onAssetMutationDetached.call(failedDetachedParent, { id: remountIdA });
+detachedReconcileRequest[3]('reconciliation failed');
+if (Object.keys(failedDetachedParent.assetMutationTokens).length) {
+  throw new Error('failed detached reconciliation must still release its matching token without restoring proof');
 }
 const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'handleMutationError')})`, {
   isUncertainNestError(error) {

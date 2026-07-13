@@ -110,6 +110,12 @@ import { isUncertainNestError } from '@/apis/nestHttp';
 // Default role per layer (server also defaults these, but the UI prefills so the
 // author can see/override). robotOverlay→pose, teachingObject→primarySubject.
 const ROLE_BY_LAYER = { backgroundScene: 'poster', teachingObject: 'primarySubject', robotOverlay: 'pose' };
+let assetMutationEpoch = 0;
+
+function nextAssetMutationId() {
+  assetMutationEpoch += 1;
+  return `asset-mutation-${assetMutationEpoch}`;
+}
 
 export default {
   name: 'LessonAssetManager',
@@ -129,7 +135,6 @@ export default {
       pickedFile: null,
       uploading: false,
       mutationPending: false,
-      mutationSequence: 0,
       activeMutationId: null,
       // Server-backed source of truth (replaces the old session-local uploaded[]).
       serverAssets: [],
@@ -152,6 +157,9 @@ export default {
   },
   mounted() {
     this.reload();
+  },
+  beforeDestroy() {
+    this.detachActiveMutation();
   },
   methods: {
     // Backend returns the relative public_id when LESSON_ASSET_ORIGIN_BASE is unset;
@@ -258,8 +266,7 @@ export default {
     },
     beginMutation() {
       if (this.disabled || this.mutationPending) return null;
-      const id = `asset-mutation-${this.mutationSequence + 1}`;
-      this.mutationSequence += 1;
+      const id = nextAssetMutationId();
       this.mutationPending = true;
       this.activeMutationId = id;
       this.$emit('mutation-state', { id, active: true });
@@ -270,6 +277,15 @@ export default {
       this.mutationPending = false;
       this.activeMutationId = null;
       this.$emit('mutation-state', { id, active: false });
+      return true;
+    },
+    detachActiveMutation() {
+      const id = this.activeMutationId;
+      if (!id || !this.mutationPending) return false;
+      this.mutationPending = false;
+      this.activeMutationId = null;
+      this.uploading = false;
+      this.$emit('asset-mutation-detached', { id });
       return true;
     },
     handleMutationError(message, error) {
