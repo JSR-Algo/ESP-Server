@@ -1629,8 +1629,10 @@ export default {
     parseAssetEvidenceResponse(result) {
       if (!result || Array.isArray(result) || !Array.isArray(result.profiles) || !Array.isArray(result.assets)) return null;
       const profiles = result.profiles.slice();
-      if (!profiles.length || profiles.some((profile) => typeof profile !== 'string' || !profile.trim()) || new Set(profiles).size !== profiles.length) return null;
-      if (!result.assets.length) return null;
+      if (!profiles.length && !result.assets.length) return { profiles: [], assets: [] };
+      if (!profiles.length || !result.assets.length
+        || profiles.some((profile) => typeof profile !== 'string' || !profile.trim())
+        || new Set(profiles).size !== profiles.length) return null;
       const seen = new Set();
       const assets = [];
       for (const raw of result.assets) {
@@ -1864,14 +1866,13 @@ export default {
         if (lesson.status === 'draft') {
           this.collectLessonEvidence(lesson, (evidence) => {
             if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId || uncertain !== this.publishUncertainState) return;
-            const comparison = this.compareOriginalEvidence(snapshot.targetDraftEvidence, evidence, { allowPendingRowChecksum: true });
             this.publishReconciling = false;
-            if (comparison.pass) {
-              this.publishUncertainState = null;
-              this.publishResult = { type: 'info', title: this.$t('lesson.publishNoCommitConfirmed'), retryAllowed: true };
-            } else {
-              this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
-            }
+            const comparison = this.compareOriginalEvidence(snapshot.targetDraftEvidence, evidence, { allowPendingRowChecksum: true });
+            this.publishResult = {
+              type: 'warning',
+              title: this.$t(comparison.pass ? 'lesson.publishNotYetObserved' : 'lesson.publishReconcileStillUncertain'),
+              uncertain: true,
+            };
           }, () => {
             if (reconcileRequestId !== this.publishReconcileRequestId) return;
             this.publishReconciling = false;

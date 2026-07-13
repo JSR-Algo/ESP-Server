@@ -319,7 +319,7 @@ export default {
   'lesson.publishRetryReconciliation': 'Thử đối soát lại',
   'lesson.publishReconcileStillUncertain': 'Trạng thái chính thức vẫn chưa chắc chắn. Xuất bản tiếp tục bị khóa.',
   'lesson.publishReconcileFailed': 'Không thể đối soát trạng thái xuất bản. Hãy thử đối soát lại mà không xuất bản lần nữa.',
-  'lesson.publishNoCommitConfirmed': 'Máy chủ xác nhận bản nháp đã duyệt chưa được xuất bản. Có thể thử xuất bản lại có kiểm soát.',
+  'lesson.publishNotYetObserved': 'Bản đích vẫn là bản nháp nhưng yêu cầu xuất bản ban đầu có thể hoàn tất sau. Xuất bản vẫn bị khóa; chỉ thử đối soát lại.',
   'lesson.validationResponseMalformed': 'Phản hồi kiểm tra từ máy chủ không hợp lệ.',
   'lesson.publishDiffEvidenceIncomplete': 'Bằng chứng bản gốc chưa đầy đủ.',
   'lesson.publishDiffOriginalIdentity': 'Danh tính hoặc phiên bản bài học gốc đã thay đổi.',

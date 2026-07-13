@@ -233,9 +233,13 @@ const validAssetResponse = { profiles: ['espTft'], assets: [{
   bytes: 128, width: 20, height: 20, sha256: 'a'.repeat(64), critical: true, url: 'https://cdn/poster.png',
 }] };
 if (!parseAssetEvidenceResponse.call({}, validAssetResponse)) throw new Error('exact backend asset evidence must be accepted');
+const emptyAssetEvidence = parseAssetEvidenceResponse.call({}, { profiles: [], assets: [] });
+if (!emptyAssetEvidence || emptyAssetEvidence.profiles.length || emptyAssetEvidence.assets.length) {
+  throw new Error('documented empty bundle evidence must remain valid and deterministic for asset-free first publication');
+}
 for (const malformed of [
   null, {}, { profiles: 'espTft', assets: [] }, { profiles: ['espTft'], assets: {} },
-  { profiles: [], assets: validAssetResponse.assets },
+  { profiles: [], assets: validAssetResponse.assets }, { profiles: ['espTft'], assets: [] },
   { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], profile: 'mobile' }] },
   { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], sha256: '' }] },
   { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], assetKey: undefined, asset_key: 'poster' }] },
@@ -310,14 +314,24 @@ noCommit.collectLessonEvidence = (lesson, success) => success({ checksum: 'a'.re
 noCommit.compareOriginalEvidence = () => ({ pass: true, differences: [] });
 reconcileUncertainPublish.call(noCommit);
 reconciliationGetLesson[1]({ lessonId: 'draft-2', lessonVersion: 2, status: 'draft' });
-if (noCommit.publishUncertainState || !noCommit.publishResult.retryAllowed || noCommit.publishReconciling) {
-  throw new Error('authoritative unchanged draft must unlock only a controlled publish retry');
+if (!noCommit.publishUncertainState || noCommit.publishResult.retryAllowed || noCommit.publishReconciling) {
+  throw new Error('draft observed after an uncertain POST must stay publish-locked and reconciliation-only');
 }
+noCommit.parsePublishResponse = (value) => value;
+noCommit.verifyPublishedEvidence = () => { noCommit.verified = true; };
+reconcileUncertainPublish.call(noCommit);
+reconciliationGetLesson[1]({ lessonId: 'draft-2', lessonKey: 'lesson', lessonVersion: 2, status: 'published', manifestChecksum: 'a'.repeat(64) });
+if (!noCommit.verified || publishApiCalls !== 1) throw new Error('a later reconciliation must detect the deferred commit with exactly one publish call total');
 const reconciliationFailure = uncertainContext();
 reconcileUncertainPublish.call(reconciliationFailure);
 reconciliationGetLesson[2]('offline');
 if (!reconciliationFailure.publishUncertainState || reconciliationFailure.publishReconciling || !reconciliationFailure.publishResult.uncertain) {
   throw new Error('failed reconciliation must stay latched and reconciliation-only');
+}
+reconcileUncertainPublish.call(reconciliationFailure);
+reconciliationGetLesson[2]('not found');
+if (!reconciliationFailure.publishUncertainState || reconciliationFailure.publishResult.retryAllowed || publishApiCalls !== 1) {
+  throw new Error('repeated not-found reconciliation reads must never unlock or repeat publish');
 }
 const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
 const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);

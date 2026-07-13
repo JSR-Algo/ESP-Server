@@ -67,7 +67,7 @@
       <el-button v-if="locked" type="primary" :loading="reconciling" :disabled="reconciling" @click="$emit('reconcile')">
         {{ reconciling ? $t('lesson.publishReconciling') : $t('lesson.publishRetryReconciliation') }}
       </el-button>
-      <el-button v-else type="primary" :loading="publishing" :disabled="!acknowledged || publishing || (!!result && !result.retryAllowed)" @click="confirmPublish">
+      <el-button v-else type="primary" :loading="publishing" :disabled="!acknowledged || publishing || !!result" @click="confirmPublish">
         {{ $t('lesson.publishReviewedVersion') }}
       </el-button>
     </span>
@@ -96,7 +96,7 @@ export default {
   },
   methods: {
     close() { if (!this.publishing && !this.locked) this.$emit('update:visible', false); },
-    confirmPublish() { if (this.acknowledged && !this.publishing && !this.locked && (!this.result || this.result.retryAllowed)) this.$emit('publish', this.snapshot); },
+    confirmPublish() { if (this.acknowledged && !this.publishing && !this.locked && !this.result) this.$emit('publish', this.snapshot); },
     formatBytes(bytes) { const n = Number(bytes || 0); return n < 1024 ? `${n} B` : `${(n / 1048576).toFixed(2)} MiB`; },
     formatTarget(target) { return this.$t('lesson.publishTargetSummary', { version: target.lessonVersion || '?', checksum: target.checksum || this.$t('lesson.publishChecksumUnavailable'), count: target.assetCount || 0 }); },
     formatCompletion(event) { return event ? `${event.stepKey || 'lesson'} / ${event.action || 'completed'}` : this.$t('lesson.publishCompletionUnavailable'); },

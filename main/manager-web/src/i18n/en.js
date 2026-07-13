@@ -319,7 +319,7 @@ export default {
   'lesson.publishRetryReconciliation': 'Retry reconciliation',
   'lesson.publishReconcileStillUncertain': 'Authoritative state is still uncertain. Publishing remains locked.',
   'lesson.publishReconcileFailed': 'Could not reconcile authoritative publish state. Retry reconciliation without publishing again.',
-  'lesson.publishNoCommitConfirmed': 'The backend confirms the reviewed draft was not published. A controlled publish retry is available.',
+  'lesson.publishNotYetObserved': 'The target is still a draft, but the original publish may commit later. Publishing remains locked; retry reconciliation only.',
   'lesson.validationResponseMalformed': 'The server validation response was malformed.',
   'lesson.publishDiffEvidenceIncomplete': 'Original evidence is incomplete.',
   'lesson.publishDiffOriginalIdentity': 'Original lesson identity or version changed.',
