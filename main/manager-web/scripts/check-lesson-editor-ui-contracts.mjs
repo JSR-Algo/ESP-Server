@@ -95,7 +95,107 @@ expectRegex(
   'prompt input must be disabled during its save request',
 );
 
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.preview.profile', 'preview metadata must come from the server');
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.checksum', 'preview checksum must remain visible');
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.etag', 'preview ETag must remain visible');
+expectContains('src/components/lesson/LessonSimulationPanel.vue', 'Api.lesson.simulate', 'simulation must use backend manifest truth');
+expectContains('src/components/lesson/LessonSimulationPanel.vue', 'terminationReason', 'simulation termination reason must be rendered');
+expectContains('src/components/lesson/LessonSimulationPanel.vue', 'event.attempt', 'simulation attempts must be rendered');
+expectContains('src/components/lesson/LessonSimulationPanel.vue', 'event.action', 'simulation actions must be rendered in trace order');
+expectContains('src/views/LessonEditor.vue', 'invalidatePreview', 'all authoring mutations must invalidate stale preview');
+expectContains('src/views/LessonEditor.vue', 'acceptSimulationEvidence', 'parent proof state must reject stale simulation evidence');
+expectContains('src/components/lesson/LessonSimulationPanel.vue', 'beforeDestroy', 'destroyed simulation panels must cancel pending callbacks');
+
 const editorSource = read('src/views/LessonEditor.vue');
+const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
+const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);
+const simulationProofContext = { proofVersion: 4, simulationEvidence: null };
+acceptSimulationEvidence.call(simulationProofContext, { checksum: 'stale' }, 3);
+if (simulationProofContext.simulationEvidence) throw new Error('stale simulation evidence must not repopulate parent proof');
+acceptSimulationEvidence.call(simulationProofContext, { checksum: 'current' }, 4);
+if (simulationProofContext.simulationEvidence.checksum !== 'current') throw new Error('current simulation evidence must be accepted');
+let previewRequest;
+const doPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPreview')})`, {
+  Api: { lesson: { manifestPreview: (...args) => { previewRequest = args; } } },
+  setPreviewRequest: (args) => { previewRequest = args; },
+});
+const proofContext = {
+  lessonId: 'lesson-1',
+  proofVersion: 0,
+  previewRequestId: 0,
+  previewing: false,
+  preview: null,
+  previewManifest: null,
+  simulationEvidence: null,
+  invalidatePreview,
+  $message: { error() {} },
+};
+doPreview.call(proofContext);
+const stalePreviewSuccess = previewRequest[2];
+invalidatePreview.call(proofContext);
+stalePreviewSuccess({
+  checksum: 'stale-checksum',
+  etag: 'stale-etag',
+  preview: { profile: 'espTft', width: 480, height: 320 },
+  manifest: { steps: [] },
+});
+if (proofContext.preview || proofContext.previewManifest || proofContext.simulationEvidence) {
+  throw new Error('a preview response started before a mutation must not repopulate proof');
+}
+
+for (const methodName of [
+  'onPromptInput',
+  'selectSharedAsset',
+  'saveSelectedStep',
+  'moveStep',
+  'deleteStep',
+  'addStep',
+  'doRename',
+  'rebindClonedVisual',
+]) {
+  const method = extractObjectMethod(editorSource, methodName);
+  if (!method.includes('invalidatePreview')) {
+    throw new Error(`${methodName} must invalidate preview and simulation evidence`);
+  }
+}
+
+const selectedAuthoringSetter = editorSource.slice(
+  editorSource.indexOf('selectedAuthoring:'),
+  editorSource.indexOf('selectedObjectKey()', editorSource.indexOf('selectedAuthoring:')),
+);
+if (!selectedAuthoringSetter.includes('invalidatePreview')) {
+  throw new Error('duration, teaching word, story, fun pattern, and motion edits must invalidate proof');
+}
+
+const simulationSource = read('src/components/lesson/LessonSimulationPanel.vue');
+const buildSimulationPayload = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'buildSimulationPayload')})`, {
+  BRANCH_ACTIONS: {
+    correct: 'advance', near_miss: 'advance', brave_try: 'advance',
+    incorrect: 'retry', retry: 'retry', timeout: 'fallback',
+  },
+});
+const maxAttemptsFor = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'maxAttemptsFor')})`);
+const outcomesFor = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'outcomesFor')})`);
+const simulationContext = {
+  manifestSteps: [
+    { id: 'passive', completionClass: 'passive' },
+    { id: 'voice', completionClass: 'interactive', interaction: { maxAttempts: 3 } },
+  ],
+  activePreset: 'retry-then-correct',
+  steps: [{ stepKey: 'voice', stepBody: { interaction: { maxAttempts: 3 } } }],
+  maxAttemptsFor,
+  outcomesFor,
+};
+const simulationPayload = buildSimulationPayload.call(simulationContext);
+if (JSON.stringify(simulationPayload.outcomes) !== JSON.stringify({ voice: ['retry', 'correct'] })) {
+  throw new Error('retry-then-correct must send the deterministic backend outcome sequence');
+}
+if (simulationPayload.projection.steps.voice.maxAttempts !== 3
+  || simulationPayload.projection.steps.voice.on.timeout !== 'fallback') {
+  throw new Error('simulation payload must include the complete safe-speaking branch projection');
+}
 const shouldApplySavedStepState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'shouldApplySavedStepState')})`);
 const matching = {
   promptSaveRequestId: 7,
@@ -195,8 +295,8 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null[\s\S]*?refreshSharedVisualTruth/m,
-  'clone rebind must wait for server confirmation before refetch and preview invalidation',
+  /invalidatePreview\(\)[\s\S]*?Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?refreshSharedVisualTruth/m,
+  'clone rebind must invalidate proof before mutation, then refetch authoritative truth after confirmation',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -205,10 +305,9 @@ expectRegex(
 );
 const cloneRebindSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
 const cloneRebindOrder = [
+  'this.invalidatePreview();',
   'Api.lesson.updateStep(',
   'this.fetchSteps({',
-  'this.preview = null;',
-  'this.previewManifest = null;',
   'this.refreshSharedVisualTruth(',
 ].map((needle) => {
   const index = cloneRebindSource.indexOf(needle);
@@ -276,6 +375,10 @@ const recoveryContext = {
   $t: (key) => key,
   preview: {},
   previewManifest: {},
+  simulationEvidence: {},
+  proofVersion: 0,
+  previewRequestId: 0,
+  invalidatePreview,
 };
 const committedClone = { assetId: 'clone-b', assetKey: 'clone-b', path: '/clone-b.png', sha256: 'clone-b-sha' };
 recoveryRebind.call(recoveryContext, committedClone);

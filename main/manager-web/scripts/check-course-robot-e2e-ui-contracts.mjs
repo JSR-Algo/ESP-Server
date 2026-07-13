@@ -202,4 +202,19 @@ function loadBuildScene() {
   assert.equal(scene.robotOverlay.asset.src, 'assets/robot/poses/bright-thinking.png');
 }
 
+{
+  const preview = read('src/components/lesson/RobotLessonPreview.vue');
+  assert.match(preview, /width:\s*480px/, 'robot preview must retain the exact espTft width');
+  assert.match(preview, /height:\s*320px/, 'robot preview must retain the exact espTft height');
+  assert.match(preview, /manifestPreview\.manifest/, 'robot preview must render the authoritative server manifest');
+  assert.doesNotMatch(preview, /props:\s*\{[\s\S]*?draft/i, 'robot preview must not accept local draft truth');
+
+  const simulation = read('src/components/lesson/LessonSimulationPanel.vue');
+  for (const preset of [
+    'correct', 'near-miss', 'brave-try', 'incorrect-to-fallback',
+    'retry-then-correct', 'timeout', 'completion',
+  ]) assert.match(simulation, new RegExp(`['"]${preset}['"]`), `simulation must expose ${preset}`);
+  assert.match(simulation, /traceIndex/, 'backend trace order must be visible');
+}
+
 console.log('course robot E2E UI contracts OK');

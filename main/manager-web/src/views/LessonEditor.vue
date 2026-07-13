@@ -72,10 +72,8 @@
             </div>
             <RobotLessonPreview
               v-if="previewManifest"
-              :manifest="previewManifest"
+              :manifest-preview="previewManifest"
               :step-index="selectedStepIndex"
-              initial-path="correct"
-              @path-change="onPreviewPathChange"
             />
             <div v-else class="preview-empty">
               <strong>Robot preview</strong>
@@ -83,8 +81,18 @@
               <el-button size="small" :disabled="promptDirty || savingStep || rebindingSharedVisual" @click="doPreview">Generate preview</el-button>
             </div>
           </div>
+          <LessonSimulationPanel
+            v-if="previewManifest"
+            :value="simulationEvidence"
+            :lesson-id="lessonId"
+            :manifest-preview="previewManifest"
+            :steps="steps"
+            :proof-version="proofVersion"
+            :disabled="promptDirty || savingStep || rebindingSharedVisual"
+            @evidence="acceptSimulationEvidence"
+          />
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
-          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest || {}" />
+          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest ? previewManifest.manifest : {}" />
         </main>
       </section>
 
@@ -347,6 +355,7 @@ import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
+import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue';
 import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
@@ -368,6 +377,7 @@ export default {
     LessonEngagementTrack,
     LessonInteractionPanel,
     LessonPublishReadiness,
+    LessonSimulationPanel,
     LessonStepPromptEditor,
     LessonStepNavigator,
     RobotLessonPreview,
@@ -415,7 +425,11 @@ export default {
       stepEditRevisions: {},
       savingStep: false,
       previewManifest: null,
-      previewPath: null,
+      simulationEvidence: null,
+      proofVersion: 0,
+      previewRequestId: 0,
+      assetProofFingerprint: null,
+      assetRefreshIsProofRecovery: false,
       renameVisible: false,
       titleDraft: '',
       sharedImpactVisible: false,
@@ -479,6 +493,7 @@ export default {
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.bumpStepEditRevision(this.selectedStep.stepKey);
+        this.invalidatePreview();
       },
     },
     selectedObjectKey() {
@@ -557,7 +572,28 @@ export default {
       };
     },
     onAssetsLoaded(assets) {
-      this.bundleAssets = Array.isArray(assets) ? assets : [];
+      const nextAssets = Array.isArray(assets) ? assets : [];
+      const fingerprint = nextAssets
+        .map((asset) => [asset.profile, asset.assetKey, asset.sha256, asset.version, asset.path].join(':'))
+        .sort()
+        .join('|');
+      if (this.assetProofFingerprint !== null
+        && fingerprint !== this.assetProofFingerprint
+        && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
+      this.assetProofFingerprint = fingerprint;
+      this.bundleAssets = nextAssets;
+    },
+    invalidatePreview() {
+      this.proofVersion += 1;
+      this.previewRequestId += 1;
+      this.previewing = false;
+      this.preview = null;
+      this.previewManifest = null;
+      this.simulationEvidence = null;
+    },
+    acceptSimulationEvidence(result, proofVersion) {
+      if (proofVersion !== this.proofVersion) return;
+      this.simulationEvidence = result;
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -783,16 +819,14 @@ export default {
       this.promptEditRevision += 1;
       this.bumpStepEditRevision(step.stepKey);
       this.promptDirty = value !== (step.prompt || '');
-      if (this.promptDirty) {
-        this.preview = null;
-        this.previewManifest = null;
-      }
+      this.invalidatePreview();
     },
     selectSharedAsset(asset) {
       if (!this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
       this.bumpStepEditRevision(this.selectedStep.stepKey);
+      this.invalidatePreview();
     },
     openSharedImpact(intent, asset) {
       if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
@@ -908,8 +942,10 @@ export default {
       const fail = (msg) => {
         if (failed) return;
         failed = true;
+        this.assetRefreshIsProofRecovery = false;
         onError(msg);
       };
+      this.assetRefreshIsProofRecovery = true;
       this.reloadAssets(done, fail);
       this.doValidate(done, fail);
       this.doPreview(done, fail);
@@ -934,6 +970,7 @@ export default {
         this.failSharedVisualRebind(this.$t('lesson.sharedImpactNoRebindTarget'));
         return;
       }
+      this.invalidatePreview();
       this.rebindingSharedVisual = true;
       Api.lesson.updateStep(
         this.lessonId,
@@ -943,9 +980,8 @@ export default {
           this.fetchSteps({
             preservePrompt: true,
             onSuccess: () => {
-              this.preview = null;
-              this.previewManifest = null;
               this.refreshSharedVisualTruth(() => {
+                this.assetRefreshIsProofRecovery = false;
                 this.rebindingSharedVisual = false;
                 this.$delete(this.selectedAssetDrafts, step.stepKey);
                 if (!this.selectedStepDrafts[step.stepKey] && !this.promptDirty) {
@@ -964,9 +1000,6 @@ export default {
         },
         (msg) => this.failSharedVisualRebind(msg),
       );
-    },
-    onPreviewPathChange(payload) {
-      this.previewPath = payload;
     },
     saveSelectedStep() {
       const step = this.selectedStep;
@@ -994,6 +1027,7 @@ export default {
         stepRevision: this.stepEditRevisions[step.stepKey] || 0,
       };
       this.promptSaveRequestId = saveGuard.requestId;
+      this.invalidatePreview();
       this.savingStep = true;
       Api.lesson.updateStep(
         this.lessonId,
@@ -1007,8 +1041,6 @@ export default {
               if (saveGuard.requestId !== this.promptSaveRequestId) return;
               this.savingStep = false;
               this.clearSavedStepDraft(saveGuard);
-              this.preview = null;
-              this.previewManifest = null;
               this.$message.success(this.$t('lesson.stepSaved'));
             },
             onError: () => {
@@ -1029,6 +1061,7 @@ export default {
       const tmp = order[index];
       order[index] = order[target];
       order[target] = tmp;
+      this.invalidatePreview();
       this.reordering = true;
       Api.lesson.reorderSteps(
         this.lessonId,
@@ -1040,6 +1073,7 @@ export default {
     deleteStep(row) {
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
+          this.invalidatePreview();
           Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; }, (msg) => this.$message.error(msg));
         })
         .catch(() => {});
@@ -1107,6 +1141,7 @@ export default {
       if (Object.keys(stepBody).length) payload.stepBody = stepBody;
       // Per-step robot-face override (server validates against firmware-supported set).
       if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
+      this.invalidatePreview();
       this.addingStep = true;
       Api.lesson.createStep(
         this.lessonId,
@@ -1126,6 +1161,7 @@ export default {
     },
     doRename() {
       if (!this.titleDraft) return;
+      this.invalidatePreview();
       this.renaming = true;
       Api.lesson.updateLesson(
         this.lessonId,
@@ -1148,17 +1184,28 @@ export default {
       );
     },
     doPreview(onSuccess, onError) {
+      const requestId = this.previewRequestId + 1;
+      const proofVersion = this.proofVersion;
+      this.previewRequestId = requestId;
       this.previewing = true;
       Api.lesson.manifestPreview(
         this.lessonId,
         'espTft',
         (res) => {
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
           this.preview = { checksum: res.checksum, etag: res.etag };
-          this.previewManifest = res.manifest || null;
+          this.previewManifest = res && res.manifest && res.preview
+            ? { manifest: res.manifest, preview: res.preview, checksum: res.checksum, etag: res.etag }
+            : null;
           if (typeof onSuccess === 'function') onSuccess(res);
         },
-        (msg) => { this.previewing = false; this.$message.error(msg); if (typeof onError === 'function') onError(msg); },
+        (msg) => {
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          this.previewing = false;
+          this.$message.error(msg);
+          if (typeof onError === 'function') onError(msg);
+        },
       );
     },
     doPublish() {
