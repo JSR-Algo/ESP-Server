@@ -155,6 +155,7 @@ main/tbot-server/.claude
 
 main/manager-web/node_modules
 main/manager-web/.playwright-cli/
+main/manager-web/output/
 .config.yaml
 .secrets.yaml
 .private_config.yaml

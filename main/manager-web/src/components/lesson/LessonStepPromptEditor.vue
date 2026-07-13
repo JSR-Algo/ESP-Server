@@ -1,6 +1,10 @@
 <template>
-  <el-form-item :label="$t('lesson.promptEditorLabel')" class="lesson-step-prompt-editor">
+  <div class="lesson-step-prompt-editor">
+    <label class="lesson-step-prompt-editor__label" for="lesson-step-prompt">
+      {{ $t('lesson.promptEditorLabel') }}
+    </label>
     <el-input
+      id="lesson-step-prompt"
       type="textarea"
       :value="value"
       :disabled="disabled"
@@ -14,7 +18,7 @@
     <p id="lesson-step-prompt-hint" class="lesson-step-prompt-editor__hint">
       {{ $t('lesson.promptEditorHint') }}
     </p>
-  </el-form-item>
+  </div>
 </template>
 
 <script>
@@ -34,6 +38,13 @@ export default {
 </script>
 
 <style scoped>
+.lesson-step-prompt-editor__label {
+  color: #606266;
+  display: block;
+  font-size: 14px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
 .lesson-step-prompt-editor__hint {
   margin: 6px 0 0;
   color: #7b8496;

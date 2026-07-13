@@ -8,7 +8,6 @@
     :close-on-click-modal="false"
     :close-on-press-escape="!cloning && !cloneUncertain && !reconciling && !rebindPending && !clonedAsset"
     :show-close="!cloning && !cloneUncertain && !reconciling && !rebindPending && !clonedAsset"
-    @open="loadImpact"
     @close="handleClose"
   >
     <div v-loading="loading" class="impact-review" role="region" :aria-label="$t('lesson.sharedImpactTitle')">
@@ -111,14 +110,16 @@ export default {
       return Array.isArray(usages) ? usages : [];
     },
     localAffectedStepKeys() {
-      return this.asset ? collectAssetReferences(this.steps, this.asset.assetKey) : [];
+      const steps = JSON.parse(JSON.stringify(this.steps));
+      return this.asset ? collectAssetReferences(steps, this.asset.assetKey) : [];
     },
     requiresCurrentReference() {
       return this.intentType === 'replace';
     },
     currentStepReferencesSource() {
+      const stepBody = JSON.parse(JSON.stringify((this.currentStep && this.currentStep.stepBody) || {}));
       return Boolean(this.currentStep && this.authoritativeAsset.assetKey
-        && stepReferencesAssetInLayer(this.currentStep.stepBody || {}, this.authoritativeAsset.assetKey, this.layer));
+        && stepReferencesAssetInLayer(stepBody, this.authoritativeAsset.assetKey, this.layer));
     },
     canClone() {
       return Boolean(this.impactLoaded && !this.loading && !this.cloning && !this.rebindPending
@@ -131,6 +132,12 @@ export default {
       immediate: true,
       handler(asset) {
         this.cloneKey = asset ? nextClonedAssetKey(asset.assetKey, this.assets) : '';
+      },
+    },
+    visible: {
+      immediate: true,
+      handler(visible) {
+        if (visible) this.loadImpact();
       },
     },
   },

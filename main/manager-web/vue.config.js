@@ -11,6 +11,8 @@ const { InjectManifest } = require('workbox-webpack-plugin');
 // 引入 path 模块
 
 const path = require('path')
+const browserE2E = process.env.REWARDS_ADMIN_BROWSER_E2E === '1';
+const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
  
 function resolve(dir) {
   return path.join(__dirname, dir)
@@ -43,7 +45,8 @@ const useCDN = process.env.VUE_APP_USE_CDN === 'true';
 module.exports = defineConfig({
   productionSourceMap: process.env.NODE_ENV !=='production', // 生产环境不生成 source map
   devServer: {
-    port: 8001, // 指定端口为 8001
+    host: '127.0.0.1',
+    port: Number(process.env.MANAGER_WEB_PORT || 8001),
     proxy: {
       '/tbot': {
         target: 'http://127.0.0.1:8002',
@@ -69,8 +72,8 @@ module.exports = defineConfig({
           if (perUser) {
             proxyReq.setHeader('Authorization', perUser);
             proxyReq.removeHeader('x-nest-authorization');
-          } else if (process.env.NESTJS_ADMIN_TOKEN) {
-            proxyReq.setHeader('Authorization', 'Bearer ' + process.env.NESTJS_ADMIN_TOKEN);
+          } else if (sharedNestAdminToken) {
+            proxyReq.setHeader('Authorization', 'Bearer ' + sharedNestAdminToken);
           }
         }
       }

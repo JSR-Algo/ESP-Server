@@ -1243,11 +1243,12 @@ export default {
       if (!intent || !step || !clonedAsset) return;
       let stepBody;
       try {
+        const sourceBody = JSON.parse(JSON.stringify(step.stepBody || {}));
         stepBody = intent.intent === 'select'
-          ? bindClonedAssetToStep(step.stepBody || {}, {
+          ? bindClonedAssetToStep(sourceBody, {
             intent: 'select', layer: intent.layer, boundAssetKey: intent.boundAssetKey,
           }, clonedAsset)
-          : replaceStepAssetReference(step.stepBody || {}, intent.asset.assetKey, clonedAsset);
+          : replaceStepAssetReference(sourceBody, intent.asset.assetKey, clonedAsset);
       } catch (error) {
         this.failSharedVisualRebind(error && error.message);
         return;

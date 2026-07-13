@@ -97,6 +97,9 @@ expectContains('src/components/lesson/LessonStepPromptEditor.vue', 'maxlength="5
 expectContains('src/components/lesson/LessonStepPromptEditor.vue', 'show-word-limit', 'authors must see the prompt character count');
 expectContains('src/components/lesson/LessonStepPromptEditor.vue', "lesson.promptEditorLabel", 'prompt editor needs a localized accessible label');
 expectContains('src/components/lesson/LessonStepPromptEditor.vue', "lesson.promptEditorHint", 'prompt editor needs localized guidance');
+expectNotContains('src/components/lesson/LessonStepPromptEditor.vue', '<el-form-item', 'standalone prompt editor must not depend on an injected ElForm');
+expectContains('src/components/lesson/LessonStepPromptEditor.vue', 'for="lesson-step-prompt"', 'prompt label must target the textarea');
+expectContains('src/components/lesson/LessonStepPromptEditor.vue', 'id="lesson-step-prompt"', 'prompt textarea needs a stable accessible id');
 
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -887,6 +890,12 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneUncer
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'retryDiscovery', 'uncertain clone recovery must retry discovery, not cloning');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'submittedCloneKey', 'clone dispatch must snapshot the immutable requested key');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', ':disabled="cloning || cloneUncertain || reconciling || rebindPending', 'clone key input must lock during async clone/recovery');
+expectRegex(
+  'src/components/lesson/SharedVisualImpactDialog.vue',
+  /visible:\s*\{[\s\S]*?immediate:\s*true,[\s\S]*?handler\(visible\)[\s\S]*?if \(visible\) this\.loadImpact\(\)/m,
+  'a dialog created already visible must load impact truth without relying on a missed Element UI open event',
+);
+expectNotContains('src/components/lesson/SharedVisualImpactDialog.vue', '@open="loadImpact"', 'impact loading must have one lifecycle trigger');
 expectContains('src/views/LessonEditor.vue', 'discoverUncertainClone', 'parent must reconcile uncertain clone commits through authoritative assets');
 expectNotContains('src/components/lesson/SharedVisualImpactDialog.vue', 'result.asset || result.clone', 'unsupported clone response wrappers must be rejected');
 expectRegex(
@@ -910,7 +919,7 @@ expectContains('src/views/LessonEditor.vue', ':mutation-settler="settleAssetMuta
 expectContains('src/views/LessonEditor.vue', ':disabled="savingStep || rebindingSharedVisual || assetMutating"', 'asset manager must lock while any asset mutation token is active');
 expectRegex(
   'src/views/LessonEditor.vue',
-  /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(step\.stepBody\s*\|\|\s*\{\}/m,
+  /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(sourceBody/m,
   'picker clone must bind the selected clone rather than search for the clicked source key',
 );
 expectRegex(
@@ -945,6 +954,11 @@ if (!/this\.rebindingSharedVisual/.test(saveSelectedStepSource)) {
 const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
 if (!/this\.savingStep/.test(rebindClonedVisualSource)) {
   throw new Error('rebindClonedVisual must reject overlap with prompt save');
+}
+if (!rebindClonedVisualSource.includes('const sourceBody = JSON.parse(JSON.stringify(step.stepBody || {}))')
+  || !/bindClonedAssetToStep\(sourceBody/.test(rebindClonedVisualSource)
+  || !/replaceStepAssetReference\(sourceBody/.test(rebindClonedVisualSource)) {
+  throw new Error('clone rebind must snapshot Vue-observed step bodies before strict JSON-tree rewriting');
 }
 const updateCalls = [];
 const guardedApi = { lesson: { updateStep: (...args) => updateCalls.push(args) } };
@@ -1007,6 +1021,41 @@ recoveryRebind.call(recoveryContext, committedClone);
 if (rebindAttempts !== 2 || successfulClose !== 1) throw new Error('retry must rebind the existing clone and close only after refresh success');
 
 const dialogSource = read('src/components/lesson/SharedVisualImpactDialog.vue');
+const localAffectedStepKeysSource = extractObjectMethod(dialogSource, 'localAffectedStepKeys');
+const currentStepReferenceSource = extractObjectMethod(dialogSource, 'currentStepReferencesSource');
+const vueArrayPrototype = Object.create(Array.prototype);
+const observedLayers = [{ assetKey: 'teachingObject.barn' }];
+Object.setPrototypeOf(observedLayers, vueArrayPrototype);
+const observedSteps = [{ stepKey: 's5', stepBody: { layers: observedLayers } }];
+Object.setPrototypeOf(observedSteps, vueArrayPrototype);
+const localAffectedStepKeys = vm.runInNewContext(`(${localAffectedStepKeysSource})`, {
+  collectAssetReferences: (steps) => {
+    if (!Array.isArray(steps) || !Array.isArray(steps[0].stepBody.layers)
+      || Object.getPrototypeOf(steps) === vueArrayPrototype
+      || Object.getPrototypeOf(steps[0].stepBody.layers) === vueArrayPrototype) {
+      throw new Error('dialog must snapshot Vue-observed arrays before strict JSON-tree analysis');
+    }
+    return ['s5'];
+  },
+});
+if (localAffectedStepKeys.call({ asset: { assetKey: 'teachingObject.barn' }, steps: observedSteps })[0] !== 's5') {
+  throw new Error('dialog must preserve local affected-step results after snapshotting reactive data');
+}
+const currentStepReference = vm.runInNewContext(`(${currentStepReferenceSource})`, {
+  stepReferencesAssetInLayer: (body) => {
+    if (!Array.isArray(body.layers) || Object.getPrototypeOf(body.layers) === vueArrayPrototype) {
+      throw new Error('dialog must snapshot the current Vue-observed step before layer analysis');
+    }
+    return true;
+  },
+});
+if (!currentStepReference.call({
+  currentStep: { stepBody: { layers: observedLayers } },
+  authoritativeAsset: { assetKey: 'teachingObject.barn' },
+  layer: 'teachingObject',
+})) {
+  throw new Error('dialog must preserve current-step reference results after snapshotting reactive data');
+}
 const confirmCloneSource = extractObjectMethod(dialogSource, 'confirmClone');
 if (confirmCloneSource.includes("this.$emit('close')")) {
   throw new Error('dialog must remain open until parent confirms rebind and refresh success');
@@ -1091,8 +1140,7 @@ let blockedCloneRequests = 0;
 const blockedConfirm = vm.runInNewContext(`(${confirmCloneSource})`, {
   Api: { lesson: { cloneSharedVisual: () => { blockedCloneRequests += 1; } } },
 });
-const currentStepReferenceSource = extractObjectMethod(dialogSource, 'currentStepReferencesSource');
-const currentStepReference = vm.runInNewContext(`(${currentStepReferenceSource})`, {
+const replacementCurrentStepReference = vm.runInNewContext(`(${currentStepReferenceSource})`, {
   stepReferencesAssetInLayer: (body, key) => body.teachingObject.asset.key === key,
 });
 const canCloneSource = extractObjectMethod(dialogSource, 'canClone');
@@ -1107,7 +1155,7 @@ const blockedContext = {
   authoritativeAsset: { assetKey: 'asset-b' },
   layer: 'teachingObject',
 };
-blockedContext.currentStepReferencesSource = currentStepReference.call(blockedContext);
+blockedContext.currentStepReferencesSource = replacementCurrentStepReference.call(blockedContext);
 blockedContext.canClone = canClone.call(blockedContext);
 blockedConfirm.call(blockedContext);
 if (blockedContext.currentStepReferencesSource || blockedContext.canClone) {
