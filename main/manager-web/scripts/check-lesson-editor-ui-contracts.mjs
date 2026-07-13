@@ -118,6 +118,14 @@ const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(edit
 const currentPreview = {
   checksum: 'preview-a', etag: 'etag-a', preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
 };
+const validSimulationResult = {
+  ...currentPreview,
+  simulation: {
+    terminated: true,
+    terminationReason: 'lesson_completed',
+    trace: [{ stepKey: 'lesson', action: 'lesson_completed' }],
+  },
+};
 const simulationProofContext = {
   proofVersion: 4, simulationEvidence: null, previewManifest: currentPreview,
   previewIdentityMatches(result, preview) {
@@ -125,12 +133,16 @@ const simulationProofContext = {
       && result.preview && result.preview.profile === preview.preview.profile
       && result.preview.width === preview.preview.width && result.preview.height === preview.preview.height);
   },
+  validSimulationEvidence(result) {
+    return Boolean(result && result.simulation && typeof result.simulation.terminated === 'boolean'
+      && result.simulation.terminationReason === 'lesson_completed' && Array.isArray(result.simulation.trace));
+  },
 };
-acceptSimulationEvidence.call(simulationProofContext, { ...currentPreview, simulation: { trace: [] } }, 3);
+acceptSimulationEvidence.call(simulationProofContext, validSimulationResult, 3);
 if (simulationProofContext.simulationEvidence) throw new Error('stale simulation evidence must not repopulate parent proof');
 acceptSimulationEvidence.call(simulationProofContext, { checksum: 'preview-a', etag: 'etag-a', simulation: { trace: [] } }, 4);
 if (simulationProofContext.simulationEvidence) throw new Error('simulation evidence missing preview identity must be rejected');
-acceptSimulationEvidence.call(simulationProofContext, { ...currentPreview, simulation: { trace: [] } }, 4);
+acceptSimulationEvidence.call(simulationProofContext, validSimulationResult, 4);
 if (simulationProofContext.simulationEvidence.checksum !== 'preview-a') throw new Error('current simulation evidence must be accepted');
 acceptSimulationEvidence.call(simulationProofContext, null, 4);
 if (simulationProofContext.simulationEvidence) throw new Error('rerunning simulation must clear previous evidence');
@@ -286,6 +298,14 @@ moveStep.call(failedReorder, 0, 1);
 if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('pending reorder must preserve proof');
 reorderRequest[3]('reorder failed', { status: 400 });
 if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('failed reorder must preserve proof');
+const expiredReorder = persistedProof({
+  lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
+});
+moveStep.call(expiredReorder, 0, 1);
+reorderRequest[3]('session expired', { status: 401 });
+if (expiredReorder.reordering || !expiredReorder.preview) {
+  throw new Error('401 reorder rejection must clear loading while preserving trusted proof');
+}
 const uncertainReorder = persistedProof({
   lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
   fetchSteps() { this.reconciled = true; },
@@ -324,6 +344,10 @@ deleteStep.call(failedDelete, { stepKey: 's1' });
 if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('pending delete must preserve proof');
 deleteStepRequest[3]('delete failed', { status: 400 });
 if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('failed delete must preserve proof');
+const expiredDelete = confirmedDeleteContext();
+deleteStep.call(expiredDelete, { stepKey: 's1' });
+deleteStepRequest[3]('session expired', { status: 401 });
+if (!expiredDelete.preview) throw new Error('401 delete rejection must settle while preserving proof');
 const uncertainDelete = confirmedDeleteContext();
 uncertainDelete.fetchSteps = function fetchSteps() { this.reconciled = true; };
 deleteStep.call(uncertainDelete, { stepKey: 's1' });
@@ -358,6 +382,10 @@ addStep.call(failedCreate);
 if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('pending create must preserve proof');
 createStepRequest[3]('create failed', { status: 400 });
 if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('failed create must preserve proof');
+const expiredCreate = createStepContext();
+addStep.call(expiredCreate);
+createStepRequest[3]('session expired', { status: 401 });
+if (expiredCreate.addingStep || !expiredCreate.preview) throw new Error('401 create rejection must clear loading and allow retry');
 const uncertainCreate = createStepContext();
 addStep.call(uncertainCreate);
 createStepRequest[3]('connection lost', { status: 0 });
@@ -381,6 +409,10 @@ doRename.call(failedRename);
 if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('pending rename must preserve proof');
 renameRequest[3]('rename failed', { status: 400 });
 if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('failed rename must preserve proof');
+const expiredRename = renameContext();
+doRename.call(expiredRename);
+renameRequest[3]('session expired', { status: 401 });
+if (expiredRename.renaming || !expiredRename.preview) throw new Error('401 rename rejection must clear loading and allow retry');
 const uncertainRename = renameContext();
 uncertainRename.fetchAll = function fetchAll() { this.reconciled = true; };
 doRename.call(uncertainRename);
@@ -455,6 +487,9 @@ function simulationRunContext() {
   return {
     lessonId: 'lesson-1', disabled: false, running: false, requestId: 0, proofVersion: 4,
     manifestPreview: currentPreview, errorMessage: '', previewIdentity, samePreviewIdentity,
+    validSimulationEvidence(result) {
+      return Boolean(result && result.preview && result.simulation && typeof result.simulation.terminated === 'boolean');
+    },
     buildSimulationPayload: () => simulationPayload,
     $emit: (...args) => events.push(args), events,
   };
@@ -462,7 +497,7 @@ function simulationRunContext() {
 const previewRaceSimulation = simulationRunContext();
 runSimulation.call(previewRaceSimulation);
 previewRaceSimulation.manifestPreview = { ...currentPreview, checksum: 'preview-b', etag: 'etag-b' };
-simulationRequest[2]({ ...currentPreview, simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [] } });
+simulationRequest[2](validSimulationResult);
 if (previewRaceSimulation.events.some(([event, value]) => event === 'evidence' && value)) {
   throw new Error('simulation A arriving after preview B must not become evidence');
 }
@@ -575,6 +610,7 @@ expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutat
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutation-uncertain'", 'ambiguous asset writes must invalidate proof and reconcile');
 expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 'the editor must subscribe to committed asset mutations');
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-uncertain="onAssetMutationUncertain"', 'the editor must subscribe to ambiguous asset mutations');
+expectContains('src/views/LessonEditor.vue', ':disabled="savingStep || rebindingSharedVisual || assetMutating"', 'asset manager must lock while any asset mutation token is active');
 expectRegex(
   'src/views/LessonEditor.vue',
   /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(step\.stepBody\s*\|\|\s*\{\}/m,
@@ -834,6 +870,40 @@ if (missingReloads !== 2 || !missingContext.sharedImpactRebindError) {
 if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries must not create another clone');
 
 const assetManagerSource = read('src/components/LessonAssetManager.vue');
+const beginAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'beginMutation')})`);
+const finishAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'finishMutation')})`);
+const mutationEvents = [];
+const assetSingleFlight = {
+  disabled: false, mutationPending: false, mutationSequence: 0, activeMutationId: null,
+  $emit: (...args) => mutationEvents.push(args),
+};
+const firstMutationId = beginAssetMutation.call(assetSingleFlight);
+if (!firstMutationId || beginAssetMutation.call(assetSingleFlight) !== null) {
+  throw new Error('asset manager must reject overlapping mutation attempts');
+}
+if (finishAssetMutation.call(assetSingleFlight, 'stale-id') || !assetSingleFlight.mutationPending) {
+  throw new Error('stale asset completion must not clear a newer pending mutation');
+}
+if (!finishAssetMutation.call(assetSingleFlight, firstMutationId) || assetSingleFlight.mutationPending) {
+  throw new Error('matching asset completion must release single-flight state');
+}
+
+const onAssetMutationState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationState')})`);
+const parentMutationTokens = {
+  assetMutationTokens: {},
+  $set(target, key, value) { target[key] = value; },
+  $delete(target, key) { delete target[key]; },
+};
+onAssetMutationState.call(parentMutationTokens, { id: 'old', active: true });
+onAssetMutationState.call(parentMutationTokens, { id: 'new', active: true });
+onAssetMutationState.call(parentMutationTokens, { id: 'old', active: false });
+if (!parentMutationTokens.assetMutationTokens.new || Object.keys(parentMutationTokens.assetMutationTokens).length !== 1) {
+  throw new Error('older asset completion must not clear a newer parent mutation token');
+}
+onAssetMutationState.call(parentMutationTokens, { id: 'new', active: false });
+if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
+  throw new Error('preview and simulation may unlock only after every mutation token completes');
+}
 const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'handleMutationError')})`, {
   isUncertainNestError(error) {
     const status = Number(error && (error.status ?? (error.response && error.response.status)));
@@ -848,8 +918,12 @@ if (uploadMutationEventIndex === -1 || uploadReloadIndex === -1 || uploadMutatio
   throw new Error('successful upload/replace must emit asset-mutated before attempting reload');
 }
 if (!uploadAssetSource.includes('handleMutationError')) throw new Error('upload/replace errors must classify uncertain commits');
+if (!uploadAssetSource.includes('beginMutation')) throw new Error('upload/replace must enter child single-flight state');
 if (!extractObjectMethod(assetManagerSource, 'onDelete').includes('handleMutationError')) {
   throw new Error('delete errors must classify uncertain commits');
+}
+if (!extractObjectMethod(assetManagerSource, 'onDelete').includes('beginMutation')) {
+  throw new Error('delete must enter child single-flight state');
 }
 const onAssetMutated = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutated')})`);
 const assetMutationParent = {
@@ -868,6 +942,12 @@ const deleteAsset = vm.runInNewContext(`(${extractObjectMethod(assetManagerSourc
 });
 const assetMutationChild = {
   lessonId: 'lesson-1',
+  disabled: false,
+  mutationPending: false,
+  mutationSequence: 0,
+  activeMutationId: null,
+  beginMutation: beginAssetMutation,
+  finishMutation: finishAssetMutation,
   $t: (key) => key,
   $message: { success() {}, error() {} },
   handleMutationError: handleAssetMutationError,
@@ -895,6 +975,40 @@ const failedMutationChild = {
 deleteAsset.call(failedMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
 deleteRequest[4]('delete failed', { status: 400 });
 if (!failedMutationParent.preview) throw new Error('failed asset mutation must not invalidate server proof');
+
+const expiredAssetDelete = { ...assetMutationChild, mutationPending: false, activeMutationId: null };
+deleteAsset.call(expiredAssetDelete, { assetKey: 'teachingObject.seed', profile: 'espTft' });
+if (!expiredAssetDelete.mutationPending) throw new Error('asset delete must latch pending state before request');
+deleteRequest[4]('session expired', { status: 401 });
+if (expiredAssetDelete.mutationPending || expiredAssetDelete.activeMutationId) {
+  throw new Error('401 asset delete rejection must release single-flight state for retry');
+}
+
+let uploadRequest;
+const uploadAsset = vm.runInNewContext(`(${uploadAssetSource})`, {
+  Api: { lesson: { uploadAsset: (...args) => { uploadRequest = args; } } },
+  ROLE_BY_LAYER: { teachingObject: 'primarySubject' },
+});
+const expiredAssetUpload = {
+  ...assetMutationChild,
+  mutationPending: false,
+  activeMutationId: null,
+  pickedFile: { name: 'seed.png' },
+  uploading: false,
+  layer: 'teachingObject', role: 'primarySubject', assetKey: 'teachingObject.seed', critical: true, replaceMode: false,
+  $refs: {},
+};
+uploadAsset.call(expiredAssetUpload);
+if (!expiredAssetUpload.uploading || !expiredAssetUpload.mutationPending) {
+  throw new Error('asset upload must latch loading and mutation state before request');
+}
+uploadRequest[4]('session expired', { status: 401 });
+if (expiredAssetUpload.uploading || expiredAssetUpload.mutationPending) {
+  throw new Error('401 asset upload rejection must release loading and allow retry');
+}
+expiredAssetUpload.pickedFile = { name: 'seed.png' };
+uploadAsset.call(expiredAssetUpload);
+if (!expiredAssetUpload.mutationPending) throw new Error('asset upload must be retryable after re-auth rejection settles');
 
 let uncertainAssetEvents = 0;
 let uncertainAssetReloads = 0;

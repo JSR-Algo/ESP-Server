@@ -153,7 +153,7 @@
         ref="assetManager"
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
-        :disabled="savingStep || rebindingSharedVisual"
+        :disabled="savingStep || rebindingSharedVisual || assetMutating"
         @assets-loaded="onAssetsLoaded"
         @asset-mutated="onAssetMutated"
         @asset-mutation-uncertain="onAssetMutationUncertain"
@@ -369,6 +369,7 @@ import {
   collectAssetReferences,
   mergeAuthoringFields,
   replaceStepAssetReference,
+  validSimulationEvidence as validateSimulationEvidence,
 } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
 import { isUncertainNestError } from '@/apis/nestHttp';
@@ -434,7 +435,7 @@ export default {
       previewRequestId: 0,
       assetProofFingerprint: null,
       assetRefreshIsProofRecovery: false,
-      assetMutating: false,
+      assetMutationTokens: {},
       renameVisible: false,
       titleDraft: '',
       sharedImpactVisible: false,
@@ -489,6 +490,9 @@ export default {
     },
     proofActionsDisabled() {
       return this.hasUnsafeProofState();
+    },
+    assetMutating() {
+      return Object.keys(this.assetMutationTokens).length > 0;
     },
     selectedAuthoring: {
       get() {
@@ -619,8 +623,10 @@ export default {
     onAssetMutationUncertain() {
       this.invalidatePreview();
     },
-    onAssetMutationState(active) {
-      this.assetMutating = active === true;
+    onAssetMutationState(payload) {
+      if (!payload || typeof payload.id !== 'string' || !payload.id) return;
+      if (payload.active === true) this.$set(this.assetMutationTokens, payload.id, true);
+      else this.$delete(this.assetMutationTokens, payload.id);
     },
     hasUnsafeProofState() {
       return Boolean(
@@ -660,7 +666,11 @@ export default {
         return;
       }
       if (!this.previewIdentityMatches(result, this.previewManifest)) return;
+      if (!this.validSimulationEvidence(result, this.previewManifest)) return;
       this.simulationEvidence = result;
+    },
+    validSimulationEvidence(result, expectedPreview) {
+      return validateSimulationEvidence(result, expectedPreview);
     },
     previewIdentityMatches(result, preview) {
       return Boolean(

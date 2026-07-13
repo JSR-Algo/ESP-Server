@@ -286,6 +286,78 @@ function calculateReadiness({ steps, assets, manifest } = {}) {
   };
 }
 
+function simulationPreviewIdentity(value) {
+  const preview = value && value.preview;
+  if (!value || typeof value.checksum !== 'string' || !value.checksum
+    || typeof value.etag !== 'string' || !value.etag
+    || !preview || preview.profile !== 'espTft'
+    || Number(preview.width) !== 480 || Number(preview.height) !== 320) return null;
+  return {
+    checksum: value.checksum,
+    etag: value.etag,
+    profile: preview.profile,
+    width: Number(preview.width),
+    height: Number(preview.height),
+  };
+}
+
+function sameSimulationPreviewIdentity(left, right) {
+  return Boolean(left && right
+    && left.checksum === right.checksum && left.etag === right.etag
+    && left.profile === right.profile && left.width === right.width && left.height === right.height);
+}
+
+function validSimulationEvidence(result, expectedPreview) {
+  const expectedIdentity = simulationPreviewIdentity(expectedPreview);
+  const resultIdentity = simulationPreviewIdentity(result);
+  if (!sameSimulationPreviewIdentity(expectedIdentity, resultIdentity)) return false;
+  const simulation = result && result.simulation;
+  if (!simulation || typeof simulation !== 'object' || Array.isArray(simulation)
+    || typeof simulation.terminated !== 'boolean'
+    || !['lesson_completed', 'max_transitions'].includes(simulation.terminationReason)
+    || !Array.isArray(simulation.trace)) return false;
+  if (simulation.terminated !== (simulation.terminationReason === 'lesson_completed')) return false;
+
+  const attempts = new Map();
+  let completionEvents = 0;
+  for (let index = 0; index < simulation.trace.length; index += 1) {
+    const event = simulation.trace[index];
+    if (!event || typeof event !== 'object' || Array.isArray(event)
+      || typeof event.stepKey !== 'string' || !event.stepKey) return false;
+    const action = event.action;
+    if (!['auto_advance', 'advance', 'retry', 'fallback_advance', 'lesson_completed'].includes(action)) return false;
+
+    if (action === 'lesson_completed') {
+      completionEvents += 1;
+      if (event.stepKey !== 'lesson' || index !== simulation.trace.length - 1
+        || Object.prototype.hasOwnProperty.call(event, 'attempt')
+        || Object.prototype.hasOwnProperty.call(event, 'outcome')) return false;
+      continue;
+    }
+    if (event.stepKey === 'lesson'
+      || typeof event.stepType !== 'string' || !event.stepType
+      || !['passive', 'interactive'].includes(event.completionClass)
+      || !Number.isFinite(event.timeoutSec) || event.timeoutSec <= 0) return false;
+
+    if (Object.prototype.hasOwnProperty.call(event, 'outcome')
+      && !['correct', 'near_miss', 'brave_try', 'incorrect', 'retry', 'timeout'].includes(event.outcome)) return false;
+    if (action === 'auto_advance') {
+      if (event.completionClass !== 'passive'
+        || Object.prototype.hasOwnProperty.call(event, 'attempt')
+        || Object.prototype.hasOwnProperty.call(event, 'outcome')) return false;
+      continue;
+    }
+    if (event.completionClass !== 'interactive'
+      || !Number.isInteger(event.attempt) || event.attempt < 1) return false;
+    const previousAttempt = attempts.get(event.stepKey) || 0;
+    if (event.attempt !== previousAttempt + 1) return false;
+    attempts.set(event.stepKey, event.attempt);
+  }
+
+  if (simulation.terminated) return completionEvents === 1;
+  return completionEvents === 0;
+}
+
 module.exports = {
   bindClonedAssetToStep,
   DEFAULT_AUTHORING_FIELDS,
@@ -298,5 +370,8 @@ module.exports = {
   mergeAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,
+  sameSimulationPreviewIdentity,
+  simulationPreviewIdentity,
   stepReferencesAssetInLayer,
+  validSimulationEvidence,
 };

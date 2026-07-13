@@ -108,16 +108,17 @@ export function settle(res, onSuccess, onError, handle401 = true) {
       body && typeof body === 'object' && 'data' in body ? body.data : body;
     if (onSuccess) onSuccess(payload);
   } else {
-    if (status === 401 && handle401) {
-      clearNestSession();
-      return;
-    }
     const body = (res && (res.data || (res.response && res.response.data))) || {};
     const msg =
       body.message ||
       body.msg ||
       (body.error && body.error.message) ||
       `Request failed (${status || 'network'})`;
+    if (status === 401 && handle401) {
+      clearNestSession();
+      if (onError) onError(msg, res);
+      return;
+    }
     if (onError) onError(msg, res);
   }
 }
@@ -187,6 +188,19 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
       } catch (e) {
         body = {};
       }
+      return { response: r, body };
+    })
+    .catch((e) => {
+      if (onError) onError(e.message || 'Upload network error', {
+        status: 0,
+        error: e,
+        transport: true,
+      });
+      return null;
+    })
+    .then((result) => {
+      if (!result) return;
+      const { response: r, body } = result;
       if (r.ok) {
         const payload = body && 'data' in body ? body.data : body;
         if (onSuccess) onSuccess(payload);
@@ -194,16 +208,13 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
         // Expired/invalid nestjs_session_token rejected by the proxy guard:
         // clear it and bounce to login, matching settle()'s data-fetch behavior.
         clearNestSession();
+        const msg = (body && (body.message || (body.error && body.error.message))) || 'Admin session expired';
+        if (onError) onError(msg, { status: 401, response: r, transport: false });
       } else {
         const msg =
           (body && (body.message || (body.error && body.error.message))) ||
           `Upload failed (${r.status})`;
         if (onError) onError(msg, { status: r.status, response: r, transport: false });
       }
-    })
-    .catch((e) => onError && onError(e.message || 'Upload network error', {
-      status: 0,
-      error: e,
-      transport: true,
-    }));
+    });
 }

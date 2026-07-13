@@ -40,6 +40,7 @@
 
 <script>
 import Api from '@/apis/api';
+import { validSimulationEvidence as validateSimulationEvidence } from './lesson-builder-logic';
 
 const BRANCH_ACTIONS = Object.freeze({
   correct: 'advance',
@@ -119,6 +120,9 @@ export default {
         && left.checksum === right.checksum && left.etag === right.etag
         && left.profile === right.profile && left.width === right.width && left.height === right.height);
     },
+    validSimulationEvidence(result, expectedPreview) {
+      return validateSimulationEvidence(result, expectedPreview);
+    },
     maxAttemptsFor(stepKey) {
       const source = this.steps.find((step) => step.stepKey === stepKey) || {};
       const interaction = source.stepBody && source.stepBody.interaction;
@@ -169,7 +173,7 @@ export default {
         (result) => {
           if (requestId !== this.requestId || proofVersion !== this.proofVersion) return;
           this.running = false;
-          if (!result || !result.simulation || !Array.isArray(result.simulation.trace)) {
+          if (!this.validSimulationEvidence(result, this.manifestPreview)) {
             this.errorMessage = 'Simulation returned an invalid response.';
             return;
           }

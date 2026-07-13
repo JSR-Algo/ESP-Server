@@ -13,8 +13,48 @@ const {
   mergeAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,
+  validSimulationEvidence,
   stepReferencesAssetInLayer,
 } = require('../src/components/lesson/lesson-builder-logic');
+
+const simulationIdentity = {
+  checksum: 'checksum-a',
+  etag: 'etag-a',
+  preview: { profile: 'espTft', width: 480, height: 320 },
+};
+const validSimulation = {
+  ...simulationIdentity,
+  simulation: {
+    terminated: true,
+    terminationReason: 'lesson_completed',
+    trace: [
+      { stepKey: 's1', stepType: 'greeting', completionClass: 'passive', timeoutSec: 10, action: 'auto_advance' },
+      { stepKey: 's2', stepType: 'listen', completionClass: 'interactive', timeoutSec: 20, outcome: 'retry', attempt: 1, action: 'retry' },
+      { stepKey: 's2', stepType: 'listen', completionClass: 'interactive', timeoutSec: 20, outcome: 'correct', attempt: 2, action: 'advance' },
+      { stepKey: 'lesson', action: 'lesson_completed' },
+    ],
+  },
+};
+assert.strictEqual(validSimulationEvidence(validSimulation, simulationIdentity), true);
+const malformedSimulations = [
+  { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: 'true' } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, terminationReason: null } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, terminationReason: 'complete' } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: {} } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: '', action: 'advance', attempt: 1 }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: 's2', action: 'advance', attempt: '1' }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: 's2', action: 'teleport', attempt: 1 }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: 's2', action: 'advance' }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: 'lesson', action: 'lesson_completed' }, { stepKey: 's2', action: 'advance', attempt: 1 }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: [{ stepKey: 's2', action: 'retry', attempt: 2 }, { stepKey: 's2', action: 'advance', attempt: 3 }, { stepKey: 'lesson', action: 'lesson_completed' }] } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: false, terminationReason: 'lesson_completed' } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: true, terminationReason: 'max_transitions' } },
+  { ...validSimulation, simulation: { ...validSimulation.simulation, trace: validSimulation.simulation.trace.slice(0, -1) } },
+  { ...validSimulation, preview: { profile: 'espTft', width: 480, height: 320 }, etag: 'different' },
+];
+malformedSimulations.forEach((candidate, index) => {
+  assert.strictEqual(validSimulationEvidence(candidate, simulationIdentity), false, `malformed simulation ${index} must be rejected`);
+});
 
 const fields = createAuthoringFields();
 assert.strictEqual(fields.durationPreset, 5);

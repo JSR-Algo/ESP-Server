@@ -128,6 +128,9 @@ export default {
       critical: true,
       pickedFile: null,
       uploading: false,
+      mutationPending: false,
+      mutationSequence: 0,
+      activeMutationId: null,
       // Server-backed source of truth (replaces the old session-local uploaded[]).
       serverAssets: [],
       loadingList: false,
@@ -190,7 +193,7 @@ export default {
     // Prefill the upload form from a row, keeping layer/role stable so the key's
     // placement does not change on replace (upsert-by-assetKey).
     startReplace(a) {
-      if (this.disabled) return;
+      if (this.disabled || this.mutationPending) return;
       if (a && a.assetId) {
         this.$emit('impact-review-request', { intent: 'replace', asset: a });
         return;
@@ -198,7 +201,7 @@ export default {
       this.confirmReplace(a);
     },
     confirmReplace(a) {
-      if (!a) return;
+      if (!a || this.disabled || this.mutationPending) return;
       this.replaceMode = true;
       this.layer = a.layer;
       this.role = a.role;
@@ -217,19 +220,20 @@ export default {
       if (this.$refs.uploader) this.$refs.uploader.clearFiles();
     },
     onDelete(a) {
-      this.$emit('mutation-state', true);
+      const mutationId = this.beginMutation();
+      if (!mutationId) return;
       Api.lesson.deleteAsset(
         this.lessonId,
         a.assetKey,
         a.profile,
         () => {
-          this.$emit('mutation-state', false);
+          if (!this.finishMutation(mutationId)) return;
           this.$emit('asset-mutated', { type: 'delete', assetKey: a.assetKey, profile: a.profile || 'espTft' });
           this.$message.success(this.$t('lesson.assetDeleted'));
           this.reload();
         },
         (msg, error) => {
-          this.$emit('mutation-state', false);
+          if (!this.finishMutation(mutationId)) return;
           this.handleMutationError(msg, error);
         },
       );
@@ -252,6 +256,22 @@ export default {
     onFilePick(file) {
       this.pickedFile = file.raw || file;
     },
+    beginMutation() {
+      if (this.disabled || this.mutationPending) return null;
+      const id = `asset-mutation-${this.mutationSequence + 1}`;
+      this.mutationSequence += 1;
+      this.mutationPending = true;
+      this.activeMutationId = id;
+      this.$emit('mutation-state', { id, active: true });
+      return id;
+    },
+    finishMutation(id) {
+      if (!id || id !== this.activeMutationId) return false;
+      this.mutationPending = false;
+      this.activeMutationId = null;
+      this.$emit('mutation-state', { id, active: false });
+      return true;
+    },
     handleMutationError(message, error) {
       if (isUncertainNestError(error)) {
         this.$emit('asset-mutation-uncertain', { message, error });
@@ -260,14 +280,15 @@ export default {
       this.$message.error(message);
     },
     uploadAsset() {
-      if (!this.pickedFile || this.disabled) return;
+      if (!this.pickedFile || this.disabled || this.mutationPending) return;
       const key = (this.assetKey || '').trim();
       if (!key) {
         this.$message.warning(this.$t('lesson.assetKeyRequired'));
         return;
       }
+      const mutationId = this.beginMutation();
+      if (!mutationId) return;
       this.uploading = true;
-      this.$emit('mutation-state', true);
       const layer = this.layer;
       const fields = {
         profile: 'espTft',
@@ -282,8 +303,8 @@ export default {
         this.pickedFile,
         fields,
         (asset) => {
+          if (!this.finishMutation(mutationId)) return;
           this.uploading = false;
-          this.$emit('mutation-state', false);
           const a = (asset && asset.asset) ? asset.asset : (asset || {});
           this.pickedFile = null;
           this.replaceMode = false;
@@ -305,8 +326,8 @@ export default {
           });
         },
         (msg, error) => {
+          if (!this.finishMutation(mutationId)) return;
           this.uploading = false;
-          this.$emit('mutation-state', false);
           // espTft sniff-rejects webp/gif and corrupt headers (415)
           this.handleMutationError(/415/.test(String(msg)) ? this.$t('lesson.uploadReject415') : msg, error);
         },

@@ -101,6 +101,21 @@ function loadBuildScene() {
 }
 
 {
+  const { settle, context } = loadSettle();
+  let failures = 0;
+  let structured;
+  settle(
+    { status: 401, data: { message: 'session expired' } },
+    () => { throw new Error('401 must never call success'); },
+    (message, error) => { failures += 1; structured = { message, error }; },
+  );
+  assert.equal(context.clearNestSessionCalled, true);
+  assert.equal(failures, 1, '401 must settle exactly once through the failure callback');
+  assert.equal(structured.message, 'session expired');
+  assert.equal(structured.error.status, 401);
+}
+
+{
   const buildScene = loadBuildScene();
   const assets = {
     'backgroundScene.poster': {
