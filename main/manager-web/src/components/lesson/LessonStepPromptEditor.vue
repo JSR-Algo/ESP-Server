@@ -9,7 +9,7 @@
       show-word-limit
       :aria-label="$t('lesson.promptEditorLabel')"
       aria-describedby="lesson-step-prompt-hint"
-      @input="this.$emit('input', $event)"
+      @input="$emit('input', $event)"
     />
     <p id="lesson-step-prompt-hint" class="lesson-step-prompt-editor__hint">
       {{ $t('lesson.promptEditorHint') }}

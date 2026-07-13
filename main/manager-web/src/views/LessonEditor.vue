@@ -20,7 +20,7 @@
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
         <el-button size="small" @click="doValidate" :loading="validating">{{ $t('lesson.validate') }}</el-button>
-        <el-button size="small" @click="doPreview" :loading="previewing">{{ $t('lesson.previewManifest') }}</el-button>
+        <el-button size="small" @click="doPreview" :loading="previewing" :disabled="promptDirty || savingStep">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing">
           {{ $t('lesson.publish') }}
         </el-button>
@@ -50,7 +50,7 @@
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || !selectedStepDirty" @click="saveSelectedStep">
               Save step
             </el-button>
           </div>
@@ -58,7 +58,7 @@
             <div>
               <lesson-step-prompt-editor
                 v-model="promptDraft"
-                :disabled="!isDraft"
+                :disabled="!isDraft || savingStep"
                 @input="onPromptInput"
               />
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
@@ -79,7 +79,7 @@
             <div v-else class="preview-empty">
               <strong>Robot preview</strong>
               <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
-              <el-button size="small" @click="doPreview">Generate preview</el-button>
+              <el-button size="small" :disabled="promptDirty || savingStep" @click="doPreview">Generate preview</el-button>
             </div>
           </div>
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
@@ -367,9 +367,12 @@ export default {
       promptDraft: '',
       promptDirty: false,
       promptStepKey: '',
+      promptEditRevision: 0,
+      promptSaveRequestId: 0,
       selectedStepDrafts: {},
       selectedAssetDrafts: {},
       dirtyStepKeys: {},
+      stepEditRevisions: {},
       savingStep: false,
       previewManifest: null,
       previewPath: null,
@@ -428,6 +431,7 @@ export default {
         if (!this.selectedStep) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+        this.bumpStepEditRevision(this.selectedStep.stepKey);
       },
     },
     selectedObjectKey() {
@@ -666,25 +670,59 @@ export default {
         () => {},
       );
     },
-    fetchSteps(onSuccess, onError) {
+    fetchSteps(options = {}) {
       Api.lesson.listSteps(this.lessonId, (rows) => {
+        const selectedKey = this.selectedStepKey;
         this.steps = rows;
-        if (this.selectedStepIndex >= rows.length) this.selectedStepIndex = Math.max(0, rows.length - 1);
-        this.resetPromptDraft(rows[this.selectedStepIndex] || null);
-        if (onSuccess) onSuccess(rows);
+        const matchingIndex = rows.findIndex((step) => step.stepKey === selectedKey);
+        this.selectedStepIndex = matchingIndex >= 0
+          ? matchingIndex
+          : Math.min(this.selectedStepIndex, Math.max(0, rows.length - 1));
+        let promptStateApplied = true;
+        if (options.promptGuard) {
+          promptStateApplied = this.syncPromptDraftAfterFetch(rows[this.selectedStepIndex] || null, options.promptGuard);
+        } else {
+          this.resetPromptDraft(rows[this.selectedStepIndex] || null);
+        }
+        if (options.onSuccess) options.onSuccess(rows, promptStateApplied);
       }, (msg) => {
         this.$message.error(msg);
-        if (onError) onError(msg);
+        if (options.onError) options.onError(msg);
       });
     },
     resetPromptDraft(step) {
       this.promptStepKey = step ? step.stepKey : '';
       this.promptDraft = step && typeof step.prompt === 'string' ? step.prompt : '';
       this.promptDirty = false;
+      this.promptEditRevision += 1;
+    },
+    shouldApplySavedStepState(guard) {
+      return Boolean(
+        guard
+        && guard.requestId === this.promptSaveRequestId
+        && guard.stepKey === this.promptStepKey
+        && guard.promptRevision === this.promptEditRevision
+        && guard.stepRevision === (this.stepEditRevisions[guard.stepKey] || 0),
+      );
+    },
+    syncPromptDraftAfterFetch(step, guard) {
+      if (this.shouldApplySavedStepState(guard)) {
+        this.resetPromptDraft(step);
+        return true;
+      }
+      if (step && step.stepKey === this.promptStepKey) {
+        this.promptDirty = this.promptDraft !== (step.prompt || '');
+      }
+      return false;
+    },
+    bumpStepEditRevision(stepKey) {
+      this.$set(this.stepEditRevisions, stepKey, (this.stepEditRevisions[stepKey] || 0) + 1);
     },
     onPromptInput(value) {
       const step = this.selectedStep;
       if (!step || this.promptStepKey !== step.stepKey) return;
+      this.promptEditRevision += 1;
+      this.bumpStepEditRevision(step.stepKey);
       this.promptDirty = value !== (step.prompt || '');
       if (this.promptDirty) {
         this.preview = null;
@@ -695,13 +733,14 @@ export default {
       if (!this.selectedStep || !this.isDraft) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+      this.bumpStepEditRevision(this.selectedStep.stepKey);
     },
     onPreviewPathChange(payload) {
       this.previewPath = payload;
     },
     saveSelectedStep() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft) return;
+      if (!step || !this.isDraft || this.savingStep) return;
       const authored = this.selectedAuthoring;
       const stepBody = { ...(step.stepBody || {}), ...authored };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
@@ -718,25 +757,44 @@ export default {
           },
         };
       }
+      const saveGuard = {
+        requestId: this.promptSaveRequestId + 1,
+        stepKey: step.stepKey,
+        promptRevision: this.promptEditRevision,
+        stepRevision: this.stepEditRevisions[step.stepKey] || 0,
+      };
+      this.promptSaveRequestId = saveGuard.requestId;
       this.savingStep = true;
       Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
         { ...step, prompt: this.promptDraft, stepBody },
         () => {
-          this.fetchSteps(() => {
-            this.savingStep = false;
-            this.$delete(this.selectedStepDrafts, step.stepKey);
-            this.$delete(this.selectedAssetDrafts, step.stepKey);
-            this.$delete(this.dirtyStepKeys, step.stepKey);
-            this.preview = null;
-            this.previewManifest = null;
-            this.$message.success(this.$t('lesson.stepSaved'));
-          }, () => {
-            this.savingStep = false;
+          if (saveGuard.requestId !== this.promptSaveRequestId) return;
+          this.fetchSteps({
+            promptGuard: saveGuard,
+            onSuccess: (rows, promptStateApplied) => {
+              if (saveGuard.requestId !== this.promptSaveRequestId) return;
+              this.savingStep = false;
+              if (promptStateApplied) {
+                this.$delete(this.selectedStepDrafts, step.stepKey);
+                this.$delete(this.selectedAssetDrafts, step.stepKey);
+                this.$delete(this.dirtyStepKeys, step.stepKey);
+                this.$delete(this.stepEditRevisions, step.stepKey);
+              }
+              this.preview = null;
+              this.previewManifest = null;
+              this.$message.success(this.$t('lesson.stepSaved'));
+            },
+            onError: () => {
+              if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+            },
           });
         },
-        (msg) => { this.savingStep = false; this.$message.error(msg); },
+        (msg) => {
+          if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+          this.$message.error(msg);
+        },
       );
     },
     moveStep(index, delta) {
