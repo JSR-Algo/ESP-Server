@@ -19,9 +19,9 @@
       </div>
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
-        <el-button size="small" @click="doValidate" :loading="validating" :disabled="savingStep || rebindingSharedVisual">{{ $t('lesson.validate') }}</el-button>
+        <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
         <el-button size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
-        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing" :disabled="assetMutating">
+        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
           {{ $t('lesson.publish') }}
         </el-button>
       </div>
@@ -92,7 +92,14 @@
             @evidence="acceptSimulationEvidence"
           />
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
-          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest ? previewManifest.manifest : {}" />
+          <LessonPublishReadiness
+            :steps="studioSteps"
+            :assets="bundleAssets"
+            :manifest="previewManifest ? previewManifest.manifest : {}"
+            :validation-result="validationResult"
+            :validation-current="validationProofVersion === proofVersion"
+            @ready-change="readinessReady = $event"
+          />
         </main>
       </section>
 
@@ -353,6 +360,13 @@
       @error="onSharedImpactError"
       @close="closeSharedImpact"
     />
+    <LessonPublishReviewDialog
+      :visible.sync="publishReviewVisible"
+      :snapshot="publishReviewSnapshot"
+      :publishing="publishing"
+      :result="publishResult"
+      @publish="publishReviewedVersion"
+    />
   </div>
 </template>
 
@@ -362,6 +376,7 @@ import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
+import LessonPublishReviewDialog from '@/components/lesson/LessonPublishReviewDialog.vue';
 import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue';
 import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
@@ -387,6 +402,7 @@ export default {
     LessonEngagementTrack,
     LessonInteractionPanel,
     LessonPublishReadiness,
+    LessonPublishReviewDialog,
     LessonSimulationPanel,
     LessonStepPromptEditor,
     LessonStepNavigator,
@@ -403,8 +419,19 @@ export default {
       reordering: false,
       addingStep: false,
       validating: false,
+      validationResult: null,
+      validationProofVersion: -1,
+      validationRequestId: 0,
       previewing: false,
+      previewProofVersion: -1,
       publishing: false,
+      publishPreparing: false,
+      publishReviewVisible: false,
+      publishReviewSnapshot: null,
+      publishReviewRequestId: 0,
+      publishRequestId: 0,
+      publishResult: null,
+      readinessReady: false,
       renaming: false,
       stepDialogVisible: false,
       stepForm: this.blankStepForm(),
@@ -436,6 +463,7 @@ export default {
       savingStep: false,
       previewManifest: null,
       simulationEvidence: null,
+      simulationProofVersion: -1,
       proofVersion: 0,
       previewRequestId: 0,
       assetProofFingerprint: null,
@@ -556,8 +584,12 @@ export default {
   },
   beforeDestroy() {
     this.editorDestroying = true;
+    this.publishReviewVisible = false;
     this.proofVersion += 1;
     this.previewRequestId += 1;
+    this.validationRequestId += 1;
+    this.publishReviewRequestId += 1;
+    this.publishRequestId += 1;
     this.promptSaveRequestId += 1;
   },
   methods: {
@@ -746,15 +778,24 @@ export default {
     },
     hasUnsafeProofState() {
       return Boolean(
-        this.promptDirty
+        this.editorDestroying
+        || this.promptDirty
         || Object.keys(this.dirtyStepKeys || {}).some((key) => this.dirtyStepKeys[key])
+        || Object.keys(this.selectedStepDrafts || {}).length > 0
+        || Object.keys(this.selectedAssetDrafts || {}).length > 0
+        || this.stepDialogVisible
+        || this.renameVisible
+        || this.sharedImpactVisible
+        || this.sharedImpactReconciling
         || this.savingStep
+        || this.validating
         || this.previewing
         || this.rebindingSharedVisual
         || this.reordering
         || this.addingStep
         || this.renaming
         || this.publishing
+        || this.publishPreparing
         || this.assetMutating
       );
     },
@@ -772,21 +813,38 @@ export default {
       if (this.editorDestroying) return;
       this.proofVersion += 1;
       this.previewRequestId += 1;
+      this.validationRequestId += 1;
+      this.publishReviewRequestId += 1;
       this.previewing = false;
+      this.validating = false;
       this.preview = null;
       this.previewManifest = null;
+      this.previewProofVersion = -1;
       this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
+      this.publishPreparing = false;
     },
     acceptSimulationEvidence(result, proofVersion) {
       if (this.editorDestroying) return;
       if (proofVersion !== this.proofVersion) return;
       if (result === null) {
         this.simulationEvidence = null;
+        this.simulationProofVersion = -1;
+        this.publishReviewRequestId += 1;
+        this.publishReviewVisible = false;
+        this.publishReviewSnapshot = null;
+        this.publishResult = null;
         return;
       }
       if (!this.previewIdentityMatches(result, this.previewManifest)) return;
       if (!this.validSimulationEvidence(result, this.previewManifest)) return;
       this.simulationEvidence = result;
+      this.simulationProofVersion = proofVersion;
     },
     validSimulationEvidence(result, expectedPreview) {
       return validateSimulationEvidence(result, expectedPreview, this.steps);
@@ -1423,20 +1481,35 @@ export default {
       );
     },
     doValidate(onSuccess, onError) {
-      if (this.editorDestroying) return false;
+      if (this.editorDestroying || this.hasUnsafeProofState()) return false;
+      const requestId = this.validationRequestId + 1;
+      const proofVersion = this.proofVersion;
+      this.validationRequestId = requestId;
+      this.publishReviewRequestId += 1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
       this.validating = true;
       Api.lesson.validate(
         this.lessonId,
         (res) => {
           if (this.editorDestroying) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
+          this.validationResult = res && typeof res === 'object' ? res : { valid: false, profiles: [], errors: ['Invalid validation response'], warnings: [] };
+          this.validationProofVersion = proofVersion;
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
           if (typeof onSuccess === 'function') onSuccess(res);
         },
         (msg) => {
           if (this.editorDestroying) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
+          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [] };
+          this.validationProofVersion = proofVersion;
           this.$message.error(msg);
           if (typeof onError === 'function') onError(msg);
         },
@@ -1456,10 +1529,17 @@ export default {
       if (this.editorDestroying) return false;
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
       const requestId = this.previewRequestId + 1;
+      const previousProofVersion = this.proofVersion;
       this.proofVersion += 1;
       const proofVersion = this.proofVersion;
+      if (this.validationProofVersion === previousProofVersion) this.validationProofVersion = proofVersion;
+      this.publishReviewRequestId += 1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
       this.previewRequestId = requestId;
       this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
       this.previewing = true;
       Api.lesson.manifestPreview(
         this.lessonId,
@@ -1477,6 +1557,7 @@ export default {
           if (options.storeProof !== false) {
             this.preview = { checksum: res.checksum, etag: res.etag };
             this.previewManifest = { manifest: res.manifest, preview: res.preview, checksum: res.checksum, etag: res.etag };
+            this.previewProofVersion = proofVersion;
           }
           if (typeof onSuccess === 'function') onSuccess(res);
         },
@@ -1490,22 +1571,208 @@ export default {
       );
       return true;
     },
+    canPublishCurrentProof() {
+      return Boolean(
+        !this.editorDestroying
+        && this.isDraft
+        && !this.publishing
+        && !this.publishPreparing
+        && !this.hasUnsafeProofState()
+        && this.readinessReady
+        && this.validationResult
+        && this.validationResult.valid === true
+        && this.validationProofVersion === this.proofVersion
+        && this.previewManifest
+        && this.previewManifest.checksum
+        && this.previewProofVersion === this.proofVersion
+        && this.simulationEvidence
+        && this.simulationProofVersion === this.proofVersion
+        && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
+      );
+    },
+    publishReviewIsCurrent(snapshot = this.publishReviewSnapshot) {
+      return Boolean(
+        snapshot
+        && snapshot === this.publishReviewSnapshot
+        && snapshot.requestId === this.publishReviewRequestId
+        && snapshot.proofVersion === this.proofVersion
+        && snapshot.previewChecksum === (this.previewManifest && this.previewManifest.checksum)
+        && this.canPublishCurrentProof()
+      );
+    },
+    normalizeEvidenceAssets(assets) {
+      return (Array.isArray(assets) ? assets : []).map((asset) => ({
+        assetId: asset.assetId || asset.id || '',
+        profile: asset.profile || '',
+        assetKey: asset.assetKey || asset.asset_key || '',
+        sha256: asset.sha256 || '',
+        bytes: asset.bytes == null ? null : Number(asset.bytes),
+        layer: asset.layer || '',
+        role: asset.role || '',
+        critical: asset.critical === true,
+        path: asset.path || asset.url || '',
+      })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    },
+    collectLessonEvidence(lesson, onSuccess, onError) {
+      if (!lesson || !lesson.lessonId) { onError('Lesson evidence identity is missing.'); return false; }
+      let manifestResult = null;
+      let assetResult = null;
+      let settled = false;
+      const fail = (message) => { if (!settled) { settled = true; onError(message); } };
+      const finish = () => {
+        if (settled || !manifestResult || !assetResult) return;
+        settled = true;
+        if (!this.validManifestPreviewResponse(manifestResult)) { onError('Authoritative manifest evidence was malformed.'); return; }
+        const assets = this.normalizeEvidenceAssets(assetResult.assets);
+        onSuccess({
+          lessonId: lesson.lessonId,
+          lessonKey: lesson.lessonKey,
+          lessonVersion: Number(lesson.lessonVersion),
+          checksum: manifestResult.checksum,
+          etag: manifestResult.etag,
+          manifest: manifestResult.manifest,
+          assets,
+          totalBytes: assets.reduce((sum, asset) => sum + (Number(asset.bytes) || 0), 0),
+        });
+      };
+      Api.lesson.manifestPreview(lesson.lessonId, 'espTft', (result) => { manifestResult = result; finish(); }, fail);
+      Api.lesson.listAssets(lesson.lessonId, 'espTft', (result) => { assetResult = result && Array.isArray(result.assets) ? result : { assets: [] }; finish(); }, fail);
+      return true;
+    },
+    compareOriginalEvidence(before, after) {
+      const stable = (value) => {
+        if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+        if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+        return JSON.stringify(value);
+      };
+      const differences = [];
+      if (!before || !after) return { pass: false, differences: ['Original evidence is incomplete.'] };
+      if (before.lessonId !== after.lessonId || Number(before.lessonVersion) !== Number(after.lessonVersion)) differences.push('Original lesson identity/version changed.');
+      if (before.checksum !== after.checksum) differences.push(`Original checksum changed: ${before.checksum || 'missing'} -> ${after.checksum || 'missing'}.`);
+      if (stable(before.manifest) !== stable(after.manifest)) differences.push('Original manifest bytes changed.');
+      if (stable(before.assets) !== stable(after.assets)) differences.push('Original asset pins, digests, paths, or byte counts changed.');
+      if (Number(before.totalBytes || 0) !== Number(after.totalBytes || 0)) differences.push(`Original asset bytes changed: ${before.totalBytes || 0} -> ${after.totalBytes || 0}.`);
+      return { pass: differences.length === 0, differences };
+    },
     doPublish() {
-      if (this.assetMutating) return false;
-      this.$confirm(this.$t('lesson.publishConfirm'), this.$t('lesson.publish'), { type: 'warning' })
-        .then(() => {
-          this.publishing = true;
-          Api.lesson.publish(
-            this.lessonId,
-            (res) => {
-              this.publishing = false;
-              this.publishMessage = this.$t('lesson.publishedMsg', { v: res.lessonVersion, checksum: res.checksum });
-              this.fetchAll(); // flip the badge to published + lock controls
-            },
-            (msg) => { this.publishing = false; this.$message.error(msg); },
-          );
-        })
-        .catch(() => {});
+      if (this.assetMutating || !this.canPublishCurrentProof()) return false;
+      const requestId = this.publishReviewRequestId + 1;
+      const proofVersion = this.proofVersion;
+      this.publishReviewRequestId = requestId;
+      this.publishPreparing = true;
+      this.publishResult = null;
+      Api.lesson.listLessons(
+        this.lesson.courseId,
+        (lessons) => {
+          if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+          const original = (Array.isArray(lessons) ? lessons : []).find((candidate) => (
+            candidate.lessonKey === this.lesson.lessonKey
+            && Number(candidate.lessonVersion) === Number(this.lesson.lessonVersion) - 1
+            && candidate.status === 'published'
+          ));
+          if (!original) {
+            this.publishPreparing = false;
+            this.$message.error(this.$t('lesson.publishOriginalMissing'));
+            return;
+          }
+          this.collectLessonEvidence(original, (originalEvidence) => {
+            if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+            this.publishPreparing = false;
+            this.publishReviewSnapshot = {
+              requestId,
+              proofVersion,
+              originalLesson: original,
+              originalEvidence,
+              originalLessonId: original.lessonId,
+              originalVersion: original.lessonVersion,
+              originalChecksum: originalEvidence.checksum,
+              originalAssets: originalEvidence.assets,
+              originalBytes: originalEvidence.totalBytes,
+              targetLessonId: this.lessonId,
+              targetVersion: this.lesson.lessonVersion,
+              stepCount: this.steps.length,
+              assetCount: this.bundleAssets.length,
+              previewProfile: this.previewManifest.preview.profile,
+              previewWidth: this.previewManifest.preview.width,
+              previewHeight: this.previewManifest.preview.height,
+              previewChecksum: this.previewManifest.checksum,
+              previewEtag: this.previewManifest.etag,
+              simulationChecksum: this.simulationEvidence.checksum,
+              simulationEtag: this.simulationEvidence.etag,
+              simulationTerminationReason: this.simulationEvidence.simulation.terminationReason,
+              simulationCompletionEvent: this.simulationEvidence.simulation.trace[this.simulationEvidence.simulation.trace.length - 1] || null,
+              validationResult: JSON.parse(JSON.stringify(this.validationResult)),
+              validationProfiles: Array.isArray(this.validationResult.profiles) ? this.validationResult.profiles.map((profile) => typeof profile === 'string' ? profile : (profile.profile || profile.name || 'profile')) : [],
+            };
+            this.publishReviewVisible = true;
+          }, (message) => {
+            if (this.editorDestroying || requestId !== this.publishReviewRequestId) return;
+            this.publishPreparing = false;
+            this.$message.error(message);
+          });
+        },
+        (message) => {
+          if (this.editorDestroying || requestId !== this.publishReviewRequestId) return;
+          this.publishPreparing = false;
+          this.$message.error(message);
+        },
+      );
+      return true;
+    },
+    publishReviewedVersion(snapshot) {
+      if (this.publishing || !this.publishReviewIsCurrent(snapshot)) return false;
+      const requestId = this.publishRequestId + 1;
+      this.publishRequestId = requestId;
+      this.publishing = true;
+      this.publishResult = null;
+      Api.lesson.publish(
+        this.lessonId,
+        (result) => {
+          if (this.editorDestroying || requestId !== this.publishRequestId) return;
+          if (!result || Number(result.lessonVersion) !== Number(snapshot.targetVersion) || typeof result.checksum !== 'string' || !result.checksum) {
+            this.publishing = false;
+            this.publishResult = { type: 'warning', title: this.$t('lesson.publishUncertain'), targetEvidence: result || null };
+            return;
+          }
+          let originalAfter = null;
+          let targetAfter = null;
+          let evidenceError = '';
+          let completed = 0;
+          const finish = () => {
+            completed += 1;
+            if (completed < 2 || this.editorDestroying || requestId !== this.publishRequestId) return;
+            this.publishing = false;
+            const originalComparison = evidenceError
+              ? { pass: false, differences: [evidenceError] }
+              : this.compareOriginalEvidence(snapshot.originalEvidence, originalAfter);
+            const targetEvidence = targetAfter ? {
+              lessonVersion: targetAfter.lessonVersion,
+              checksum: targetAfter.checksum,
+              etag: targetAfter.etag,
+              assetCount: targetAfter.assets.length,
+              bytes: targetAfter.totalBytes,
+              publishChecksum: result.checksum,
+            } : { lessonVersion: result.lessonVersion, checksum: result.checksum, assetCount: 0 };
+            this.publishResult = {
+              type: originalComparison.pass ? 'success' : 'error',
+              title: originalComparison.pass ? this.$t('lesson.publishVerified') : this.$t('lesson.publishVerificationFailed'),
+              originalComparison,
+              targetEvidence,
+            };
+            this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
+            this.fetchAll();
+          };
+          this.collectLessonEvidence(snapshot.originalLesson, (evidence) => { originalAfter = evidence; finish(); }, (message) => { evidenceError = `Original verification unavailable: ${message}`; finish(); });
+          this.collectLessonEvidence({ ...this.lesson, lessonVersion: result.lessonVersion }, (evidence) => { targetAfter = evidence; finish(); }, (message) => { evidenceError = evidenceError || `Target evidence unavailable: ${message}`; finish(); });
+        },
+        (message, error) => {
+          if (this.editorDestroying || requestId !== this.publishRequestId) return;
+          this.publishing = false;
+          const uncertain = this.isUncertainMutationError(error);
+          this.publishResult = { type: uncertain ? 'warning' : 'error', title: uncertain ? this.$t('lesson.publishUncertain') : message };
+          this.$message.error(message);
+        },
+      );
       return true;
     },
   },

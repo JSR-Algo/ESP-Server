@@ -114,7 +114,13 @@ expectRegex(
   /beforeDestroy\(\)\s*\{\s*this\.editorDestroying = true;/m,
   'the parent teardown guard must be set before child destroy hooks can emit',
 );
-expectRegex('src/views/LessonEditor.vue', /@click="doPublish"[^>]*:disabled="assetMutating"/m, 'publish must lock during asset mutation');
+expectRegex('src/views/LessonEditor.vue', /@click="doPublish"[^>]*:disabled="!canPublishCurrentProof\(\)"/m, 'publish must lock unless every proof gate is current');
+expectContains('src/views/LessonEditor.vue', 'validationResult', 'server validation must remain visible');
+expectContains('src/views/LessonEditor.vue', 'publishReviewVisible', 'publish needs a review stage');
+expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'originalChecksum', 'review must preserve original evidence');
+expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'previewChecksum', 'review must bind publish to current preview');
+expectContains('src/components/lesson/LessonPublishReadiness.vue', 'validation-result', 'readiness must render authoritative validation evidence');
+expectContains('src/components/lesson/LessonPublishReadiness.vue', 'budgetRows', 'readiness must keep local budget evidence visible');
 expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors must expose definitive status to mutation callers');
 expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
 
@@ -123,6 +129,77 @@ let publishConfirmCalls = 0;
 const guardedPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPublish')})`, { Api: { lesson: {} } });
 guardedPublish.call({ assetMutating: true, $confirm: () => { publishConfirmCalls += 1; } });
 if (publishConfirmCalls !== 0) throw new Error('programmatic publish must reject active asset mutations');
+const canPublishCurrentProof = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'canPublishCurrentProof')})`);
+const publishTestPreview = {
+  checksum: 'preview-a', etag: 'etag-a', preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
+};
+const publishTestSimulation = {
+  ...publishTestPreview,
+  simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [{ stepKey: 'lesson', action: 'lesson_completed' }] },
+};
+const publishReadyContext = {
+  editorDestroying: false, isDraft: true, publishing: false, publishPreparing: false,
+  publishReviewVisible: false, hasUnsafeProofState: () => false, readinessReady: true,
+  proofVersion: 7, validationProofVersion: 7, previewProofVersion: 7, simulationProofVersion: 7,
+  validationResult: { valid: true, profiles: ['espTft'], errors: [], warnings: [] },
+  previewManifest: publishTestPreview,
+  simulationEvidence: publishTestSimulation,
+  validSimulationEvidence: () => true,
+};
+if (!canPublishCurrentProof.call(publishReadyContext)) throw new Error('current validation, preview, simulation, and budgets must enable publish review');
+for (const staleProof of [
+  { validationResult: null },
+  { validationProofVersion: 6 },
+  { previewManifest: null },
+  { previewProofVersion: 6 },
+  { simulationEvidence: null },
+  { simulationProofVersion: 6 },
+  { readinessReady: false },
+  { hasUnsafeProofState: () => true },
+  { editorDestroying: true },
+]) {
+  if (canPublishCurrentProof.call({ ...publishReadyContext, ...staleProof })) {
+    throw new Error('publish must reject missing, stale, dirty, budget-failing, or teardown proof');
+  }
+}
+const publishReviewIsCurrent = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'publishReviewIsCurrent')})`);
+const reviewSnapshot = { proofVersion: 7, requestId: 3, previewChecksum: 'preview-a' };
+if (!publishReviewIsCurrent.call({ ...publishReadyContext, canPublishCurrentProof, publishReviewRequestId: 3, publishReviewSnapshot: reviewSnapshot })) {
+  throw new Error('review snapshot should remain current while its proof and request identity match');
+}
+if (publishReviewIsCurrent.call({ ...publishReadyContext, canPublishCurrentProof, proofVersion: 8, publishReviewRequestId: 3, publishReviewSnapshot: reviewSnapshot })) {
+  throw new Error('mutation after opening review must invalidate acknowledgement and review');
+}
+const compareOriginalEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'compareOriginalEvidence')})`);
+const originalEvidence = {
+  lessonId: 'original-1', lessonVersion: 1, checksum: 'source-checksum',
+  manifest: { steps: [{ stepKey: 's1' }] },
+  assets: [{ assetKey: 'teachingObject.seed', sha256: 'asset-sha', bytes: 128 }],
+};
+const unchanged = compareOriginalEvidence.call({}, originalEvidence, JSON.parse(JSON.stringify(originalEvidence)));
+if (!unchanged.pass || unchanged.differences.length) throw new Error('byte/checksum/pin-identical original evidence must PASS');
+const changed = compareOriginalEvidence.call({}, originalEvidence, {
+  ...originalEvidence,
+  assets: [{ assetKey: 'teachingObject.seed', sha256: 'changed-sha', bytes: 128 }],
+});
+if (changed.pass || !changed.differences.length) throw new Error('changed original pin evidence must FAIL honestly');
+let publishApiCalls = 0;
+let publishCallbacks;
+const publishReviewedVersion = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'publishReviewedVersion')})`, {
+  Api: { lesson: { publish: (...args) => { publishApiCalls += 1; publishCallbacks = args; } } },
+});
+const publishExecutionContext = {
+  lessonId: 'draft-2', publishing: false, publishRequestId: 0, publishResult: null,
+  editorDestroying: false, publishReviewIsCurrent: () => true,
+  $t: (key) => key, $message: { error() {} },
+};
+publishReviewedVersion.call(publishExecutionContext, { targetVersion: 2 });
+publishReviewedVersion.call(publishExecutionContext, { targetVersion: 2 });
+if (publishApiCalls !== 1) throw new Error('double click must never issue a second publish request');
+publishCallbacks[1]({ lessonVersion: 2 });
+if (publishExecutionContext.publishing || !publishExecutionContext.publishResult || publishExecutionContext.publishResult.type !== 'warning') {
+  throw new Error('malformed publish success must remain explicitly uncertain and actionable');
+}
 const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
 const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);
 const currentPreview = {
