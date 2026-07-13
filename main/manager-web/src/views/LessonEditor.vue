@@ -20,7 +20,7 @@
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="savingStep || rebindingSharedVisual">{{ $t('lesson.validate') }}</el-button>
-        <el-button size="small" @click="doPreview" :loading="previewing" :disabled="promptDirty || savingStep || rebindingSharedVisual">{{ $t('lesson.previewManifest') }}</el-button>
+        <el-button size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing">
           {{ $t('lesson.publish') }}
         </el-button>
@@ -78,7 +78,7 @@
             <div v-else class="preview-empty">
               <strong>Robot preview</strong>
               <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
-              <el-button size="small" :disabled="promptDirty || savingStep || rebindingSharedVisual" @click="doPreview">Generate preview</el-button>
+              <el-button size="small" :disabled="proofActionsDisabled" @click="doPreview">Generate preview</el-button>
             </div>
           </div>
           <LessonSimulationPanel
@@ -88,7 +88,7 @@
             :manifest-preview="previewManifest"
             :steps="steps"
             :proof-version="proofVersion"
-            :disabled="promptDirty || savingStep || rebindingSharedVisual"
+            :disabled="proofActionsDisabled"
             @evidence="acceptSimulationEvidence"
           />
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
@@ -156,6 +156,8 @@
         :disabled="savingStep || rebindingSharedVisual"
         @assets-loaded="onAssetsLoaded"
         @asset-mutated="onAssetMutated"
+        @asset-mutation-uncertain="onAssetMutationUncertain"
+        @mutation-state="onAssetMutationState"
         @impact-review-request="reviewAssetReplacement"
       />
     </div>
@@ -369,6 +371,7 @@ import {
   replaceStepAssetReference,
 } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
+import { isUncertainNestError } from '@/apis/nestHttp';
 
 export default {
   name: 'LessonEditor',
@@ -431,6 +434,7 @@ export default {
       previewRequestId: 0,
       assetProofFingerprint: null,
       assetRefreshIsProofRecovery: false,
+      assetMutating: false,
       renameVisible: false,
       titleDraft: '',
       sharedImpactVisible: false,
@@ -483,6 +487,9 @@ export default {
         ),
       );
     },
+    proofActionsDisabled() {
+      return this.hasUnsafeProofState();
+    },
     selectedAuthoring: {
       get() {
         if (!this.selectedStep) return mergeAuthoringFields({}, {});
@@ -532,6 +539,11 @@ export default {
       return;
     }
     this.fetchAll();
+  },
+  beforeDestroy() {
+    this.proofVersion += 1;
+    this.previewRequestId += 1;
+    this.promptSaveRequestId += 1;
   },
   methods: {
     statusType(status) {
@@ -604,6 +616,35 @@ export default {
     onAssetMutated() {
       this.invalidatePreview();
     },
+    onAssetMutationUncertain() {
+      this.invalidatePreview();
+    },
+    onAssetMutationState(active) {
+      this.assetMutating = active === true;
+    },
+    hasUnsafeProofState() {
+      return Boolean(
+        this.promptDirty
+        || Object.keys(this.dirtyStepKeys || {}).some((key) => this.dirtyStepKeys[key])
+        || this.savingStep
+        || this.previewing
+        || this.rebindingSharedVisual
+        || this.reordering
+        || this.addingStep
+        || this.renaming
+        || this.publishing
+        || this.assetMutating
+      );
+    },
+    isUncertainMutationError(error) {
+      return isUncertainNestError(error);
+    },
+    handleUncertainMutationError(error, reconcile) {
+      if (!this.isUncertainMutationError(error)) return false;
+      this.invalidatePreview();
+      if (typeof reconcile === 'function') reconcile.call(this);
+      return true;
+    },
     invalidatePreview() {
       this.proofVersion += 1;
       this.previewRequestId += 1;
@@ -614,7 +655,21 @@ export default {
     },
     acceptSimulationEvidence(result, proofVersion) {
       if (proofVersion !== this.proofVersion) return;
+      if (result === null) {
+        this.simulationEvidence = null;
+        return;
+      }
+      if (!this.previewIdentityMatches(result, this.previewManifest)) return;
       this.simulationEvidence = result;
+    },
+    previewIdentityMatches(result, preview) {
+      return Boolean(
+        result && preview && result.checksum === preview.checksum && result.etag === preview.etag
+        && result.preview && preview.preview
+        && result.preview.profile === preview.preview.profile
+        && result.preview.width === preview.preview.width
+        && result.preview.height === preview.preview.height
+      );
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -969,7 +1024,7 @@ export default {
       this.assetRefreshIsProofRecovery = true;
       this.reloadAssets(done, fail);
       this.doValidate(done, fail);
-      this.doPreview(done, fail);
+      this.doPreview(done, fail, { allowUnsafe: true, storeProof: !this.promptDirty && !Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]) });
     },
     rebindClonedVisual(clonedAsset) {
       if (this.savingStep || this.rebindingSharedVisual) return;
@@ -1087,7 +1142,11 @@ export default {
         this.lessonId,
         order,
         (rows) => { this.invalidatePreview(); this.reordering = false; this.steps = rows; },
-        (msg) => { this.reordering = false; this.$message.error(msg); },
+        (msg, error) => {
+          this.reordering = false;
+          this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+          this.$message.error(msg);
+        },
       );
     },
     deleteStep(row) {
@@ -1097,7 +1156,10 @@ export default {
             this.lessonId,
             row.stepKey,
             (rows) => { this.invalidatePreview(); this.steps = rows; },
-            (msg) => this.$message.error(msg),
+            (msg, error) => {
+              this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+              this.$message.error(msg);
+            },
           );
         })
         .catch(() => {});
@@ -1176,7 +1238,11 @@ export default {
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
           this.fetchSteps();
         },
-        (msg) => { this.addingStep = false; this.$message.error(msg); },
+        (msg, error) => {
+          this.addingStep = false;
+          this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+          this.$message.error(msg);
+        },
       );
     },
     openRename() {
@@ -1196,7 +1262,11 @@ export default {
           this.lesson = l;
           this.$message.success(this.$t('lesson.renamed'));
         },
-        (msg) => { this.renaming = false; this.$message.error(msg); },
+        (msg, error) => {
+          this.renaming = false;
+          this.handleUncertainMutationError(error, this.fetchAll);
+          this.$message.error(msg);
+        },
       );
     },
     doValidate(onSuccess, onError) {
@@ -1212,10 +1282,22 @@ export default {
         (msg) => { this.validating = false; this.$message.error(msg); if (typeof onError === 'function') onError(msg); },
       );
     },
-    doPreview(onSuccess, onError) {
+    validManifestPreviewResponse(result) {
+      return Boolean(
+        result && typeof result.checksum === 'string' && result.checksum
+        && typeof result.etag === 'string' && result.etag
+        && result.manifest && Array.isArray(result.manifest.steps)
+        && result.preview && result.preview.profile === 'espTft'
+        && Number(result.preview.width) === 480 && Number(result.preview.height) === 320
+      );
+    },
+    doPreview(onSuccess, onError, options = {}) {
+      if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
       const requestId = this.previewRequestId + 1;
+      this.proofVersion += 1;
       const proofVersion = this.proofVersion;
       this.previewRequestId = requestId;
+      this.simulationEvidence = null;
       this.previewing = true;
       Api.lesson.manifestPreview(
         this.lessonId,
@@ -1223,10 +1305,16 @@ export default {
         (res) => {
           if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
-          this.preview = { checksum: res.checksum, etag: res.etag };
-          this.previewManifest = res && res.manifest && res.preview
-            ? { manifest: res.manifest, preview: res.preview, checksum: res.checksum, etag: res.etag }
-            : null;
+          if (!this.validManifestPreviewResponse(res)) {
+            const message = 'Manifest preview returned an invalid response.';
+            this.$message.error(message);
+            if (typeof onError === 'function') onError(message);
+            return;
+          }
+          if (options.storeProof !== false) {
+            this.preview = { checksum: res.checksum, etag: res.etag };
+            this.previewManifest = { manifest: res.manifest, preview: res.preview, checksum: res.checksum, etag: res.etag };
+          }
           if (typeof onSuccess === 'function') onSuccess(res);
         },
         (msg) => {
@@ -1236,6 +1324,7 @@ export default {
           if (typeof onError === 'function') onError(msg);
         },
       );
+      return true;
     },
     doPublish() {
       this.$confirm(this.$t('lesson.publishConfirm'), this.$t('lesson.publish'), { type: 'warning' })

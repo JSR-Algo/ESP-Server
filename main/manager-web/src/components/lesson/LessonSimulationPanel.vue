@@ -89,11 +89,36 @@ export default {
       this.running = false;
       this.errorMessage = '';
     },
+    manifestPreview() {
+      this.requestId += 1;
+      this.running = false;
+      this.errorMessage = '';
+    },
   },
   beforeDestroy() {
     this.requestId += 1;
+    this.running = false;
   },
   methods: {
+    previewIdentity(value) {
+      const preview = value && value.preview;
+      if (!value || typeof value.checksum !== 'string' || !value.checksum
+        || typeof value.etag !== 'string' || !value.etag
+        || !preview || typeof preview.profile !== 'string'
+        || !Number.isFinite(Number(preview.width)) || !Number.isFinite(Number(preview.height))) return null;
+      return {
+        checksum: value.checksum,
+        etag: value.etag,
+        profile: preview.profile,
+        width: Number(preview.width),
+        height: Number(preview.height),
+      };
+    },
+    samePreviewIdentity(left, right) {
+      return Boolean(left && right
+        && left.checksum === right.checksum && left.etag === right.etag
+        && left.profile === right.profile && left.width === right.width && left.height === right.height);
+    },
     maxAttemptsFor(stepKey) {
       const source = this.steps.find((step) => step.stepKey === stepKey) || {};
       const interaction = source.stepBody && source.stepBody.interaction;
@@ -129,6 +154,11 @@ export default {
       if (this.disabled || this.running) return;
       const requestId = this.requestId + 1;
       const proofVersion = this.proofVersion;
+      const previewIdentity = this.previewIdentity(this.manifestPreview);
+      if (!previewIdentity) {
+        this.errorMessage = 'Generate a valid authoritative preview before simulation.';
+        return;
+      }
       this.requestId = requestId;
       this.running = true;
       this.errorMessage = '';
@@ -141,6 +171,13 @@ export default {
           this.running = false;
           if (!result || !result.simulation || !Array.isArray(result.simulation.trace)) {
             this.errorMessage = 'Simulation returned an invalid response.';
+            return;
+          }
+          const responseIdentity = this.previewIdentity(result);
+          const currentIdentity = this.previewIdentity(this.manifestPreview);
+          if (!this.samePreviewIdentity(previewIdentity, responseIdentity)
+            || !this.samePreviewIdentity(previewIdentity, currentIdentity)) {
+            this.errorMessage = 'Simulation response does not match the current manifest preview.';
             return;
           }
           this.$emit('evidence', result, proofVersion);

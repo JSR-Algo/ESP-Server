@@ -122,6 +122,12 @@ export function settle(res, onSuccess, onError, handle401 = true) {
   }
 }
 
+export function isUncertainNestError(error) {
+  const status = Number(error && (error.status ?? (error.response && error.response.status)));
+  if (error && error.transport === true) return true;
+  return !Number.isFinite(status) || status === 0 || status >= 500;
+}
+
 // Per-user NestJS session token (issued by /v1/admin/auth/login). Sent on a
 // CUSTOM header because flyio's send() force-overwrites Authorization with the
 // manager-api token; the `/nestjs` proxy promotes X-Nest-Authorization →
@@ -192,8 +198,12 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
         const msg =
           (body && (body.message || (body.error && body.error.message))) ||
           `Upload failed (${r.status})`;
-        if (onError) onError(msg);
+        if (onError) onError(msg, { status: r.status, response: r, transport: false });
       }
     })
-    .catch((e) => onError && onError(e.message || 'Upload network error'));
+    .catch((e) => onError && onError(e.message || 'Upload network error', {
+      status: 0,
+      error: e,
+      transport: true,
+    }));
 }

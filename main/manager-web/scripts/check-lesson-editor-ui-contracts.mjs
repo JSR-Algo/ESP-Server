@@ -86,8 +86,8 @@ expectContains('src/components/lesson/LessonStepPromptEditor.vue', "lesson.promp
 
 expectRegex(
   'src/views/LessonEditor.vue',
-  /:disabled="promptDirty\s*\|\|\s*savingStep\s*\|\|\s*rebindingSharedVisual"/m,
-  'manifest preview must be disabled while the prompt is unsaved or saving',
+  /@click="doPreview"[^>]*:disabled="proofActionsDisabled"/m,
+  'manifest preview must be disabled for every unsafe or dirty authoring state',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -107,15 +107,33 @@ expectContains('src/components/lesson/LessonSimulationPanel.vue', 'event.action'
 expectContains('src/views/LessonEditor.vue', 'invalidatePreview', 'all authoring mutations must invalidate stale preview');
 expectContains('src/views/LessonEditor.vue', 'acceptSimulationEvidence', 'parent proof state must reject stale simulation evidence');
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'beforeDestroy', 'destroyed simulation panels must cancel pending callbacks');
+expectContains('src/components/lesson/RobotLessonPreview.vue', 'ResizeObserver', 'responsive preview needs a non-container-query resize path');
+expectContains('src/views/LessonEditor.vue', 'beforeDestroy', 'destroyed editors must invalidate proof request tokens');
+expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors must expose definitive status to mutation callers');
+expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
 
 const editorSource = read('src/views/LessonEditor.vue');
 const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
 const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);
-const simulationProofContext = { proofVersion: 4, simulationEvidence: null };
-acceptSimulationEvidence.call(simulationProofContext, { checksum: 'stale' }, 3);
+const currentPreview = {
+  checksum: 'preview-a', etag: 'etag-a', preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
+};
+const simulationProofContext = {
+  proofVersion: 4, simulationEvidence: null, previewManifest: currentPreview,
+  previewIdentityMatches(result, preview) {
+    return Boolean(result && result.checksum === preview.checksum && result.etag === preview.etag
+      && result.preview && result.preview.profile === preview.preview.profile
+      && result.preview.width === preview.preview.width && result.preview.height === preview.preview.height);
+  },
+};
+acceptSimulationEvidence.call(simulationProofContext, { ...currentPreview, simulation: { trace: [] } }, 3);
 if (simulationProofContext.simulationEvidence) throw new Error('stale simulation evidence must not repopulate parent proof');
-acceptSimulationEvidence.call(simulationProofContext, { checksum: 'current' }, 4);
-if (simulationProofContext.simulationEvidence.checksum !== 'current') throw new Error('current simulation evidence must be accepted');
+acceptSimulationEvidence.call(simulationProofContext, { checksum: 'preview-a', etag: 'etag-a', simulation: { trace: [] } }, 4);
+if (simulationProofContext.simulationEvidence) throw new Error('simulation evidence missing preview identity must be rejected');
+acceptSimulationEvidence.call(simulationProofContext, { ...currentPreview, simulation: { trace: [] } }, 4);
+if (simulationProofContext.simulationEvidence.checksum !== 'preview-a') throw new Error('current simulation evidence must be accepted');
+acceptSimulationEvidence.call(simulationProofContext, null, 4);
+if (simulationProofContext.simulationEvidence) throw new Error('rerunning simulation must clear previous evidence');
 let previewRequest;
 const doPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPreview')})`, {
   Api: { lesson: { manifestPreview: (...args) => { previewRequest = args; } } },
@@ -130,6 +148,7 @@ const proofContext = {
   previewManifest: null,
   simulationEvidence: null,
   invalidatePreview,
+  hasUnsafeProofState: () => false,
   $message: { error() {} },
 };
 doPreview.call(proofContext);
@@ -144,6 +163,44 @@ stalePreviewSuccess({
 if (proofContext.preview || proofContext.previewManifest || proofContext.simulationEvidence) {
   throw new Error('a preview response started before a mutation must not repopulate proof');
 }
+
+const hasUnsafeProofState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'hasUnsafeProofState')})`);
+for (const dirtyPatch of [
+  { durationPreset: 8 },
+  { interaction: { maxAttempts: 4 } },
+  { teachingWord: { text: 'SEED' } },
+  { storyBeat: { goal: 'Rescue the seed' } },
+  { motion: { correct: 'celebrate' } },
+  { selectedAssetDrafts: { offTab: { assetKey: 'teachingObject.seed' } } },
+]) {
+  const unsafe = hasUnsafeProofState.call({
+    dirtyStepKeys: { offTab: true }, promptDirty: false, savingStep: false, rebindingSharedVisual: false,
+    reordering: false, addingStep: false, renaming: false, assetMutating: false, ...dirtyPatch,
+  });
+  if (!unsafe) throw new Error('any dirty step, including an off-tab authoring change, must block proof generation');
+}
+let guardedPreviewCalls = 0;
+const guardedPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPreview')})`, {
+  Api: { lesson: { manifestPreview: () => { guardedPreviewCalls += 1; } } },
+});
+guardedPreview.call({ hasUnsafeProofState: () => true, proofActionsDisabled: true });
+if (guardedPreviewCalls !== 0) throw new Error('programmatic preview calls must reject unsafe dirty state');
+const validManifestPreviewResponse = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'validManifestPreviewResponse')})`);
+if (validManifestPreviewResponse.call({}, {
+  checksum: 'c', etag: 'e', manifest: { steps: [] }, preview: { profile: 'espTft', width: 320, height: 240 },
+})) throw new Error('preview proof must reject non-authoritative espTft dimensions');
+const malformedPreviewContext = {
+  lessonId: 'lesson-1', proofVersion: 0, previewRequestId: 0, previewing: false,
+  preview: { checksum: 'valid-checksum' }, previewManifest: currentPreview, simulationEvidence: { checksum: 'valid' },
+  hasUnsafeProofState: () => false, validManifestPreviewResponse,
+  $message: { error(message) { malformedPreviewContext.errorMessage = message; } },
+};
+doPreview.call(malformedPreviewContext);
+previewRequest[2]({});
+if (malformedPreviewContext.previewing || !malformedPreviewContext.preview || !malformedPreviewContext.errorMessage) {
+  throw new Error('malformed preview success must clear loading, preserve prior preview, and surface an error');
+}
+if (malformedPreviewContext.simulationEvidence) throw new Error('preview regeneration must invalidate prior simulation evidence');
 
 for (const methodName of [
   'onPromptInput',
@@ -171,6 +228,33 @@ for (const [methodName, apiCall] of [
   if (method.indexOf('this.invalidatePreview();') < method.indexOf(apiCall)) {
     throw new Error(`${methodName} must invalidate only inside the server success boundary`);
   }
+  if (!method.includes('this.handleUncertainMutationError')) {
+    throw new Error(`${methodName} must reconcile ambiguous transport/server failures`);
+  }
+}
+
+const isUncertainMutationError = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'isUncertainMutationError')})`, {
+  isUncertainNestError(error) {
+    const status = Number(error && (error.status ?? (error.response && error.response.status)));
+    if (error && error.transport === true) return true;
+    return !Number.isFinite(status) || status === 0 || status >= 500;
+  },
+});
+if (isUncertainMutationError.call({}, { status: 400 }) || isUncertainMutationError.call({}, { status: 409 })) {
+  throw new Error('validated HTTP 4xx responses are definitive rejections');
+}
+for (const uncertain of [{ status: 0 }, { status: 500 }, { response: { status: 503 } }, { message: 'timeout' }, null]) {
+  if (!isUncertainMutationError.call({}, uncertain)) throw new Error('transport and ambiguous 5xx failures must be uncertain');
+}
+const handleUncertainMutationError = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'handleUncertainMutationError')})`);
+let uncertainReconciles = 0;
+const uncertainProof = {
+  proofVersion: 3, previewRequestId: 4, preview: {}, previewManifest: {}, simulationEvidence: {},
+  invalidatePreview, isUncertainMutationError, reconcile() { uncertainReconciles += 1; },
+};
+handleUncertainMutationError.call(uncertainProof, { status: 0 }, uncertainProof.reconcile);
+if (uncertainProof.preview || uncertainReconciles !== 1) {
+  throw new Error('uncertain mutation errors must invalidate proof and trigger reconciliation');
 }
 
 function persistedProof(overrides = {}) {
@@ -182,6 +266,9 @@ function persistedProof(overrides = {}) {
     previewManifest: { checksum: 'valid-checksum' },
     simulationEvidence: { checksum: 'valid-checksum' },
     invalidatePreview,
+    hasUnsafeProofState: () => false,
+    handleUncertainMutationError,
+    isUncertainMutationError,
     $message: { success() {}, error() {}, warning() {} },
     $t: (key) => key,
     ...overrides,
@@ -197,8 +284,15 @@ const failedReorder = persistedProof({
 });
 moveStep.call(failedReorder, 0, 1);
 if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('pending reorder must preserve proof');
-reorderRequest[3]('reorder failed');
+reorderRequest[3]('reorder failed', { status: 400 });
 if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('failed reorder must preserve proof');
+const uncertainReorder = persistedProof({
+  lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
+  fetchSteps() { this.reconciled = true; },
+});
+moveStep.call(uncertainReorder, 0, 1);
+reorderRequest[3]('timeout', { status: 0 });
+if (uncertainReorder.preview || !uncertainReorder.reconciled) throw new Error('uncertain reorder must invalidate and reconcile');
 
 const successfulReorder = persistedProof({
   lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
@@ -207,7 +301,7 @@ doPreview.call(successfulReorder);
 const preReorderPreviewSuccess = previewRequest[2];
 moveStep.call(successfulReorder, 0, 1);
 reorderRequest[2]([{ stepKey: 's2' }, { stepKey: 's1' }]);
-if (successfulReorder.preview || successfulReorder.proofVersion !== 9 || successfulReorder.steps[0].stepKey !== 's2') {
+if (successfulReorder.preview || successfulReorder.proofVersion !== 10 || successfulReorder.steps[0].stepKey !== 's2') {
   throw new Error('successful reorder must invalidate before applying authoritative order');
 }
 preReorderPreviewSuccess({
@@ -228,8 +322,13 @@ function confirmedDeleteContext() {
 const failedDelete = confirmedDeleteContext();
 deleteStep.call(failedDelete, { stepKey: 's1' });
 if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('pending delete must preserve proof');
-deleteStepRequest[3]('delete failed');
+deleteStepRequest[3]('delete failed', { status: 400 });
 if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('failed delete must preserve proof');
+const uncertainDelete = confirmedDeleteContext();
+uncertainDelete.fetchSteps = function fetchSteps() { this.reconciled = true; };
+deleteStep.call(uncertainDelete, { stepKey: 's1' });
+deleteStepRequest[3]('connection lost', { status: 0 });
+if (uncertainDelete.preview || !uncertainDelete.reconciled) throw new Error('uncertain delete must invalidate and reconcile');
 const successfulDelete = confirmedDeleteContext();
 deleteStep.call(successfulDelete, { stepKey: 's1' });
 deleteStepRequest[2]([]);
@@ -257,8 +356,12 @@ function createStepContext() {
 const failedCreate = createStepContext();
 addStep.call(failedCreate);
 if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('pending create must preserve proof');
-createStepRequest[3]('create failed');
+createStepRequest[3]('create failed', { status: 400 });
 if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('failed create must preserve proof');
+const uncertainCreate = createStepContext();
+addStep.call(uncertainCreate);
+createStepRequest[3]('connection lost', { status: 0 });
+if (uncertainCreate.preview || !uncertainCreate.fetchAfterCreate) throw new Error('uncertain create must invalidate and reconcile');
 const successfulCreate = createStepContext();
 addStep.call(successfulCreate);
 createStepRequest[2]({ stepKey: 's2' });
@@ -276,8 +379,13 @@ function renameContext() {
 const failedRename = renameContext();
 doRename.call(failedRename);
 if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('pending rename must preserve proof');
-renameRequest[3]('rename failed');
+renameRequest[3]('rename failed', { status: 400 });
 if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('failed rename must preserve proof');
+const uncertainRename = renameContext();
+uncertainRename.fetchAll = function fetchAll() { this.reconciled = true; };
+doRename.call(uncertainRename);
+renameRequest[3]('server unavailable', { status: 503 });
+if (uncertainRename.preview || !uncertainRename.reconciled) throw new Error('uncertain rename must invalidate and reconcile');
 const successfulRename = renameContext();
 doRename.call(successfulRename);
 renameRequest[2]({ title: 'New title' });
@@ -294,6 +402,18 @@ if (!selectedAuthoringSetter.includes('invalidatePreview')) {
 }
 
 const simulationSource = read('src/components/lesson/LessonSimulationPanel.vue');
+const previewIdentity = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'previewIdentity')})`);
+const samePreviewIdentity = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'samePreviewIdentity')})`);
+const identityA = previewIdentity.call({}, currentPreview);
+if (!samePreviewIdentity.call({}, identityA, previewIdentity.call({}, currentPreview))) {
+  throw new Error('matching preview identity must permit simulation evidence');
+}
+if (samePreviewIdentity.call({}, identityA, previewIdentity.call({}, { ...currentPreview, checksum: 'preview-b' }))) {
+  throw new Error('simulation A must be rejected after preview B replaces it');
+}
+if (previewIdentity.call({}, { checksum: 'preview-a', etag: 'etag-a' })) {
+  throw new Error('preview identity requires server profile and dimensions');
+}
 const buildSimulationPayload = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'buildSimulationPayload')})`, {
   BRANCH_ACTIONS: {
     correct: 'advance', near_miss: 'advance', brave_try: 'advance',
@@ -319,6 +439,45 @@ if (JSON.stringify(simulationPayload.outcomes) !== JSON.stringify({ voice: ['ret
 if (simulationPayload.projection.steps.voice.maxAttempts !== 3
   || simulationPayload.projection.steps.voice.on.timeout !== 'fallback') {
   throw new Error('simulation payload must include the complete safe-speaking branch projection');
+}
+let simulationRequest;
+const runSimulation = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'runSimulation')})`, {
+  Api: { lesson: { simulate: (...args) => { simulationRequest = args; } } },
+});
+let guardedSimulationCalls = 0;
+const guardedSimulation = vm.runInNewContext(`(${extractObjectMethod(simulationSource, 'runSimulation')})`, {
+  Api: { lesson: { simulate: () => { guardedSimulationCalls += 1; } } },
+});
+guardedSimulation.call({ disabled: true, running: false });
+if (guardedSimulationCalls !== 0) throw new Error('programmatic simulation calls must reject unsafe dirty state');
+function simulationRunContext() {
+  const events = [];
+  return {
+    lessonId: 'lesson-1', disabled: false, running: false, requestId: 0, proofVersion: 4,
+    manifestPreview: currentPreview, errorMessage: '', previewIdentity, samePreviewIdentity,
+    buildSimulationPayload: () => simulationPayload,
+    $emit: (...args) => events.push(args), events,
+  };
+}
+const previewRaceSimulation = simulationRunContext();
+runSimulation.call(previewRaceSimulation);
+previewRaceSimulation.manifestPreview = { ...currentPreview, checksum: 'preview-b', etag: 'etag-b' };
+simulationRequest[2]({ ...currentPreview, simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [] } });
+if (previewRaceSimulation.events.some(([event, value]) => event === 'evidence' && value)) {
+  throw new Error('simulation A arriving after preview B must not become evidence');
+}
+const malformedSimulation = simulationRunContext();
+runSimulation.call(malformedSimulation);
+simulationRequest[2]({ checksum: 'preview-a', etag: 'etag-a', simulation: { terminated: true, trace: [] } });
+if (malformedSimulation.events.some(([event, value]) => event === 'evidence' && value) || !malformedSimulation.errorMessage) {
+  throw new Error('simulation response missing preview identity must be rejected safely');
+}
+
+const robotPreviewSource = read('src/components/lesson/RobotLessonPreview.vue');
+const previewScaleForWidth = vm.runInNewContext(`(${extractObjectMethod(robotPreviewSource, 'previewScaleForWidth')})`);
+const narrowScale = previewScaleForWidth.call({}, 320);
+if (Math.abs(narrowScale - (2 / 3)) > 0.0001) {
+  throw new Error('320px preview container must fully scale the 480px stage to approximately 2/3');
 }
 const shouldApplySavedStepState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'shouldApplySavedStepState')})`);
 const matching = {
@@ -413,7 +572,9 @@ expectRegex(
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-review-request'", 'shared replacement must request review first');
 expectContains('src/components/LessonAssetManager.vue', 'confirmReplace', 'replacement mode needs an explicit parent confirmation gate');
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutated'", 'successful asset writes must invalidate proof independently of reload');
+expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutation-uncertain'", 'ambiguous asset writes must invalidate proof and reconcile');
 expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 'the editor must subscribe to committed asset mutations');
+expectContains('src/views/LessonEditor.vue', '@asset-mutation-uncertain="onAssetMutationUncertain"', 'the editor must subscribe to ambiguous asset mutations');
 expectRegex(
   'src/views/LessonEditor.vue',
   /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(step\.stepBody\s*\|\|\s*\{\}/m,
@@ -426,7 +587,7 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /refreshSharedVisualTruth\([\s\S]*?reloadAssets\(done, fail\)[\s\S]*?doValidate\(done, fail\)[\s\S]*?doPreview\(done, fail\)/m,
+  /refreshSharedVisualTruth\([\s\S]*?reloadAssets\(done, fail\)[\s\S]*?doValidate\(done, fail\)[\s\S]*?doPreview\(done, fail,/m,
   'server-confirmed clone rebind must refetch validation and manifest preview',
 );
 const cloneRebindSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
@@ -673,11 +834,22 @@ if (missingReloads !== 2 || !missingContext.sharedImpactRebindError) {
 if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries must not create another clone');
 
 const assetManagerSource = read('src/components/LessonAssetManager.vue');
+const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'handleMutationError')})`, {
+  isUncertainNestError(error) {
+    const status = Number(error && (error.status ?? (error.response && error.response.status)));
+    if (error && error.transport === true) return true;
+    return !Number.isFinite(status) || status === 0 || status >= 500;
+  },
+});
 const uploadAssetSource = extractObjectMethod(assetManagerSource, 'uploadAsset');
 const uploadMutationEventIndex = uploadAssetSource.indexOf("this.$emit('asset-mutated'");
 const uploadReloadIndex = uploadAssetSource.indexOf('this.reload()');
 if (uploadMutationEventIndex === -1 || uploadReloadIndex === -1 || uploadMutationEventIndex > uploadReloadIndex) {
   throw new Error('successful upload/replace must emit asset-mutated before attempting reload');
+}
+if (!uploadAssetSource.includes('handleMutationError')) throw new Error('upload/replace errors must classify uncertain commits');
+if (!extractObjectMethod(assetManagerSource, 'onDelete').includes('handleMutationError')) {
+  throw new Error('delete errors must classify uncertain commits');
 }
 const onAssetMutated = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutated')})`);
 const assetMutationParent = {
@@ -698,6 +870,7 @@ const assetMutationChild = {
   lessonId: 'lesson-1',
   $t: (key) => key,
   $message: { success() {}, error() {} },
+  handleMutationError: handleAssetMutationError,
   $emit(event, payload) {
     if (event === 'asset-mutated') onAssetMutated.call(assetMutationParent, payload);
   },
@@ -720,8 +893,26 @@ const failedMutationChild = {
   },
 };
 deleteAsset.call(failedMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
-deleteRequest[4]('delete failed');
+deleteRequest[4]('delete failed', { status: 400 });
 if (!failedMutationParent.preview) throw new Error('failed asset mutation must not invalidate server proof');
+
+let uncertainAssetEvents = 0;
+let uncertainAssetReloads = 0;
+const uncertainMutationChild = {
+  ...assetMutationChild,
+  reload() { uncertainAssetReloads += 1; },
+  $emit(event) {
+    if (event === 'asset-mutation-uncertain') {
+      uncertainAssetEvents += 1;
+      onAssetMutated.call(failedMutationParent);
+    }
+  },
+};
+deleteAsset.call(uncertainMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
+deleteRequest[4]('network timeout', { status: 0 });
+if (uncertainAssetEvents !== 1 || uncertainAssetReloads !== 1 || failedMutationParent.preview) {
+  throw new Error('uncertain asset delete must invalidate proof and reload authoritative assets');
+}
 
 const assetProofFingerprint = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'buildAssetProofFingerprint')})`);
 const baseAsset = {

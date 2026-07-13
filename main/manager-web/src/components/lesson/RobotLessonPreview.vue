@@ -11,8 +11,8 @@
       </div>
     </div>
 
-    <div class="stage-scaler">
-      <div class="stage" :style="backgroundStyle">
+    <div ref="scaler" class="stage-scaler">
+      <div class="stage" :style="stageStyle">
         <img v-if="teachingObjectSrc" class="teaching-object" :src="teachingObjectSrc" alt="" />
         <img v-if="robotOverlaySrc" class="robot-overlay" :src="robotOverlaySrc" alt="" />
         <div v-if="!backgroundSrc && !teachingObjectSrc" class="empty-scene">
@@ -37,6 +37,9 @@ export default {
   props: {
     manifestPreview: { type: Object, required: true },
     stepIndex: { type: Number, default: 0 },
+  },
+  data() {
+    return { previewScale: 1, resizeObserver: null };
   },
   computed: {
     steps() {
@@ -66,6 +69,9 @@ export default {
     backgroundStyle() {
       return this.backgroundSrc ? { backgroundImage: `url("${this.backgroundSrc}")` } : {};
     },
+    stageStyle() {
+      return { ...this.backgroundStyle, transform: `scale(${this.previewScale})` };
+    },
     caption() {
       const background = this.scene.backgroundScene || {};
       return background.altCaption || this.currentStep.prompt || this.currentStep.subject || 'Robot scene';
@@ -74,7 +80,33 @@ export default {
       return this.currentStep.id || `Step ${this.currentIndex + 1}`;
     },
   },
+  mounted() {
+    this.updatePreviewScale();
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries && entries[0];
+        this.updatePreviewScale(entry && entry.contentRect && entry.contentRect.width);
+      });
+      this.resizeObserver.observe(this.$refs.scaler);
+    }
+    if (typeof window !== 'undefined') window.addEventListener('resize', this.updatePreviewScale);
+  },
+  beforeDestroy() {
+    if (this.resizeObserver) this.resizeObserver.disconnect();
+    this.resizeObserver = null;
+    if (typeof window !== 'undefined') window.removeEventListener('resize', this.updatePreviewScale);
+  },
   methods: {
+    previewScaleForWidth(width) {
+      const available = Number(width);
+      if (!Number.isFinite(available) || available <= 0) return 1;
+      return Math.min(1, available / 480);
+    },
+    updatePreviewScale(width) {
+      const scaler = this.$refs && this.$refs.scaler;
+      const available = Number(width) || (scaler && scaler.getBoundingClientRect().width) || 480;
+      this.previewScale = this.previewScaleForWidth(available);
+    },
     assetSrc(value) {
       if (!value || typeof value !== 'object') return '';
       const asset = value.asset || value;
@@ -138,15 +170,8 @@ export default {
   overflow: hidden;
   position: absolute;
   top: 0;
-  transform: scale(1);
   transform-origin: top left;
   width: 480px;
-}
-
-/* Container queries keep the authoritative stage fixed while only its outer view scales. */
-@supports (container-type: inline-size) {
-  .stage-scaler { container-type: inline-size; }
-  .stage { transform: scale(calc(100cqw / 480px)); }
 }
 
 .teaching-object {

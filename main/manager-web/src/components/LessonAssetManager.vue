@@ -105,6 +105,7 @@
 
 <script>
 import Api from '@/apis/api';
+import { isUncertainNestError } from '@/apis/nestHttp';
 
 // Default role per layer (server also defaults these, but the UI prefills so the
 // author can see/override). robotOverlay→pose, teachingObject→primarySubject.
@@ -216,16 +217,21 @@ export default {
       if (this.$refs.uploader) this.$refs.uploader.clearFiles();
     },
     onDelete(a) {
+      this.$emit('mutation-state', true);
       Api.lesson.deleteAsset(
         this.lessonId,
         a.assetKey,
         a.profile,
         () => {
+          this.$emit('mutation-state', false);
           this.$emit('asset-mutated', { type: 'delete', assetKey: a.assetKey, profile: a.profile || 'espTft' });
           this.$message.success(this.$t('lesson.assetDeleted'));
           this.reload();
         },
-        (msg) => this.$message.error(msg),
+        (msg, error) => {
+          this.$emit('mutation-state', false);
+          this.handleMutationError(msg, error);
+        },
       );
     },
     // Seed-convention default assetKey for the current layer/pose/subject.
@@ -246,6 +252,13 @@ export default {
     onFilePick(file) {
       this.pickedFile = file.raw || file;
     },
+    handleMutationError(message, error) {
+      if (isUncertainNestError(error)) {
+        this.$emit('asset-mutation-uncertain', { message, error });
+        this.reload();
+      }
+      this.$message.error(message);
+    },
     uploadAsset() {
       if (!this.pickedFile || this.disabled) return;
       const key = (this.assetKey || '').trim();
@@ -254,6 +267,7 @@ export default {
         return;
       }
       this.uploading = true;
+      this.$emit('mutation-state', true);
       const layer = this.layer;
       const fields = {
         profile: 'espTft',
@@ -269,6 +283,7 @@ export default {
         fields,
         (asset) => {
           this.uploading = false;
+          this.$emit('mutation-state', false);
           const a = (asset && asset.asset) ? asset.asset : (asset || {});
           this.pickedFile = null;
           this.replaceMode = false;
@@ -289,11 +304,11 @@ export default {
             layer: a.layer || layer,
           });
         },
-        (msg) => {
+        (msg, error) => {
           this.uploading = false;
+          this.$emit('mutation-state', false);
           // espTft sniff-rejects webp/gif and corrupt headers (415)
-          if (/415/.test(String(msg))) this.$message.error(this.$t('lesson.uploadReject415'));
-          else this.$message.error(msg);
+          this.handleMutationError(/415/.test(String(msg)) ? this.$t('lesson.uploadReject415') : msg, error);
         },
       );
     },
