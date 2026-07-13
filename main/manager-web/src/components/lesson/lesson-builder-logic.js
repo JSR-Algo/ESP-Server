@@ -104,12 +104,20 @@ function assertJsonTree(value, label, ancestors = new Set()) {
   ancestors.delete(value);
 }
 
-function containsAssetKey(value, assetKey, propertyName = '') {
-  if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey, propertyName));
+function isKeyedAssetReference(value, assetKey, path) {
+  const propertyName = path[path.length - 1];
+  const parentProperty = path[path.length - 2];
+  const isPersistedAsset = propertyName === 'asset';
+  const isBackgroundPoster = parentProperty === 'backgroundScene' && propertyName === 'poster';
+  return (isPersistedAsset || isBackgroundPoster) && value.key === assetKey;
+}
+
+function containsAssetKey(value, assetKey, path = []) {
+  if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey, path));
   if (!value || typeof value !== 'object') return false;
   if (value.assetKey === assetKey) return true;
-  if (propertyName === 'asset' && value.key === assetKey) return true;
-  return Object.entries(value).some(([key, item]) => containsAssetKey(item, assetKey, key));
+  if (isKeyedAssetReference(value, assetKey, path)) return true;
+  return Object.entries(value).some(([key, item]) => containsAssetKey(item, assetKey, path.concat(key)));
 }
 
 /** Finds references in authoring bodies, which must be acyclic JSON trees. */
@@ -138,19 +146,19 @@ function nextClonedAssetKey(assetKey, assets) {
   return `${base}.v${maxVersion + 1}`;
 }
 
-function replaceAssetReference(value, fromKey, clonedAsset, propertyName = '') {
+function replaceAssetReference(value, fromKey, clonedAsset, path = []) {
   if (Array.isArray(value)) {
-    return value.map((item) => replaceAssetReference(item, fromKey, clonedAsset, propertyName));
+    return value.map((item) => replaceAssetReference(item, fromKey, clonedAsset, path));
   }
   if (!value || typeof value !== 'object') return value;
 
   const replaced = Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      replaceAssetReference(item, fromKey, clonedAsset, key),
+      replaceAssetReference(item, fromKey, clonedAsset, path.concat(key)),
     ]),
   );
-  if (propertyName === 'asset' && value.key === fromKey) {
+  if (isKeyedAssetReference(value, fromKey, path)) {
     return {
       ...replaced,
       assetId: clonedAsset.assetId,

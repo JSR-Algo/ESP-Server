@@ -204,6 +204,40 @@ assert.deepStrictEqual(replaceStepAssetReference(realSchemaBody, referencedAsset
   choiceMetadata: { key: referencedAssetKey, label: 'must not be treated as an asset' },
 });
 
+const backgroundKey = 'backgroundScene.moonGarden.v1';
+const backgroundClone = {
+  assetId: 'background-clone',
+  assetKey: 'backgroundScene.moonGarden.v2',
+  path: '/background-clone.png',
+  sha256: 'background-clone-sha',
+};
+const realBackgroundBody = {
+  backgroundScene: {
+    mode: 'poster',
+    poster: { key: backgroundKey, src: '/background.png', fit: 'cover', sha256: 'background-sha' },
+    altCaption: 'Moon garden',
+  },
+  analyticsMetadata: { key: backgroundKey, event: 'background-viewed' },
+};
+assert.deepStrictEqual(
+  collectAssetReferences([{ stepKey: 'background-s1', stepBody: realBackgroundBody }], backgroundKey),
+  ['background-s1'],
+);
+assert.deepStrictEqual(replaceStepAssetReference(realBackgroundBody, backgroundKey, backgroundClone), {
+  backgroundScene: {
+    mode: 'poster',
+    poster: {
+      key: backgroundClone.assetKey,
+      src: backgroundClone.path,
+      fit: 'cover',
+      sha256: backgroundClone.sha256,
+      assetId: backgroundClone.assetId,
+    },
+    altCaption: 'Moon garden',
+  },
+  analyticsMetadata: { key: backgroundKey, event: 'background-viewed' },
+});
+
 const cyclicArray = [];
 cyclicArray.push(cyclicArray);
 assert.throws(
