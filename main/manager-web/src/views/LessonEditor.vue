@@ -364,8 +364,11 @@
       :visible.sync="publishReviewVisible"
       :snapshot="publishReviewSnapshot"
       :publishing="publishing"
+      :locked="!!publishUncertainState || publishReconciling"
+      :reconciling="publishReconciling"
       :result="publishResult"
       @publish="publishReviewedVersion"
+      @reconcile="reconcileUncertainPublish"
     />
   </div>
 </template>
@@ -431,6 +434,9 @@ export default {
       publishReviewRequestId: 0,
       publishRequestId: 0,
       publishResult: null,
+      publishUncertainState: null,
+      publishReconciling: false,
+      publishReconcileRequestId: 0,
       readinessReady: false,
       renaming: false,
       stepDialogVisible: false,
@@ -590,6 +596,7 @@ export default {
     this.validationRequestId += 1;
     this.publishReviewRequestId += 1;
     this.publishRequestId += 1;
+    this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
   },
   methods: {
@@ -811,6 +818,7 @@ export default {
     },
     invalidatePreview() {
       if (this.editorDestroying) return;
+      if (this.publishUncertainState || this.publishReconciling) return false;
       this.proofVersion += 1;
       this.previewRequestId += 1;
       this.validationRequestId += 1;
@@ -1512,18 +1520,19 @@ export default {
           if (this.editorDestroying) return;
           if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
-          this.validationResult = res && typeof res === 'object' ? res : { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [] };
+          const parsed = this.parseValidationResult(res, 'espTft');
+          this.validationResult = parsed || { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [], findings: [] };
           this.validationProofVersion = proofVersion;
-          if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
+          if (parsed) this.$message.success(this.$t('lesson.validOk', { profiles: parsed.profiles.join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
-          if (options.requireValid && (!res || res.valid !== true)) fail(this.$t('lesson.validFail'));
-          else succeed(res);
+          if (!parsed) fail(this.$t('lesson.validationResponseMalformed'));
+          else succeed(parsed);
         },
         (msg) => {
           if (this.editorDestroying) return;
           if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
-          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [] };
+          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
           this.validationProofVersion = proofVersion;
           this.$message.error(msg);
           fail(msg);
@@ -1592,6 +1601,8 @@ export default {
         && this.isDraft
         && !this.publishing
         && !this.publishPreparing
+        && !this.publishUncertainState
+        && !this.publishReconciling
         && !this.hasUnsafeProofState()
         && this.readinessReady
         && this.validationResult
@@ -1615,22 +1626,61 @@ export default {
         && this.canPublishCurrentProof()
       );
     },
-    normalizeEvidenceAssets(assets) {
-      return (Array.isArray(assets) ? assets : []).map((asset) => ({
-        assetId: asset.assetId || asset.id || '',
-        profile: asset.profile || '',
-        assetKey: asset.assetKey || asset.asset_key || '',
-        sha256: asset.sha256 || '',
-        bytes: asset.bytes == null ? null : Number(asset.bytes),
-        layer: asset.layer || '',
-        role: asset.role || '',
-        critical: asset.critical === true,
-        mediaType: asset.mediaType || asset.media_type || '',
-        width: asset.width == null ? null : Number(asset.width),
-        height: asset.height == null ? null : Number(asset.height),
-        version: asset.version || asset.versionId || asset.version_id || '',
-        path: asset.path || asset.url || '',
-      })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    parseAssetEvidenceResponse(result) {
+      if (!result || Array.isArray(result) || !Array.isArray(result.profiles) || !Array.isArray(result.assets)) return null;
+      const profiles = result.profiles.slice();
+      if (!profiles.length || profiles.some((profile) => typeof profile !== 'string' || !profile.trim()) || new Set(profiles).size !== profiles.length) return null;
+      if (!result.assets.length) return null;
+      const seen = new Set();
+      const assets = [];
+      for (const raw of result.assets) {
+        if (!raw || Array.isArray(raw) || typeof raw !== 'object') return null;
+        const profile = raw.profile;
+        const assetKey = raw.assetKey;
+        const mediaType = raw.mediaType;
+        const location = raw.path || raw.url;
+        const bytes = Number(raw.bytes);
+        const width = raw.width == null ? null : Number(raw.width);
+        const height = raw.height == null ? null : Number(raw.height);
+        if (![profile, assetKey, raw.layer, raw.role, mediaType, raw.sha256, location].every((value) => typeof value === 'string' && value.trim())) return null;
+        if (!profiles.includes(profile) || !/^[a-f0-9]{64}$/i.test(raw.sha256)) return null;
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || (width !== null && (!Number.isFinite(width) || width < 0)) || (height !== null && (!Number.isFinite(height) || height < 0))) return null;
+        if (typeof raw.critical !== 'boolean') return null;
+        const identity = `${profile}\u0000${assetKey}`;
+        if (seen.has(identity)) return null;
+        seen.add(identity);
+        assets.push({ profile, assetKey, layer: raw.layer, role: raw.role, mediaType, bytes, width, height, sha256: raw.sha256, critical: raw.critical, path: location });
+      }
+      const assetProfiles = [...new Set(assets.map((asset) => asset.profile))].sort();
+      if (assetProfiles.join('|') !== profiles.slice().sort().join('|')) return null;
+      return { profiles: profiles.slice().sort(), assets: assets.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) };
+    },
+    parseValidationResult(result, expectedProfile = 'espTft') {
+      if (!result || Array.isArray(result) || result.valid !== true || !Array.isArray(result.profiles)) return null;
+      const profiles = result.profiles.slice();
+      if (!profiles.length || profiles.some((profile) => typeof profile !== 'string' || !profile.trim()) || new Set(profiles).size !== profiles.length || !profiles.includes(expectedProfile)) return null;
+      const validFinding = (finding) => typeof finding === 'string'
+        ? Boolean(finding.trim())
+        : Boolean(finding && !Array.isArray(finding) && typeof finding === 'object'
+          && ['message', 'reason', 'code'].some((key) => typeof finding[key] === 'string' && finding[key].trim()));
+      for (const key of ['errors', 'warnings', 'findings']) {
+        if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].some((finding) => !validFinding(finding)))) return null;
+      }
+      if (Array.isArray(result.errors) && result.errors.length) return null;
+      return { ...result, valid: true, profiles, errors: result.errors || [], warnings: result.warnings || [], findings: result.findings || [] };
+    },
+    derivePublishSource(rows, currentLesson) {
+      if (!currentLesson || !Array.isArray(rows)) return null;
+      const authoritativeDraft = rows.find((row) => row.lessonId === currentLesson.lessonId
+        && row.lessonKey === currentLesson.lessonKey
+        && Number(row.lessonVersion) === Number(currentLesson.lessonVersion)
+        && row.status === 'draft');
+      if (!authoritativeDraft) return null;
+      const priorPublished = rows.filter((row) => row.lessonKey === authoritativeDraft.lessonKey
+        && row.status === 'published'
+        && Number(row.lessonVersion) < Number(authoritativeDraft.lessonVersion))
+        .sort((a, b) => Number(b.lessonVersion) - Number(a.lessonVersion))[0];
+      return { mode: priorPublished ? 'prior-published' : 'first-publish', authoritativeDraft, evidenceLesson: priorPublished || authoritativeDraft };
     },
     collectLessonEvidence(lesson, onSuccess, onError) {
       if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishEvidenceIdentityMissing')); return false; }
@@ -1642,7 +1692,9 @@ export default {
         if (settled || !manifestResult || !assetResult) return;
         settled = true;
         if (!this.validManifestPreviewResponse(manifestResult)) { onError(this.$t('lesson.publishManifestEvidenceMalformed')); return; }
-        const assets = this.normalizeEvidenceAssets(assetResult.assets);
+        const parsedAssets = this.parseAssetEvidenceResponse(assetResult);
+        if (!parsedAssets) { onError(this.$t('lesson.publishAssetEvidenceMalformed')); return; }
+        const assets = parsedAssets.assets;
         onSuccess({
           lessonId: lesson.lessonId,
           lessonKey: lesson.lessonKey,
@@ -1653,14 +1705,15 @@ export default {
           etag: manifestResult.etag,
           manifest: manifestResult.manifest,
           assets,
+          profiles: parsedAssets.profiles,
           totalBytes: assets.reduce((sum, asset) => sum + (Number(asset.bytes) || 0), 0),
         });
       };
       Api.lesson.manifestPreview(lesson.lessonId, 'espTft', (result) => { manifestResult = result; finish(); }, fail);
-      Api.lesson.listAssets(lesson.lessonId, undefined, (result) => { assetResult = result && Array.isArray(result.assets) ? result : { assets: [] }; finish(); }, fail);
+      Api.lesson.listAssets(lesson.lessonId, undefined, (result) => { assetResult = result; finish(); }, fail);
       return true;
     },
-    compareOriginalEvidence(before, after) {
+    compareOriginalEvidence(before, after, options = {}) {
       const stable = (value) => {
         if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
         if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
@@ -1670,8 +1723,9 @@ export default {
       if (!before || !after) return { pass: false, differences: [{ key: 'lesson.publishDiffEvidenceIncomplete' }] };
       if (before.lessonId !== after.lessonId || Number(before.lessonVersion) !== Number(after.lessonVersion)) differences.push({ key: 'lesson.publishDiffOriginalIdentity' });
       if (before.checksum !== after.checksum) differences.push({ key: 'lesson.publishDiffOriginalChecksum', params: { before: before.checksum || '—', after: after.checksum || '—' } });
-      if ((before.rowManifestChecksum || after.rowManifestChecksum)
-        && (before.rowManifestChecksum !== after.rowManifestChecksum || after.rowManifestChecksum !== after.checksum)) differences.push({ key: 'lesson.publishDiffOriginalRowChecksum' });
+      if (!options.allowPublishChecksumTransition && (before.rowManifestChecksum || after.rowManifestChecksum)
+        && (before.rowManifestChecksum !== after.rowManifestChecksum
+          || (!options.allowPendingRowChecksum && after.rowManifestChecksum !== after.checksum))) differences.push({ key: 'lesson.publishDiffOriginalRowChecksum' });
       if (stable(before.manifest) !== stable(after.manifest)) differences.push({ key: 'lesson.publishDiffOriginalManifest' });
       if (stable(before.assets) !== stable(after.assets)) differences.push({ key: 'lesson.publishDiffOriginalAssets' });
       if (Number(before.totalBytes || 0) !== Number(after.totalBytes || 0)) differences.push({ key: 'lesson.publishDiffOriginalBytes', params: { before: before.totalBytes || 0, after: after.totalBytes || 0 } });
@@ -1690,6 +1744,16 @@ export default {
         || fetchedTarget.rowManifestChecksum !== fetchedTarget.checksum) differences.push({ key: 'lesson.publishDiffTargetChecksum' });
       return { pass: differences.length === 0, differences };
     },
+    parsePublishResponse(result, snapshot) {
+      if (!result || Array.isArray(result) || !snapshot) return null;
+      if (result.lessonId !== snapshot.targetLessonId || result.status !== 'published'
+        || Number(result.lessonVersion) !== Number(snapshot.targetVersion)
+        || typeof result.lessonKey !== 'string' || !result.lessonKey
+        || typeof result.checksum !== 'string' || !/^[a-f0-9]{64}$/i.test(result.checksum)
+        || !result.profileChecksums || Array.isArray(result.profileChecksums) || typeof result.profileChecksums !== 'object'
+        || result.profileChecksums.espTft !== result.checksum) return null;
+      return result;
+    },
     collectPublishedTargetEvidence(snapshot, publishResponse, onSuccess, onError) {
       Api.lesson.getLesson(snapshot.targetLessonId, (lesson) => {
         if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishTargetIdentityMalformed')); return; }
@@ -1702,6 +1766,128 @@ export default {
         this.collectLessonEvidence(lesson, onSuccess, onError);
       }, onError);
     },
+    verifyPublishedEvidence(snapshot, result, requestId) {
+      let originalAfter = null;
+      let targetAfter = null;
+      let originalError = '';
+      let targetError = '';
+      let completed = 0;
+      const finish = () => {
+        completed += 1;
+        if (completed < 2 || this.editorDestroying || requestId !== this.publishRequestId) return;
+        this.publishing = false;
+        this.publishReconciling = false;
+        this.publishUncertainState = null;
+        const originalComparison = originalError
+          ? { pass: false, differences: [{ key: 'lesson.publishDiffOriginalUnavailable', params: { reason: originalError } }] }
+          : this.compareOriginalEvidence(snapshot.originalEvidence, originalAfter, { allowPublishChecksumTransition: snapshot.sourceMode === 'first-publish' });
+        const targetComparison = targetError
+          ? { pass: false, differences: [{ key: 'lesson.publishDiffTargetUnavailable', params: { reason: targetError } }] }
+          : this.compareTargetEvidence(snapshot, result, targetAfter);
+        const targetEvidence = targetAfter ? {
+          lessonVersion: targetAfter.lessonVersion,
+          checksum: targetAfter.checksum,
+          etag: targetAfter.etag,
+          assetCount: targetAfter.assets.length,
+          bytes: targetAfter.totalBytes,
+          publishChecksum: result.checksum,
+        } : null;
+        const verified = originalComparison.pass && targetComparison.pass;
+        this.publishResult = {
+          type: verified ? 'success' : 'error',
+          title: verified
+            ? this.$t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstVerified' : 'lesson.publishVerified')
+            : this.$t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstVerificationFailed' : 'lesson.publishVerificationFailed'),
+          originalComparison,
+          targetComparison,
+          targetEvidence,
+        };
+        this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
+        this.fetchAll();
+      };
+      this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
+      this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });
+      return true;
+    },
+    latchUncertainPublish(snapshot, requestId, reason) {
+      this.publishing = false;
+      this.publishUncertainState = {
+        requestId,
+        lessonId: snapshot.targetLessonId,
+        lessonVersion: snapshot.targetVersion,
+        checksum: snapshot.previewChecksum,
+        proofVersion: snapshot.proofVersion,
+        reason,
+      };
+      this.publishResult = { type: 'warning', title: this.$t('lesson.publishUncertain'), uncertain: true };
+      this.reconcileUncertainPublish();
+      return true;
+    },
+    reconcileUncertainPublish() {
+      const uncertain = this.publishUncertainState;
+      const snapshot = this.publishReviewSnapshot;
+      if (this.editorDestroying || this.publishReconciling || !uncertain || !snapshot
+        || uncertain.requestId !== this.publishRequestId
+        || uncertain.lessonId !== snapshot.targetLessonId
+        || uncertain.lessonVersion !== snapshot.targetVersion
+        || uncertain.checksum !== snapshot.previewChecksum
+        || uncertain.proofVersion !== snapshot.proofVersion
+        || uncertain.proofVersion !== this.proofVersion) return false;
+      const reconcileRequestId = this.publishReconcileRequestId + 1;
+      this.publishReconcileRequestId = reconcileRequestId;
+      this.publishReconciling = true;
+      this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconciling'), uncertain: true };
+      Api.lesson.getLesson(snapshot.targetLessonId, (lesson) => {
+        if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId || uncertain !== this.publishUncertainState) return;
+        if (!lesson || lesson.lessonId !== snapshot.targetLessonId || Number(lesson.lessonVersion) !== Number(snapshot.targetVersion)) {
+          this.publishReconciling = false;
+          this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
+          return;
+        }
+        if (lesson.status === 'published' && typeof lesson.manifestChecksum === 'string' && lesson.manifestChecksum) {
+          const recovered = this.parsePublishResponse({
+            lessonId: lesson.lessonId,
+            lessonKey: lesson.lessonKey,
+            lessonVersion: lesson.lessonVersion,
+            checksum: lesson.manifestChecksum,
+            status: lesson.status,
+            profileChecksums: { espTft: lesson.manifestChecksum },
+          }, snapshot);
+          if (!recovered) {
+            this.publishReconciling = false;
+            this.publishResult = { type: 'error', title: this.$t('lesson.publishVerificationFailed'), uncertain: true };
+            return;
+          }
+          this.verifyPublishedEvidence(snapshot, recovered, uncertain.requestId);
+          return;
+        }
+        if (lesson.status === 'draft') {
+          this.collectLessonEvidence(lesson, (evidence) => {
+            if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId || uncertain !== this.publishUncertainState) return;
+            const comparison = this.compareOriginalEvidence(snapshot.targetDraftEvidence, evidence, { allowPendingRowChecksum: true });
+            this.publishReconciling = false;
+            if (comparison.pass) {
+              this.publishUncertainState = null;
+              this.publishResult = { type: 'info', title: this.$t('lesson.publishNoCommitConfirmed'), retryAllowed: true };
+            } else {
+              this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
+            }
+          }, () => {
+            if (reconcileRequestId !== this.publishReconcileRequestId) return;
+            this.publishReconciling = false;
+            this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileFailed'), uncertain: true };
+          });
+          return;
+        }
+        this.publishReconciling = false;
+        this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
+      }, () => {
+        if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId) return;
+        this.publishReconciling = false;
+        this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileFailed'), uncertain: true };
+      });
+      return true;
+    },
     doPublish() {
       if (this.assetMutating || !this.canPublishCurrentProof()) return false;
       const requestId = this.publishReviewRequestId + 1;
@@ -1713,46 +1899,53 @@ export default {
         this.lesson.courseId,
         (lessons) => {
           if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
-          const original = (Array.isArray(lessons) ? lessons : []).find((candidate) => (
-            candidate.lessonKey === this.lesson.lessonKey
-            && Number(candidate.lessonVersion) === Number(this.lesson.lessonVersion) - 1
-            && candidate.status === 'published'
-          ));
-          if (!original) {
+          const source = this.derivePublishSource(lessons, this.lesson);
+          if (!source) {
             this.publishPreparing = false;
             this.$message.error(this.$t('lesson.publishOriginalMissing'));
             return;
           }
-          this.collectLessonEvidence(original, (originalEvidence) => {
+          this.collectLessonEvidence(source.evidenceLesson, (originalEvidence) => {
             if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
-            this.publishPreparing = false;
-            this.publishReviewSnapshot = {
-              requestId,
-              proofVersion,
-              originalLesson: original,
-              originalEvidence,
-              originalLessonId: original.lessonId,
-              originalVersion: original.lessonVersion,
-              originalChecksum: originalEvidence.checksum,
-              originalAssets: originalEvidence.assets,
-              originalBytes: originalEvidence.totalBytes,
-              targetLessonId: this.lessonId,
-              targetVersion: this.lesson.lessonVersion,
-              stepCount: this.steps.length,
-              assetCount: this.bundleAssets.length,
-              previewProfile: this.previewManifest.preview.profile,
-              previewWidth: this.previewManifest.preview.width,
-              previewHeight: this.previewManifest.preview.height,
-              previewChecksum: this.previewManifest.checksum,
-              previewEtag: this.previewManifest.etag,
-              simulationChecksum: this.simulationEvidence.checksum,
-              simulationEtag: this.simulationEvidence.etag,
-              simulationTerminationReason: this.simulationEvidence.simulation.terminationReason,
-              simulationCompletionEvent: this.simulationEvidence.simulation.trace[this.simulationEvidence.simulation.trace.length - 1] || null,
-              validationResult: JSON.parse(JSON.stringify(this.validationResult)),
-              validationProfiles: Array.isArray(this.validationResult.profiles) ? this.validationResult.profiles.map((profile) => typeof profile === 'string' ? profile : (profile.profile || profile.name || 'profile')) : [],
+            const openReview = (targetDraftEvidence) => {
+              if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+              this.publishPreparing = false;
+              this.publishReviewSnapshot = {
+                requestId,
+                proofVersion,
+                sourceMode: source.mode,
+                originalLesson: source.evidenceLesson,
+                originalEvidence,
+                targetDraftEvidence,
+                originalLessonId: source.evidenceLesson.lessonId,
+                originalVersion: source.evidenceLesson.lessonVersion,
+                originalChecksum: originalEvidence.checksum,
+                originalAssets: originalEvidence.assets,
+                originalBytes: originalEvidence.totalBytes,
+                targetLessonId: source.authoritativeDraft.lessonId,
+                targetVersion: source.authoritativeDraft.lessonVersion,
+                stepCount: this.steps.length,
+                assetCount: targetDraftEvidence.assets.length,
+                previewProfile: this.previewManifest.preview.profile,
+                previewWidth: this.previewManifest.preview.width,
+                previewHeight: this.previewManifest.preview.height,
+                previewChecksum: this.previewManifest.checksum,
+                previewEtag: this.previewManifest.etag,
+                simulationChecksum: this.simulationEvidence.checksum,
+                simulationEtag: this.simulationEvidence.etag,
+                simulationTerminationReason: this.simulationEvidence.simulation.terminationReason,
+                simulationCompletionEvent: this.simulationEvidence.simulation.trace[this.simulationEvidence.simulation.trace.length - 1] || null,
+                validationResult: JSON.parse(JSON.stringify(this.validationResult)),
+                validationProfiles: this.validationResult.profiles.slice(),
+              };
+              this.publishReviewVisible = true;
             };
-            this.publishReviewVisible = true;
+            if (source.evidenceLesson.lessonId === source.authoritativeDraft.lessonId) openReview(originalEvidence);
+            else this.collectLessonEvidence(source.authoritativeDraft, openReview, (message) => {
+              if (requestId !== this.publishReviewRequestId) return;
+              this.publishPreparing = false;
+              this.$message.error(message);
+            });
           }, (message) => {
             if (this.editorDestroying || requestId !== this.publishReviewRequestId) return;
             this.publishPreparing = false;
@@ -1768,62 +1961,25 @@ export default {
       return true;
     },
     publishReviewedVersion(snapshot) {
-      if (this.publishing || !this.publishReviewIsCurrent(snapshot)) return false;
+      if (this.publishing || this.publishUncertainState || this.publishReconciling || !this.publishReviewIsCurrent(snapshot)) return false;
       const requestId = this.publishRequestId + 1;
       this.publishRequestId = requestId;
       this.publishing = true;
       this.publishResult = null;
       Api.lesson.publish(
-        this.lessonId,
+        snapshot.targetLessonId,
         (result) => {
           if (this.editorDestroying || requestId !== this.publishRequestId) return;
-          if (!result || Number(result.lessonVersion) !== Number(snapshot.targetVersion) || typeof result.checksum !== 'string' || !result.checksum) {
-            this.publishing = false;
-            this.publishResult = { type: 'warning', title: this.$t('lesson.publishUncertain'), targetEvidence: result || null };
-            return;
-          }
-          let originalAfter = null;
-          let targetAfter = null;
-          let originalError = '';
-          let targetError = '';
-          let completed = 0;
-          const finish = () => {
-            completed += 1;
-            if (completed < 2 || this.editorDestroying || requestId !== this.publishRequestId) return;
-            this.publishing = false;
-            const originalComparison = originalError
-              ? { pass: false, differences: [{ key: 'lesson.publishDiffOriginalUnavailable', params: { reason: originalError } }] }
-              : this.compareOriginalEvidence(snapshot.originalEvidence, originalAfter);
-            const targetComparison = targetError
-              ? { pass: false, differences: [{ key: 'lesson.publishDiffTargetUnavailable', params: { reason: targetError } }] }
-              : this.compareTargetEvidence(snapshot, result, targetAfter);
-            const targetEvidence = targetAfter ? {
-              lessonVersion: targetAfter.lessonVersion,
-              checksum: targetAfter.checksum,
-              etag: targetAfter.etag,
-              assetCount: targetAfter.assets.length,
-              bytes: targetAfter.totalBytes,
-              publishChecksum: result.checksum,
-            } : null;
-            const verified = originalComparison.pass && targetComparison.pass;
-            this.publishResult = {
-              type: verified ? 'success' : 'error',
-              title: verified ? this.$t('lesson.publishVerified') : this.$t('lesson.publishVerificationFailed'),
-              originalComparison,
-              targetComparison,
-              targetEvidence,
-            };
-            this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
-            this.fetchAll();
-          };
-          this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
-          this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });
+          const parsed = this.parsePublishResponse(result, snapshot);
+          if (!parsed) { this.latchUncertainPublish(snapshot, requestId, this.$t('lesson.publishResponseMalformed')); return; }
+          this.verifyPublishedEvidence(snapshot, parsed, requestId);
         },
         (message, error) => {
           if (this.editorDestroying || requestId !== this.publishRequestId) return;
           this.publishing = false;
           const uncertain = this.isUncertainMutationError(error);
-          this.publishResult = { type: uncertain ? 'warning' : 'error', title: uncertain ? this.$t('lesson.publishUncertain') : this.$t('lesson.publishFailed', { reason: message }) };
+          if (uncertain) this.latchUncertainPublish(snapshot, requestId, message);
+          else this.publishResult = { type: 'error', title: this.$t('lesson.publishFailed', { reason: message }) };
           this.$message.error(message);
         },
       );

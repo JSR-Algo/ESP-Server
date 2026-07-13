@@ -3,16 +3,16 @@
     :title="$t('lesson.publishReviewTitle')"
     :visible="visible"
     width="760px"
-    :close-on-click-modal="!publishing"
-    :close-on-press-escape="!publishing"
-    :show-close="!publishing"
+    :close-on-click-modal="!publishing && !locked"
+    :close-on-press-escape="!publishing && !locked"
+    :show-close="!publishing && !locked"
     @close="close"
   >
     <template v-if="snapshot">
-      <el-alert :title="$t('lesson.publishImmutableWarning')" type="warning" :closable="false" show-icon />
+      <el-alert :title="$t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstWarning' : 'lesson.publishImmutableWarning')" type="warning" :closable="false" show-icon />
       <div class="evidence-grid">
         <section>
-          <h4>{{ $t('lesson.publishSourceEvidence') }}</h4>
+          <h4>{{ $t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstSourceEvidence' : 'lesson.publishSourceEvidence') }}</h4>
           <dl>
             <dt>{{ $t('lesson.publishFieldLesson') }}</dt><dd class="mono">{{ snapshot.originalLessonId }}</dd>
             <dt>{{ $t('lesson.publishFieldVersion') }}</dt><dd>v{{ snapshot.originalVersion }}</dd>
@@ -39,18 +39,20 @@
         <div><span>{{ $t('lesson.serverValidation') }}</span><strong>{{ snapshot.validationResult.valid ? $t('lesson.statusPass') : $t('lesson.statusFail') }}</strong><small>{{ snapshot.validationProfiles.join(', ') || '—' }}</small><small class="mono">{{ formatValidation(snapshot.validationResult) }}</small></div>
       </section>
       <section class="pin-evidence">
-        <h4>{{ $t('lesson.publishSourcePins') }}</h4>
+        <h4>{{ $t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstPins' : 'lesson.publishSourcePins') }}</h4>
         <div v-for="asset in snapshot.originalAssets" :key="`${asset.profile}:${asset.assetKey}`" class="pin-row mono">
           <span>{{ asset.profile }} / {{ asset.assetKey }}</span><span>{{ asset.sha256 }} · {{ asset.bytes == null ? '?' : asset.bytes }} B</span>
         </div>
         <p v-if="!snapshot.originalAssets.length">—</p>
       </section>
-      <el-checkbox v-model="acknowledged" :disabled="publishing" data-testid="immutable-ack">
-        {{ $t('lesson.publishImmutableAck', { source: snapshot.originalVersion, target: snapshot.targetVersion }) }}
+      <el-checkbox v-model="acknowledged" :disabled="publishing || locked" data-testid="immutable-ack">
+        {{ $t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstAck' : 'lesson.publishImmutableAck', { source: snapshot.originalVersion, target: snapshot.targetVersion }) }}
       </el-checkbox>
       <el-alert v-if="result" :title="result.title" :type="result.type" :closable="false" show-icon class="result-alert">
         <div v-if="result.originalComparison">
-          <strong>{{ result.originalComparison.pass ? $t('lesson.publishOriginalPass') : $t('lesson.publishOriginalFail') }}</strong>
+          <strong>{{ result.originalComparison.pass
+            ? $t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstSourcePass' : 'lesson.publishOriginalPass')
+            : $t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstSourceFail' : 'lesson.publishOriginalFail') }}</strong>
           <ul v-if="result.originalComparison.differences.length"><li v-for="(item, index) in result.originalComparison.differences" :key="index">{{ formatDifference(item) }}</li></ul>
         </div>
         <div v-if="result.targetComparison">
@@ -61,8 +63,11 @@
       </el-alert>
     </template>
     <span slot="footer">
-      <el-button :disabled="publishing" @click="close">{{ $t('lesson.cancel') }}</el-button>
-      <el-button type="primary" :loading="publishing" :disabled="!acknowledged || publishing || !!result" @click="confirmPublish">
+      <el-button :disabled="publishing || locked" @click="close">{{ $t('lesson.cancel') }}</el-button>
+      <el-button v-if="locked" type="primary" :loading="reconciling" :disabled="reconciling" @click="$emit('reconcile')">
+        {{ reconciling ? $t('lesson.publishReconciling') : $t('lesson.publishRetryReconciliation') }}
+      </el-button>
+      <el-button v-else type="primary" :loading="publishing" :disabled="!acknowledged || publishing || (!!result && !result.retryAllowed)" @click="confirmPublish">
         {{ $t('lesson.publishReviewedVersion') }}
       </el-button>
     </span>
@@ -76,6 +81,8 @@ export default {
     visible: { type: Boolean, default: false },
     snapshot: { type: Object, default: null },
     publishing: { type: Boolean, default: false },
+    locked: { type: Boolean, default: false },
+    reconciling: { type: Boolean, default: false },
     result: { type: Object, default: null },
   },
   data() { return { acknowledged: false }; },
@@ -88,8 +95,8 @@ export default {
     snapshot() { this.acknowledged = false; },
   },
   methods: {
-    close() { if (!this.publishing) this.$emit('update:visible', false); },
-    confirmPublish() { if (this.acknowledged && !this.publishing && !this.result) this.$emit('publish', this.snapshot); },
+    close() { if (!this.publishing && !this.locked) this.$emit('update:visible', false); },
+    confirmPublish() { if (this.acknowledged && !this.publishing && !this.locked && (!this.result || this.result.retryAllowed)) this.$emit('publish', this.snapshot); },
     formatBytes(bytes) { const n = Number(bytes || 0); return n < 1024 ? `${n} B` : `${(n / 1048576).toFixed(2)} MiB`; },
     formatTarget(target) { return this.$t('lesson.publishTargetSummary', { version: target.lessonVersion || '?', checksum: target.checksum || this.$t('lesson.publishChecksumUnavailable'), count: target.assetCount || 0 }); },
     formatCompletion(event) { return event ? `${event.stepKey || 'lesson'} / ${event.action || 'completed'}` : this.$t('lesson.publishCompletionUnavailable'); },

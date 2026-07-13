@@ -32,7 +32,10 @@
         <ul v-if="validationWarnings.length" class="validation-list validation-list--warnings">
           <li v-for="(warning, index) in validationWarnings" :key="`warning-${index}`">{{ formatFinding(warning) }}</li>
         </ul>
-        <p v-if="!validationErrors.length && !validationWarnings.length" class="validation-empty">{{ $t('lesson.validationNoFindings') }}</p>
+        <ul v-if="validationFindings.length" class="validation-list">
+          <li v-for="(finding, index) in validationFindings" :key="`finding-${index}`">{{ formatFinding(finding) }}</li>
+        </ul>
+        <p v-if="!validationErrors.length && !validationWarnings.length && !validationFindings.length" class="validation-empty">{{ $t('lesson.validationNoFindings') }}</p>
       </template>
       <p v-else class="validation-empty">{{ $t('lesson.validationRunHint') }}</p>
     </div>
@@ -67,8 +70,21 @@ export default {
     validationWarnings() {
       return this.findings('warnings');
     },
+    validationFindings() {
+      return this.findings('findings');
+    },
     validationReady() {
-      return Boolean(this.validationResult && this.validationResult.valid === true && this.validationCurrent && !this.validationErrors.length);
+      return Boolean(
+        this.validationResult
+        && this.validationResult.valid === true
+        && Array.isArray(this.validationResult.profiles)
+        && this.validationResult.profiles.includes('espTft')
+        && Array.isArray(this.validationResult.errors)
+        && Array.isArray(this.validationResult.warnings)
+        && Array.isArray(this.validationResult.findings)
+        && this.validationCurrent
+        && !this.validationErrors.length
+      );
     },
     budgetRows() {
       return [

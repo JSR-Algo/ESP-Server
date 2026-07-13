@@ -124,6 +124,11 @@ expectContains('src/components/lesson/LessonPublishReadiness.vue', 'budgetRows',
 expectRegex('src/views/LessonEditor.vue', /listAssets\(lesson\.lessonId,\s*(?:null|undefined),/m, 'immutability evidence must include every asset profile');
 expectContains('src/views/LessonEditor.vue', 'compareTargetEvidence', 'publish verification needs authoritative target identity comparison');
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.getLesson', 'published target identity must be re-fetched from the backend');
+expectContains('src/views/LessonEditor.vue', 'derivePublishSource', 'publish source semantics must come from authoritative lesson rows');
+expectContains('src/views/LessonEditor.vue', 'publishUncertainState', 'ambiguous publish outcomes must latch reconciliation state');
+expectContains('src/views/LessonEditor.vue', 'reconcileUncertainPublish', 'ambiguous publish outcomes need reconciliation without republishing');
+expectContains('src/views/LessonEditor.vue', 'parseAssetEvidenceResponse', 'asset evidence must use a strict backend schema');
+expectContains('src/views/LessonEditor.vue', 'parseValidationResult', 'validation evidence must use the exact backend schema');
 for (const forbidden of ['>Lesson<', '>Version<', '>Checksum<', '>Pins<', '>Bytes<', '>Steps<', '>Assets<', '>Profile<', '>Stage<', "'PASS'", "'FAIL'", "'READY'", "'CHECK'"]) {
   expectNotContains('src/components/lesson/LessonPublishReviewDialog.vue', forbidden, 'new review labels and statuses must be localized');
 }
@@ -164,6 +169,8 @@ for (const staleProof of [
   { simulationEvidence: null },
   { simulationProofVersion: 6 },
   { readinessReady: false },
+  { publishUncertainState: { requestId: 1 } },
+  { publishReconciling: true },
   { hasUnsafeProofState: () => true },
   { editorDestroying: true },
 ]) {
@@ -208,6 +215,56 @@ if (!compareTargetEvidence.call({}, reviewedTarget, publishResponse, fetchedTarg
 for (const badTarget of [null, { ...fetchedTarget, lessonVersion: 3 }, { ...fetchedTarget, checksum: 'other' }, { ...fetchedTarget, rowManifestChecksum: '' }]) {
   if (compareTargetEvidence.call({}, reviewedTarget, publishResponse, badTarget).pass) throw new Error('missing or mismatched target version/checksum must fail verification');
 }
+const derivePublishSource = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'derivePublishSource')})`);
+const v1Draft = { lessonId: 'draft-v1', lessonKey: 'fresh', lessonVersion: 1, status: 'draft' };
+const firstSource = derivePublishSource.call({}, [v1Draft], v1Draft);
+if (!firstSource || firstSource.mode !== 'first-publish' || firstSource.evidenceLesson.lessonId !== 'draft-v1') {
+  throw new Error('fresh v1 publishing must snapshot the actual authoritative draft without inventing v0');
+}
+const v1Published = { lessonId: 'published-v1', lessonKey: 'fresh', lessonVersion: 1, status: 'published' };
+const v3Draft = { lessonId: 'draft-v3', lessonKey: 'fresh', lessonVersion: 3, status: 'draft' };
+const laterSource = derivePublishSource.call({}, [v1Published, { ...v1Published, lessonId: 'published-v2', lessonVersion: 2 }, v3Draft], v3Draft);
+if (!laterSource || laterSource.mode !== 'prior-published' || laterSource.evidenceLesson.lessonVersion !== 2) {
+  throw new Error('later publishing must select the highest authoritative prior published row without arithmetic assumptions');
+}
+const parseAssetEvidenceResponse = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'parseAssetEvidenceResponse')})`);
+const validAssetResponse = { profiles: ['espTft'], assets: [{
+  profile: 'espTft', assetKey: 'poster', layer: 'backgroundScene', role: 'poster', mediaType: 'image/png',
+  bytes: 128, width: 20, height: 20, sha256: 'a'.repeat(64), critical: true, url: 'https://cdn/poster.png',
+}] };
+if (!parseAssetEvidenceResponse.call({}, validAssetResponse)) throw new Error('exact backend asset evidence must be accepted');
+for (const malformed of [
+  null, {}, { profiles: 'espTft', assets: [] }, { profiles: ['espTft'], assets: {} },
+  { profiles: [], assets: validAssetResponse.assets },
+  { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], profile: 'mobile' }] },
+  { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], sha256: '' }] },
+  { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], assetKey: undefined, asset_key: 'poster' }] },
+  { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], bytes: -1 }] },
+  { profiles: ['espTft'], assets: [{ ...validAssetResponse.assets[0], url: '' }] },
+]) {
+  if (parseAssetEvidenceResponse.call({}, malformed)) throw new Error('malformed asset evidence must fail closed');
+}
+const parseValidationResult = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'parseValidationResult')})`);
+const parsedValidation = parseValidationResult.call({}, { valid: true, profiles: ['espTft'] }, 'espTft');
+if (!parsedValidation || !Array.isArray(parsedValidation.errors) || !Array.isArray(parsedValidation.warnings) || !Array.isArray(parsedValidation.findings)) {
+  throw new Error('exact backend validation success must normalize explicit finding arrays');
+}
+for (const malformed of [
+  null, {}, { valid: 'true', profiles: ['espTft'] }, { valid: true, profiles: 'espTft' },
+  { valid: true, profiles: [] }, { valid: true, profiles: ['mobile'] },
+  { valid: true, profiles: ['espTft'], errors: {} }, { valid: true, profiles: ['espTft'], warnings: [1] },
+  { valid: true, profiles: ['espTft'], errors: ['contradictory error'] },
+  { valid: true, profiles: ['espTft'], findings: [{ nope: true }] },
+]) {
+  if (parseValidationResult.call({}, malformed, 'espTft')) throw new Error('malformed validation success must fail closed');
+}
+const parsePublishResponse = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'parsePublishResponse')})`);
+const publishSnapshot = { targetLessonId: 'draft-2', targetVersion: 2 };
+const exactPublishResponse = { lessonId: 'draft-2', lessonKey: 'lesson', lessonVersion: 2, status: 'published', checksum: 'a'.repeat(64), profileChecksums: { espTft: 'a'.repeat(64) } };
+if (!parsePublishResponse.call({}, exactPublishResponse, publishSnapshot)) throw new Error('exact backend publish response must be accepted');
+for (const malformed of [null, {}, { ...exactPublishResponse, status: 'draft' }, { ...exactPublishResponse, lessonVersion: 3 }, { ...exactPublishResponse, checksum: '' }, { ...exactPublishResponse, profileChecksums: {} }]) {
+  if (parsePublishResponse.call({}, malformed, publishSnapshot)) throw new Error('malformed publish response must enter reconciliation');
+}
 let publishApiCalls = 0;
 let publishCallbacks;
 const publishReviewedVersion = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'publishReviewedVersion')})`, {
@@ -216,6 +273,8 @@ const publishReviewedVersion = vm.runInNewContext(`(${extractObjectMethod(editor
 const publishExecutionContext = {
   lessonId: 'draft-2', publishing: false, publishRequestId: 0, publishResult: null,
   editorDestroying: false, publishReviewIsCurrent: () => true,
+  parsePublishResponse: () => null,
+  latchUncertainPublish() { this.publishing = false; this.publishResult = { type: 'warning' }; },
   $t: (key) => key, $message: { error() {} },
 };
 publishReviewedVersion.call(publishExecutionContext, { targetVersion: 2 });
@@ -224,6 +283,41 @@ if (publishApiCalls !== 1) throw new Error('double click must never issue a seco
 publishCallbacks[1]({ lessonVersion: 2 });
 if (publishExecutionContext.publishing || !publishExecutionContext.publishResult || publishExecutionContext.publishResult.type !== 'warning') {
   throw new Error('malformed publish success must remain explicitly uncertain and actionable');
+}
+publishReviewedVersion.call({ ...publishExecutionContext, publishing: false, publishUncertainState: { requestId: 1 } }, { targetVersion: 2 });
+if (publishApiCalls !== 1) throw new Error('reopen or programmatic publish must stay locked while outcome is uncertain');
+let reconciliationGetLesson;
+const reconcileUncertainPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'reconcileUncertainPublish')})`, {
+  Api: { lesson: { getLesson: (...args) => { reconciliationGetLesson = args; } } },
+});
+function uncertainContext() {
+  const snapshot = { targetLessonId: 'draft-2', targetVersion: 2, previewChecksum: 'a'.repeat(64), targetDraftEvidence: { checksum: 'a'.repeat(64) } };
+  const uncertain = { requestId: 4, lessonId: 'draft-2', lessonVersion: 2, checksum: 'a'.repeat(64) };
+  return {
+    editorDestroying: false, publishReconciling: false, publishReconcileRequestId: 0, publishRequestId: 4,
+    publishUncertainState: uncertain, publishReviewSnapshot: snapshot, publishResult: null,
+    $t: (key) => key,
+  };
+}
+const committedLostResponse = uncertainContext();
+committedLostResponse.parsePublishResponse = (value) => value;
+committedLostResponse.verifyPublishedEvidence = () => { committedLostResponse.verified = true; };
+reconcileUncertainPublish.call(committedLostResponse);
+reconciliationGetLesson[1]({ lessonId: 'draft-2', lessonKey: 'lesson', lessonVersion: 2, status: 'published', manifestChecksum: 'a'.repeat(64) });
+if (!committedLostResponse.verified) throw new Error('commit with lost response must resume verification without another publish');
+const noCommit = uncertainContext();
+noCommit.collectLessonEvidence = (lesson, success) => success({ checksum: 'a'.repeat(64) });
+noCommit.compareOriginalEvidence = () => ({ pass: true, differences: [] });
+reconcileUncertainPublish.call(noCommit);
+reconciliationGetLesson[1]({ lessonId: 'draft-2', lessonVersion: 2, status: 'draft' });
+if (noCommit.publishUncertainState || !noCommit.publishResult.retryAllowed || noCommit.publishReconciling) {
+  throw new Error('authoritative unchanged draft must unlock only a controlled publish retry');
+}
+const reconciliationFailure = uncertainContext();
+reconcileUncertainPublish.call(reconciliationFailure);
+reconciliationGetLesson[2]('offline');
+if (!reconciliationFailure.publishUncertainState || reconciliationFailure.publishReconciling || !reconciliationFailure.publishResult.uncertain) {
+  throw new Error('failed reconciliation must stay latched and reconciliation-only');
 }
 const invalidatePreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'invalidatePreview')})`);
 const acceptSimulationEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'acceptSimulationEvidence')})`);
@@ -1195,7 +1289,8 @@ const internalValidationContext = {
   editorDestroying: false, rebindingSharedVisual: true, proofVersion: 4, validationRequestId: 0,
   validationResult: null, validationProofVersion: -1, validating: false,
   publishReviewRequestId: 0, publishReviewVisible: false, publishReviewSnapshot: null, publishResult: null,
-  hasUnsafeProofState: () => true, $message: { success() {}, warning() {}, error() {} }, $t: (key) => key,
+  hasUnsafeProofState: () => true, parseValidationResult,
+  $message: { success() {}, warning() {}, error() {} }, $t: (key) => key,
 };
 internalDoValidate.call(internalValidationContext, () => { internalValidationSuccess += 1; }, () => { internalValidationFailure += 1; }, { allowUnsafe: true, requireValid: true });
 if (!internalValidationRequest) throw new Error('internal shared-visual refresh must dispatch validation during rebind');
