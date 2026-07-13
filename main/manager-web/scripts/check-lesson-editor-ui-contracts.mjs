@@ -30,7 +30,7 @@ function expectNotContains(file, needle, reason) {
 }
 
 function extractObjectMethod(source, name) {
-  const methodPattern = new RegExp(`\\n\\s{4}${name}\\(`);
+  const methodPattern = new RegExp(`\\n\\s{2,4}${name}\\(`);
   const match = methodPattern.exec(source);
   if (!match) throw new Error(`${name} method not found`);
   const start = match.index + match[0].lastIndexOf(name);
@@ -109,6 +109,11 @@ expectContains('src/views/LessonEditor.vue', 'acceptSimulationEvidence', 'parent
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'beforeDestroy', 'destroyed simulation panels must cancel pending callbacks');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'ResizeObserver', 'responsive preview needs a non-container-query resize path');
 expectContains('src/views/LessonEditor.vue', 'beforeDestroy', 'destroyed editors must invalidate proof request tokens');
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /beforeDestroy\(\)\s*\{\s*this\.editorDestroying = true;/m,
+  'the parent teardown guard must be set before child destroy hooks can emit',
+);
 expectRegex('src/views/LessonEditor.vue', /@click="doPublish"[^>]*:disabled="assetMutating"/m, 'publish must lock during asset mutation');
 expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors must expose definitive status to mutation callers');
 expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
@@ -952,6 +957,132 @@ if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
 }
 
 const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`);
+const beforeDestroyEditor = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'beforeDestroy')})`);
+let terminalAssetRead;
+const settleAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'settleAssetMutation')})`, {
+  Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; } } },
+});
+let destroyedTokenWrites = 0;
+let destroyedTokenDeletes = 0;
+let destroyedMessages = 0;
+const destroyedParent = {
+  editorDestroying: false,
+  lessonId: 'lesson-1',
+  assetMutationTokens: { success: true, rejected: true, timeout: true },
+  proofVersion: 4, previewRequestId: 6, promptSaveRequestId: 8,
+  preview: { checksum: 'preserve' }, previewManifest: { checksum: 'preserve' }, simulationEvidence: { checksum: 'preserve' },
+  $set(target, key, value) { destroyedTokenWrites += 1; target[key] = value; },
+  $delete(target, key) { destroyedTokenDeletes += 1; delete target[key]; },
+  $message: { error() { destroyedMessages += 1; } },
+  invalidatePreview,
+  onAssetsLoaded() { throw new Error('destroyed editor must not apply reconciled assets'); },
+};
+beforeDestroyEditor.call(destroyedParent);
+const destroyedSnapshot = JSON.stringify({
+  tokens: destroyedParent.assetMutationTokens,
+  proofVersion: destroyedParent.proofVersion,
+  previewRequestId: destroyedParent.previewRequestId,
+  promptSaveRequestId: destroyedParent.promptSaveRequestId,
+  preview: destroyedParent.preview,
+  previewManifest: destroyedParent.previewManifest,
+  simulationEvidence: destroyedParent.simulationEvidence,
+});
+onAssetMutationDetached.call(destroyedParent, { id: 'late-detach' });
+settleAssetMutation.call(destroyedParent, { id: 'success', outcome: 'success' });
+settleAssetMutation.call(destroyedParent, { id: 'rejected', outcome: 'rejected', error: { status: 401 } });
+settleAssetMutation.call(destroyedParent, { id: 'timeout', outcome: 'uncertain', error: { status: 0 } });
+if (!destroyedParent.editorDestroying
+  || JSON.stringify({
+    tokens: destroyedParent.assetMutationTokens,
+    proofVersion: destroyedParent.proofVersion,
+    previewRequestId: destroyedParent.previewRequestId,
+    promptSaveRequestId: destroyedParent.promptSaveRequestId,
+    preview: destroyedParent.preview,
+    previewManifest: destroyedParent.previewManifest,
+    simulationEvidence: destroyedParent.simulationEvidence,
+  }) !== destroyedSnapshot
+  || destroyedTokenWrites || destroyedTokenDeletes || destroyedMessages || terminalAssetRead) {
+  throw new Error('destroyed parent must ignore child detach and every late asset settlement outcome');
+}
+let reconciliationAssetApplies = 0;
+let reconciliationDeletes = 0;
+let reconciliationMessages = 0;
+const reconciliationParent = {
+  editorDestroying: false,
+  lessonId: 'lesson-1', assetMutationTokens: { reconcile: true },
+  proofVersion: 1, previewRequestId: 1, promptSaveRequestId: 1,
+  preview: { checksum: 'unsafe' }, previewManifest: {}, simulationEvidence: {},
+  $set(target, key, value) { target[key] = value; },
+  $delete(target, key) { reconciliationDeletes += 1; delete target[key]; },
+  $message: { error() { reconciliationMessages += 1; } },
+  invalidatePreview,
+  onAssetsLoaded() { reconciliationAssetApplies += 1; },
+};
+terminalAssetRead = null;
+settleAssetMutation.call(reconciliationParent, { id: 'reconcile', outcome: 'success' });
+if (!terminalAssetRead) throw new Error('live parent settlement must start authoritative reconciliation');
+beforeDestroyEditor.call(reconciliationParent);
+const reconciliationSnapshot = JSON.stringify(reconciliationParent.assetMutationTokens);
+terminalAssetRead[2]({ assets: [] });
+terminalAssetRead[3]('late reconciliation failure');
+if (JSON.stringify(reconciliationParent.assetMutationTokens) !== reconciliationSnapshot
+  || reconciliationAssetApplies || reconciliationDeletes || reconciliationMessages) {
+  throw new Error('asset reconciliation callbacks must no-op after parent teardown');
+}
+
+const destroyedSimulation = {
+  editorDestroying: false,
+  proofVersion: 3, previewRequestId: 3, promptSaveRequestId: 3,
+  simulationEvidence: null, previewManifest: currentPreview,
+  previewIdentityMatches: simulationProofContext.previewIdentityMatches,
+  validSimulationEvidence: simulationProofContext.validSimulationEvidence,
+};
+beforeDestroyEditor.call(destroyedSimulation);
+acceptSimulationEvidence.call(destroyedSimulation, validSimulationResult, destroyedSimulation.proofVersion);
+if (destroyedSimulation.simulationEvidence) throw new Error('simulation callbacks must no-op after parent teardown');
+
+let destroyedPreviewRequest;
+let previewMessages = 0;
+let previewContinuations = 0;
+const destroyedDoPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPreview')})`, {
+  Api: { lesson: { manifestPreview: (...args) => { destroyedPreviewRequest = args; } } },
+});
+const destroyedPreview = {
+  editorDestroying: false,
+  lessonId: 'lesson-1', proofVersion: 2, previewRequestId: 2, promptSaveRequestId: 2,
+  previewing: false, preview: null, previewManifest: null, simulationEvidence: { checksum: 'old' },
+  hasUnsafeProofState() { return false; },
+  validManifestPreviewResponse() { return true; },
+  $message: { error() { previewMessages += 1; } },
+};
+destroyedDoPreview.call(destroyedPreview, () => { previewContinuations += 1; }, () => { previewContinuations += 1; });
+beforeDestroyEditor.call(destroyedPreview);
+const previewSnapshot = JSON.stringify(destroyedPreview);
+destroyedPreviewRequest[2](currentPreview);
+destroyedPreviewRequest[3]('late preview failure');
+if (JSON.stringify(destroyedPreview) !== previewSnapshot || previewMessages || previewContinuations) {
+  throw new Error('preview callbacks must no-op after parent teardown');
+}
+
+const refreshSharedVisualTruth = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'refreshSharedVisualTruth')})`);
+const sharedCallbacks = [];
+let sharedSuccesses = 0;
+let sharedFailures = 0;
+const destroyedSharedRefresh = {
+  editorDestroying: false,
+  proofVersion: 1, previewRequestId: 1, promptSaveRequestId: 1,
+  assetRefreshIsProofRecovery: false, promptDirty: false, dirtyStepKeys: {},
+  reloadAssets(success, failure) { sharedCallbacks.push(success, failure); },
+  doValidate(success, failure) { sharedCallbacks.push(success, failure); },
+  doPreview(success, failure) { sharedCallbacks.push(success, failure); },
+};
+refreshSharedVisualTruth.call(destroyedSharedRefresh, () => { sharedSuccesses += 1; }, () => { sharedFailures += 1; });
+beforeDestroyEditor.call(destroyedSharedRefresh);
+const sharedRefreshSnapshot = JSON.stringify(destroyedSharedRefresh);
+sharedCallbacks.forEach((callback) => callback('late'));
+if (JSON.stringify(destroyedSharedRefresh) !== sharedRefreshSnapshot || sharedSuccesses || sharedFailures) {
+  throw new Error('shared refresh callbacks must no-op after parent teardown');
+}
 const detachedParent = {
   lessonId: 'lesson-1', assetMutationTokens: { [remountIdA]: true, [remountIdB]: true },
   proofVersion: 1, previewRequestId: 1, preview: {}, previewManifest: {}, simulationEvidence: {},
@@ -963,10 +1094,6 @@ if (!detachedParent.preview || !detachedParent.assetMutationTokens[remountIdA] |
   throw new Error('detach must keep proof locked by the token without a premature reconciliation read');
 }
 
-let terminalAssetRead;
-const settleAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'settleAssetMutation')})`, {
-  Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; } } },
-});
 detachedParent.invalidatePreview = invalidatePreview;
 detachedParent.onAssetsLoaded = function onAssetsLoaded() { this.assetsReconciled = true; };
 settleAssetMutation.call(detachedParent, { id: remountIdA, outcome: 'success' });

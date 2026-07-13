@@ -438,6 +438,7 @@ export default {
       assetProofFingerprint: null,
       assetRefreshIsProofRecovery: false,
       assetMutationTokens: {},
+      editorDestroying: false,
       renameVisible: false,
       titleDraft: '',
       sharedImpactVisible: false,
@@ -547,6 +548,7 @@ export default {
     this.fetchAll();
   },
   beforeDestroy() {
+    this.editorDestroying = true;
     this.proofVersion += 1;
     this.previewRequestId += 1;
     this.promptSaveRequestId += 1;
@@ -591,6 +593,7 @@ export default {
       };
     },
     onAssetsLoaded(assets) {
+      if (this.editorDestroying) return;
       const nextAssets = Array.isArray(assets) ? assets : [];
       const fingerprint = this.buildAssetProofFingerprint(nextAssets);
       if (this.assetProofFingerprint !== null
@@ -620,22 +623,27 @@ export default {
         .join('|');
     },
     onAssetMutated() {
+      if (this.editorDestroying) return;
       this.invalidatePreview();
     },
     onAssetMutationUncertain() {
+      if (this.editorDestroying) return;
       this.invalidatePreview();
     },
     onAssetMutationState(payload) {
+      if (this.editorDestroying) return;
       if (!payload || typeof payload.id !== 'string' || !payload.id) return;
       if (payload.active === true) this.$set(this.assetMutationTokens, payload.id, true);
       else this.$delete(this.assetMutationTokens, payload.id);
     },
     onAssetMutationDetached(payload) {
+      if (this.editorDestroying) return;
       const id = payload && payload.id;
       if (typeof id !== 'string' || !id) return;
       this.$set(this.assetMutationTokens, id, true);
     },
     settleAssetMutation(payload) {
+      if (this.editorDestroying) return false;
       const id = payload && payload.id;
       const outcome = payload && payload.outcome;
       if (typeof id !== 'string' || !this.assetMutationTokens[id]) return false;
@@ -651,10 +659,12 @@ export default {
         this.lessonId,
         'espTft',
         (result) => {
+          if (this.editorDestroying) return;
           this.onAssetsLoaded(result && result.assets);
           this.$delete(this.assetMutationTokens, id);
         },
         (message) => {
+          if (this.editorDestroying) return;
           this.$delete(this.assetMutationTokens, id);
           this.$message.error(message);
         },
@@ -679,12 +689,14 @@ export default {
       return isUncertainNestError(error);
     },
     handleUncertainMutationError(error, reconcile) {
+      if (this.editorDestroying) return false;
       if (!this.isUncertainMutationError(error)) return false;
       this.invalidatePreview();
       if (typeof reconcile === 'function') reconcile.call(this);
       return true;
     },
     invalidatePreview() {
+      if (this.editorDestroying) return;
       this.proofVersion += 1;
       this.previewRequestId += 1;
       this.previewing = false;
@@ -693,6 +705,7 @@ export default {
       this.simulationEvidence = null;
     },
     acceptSimulationEvidence(result, proofVersion) {
+      if (this.editorDestroying) return;
       if (proofVersion !== this.proofVersion) return;
       if (result === null) {
         this.simulationEvidence = null;
@@ -986,9 +999,11 @@ export default {
       this.sharedImpactReconciling = false;
     },
     onSharedImpactError(msg) {
+      if (this.editorDestroying) return;
       this.$message.error(msg || this.$t('lesson.sharedImpactCloneError'));
     },
     onCloneUncertain(payload) {
+      if (this.editorDestroying) return;
       const key = payload && payload.assetKey;
       if (!key) {
         this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
@@ -998,11 +1013,13 @@ export default {
       this.discoverUncertainClone();
     },
     discoverUncertainClone() {
+      if (this.editorDestroying) return;
       const key = this.sharedImpactUncertainCloneKey;
       if (!key || this.sharedImpactReconciling) return;
       this.sharedImpactReconciling = true;
       this.sharedImpactRebindError = '';
       this.reloadAssets((assets) => {
+        if (this.editorDestroying) return;
         const clone = (Array.isArray(assets) ? assets : []).find((asset) => asset.assetKey === key);
         this.sharedImpactReconciling = false;
         if (!this.validClonedAsset(clone)) {
@@ -1012,15 +1029,19 @@ export default {
         this.sharedImpactUncertainCloneKey = '';
         this.applyClonedVisual(clone);
       }, (msg) => {
+        if (this.editorDestroying) return;
         this.sharedImpactReconciling = false;
         this.sharedImpactRebindError = this.$t('lesson.sharedImpactDiscoveryFailed', { reason: msg || key });
       });
     },
     reloadAssets(onSuccess, onError) {
+      if (this.editorDestroying) return false;
       if (this.$refs.assetManager) this.$refs.assetManager.reload(onSuccess, onError);
       else if (onError) onError(this.$t('lesson.sharedImpactRefreshError'));
+      return true;
     },
     applyClonedVisual(clonedAsset) {
+      if (this.editorDestroying) return;
       if (!this.validClonedAsset(clonedAsset)) {
         this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
         this.$message.error(this.sharedImpactRebindError);
@@ -1045,21 +1066,23 @@ export default {
         .every((key) => typeof asset[key] === 'string' && asset[key].trim()));
     },
     failSharedVisualRebind(msg) {
+      if (this.editorDestroying) return;
       this.rebindingSharedVisual = false;
       this.sharedImpactRebindError = this.$t('lesson.sharedImpactRebindFailed', { reason: msg || this.$t('lesson.sharedImpactRefreshError') });
       this.reloadAssets();
       this.$message.error(this.sharedImpactRebindError);
     },
     refreshSharedVisualTruth(onSuccess, onError) {
+      if (this.editorDestroying) return false;
       let remaining = 3;
       let failed = false;
       const done = () => {
-        if (failed) return;
+        if (this.editorDestroying || failed) return;
         remaining -= 1;
         if (remaining === 0) onSuccess();
       };
       const fail = (msg) => {
-        if (failed) return;
+        if (this.editorDestroying || failed) return;
         failed = true;
         this.assetRefreshIsProofRecovery = false;
         onError(msg);
@@ -1068,8 +1091,10 @@ export default {
       this.reloadAssets(done, fail);
       this.doValidate(done, fail);
       this.doPreview(done, fail, { allowUnsafe: true, storeProof: !this.promptDirty && !Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]) });
+      return true;
     },
     rebindClonedVisual(clonedAsset) {
+      if (this.editorDestroying) return;
       if (this.savingStep || this.rebindingSharedVisual) return;
       const intent = this.sharedImpactIntent;
       const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
@@ -1096,10 +1121,13 @@ export default {
         step.stepKey,
         { ...step, stepBody },
         () => {
+          if (this.editorDestroying) return;
           this.fetchSteps({
             preservePrompt: true,
             onSuccess: () => {
+              if (this.editorDestroying) return;
               this.refreshSharedVisualTruth(() => {
+                if (this.editorDestroying) return;
                 this.assetRefreshIsProofRecovery = false;
                 this.rebindingSharedVisual = false;
                 this.$delete(this.selectedAssetDrafts, step.stepKey);
@@ -1112,12 +1140,21 @@ export default {
                   if (this.$refs.assetManager) this.$refs.assetManager.confirmReplace({ ...intent.asset, ...clonedAsset });
                 });
                 this.$message.success(this.$t('lesson.sharedImpactCloned'));
-              }, (msg) => this.failSharedVisualRebind(msg));
+              }, (msg) => {
+                if (this.editorDestroying) return;
+                this.failSharedVisualRebind(msg);
+              });
             },
-            onError: (msg) => this.failSharedVisualRebind(msg),
+            onError: (msg) => {
+              if (this.editorDestroying) return;
+              this.failSharedVisualRebind(msg);
+            },
           });
         },
-        (msg) => this.failSharedVisualRebind(msg),
+        (msg) => {
+          if (this.editorDestroying) return;
+          this.failSharedVisualRebind(msg);
+        },
       );
     },
     saveSelectedStep() {
@@ -1313,17 +1350,25 @@ export default {
       );
     },
     doValidate(onSuccess, onError) {
+      if (this.editorDestroying) return false;
       this.validating = true;
       Api.lesson.validate(
         this.lessonId,
         (res) => {
+          if (this.editorDestroying) return;
           this.validating = false;
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
           if (typeof onSuccess === 'function') onSuccess(res);
         },
-        (msg) => { this.validating = false; this.$message.error(msg); if (typeof onError === 'function') onError(msg); },
+        (msg) => {
+          if (this.editorDestroying) return;
+          this.validating = false;
+          this.$message.error(msg);
+          if (typeof onError === 'function') onError(msg);
+        },
       );
+      return true;
     },
     validManifestPreviewResponse(result) {
       return Boolean(
@@ -1335,6 +1380,7 @@ export default {
       );
     },
     doPreview(onSuccess, onError, options = {}) {
+      if (this.editorDestroying) return false;
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
       const requestId = this.previewRequestId + 1;
       this.proofVersion += 1;
@@ -1346,6 +1392,7 @@ export default {
         this.lessonId,
         'espTft',
         (res) => {
+          if (this.editorDestroying) return;
           if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
           if (!this.validManifestPreviewResponse(res)) {
@@ -1361,6 +1408,7 @@ export default {
           if (typeof onSuccess === 'function') onSuccess(res);
         },
         (msg) => {
+          if (this.editorDestroying) return;
           if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
           this.$message.error(msg);
