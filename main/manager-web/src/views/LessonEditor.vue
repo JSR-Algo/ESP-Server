@@ -48,7 +48,7 @@
           <div class="lesson-studio__toolbar">
             <div>
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
-              <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
+              <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
             <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
               Save step
@@ -56,6 +56,11 @@
           </div>
           <div v-if="selectedStep" class="lesson-studio__workbench">
             <div>
+              <lesson-step-prompt-editor
+                v-model="promptDraft"
+                :disabled="!isDraft"
+                @input="onPromptInput"
+              />
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
               <SharedAssetPicker
                 :assets="bundleAssets"
@@ -309,6 +314,7 @@ import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
+import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
@@ -323,6 +329,7 @@ export default {
     LessonEngagementTrack,
     LessonInteractionPanel,
     LessonPublishReadiness,
+    LessonStepPromptEditor,
     LessonStepNavigator,
     RobotLessonPreview,
     SharedAssetPicker,
@@ -357,6 +364,9 @@ export default {
       preview: null,
       publishMessage: '',
       selectedStepIndex: 0,
+      promptDraft: '',
+      promptDirty: false,
+      promptStepKey: '',
       selectedStepDrafts: {},
       selectedAssetDrafts: {},
       dirtyStepKeys: {},
@@ -396,8 +406,17 @@ export default {
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
     },
+    selectedStepKey() {
+      return this.selectedStep ? this.selectedStep.stepKey : '';
+    },
     selectedStepDirty() {
-      return Boolean(this.selectedStep && this.dirtyStepKeys[this.selectedStep.stepKey]);
+      return Boolean(
+        this.selectedStep
+        && (
+          this.dirtyStepKeys[this.selectedStep.stepKey]
+          || (this.promptStepKey === this.selectedStep.stepKey && this.promptDirty)
+        ),
+      );
     },
     selectedAuthoring: {
       get() {
@@ -428,6 +447,9 @@ export default {
     },
   },
   watch: {
+    selectedStepKey() {
+      this.resetPromptDraft(this.selectedStep);
+    },
     // Mirror subject into vocab.word + scene.primaryWord while they track it
     // (don't clobber an author-edited value).
     'stepForm.subject'(val, old) {
@@ -644,11 +666,30 @@ export default {
         () => {},
       );
     },
-    fetchSteps() {
+    fetchSteps(onSuccess, onError) {
       Api.lesson.listSteps(this.lessonId, (rows) => {
         this.steps = rows;
         if (this.selectedStepIndex >= rows.length) this.selectedStepIndex = Math.max(0, rows.length - 1);
-      }, (msg) => this.$message.error(msg));
+        this.resetPromptDraft(rows[this.selectedStepIndex] || null);
+        if (onSuccess) onSuccess(rows);
+      }, (msg) => {
+        this.$message.error(msg);
+        if (onError) onError(msg);
+      });
+    },
+    resetPromptDraft(step) {
+      this.promptStepKey = step ? step.stepKey : '';
+      this.promptDraft = step && typeof step.prompt === 'string' ? step.prompt : '';
+      this.promptDirty = false;
+    },
+    onPromptInput(value) {
+      const step = this.selectedStep;
+      if (!step || this.promptStepKey !== step.stepKey) return;
+      this.promptDirty = value !== (step.prompt || '');
+      if (this.promptDirty) {
+        this.preview = null;
+        this.previewManifest = null;
+      }
     },
     selectSharedAsset(asset) {
       if (!this.selectedStep || !this.isDraft) return;
@@ -681,15 +722,19 @@ export default {
       Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
-        { ...step, stepBody },
-        (updated) => {
-          this.savingStep = false;
-          this.$set(this.steps, this.selectedStepIndex, updated);
-          this.$delete(this.selectedStepDrafts, step.stepKey);
-          this.$delete(this.selectedAssetDrafts, step.stepKey);
-          this.$delete(this.dirtyStepKeys, step.stepKey);
-          this.previewManifest = null;
-          this.$message.success('Step saved to the lesson draft.');
+        { ...step, prompt: this.promptDraft, stepBody },
+        () => {
+          this.fetchSteps(() => {
+            this.savingStep = false;
+            this.$delete(this.selectedStepDrafts, step.stepKey);
+            this.$delete(this.selectedAssetDrafts, step.stepKey);
+            this.$delete(this.dirtyStepKeys, step.stepKey);
+            this.preview = null;
+            this.previewManifest = null;
+            this.$message.success(this.$t('lesson.stepSaved'));
+          }, () => {
+            this.savingStep = false;
+          });
         },
         (msg) => { this.savingStep = false; this.$message.error(msg); },
       );
