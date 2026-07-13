@@ -13,6 +13,7 @@ const {
   mergeAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,
+  stepReferencesAssetInLayer,
 } = require('../src/components/lesson/lesson-builder-logic');
 
 const fields = createAuthoringFields();
@@ -217,6 +218,8 @@ const selectedDifferentAsset = bindClonedAssetToStep(realSchemaBody, {
 assert.strictEqual(selectedDifferentAsset.teachingObject.asset.key, 'teachingObject.selectedB.v2');
 assert.strictEqual(selectedDifferentAsset.teachingObject.asset.src, '/selected-b.png');
 assert.strictEqual(selectedDifferentAsset.choiceMetadata.key, referencedAssetKey);
+assert.strictEqual(stepReferencesAssetInLayer(realSchemaBody, referencedAssetKey, 'teachingObject'), true);
+assert.strictEqual(stepReferencesAssetInLayer(realSchemaBody, referencedAssetKey, 'backgroundScene'), false);
 
 const backgroundKey = 'backgroundScene.moonGarden.v1';
 const backgroundClone = {
@@ -233,6 +236,8 @@ const realBackgroundBody = {
   },
   analyticsMetadata: { key: backgroundKey, event: 'background-viewed' },
 };
+assert.strictEqual(stepReferencesAssetInLayer(realBackgroundBody, backgroundKey, 'backgroundScene'), true);
+assert.strictEqual(stepReferencesAssetInLayer(realBackgroundBody, backgroundKey, 'teachingObject'), false);
 assert.deepStrictEqual(
   collectAssetReferences([{ stepKey: 'background-s1', stepBody: realBackgroundBody }], backgroundKey),
   ['background-s1'],

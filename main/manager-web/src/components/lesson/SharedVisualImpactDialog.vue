@@ -6,10 +6,10 @@
     append-to-body
     custom-class="shared-impact-dialog"
     :close-on-click-modal="false"
-    :close-on-press-escape="!rebindPending && !clonedAsset"
-    :show-close="!rebindPending && !clonedAsset"
+    :close-on-press-escape="!cloning && !rebindPending && !clonedAsset"
+    :show-close="!cloning && !rebindPending && !clonedAsset"
     @open="loadImpact"
-    @close="$emit('close')"
+    @close="handleClose"
   >
     <div v-loading="loading" class="impact-review" role="region" :aria-label="$t('lesson.sharedImpactTitle')">
       <el-alert
@@ -20,6 +20,14 @@
         :closable="false"
       />
       <el-alert v-if="rebindError" :title="rebindError" type="warning" show-icon :closable="false" />
+      <el-alert v-if="cloneError" :title="cloneError" type="error" show-icon :closable="false" />
+      <el-alert
+        v-if="impactLoaded && requiresCurrentReference && !currentStepReferencesSource"
+        :title="$t('lesson.sharedImpactSelectAffectedStep')"
+        type="warning"
+        show-icon
+        :closable="false"
+      />
 
       <dl v-if="asset" class="impact-review__source">
         <dt>{{ $t('lesson.sharedImpactSourceKey') }}</dt><dd class="mono">{{ authoritativeAsset.assetKey || '—' }}</dd>
@@ -58,7 +66,7 @@
       <el-button v-if="clonedAsset" type="primary" size="small" :loading="rebindPending" :disabled="rebindPending" @click="retryRebind">
         {{ rebindPending ? $t('lesson.sharedImpactRebinding') : $t('lesson.sharedImpactRetryRebind') }}
       </el-button>
-      <el-button v-else type="primary" size="small" :loading="cloning" :disabled="!impactLoaded || loading || cloning || rebindPending || !cloneKey" @click="confirmClone">
+      <el-button v-else type="primary" size="small" :loading="cloning" :disabled="!canClone" @click="confirmClone">
         {{ $t('lesson.sharedImpactClone') }}
       </el-button>
     </span>
@@ -67,7 +75,7 @@
 
 <script>
 import Api from '@/apis/api';
-import { collectAssetReferences, nextClonedAssetKey } from '@/components/lesson/lesson-builder-logic';
+import { collectAssetReferences, nextClonedAssetKey, stepReferencesAssetInLayer } from '@/components/lesson/lesson-builder-logic';
 
 export default {
   name: 'SharedVisualImpactDialog',
@@ -81,9 +89,11 @@ export default {
     clonedAsset: { type: Object, default: null },
     rebindPending: { type: Boolean, default: false },
     rebindError: { type: String, default: '' },
+    intentType: { type: String, default: 'select' },
+    layer: { type: String, default: 'teachingObject' },
   },
   data() {
-    return { impact: null, impactLoaded: false, loading: false, cloning: false, loadError: '', cloneKey: '' };
+    return { impact: null, impactLoaded: false, loading: false, cloning: false, loadError: '', cloneError: '', cloneKey: '' };
   },
   computed: {
     authoritativeAsset() {
@@ -97,6 +107,18 @@ export default {
     },
     localAffectedStepKeys() {
       return this.asset ? collectAssetReferences(this.steps, this.asset.assetKey) : [];
+    },
+    requiresCurrentReference() {
+      return this.intentType === 'replace';
+    },
+    currentStepReferencesSource() {
+      return Boolean(this.currentStep && this.authoritativeAsset.assetKey
+        && stepReferencesAssetInLayer(this.currentStep.stepBody || {}, this.authoritativeAsset.assetKey, this.layer));
+    },
+    canClone() {
+      return Boolean(this.impactLoaded && !this.loading && !this.cloning && !this.rebindPending
+        && !this.clonedAsset && this.cloneKey
+        && (!this.requiresCurrentReference || this.currentStepReferencesSource));
     },
   },
   watch: {
@@ -114,6 +136,7 @@ export default {
       this.impactLoaded = false;
       this.impact = null;
       this.loadError = '';
+      this.cloneError = '';
       Api.lesson.reviewSharedVisualImpact(
         this.asset.assetId,
         (impact) => {
@@ -136,18 +159,25 @@ export default {
       );
     },
     keepShared() {
-      if (!this.impactLoaded || this.clonedAsset || this.rebindPending) return;
+      if (!this.impactLoaded || this.cloning || this.clonedAsset || this.rebindPending) return;
       this.$emit('keep-shared', { asset: this.asset, currentStep: this.currentStep });
       this.$emit('close');
     },
     confirmClone() {
-      if (!this.impactLoaded || !this.asset || !this.asset.assetId || !this.cloneKey || this.cloning || this.rebindPending || this.clonedAsset) return;
+      if (!this.canClone || !this.asset || !this.asset.assetId) return;
       this.cloning = true;
+      this.cloneError = '';
       Api.lesson.cloneSharedVisual(this.lessonId, this.asset.assetId, {
         profile: 'espTft',
         assetKey: this.cloneKey,
       }, (result) => {
-        this.$emit('cloned', result && (result.asset || result.clone) ? (result.asset || result.clone) : result);
+        if (!this.validCloneResponse(result)) {
+          this.cloning = false;
+          this.cloneError = this.$t('lesson.sharedImpactInvalidCloneResponse');
+          this.$emit('error', this.cloneError);
+          return;
+        }
+        this.$emit('cloned', result);
       }, (msg) => {
         this.cloning = false;
         this.$emit('error', msg);
@@ -156,6 +186,14 @@ export default {
     retryRebind() {
       if (!this.clonedAsset || this.rebindPending) return;
       this.$emit('retry-rebind', this.clonedAsset);
+    },
+    validCloneResponse(result) {
+      return Boolean(result && !Array.isArray(result) && ['assetId', 'assetKey', 'path', 'sha256']
+        .every((key) => typeof result[key] === 'string' && result[key].trim()));
+    },
+    handleClose() {
+      if (this.cloning || this.rebindPending || this.clonedAsset) return;
+      this.$emit('close');
     },
   },
 };

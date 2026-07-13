@@ -336,6 +336,8 @@ export default {
   'lesson.sharedImpactRefreshError': 'Không thể tải lại trạng thái bài học chính thức.',
   'lesson.sharedImpactNoRebindTarget': 'Bước đang chọn không có trường hình ảnh phù hợp để thay thế.',
   'lesson.sharedImpactBusyRetry': 'Hình ảnh đã được nhân bản khi một lần ghi bước khác đang chạy. Hãy thử gắn lại sau khi tác vụ đó hoàn tất.',
+  'lesson.sharedImpactSelectAffectedStep': 'Hình ảnh này không được dùng trong bước đang chọn. Hãy chọn một bước bị ảnh hưởng, hoặc giữ ghim dùng chung và huỷ.',
+  'lesson.sharedImpactInvalidCloneResponse': 'Máy chủ trả về kết quả nhân bản không đầy đủ. Bản nháp chưa được gắn lại.',
   // Ghi đè biểu cảm robot
   'lesson.renderExpression': 'Biểu cảm robot (ghi đè)',
   'lesson.renderExpressionAuto': 'Tự động theo loại bước',

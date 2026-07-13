@@ -326,6 +326,8 @@
       :cloned-asset="sharedImpactClonedAsset"
       :rebind-pending="rebindingSharedVisual"
       :rebind-error="sharedImpactRebindError"
+      :intent-type="sharedImpactIntent.intent"
+      :layer="sharedImpactIntent.layer"
       @keep-shared="keepSharedVisual"
       @cloned="applyClonedVisual"
       @retry-rebind="retryClonedVisual"
@@ -819,7 +821,11 @@ export default {
       else if (onError) onError(this.$t('lesson.sharedImpactRefreshError'));
     },
     applyClonedVisual(clonedAsset) {
-      if (!clonedAsset) return;
+      if (!this.validClonedAsset(clonedAsset)) {
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
+        this.$message.error(this.sharedImpactRebindError);
+        return;
+      }
       this.sharedImpactClonedAsset = clonedAsset;
       this.sharedImpactRebindError = '';
       if (this.savingStep || this.rebindingSharedVisual) {
@@ -833,6 +839,10 @@ export default {
       if (!clonedAsset || clonedAsset !== this.sharedImpactClonedAsset || this.savingStep || this.rebindingSharedVisual) return;
       this.sharedImpactRebindError = '';
       this.rebindClonedVisual(clonedAsset);
+    },
+    validClonedAsset(asset) {
+      return Boolean(asset && !Array.isArray(asset) && ['assetId', 'assetKey', 'path', 'sha256']
+        .every((key) => typeof asset[key] === 'string' && asset[key].trim()));
     },
     failSharedVisualRebind(msg) {
       this.rebindingSharedVisual = false;
@@ -862,11 +872,17 @@ export default {
       const intent = this.sharedImpactIntent;
       const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
       if (!intent || !step || !clonedAsset) return;
-      const stepBody = intent.intent === 'select'
-        ? bindClonedAssetToStep(step.stepBody || {}, {
-          intent: 'select', layer: intent.layer, boundAssetKey: intent.boundAssetKey,
-        }, clonedAsset)
-        : replaceStepAssetReference(step.stepBody || {}, intent.asset.assetKey, clonedAsset);
+      let stepBody;
+      try {
+        stepBody = intent.intent === 'select'
+          ? bindClonedAssetToStep(step.stepBody || {}, {
+            intent: 'select', layer: intent.layer, boundAssetKey: intent.boundAssetKey,
+          }, clonedAsset)
+          : replaceStepAssetReference(step.stepBody || {}, intent.asset.assetKey, clonedAsset);
+      } catch (error) {
+        this.failSharedVisualRebind(error && error.message);
+        return;
+      }
       if (!collectAssetReferences([{ stepKey: step.stepKey, stepBody }], clonedAsset.assetKey).length) {
         this.failSharedVisualRebind(this.$t('lesson.sharedImpactNoRebindTarget'));
         return;

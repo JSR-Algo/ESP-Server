@@ -139,6 +139,11 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'authoritat
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', '!impactLoaded', 'actions must remain gated until authoritative impact succeeds');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'retryRebind', 'a committed clone must retry rebind without cloning again');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'rebindError', 'partial clone failures need an actionable recovery state');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'requiresCurrentReference', 'global replacement must prove the selected step is affected');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'currentStepReferencesSource', 'clone eligibility must use layer-specific current-step analysis');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'handleClose', 'dialog close attempts need an in-flight operation guard');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'validCloneResponse', 'clone callbacks must be validated before recovery state is emitted');
+expectNotContains('src/components/lesson/SharedVisualImpactDialog.vue', 'result.asset || result.clone', 'unsupported clone response wrappers must be rejected');
 expectRegex(
   'src/components/lesson/SharedVisualImpactDialog.vue',
   /keepShared\(\)\s*\{[\s\S]*?if\s*\(!this\.impactLoaded\s*\|\|[\s\S]*?\)\s*return/m,
@@ -146,7 +151,7 @@ expectRegex(
 );
 expectRegex(
   'src/components/lesson/SharedVisualImpactDialog.vue',
-  /confirmClone\(\)\s*\{[\s\S]*?!this\.impactLoaded/m,
+  /confirmClone\(\)\s*\{[\s\S]*?!this\.canClone/m,
   'clone must not bypass a failed impact request',
 );
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-review-request'", 'shared replacement must request review first');
@@ -255,14 +260,19 @@ const retryRebindSource = extractObjectMethod(dialogSource, 'retryRebind');
 if (retryRebindSource.includes('cloneSharedVisual')) {
   throw new Error('retrying a rebind must reuse the committed clone');
 }
+const handleCloseSource = extractObjectMethod(dialogSource, 'handleClose');
+const keepSharedSource = extractObjectMethod(dialogSource, 'keepShared');
+const validCloneResponseSource = extractObjectMethod(dialogSource, 'validCloneResponse');
 let cloneRequests = 0;
 const dialogEvents = [];
+let deferredCloneSuccess;
 const confirmClone = vm.runInNewContext(`(${confirmCloneSource})`, {
   Api: { lesson: { cloneSharedVisual: (lessonId, assetId, payload, success) => {
     cloneRequests += 1;
-    success({ assetId: 'clone-b', assetKey: payload.assetKey, path: '/clone-b.png', sha256: 'clone-b-sha' });
+    deferredCloneSuccess = success;
   } } },
 });
+const validCloneResponse = vm.runInNewContext(`(${validCloneResponseSource})`);
 const dialogContext = {
   impactLoaded: true,
   asset: { assetId: 'source-b' },
@@ -271,14 +281,67 @@ const dialogContext = {
   lessonId: 'lesson-1',
   clonedAsset: null,
   rebindPending: false,
+  requiresCurrentReference: false,
+  currentStepReferencesSource: true,
+  canClone: true,
+  cloneError: '',
+  validCloneResponse,
+  $t: (key) => key,
   $emit: (...args) => dialogEvents.push(args),
 };
 confirmClone.call(dialogContext);
+const handleClose = vm.runInNewContext(`(${handleCloseSource})`);
+const keepShared = vm.runInNewContext(`(${keepSharedSource})`);
+handleClose.call(dialogContext);
+keepShared.call(dialogContext);
+if (dialogEvents.some(([event]) => event === 'close')) throw new Error('clone-in-flight close attempts must preserve dialog context');
+deferredCloneSuccess({ assetId: 'clone-b', assetKey: 'teachingObject.b.v2', path: '/clone-b.png', sha256: 'clone-b-sha' });
 dialogContext.clonedAsset = { assetId: 'clone-b', assetKey: 'teachingObject.b.v2' };
 const retryRebind = vm.runInNewContext(`(${retryRebindSource})`);
 retryRebind.call(dialogContext);
 if (cloneRequests !== 1) throw new Error('rebind retry must not create a second clone');
 if (!dialogEvents.some(([event]) => event === 'retry-rebind')) throw new Error('failed rebind must expose a retry event');
+
+let blockedCloneRequests = 0;
+const blockedConfirm = vm.runInNewContext(`(${confirmCloneSource})`, {
+  Api: { lesson: { cloneSharedVisual: () => { blockedCloneRequests += 1; } } },
+});
+const currentStepReferenceSource = extractObjectMethod(dialogSource, 'currentStepReferencesSource');
+const currentStepReference = vm.runInNewContext(`(${currentStepReferenceSource})`, {
+  stepReferencesAssetInLayer: (body, key) => body.teachingObject.asset.key === key,
+});
+const canCloneSource = extractObjectMethod(dialogSource, 'canClone');
+const canClone = vm.runInNewContext(`(${canCloneSource})`);
+const blockedContext = {
+  ...dialogContext,
+  cloning: false,
+  clonedAsset: null,
+  intentType: 'replace',
+  requiresCurrentReference: true,
+  currentStep: { stepBody: { teachingObject: { asset: { key: 'asset-a' } } } },
+  authoritativeAsset: { assetKey: 'asset-b' },
+  layer: 'teachingObject',
+};
+blockedContext.currentStepReferencesSource = currentStepReference.call(blockedContext);
+blockedContext.canClone = canClone.call(blockedContext);
+blockedConfirm.call(blockedContext);
+if (blockedContext.currentStepReferencesSource || blockedContext.canClone) {
+  throw new Error('replacement clone must be ineligible when only another step references the source');
+}
+if (blockedCloneRequests !== 0) throw new Error('asset used only by another step must not create an orphan clone');
+
+for (const malformed of [undefined, { assetId: 'clone-b' }, { asset: { assetId: 'clone-b', assetKey: 'b', path: '/b', sha256: 'sha' } }]) {
+  const events = [];
+  const malformedConfirm = vm.runInNewContext(`(${confirmCloneSource})`, {
+    Api: { lesson: { cloneSharedVisual: (lessonId, assetId, payload, success) => success(malformed) } },
+    malformed,
+  });
+  const context = { ...dialogContext, cloning: false, clonedAsset: null, cloneError: '', $emit: (...args) => events.push(args) };
+  malformedConfirm.call(context);
+  if (context.cloning || !context.cloneError || events.some(([event]) => event === 'cloned')) {
+    throw new Error('malformed clone callbacks must remain actionable without assuming a committed clone');
+  }
+}
 
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   for (const key of [

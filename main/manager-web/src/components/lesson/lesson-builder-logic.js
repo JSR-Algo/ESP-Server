@@ -132,6 +132,18 @@ function collectAssetReferences(steps, assetKey) {
     .filter(Boolean);
 }
 
+function stepReferencesAssetInLayer(value, assetKey, layer) {
+  assertJsonTree(value, 'step body');
+  const paths = {
+    teachingObject: ['teachingObject'],
+    backgroundScene: ['backgroundScene'],
+    robotOverlay: ['robotOverlay'],
+  };
+  const root = paths[layer];
+  if (!root || !value || typeof value !== 'object') return false;
+  return containsAssetKey(value[root[0]], assetKey, root);
+}
+
 function nextClonedAssetKey(assetKey, assets) {
   const match = String(assetKey || '').match(/^(.*)\.v(\d+)$/);
   const base = match ? match[1] : String(assetKey || '');
@@ -286,4 +298,5 @@ module.exports = {
   mergeAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,
+  stepReferencesAssetInLayer,
 };

@@ -336,6 +336,8 @@ export default {
   'lesson.sharedImpactRefreshError': 'Could not refresh authoritative lesson state.',
   'lesson.sharedImpactNoRebindTarget': 'The selected step has no matching visual field to replace.',
   'lesson.sharedImpactBusyRetry': 'The visual was cloned while another step write was active. Retry the rebind when it finishes.',
+  'lesson.sharedImpactSelectAffectedStep': 'This visual is not used by the selected step. Select an affected step, or keep the shared pin and cancel.',
+  'lesson.sharedImpactInvalidCloneResponse': 'The server returned an incomplete clone result. No draft rebind was attempted.',
   // Robot expression override
   'lesson.renderExpression': 'Robot expression (override)',
   'lesson.renderExpressionAuto': 'Auto from step type',
