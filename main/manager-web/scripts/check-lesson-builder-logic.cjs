@@ -226,7 +226,7 @@ assert.strictEqual(apiRequests[0].method, 'GET');
 assert.strictEqual(apiRequests[0].onSuccess, onSuccess);
 assert.strictEqual(apiRequests[0].onError, onError);
 
-const clonePayload = { assetKey: 'teachingObject.glowSeed.v2' };
+const clonePayload = { profile: 'espTft', assetKey: 'teachingObject.glowSeed.v2' };
 assert.strictEqual(typeof lessonApi.cloneSharedVisual, 'function');
 lessonApi.cloneSharedVisual('lesson-3', 'asset-7', clonePayload, onSuccess, onError);
 assert.strictEqual(apiRequests[1].url, '/v1/admin/lessons/lesson-3/assets/asset-7/clone');

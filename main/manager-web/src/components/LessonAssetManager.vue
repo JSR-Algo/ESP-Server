@@ -188,6 +188,14 @@ export default {
     // Prefill the upload form from a row, keeping layer/role stable so the key's
     // placement does not change on replace (upsert-by-assetKey).
     startReplace(a) {
+      if (a && a.assetId) {
+        this.$emit('impact-review-request', { intent: 'replace', asset: a });
+        return;
+      }
+      this.confirmReplace(a);
+    },
+    confirmReplace(a) {
+      if (!a) return;
       this.replaceMode = true;
       this.layer = a.layer;
       this.role = a.role;

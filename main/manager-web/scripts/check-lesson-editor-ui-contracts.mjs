@@ -123,4 +123,37 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   expectContains(locale, "'lesson.stepSaved'", 'save confirmation must be localized');
 }
 
+expectContains('src/components/lesson/SharedAssetPicker.vue', "this.$emit('select-intent'", 'selection must review impact first');
+expectNotContains('src/components/lesson/SharedAssetPicker.vue', "$emit('select', asset)", 'shared selection must not mutate a draft before review');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'reviewSharedVisualImpact', 'dialog must load backend usage truth');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneSharedVisual', 'dialog must clone without mutating source pins');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', "profile: 'espTft'", 'clone payload must target the firmware profile');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'scope.row.lessonKey', 'every backend lesson usage must be rendered');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'scope.row.lessonVersion', 'every backend lesson version must be rendered');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'localAffectedStepKeys', 'the current draft step references must be visible');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneKey', 'the collision-free clone key must be visible');
+expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-review-request'", 'shared replacement must request review first');
+expectContains('src/components/LessonAssetManager.vue', 'confirmReplace', 'replacement mode needs an explicit parent confirmation gate');
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /replaceStepAssetReference\(step\.stepBody\s*\|\|\s*\{\},\s*intent\.asset\.assetKey,\s*clonedAsset\)/m,
+  'clone must rewrite only the selected step body',
+);
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?reloadAssets[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null/m,
+  'clone rebind must wait for server confirmation before refetch and preview invalidation',
+);
+
+for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
+  for (const key of [
+    'lesson.sharedImpactTitle',
+    'lesson.sharedImpactKeep',
+    'lesson.sharedImpactClone',
+    'lesson.sharedImpactUsages',
+    'lesson.sharedImpactLocalSteps',
+    'lesson.sharedImpactCloneKey',
+  ]) expectContains(locale, `'${key}'`, 'shared visual review must be localized');
+}
+
 console.log('lesson editor UI contracts OK');

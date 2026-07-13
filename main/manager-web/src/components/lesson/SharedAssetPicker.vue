@@ -1,12 +1,12 @@
 <template>
   <section class="asset-picker">
-    <div class="asset-picker__head"><strong>Shared visual</strong><el-input v-model="query" size="mini" clearable placeholder="Filter asset key" /></div>
+    <div class="asset-picker__head"><strong>{{ $t('lesson.sharedVisual') }}</strong><el-input v-model="query" size="mini" clearable :placeholder="$t('lesson.sharedVisualFilter')" /></div>
     <div class="asset-picker__grid">
-      <button v-for="asset in filtered" :key="asset.assetKey + ':' + (asset.version || '')" type="button" :class="['asset-tile', { selected: selectedKey === asset.assetKey }]" @click="$emit('select', asset)">
+      <button v-for="asset in filtered" :key="asset.assetKey + ':' + (asset.version || '')" type="button" :class="['asset-tile', { selected: selectedKey === asset.assetKey }]" @click="selectAsset(asset)">
         <span class="asset-tile__preview"><img v-if="asset.thumbnailUrl || asset.url" :src="asset.thumbnailUrl || asset.url" alt="" /><span v-else>{{ initials(asset.assetKey) }}</span></span>
         <strong>{{ asset.assetKey }}</strong><small>v{{ asset.version || 1 }} · {{ formatBytes(asset.bytes) }}</small>
       </button>
-      <div v-if="!filtered.length" class="empty">No matching shared visuals.</div>
+      <div v-if="!filtered.length" class="empty">{{ $t('lesson.sharedVisualEmpty') }}</div>
     </div>
   </section>
 </template>
@@ -17,6 +17,7 @@ export default {
   data: () => ({ query: '' }),
   computed: { filtered() { const q = this.query.toLowerCase(); return this.assets.filter((a) => (!this.category || a.category === this.category || a.layer === this.category) && (!q || String(a.assetKey).toLowerCase().includes(q))); } },
   methods: {
+    selectAsset(asset) { this.$emit('select-intent', asset); },
     initials(key) { return String(key || 'AS').split('.').slice(-2).map((p) => p[0]).join('').toUpperCase(); },
     formatBytes(bytes) { const n = Number(bytes || 0); return n < 1024 ? `${n} B` : `${Math.round(n / 1024)} KiB`; },
   },

@@ -66,7 +66,7 @@
                 :assets="bundleAssets"
                 :selected-key="selectedObjectKey"
                 category="teachingObject"
-                @select="selectSharedAsset"
+                @select-intent="reviewSharedAssetSelection"
               />
             </div>
             <RobotLessonPreview
@@ -139,7 +139,14 @@
 
       <!-- Asset authoring (draft only): layer + role + stable assetKey + critical
            + robot pose picker + per-session preview list. -->
-      <LessonAssetManager v-if="isDraft" :lesson-id="lessonId" :subject-hint="lastSubject" @assets-loaded="onAssetsLoaded" />
+      <LessonAssetManager
+        v-if="isDraft"
+        ref="assetManager"
+        :lesson-id="lessonId"
+        :subject-hint="lastSubject"
+        @assets-loaded="onAssetsLoaded"
+        @impact-review-request="reviewAssetReplacement"
+      />
     </div>
 
     <!-- Step editor dialog (draft only) -->
@@ -305,6 +312,20 @@
         <el-button type="primary" size="small" :loading="renaming" @click="doRename">{{ $t('course.save') }}</el-button>
       </span>
     </el-dialog>
+
+    <SharedVisualImpactDialog
+      v-if="sharedImpactIntent"
+      :visible="sharedImpactVisible"
+      :lesson-id="lessonId"
+      :asset="sharedImpactIntent.asset"
+      :assets="bundleAssets"
+      :steps="steps"
+      :current-step="selectedStep"
+      @keep-shared="keepSharedVisual"
+      @cloned="applyClonedVisual"
+      @error="onSharedImpactError"
+      @close="closeSharedImpact"
+    />
   </div>
 </template>
 
@@ -318,7 +339,8 @@ import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.v
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
-import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import SharedVisualImpactDialog from '@/components/lesson/SharedVisualImpactDialog.vue';
+import { mergeAuthoringFields, replaceStepAssetReference } from '@/components/lesson/lesson-builder-logic';
 import Api from '@/apis/api';
 
 export default {
@@ -333,6 +355,7 @@ export default {
     LessonStepNavigator,
     RobotLessonPreview,
     SharedAssetPicker,
+    SharedVisualImpactDialog,
   },
   data() {
     return {
@@ -378,6 +401,9 @@ export default {
       previewPath: null,
       renameVisible: false,
       titleDraft: '',
+      sharedImpactVisible: false,
+      sharedImpactIntent: null,
+      rebindingSharedVisual: false,
     };
   },
   computed: {
@@ -681,6 +707,9 @@ export default {
         let promptStateApplied = true;
         if (options.promptGuard) {
           promptStateApplied = this.syncPromptDraftAfterFetch(rows[this.selectedStepIndex] || null, options.promptGuard);
+        } else if (options.preservePrompt && this.promptStepKey === selectedKey) {
+          const selected = rows[this.selectedStepIndex] || null;
+          this.promptDirty = this.promptDraft !== (selected && selected.prompt ? selected.prompt : '');
         } else {
           this.resetPromptDraft(rows[this.selectedStepIndex] || null);
         }
@@ -734,6 +763,73 @@ export default {
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
       this.bumpStepEditRevision(this.selectedStep.stepKey);
+    },
+    openSharedImpact(intent, asset) {
+      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft) return;
+      this.sharedImpactIntent = { intent, asset, stepKey: this.selectedStep.stepKey };
+      this.sharedImpactVisible = true;
+    },
+    reviewSharedAssetSelection(asset) {
+      this.openSharedImpact('select', asset);
+    },
+    reviewAssetReplacement(payload) {
+      if (!payload || payload.intent !== 'replace') return;
+      this.openSharedImpact('replace', payload.asset);
+    },
+    keepSharedVisual() {
+      const intent = this.sharedImpactIntent;
+      if (intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
+        this.selectSharedAsset(intent.asset);
+      }
+      this.closeSharedImpact();
+    },
+    closeSharedImpact() {
+      this.sharedImpactVisible = false;
+      this.sharedImpactIntent = null;
+    },
+    onSharedImpactError(msg) {
+      this.$message.error(msg || this.$t('lesson.sharedImpactCloneError'));
+    },
+    reloadAssets() {
+      if (this.$refs.assetManager) this.$refs.assetManager.reload();
+    },
+    applyClonedVisual(clonedAsset) {
+      const intent = this.sharedImpactIntent;
+      const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
+      if (!intent || !step || !clonedAsset || this.rebindingSharedVisual) return;
+      const stepBody = replaceStepAssetReference(step.stepBody || {}, intent.asset.assetKey, clonedAsset);
+      this.rebindingSharedVisual = true;
+      Api.lesson.updateStep(
+        this.lessonId,
+        step.stepKey,
+        { ...step, stepBody },
+        () => {
+          this.fetchSteps({
+            preservePrompt: true,
+            onSuccess: () => {
+              this.rebindingSharedVisual = false;
+              this.reloadAssets();
+              this.preview = null;
+              this.previewManifest = null;
+              this.$delete(this.selectedAssetDrafts, step.stepKey);
+              if (!this.selectedStepDrafts[step.stepKey] && !this.promptDirty) {
+                this.$delete(this.dirtyStepKeys, step.stepKey);
+              }
+              const replaceAfterClone = intent.intent === 'replace';
+              this.closeSharedImpact();
+              if (replaceAfterClone) this.$nextTick(() => {
+                if (this.$refs.assetManager) this.$refs.assetManager.confirmReplace(clonedAsset);
+              });
+              this.$message.success(this.$t('lesson.sharedImpactCloned'));
+            },
+            onError: () => { this.rebindingSharedVisual = false; },
+          });
+        },
+        (msg) => {
+          this.rebindingSharedVisual = false;
+          this.$message.error(msg);
+        },
+      );
     },
     onPreviewPathChange(payload) {
       this.previewPath = payload;
