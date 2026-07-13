@@ -380,6 +380,7 @@ const lessonApiSource = fs.readFileSync(
 const executableLessonApiSource = lessonApiSource
   .replace(/^import \{ getNestUrl \} from '\.\.\/api';$/m, '')
   .replace(/import \{[\s\S]*?\} from '\.\.\/nestHttp';/, '')
+  .replace(/^export function /gm, 'function ')
   .replace('export default {', 'const lessonApi = {')
   .concat('\nmodule.exports = lessonApi;\n');
 const apiRequests = [];

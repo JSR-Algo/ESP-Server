@@ -52,6 +52,20 @@ function extractObjectMethod(source, name) {
   throw new Error(`${name} method body not closed`);
 }
 
+function extractNamedFunction(source, name) {
+  const marker = `export function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(`${name} function not found`);
+  const functionStart = start + 'export '.length;
+  const braceStart = source.indexOf('{', functionStart);
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    if (source[i] === '}' && --depth === 0) return source.slice(functionStart, i + 1);
+  }
+  throw new Error(`${name} function body not closed`);
+}
+
 expectContains('src/views/LessonEditor.vue', '<lesson-step-prompt-editor', 'selected draft steps need prompt editing');
 expectContains('src/views/LessonEditor.vue', 'prompt: this.promptDraft', 'save must persist the edited prompt');
 expectContains('src/views/LessonEditor.vue', 'promptDirty', 'prompt edits need explicit dirty tracking');
@@ -129,6 +143,8 @@ expectContains('src/views/LessonEditor.vue', 'publishUncertainState', 'ambiguous
 expectContains('src/views/LessonEditor.vue', 'reconcileUncertainPublish', 'ambiguous publish outcomes need reconciliation without republishing');
 expectContains('src/views/LessonEditor.vue', 'parseAssetEvidenceResponse', 'asset evidence must use a strict backend schema');
 expectContains('src/views/LessonEditor.vue', 'parseValidationResult', 'validation evidence must use the exact backend schema');
+expectContains('src/apis/module/lesson.js', 'validateAssetListResponse', 'asset list wrapper must reject malformed 2xx payloads');
+expectNotContains('src/apis/module/lesson.js', "{ profiles: [], assets: [] }", 'asset list wrapper must never coerce malformed success into an empty bundle');
 for (const forbidden of ['>Lesson<', '>Version<', '>Checksum<', '>Pins<', '>Bytes<', '>Steps<', '>Assets<', '>Profile<', '>Stage<', "'PASS'", "'FAIL'", "'READY'", "'CHECK'"]) {
   expectNotContains('src/components/lesson/LessonPublishReviewDialog.vue', forbidden, 'new review labels and statuses must be localized');
 }
@@ -139,6 +155,41 @@ expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors m
 expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
 
 const editorSource = read('src/views/LessonEditor.vue');
+const lessonApiSource = read('src/apis/module/lesson.js');
+const validateAssetListResponse = vm.runInNewContext(`(${extractNamedFunction(lessonApiSource, 'validateAssetListResponse')})`);
+let assetListRequest;
+const listAssetsWrapper = vm.runInNewContext(`(${extractObjectMethod(lessonApiSource, 'listAssets')})`, {
+  getNestUrl: () => '/nestjs',
+  nestRequest: (request) => { assetListRequest = request; },
+  validateAssetListResponse,
+});
+let wrapperSuccesses = 0;
+let wrapperFailures = 0;
+let wrapperError;
+listAssetsWrapper.call({}, 'lesson-1', undefined, () => { wrapperSuccesses += 1; }, (message, error) => {
+  wrapperFailures += 1; wrapperError = { message, error };
+});
+assetListRequest.onSuccess({ profiles: [], assets: [] });
+if (wrapperSuccesses !== 1 || wrapperFailures) throw new Error('valid empty asset-list response must pass unchanged');
+for (const malformed of [{}, { profiles: 'bad', assets: [] }, { profiles: [], assets: {} }, { profiles: [] }, { assets: [] }]) {
+  wrapperSuccesses = 0; wrapperFailures = 0; wrapperError = null;
+  assetListRequest.onSuccess(malformed);
+  if (wrapperSuccesses || wrapperFailures !== 1 || !wrapperError.error || wrapperError.error.code !== 'INVALID_ASSET_LIST_RESPONSE') {
+    throw new Error('malformed 2xx asset-list payload must fail exactly once with a structured contract error');
+  }
+}
+const wrapperAsset = {
+  profile: 'espTft', assetKey: 'poster', layer: 'backgroundScene', role: 'poster', mediaType: 'image/png',
+  bytes: 128, width: 20, height: 20, sha256: 'a'.repeat(64), critical: true, url: 'https://cdn/poster.png',
+};
+wrapperSuccesses = 0; wrapperFailures = 0;
+assetListRequest.onSuccess({ profiles: ['espTft'], assets: [wrapperAsset] });
+if (wrapperSuccesses !== 1 || wrapperFailures) throw new Error('contract-proven non-empty asset list must pass unchanged');
+for (const badAsset of [{ ...wrapperAsset, bytes: '128' }, { ...wrapperAsset, url: '' }, { ...wrapperAsset, width: undefined }]) {
+  wrapperSuccesses = 0; wrapperFailures = 0;
+  assetListRequest.onSuccess({ profiles: ['espTft'], assets: [badAsset] });
+  if (wrapperSuccesses || wrapperFailures !== 1) throw new Error('malformed asset rows must fail at the wrapper boundary');
+}
 let publishConfirmCalls = 0;
 const guardedPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPublish')})`, { Api: { lesson: {} } });
 guardedPublish.call({ assetMutating: true, $confirm: () => { publishConfirmCalls += 1; } });

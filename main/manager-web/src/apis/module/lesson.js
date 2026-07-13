@@ -19,6 +19,31 @@ import {
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
 
+export function validateAssetListResponse(payload) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object'
+    || !Array.isArray(payload.profiles) || !Array.isArray(payload.assets)) return null;
+  if (payload.profiles.some((profile) => typeof profile !== 'string' || !profile.trim())
+    || new Set(payload.profiles).size !== payload.profiles.length) return null;
+  if ((!payload.profiles.length && payload.assets.length) || (payload.profiles.length && !payload.assets.length)) return null;
+  const identities = new Set();
+  for (const asset of payload.assets) {
+    if (!asset || Array.isArray(asset) || typeof asset !== 'object') return null;
+    if (![asset.profile, asset.assetKey, asset.layer, asset.role, asset.mediaType, asset.sha256, asset.url]
+      .every((value) => typeof value === 'string' && value.trim())) return null;
+    if (!payload.profiles.includes(asset.profile) || !/^[a-f0-9]{64}$/i.test(asset.sha256)
+      || typeof asset.bytes !== 'number' || !Number.isSafeInteger(asset.bytes) || asset.bytes < 0
+      || (asset.width !== null && (typeof asset.width !== 'number' || !Number.isFinite(asset.width) || asset.width < 0))
+      || (asset.height !== null && (typeof asset.height !== 'number' || !Number.isFinite(asset.height) || asset.height < 0))
+      || typeof asset.critical !== 'boolean') return null;
+    const identity = `${asset.profile}\u0000${asset.assetKey}`;
+    if (identities.has(identity)) return null;
+    identities.add(identity);
+  }
+  const assetProfiles = [...new Set(payload.assets.map((asset) => asset.profile))].sort();
+  if (assetProfiles.join('|') !== payload.profiles.slice().sort().join('|')) return null;
+  return payload;
+}
+
 export default {
   // GET /v1/admin/courses/:courseId/lessons -> Lesson[]
   listLessons(courseId, onSuccess, onError) {
@@ -195,8 +220,18 @@ export default {
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/assets${q}`,
       method: 'GET',
-      onSuccess: (p) =>
-        onSuccess(p && Array.isArray(p.assets) ? p : { profiles: [], assets: [] }),
+      onSuccess: (payload) => {
+        const validated = validateAssetListResponse(payload);
+        if (validated) {
+          if (onSuccess) onSuccess(validated);
+          return;
+        }
+        if (onError) onError('Asset list response violated the backend contract.', {
+          status: 200,
+          contract: true,
+          code: 'INVALID_ASSET_LIST_RESPONSE',
+        });
+      },
       onError,
     });
   },
