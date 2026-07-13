@@ -330,6 +330,12 @@ export default {
   'lesson.sharedImpactInvalidResponse': 'Máy chủ trả về dữ liệu ảnh hưởng hình ảnh dùng chung không hợp lệ.',
   'lesson.sharedImpactCloneError': 'Không thể nhân bản hình ảnh dùng chung.',
   'lesson.sharedImpactCloned': 'Đã nhân bản hình ảnh và chỉ gắn lại bước nháp đang chọn.',
+  'lesson.sharedImpactRetryRebind': 'Thử gắn lại bản nháp',
+  'lesson.sharedImpactRebinding': 'Đang gắn lại bản nháp…',
+  'lesson.sharedImpactRebindFailed': 'Đã nhân bản hình ảnh nhưng chưa gắn xong vào bản nháp: {reason}. Thử lại sẽ dùng bản sao hiện có.',
+  'lesson.sharedImpactRefreshError': 'Không thể tải lại trạng thái bài học chính thức.',
+  'lesson.sharedImpactNoRebindTarget': 'Bước đang chọn không có trường hình ảnh phù hợp để thay thế.',
+  'lesson.sharedImpactBusyRetry': 'Hình ảnh đã được nhân bản khi một lần ghi bước khác đang chạy. Hãy thử gắn lại sau khi tác vụ đó hoàn tất.',
   // Ghi đè biểu cảm robot
   'lesson.renderExpression': 'Biểu cảm robot (ghi đè)',
   'lesson.renderExpressionAuto': 'Tự động theo loại bước',

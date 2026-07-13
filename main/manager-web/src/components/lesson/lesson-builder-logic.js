@@ -191,6 +191,51 @@ function replaceStepAssetReference(value, fromKey, clonedAsset) {
   return replaceAssetReference(value, fromKey, clonedAsset);
 }
 
+function persistedAssetReference(clonedAsset) {
+  return {
+    assetId: clonedAsset.assetId,
+    key: clonedAsset.assetKey,
+    src: clonedAsset.path || clonedAsset.src,
+    sha256: clonedAsset.sha256,
+  };
+}
+
+/** Binds a newly cloned picker selection to the selected step's intended layer. */
+function bindClonedAssetToStep(value, intent, clonedAsset) {
+  assertJsonTree(value, 'step body');
+  assertJsonTree(intent, 'asset binding intent');
+  assertJsonTree(clonedAsset, 'cloned asset');
+  const layer = intent && intent.layer;
+  const boundAssetKey = intent && intent.boundAssetKey;
+  if (boundAssetKey && containsAssetKey(value, boundAssetKey)) {
+    return replaceStepAssetReference(value, boundAssetKey, clonedAsset);
+  }
+  const body = replaceStepAssetReference(value, '__no_existing_asset__', clonedAsset);
+  if (layer === 'teachingObject') {
+    return {
+      ...body,
+      teachingObject: {
+        ...(body.teachingObject || {}),
+        asset: persistedAssetReference(clonedAsset),
+      },
+    };
+  }
+  if (layer === 'backgroundScene') {
+    return {
+      ...body,
+      backgroundScene: {
+        ...(body.backgroundScene || {}),
+        mode: 'poster',
+        poster: {
+          ...((body.backgroundScene && body.backgroundScene.poster) || {}),
+          ...persistedAssetReference(clonedAsset),
+        },
+      },
+    };
+  }
+  throw new TypeError(`unsupported asset binding layer: ${layer || 'unknown'}`);
+}
+
 function calculateReadiness({ steps, assets, manifest } = {}) {
   const rows = Array.isArray(assets) ? assets : [];
   const unique = new Map();
@@ -230,6 +275,7 @@ function calculateReadiness({ steps, assets, manifest } = {}) {
 }
 
 module.exports = {
+  bindClonedAssetToStep,
   DEFAULT_AUTHORING_FIELDS,
   DURATION_PRESETS,
   NAMED_MOTIONS,

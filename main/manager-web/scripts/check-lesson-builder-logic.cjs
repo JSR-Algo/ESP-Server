@@ -4,6 +4,7 @@ const path = require('path');
 const vm = require('vm');
 const {
   buildEngagementTrack,
+  bindClonedAssetToStep,
   calculateReadiness,
   collectAssetReferences,
   createAuthoringFields,
@@ -203,6 +204,19 @@ assert.deepStrictEqual(replaceStepAssetReference(realSchemaBody, referencedAsset
   },
   choiceMetadata: { key: referencedAssetKey, label: 'must not be treated as an asset' },
 });
+const selectedDifferentAsset = bindClonedAssetToStep(realSchemaBody, {
+  intent: 'select',
+  layer: 'teachingObject',
+  boundAssetKey: referencedAssetKey,
+}, {
+  assetId: 'asset-clone-b',
+  assetKey: 'teachingObject.selectedB.v2',
+  path: '/selected-b.png',
+  sha256: 'selected-b-sha',
+});
+assert.strictEqual(selectedDifferentAsset.teachingObject.asset.key, 'teachingObject.selectedB.v2');
+assert.strictEqual(selectedDifferentAsset.teachingObject.asset.src, '/selected-b.png');
+assert.strictEqual(selectedDifferentAsset.choiceMetadata.key, referencedAssetKey);
 
 const backgroundKey = 'backgroundScene.moonGarden.v1';
 const backgroundClone = {

@@ -30,9 +30,10 @@ function expectNotContains(file, needle, reason) {
 }
 
 function extractObjectMethod(source, name) {
-  const marker = `${name}(`;
-  const start = source.indexOf(marker);
-  if (start === -1) throw new Error(`${name} method not found`);
+  const methodPattern = new RegExp(`\\n\\s{4}${name}\\(`);
+  const match = methodPattern.exec(source);
+  if (!match) throw new Error(`${name} method not found`);
+  const start = match.index + match[0].lastIndexOf(name);
   const paramsStart = source.indexOf('(', start);
   const paramsEnd = source.indexOf(')', paramsStart);
   const braceStart = source.indexOf('{', paramsEnd);
@@ -85,12 +86,12 @@ expectContains('src/components/lesson/LessonStepPromptEditor.vue', "lesson.promp
 
 expectRegex(
   'src/views/LessonEditor.vue',
-  /:disabled="promptDirty\s*\|\|\s*savingStep"/m,
+  /:disabled="promptDirty\s*\|\|\s*savingStep\s*\|\|\s*rebindingSharedVisual"/m,
   'manifest preview must be disabled while the prompt is unsaved or saving',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep"/m,
+  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*rebindingSharedVisual"/m,
   'prompt input must be disabled during its save request',
 );
 
@@ -124,6 +125,7 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
 }
 
 expectContains('src/components/lesson/SharedAssetPicker.vue', "this.$emit('select-intent'", 'selection must review impact first');
+expectContains('src/components/lesson/SharedAssetPicker.vue', ':disabled="disabled"', 'selection must lock during save or clone rebind');
 expectNotContains('src/components/lesson/SharedAssetPicker.vue', "$emit('select', asset)", 'shared selection must not mutate a draft before review');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'reviewSharedVisualImpact', 'dialog must load backend usage truth');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneSharedVisual', 'dialog must clone without mutating source pins');
@@ -135,9 +137,11 @@ expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneKey',
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'authoritativeAsset.assetKey', 'source key must come from the impact response');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'authoritativeAsset.sha256', 'source checksum must come from the impact response');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', '!impactLoaded', 'actions must remain gated until authoritative impact succeeds');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'retryRebind', 'a committed clone must retry rebind without cloning again');
+expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'rebindError', 'partial clone failures need an actionable recovery state');
 expectRegex(
   'src/components/lesson/SharedVisualImpactDialog.vue',
-  /keepShared\(\)\s*\{[\s\S]*?if\s*\(!this\.impactLoaded\)\s*return/m,
+  /keepShared\(\)\s*\{[\s\S]*?if\s*\(!this\.impactLoaded\s*\|\|[\s\S]*?\)\s*return/m,
   'keep-shared must not bypass a failed impact request',
 );
 expectRegex(
@@ -149,28 +153,26 @@ expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-revi
 expectContains('src/components/LessonAssetManager.vue', 'confirmReplace', 'replacement mode needs an explicit parent confirmation gate');
 expectRegex(
   'src/views/LessonEditor.vue',
-  /replaceStepAssetReference\(step\.stepBody\s*\|\|\s*\{\},\s*intent\.asset\.assetKey,\s*clonedAsset\)/m,
-  'clone must rewrite only the selected step body',
+  /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(step\.stepBody\s*\|\|\s*\{\}/m,
+  'picker clone must bind the selected clone rather than search for the clicked source key',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?reloadAssets[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null/m,
+  /Api\.lesson\.updateStep\([\s\S]*?step\.stepKey[\s\S]*?fetchSteps[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null[\s\S]*?refreshSharedVisualTruth/m,
   'clone rebind must wait for server confirmation before refetch and preview invalidation',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /Api\.lesson\.updateStep\([\s\S]*?fetchSteps\([\s\S]*?reloadAssets\(\)[\s\S]*?preview\s*=\s*null[\s\S]*?previewManifest\s*=\s*null[\s\S]*?doValidate\(\)[\s\S]*?doPreview\(\)/m,
+  /refreshSharedVisualTruth\([\s\S]*?reloadAssets\(done, fail\)[\s\S]*?doValidate\(done, fail\)[\s\S]*?doPreview\(done, fail\)/m,
   'server-confirmed clone rebind must refetch validation and manifest preview',
 );
-const cloneRebindSource = extractObjectMethod(editorSource, 'applyClonedVisual');
+const cloneRebindSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
 const cloneRebindOrder = [
   'Api.lesson.updateStep(',
   'this.fetchSteps({',
-  'this.reloadAssets();',
   'this.preview = null;',
   'this.previewManifest = null;',
-  'this.doValidate();',
-  'this.doPreview();',
+  'this.refreshSharedVisualTruth(',
 ].map((needle) => {
   const index = cloneRebindSource.indexOf(needle);
   if (index === -1) throw new Error(`applyClonedVisual missing ${needle}`);
@@ -180,6 +182,104 @@ if (!cloneRebindOrder.every((index, position) => position === 0 || index > clone
   throw new Error('applyClonedVisual must update one step, then refetch steps/assets and authoritative validation/preview in order');
 }
 
+const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
+if (!/this\.rebindingSharedVisual/.test(saveSelectedStepSource)) {
+  throw new Error('saveSelectedStep must reject overlap with clone rebind');
+}
+const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
+if (!/this\.savingStep/.test(rebindClonedVisualSource)) {
+  throw new Error('rebindClonedVisual must reject overlap with prompt save');
+}
+const updateCalls = [];
+const guardedApi = { lesson: { updateStep: (...args) => updateCalls.push(args) } };
+const guardedSave = vm.runInNewContext(`(${saveSelectedStepSource})`, { Api: guardedApi });
+guardedSave.call({
+  selectedStep: { stepKey: 's1' }, isDraft: true, savingStep: false, rebindingSharedVisual: true,
+});
+const guardedRebind = vm.runInNewContext(`(${rebindClonedVisualSource})`, {
+  Api: guardedApi,
+  bindClonedAssetToStep: () => ({}),
+  replaceStepAssetReference: () => ({}),
+  collectAssetReferences: () => ['s1'],
+});
+guardedRebind.call({ savingStep: true, rebindingSharedVisual: false });
+if (updateCalls.length !== 0) throw new Error('overlapping save/rebind guards must prevent updateStep dispatch');
+
+let rebindAttempts = 0;
+let successfulClose = 0;
+const recoveryApi = { lesson: { updateStep: (lessonId, stepKey, payload, success, error) => {
+  rebindAttempts += 1;
+  if (rebindAttempts === 1) error('write failed');
+  else success();
+} } };
+const recoveryRebind = vm.runInNewContext(`(${rebindClonedVisualSource})`, {
+  Api: recoveryApi,
+  bindClonedAssetToStep: () => ({ teachingObject: { asset: { key: 'clone-b' } } }),
+  replaceStepAssetReference: () => ({}),
+  collectAssetReferences: () => ['s1'],
+});
+const recoveryContext = {
+  savingStep: false,
+  rebindingSharedVisual: false,
+  lessonId: 'lesson-1',
+  sharedImpactIntent: { intent: 'select', stepKey: 's1', layer: 'teachingObject', boundAssetKey: 'asset-a', asset: { assetKey: 'asset-b' } },
+  steps: [{ stepKey: 's1', stepBody: { teachingObject: { asset: { key: 'asset-a' } } } }],
+  failSharedVisualRebind() { this.rebindingSharedVisual = false; },
+  fetchSteps({ onSuccess }) { onSuccess(); },
+  refreshSharedVisualTruth(onSuccess) { onSuccess(); },
+  $delete() {},
+  selectedStepDrafts: {},
+  promptDirty: false,
+  dirtyStepKeys: {},
+  selectedAssetDrafts: {},
+  closeSharedImpact() { successfulClose += 1; },
+  $nextTick(fn) { fn(); },
+  $refs: {},
+  $message: { success() {} },
+  $t: (key) => key,
+  preview: {},
+  previewManifest: {},
+};
+const committedClone = { assetId: 'clone-b', assetKey: 'clone-b', path: '/clone-b.png', sha256: 'clone-b-sha' };
+recoveryRebind.call(recoveryContext, committedClone);
+if (successfulClose !== 0) throw new Error('failed updateStep must keep recovery context open');
+recoveryRebind.call(recoveryContext, committedClone);
+if (rebindAttempts !== 2 || successfulClose !== 1) throw new Error('retry must rebind the existing clone and close only after refresh success');
+
+const dialogSource = read('src/components/lesson/SharedVisualImpactDialog.vue');
+const confirmCloneSource = extractObjectMethod(dialogSource, 'confirmClone');
+if (confirmCloneSource.includes("this.$emit('close')")) {
+  throw new Error('dialog must remain open until parent confirms rebind and refresh success');
+}
+const retryRebindSource = extractObjectMethod(dialogSource, 'retryRebind');
+if (retryRebindSource.includes('cloneSharedVisual')) {
+  throw new Error('retrying a rebind must reuse the committed clone');
+}
+let cloneRequests = 0;
+const dialogEvents = [];
+const confirmClone = vm.runInNewContext(`(${confirmCloneSource})`, {
+  Api: { lesson: { cloneSharedVisual: (lessonId, assetId, payload, success) => {
+    cloneRequests += 1;
+    success({ assetId: 'clone-b', assetKey: payload.assetKey, path: '/clone-b.png', sha256: 'clone-b-sha' });
+  } } },
+});
+const dialogContext = {
+  impactLoaded: true,
+  asset: { assetId: 'source-b' },
+  cloneKey: 'teachingObject.b.v2',
+  cloning: false,
+  lessonId: 'lesson-1',
+  clonedAsset: null,
+  rebindPending: false,
+  $emit: (...args) => dialogEvents.push(args),
+};
+confirmClone.call(dialogContext);
+dialogContext.clonedAsset = { assetId: 'clone-b', assetKey: 'teachingObject.b.v2' };
+const retryRebind = vm.runInNewContext(`(${retryRebindSource})`);
+retryRebind.call(dialogContext);
+if (cloneRequests !== 1) throw new Error('rebind retry must not create a second clone');
+if (!dialogEvents.some(([event]) => event === 'retry-rebind')) throw new Error('failed rebind must expose a retry event');
+
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   for (const key of [
     'lesson.sharedImpactTitle',
@@ -188,6 +288,8 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
     'lesson.sharedImpactUsages',
     'lesson.sharedImpactLocalSteps',
     'lesson.sharedImpactCloneKey',
+    'lesson.sharedImpactRetryRebind',
+    'lesson.sharedImpactRebindFailed',
   ]) expectContains(locale, `'${key}'`, 'shared visual review must be localized');
 }
 

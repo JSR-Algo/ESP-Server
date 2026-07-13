@@ -4,7 +4,10 @@
     :title="$t('lesson.sharedImpactTitle')"
     width="720px"
     append-to-body
+    custom-class="shared-impact-dialog"
     :close-on-click-modal="false"
+    :close-on-press-escape="!rebindPending && !clonedAsset"
+    :show-close="!rebindPending && !clonedAsset"
     @open="loadImpact"
     @close="$emit('close')"
   >
@@ -16,6 +19,7 @@
         show-icon
         :closable="false"
       />
+      <el-alert v-if="rebindError" :title="rebindError" type="warning" show-icon :closable="false" />
 
       <dl v-if="asset" class="impact-review__source">
         <dt>{{ $t('lesson.sharedImpactSourceKey') }}</dt><dd class="mono">{{ authoritativeAsset.assetKey || '—' }}</dd>
@@ -50,8 +54,11 @@
     </div>
 
     <span slot="footer">
-      <el-button size="small" :disabled="!impactLoaded || loading || cloning" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
-      <el-button type="primary" size="small" :loading="cloning" :disabled="!impactLoaded || loading || cloning || !cloneKey" @click="confirmClone">
+      <el-button size="small" :disabled="!impactLoaded || loading || cloning || rebindPending || !!clonedAsset" @click="keepShared">{{ $t('lesson.sharedImpactKeep') }}</el-button>
+      <el-button v-if="clonedAsset" type="primary" size="small" :loading="rebindPending" :disabled="rebindPending" @click="retryRebind">
+        {{ rebindPending ? $t('lesson.sharedImpactRebinding') : $t('lesson.sharedImpactRetryRebind') }}
+      </el-button>
+      <el-button v-else type="primary" size="small" :loading="cloning" :disabled="!impactLoaded || loading || cloning || rebindPending || !cloneKey" @click="confirmClone">
         {{ $t('lesson.sharedImpactClone') }}
       </el-button>
     </span>
@@ -71,6 +78,9 @@ export default {
     assets: { type: Array, default: () => [] },
     steps: { type: Array, default: () => [] },
     currentStep: { type: Object, default: null },
+    clonedAsset: { type: Object, default: null },
+    rebindPending: { type: Boolean, default: false },
+    rebindError: { type: String, default: '' },
   },
   data() {
     return { impact: null, impactLoaded: false, loading: false, cloning: false, loadError: '', cloneKey: '' };
@@ -126,24 +136,26 @@ export default {
       );
     },
     keepShared() {
-      if (!this.impactLoaded) return;
+      if (!this.impactLoaded || this.clonedAsset || this.rebindPending) return;
       this.$emit('keep-shared', { asset: this.asset, currentStep: this.currentStep });
       this.$emit('close');
     },
     confirmClone() {
-      if (!this.impactLoaded || !this.asset || !this.asset.assetId || !this.cloneKey || this.cloning) return;
+      if (!this.impactLoaded || !this.asset || !this.asset.assetId || !this.cloneKey || this.cloning || this.rebindPending || this.clonedAsset) return;
       this.cloning = true;
       Api.lesson.cloneSharedVisual(this.lessonId, this.asset.assetId, {
         profile: 'espTft',
         assetKey: this.cloneKey,
       }, (result) => {
-        this.cloning = false;
         this.$emit('cloned', result && (result.asset || result.clone) ? (result.asset || result.clone) : result);
-        this.$emit('close');
       }, (msg) => {
         this.cloning = false;
         this.$emit('error', msg);
       });
+    },
+    retryRebind() {
+      if (!this.clonedAsset || this.rebindPending) return;
+      this.$emit('retry-rebind', this.clonedAsset);
     },
   },
 };
@@ -151,4 +163,7 @@ export default {
 
 <style scoped>
 .impact-review__source { display:grid; grid-template-columns:150px minmax(0, 1fr); gap:8px 12px; margin:0 0 18px; }.impact-review__source dt { color:#7c8582; }.impact-review__source dd { margin:0; min-width:0; }.impact-review h4 { margin:18px 0 8px; }.mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; }.muted { color:#909399; }.step-keys { display:flex; flex-wrap:wrap; gap:6px; }
+</style>
+<style>
+.shared-impact-dialog { max-width:calc(100vw - 24px); }
 </style>

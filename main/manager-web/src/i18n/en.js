@@ -330,6 +330,12 @@ export default {
   'lesson.sharedImpactInvalidResponse': 'The server returned an invalid shared visual impact response.',
   'lesson.sharedImpactCloneError': 'Could not clone the shared visual.',
   'lesson.sharedImpactCloned': 'Cloned the visual and rebound only the selected draft step.',
+  'lesson.sharedImpactRetryRebind': 'Retry draft rebind',
+  'lesson.sharedImpactRebinding': 'Rebinding draft…',
+  'lesson.sharedImpactRebindFailed': 'The visual was cloned, but the draft rebind did not finish: {reason}. Retry uses the existing clone.',
+  'lesson.sharedImpactRefreshError': 'Could not refresh authoritative lesson state.',
+  'lesson.sharedImpactNoRebindTarget': 'The selected step has no matching visual field to replace.',
+  'lesson.sharedImpactBusyRetry': 'The visual was cloned while another step write was active. Retry the rebind when it finishes.',
   // Robot expression override
   'lesson.renderExpression': 'Robot expression (override)',
   'lesson.renderExpressionAuto': 'Auto from step type',

@@ -167,7 +167,7 @@ export default {
       };
       return map[layer] ? this.$t(map[layer]) : layer;
     },
-    reload() {
+    reload(onSuccess, onError) {
       this.loadingList = true;
       Api.lesson.listAssets(
         this.lessonId,
@@ -177,8 +177,9 @@ export default {
           this.serverAssets = Array.isArray(res.assets) ? res.assets : [];
           // Lift the loaded list up so the Scene editor can reference real assetKeys.
           this.$emit('assets-loaded', this.serverAssets);
+          if (typeof onSuccess === 'function') onSuccess(this.serverAssets);
         },
-        (msg) => { this.loadingList = false; this.$message.error(msg); },
+        (msg) => { this.loadingList = false; this.$message.error(msg); if (typeof onError === 'function') onError(msg); },
       );
     },
     openPreview(a) {
@@ -188,6 +189,7 @@ export default {
     // Prefill the upload form from a row, keeping layer/role stable so the key's
     // placement does not change on replace (upsert-by-assetKey).
     startReplace(a) {
+      if (this.disabled) return;
       if (a && a.assetId) {
         this.$emit('impact-review-request', { intent: 'replace', asset: a });
         return;
@@ -241,7 +243,7 @@ export default {
       this.pickedFile = file.raw || file;
     },
     uploadAsset() {
-      if (!this.pickedFile) return;
+      if (!this.pickedFile || this.disabled) return;
       const key = (this.assetKey || '').trim();
       if (!key) {
         this.$message.warning(this.$t('lesson.assetKeyRequired'));
