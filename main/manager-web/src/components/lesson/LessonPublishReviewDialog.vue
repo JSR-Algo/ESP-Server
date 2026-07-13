@@ -14,29 +14,29 @@
         <section>
           <h4>{{ $t('lesson.publishSourceEvidence') }}</h4>
           <dl>
-            <dt>Lesson</dt><dd class="mono">{{ snapshot.originalLessonId }}</dd>
-            <dt>Version</dt><dd>v{{ snapshot.originalVersion }}</dd>
-            <dt>Checksum</dt><dd class="mono">{{ originalChecksum }}</dd>
-            <dt>Pins</dt><dd>{{ snapshot.originalAssets.length }}</dd>
-            <dt>Bytes</dt><dd>{{ formatBytes(snapshot.originalBytes) }}</dd>
+            <dt>{{ $t('lesson.publishFieldLesson') }}</dt><dd class="mono">{{ snapshot.originalLessonId }}</dd>
+            <dt>{{ $t('lesson.publishFieldVersion') }}</dt><dd>v{{ snapshot.originalVersion }}</dd>
+            <dt>{{ $t('lesson.publishFieldChecksum') }}</dt><dd class="mono">{{ originalChecksum }}</dd>
+            <dt>{{ $t('lesson.publishFieldPins') }}</dt><dd>{{ snapshot.originalAssets.length }}</dd>
+            <dt>{{ $t('lesson.publishFieldBytes') }}</dt><dd>{{ formatBytes(snapshot.originalBytes) }}</dd>
           </dl>
         </section>
         <section>
           <h4>{{ $t('lesson.publishTargetEvidence') }}</h4>
           <dl>
-            <dt>Version</dt><dd>v{{ snapshot.targetVersion }}</dd>
-            <dt>Steps</dt><dd>{{ snapshot.stepCount }}</dd>
-            <dt>Assets</dt><dd>{{ snapshot.assetCount }}</dd>
-            <dt>Profile</dt><dd>{{ snapshot.previewProfile }}</dd>
-            <dt>Stage</dt><dd>{{ snapshot.previewWidth }}×{{ snapshot.previewHeight }}</dd>
-            <dt>Checksum</dt><dd class="mono">{{ previewChecksum }}</dd>
-            <dt>ETag</dt><dd class="mono">{{ snapshot.previewEtag }}</dd>
+            <dt>{{ $t('lesson.publishFieldVersion') }}</dt><dd>v{{ snapshot.targetVersion }}</dd>
+            <dt>{{ $t('lesson.publishFieldSteps') }}</dt><dd>{{ snapshot.stepCount }}</dd>
+            <dt>{{ $t('lesson.publishFieldAssets') }}</dt><dd>{{ snapshot.assetCount }}</dd>
+            <dt>{{ $t('lesson.publishFieldProfile') }}</dt><dd>{{ snapshot.previewProfile }}</dd>
+            <dt>{{ $t('lesson.publishFieldStage') }}</dt><dd>{{ snapshot.previewWidth }}×{{ snapshot.previewHeight }}</dd>
+            <dt>{{ $t('lesson.publishFieldChecksum') }}</dt><dd class="mono">{{ previewChecksum }}</dd>
+            <dt>{{ $t('lesson.publishFieldEtag') }}</dt><dd class="mono">{{ snapshot.previewEtag }}</dd>
           </dl>
         </section>
       </div>
       <section class="proof-strip">
-        <div><span>{{ $t('lesson.publishSimulationEvidence') }}</span><strong>{{ snapshot.simulationTerminationReason }}</strong><small class="mono">{{ snapshot.simulationChecksum }}</small><small class="mono">{{ snapshot.simulationEtag }} · proof {{ snapshot.proofVersion }}</small><small class="mono">{{ formatCompletion(snapshot.simulationCompletionEvent) }}</small></div>
-        <div><span>{{ $t('lesson.serverValidation') }}</span><strong>{{ snapshot.validationResult.valid ? 'PASS' : 'FAIL' }}</strong><small>{{ snapshot.validationProfiles.join(', ') || '—' }}</small><small class="mono">{{ formatValidation(snapshot.validationResult) }}</small></div>
+        <div><span>{{ $t('lesson.publishSimulationEvidence') }}</span><strong>{{ snapshot.simulationTerminationReason }}</strong><small class="mono">{{ snapshot.simulationChecksum }}</small><small class="mono">{{ snapshot.simulationEtag }} · {{ $t('lesson.publishFieldProof') }} {{ snapshot.proofVersion }}</small><small class="mono">{{ formatCompletion(snapshot.simulationCompletionEvent) }}</small></div>
+        <div><span>{{ $t('lesson.serverValidation') }}</span><strong>{{ snapshot.validationResult.valid ? $t('lesson.statusPass') : $t('lesson.statusFail') }}</strong><small>{{ snapshot.validationProfiles.join(', ') || '—' }}</small><small class="mono">{{ formatValidation(snapshot.validationResult) }}</small></div>
       </section>
       <section class="pin-evidence">
         <h4>{{ $t('lesson.publishSourcePins') }}</h4>
@@ -50,8 +50,12 @@
       </el-checkbox>
       <el-alert v-if="result" :title="result.title" :type="result.type" :closable="false" show-icon class="result-alert">
         <div v-if="result.originalComparison">
-          <strong>{{ result.originalComparison.pass ? 'ORIGINAL IMMUTABILITY: PASS' : 'ORIGINAL IMMUTABILITY: FAIL' }}</strong>
-          <ul v-if="result.originalComparison.differences.length"><li v-for="item in result.originalComparison.differences" :key="item">{{ item }}</li></ul>
+          <strong>{{ result.originalComparison.pass ? $t('lesson.publishOriginalPass') : $t('lesson.publishOriginalFail') }}</strong>
+          <ul v-if="result.originalComparison.differences.length"><li v-for="(item, index) in result.originalComparison.differences" :key="index">{{ formatDifference(item) }}</li></ul>
+        </div>
+        <div v-if="result.targetComparison">
+          <strong>{{ result.targetComparison.pass ? $t('lesson.publishTargetPass') : $t('lesson.publishTargetFail') }}</strong>
+          <ul v-if="result.targetComparison.differences.length"><li v-for="(item, index) in result.targetComparison.differences" :key="index">{{ formatDifference(item) }}</li></ul>
         </div>
         <div v-if="result.targetEvidence" class="target-result mono">{{ formatTarget(result.targetEvidence) }}</div>
       </el-alert>
@@ -87,9 +91,10 @@ export default {
     close() { if (!this.publishing) this.$emit('update:visible', false); },
     confirmPublish() { if (this.acknowledged && !this.publishing && !this.result) this.$emit('publish', this.snapshot); },
     formatBytes(bytes) { const n = Number(bytes || 0); return n < 1024 ? `${n} B` : `${(n / 1048576).toFixed(2)} MiB`; },
-    formatTarget(target) { return `v${target.lessonVersion || '?'} · ${target.checksum || 'checksum unavailable'} · ${target.assetCount || 0} assets`; },
-    formatCompletion(event) { return event ? `${event.stepKey || 'lesson'} / ${event.action || 'completed'}` : 'completion event unavailable'; },
+    formatTarget(target) { return this.$t('lesson.publishTargetSummary', { version: target.lessonVersion || '?', checksum: target.checksum || this.$t('lesson.publishChecksumUnavailable'), count: target.assetCount || 0 }); },
+    formatCompletion(event) { return event ? `${event.stepKey || 'lesson'} / ${event.action || 'completed'}` : this.$t('lesson.publishCompletionUnavailable'); },
     formatValidation(result) { return JSON.stringify(result); },
+    formatDifference(item) { return item && item.key ? this.$t(item.key, item.params || {}) : String(item || ''); },
   },
 };
 </script>

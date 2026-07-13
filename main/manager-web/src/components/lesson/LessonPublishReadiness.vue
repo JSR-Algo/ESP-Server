@@ -2,7 +2,7 @@
   <section class="readiness">
     <div class="readiness__title">
       <strong>{{ $t('lesson.publishReadiness') }}</strong>
-      <el-tag :type="ready ? 'success' : 'warning'" size="mini">{{ ready ? 'READY' : 'CHECK' }}</el-tag>
+      <el-tag :type="ready ? 'success' : 'warning'" size="mini">{{ ready ? $t('lesson.statusReady') : $t('lesson.statusCheck') }}</el-tag>
     </div>
 
     <div class="readiness__grid">
@@ -15,7 +15,7 @@
       <div class="validation-result__head">
         <strong>{{ $t('lesson.serverValidation') }}</strong>
         <el-tag v-if="validationResult" :type="validationReady ? 'success' : 'danger'" size="mini">
-          {{ validationReady ? 'PASS' : 'FAIL' }}
+          {{ validationReady ? $t('lesson.statusPass') : $t('lesson.statusFail') }}
         </el-tag>
         <el-tag v-else type="info" size="mini">{{ $t('lesson.validationMissing') }}</el-tag>
         <el-tag v-if="validationResult && !validationCurrent" type="warning" size="mini">{{ $t('lesson.proofStale') }}</el-tag>
@@ -75,8 +75,8 @@ export default {
         { key: 'download', label: this.$t('lesson.budgetDownload'), value: this.formatBytes(this.metrics.downloadBytes), pass: Number.isFinite(Number(this.metrics.downloadBytes)) },
         { key: 'assets', label: this.$t('lesson.budgetAssets'), value: `${this.metrics.uniqueAssetCount} / ${this.metrics.sharedReferenceCount}`, pass: true },
         { key: 'psram', label: this.$t('lesson.budgetPsram'), value: this.formatBytes(this.metrics.estimatedPeakPsram), pass: this.metrics.estimatedPeakPsram <= 1572864 },
-        { key: 'offline', label: this.$t('lesson.budgetOffline'), value: this.metrics.offlineReady ? 'PASS' : 'FAIL', pass: this.metrics.offlineReady },
-        { key: 'paths', label: this.$t('lesson.budgetPaths'), value: this.metrics.allPathsTerminate ? 'PASS' : 'FAIL', pass: this.metrics.allPathsTerminate },
+        { key: 'offline', label: this.$t('lesson.budgetOffline'), value: this.metrics.offlineReady ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.offlineReady },
+        { key: 'paths', label: this.$t('lesson.budgetPaths'), value: this.metrics.allPathsTerminate ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.allPathsTerminate },
       ];
     },
     budgetsReady() {

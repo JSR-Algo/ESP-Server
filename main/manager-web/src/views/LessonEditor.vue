@@ -1210,7 +1210,10 @@ export default {
       const done = () => {
         if (this.editorDestroying || failed) return;
         remaining -= 1;
-        if (remaining === 0) onSuccess();
+        if (remaining === 0) {
+          this.assetRefreshIsProofRecovery = false;
+          onSuccess();
+        }
       };
       const fail = (msg) => {
         if (this.editorDestroying || failed) return;
@@ -1220,8 +1223,8 @@ export default {
       };
       this.assetRefreshIsProofRecovery = true;
       this.reloadAssets(done, fail);
-      this.doValidate(done, fail);
-      this.doPreview(done, fail, { allowUnsafe: true, storeProof: !this.promptDirty && !Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]) });
+      this.doValidate(done, fail, { allowUnsafe: true, requireValid: true });
+      this.doPreview(done, fail, { allowUnsafe: true, reuseProofVersion: true, storeProof: !this.promptDirty && !Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]) });
       return true;
     },
     rebindClonedVisual(clonedAsset) {
@@ -1480,10 +1483,21 @@ export default {
         },
       );
     },
-    doValidate(onSuccess, onError) {
-      if (this.editorDestroying || this.hasUnsafeProofState()) return false;
+    doValidate(onSuccess, onError, options = {}) {
+      if (this.editorDestroying || (!options.allowUnsafe && this.hasUnsafeProofState())) return false;
       const requestId = this.validationRequestId + 1;
       const proofVersion = this.proofVersion;
+      let settled = false;
+      const succeed = (result) => {
+        if (settled) return;
+        settled = true;
+        if (typeof onSuccess === 'function') onSuccess(result);
+      };
+      const fail = (message) => {
+        if (settled) return;
+        settled = true;
+        if (typeof onError === 'function') onError(message);
+      };
       this.validationRequestId = requestId;
       this.publishReviewRequestId += 1;
       this.publishReviewVisible = false;
@@ -1498,11 +1512,12 @@ export default {
           if (this.editorDestroying) return;
           if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
-          this.validationResult = res && typeof res === 'object' ? res : { valid: false, profiles: [], errors: ['Invalid validation response'], warnings: [] };
+          this.validationResult = res && typeof res === 'object' ? res : { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [] };
           this.validationProofVersion = proofVersion;
           if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
-          if (typeof onSuccess === 'function') onSuccess(res);
+          if (options.requireValid && (!res || res.valid !== true)) fail(this.$t('lesson.validFail'));
+          else succeed(res);
         },
         (msg) => {
           if (this.editorDestroying) return;
@@ -1511,7 +1526,7 @@ export default {
           this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [] };
           this.validationProofVersion = proofVersion;
           this.$message.error(msg);
-          if (typeof onError === 'function') onError(msg);
+          fail(msg);
         },
       );
       return true;
@@ -1530,7 +1545,7 @@ export default {
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
       const requestId = this.previewRequestId + 1;
       const previousProofVersion = this.proofVersion;
-      this.proofVersion += 1;
+      if (!options.reuseProofVersion) this.proofVersion += 1;
       const proofVersion = this.proofVersion;
       if (this.validationProofVersion === previousProofVersion) this.validationProofVersion = proofVersion;
       this.publishReviewRequestId += 1;
@@ -1610,11 +1625,15 @@ export default {
         layer: asset.layer || '',
         role: asset.role || '',
         critical: asset.critical === true,
+        mediaType: asset.mediaType || asset.media_type || '',
+        width: asset.width == null ? null : Number(asset.width),
+        height: asset.height == null ? null : Number(asset.height),
+        version: asset.version || asset.versionId || asset.version_id || '',
         path: asset.path || asset.url || '',
       })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     },
     collectLessonEvidence(lesson, onSuccess, onError) {
-      if (!lesson || !lesson.lessonId) { onError('Lesson evidence identity is missing.'); return false; }
+      if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishEvidenceIdentityMissing')); return false; }
       let manifestResult = null;
       let assetResult = null;
       let settled = false;
@@ -1622,12 +1641,14 @@ export default {
       const finish = () => {
         if (settled || !manifestResult || !assetResult) return;
         settled = true;
-        if (!this.validManifestPreviewResponse(manifestResult)) { onError('Authoritative manifest evidence was malformed.'); return; }
+        if (!this.validManifestPreviewResponse(manifestResult)) { onError(this.$t('lesson.publishManifestEvidenceMalformed')); return; }
         const assets = this.normalizeEvidenceAssets(assetResult.assets);
         onSuccess({
           lessonId: lesson.lessonId,
           lessonKey: lesson.lessonKey,
           lessonVersion: Number(lesson.lessonVersion),
+          status: lesson.status || '',
+          rowManifestChecksum: lesson.manifestChecksum || '',
           checksum: manifestResult.checksum,
           etag: manifestResult.etag,
           manifest: manifestResult.manifest,
@@ -1636,7 +1657,7 @@ export default {
         });
       };
       Api.lesson.manifestPreview(lesson.lessonId, 'espTft', (result) => { manifestResult = result; finish(); }, fail);
-      Api.lesson.listAssets(lesson.lessonId, 'espTft', (result) => { assetResult = result && Array.isArray(result.assets) ? result : { assets: [] }; finish(); }, fail);
+      Api.lesson.listAssets(lesson.lessonId, undefined, (result) => { assetResult = result && Array.isArray(result.assets) ? result : { assets: [] }; finish(); }, fail);
       return true;
     },
     compareOriginalEvidence(before, after) {
@@ -1646,13 +1667,40 @@ export default {
         return JSON.stringify(value);
       };
       const differences = [];
-      if (!before || !after) return { pass: false, differences: ['Original evidence is incomplete.'] };
-      if (before.lessonId !== after.lessonId || Number(before.lessonVersion) !== Number(after.lessonVersion)) differences.push('Original lesson identity/version changed.');
-      if (before.checksum !== after.checksum) differences.push(`Original checksum changed: ${before.checksum || 'missing'} -> ${after.checksum || 'missing'}.`);
-      if (stable(before.manifest) !== stable(after.manifest)) differences.push('Original manifest bytes changed.');
-      if (stable(before.assets) !== stable(after.assets)) differences.push('Original asset pins, digests, paths, or byte counts changed.');
-      if (Number(before.totalBytes || 0) !== Number(after.totalBytes || 0)) differences.push(`Original asset bytes changed: ${before.totalBytes || 0} -> ${after.totalBytes || 0}.`);
+      if (!before || !after) return { pass: false, differences: [{ key: 'lesson.publishDiffEvidenceIncomplete' }] };
+      if (before.lessonId !== after.lessonId || Number(before.lessonVersion) !== Number(after.lessonVersion)) differences.push({ key: 'lesson.publishDiffOriginalIdentity' });
+      if (before.checksum !== after.checksum) differences.push({ key: 'lesson.publishDiffOriginalChecksum', params: { before: before.checksum || '—', after: after.checksum || '—' } });
+      if ((before.rowManifestChecksum || after.rowManifestChecksum)
+        && (before.rowManifestChecksum !== after.rowManifestChecksum || after.rowManifestChecksum !== after.checksum)) differences.push({ key: 'lesson.publishDiffOriginalRowChecksum' });
+      if (stable(before.manifest) !== stable(after.manifest)) differences.push({ key: 'lesson.publishDiffOriginalManifest' });
+      if (stable(before.assets) !== stable(after.assets)) differences.push({ key: 'lesson.publishDiffOriginalAssets' });
+      if (Number(before.totalBytes || 0) !== Number(after.totalBytes || 0)) differences.push({ key: 'lesson.publishDiffOriginalBytes', params: { before: before.totalBytes || 0, after: after.totalBytes || 0 } });
       return { pass: differences.length === 0, differences };
+    },
+    compareTargetEvidence(snapshot, publishResponse, fetchedTarget) {
+      const differences = [];
+      if (!snapshot || !publishResponse || !fetchedTarget) return { pass: false, differences: [{ key: 'lesson.publishDiffTargetMissing' }] };
+      if (fetchedTarget.lessonId !== snapshot.targetLessonId) differences.push({ key: 'lesson.publishDiffTargetIdentity' });
+      if (fetchedTarget.status !== 'published') differences.push({ key: 'lesson.publishDiffTargetStatus' });
+      if (Number(fetchedTarget.lessonVersion) !== Number(snapshot.targetVersion)
+        || Number(fetchedTarget.lessonVersion) !== Number(publishResponse.lessonVersion)) differences.push({ key: 'lesson.publishDiffTargetVersion' });
+      if (!fetchedTarget.rowManifestChecksum) differences.push({ key: 'lesson.publishDiffTargetRowChecksumMissing' });
+      if (fetchedTarget.checksum !== publishResponse.checksum
+        || fetchedTarget.checksum !== snapshot.previewChecksum
+        || fetchedTarget.rowManifestChecksum !== fetchedTarget.checksum) differences.push({ key: 'lesson.publishDiffTargetChecksum' });
+      return { pass: differences.length === 0, differences };
+    },
+    collectPublishedTargetEvidence(snapshot, publishResponse, onSuccess, onError) {
+      Api.lesson.getLesson(snapshot.targetLessonId, (lesson) => {
+        if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishTargetIdentityMalformed')); return; }
+        this.collectLessonEvidence(lesson, onSuccess, onError);
+      }, onError);
+    },
+    collectRefetchedLessonEvidence(lessonId, onSuccess, onError) {
+      Api.lesson.getLesson(lessonId, (lesson) => {
+        if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishEvidenceIdentityMissing')); return; }
+        this.collectLessonEvidence(lesson, onSuccess, onError);
+      }, onError);
     },
     doPublish() {
       if (this.assetMutating || !this.canPublishCurrentProof()) return false;
@@ -1736,15 +1784,19 @@ export default {
           }
           let originalAfter = null;
           let targetAfter = null;
-          let evidenceError = '';
+          let originalError = '';
+          let targetError = '';
           let completed = 0;
           const finish = () => {
             completed += 1;
             if (completed < 2 || this.editorDestroying || requestId !== this.publishRequestId) return;
             this.publishing = false;
-            const originalComparison = evidenceError
-              ? { pass: false, differences: [evidenceError] }
+            const originalComparison = originalError
+              ? { pass: false, differences: [{ key: 'lesson.publishDiffOriginalUnavailable', params: { reason: originalError } }] }
               : this.compareOriginalEvidence(snapshot.originalEvidence, originalAfter);
+            const targetComparison = targetError
+              ? { pass: false, differences: [{ key: 'lesson.publishDiffTargetUnavailable', params: { reason: targetError } }] }
+              : this.compareTargetEvidence(snapshot, result, targetAfter);
             const targetEvidence = targetAfter ? {
               lessonVersion: targetAfter.lessonVersion,
               checksum: targetAfter.checksum,
@@ -1752,24 +1804,26 @@ export default {
               assetCount: targetAfter.assets.length,
               bytes: targetAfter.totalBytes,
               publishChecksum: result.checksum,
-            } : { lessonVersion: result.lessonVersion, checksum: result.checksum, assetCount: 0 };
+            } : null;
+            const verified = originalComparison.pass && targetComparison.pass;
             this.publishResult = {
-              type: originalComparison.pass ? 'success' : 'error',
-              title: originalComparison.pass ? this.$t('lesson.publishVerified') : this.$t('lesson.publishVerificationFailed'),
+              type: verified ? 'success' : 'error',
+              title: verified ? this.$t('lesson.publishVerified') : this.$t('lesson.publishVerificationFailed'),
               originalComparison,
+              targetComparison,
               targetEvidence,
             };
             this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
             this.fetchAll();
           };
-          this.collectLessonEvidence(snapshot.originalLesson, (evidence) => { originalAfter = evidence; finish(); }, (message) => { evidenceError = `Original verification unavailable: ${message}`; finish(); });
-          this.collectLessonEvidence({ ...this.lesson, lessonVersion: result.lessonVersion }, (evidence) => { targetAfter = evidence; finish(); }, (message) => { evidenceError = evidenceError || `Target evidence unavailable: ${message}`; finish(); });
+          this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
+          this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });
         },
         (message, error) => {
           if (this.editorDestroying || requestId !== this.publishRequestId) return;
           this.publishing = false;
           const uncertain = this.isUncertainMutationError(error);
-          this.publishResult = { type: uncertain ? 'warning' : 'error', title: uncertain ? this.$t('lesson.publishUncertain') : message };
+          this.publishResult = { type: uncertain ? 'warning' : 'error', title: uncertain ? this.$t('lesson.publishUncertain') : this.$t('lesson.publishFailed', { reason: message }) };
           this.$message.error(message);
         },
       );

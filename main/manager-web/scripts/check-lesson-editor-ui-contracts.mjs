@@ -121,6 +121,15 @@ expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'originalC
 expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'previewChecksum', 'review must bind publish to current preview');
 expectContains('src/components/lesson/LessonPublishReadiness.vue', 'validation-result', 'readiness must render authoritative validation evidence');
 expectContains('src/components/lesson/LessonPublishReadiness.vue', 'budgetRows', 'readiness must keep local budget evidence visible');
+expectRegex('src/views/LessonEditor.vue', /listAssets\(lesson\.lessonId,\s*(?:null|undefined),/m, 'immutability evidence must include every asset profile');
+expectContains('src/views/LessonEditor.vue', 'compareTargetEvidence', 'publish verification needs authoritative target identity comparison');
+expectContains('src/views/LessonEditor.vue', 'Api.lesson.getLesson', 'published target identity must be re-fetched from the backend');
+for (const forbidden of ['>Lesson<', '>Version<', '>Checksum<', '>Pins<', '>Bytes<', '>Steps<', '>Assets<', '>Profile<', '>Stage<', "'PASS'", "'FAIL'", "'READY'", "'CHECK'"]) {
+  expectNotContains('src/components/lesson/LessonPublishReviewDialog.vue', forbidden, 'new review labels and statuses must be localized');
+}
+for (const forbidden of ["'PASS'", "'FAIL'", "'READY'", "'CHECK'"]) {
+  expectNotContains('src/components/lesson/LessonPublishReadiness.vue', forbidden, 'new readiness statuses must be localized');
+}
 expectContains('src/apis/nestHttp.js', 'status: r.status', 'upload HTTP errors must expose definitive status to mutation callers');
 expectContains('src/apis/nestHttp.js', 'transport: true', 'upload transport failures must be marked ambiguous');
 
@@ -183,6 +192,22 @@ const changed = compareOriginalEvidence.call({}, originalEvidence, {
   assets: [{ assetKey: 'teachingObject.seed', sha256: 'changed-sha', bytes: 128 }],
 });
 if (changed.pass || !changed.differences.length) throw new Error('changed original pin evidence must FAIL honestly');
+const changedSecondaryProfile = compareOriginalEvidence.call({}, {
+  ...originalEvidence,
+  assets: [...originalEvidence.assets, { profile: 'web', assetKey: 'poster', sha256: 'web-a', bytes: 64, path: '/poster-a.png' }],
+}, {
+  ...originalEvidence,
+  assets: [...originalEvidence.assets, { profile: 'web', assetKey: 'poster', sha256: 'web-b', bytes: 64, path: '/poster-a.png' }],
+});
+if (changedSecondaryProfile.pass) throw new Error('a non-espTft asset mutation must fail original immutability');
+const compareTargetEvidence = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'compareTargetEvidence')})`);
+const reviewedTarget = { targetLessonId: 'draft-2', targetVersion: 2, previewChecksum: 'reviewed-checksum' };
+const publishResponse = { lessonVersion: 2, checksum: 'reviewed-checksum' };
+const fetchedTarget = { lessonId: 'draft-2', lessonVersion: 2, status: 'published', checksum: 'reviewed-checksum', rowManifestChecksum: 'reviewed-checksum' };
+if (!compareTargetEvidence.call({}, reviewedTarget, publishResponse, fetchedTarget).pass) throw new Error('matching authoritative target identity must pass');
+for (const badTarget of [null, { ...fetchedTarget, lessonVersion: 3 }, { ...fetchedTarget, checksum: 'other' }, { ...fetchedTarget, rowManifestChecksum: '' }]) {
+  if (compareTargetEvidence.call({}, reviewedTarget, publishResponse, badTarget).pass) throw new Error('missing or mismatched target version/checksum must fail verification');
+}
 let publishApiCalls = 0;
 let publishCallbacks;
 const publishReviewedVersion = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'publishReviewedVersion')})`, {
@@ -712,7 +737,7 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /refreshSharedVisualTruth\([\s\S]*?reloadAssets\(done, fail\)[\s\S]*?doValidate\(done, fail\)[\s\S]*?doPreview\(done, fail,/m,
+  /refreshSharedVisualTruth\([\s\S]*?reloadAssets\(done, fail\)[\s\S]*?doValidate\(done, fail,\s*\{\s*allowUnsafe:\s*true,\s*requireValid:\s*true\s*\}\)[\s\S]*?doPreview\(done, fail,/m,
   'server-confirmed clone rebind must refetch validation and manifest preview',
 );
 const cloneRebindSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
@@ -1160,6 +1185,46 @@ if (JSON.stringify(destroyedPreview) !== previewSnapshot || previewMessages || p
 }
 
 const refreshSharedVisualTruth = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'refreshSharedVisualTruth')})`);
+let internalValidationRequest;
+const internalDoValidate = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doValidate')})`, {
+  Api: { lesson: { validate: (...args) => { internalValidationRequest = args; } } },
+});
+let internalValidationSuccess = 0;
+let internalValidationFailure = 0;
+const internalValidationContext = {
+  editorDestroying: false, rebindingSharedVisual: true, proofVersion: 4, validationRequestId: 0,
+  validationResult: null, validationProofVersion: -1, validating: false,
+  publishReviewRequestId: 0, publishReviewVisible: false, publishReviewSnapshot: null, publishResult: null,
+  hasUnsafeProofState: () => true, $message: { success() {}, warning() {}, error() {} }, $t: (key) => key,
+};
+internalDoValidate.call(internalValidationContext, () => { internalValidationSuccess += 1; }, () => { internalValidationFailure += 1; }, { allowUnsafe: true, requireValid: true });
+if (!internalValidationRequest) throw new Error('internal shared-visual refresh must dispatch validation during rebind');
+internalValidationRequest[1]({ valid: false, profiles: ['espTft'], errors: ['bad pin'] });
+if (internalValidationSuccess || internalValidationFailure !== 1 || internalValidationContext.validating) {
+  throw new Error('failed internal validation must settle exactly once and clear busy state');
+}
+const completedRefresh = {
+  editorDestroying: false, rebindingSharedVisual: true, assetRefreshIsProofRecovery: false,
+  promptDirty: false, dirtyStepKeys: {},
+  reloadAssets(success) { success(); },
+  doValidate(success, failure, options) { if (!options.allowUnsafe || !options.requireValid) failure('unsafe'); else success(); },
+  doPreview(success, failure, options) { if (!options.allowUnsafe || !options.reuseProofVersion) failure('unsafe'); else success(); },
+};
+refreshSharedVisualTruth.call(completedRefresh, () => { completedRefresh.rebindingSharedVisual = false; }, () => {});
+if (completedRefresh.rebindingSharedVisual || completedRefresh.assetRefreshIsProofRecovery) {
+  throw new Error('clone rebind authoritative refresh must complete and clear recovery/busy state');
+}
+const failedRefresh = {
+  ...completedRefresh, rebindingSharedVisual: true,
+  reloadAssets(success) { success(); },
+  doValidate(success, failure) { failure('validation failed'); },
+  doPreview(success) { success(); },
+};
+let failedRefreshCalls = 0;
+refreshSharedVisualTruth.call(failedRefresh, () => {}, () => { failedRefreshCalls += 1; failedRefresh.rebindingSharedVisual = false; });
+if (failedRefreshCalls !== 1 || failedRefresh.rebindingSharedVisual || failedRefresh.assetRefreshIsProofRecovery) {
+  throw new Error('clone rebind validation failure must settle once and leave actionable recovery state');
+}
 const sharedCallbacks = [];
 let sharedSuccesses = 0;
 let sharedFailures = 0;
