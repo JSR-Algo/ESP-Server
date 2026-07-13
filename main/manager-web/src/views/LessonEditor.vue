@@ -601,6 +601,9 @@ export default {
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
+      Object.keys(this.assetMutationTokens || {}).forEach((id) => {
+        if (this.assetMutationTokens[id] === 'reconcile-failed') this.$delete(this.assetMutationTokens, id);
+      });
     },
     buildAssetProofFingerprint(assets) {
       return (Array.isArray(assets) ? assets : [])
@@ -660,12 +663,15 @@ export default {
         'espTft',
         (result) => {
           if (this.editorDestroying) return;
-          this.onAssetsLoaded(result && result.assets);
+          const assets = result && result.assets;
+          const manager = this.$refs && this.$refs.assetManager;
+          if (manager && typeof manager.applyServerAssets === 'function') manager.applyServerAssets(assets);
+          else this.onAssetsLoaded(assets);
           this.$delete(this.assetMutationTokens, id);
         },
         (message) => {
           if (this.editorDestroying) return;
-          this.$delete(this.assetMutationTokens, id);
+          this.$set(this.assetMutationTokens, id, 'reconcile-failed');
           this.$message.error(message);
         },
       );

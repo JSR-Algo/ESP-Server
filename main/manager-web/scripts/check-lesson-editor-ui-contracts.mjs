@@ -1108,6 +1108,48 @@ onAssetMutationState.call(detachedParent, { id: remountIdB, active: false });
 if (Object.keys(detachedParent.assetMutationTokens).length) {
   throw new Error('parent must not remain permanently disabled after detached reconciliation and newer completion');
 }
+for (const [mutationId, initialAssets, reconciledAssets] of [
+  ['upload-row', [], [{ assetKey: 'teachingObject.seed', sha256: 'new-upload' }]],
+  ['delete-row', [{ assetKey: 'teachingObject.seed', sha256: 'old' }], []],
+  ['replace-row', [{ assetKey: 'teachingObject.seed', sha256: 'old' }], [{ assetKey: 'teachingObject.seed', sha256: 'replacement' }]],
+]) {
+  const reconciliationOrder = [];
+  const mountedAssetManager = {
+    serverAssets: initialAssets,
+    applyServerAssets(assets) {
+      reconciliationOrder.push('child');
+      this.serverAssets = assets;
+      mountedSettlementParent.onAssetsLoaded(assets);
+    },
+  };
+  const mountedSettlementParent = {
+    ...detachedParent,
+    editorDestroying: false,
+    assetMutationTokens: { [mutationId]: true },
+    bundleAssets: initialAssets,
+    $refs: { assetManager: mountedAssetManager },
+    onAssetsLoaded(assets) {
+      reconciliationOrder.push('parent');
+      this.bundleAssets = assets;
+    },
+    $delete(target, key) {
+      reconciliationOrder.push('unlock');
+      delete target[key];
+    },
+  };
+  terminalAssetRead = null;
+  settleAssetMutation.call(mountedSettlementParent, { id: mutationId, outcome: 'success' });
+  if (!mountedSettlementParent.assetMutationTokens[mutationId] || !terminalAssetRead) {
+    throw new Error(`${mutationId} must remain locked until authoritative assets return`);
+  }
+  terminalAssetRead[2]({ assets: reconciledAssets });
+  if (JSON.stringify(mountedSettlementParent.bundleAssets) !== JSON.stringify(reconciledAssets)
+    || JSON.stringify(mountedAssetManager.serverAssets) !== JSON.stringify(reconciledAssets)
+    || mountedSettlementParent.assetMutationTokens[mutationId]
+    || reconciliationOrder.join(',') !== 'child,parent,unlock') {
+    throw new Error(`${mutationId} must refresh child and parent rows before unlocking controls`);
+  }
+}
 const rejectedDetachedParent = {
   ...detachedParent, assetMutationTokens: { rejected: true }, preview: { checksum: 'still-valid' },
 };
@@ -1126,16 +1168,37 @@ if (settleAssetMutation.call(invalidSettlementParent, { id: 'invalid', outcome: 
   || terminalAssetRead) {
   throw new Error('invalid asset outcomes must not strand, unlock, or reconcile the active token');
 }
+let timeoutReconciliationMessages = 0;
 const timeoutDetachedParent = {
-  ...detachedParent, assetMutationTokens: { timeout: true }, preview: { checksum: 'unsafe' }, assetsReconciled: false,
+  ...detachedParent,
+  editorDestroying: false,
+  assetMutationTokens: { timeout: true },
+  preview: { checksum: 'unsafe' },
+  assetsReconciled: false,
+  bundleAssets: [{ assetKey: 'stale-row' }],
+  $refs: { assetManager: { serverAssets: [{ assetKey: 'stale-row' }] } },
+  $message: { error() { timeoutReconciliationMessages += 1; } },
 };
 settleAssetMutation.call(timeoutDetachedParent, { id: 'timeout', outcome: 'uncertain', error: { status: 0 } });
 if (timeoutDetachedParent.preview || !timeoutDetachedParent.assetMutationTokens.timeout || !terminalAssetRead) {
   throw new Error('terminal timeout must invalidate and keep locked through reconciliation');
 }
 terminalAssetRead[3]('reload failed');
-if (Object.keys(timeoutDetachedParent.assetMutationTokens).length) {
-  throw new Error('terminal timeout reconciliation failure must still release only its token');
+if (timeoutDetachedParent.assetMutationTokens.timeout !== 'reconcile-failed'
+  || timeoutReconciliationMessages !== 1
+  || timeoutDetachedParent.$refs.assetManager.serverAssets[0].assetKey !== 'stale-row') {
+  throw new Error('failed reconciliation must remain locked and expose stale rows as unsafe');
+}
+const reconcileAssetsLoaded = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetsLoaded')})`);
+timeoutDetachedParent.assetProofFingerprint = null;
+timeoutDetachedParent.assetRefreshIsProofRecovery = false;
+timeoutDetachedParent.buildAssetProofFingerprint = () => 'fresh';
+timeoutDetachedParent.invalidatePreview = () => {};
+timeoutDetachedParent.$delete = (target, key) => { delete target[key]; };
+timeoutDetachedParent.$refs.assetManager.serverAssets = [];
+reconcileAssetsLoaded.call(timeoutDetachedParent, []);
+if (Object.keys(timeoutDetachedParent.assetMutationTokens).length || timeoutDetachedParent.bundleAssets.length) {
+  throw new Error('a successful manual child refresh must apply truth before releasing failed reconciliation locks');
 }
 const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'handleMutationError')})`, {
   isUncertainNestError(error) {
@@ -1144,6 +1207,33 @@ const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(asse
     return !Number.isFinite(status) || status === 0 || status >= 500;
   },
 });
+const applyServerAssets = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'applyServerAssets')})`);
+const appliedChildEvents = [];
+const appliedChild = { serverAssets: [{ assetKey: 'old' }], $emit: (...args) => appliedChildEvents.push(args) };
+applyServerAssets.call(appliedChild, [{ assetKey: 'new' }]);
+if (appliedChild.serverAssets[0].assetKey !== 'new'
+  || appliedChildEvents.length !== 1
+  || appliedChildEvents[0][0] !== 'assets-loaded') {
+  throw new Error('asset manager must atomically apply and lift authoritative server rows');
+}
+let staleChildRead;
+const reloadAssetRows = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'reload')})`, {
+  Api: { lesson: { listAssets: (...args) => { staleChildRead = args; } } },
+});
+const raceChildEvents = [];
+const raceChild = {
+  lessonId: 'lesson-1', assetListRequestId: 0, loadingList: false,
+  serverAssets: [{ assetKey: 'initial' }],
+  applyServerAssets,
+  $emit: (...args) => raceChildEvents.push(args),
+  $message: { error() { throw new Error('stale child failure must be ignored'); } },
+};
+reloadAssetRows.call(raceChild);
+applyServerAssets.call(raceChild, [{ assetKey: 'authoritative' }]);
+staleChildRead[2]({ assets: [{ assetKey: 'stale' }] });
+if (raceChild.serverAssets[0].assetKey !== 'authoritative' || raceChildEvents.length !== 1 || raceChild.loadingList) {
+  throw new Error('parent-applied asset truth must invalidate older child reload responses');
+}
 const uploadAssetSource = extractObjectMethod(assetManagerSource, 'uploadAsset');
 const uploadMutationEventIndex = uploadAssetSource.indexOf("this.$emit('asset-mutated'");
 const uploadSettlementIndex = uploadAssetSource.indexOf("settleMutation('success'");

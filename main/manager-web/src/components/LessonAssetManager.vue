@@ -140,6 +140,7 @@ export default {
       // Server-backed source of truth (replaces the old session-local uploaded[]).
       serverAssets: [],
       loadingList: false,
+      assetListRequestId: 0,
       replaceMode: false,
       previewVisible: false,
       previewAsset: null,
@@ -180,19 +181,31 @@ export default {
       };
       return map[layer] ? this.$t(map[layer]) : layer;
     },
+    applyServerAssets(assets) {
+      this.assetListRequestId = Number(this.assetListRequestId || 0) + 1;
+      this.loadingList = false;
+      this.serverAssets = Array.isArray(assets) ? assets : [];
+      this.$emit('assets-loaded', this.serverAssets);
+      return this.serverAssets;
+    },
     reload(onSuccess, onError) {
+      const requestId = Number(this.assetListRequestId || 0) + 1;
+      this.assetListRequestId = requestId;
       this.loadingList = true;
       Api.lesson.listAssets(
         this.lessonId,
         'espTft',
         (res) => {
-          this.loadingList = false;
-          this.serverAssets = Array.isArray(res.assets) ? res.assets : [];
-          // Lift the loaded list up so the Scene editor can reference real assetKeys.
-          this.$emit('assets-loaded', this.serverAssets);
-          if (typeof onSuccess === 'function') onSuccess(this.serverAssets);
+          if (requestId !== this.assetListRequestId) return;
+          const assets = this.applyServerAssets(res && res.assets);
+          if (typeof onSuccess === 'function') onSuccess(assets);
         },
-        (msg) => { this.loadingList = false; this.$message.error(msg); if (typeof onError === 'function') onError(msg); },
+        (msg) => {
+          if (requestId !== this.assetListRequestId) return;
+          this.loadingList = false;
+          this.$message.error(msg);
+          if (typeof onError === 'function') onError(msg);
+        },
       );
     },
     openPreview(a) {
