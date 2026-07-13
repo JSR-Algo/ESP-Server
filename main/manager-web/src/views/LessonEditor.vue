@@ -154,6 +154,7 @@
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
         :disabled="savingStep || rebindingSharedVisual || assetMutating"
+        :mutation-settler="settleAssetMutation"
         @assets-loaded="onAssetsLoaded"
         @asset-mutated="onAssetMutated"
         @asset-mutation-uncertain="onAssetMutationUncertain"
@@ -633,6 +634,18 @@ export default {
       const id = payload && payload.id;
       if (typeof id !== 'string' || !id) return;
       this.$set(this.assetMutationTokens, id, true);
+    },
+    settleAssetMutation(payload) {
+      const id = payload && payload.id;
+      const outcome = payload && payload.outcome;
+      if (typeof id !== 'string' || !this.assetMutationTokens[id]) return false;
+      if (this.assetMutationTokens[id] === 'settling') return false;
+      if (outcome !== 'rejected' && outcome !== 'success' && outcome !== 'uncertain') return false;
+      this.$set(this.assetMutationTokens, id, 'settling');
+      if (outcome === 'rejected') {
+        this.$delete(this.assetMutationTokens, id);
+        return true;
+      }
       this.invalidatePreview();
       Api.lesson.listAssets(
         this.lessonId,
@@ -646,6 +659,7 @@ export default {
           this.$message.error(message);
         },
       );
+      return true;
     },
     hasUnsafeProofState() {
       return Boolean(

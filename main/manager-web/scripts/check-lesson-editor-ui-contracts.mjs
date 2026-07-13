@@ -616,6 +616,7 @@ expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutat
 expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 'the editor must subscribe to committed asset mutations');
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-uncertain="onAssetMutationUncertain"', 'the editor must subscribe to ambiguous asset mutations');
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-detached="onAssetMutationDetached"', 'the editor must reconcile active mutations detached during unmount');
+expectContains('src/views/LessonEditor.vue', ':mutation-settler="settleAssetMutation"', 'asset request settlement must remain parent-owned after child teardown');
 expectContains('src/views/LessonEditor.vue', ':disabled="savingStep || rebindingSharedVisual || assetMutating"', 'asset manager must lock while any asset mutation token is active');
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -910,6 +911,7 @@ const remountIdB = globallyUniqueBegin.call(remountedB);
 if (remountIdA === remountIdB) throw new Error('asset mutation ids must not collide after remount');
 
 const detachAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'detachActiveMutation')})`);
+const createMutationSettlement = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'createMutationSettlement')})`);
 const detachedEvents = [];
 const detachingChild = {
   mutationPending: true, activeMutationId: remountIdA, uploading: true,
@@ -922,6 +924,14 @@ if (detachingChild.mutationPending || detachingChild.activeMutationId
 }
 if (finishAssetMutation.call(detachingChild, remountIdA)) {
   throw new Error('late completion from a detached instance must be ignored');
+}
+const parentSettlements = [];
+const settlementOwner = { mutationSettler: (payload) => parentSettlements.push(payload) };
+const settleDetachedRequest = createMutationSettlement.call(settlementOwner, remountIdA);
+settleDetachedRequest('success', { assetKey: 'teachingObject.seed' });
+settleDetachedRequest('success', { assetKey: 'duplicate' });
+if (parentSettlements.length !== 1 || parentSettlements[0].id !== remountIdA) {
+  throw new Error('detached request callback must settle its parent token exactly once');
 }
 
 const onAssetMutationState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationState')})`);
@@ -941,39 +951,64 @@ if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
   throw new Error('preview and simulation may unlock only after every mutation token completes');
 }
 
-let detachedReconcileRequest;
-const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`, {
-  Api: { lesson: { listAssets: (...args) => { detachedReconcileRequest = args; } } },
-});
+const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`);
 const detachedParent = {
   lessonId: 'lesson-1', assetMutationTokens: { [remountIdA]: true, [remountIdB]: true },
   proofVersion: 1, previewRequestId: 1, preview: {}, previewManifest: {}, simulationEvidence: {},
-  invalidatePreview, onAssetsLoaded() { this.assetsReconciled = true; },
   $set(target, key, value) { target[key] = value; }, $delete(target, key) { delete target[key]; },
   $message: { error() {} },
 };
 onAssetMutationDetached.call(detachedParent, { id: remountIdA });
-if (detachedParent.preview || !detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB]) {
-  throw new Error('detached mutation must invalidate proof while keeping all active tokens locked');
+if (!detachedParent.preview || !detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB]) {
+  throw new Error('detach must keep proof locked by the token without a premature reconciliation read');
 }
-detachedReconcileRequest[2]({ assets: [] });
-if (detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB]
-  || !detachedParent.assetsReconciled) {
-  throw new Error('detached reconciliation must clear only its matching token after authoritative success');
+
+let terminalAssetRead;
+const settleAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'settleAssetMutation')})`, {
+  Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; } } },
+});
+detachedParent.invalidatePreview = invalidatePreview;
+detachedParent.onAssetsLoaded = function onAssetsLoaded() { this.assetsReconciled = true; };
+settleAssetMutation.call(detachedParent, { id: remountIdA, outcome: 'success' });
+if (detachedParent.preview || !detachedParent.assetMutationTokens[remountIdA] || !terminalAssetRead) {
+  throw new Error('terminal success must invalidate proof and reconcile before unlocking its token');
+}
+terminalAssetRead[2]({ assets: [] });
+if (detachedParent.assetMutationTokens[remountIdA] || !detachedParent.assetMutationTokens[remountIdB] || !detachedParent.assetsReconciled) {
+  throw new Error('post-terminal reconciliation must clear only its matching token');
 }
 onAssetMutationState.call(detachedParent, { id: remountIdB, active: false });
 if (Object.keys(detachedParent.assetMutationTokens).length) {
   throw new Error('parent must not remain permanently disabled after detached reconciliation and newer completion');
 }
-const failedDetachedParent = {
-  ...detachedParent,
-  assetMutationTokens: { [remountIdA]: true },
-  preview: null,
+const rejectedDetachedParent = {
+  ...detachedParent, assetMutationTokens: { rejected: true }, preview: { checksum: 'still-valid' },
 };
-onAssetMutationDetached.call(failedDetachedParent, { id: remountIdA });
-detachedReconcileRequest[3]('reconciliation failed');
-if (Object.keys(failedDetachedParent.assetMutationTokens).length) {
-  throw new Error('failed detached reconciliation must still release its matching token without restoring proof');
+terminalAssetRead = null;
+settleAssetMutation.call(rejectedDetachedParent, { id: 'rejected', outcome: 'rejected', error: { status: 401 } });
+if (Object.keys(rejectedDetachedParent.assetMutationTokens).length || !rejectedDetachedParent.preview || terminalAssetRead) {
+  throw new Error('definitive terminal rejection must unlock without invalidating proof or reading assets');
+}
+const invalidSettlementParent = {
+  ...detachedParent, assetMutationTokens: { invalid: true }, preview: { checksum: 'still-valid' },
+};
+terminalAssetRead = null;
+if (settleAssetMutation.call(invalidSettlementParent, { id: 'invalid', outcome: 'unknown' })
+  || invalidSettlementParent.assetMutationTokens.invalid !== true
+  || !invalidSettlementParent.preview
+  || terminalAssetRead) {
+  throw new Error('invalid asset outcomes must not strand, unlock, or reconcile the active token');
+}
+const timeoutDetachedParent = {
+  ...detachedParent, assetMutationTokens: { timeout: true }, preview: { checksum: 'unsafe' }, assetsReconciled: false,
+};
+settleAssetMutation.call(timeoutDetachedParent, { id: 'timeout', outcome: 'uncertain', error: { status: 0 } });
+if (timeoutDetachedParent.preview || !timeoutDetachedParent.assetMutationTokens.timeout || !terminalAssetRead) {
+  throw new Error('terminal timeout must invalidate and keep locked through reconciliation');
+}
+terminalAssetRead[3]('reload failed');
+if (Object.keys(timeoutDetachedParent.assetMutationTokens).length) {
+  throw new Error('terminal timeout reconciliation failure must still release only its token');
 }
 const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'handleMutationError')})`, {
   isUncertainNestError(error) {
@@ -984,10 +1019,11 @@ const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(asse
 });
 const uploadAssetSource = extractObjectMethod(assetManagerSource, 'uploadAsset');
 const uploadMutationEventIndex = uploadAssetSource.indexOf("this.$emit('asset-mutated'");
-const uploadReloadIndex = uploadAssetSource.indexOf('this.reload()');
-if (uploadMutationEventIndex === -1 || uploadReloadIndex === -1 || uploadMutationEventIndex > uploadReloadIndex) {
-  throw new Error('successful upload/replace must emit asset-mutated before attempting reload');
+const uploadSettlementIndex = uploadAssetSource.indexOf("settleMutation('success'");
+if (uploadMutationEventIndex === -1 || uploadSettlementIndex === -1 || uploadSettlementIndex > uploadMutationEventIndex) {
+  throw new Error('successful upload/replace must settle the parent token before notifying consumers');
 }
+if (uploadAssetSource.includes('this.reload()')) throw new Error('upload/replace must leave authoritative reload to parent settlement');
 if (!uploadAssetSource.includes('handleMutationError')) throw new Error('upload/replace errors must classify uncertain commits');
 if (!uploadAssetSource.includes('beginMutation')) throw new Error('upload/replace must enter child single-flight state');
 if (!extractObjectMethod(assetManagerSource, 'onDelete').includes('handleMutationError')) {
@@ -1006,10 +1042,14 @@ const assetMutationParent = {
   simulationEvidence: { checksum: 'old' },
   invalidatePreview,
 };
-let reloadAttempts = 0;
+const mutationSettlements = [];
 let deleteRequest;
 const deleteAsset = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'onDelete')})`, {
   Api: { lesson: { deleteAsset: (...args) => { deleteRequest = args; } } },
+  isUncertainNestError(error) {
+    const status = Number(error && (error.status ?? (error.response && error.response.status)));
+    return !Number.isFinite(status) || status === 0 || status >= 500;
+  },
 });
 const assetMutationChild = {
   lessonId: 'lesson-1',
@@ -1019,26 +1059,50 @@ const assetMutationChild = {
   activeMutationId: null,
   beginMutation: beginAssetMutation,
   finishMutation: finishAssetMutation,
+  createMutationSettlement,
+  mutationSettler(payload) {
+    mutationSettlements.push(payload);
+    if (payload.outcome === 'success' || payload.outcome === 'uncertain') onAssetMutated.call(assetMutationParent);
+  },
   $t: (key) => key,
   $message: { success() {}, error() {} },
   handleMutationError: handleAssetMutationError,
   $emit(event, payload) {
     if (event === 'asset-mutated') onAssetMutated.call(assetMutationParent, payload);
   },
-  reload() { reloadAttempts += 1; throw new Error('reload failed'); },
 };
+const detachedCallbackSettlements = [];
+let detachedCallbackEvents = 0;
+let detachedCallbackMessages = 0;
+const detachedDeleteChild = {
+  ...assetMutationChild,
+  mutationPending: false,
+  activeMutationId: null,
+  detachActiveMutation: detachAssetMutation,
+  mutationSettler(payload) { detachedCallbackSettlements.push(payload); },
+  $emit(event) { if (event === 'asset-mutated') detachedCallbackEvents += 1; },
+  $message: { success() { detachedCallbackMessages += 1; }, error() {} },
+};
+deleteAsset.call(detachedDeleteChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
+detachAssetMutation.call(detachedDeleteChild);
+deleteRequest[3]();
+if (detachedCallbackSettlements.length !== 1 || detachedCallbackSettlements[0].outcome !== 'success') {
+  throw new Error('detached delete completion must still settle its parent token');
+}
+if (detachedCallbackEvents || detachedCallbackMessages) {
+  throw new Error('detached delete completion must not update its stale child instance');
+}
 deleteAsset.call(assetMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
-try { deleteRequest[3](); } catch (error) {
-  if (error.message !== 'reload failed') throw error;
-}
+deleteRequest[3]();
 if (assetMutationParent.preview || assetMutationParent.previewManifest || assetMutationParent.simulationEvidence) {
-  throw new Error('successful delete must invalidate proof before and independently of reload');
+  throw new Error('successful delete settlement must invalidate proof');
 }
-if (reloadAttempts !== 1) throw new Error('successful delete must still attempt authoritative asset reload');
+if (mutationSettlements.at(-1)?.outcome !== 'success') throw new Error('successful delete must settle its parent token');
 
 const failedMutationParent = { ...assetMutationParent, preview: { checksum: 'current' } };
 const failedMutationChild = {
   ...assetMutationChild,
+  mutationSettler(payload) { mutationSettlements.push(payload); },
   $emit(event, payload) {
     if (event === 'asset-mutated') onAssetMutated.call(failedMutationParent, payload);
   },
@@ -1046,6 +1110,7 @@ const failedMutationChild = {
 deleteAsset.call(failedMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
 deleteRequest[4]('delete failed', { status: 400 });
 if (!failedMutationParent.preview) throw new Error('failed asset mutation must not invalidate server proof');
+if (mutationSettlements.at(-1)?.outcome !== 'rejected') throw new Error('definitive asset failure must reject its parent token');
 
 const expiredAssetDelete = { ...assetMutationChild, mutationPending: false, activeMutationId: null };
 deleteAsset.call(expiredAssetDelete, { assetKey: 'teachingObject.seed', profile: 'espTft' });
@@ -1059,6 +1124,10 @@ let uploadRequest;
 const uploadAsset = vm.runInNewContext(`(${uploadAssetSource})`, {
   Api: { lesson: { uploadAsset: (...args) => { uploadRequest = args; } } },
   ROLE_BY_LAYER: { teachingObject: 'primarySubject' },
+  isUncertainNestError(error) {
+    const status = Number(error && (error.status ?? (error.response && error.response.status)));
+    return !Number.isFinite(status) || status === 0 || status >= 500;
+  },
 });
 const expiredAssetUpload = {
   ...assetMutationChild,
@@ -1082,10 +1151,12 @@ uploadAsset.call(expiredAssetUpload);
 if (!expiredAssetUpload.mutationPending) throw new Error('asset upload must be retryable after re-auth rejection settles');
 
 let uncertainAssetEvents = 0;
-let uncertainAssetReloads = 0;
 const uncertainMutationChild = {
   ...assetMutationChild,
-  reload() { uncertainAssetReloads += 1; },
+  mutationSettler(payload) {
+    mutationSettlements.push(payload);
+    if (payload.outcome === 'uncertain') onAssetMutated.call(failedMutationParent);
+  },
   $emit(event) {
     if (event === 'asset-mutation-uncertain') {
       uncertainAssetEvents += 1;
@@ -1095,8 +1166,8 @@ const uncertainMutationChild = {
 };
 deleteAsset.call(uncertainMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
 deleteRequest[4]('network timeout', { status: 0 });
-if (uncertainAssetEvents !== 1 || uncertainAssetReloads !== 1 || failedMutationParent.preview) {
-  throw new Error('uncertain asset delete must invalidate proof and reload authoritative assets');
+if (uncertainAssetEvents !== 1 || mutationSettlements.at(-1)?.outcome !== 'uncertain' || failedMutationParent.preview) {
+  throw new Error('uncertain asset delete must invalidate proof through parent settlement');
 }
 
 const assetProofFingerprint = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'buildAssetProofFingerprint')})`);

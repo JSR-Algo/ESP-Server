@@ -79,6 +79,23 @@ impossibleBranchTraces.forEach((interactive, index) => {
     simulation: { terminated: true, terminationReason: 'lesson_completed', trace: [passiveTrace, ...interactive, completionTrace] },
   }, simulationIdentity, simulationAuthoringSteps), false, `impossible outcome/action trace ${index} must be rejected`);
 });
+const loopingIdentity = {
+  ...simulationIdentity,
+  manifest: { steps: [{ id: 's2', type: 'listen', completionClass: 'interactive', timeoutSec: 20 }] },
+};
+const loopingAuthoringSteps = [{ stepKey: 's2', stepBody: { interaction: { maxAttempts: 200 } } }];
+const loopingTraceFor = (length) => Array.from({ length }, (_, index) => interactiveTrace('retry', index + 1, 'retry'));
+const loopingTrace = loopingTraceFor(100);
+assert.strictEqual(validSimulationEvidence({
+  ...loopingIdentity,
+  simulation: { terminated: false, terminationReason: 'max_transitions', trace: loopingTrace },
+}, loopingIdentity, loopingAuthoringSteps), true, 'max_transitions requires the exact fixed 100-event trace');
+for (const length of [0, 99, 101]) {
+  assert.strictEqual(validSimulationEvidence({
+    ...loopingIdentity,
+    simulation: { terminated: false, terminationReason: 'max_transitions', trace: loopingTraceFor(length) },
+  }, loopingIdentity, loopingAuthoringSteps), false, `max_transitions trace length ${length} must be rejected`);
+}
 const malformedSimulations = [
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminated: 'true' } },
   { ...validSimulation, simulation: { ...validSimulation.simulation, terminationReason: null } },

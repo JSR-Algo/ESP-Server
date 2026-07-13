@@ -317,6 +317,7 @@ function validSimulationEvidence(result, expectedPreview, authoringSteps = []) {
     || !['lesson_completed', 'max_transitions'].includes(simulation.terminationReason)
     || !Array.isArray(simulation.trace)) return false;
   if (simulation.terminated !== (simulation.terminationReason === 'lesson_completed')) return false;
+  if (simulation.terminationReason === 'max_transitions' && simulation.trace.length !== 100) return false;
 
   const attempts = new Map();
   const completedSteps = new Set();

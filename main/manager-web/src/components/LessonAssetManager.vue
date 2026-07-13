@@ -124,6 +124,7 @@ export default {
     disabled: { type: Boolean, default: false },
     // Optional vocab/subject to prefill teachingObject.<subject> assetKey
     subjectHint: { type: String, default: '' },
+    mutationSettler: { type: Function, required: true },
   },
   data() {
     return {
@@ -230,18 +231,23 @@ export default {
     onDelete(a) {
       const mutationId = this.beginMutation();
       if (!mutationId) return;
+      const settleMutation = this.createMutationSettlement(mutationId);
       Api.lesson.deleteAsset(
         this.lessonId,
         a.assetKey,
         a.profile,
         () => {
-          if (!this.finishMutation(mutationId)) return;
+          const locallyActive = this.finishMutation(mutationId);
+          if (!settleMutation('success', { assetKey: a.assetKey, profile: a.profile || 'espTft' })) return;
+          if (!locallyActive) return;
           this.$emit('asset-mutated', { type: 'delete', assetKey: a.assetKey, profile: a.profile || 'espTft' });
           this.$message.success(this.$t('lesson.assetDeleted'));
-          this.reload();
         },
         (msg, error) => {
-          if (!this.finishMutation(mutationId)) return;
+          const locallyActive = this.finishMutation(mutationId);
+          const outcome = isUncertainNestError(error) ? 'uncertain' : 'rejected';
+          if (!settleMutation(outcome, { message: msg, error })) return;
+          if (!locallyActive) return;
           this.handleMutationError(msg, error);
         },
       );
@@ -276,8 +282,17 @@ export default {
       if (!id || id !== this.activeMutationId) return false;
       this.mutationPending = false;
       this.activeMutationId = null;
-      this.$emit('mutation-state', { id, active: false });
       return true;
+    },
+    createMutationSettlement(id) {
+      const settleWithParent = this.mutationSettler;
+      let settled = false;
+      return (outcome, details = {}) => {
+        if (settled) return false;
+        settled = true;
+        settleWithParent({ id, outcome, ...details });
+        return true;
+      };
     },
     detachActiveMutation() {
       const id = this.activeMutationId;
@@ -291,7 +306,6 @@ export default {
     handleMutationError(message, error) {
       if (isUncertainNestError(error)) {
         this.$emit('asset-mutation-uncertain', { message, error });
-        this.reload();
       }
       this.$message.error(message);
     },
@@ -304,6 +318,7 @@ export default {
       }
       const mutationId = this.beginMutation();
       if (!mutationId) return;
+      const settleMutation = this.createMutationSettlement(mutationId);
       this.uploading = true;
       const layer = this.layer;
       const fields = {
@@ -319,9 +334,14 @@ export default {
         this.pickedFile,
         fields,
         (asset) => {
-          if (!this.finishMutation(mutationId)) return;
-          this.uploading = false;
+          const locallyActive = this.finishMutation(mutationId);
           const a = (asset && asset.asset) ? asset.asset : (asset || {});
+          if (!settleMutation('success', {
+            assetKey: a.asset_key || a.assetKey || key,
+            profile: a.profile || fields.profile,
+          })) return;
+          if (!locallyActive) return;
+          this.uploading = false;
           this.pickedFile = null;
           this.replaceMode = false;
           if (this.$refs.uploader) this.$refs.uploader.clearFiles();
@@ -332,9 +352,6 @@ export default {
             layer: a.layer || layer,
           });
           this.$message.success(this.$t('lesson.uploadOk'));
-          // Refetch so the server list (incl. upsert/replace) is authoritative;
-          // reload() emits 'assets-loaded' to refresh the Scene editor dropdowns.
-          this.reload();
           // Preserve the existing notification for any non-editor consumers.
           this.$emit('uploaded', {
             assetKey: a.asset_key || a.assetKey || key,
@@ -342,7 +359,10 @@ export default {
           });
         },
         (msg, error) => {
-          if (!this.finishMutation(mutationId)) return;
+          const locallyActive = this.finishMutation(mutationId);
+          const outcome = isUncertainNestError(error) ? 'uncertain' : 'rejected';
+          if (!settleMutation(outcome, { message: msg, error })) return;
+          if (!locallyActive) return;
           this.uploading = false;
           // espTft sniff-rejects webp/gif and corrupt headers (415)
           this.handleMutationError(/415/.test(String(msg)) ? this.$t('lesson.uploadReject415') : msg, error);
