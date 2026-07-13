@@ -135,6 +135,7 @@ expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'originalC
 expectContains('src/components/lesson/LessonPublishReviewDialog.vue', 'previewChecksum', 'review must bind publish to current preview');
 expectContains('src/components/lesson/LessonPublishReadiness.vue', 'validation-result', 'readiness must render authoritative validation evidence');
 expectContains('src/components/lesson/LessonPublishReadiness.vue', 'budgetRows', 'readiness must keep local budget evidence visible');
+expectContains('src/components/lesson/LessonPublishReadiness.vue', 'validationFindings', 'authoritative validation findings must remain visible even when valid is false');
 expectRegex('src/views/LessonEditor.vue', /listAssets\(lesson\.lessonId,\s*(?:null|undefined),/m, 'immutability evidence must include every asset profile');
 expectContains('src/views/LessonEditor.vue', 'compareTargetEvidence', 'publish verification needs authoritative target identity comparison');
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.getLesson', 'published target identity must be re-fetched from the backend');
@@ -304,11 +305,34 @@ const parsedValidation = parseValidationResult.call({}, { valid: true, profiles:
 if (!parsedValidation || !Array.isArray(parsedValidation.errors) || !Array.isArray(parsedValidation.warnings) || !Array.isArray(parsedValidation.findings)) {
   throw new Error('exact backend validation success must normalize explicit finding arrays');
 }
+const authoritativeInvalidValidation = parseValidationResult.call({}, {
+  valid: false,
+  profiles: ['espTft'],
+  errors: [{ code: 'MISSING_PIN', message: 'Teaching object pin is missing.' }],
+  warnings: ['Optional narration is absent.'],
+  findings: [{ reason: 'Budget evidence requires review.' }],
+}, 'espTft');
+if (!authoritativeInvalidValidation || authoritativeInvalidValidation.valid !== false
+  || authoritativeInvalidValidation.errors.length !== 1
+  || authoritativeInvalidValidation.warnings.length !== 1
+  || authoritativeInvalidValidation.findings.length !== 1) {
+  throw new Error('well-formed authoritative valid:false evidence must be preserved exactly');
+}
+const authoritativeInvalidWithoutWarnings = parseValidationResult.call({}, {
+  valid: false, profiles: ['espTft'], errors: ['invalid'], warnings: [], findings: [],
+}, 'espTft');
+if (!authoritativeInvalidWithoutWarnings || authoritativeInvalidWithoutWarnings.warnings.length) {
+  throw new Error('well-formed valid:false evidence with empty warnings must remain distinguishable from malformed data');
+}
+if (canPublishCurrentProof.call({ ...publishReadyContext, validationResult: authoritativeInvalidValidation })) {
+  throw new Error('well-formed authoritative valid:false evidence must keep publish disabled');
+}
 for (const malformed of [
   null, {}, { valid: 'true', profiles: ['espTft'] }, { valid: true, profiles: 'espTft' },
   { valid: true, profiles: [] }, { valid: true, profiles: ['mobile'] },
   { valid: true, profiles: ['espTft'], errors: {} }, { valid: true, profiles: ['espTft'], warnings: [1] },
   { valid: true, profiles: ['espTft'], errors: ['contradictory error'] },
+  { valid: false, profiles: ['espTft'], errors: {}, warnings: [], findings: [] },
   { valid: true, profiles: ['espTft'], findings: [{ nope: true }] },
 ]) {
   if (parseValidationResult.call({}, malformed, 'espTft')) throw new Error('malformed validation success must fail closed');
@@ -1362,6 +1386,10 @@ if (!internalValidationRequest) throw new Error('internal shared-visual refresh 
 internalValidationRequest[1]({ valid: false, profiles: ['espTft'], errors: ['bad pin'] });
 if (internalValidationSuccess || internalValidationFailure !== 1 || internalValidationContext.validating) {
   throw new Error('failed internal validation must settle exactly once and clear busy state');
+}
+if (!internalValidationContext.validationResult || internalValidationContext.validationResult.valid !== false
+  || internalValidationContext.validationResult.errors[0] !== 'bad pin') {
+  throw new Error('internal refresh must preserve authoritative invalid validation evidence instead of fabricating malformed data');
 }
 const completedRefresh = {
   editorDestroying: false, rebindingSharedVisual: true, assetRefreshIsProofRecovery: false,

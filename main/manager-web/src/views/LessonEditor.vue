@@ -1523,9 +1523,10 @@ export default {
           const parsed = this.parseValidationResult(res, 'espTft');
           this.validationResult = parsed || { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [], findings: [] };
           this.validationProofVersion = proofVersion;
-          if (parsed) this.$message.success(this.$t('lesson.validOk', { profiles: parsed.profiles.join(', ') }));
+          if (parsed && parsed.valid) this.$message.success(this.$t('lesson.validOk', { profiles: parsed.profiles.join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
           if (!parsed) fail(this.$t('lesson.validationResponseMalformed'));
+          else if (!parsed.valid) fail(this.$t('lesson.validFail'));
           else succeed(parsed);
         },
         (msg) => {
@@ -1658,7 +1659,7 @@ export default {
       return { profiles: profiles.slice().sort(), assets: assets.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) };
     },
     parseValidationResult(result, expectedProfile = 'espTft') {
-      if (!result || Array.isArray(result) || result.valid !== true || !Array.isArray(result.profiles)) return null;
+      if (!result || Array.isArray(result) || typeof result.valid !== 'boolean' || !Array.isArray(result.profiles)) return null;
       const profiles = result.profiles.slice();
       if (!profiles.length || profiles.some((profile) => typeof profile !== 'string' || !profile.trim()) || new Set(profiles).size !== profiles.length || !profiles.includes(expectedProfile)) return null;
       const validFinding = (finding) => typeof finding === 'string'
@@ -1668,8 +1669,8 @@ export default {
       for (const key of ['errors', 'warnings', 'findings']) {
         if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].some((finding) => !validFinding(finding)))) return null;
       }
-      if (Array.isArray(result.errors) && result.errors.length) return null;
-      return { ...result, valid: true, profiles, errors: result.errors || [], warnings: result.warnings || [], findings: result.findings || [] };
+      if (result.valid && Array.isArray(result.errors) && result.errors.length) return null;
+      return { ...result, valid: result.valid, profiles, errors: result.errors || [], warnings: result.warnings || [], findings: result.findings || [] };
     },
     derivePublishSource(rows, currentLesson) {
       if (!currentLesson || !Array.isArray(rows)) return null;
