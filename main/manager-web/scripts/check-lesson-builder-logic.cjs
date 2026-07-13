@@ -117,6 +117,34 @@ assert.strictEqual(
   nextClonedAssetKey('teachingObject.glowSeed.v1', clonedAssets),
   'teachingObject.glowSeed.v4',
 );
+assert.strictEqual(
+  nextClonedAssetKey('scene.forest.v1', [
+    { assetKey: 'scene.forest.v1' },
+    { assetKey: 'scene.forest.v3' },
+    { assetKey: 'scene.desert.v12' },
+  ]),
+  'scene.forest.v4',
+);
+assert.strictEqual(
+  nextClonedAssetKey('scene.forest.v1', [{ assetKey: 'scene.desert.v12' }]),
+  'scene.forest.v2',
+);
+
+const cyclicBody = {};
+cyclicBody.self = cyclicBody;
+assert.throws(
+  () => collectAssetReferences([{ stepKey: 'cycle', stepBody: cyclicBody }], referencedAssetKey),
+  { name: 'TypeError', message: 'step body must be an acyclic JSON tree' },
+);
+class CustomBody {
+  constructor() {
+    this.assetKey = referencedAssetKey;
+  }
+}
+assert.throws(
+  () => collectAssetReferences([{ stepKey: 'custom', stepBody: new CustomBody() }], referencedAssetKey),
+  { name: 'TypeError', message: 'step body must contain only JSON primitives, arrays, and plain objects' },
+);
 
 const originalBody = {
   scene: {
@@ -150,6 +178,21 @@ assert.deepStrictEqual(originalBody, originalSnapshot);
 assert.notStrictEqual(replacedBody, originalBody);
 assert.notStrictEqual(replacedBody.scene, originalBody.scene);
 assert.notStrictEqual(replacedBody.scene.layers, originalBody.scene.layers);
+
+const cyclicArray = [];
+cyclicArray.push(cyclicArray);
+assert.throws(
+  () => replaceStepAssetReference(cyclicArray, referencedAssetKey, clonedAsset),
+  { name: 'TypeError', message: 'step body must be an acyclic JSON tree' },
+);
+assert.throws(
+  () => replaceStepAssetReference(new CustomBody(), referencedAssetKey, clonedAsset),
+  { name: 'TypeError', message: 'step body must contain only JSON primitives, arrays, and plain objects' },
+);
+assert.throws(
+  () => replaceStepAssetReference(originalBody, referencedAssetKey, new CustomBody()),
+  { name: 'TypeError', message: 'cloned asset must contain only JSON primitives, arrays, and plain objects' },
+);
 
 const lessonApiSource = fs.readFileSync(
   path.join(__dirname, '../src/apis/module/lesson.js'),

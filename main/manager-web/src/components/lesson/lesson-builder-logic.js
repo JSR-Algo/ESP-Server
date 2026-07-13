@@ -80,6 +80,30 @@ function assetIdentity(asset) {
   return asset.sha256 || asset.versionId || asset.path || asset.src || asset.assetKey;
 }
 
+/**
+ * Authoring helper inputs must be acyclic JSON trees: JSON primitives, standard
+ * arrays, and plain objects whose prototype is Object.prototype.
+ */
+function assertJsonTree(value, label, ancestors = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (!value || typeof value !== 'object') {
+    throw new TypeError(`${label} must contain only JSON primitives, arrays, and plain objects`);
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  const isStandardArray = Array.isArray(value) && prototype === Array.prototype;
+  const isPlainObject = !Array.isArray(value) && prototype === Object.prototype;
+  if (!isStandardArray && !isPlainObject) {
+    throw new TypeError(`${label} must contain only JSON primitives, arrays, and plain objects`);
+  }
+  if (ancestors.has(value)) throw new TypeError(`${label} must be an acyclic JSON tree`);
+
+  ancestors.add(value);
+  Object.values(value).forEach((item) => assertJsonTree(item, label, ancestors));
+  ancestors.delete(value);
+}
+
 function containsAssetKey(value, assetKey) {
   if (Array.isArray(value)) return value.some((item) => containsAssetKey(item, assetKey));
   if (!value || typeof value !== 'object') return false;
@@ -87,9 +111,14 @@ function containsAssetKey(value, assetKey) {
   return Object.values(value).some((item) => containsAssetKey(item, assetKey));
 }
 
+/** Finds references in authoring bodies, which must be acyclic JSON trees. */
 function collectAssetReferences(steps, assetKey) {
   return (Array.isArray(steps) ? steps : [])
-    .filter((step) => containsAssetKey(step.stepBody || step.body || {}, assetKey))
+    .filter((step) => {
+      const body = step.stepBody || step.body || {};
+      assertJsonTree(body, 'step body');
+      return containsAssetKey(body, assetKey);
+    })
     .map((step) => step.stepKey || step.stepId)
     .filter(Boolean);
 }
@@ -97,22 +126,27 @@ function collectAssetReferences(steps, assetKey) {
 function nextClonedAssetKey(assetKey, assets) {
   const match = String(assetKey || '').match(/^(.*)\.v(\d+)$/);
   const base = match ? match[1] : String(assetKey || '');
-  const used = new Set((Array.isArray(assets) ? assets : []).map((asset) => asset.assetKey));
-  let version = match ? Number(match[2]) + 1 : 2;
-  while (used.has(`${base}.v${version}`)) version += 1;
-  return `${base}.v${version}`;
+  const maxVersion = (Array.isArray(assets) ? assets : []).reduce(
+    (maximum, asset) => {
+      const candidate = String(asset.assetKey || '').match(/^(.*)\.v(\d+)$/);
+      if (!candidate || candidate[1] !== base) return maximum;
+      return Math.max(maximum, Number(candidate[2]));
+    },
+    match ? Number(match[2]) : 1,
+  );
+  return `${base}.v${maxVersion + 1}`;
 }
 
-function replaceStepAssetReference(value, fromKey, clonedAsset) {
+function replaceAssetReference(value, fromKey, clonedAsset) {
   if (Array.isArray(value)) {
-    return value.map((item) => replaceStepAssetReference(item, fromKey, clonedAsset));
+    return value.map((item) => replaceAssetReference(item, fromKey, clonedAsset));
   }
   if (!value || typeof value !== 'object') return value;
 
   const replaced = Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      replaceStepAssetReference(item, fromKey, clonedAsset),
+      replaceAssetReference(item, fromKey, clonedAsset),
     ]),
   );
   if (value.assetKey !== fromKey) return replaced;
@@ -123,6 +157,20 @@ function replaceStepAssetReference(value, fromKey, clonedAsset) {
     path: clonedAsset.path,
     sha256: clonedAsset.sha256,
   };
+}
+
+/** Immutably rewrites an acyclic JSON step body using a plain JSON clone record. */
+function replaceStepAssetReference(value, fromKey, clonedAsset) {
+  assertJsonTree(value, 'step body');
+  assertJsonTree(clonedAsset, 'cloned asset');
+  const prototype = clonedAsset && typeof clonedAsset === 'object'
+    ? Object.getPrototypeOf(clonedAsset)
+    : undefined;
+  if (!clonedAsset || Array.isArray(clonedAsset)
+    || prototype !== Object.prototype) {
+    throw new TypeError('cloned asset must be a plain JSON object');
+  }
+  return replaceAssetReference(value, fromKey, clonedAsset);
 }
 
 function calculateReadiness({ steps, assets, manifest } = {}) {
