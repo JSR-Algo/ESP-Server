@@ -155,6 +155,7 @@
         :subject-hint="lastSubject"
         :disabled="savingStep || rebindingSharedVisual"
         @assets-loaded="onAssetsLoaded"
+        @asset-mutated="onAssetMutated"
         @impact-review-request="reviewAssetReplacement"
       />
     </div>
@@ -573,15 +574,35 @@ export default {
     },
     onAssetsLoaded(assets) {
       const nextAssets = Array.isArray(assets) ? assets : [];
-      const fingerprint = nextAssets
-        .map((asset) => [asset.profile, asset.assetKey, asset.sha256, asset.version, asset.path].join(':'))
-        .sort()
-        .join('|');
+      const fingerprint = this.buildAssetProofFingerprint(nextAssets);
       if (this.assetProofFingerprint !== null
         && fingerprint !== this.assetProofFingerprint
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
+    },
+    buildAssetProofFingerprint(assets) {
+      return (Array.isArray(assets) ? assets : [])
+        .map((asset) => JSON.stringify({
+          assetId: asset.assetId || '',
+          profile: asset.profile || '',
+          assetKey: asset.assetKey || '',
+          sha256: asset.sha256 || '',
+          layer: asset.layer || '',
+          role: asset.role || '',
+          critical: asset.critical === true,
+          mediaType: asset.mediaType || '',
+          bytes: asset.bytes == null ? null : Number(asset.bytes),
+          width: asset.width == null ? null : Number(asset.width),
+          height: asset.height == null ? null : Number(asset.height),
+          path: asset.path || asset.url || '',
+          version: asset.version || asset.versionId || '',
+        }))
+        .sort()
+        .join('|');
+    },
+    onAssetMutated() {
+      this.invalidatePreview();
     },
     invalidatePreview() {
       this.proofVersion += 1;

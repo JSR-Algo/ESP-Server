@@ -288,6 +288,8 @@ expectRegex(
 );
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('impact-review-request'", 'shared replacement must request review first');
 expectContains('src/components/LessonAssetManager.vue', 'confirmReplace', 'replacement mode needs an explicit parent confirmation gate');
+expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutated'", 'successful asset writes must invalidate proof independently of reload');
+expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 'the editor must subscribe to committed asset mutations');
 expectRegex(
   'src/views/LessonEditor.vue',
   /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(step\.stepBody\s*\|\|\s*\{\}/m,
@@ -545,6 +547,91 @@ if (missingReloads !== 2 || !missingContext.sharedImpactRebindError) {
   throw new Error('failed discovery retry must only reload assets and keep actionable uncertainty');
 }
 if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries must not create another clone');
+
+const assetManagerSource = read('src/components/LessonAssetManager.vue');
+const uploadAssetSource = extractObjectMethod(assetManagerSource, 'uploadAsset');
+const uploadMutationEventIndex = uploadAssetSource.indexOf("this.$emit('asset-mutated'");
+const uploadReloadIndex = uploadAssetSource.indexOf('this.reload()');
+if (uploadMutationEventIndex === -1 || uploadReloadIndex === -1 || uploadMutationEventIndex > uploadReloadIndex) {
+  throw new Error('successful upload/replace must emit asset-mutated before attempting reload');
+}
+const onAssetMutated = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutated')})`);
+const assetMutationParent = {
+  proofVersion: 2,
+  previewRequestId: 4,
+  previewing: false,
+  preview: { checksum: 'old' },
+  previewManifest: { checksum: 'old' },
+  simulationEvidence: { checksum: 'old' },
+  invalidatePreview,
+};
+let reloadAttempts = 0;
+let deleteRequest;
+const deleteAsset = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'onDelete')})`, {
+  Api: { lesson: { deleteAsset: (...args) => { deleteRequest = args; } } },
+});
+const assetMutationChild = {
+  lessonId: 'lesson-1',
+  $t: (key) => key,
+  $message: { success() {}, error() {} },
+  $emit(event, payload) {
+    if (event === 'asset-mutated') onAssetMutated.call(assetMutationParent, payload);
+  },
+  reload() { reloadAttempts += 1; throw new Error('reload failed'); },
+};
+deleteAsset.call(assetMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
+try { deleteRequest[3](); } catch (error) {
+  if (error.message !== 'reload failed') throw error;
+}
+if (assetMutationParent.preview || assetMutationParent.previewManifest || assetMutationParent.simulationEvidence) {
+  throw new Error('successful delete must invalidate proof before and independently of reload');
+}
+if (reloadAttempts !== 1) throw new Error('successful delete must still attempt authoritative asset reload');
+
+const failedMutationParent = { ...assetMutationParent, preview: { checksum: 'current' } };
+const failedMutationChild = {
+  ...assetMutationChild,
+  $emit(event, payload) {
+    if (event === 'asset-mutated') onAssetMutated.call(failedMutationParent, payload);
+  },
+};
+deleteAsset.call(failedMutationChild, { assetKey: 'teachingObject.seed', profile: 'espTft' });
+deleteRequest[4]('delete failed');
+if (!failedMutationParent.preview) throw new Error('failed asset mutation must not invalidate server proof');
+
+const assetProofFingerprint = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'buildAssetProofFingerprint')})`);
+const baseAsset = {
+  assetId: 'asset-1', profile: 'espTft', assetKey: 'teachingObject.seed', sha256: 'same-sha',
+  layer: 'teachingObject', role: 'primarySubject', critical: true, mediaType: 'image/png',
+  bytes: 12, width: 4, height: 3, url: '/seed.png',
+};
+const baseFingerprint = assetProofFingerprint.call({}, [baseAsset]);
+for (const changed of [
+  { ...baseAsset, role: 'supportSubject' },
+  { ...baseAsset, critical: false },
+  { ...baseAsset, layer: 'backgroundScene' },
+]) {
+  if (assetProofFingerprint.call({}, [changed]) === baseFingerprint) {
+    throw new Error('manifest-relevant asset metadata changes must invalidate the fingerprint');
+  }
+}
+if (assetProofFingerprint.call({}, [baseAsset, { ...baseAsset, assetId: 'asset-2', assetKey: 'robotOverlay.teach' }])
+  !== assetProofFingerprint.call({}, [{ ...baseAsset, assetId: 'asset-2', assetKey: 'robotOverlay.teach' }, baseAsset])) {
+  throw new Error('asset proof fingerprint must be deterministic across response ordering');
+}
+const onAssetsLoaded = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetsLoaded')})`);
+let metadataInvalidations = 0;
+const metadataContext = {
+  assetProofFingerprint: baseFingerprint,
+  assetRefreshIsProofRecovery: false,
+  bundleAssets: [baseAsset],
+  buildAssetProofFingerprint: assetProofFingerprint,
+  invalidatePreview() { metadataInvalidations += 1; },
+};
+onAssetsLoaded.call(metadataContext, [{ ...baseAsset, role: 'supportSubject' }]);
+if (metadataInvalidations !== 1) {
+  throw new Error('same-key/same-sha metadata changes must invalidate existing proof');
+}
 
 for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   for (const key of [

@@ -220,7 +220,11 @@ export default {
         this.lessonId,
         a.assetKey,
         a.profile,
-        () => { this.$message.success(this.$t('lesson.assetDeleted')); this.reload(); },
+        () => {
+          this.$emit('asset-mutated', { type: 'delete', assetKey: a.assetKey, profile: a.profile || 'espTft' });
+          this.$message.success(this.$t('lesson.assetDeleted'));
+          this.reload();
+        },
         (msg) => this.$message.error(msg),
       );
     },
@@ -258,6 +262,7 @@ export default {
         assetKey: key,
         critical: this.critical ? 'true' : 'false',
       };
+      const mutationType = this.replaceMode ? 'replace' : 'upload';
       Api.lesson.uploadAsset(
         this.lessonId,
         this.pickedFile,
@@ -268,11 +273,17 @@ export default {
           this.pickedFile = null;
           this.replaceMode = false;
           if (this.$refs.uploader) this.$refs.uploader.clearFiles();
+          this.$emit('asset-mutated', {
+            type: mutationType,
+            assetKey: a.asset_key || a.assetKey || key,
+            profile: a.profile || fields.profile,
+            layer: a.layer || layer,
+          });
           this.$message.success(this.$t('lesson.uploadOk'));
           // Refetch so the server list (incl. upsert/replace) is authoritative;
           // reload() emits 'assets-loaded' to refresh the Scene editor dropdowns.
           this.reload();
-          // Keep 'uploaded' so LessonEditor can refresh validate/preview state.
+          // Preserve the existing notification for any non-editor consumers.
           this.$emit('uploaded', {
             assetKey: a.asset_key || a.assetKey || key,
             layer: a.layer || layer,
