@@ -89,7 +89,7 @@ function containsAssetKey(value, assetKey) {
 
 function collectAssetReferences(steps, assetKey) {
   return (Array.isArray(steps) ? steps : [])
-    .filter((step) => containsAssetKey(step, assetKey))
+    .filter((step) => containsAssetKey(step.stepBody || step.body || {}, assetKey))
     .map((step) => step.stepKey || step.stepId)
     .filter(Boolean);
 }

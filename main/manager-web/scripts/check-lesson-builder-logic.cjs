@@ -1,4 +1,7 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 const {
   buildEngagementTrack,
   calculateReadiness,
@@ -81,7 +84,7 @@ const referenceSteps = [
   },
   {
     stepKey: 's4',
-    stepBody: { overlays: [{ assetKey: 'sparkle.v1' }, { assetKey: referencedAssetKey }] },
+    body: { overlays: [{ assetKey: 'sparkle.v1' }, { assetKey: referencedAssetKey }] },
   },
   {
     stepKey: 's5',
@@ -90,7 +93,7 @@ const referenceSteps = [
 ];
 assert.deepStrictEqual(
   collectAssetReferences(referenceSteps, referencedAssetKey),
-  ['s2', 'step-id-3', 's4'],
+  ['s2', 's4'],
 );
 assert.deepStrictEqual(collectAssetReferences(referenceSteps, 'missing.v1'), []);
 assert.deepStrictEqual(collectAssetReferences(null, referencedAssetKey), []);
@@ -147,5 +150,56 @@ assert.deepStrictEqual(originalBody, originalSnapshot);
 assert.notStrictEqual(replacedBody, originalBody);
 assert.notStrictEqual(replacedBody.scene, originalBody.scene);
 assert.notStrictEqual(replacedBody.scene.layers, originalBody.scene.layers);
+
+const lessonApiSource = fs.readFileSync(
+  path.join(__dirname, '../src/apis/module/lesson.js'),
+  'utf8',
+);
+const executableLessonApiSource = lessonApiSource
+  .replace(/^import \{ getNestUrl \} from '\.\.\/api';$/m, '')
+  .replace(/import \{[\s\S]*?\} from '\.\.\/nestHttp';/, '')
+  .replace('export default {', 'const lessonApi = {')
+  .concat('\nmodule.exports = lessonApi;\n');
+const apiRequests = [];
+const apiSandbox = {
+  module: { exports: {} },
+  exports: {},
+  getNestUrl: () => '/v1/admin',
+  nestRequest: (request) => apiRequests.push(request),
+  nestUpload: () => {},
+  normalizeLesson: (value) => value,
+  normalizeStep: (value) => value,
+  normalizeStepType: (value) => value,
+};
+vm.runInNewContext(executableLessonApiSource, apiSandbox, { filename: 'lesson.js' });
+const lessonApi = apiSandbox.module.exports;
+const onSuccess = () => {};
+const onError = () => {};
+
+assert.strictEqual(typeof lessonApi.reviewSharedVisualImpact, 'function');
+lessonApi.reviewSharedVisualImpact('asset-7', onSuccess, onError);
+assert.strictEqual(apiRequests[0].url, '/v1/admin/assets/asset-7/impact');
+assert.strictEqual(apiRequests[0].method, 'GET');
+assert.strictEqual(apiRequests[0].onSuccess, onSuccess);
+assert.strictEqual(apiRequests[0].onError, onError);
+
+const clonePayload = { assetKey: 'teachingObject.glowSeed.v2' };
+assert.strictEqual(typeof lessonApi.cloneSharedVisual, 'function');
+lessonApi.cloneSharedVisual('lesson-3', 'asset-7', clonePayload, onSuccess, onError);
+assert.strictEqual(apiRequests[1].url, '/v1/admin/lessons/lesson-3/assets/asset-7/clone');
+assert.strictEqual(apiRequests[1].method, 'POST');
+assert.strictEqual(apiRequests[1].data, clonePayload);
+assert.strictEqual(apiRequests[1].onSuccess, onSuccess);
+assert.strictEqual(apiRequests[1].onError, onError);
+
+const simulationPayload = { startStepKey: 's2', answers: ['wrong', 'correct'] };
+assert.strictEqual(typeof lessonApi.simulate, 'function');
+lessonApi.simulate('lesson-3', simulationPayload, onSuccess, onError);
+assert.strictEqual(apiRequests[2].url, '/v1/admin/lessons/lesson-3/simulate?profile=espTft');
+assert.strictEqual(apiRequests[2].method, 'POST');
+assert.strictEqual(apiRequests[2].data, simulationPayload);
+assert.strictEqual(apiRequests[2].onSuccess, onSuccess);
+assert.strictEqual(apiRequests[2].onError, onError);
+assert.strictEqual(apiRequests.length, 3);
 
 console.log('lesson builder logic checks passed');
