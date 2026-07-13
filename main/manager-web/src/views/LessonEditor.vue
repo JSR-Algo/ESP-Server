@@ -441,6 +441,7 @@ export default {
       assetMutationTokens: {},
       assetReconciliationEpoch: 0,
       assetReconciliationRequests: {},
+      assetAppliedReadEpoch: 0,
       editorDestroying: false,
       renameVisible: false,
       titleDraft: '',
@@ -595,8 +596,11 @@ export default {
         },
       };
     },
-    onAssetsLoaded(assets) {
+    onAssetsLoaded(assets, metadata = {}) {
       if (this.editorDestroying) return;
+      const readEpoch = Number(metadata && metadata.readEpoch);
+      if (Number.isFinite(readEpoch) && readEpoch < this.assetAppliedReadEpoch) return false;
+      if (Number.isFinite(readEpoch)) this.assetAppliedReadEpoch = readEpoch;
       const nextAssets = Array.isArray(assets) ? assets : [];
       const fingerprint = this.buildAssetProofFingerprint(nextAssets);
       if (this.assetProofFingerprint !== null
@@ -604,6 +608,7 @@ export default {
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
+      return true;
     },
     buildAssetProofFingerprint(assets) {
       return (Array.isArray(assets) ? assets : [])
@@ -675,6 +680,11 @@ export default {
         (result) => {
           if (this.editorDestroying) return;
           if (this.assetReconciliationRequests[id] !== requestId) return;
+          if (requestId !== this.assetReconciliationEpoch) {
+            this.$delete(this.assetReconciliationRequests, id);
+            if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
           const assets = result && result.assets;
           const manager = this.$refs && this.$refs.assetManager;
           if (manager && typeof manager.applyServerAssets === 'function') manager.applyServerAssets(assets);
@@ -685,6 +695,11 @@ export default {
         (message) => {
           if (this.editorDestroying) return;
           if (this.assetReconciliationRequests[id] !== requestId) return;
+          if (requestId !== this.assetReconciliationEpoch) {
+            this.$delete(this.assetReconciliationRequests, id);
+            if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
           this.$delete(this.assetReconciliationRequests, id);
           this.$set(this.assetMutationTokens, id, 'reconcile-failed');
           this.$message.error(message);
@@ -697,8 +712,13 @@ export default {
       return this.reconcileAssetMutation(id);
     },
     retryFailedAssetReconciliation() {
+      if (Object.keys(this.assetMutationTokens).some((key) => this.assetMutationTokens[key] === 'settling')) return true;
       const id = Object.keys(this.assetMutationTokens).find((key) => this.assetMutationTokens[key] === 'reconcile-failed');
-      return id ? this.retryAssetReconciliation(id) : false;
+      if (id) {
+        this.retryAssetReconciliation(id);
+        return true;
+      }
+      return false;
     },
     hasUnsafeProofState() {
       return Boolean(

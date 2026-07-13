@@ -111,10 +111,16 @@ import { isUncertainNestError } from '@/apis/nestHttp';
 // author can see/override). robotOverlay→pose, teachingObject→primarySubject.
 const ROLE_BY_LAYER = { backgroundScene: 'poster', teachingObject: 'primarySubject', robotOverlay: 'pose' };
 let assetMutationEpoch = 0;
+let assetReadEpoch = 0;
 
 function nextAssetMutationId() {
   assetMutationEpoch += 1;
   return `asset-mutation-${assetMutationEpoch}`;
+}
+
+function nextAssetReadId() {
+  assetReadEpoch += 1;
+  return assetReadEpoch;
 }
 
 export default {
@@ -162,6 +168,7 @@ export default {
     this.reload();
   },
   beforeDestroy() {
+    this.invalidateAssetReads();
     this.detachActiveMutation();
   },
   methods: {
@@ -183,18 +190,18 @@ export default {
       return map[layer] ? this.$t(map[layer]) : layer;
     },
     invalidateAssetReads() {
-      this.assetListRequestId = Number(this.assetListRequestId || 0) + 1;
+      this.assetListRequestId = nextAssetReadId();
       this.loadingList = false;
       return this.assetListRequestId;
     },
     applyServerAssets(assets) {
-      this.invalidateAssetReads();
+      const readEpoch = this.invalidateAssetReads();
       this.serverAssets = Array.isArray(assets) ? assets : [];
-      this.$emit('assets-loaded', this.serverAssets);
+      this.$emit('assets-loaded', this.serverAssets, { readEpoch });
       return this.serverAssets;
     },
     reload(onSuccess, onError) {
-      const requestId = Number(this.assetListRequestId || 0) + 1;
+      const requestId = nextAssetReadId();
       this.assetListRequestId = requestId;
       this.loadingList = true;
       Api.lesson.listAssets(

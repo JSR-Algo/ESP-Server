@@ -884,6 +884,11 @@ if (cloneRequests !== 1) throw new Error('reconciliation and discovery retries m
 const assetManagerSource = read('src/components/LessonAssetManager.vue');
 expectContains('src/components/LessonAssetManager.vue', 'nextAssetMutationId', 'asset mutation ids must be unique across component remounts');
 expectContains('src/components/LessonAssetManager.vue', "this.$emit('asset-mutation-detached'", 'unmounting an active mutation must notify the parent');
+const assetManagerBeforeDestroySource = extractObjectMethod(assetManagerSource, 'beforeDestroy');
+if (assetManagerBeforeDestroySource.indexOf('invalidateAssetReads()') === -1
+  || assetManagerBeforeDestroySource.indexOf('invalidateAssetReads()') > assetManagerBeforeDestroySource.indexOf('detachActiveMutation()')) {
+  throw new Error('asset manager teardown must invalidate pending reads before detaching mutations');
+}
 let testMutationSequence = 0;
 const beginAssetMutation = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'beginMutation')})`, {
   nextAssetMutationId: () => `asset-test-${testMutationSequence += 1}`,
@@ -959,11 +964,13 @@ if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
 const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`);
 const beforeDestroyEditor = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'beforeDestroy')})`);
 let terminalAssetRead;
+let terminalAssetReads = [];
 const reconcileAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'reconcileAssetMutation')})`, {
-  Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; } } },
+  Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; terminalAssetReads.push(args); } } },
 });
 const settleAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'settleAssetMutation')})`);
 const retryAssetReconciliation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'retryAssetReconciliation')})`);
+const retryFailedAssetReconciliation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'retryFailedAssetReconciliation')})`);
 let destroyedTokenWrites = 0;
 let destroyedTokenDeletes = 0;
 let destroyedMessages = 0;
@@ -1157,6 +1164,37 @@ for (const [mutationId, initialAssets, reconciledAssets] of [
     throw new Error(`${mutationId} must refresh child and parent rows before unlocking controls`);
   }
 }
+const outOfOrderParent = {
+  ...detachedParent,
+  editorDestroying: false,
+  assetMutationTokens: { A: true, B: true },
+  assetReconciliationEpoch: 0,
+  assetReconciliationRequests: {},
+  bundleAssets: [],
+  $refs: {
+    assetManager: {
+      serverAssets: [],
+      invalidateAssetReads() {},
+      applyServerAssets(assets) {
+        this.serverAssets = assets;
+        outOfOrderParent.onAssetsLoaded(assets);
+      },
+    },
+  },
+  onAssetsLoaded(assets) { this.bundleAssets = assets; },
+};
+terminalAssetReads = [];
+settleAssetMutation.call(outOfOrderParent, { id: 'A', outcome: 'success' });
+settleAssetMutation.call(outOfOrderParent, { id: 'B', outcome: 'success' });
+const [reconciliationA, reconciliationB] = terminalAssetReads;
+reconciliationB[2]({ assets: [{ assetKey: 'truth-B' }] });
+reconciliationA[2]({ assets: [{ assetKey: 'stale-A' }] });
+if (outOfOrderParent.bundleAssets[0].assetKey !== 'truth-B'
+  || outOfOrderParent.$refs.assetManager.serverAssets[0].assetKey !== 'truth-B'
+  || outOfOrderParent.assetMutationTokens.B
+  || outOfOrderParent.assetMutationTokens.A !== 'reconcile-failed') {
+  throw new Error('older reconciliation A must not overwrite newer B and must remain explicitly retryable');
+}
 const rejectedDetachedParent = {
   ...detachedParent, assetMutationTokens: { rejected: true }, preview: { checksum: 'still-valid' },
 };
@@ -1234,7 +1272,10 @@ const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(asse
     return !Number.isFinite(status) || status === 0 || status >= 500;
   },
 });
-const invalidateAssetReads = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'invalidateAssetReads')})`);
+let testAssetReadEpoch = 0;
+const invalidateAssetReads = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'invalidateAssetReads')})`, {
+  nextAssetReadId: () => { testAssetReadEpoch += 1; return testAssetReadEpoch; },
+});
 const applyServerAssets = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'applyServerAssets')})`);
 const appliedChildEvents = [];
 const appliedChild = {
@@ -1253,6 +1294,7 @@ if (appliedChild.serverAssets[0].assetKey !== 'new'
 let staleChildRead;
 const reloadAssetRows = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'reload')})`, {
   Api: { lesson: { listAssets: (...args) => { staleChildRead = args; } } },
+  nextAssetReadId: () => { testAssetReadEpoch += 1; return testAssetReadEpoch; },
 });
 const raceChildEvents = [];
 const raceChild = {
@@ -1321,6 +1363,48 @@ if (deferredParent.assetMutationTokens.race
   || deferredChild.serverAssets[0].assetKey !== 'fresh-r2'
   || deferredParent.bundleAssets[0].assetKey !== 'fresh-r2') {
   throw new Error('token-bound R2 must refresh truth and clear only its matching failed token');
+}
+const refreshAssets = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'refreshAssets')})`);
+let retryStarts = 0;
+let genericRefreshes = 0;
+const settlingRefreshParent = {
+  editorDestroying: false,
+  assetMutationTokens: { retry: 'reconcile-failed' },
+  retryAssetReconciliation(id) {
+    retryStarts += 1;
+    this.assetMutationTokens[id] = 'settling';
+    return true;
+  },
+};
+const settlingRefreshChild = {
+  refreshHandler: () => retryFailedAssetReconciliation.call(settlingRefreshParent),
+  reload() { genericRefreshes += 1; },
+};
+refreshAssets.call(settlingRefreshChild);
+refreshAssets.call(settlingRefreshChild);
+if (retryStarts !== 1 || genericRefreshes !== 0 || settlingRefreshParent.assetMutationTokens.retry !== 'settling') {
+  throw new Error('refresh must be consumed while exact-token reconciliation is failed or settling');
+}
+settlingRefreshParent.assetMutationTokens.waiting = 'reconcile-failed';
+refreshAssets.call(settlingRefreshChild);
+if (retryStarts !== 1 || genericRefreshes !== 0) {
+  throw new Error('an active settling token must consume refresh before another failed token can retry');
+}
+
+const orderedAssetsLoaded = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetsLoaded')})`);
+const orderedAssetsParent = {
+  editorDestroying: false,
+  assetAppliedReadEpoch: 0,
+  assetProofFingerprint: null,
+  assetRefreshIsProofRecovery: false,
+  bundleAssets: [],
+  buildAssetProofFingerprint: (assets) => JSON.stringify(assets),
+  invalidatePreview() {},
+};
+orderedAssetsLoaded.call(orderedAssetsParent, [{ assetKey: 'newer' }], { readEpoch: 10 });
+orderedAssetsLoaded.call(orderedAssetsParent, [{ assetKey: 'older' }], { readEpoch: 9 });
+if (orderedAssetsParent.bundleAssets[0].assetKey !== 'newer' || orderedAssetsParent.assetAppliedReadEpoch !== 10) {
+  throw new Error('older generic asset reads must not overwrite newer applied truth');
 }
 const uploadAssetSource = extractObjectMethod(assetManagerSource, 'uploadAsset');
 const uploadMutationEventIndex = uploadAssetSource.indexOf("this.$emit('asset-mutated'");
