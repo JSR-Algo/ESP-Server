@@ -1082,20 +1082,23 @@ export default {
       const tmp = order[index];
       order[index] = order[target];
       order[target] = tmp;
-      this.invalidatePreview();
       this.reordering = true;
       Api.lesson.reorderSteps(
         this.lessonId,
         order,
-        (rows) => { this.reordering = false; this.steps = rows; },
+        (rows) => { this.invalidatePreview(); this.reordering = false; this.steps = rows; },
         (msg) => { this.reordering = false; this.$message.error(msg); },
       );
     },
     deleteStep(row) {
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
-          this.invalidatePreview();
-          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; }, (msg) => this.$message.error(msg));
+          Api.lesson.deleteStep(
+            this.lessonId,
+            row.stepKey,
+            (rows) => { this.invalidatePreview(); this.steps = rows; },
+            (msg) => this.$message.error(msg),
+          );
         })
         .catch(() => {});
     },
@@ -1162,12 +1165,12 @@ export default {
       if (Object.keys(stepBody).length) payload.stepBody = stepBody;
       // Per-step robot-face override (server validates against firmware-supported set).
       if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
-      this.invalidatePreview();
       this.addingStep = true;
       Api.lesson.createStep(
         this.lessonId,
         payload,
         () => {
+          this.invalidatePreview();
           this.addingStep = false;
           this.stepDialogVisible = false;
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
@@ -1182,12 +1185,17 @@ export default {
     },
     doRename() {
       if (!this.titleDraft) return;
-      this.invalidatePreview();
       this.renaming = true;
       Api.lesson.updateLesson(
         this.lessonId,
         { title: this.titleDraft },
-        (l) => { this.renaming = false; this.renameVisible = false; this.lesson = l; this.$message.success(this.$t('lesson.renamed')); },
+        (l) => {
+          this.invalidatePreview();
+          this.renaming = false;
+          this.renameVisible = false;
+          this.lesson = l;
+          this.$message.success(this.$t('lesson.renamed'));
+        },
         (msg) => { this.renaming = false; this.$message.error(msg); },
       );
     },

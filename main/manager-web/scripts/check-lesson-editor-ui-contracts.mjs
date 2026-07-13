@@ -161,6 +161,130 @@ for (const methodName of [
   }
 }
 
+for (const [methodName, apiCall] of [
+  ['moveStep', 'Api.lesson.reorderSteps('],
+  ['deleteStep', 'Api.lesson.deleteStep('],
+  ['addStep', 'Api.lesson.createStep('],
+  ['doRename', 'Api.lesson.updateLesson('],
+]) {
+  const method = extractObjectMethod(editorSource, methodName);
+  if (method.indexOf('this.invalidatePreview();') < method.indexOf(apiCall)) {
+    throw new Error(`${methodName} must invalidate only inside the server success boundary`);
+  }
+}
+
+function persistedProof(overrides = {}) {
+  return {
+    proofVersion: 8,
+    previewRequestId: 12,
+    previewing: false,
+    preview: { checksum: 'valid-checksum' },
+    previewManifest: { checksum: 'valid-checksum' },
+    simulationEvidence: { checksum: 'valid-checksum' },
+    invalidatePreview,
+    $message: { success() {}, error() {}, warning() {} },
+    $t: (key) => key,
+    ...overrides,
+  };
+}
+
+let reorderRequest;
+const moveStep = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'moveStep')})`, {
+  Api: { lesson: { reorderSteps: (...args) => { reorderRequest = args; } } },
+});
+const failedReorder = persistedProof({
+  lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
+});
+moveStep.call(failedReorder, 0, 1);
+if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('pending reorder must preserve proof');
+reorderRequest[3]('reorder failed');
+if (!failedReorder.preview || failedReorder.proofVersion !== 8) throw new Error('failed reorder must preserve proof');
+
+const successfulReorder = persistedProof({
+  lessonId: 'lesson-1', reordering: false, steps: [{ stepKey: 's1' }, { stepKey: 's2' }],
+});
+doPreview.call(successfulReorder);
+const preReorderPreviewSuccess = previewRequest[2];
+moveStep.call(successfulReorder, 0, 1);
+reorderRequest[2]([{ stepKey: 's2' }, { stepKey: 's1' }]);
+if (successfulReorder.preview || successfulReorder.proofVersion !== 9 || successfulReorder.steps[0].stepKey !== 's2') {
+  throw new Error('successful reorder must invalidate before applying authoritative order');
+}
+preReorderPreviewSuccess({
+  checksum: 'stale', etag: 'stale', preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
+});
+if (successfulReorder.preview) throw new Error('pre-reorder preview callback must stay stale after confirmed reorder');
+
+let deleteStepRequest;
+const deleteStep = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'deleteStep')})`, {
+  Api: { lesson: { deleteStep: (...args) => { deleteStepRequest = args; } } },
+});
+function confirmedDeleteContext() {
+  return persistedProof({
+    lessonId: 'lesson-1', steps: [{ stepKey: 's1' }],
+    $confirm: () => ({ then(fn) { fn(); return { catch() {} }; } }),
+  });
+}
+const failedDelete = confirmedDeleteContext();
+deleteStep.call(failedDelete, { stepKey: 's1' });
+if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('pending delete must preserve proof');
+deleteStepRequest[3]('delete failed');
+if (!failedDelete.preview || failedDelete.proofVersion !== 8) throw new Error('failed delete must preserve proof');
+const successfulDelete = confirmedDeleteContext();
+deleteStep.call(successfulDelete, { stepKey: 's1' });
+deleteStepRequest[2]([]);
+if (successfulDelete.preview || successfulDelete.proofVersion !== 9 || successfulDelete.steps.length !== 0) {
+  throw new Error('successful delete must invalidate before applying authoritative rows');
+}
+
+let createStepRequest;
+const addStep = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'addStep')})`, {
+  Api: { lesson: { createStep: (...args) => { createStepRequest = args; } } },
+  mergeAuthoringFields: () => ({}),
+});
+function createStepContext() {
+  return persistedProof({
+    lessonId: 'lesson-1', addingStep: false, stepDialogVisible: true, lastSubject: '', isChoiceStep: false,
+    stepForm: {
+      stepType: 'listen', prompt: 'Say seed', subject: 'seed', helperText: '', l1TransferHint: '',
+      choices: [], renderExpression: '', scene: { primaryWord: 'seed' },
+    },
+    buildScene: () => null,
+    buildVocab: () => null,
+    fetchSteps() { this.fetchAfterCreate = true; },
+  });
+}
+const failedCreate = createStepContext();
+addStep.call(failedCreate);
+if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('pending create must preserve proof');
+createStepRequest[3]('create failed');
+if (!failedCreate.preview || failedCreate.proofVersion !== 8) throw new Error('failed create must preserve proof');
+const successfulCreate = createStepContext();
+addStep.call(successfulCreate);
+createStepRequest[2]({ stepKey: 's2' });
+if (successfulCreate.preview || successfulCreate.proofVersion !== 9 || !successfulCreate.fetchAfterCreate) {
+  throw new Error('successful create must invalidate before authoritative refetch');
+}
+
+let renameRequest;
+const doRename = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doRename')})`, {
+  Api: { lesson: { updateLesson: (...args) => { renameRequest = args; } } },
+});
+function renameContext() {
+  return persistedProof({ lessonId: 'lesson-1', titleDraft: 'New title', renaming: false, renameVisible: true, lesson: { title: 'Old' } });
+}
+const failedRename = renameContext();
+doRename.call(failedRename);
+if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('pending rename must preserve proof');
+renameRequest[3]('rename failed');
+if (!failedRename.preview || failedRename.proofVersion !== 8) throw new Error('failed rename must preserve proof');
+const successfulRename = renameContext();
+doRename.call(successfulRename);
+renameRequest[2]({ title: 'New title' });
+if (successfulRename.preview || successfulRename.proofVersion !== 9 || successfulRename.lesson.title !== 'New title') {
+  throw new Error('successful rename must invalidate before applying authoritative lesson');
+}
+
 const selectedAuthoringSetter = editorSource.slice(
   editorSource.indexOf('selectedAuthoring:'),
   editorSource.indexOf('selectedObjectKey()', editorSource.indexOf('selectedAuthoring:')),
