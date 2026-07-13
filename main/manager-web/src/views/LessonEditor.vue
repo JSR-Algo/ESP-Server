@@ -157,6 +157,7 @@
         :mutation-settler="settleAssetMutation"
         :refresh-handler="retryFailedAssetReconciliation"
         @assets-loaded="onAssetsLoaded"
+        @asset-read-started="onAssetReadStarted"
         @asset-mutated="onAssetMutated"
         @asset-mutation-uncertain="onAssetMutationUncertain"
         @asset-mutation-detached="onAssetMutationDetached"
@@ -367,6 +368,7 @@ import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
 import SharedVisualImpactDialog from '@/components/lesson/SharedVisualImpactDialog.vue';
+import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 import {
   bindClonedAssetToStep,
   collectAssetReferences,
@@ -442,6 +444,7 @@ export default {
       assetReconciliationEpoch: 0,
       assetReconciliationRequests: {},
       assetAppliedReadEpoch: 0,
+      assetLatestReadEpoch: 0,
       editorDestroying: false,
       renameVisible: false,
       titleDraft: '',
@@ -599,8 +602,12 @@ export default {
     onAssetsLoaded(assets, metadata = {}) {
       if (this.editorDestroying) return;
       const readEpoch = Number(metadata && metadata.readEpoch);
-      if (Number.isFinite(readEpoch) && readEpoch < this.assetAppliedReadEpoch) return false;
-      if (Number.isFinite(readEpoch)) this.assetAppliedReadEpoch = readEpoch;
+      if (Number.isFinite(readEpoch)
+        && (readEpoch < this.assetAppliedReadEpoch || readEpoch < this.assetLatestReadEpoch)) return false;
+      if (Number.isFinite(readEpoch)) {
+        this.assetLatestReadEpoch = Math.max(this.assetLatestReadEpoch, readEpoch);
+        this.assetAppliedReadEpoch = readEpoch;
+      }
       const nextAssets = Array.isArray(assets) ? assets : [];
       const fingerprint = this.buildAssetProofFingerprint(nextAssets);
       if (this.assetProofFingerprint !== null
@@ -608,6 +615,13 @@ export default {
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
+      return true;
+    },
+    onAssetReadStarted(metadata) {
+      if (this.editorDestroying) return false;
+      const readEpoch = Number(metadata && metadata.readEpoch);
+      if (!Number.isFinite(readEpoch)) return false;
+      this.assetLatestReadEpoch = Math.max(this.assetLatestReadEpoch, readEpoch);
       return true;
     },
     buildAssetProofFingerprint(assets) {
@@ -669,33 +683,43 @@ export default {
       if (this.editorDestroying || typeof id !== 'string') return false;
       if (this.assetMutationTokens[id] !== 'settling' && this.assetMutationTokens[id] !== 'reconcile-failed') return false;
       const requestId = this.assetReconciliationEpoch + 1;
+      const readEpoch = reserveAssetReadEpoch();
       this.assetReconciliationEpoch = requestId;
-      this.$set(this.assetReconciliationRequests, id, requestId);
+      this.$set(this.assetReconciliationRequests, id, { requestId, readEpoch });
       this.$set(this.assetMutationTokens, id, 'settling');
+      this.onAssetReadStarted({ readEpoch });
       const currentManager = this.$refs && this.$refs.assetManager;
-      if (currentManager && typeof currentManager.invalidateAssetReads === 'function') currentManager.invalidateAssetReads();
+      if (currentManager && typeof currentManager.trackAssetRead === 'function') currentManager.trackAssetRead(readEpoch);
       Api.lesson.listAssets(
         this.lessonId,
         'espTft',
         (result) => {
           if (this.editorDestroying) return;
-          if (this.assetReconciliationRequests[id] !== requestId) return;
-          if (requestId !== this.assetReconciliationEpoch) {
+          const activeRequest = this.assetReconciliationRequests[id];
+          if (!activeRequest || activeRequest.requestId !== requestId || activeRequest.readEpoch !== readEpoch) return;
+          if (requestId !== this.assetReconciliationEpoch || readEpoch !== this.assetLatestReadEpoch) {
             this.$delete(this.assetReconciliationRequests, id);
             if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
             return;
           }
           const assets = result && result.assets;
           const manager = this.$refs && this.$refs.assetManager;
-          if (manager && typeof manager.applyServerAssets === 'function') manager.applyServerAssets(assets);
-          else this.onAssetsLoaded(assets);
+          const applied = manager && typeof manager.applyServerAssets === 'function'
+            ? manager.applyServerAssets(assets, readEpoch)
+            : this.onAssetsLoaded(assets, { readEpoch });
+          if (applied === false) {
+            this.$delete(this.assetReconciliationRequests, id);
+            this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
           this.$delete(this.assetReconciliationRequests, id);
           this.$delete(this.assetMutationTokens, id);
         },
         (message) => {
           if (this.editorDestroying) return;
-          if (this.assetReconciliationRequests[id] !== requestId) return;
-          if (requestId !== this.assetReconciliationEpoch) {
+          const activeRequest = this.assetReconciliationRequests[id];
+          if (!activeRequest || activeRequest.requestId !== requestId || activeRequest.readEpoch !== readEpoch) return;
+          if (requestId !== this.assetReconciliationEpoch || readEpoch !== this.assetLatestReadEpoch) {
             this.$delete(this.assetReconciliationRequests, id);
             if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
             return;

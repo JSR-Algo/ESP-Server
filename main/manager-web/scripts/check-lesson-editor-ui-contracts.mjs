@@ -965,12 +965,15 @@ const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(edito
 const beforeDestroyEditor = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'beforeDestroy')})`);
 let terminalAssetRead;
 let terminalAssetReads = [];
+let testSharedAssetReadEpoch = 0;
 const reconcileAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'reconcileAssetMutation')})`, {
   Api: { lesson: { listAssets: (...args) => { terminalAssetRead = args; terminalAssetReads.push(args); } } },
+  reserveAssetReadEpoch: () => { testSharedAssetReadEpoch += 1; return testSharedAssetReadEpoch; },
 });
 const settleAssetMutation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'settleAssetMutation')})`);
 const retryAssetReconciliation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'retryAssetReconciliation')})`);
 const retryFailedAssetReconciliation = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'retryFailedAssetReconciliation')})`);
+const onAssetReadStarted = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetReadStarted')})`);
 let destroyedTokenWrites = 0;
 let destroyedTokenDeletes = 0;
 let destroyedMessages = 0;
@@ -1026,8 +1029,11 @@ const reconciliationParent = {
   $message: { error() { reconciliationMessages += 1; } },
   invalidatePreview,
   reconcileAssetMutation,
+  onAssetReadStarted,
   assetReconciliationEpoch: 0,
   assetReconciliationRequests: {},
+  assetAppliedReadEpoch: 0,
+  assetLatestReadEpoch: 0,
   onAssetsLoaded() { reconciliationAssetApplies += 1; },
 };
 terminalAssetRead = null;
@@ -1098,8 +1104,9 @@ if (JSON.stringify(destroyedSharedRefresh) !== sharedRefreshSnapshot || sharedSu
 const detachedParent = {
   lessonId: 'lesson-1', assetMutationTokens: { [remountIdA]: true, [remountIdB]: true },
   assetReconciliationEpoch: 0, assetReconciliationRequests: {},
+  assetAppliedReadEpoch: 0, assetLatestReadEpoch: 0,
   proofVersion: 1, previewRequestId: 1, preview: {}, previewManifest: {}, simulationEvidence: {},
-  reconcileAssetMutation,
+  reconcileAssetMutation, onAssetReadStarted,
   $set(target, key, value) { target[key] = value; }, $delete(target, key) { delete target[key]; },
   $message: { error() {} },
 };
@@ -1272,20 +1279,28 @@ const handleAssetMutationError = vm.runInNewContext(`(${extractObjectMethod(asse
     return !Number.isFinite(status) || status === 0 || status >= 500;
   },
 });
-let testAssetReadEpoch = 0;
+const trackAssetRead = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'trackAssetRead')})`);
 const invalidateAssetReads = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'invalidateAssetReads')})`, {
-  nextAssetReadId: () => { testAssetReadEpoch += 1; return testAssetReadEpoch; },
+  reserveAssetReadEpoch: () => { testSharedAssetReadEpoch += 1; return testSharedAssetReadEpoch; },
 });
 const applyServerAssets = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'applyServerAssets')})`);
+if (extractObjectMethod(assetManagerSource, 'applyServerAssets').includes('reserveAssetReadEpoch')) {
+  throw new Error('asset response application must carry its reserved epoch without allocating another');
+}
+if (!extractObjectMethod(assetManagerSource, 'reload').includes('reserveAssetReadEpoch')
+  || !extractObjectMethod(editorSource, 'reconcileAssetMutation').includes('reserveAssetReadEpoch')) {
+  throw new Error('every child or parent authoritative asset read must reserve the shared epoch at request start');
+}
 const appliedChildEvents = [];
 const appliedChild = {
   assetListRequestId: 0,
   loadingList: false,
   serverAssets: [{ assetKey: 'old' }],
+  trackAssetRead,
   invalidateAssetReads,
   $emit: (...args) => appliedChildEvents.push(args),
 };
-applyServerAssets.call(appliedChild, [{ assetKey: 'new' }]);
+applyServerAssets.call(appliedChild, [{ assetKey: 'new' }], 1);
 if (appliedChild.serverAssets[0].assetKey !== 'new'
   || appliedChildEvents.length !== 1
   || appliedChildEvents[0][0] !== 'assets-loaded') {
@@ -1294,21 +1309,25 @@ if (appliedChild.serverAssets[0].assetKey !== 'new'
 let staleChildRead;
 const reloadAssetRows = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'reload')})`, {
   Api: { lesson: { listAssets: (...args) => { staleChildRead = args; } } },
-  nextAssetReadId: () => { testAssetReadEpoch += 1; return testAssetReadEpoch; },
+  reserveAssetReadEpoch: () => { testSharedAssetReadEpoch += 1; return testSharedAssetReadEpoch; },
 });
 const raceChildEvents = [];
 const raceChild = {
   lessonId: 'lesson-1', assetListRequestId: 0, loadingList: false,
   serverAssets: [{ assetKey: 'initial' }],
+  trackAssetRead,
   invalidateAssetReads,
   applyServerAssets,
   $emit: (...args) => raceChildEvents.push(args),
   $message: { error() { throw new Error('stale child failure must be ignored'); } },
 };
 reloadAssetRows.call(raceChild);
-applyServerAssets.call(raceChild, [{ assetKey: 'authoritative' }]);
+testSharedAssetReadEpoch += 1;
+applyServerAssets.call(raceChild, [{ assetKey: 'authoritative' }], testSharedAssetReadEpoch);
 staleChildRead[2]({ assets: [{ assetKey: 'stale' }] });
-if (raceChild.serverAssets[0].assetKey !== 'authoritative' || raceChildEvents.length !== 1 || raceChild.loadingList) {
+if (raceChild.serverAssets[0].assetKey !== 'authoritative'
+  || raceChildEvents.filter(([event]) => event === 'assets-loaded').length !== 1
+  || raceChild.loadingList) {
   throw new Error('parent-applied asset truth must invalidate older child reload responses');
 }
 let deferredMessages = 0;
@@ -1318,11 +1337,14 @@ const deferredParent = {
   assetMutationTokens: { race: true, other: 'reconcile-failed' },
   assetReconciliationEpoch: 0,
   assetReconciliationRequests: {},
+  assetAppliedReadEpoch: 0,
+  assetLatestReadEpoch: 0,
   proofVersion: 1, previewRequestId: 1,
   preview: {}, previewManifest: {}, simulationEvidence: {},
   assetProofFingerprint: null, assetRefreshIsProofRecovery: false, bundleAssets: [{ assetKey: 'initial' }],
   invalidatePreview,
   reconcileAssetMutation,
+  onAssetReadStarted,
   buildAssetProofFingerprint: () => 'fresh',
   onAssetsLoaded: reconcileAssetsLoaded,
   $set(target, key, value) { target[key] = value; },
@@ -1332,10 +1354,12 @@ const deferredParent = {
 const deferredChild = {
   lessonId: 'lesson-1', assetListRequestId: 0, loadingList: false,
   serverAssets: [{ assetKey: 'initial' }],
+  trackAssetRead,
   invalidateAssetReads,
   applyServerAssets,
-  $emit(event, assets) {
-    if (event === 'assets-loaded') reconcileAssetsLoaded.call(deferredParent, assets);
+  $emit(event, payload, metadata) {
+    if (event === 'asset-read-started') onAssetReadStarted.call(deferredParent, payload);
+    if (event === 'assets-loaded') reconcileAssetsLoaded.call(deferredParent, payload, metadata);
   },
   $message: { error() {} },
 };
@@ -1363,6 +1387,68 @@ if (deferredParent.assetMutationTokens.race
   || deferredChild.serverAssets[0].assetKey !== 'fresh-r2'
   || deferredParent.bundleAssets[0].assetKey !== 'fresh-r2') {
   throw new Error('token-bound R2 must refresh truth and clear only its matching failed token');
+}
+function createCrossSourceHarness(token) {
+  const parent = {
+    editorDestroying: false,
+    lessonId: 'lesson-1',
+    assetMutationTokens: { [token]: true },
+    assetReconciliationEpoch: 0,
+    assetReconciliationRequests: {},
+    assetAppliedReadEpoch: 0,
+    assetLatestReadEpoch: 0,
+    proofVersion: 1, previewRequestId: 1,
+    preview: {}, previewManifest: {}, simulationEvidence: {},
+    assetProofFingerprint: null, assetRefreshIsProofRecovery: false, bundleAssets: [{ assetKey: 'initial' }],
+    invalidatePreview,
+    reconcileAssetMutation,
+    onAssetReadStarted,
+    buildAssetProofFingerprint: (assets) => JSON.stringify(assets),
+    onAssetsLoaded: reconcileAssetsLoaded,
+    $set(target, key, value) { target[key] = value; },
+    $delete(target, key) { delete target[key]; },
+    $message: { error() {} },
+  };
+  const child = {
+    lessonId: 'lesson-1', assetListRequestId: 0, loadingList: false,
+    serverAssets: [{ assetKey: 'initial' }],
+    trackAssetRead, invalidateAssetReads, applyServerAssets,
+    $emit(event, payload, metadata) {
+      if (event === 'asset-read-started') onAssetReadStarted.call(parent, payload);
+      if (event === 'assets-loaded') reconcileAssetsLoaded.call(parent, payload, metadata);
+    },
+    $message: { error() {} },
+  };
+  parent.$refs = { assetManager: child };
+  return { parent, child };
+}
+
+const olderReconciliation = createCrossSourceHarness('older-reconciliation');
+terminalAssetRead = null;
+settleAssetMutation.call(olderReconciliation.parent, { id: 'older-reconciliation', outcome: 'success' });
+const olderReconciliationRead = terminalAssetRead;
+reloadAssetRows.call(olderReconciliation.child);
+const newerDirectRead = staleChildRead;
+newerDirectRead[2]({ assets: [{ assetKey: 'newer-direct' }] });
+olderReconciliationRead[2]({ assets: [{ assetKey: 'older-reconciliation' }] });
+if (olderReconciliation.parent.bundleAssets[0].assetKey !== 'newer-direct'
+  || olderReconciliation.child.serverAssets[0].assetKey !== 'newer-direct'
+  || olderReconciliation.parent.assetMutationTokens['older-reconciliation'] !== 'reconcile-failed') {
+  throw new Error('newer direct read must beat an older delayed reconciliation and leave its token retryable');
+}
+
+const newerReconciliation = createCrossSourceHarness('newer-reconciliation');
+reloadAssetRows.call(newerReconciliation.child);
+const olderDirectRead = staleChildRead;
+terminalAssetRead = null;
+settleAssetMutation.call(newerReconciliation.parent, { id: 'newer-reconciliation', outcome: 'success' });
+const newerReconciliationRead = terminalAssetRead;
+olderDirectRead[2]({ assets: [{ assetKey: 'older-direct' }] });
+newerReconciliationRead[2]({ assets: [{ assetKey: 'newer-reconciliation' }] });
+if (newerReconciliation.parent.bundleAssets[0].assetKey !== 'newer-reconciliation'
+  || newerReconciliation.child.serverAssets[0].assetKey !== 'newer-reconciliation'
+  || newerReconciliation.parent.assetMutationTokens['newer-reconciliation']) {
+  throw new Error('newer reconciliation must supersede an older direct read by request-start epoch');
 }
 const refreshAssets = vm.runInNewContext(`(${extractObjectMethod(assetManagerSource, 'refreshAssets')})`);
 let retryStarts = 0;
@@ -1395,6 +1481,7 @@ const orderedAssetsLoaded = vm.runInNewContext(`(${extractObjectMethod(editorSou
 const orderedAssetsParent = {
   editorDestroying: false,
   assetAppliedReadEpoch: 0,
+  assetLatestReadEpoch: 0,
   assetProofFingerprint: null,
   assetRefreshIsProofRecovery: false,
   bundleAssets: [],

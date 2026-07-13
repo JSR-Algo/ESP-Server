@@ -106,21 +106,16 @@
 <script>
 import Api from '@/apis/api';
 import { isUncertainNestError } from '@/apis/nestHttp';
+import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 
 // Default role per layer (server also defaults these, but the UI prefills so the
 // author can see/override). robotOverlay→pose, teachingObject→primarySubject.
 const ROLE_BY_LAYER = { backgroundScene: 'poster', teachingObject: 'primarySubject', robotOverlay: 'pose' };
 let assetMutationEpoch = 0;
-let assetReadEpoch = 0;
 
 function nextAssetMutationId() {
   assetMutationEpoch += 1;
   return `asset-mutation-${assetMutationEpoch}`;
-}
-
-function nextAssetReadId() {
-  assetReadEpoch += 1;
-  return assetReadEpoch;
 }
 
 export default {
@@ -189,27 +184,36 @@ export default {
       };
       return map[layer] ? this.$t(map[layer]) : layer;
     },
-    invalidateAssetReads() {
-      this.assetListRequestId = nextAssetReadId();
+    trackAssetRead(readEpoch) {
+      const epoch = Number(readEpoch);
+      if (!Number.isFinite(epoch) || epoch < this.assetListRequestId) return false;
+      this.assetListRequestId = epoch;
       this.loadingList = false;
-      return this.assetListRequestId;
+      return true;
     },
-    applyServerAssets(assets) {
-      const readEpoch = this.invalidateAssetReads();
+    invalidateAssetReads() {
+      const readEpoch = reserveAssetReadEpoch();
+      this.trackAssetRead(readEpoch);
+      return readEpoch;
+    },
+    applyServerAssets(assets, readEpoch) {
+      if (!this.trackAssetRead(readEpoch)) return false;
       this.serverAssets = Array.isArray(assets) ? assets : [];
       this.$emit('assets-loaded', this.serverAssets, { readEpoch });
       return this.serverAssets;
     },
     reload(onSuccess, onError) {
-      const requestId = nextAssetReadId();
+      const requestId = reserveAssetReadEpoch();
       this.assetListRequestId = requestId;
       this.loadingList = true;
+      this.$emit('asset-read-started', { readEpoch: requestId });
       Api.lesson.listAssets(
         this.lessonId,
         'espTft',
         (res) => {
           if (requestId !== this.assetListRequestId) return;
-          const assets = this.applyServerAssets(res && res.assets);
+          const assets = this.applyServerAssets(res && res.assets, requestId);
+          if (assets === false) return;
           if (typeof onSuccess === 'function') onSuccess(assets);
         },
         (msg) => {
