@@ -39,7 +39,11 @@ expectContains('src/views/DeviceManagement.vue', 'device.childProfile', 'device 
 expectContains('src/views/DeviceManagement.vue', 'childName: device.childName', 'device admin must map childName from ESP server API');
 expectContains('src/views/DeviceManagement.vue', 'childAge: device.childAge', 'device admin must map childAge from ESP server API');
 expectContains('src/views/DeviceManagement.vue', 'updateChildProfile(row)', 'device admin must allow direct child profile edits');
-expectRegex('src/views/DeviceManagement.vue', /\{\s*alias:\s*child\.childName,\s*childName:\s*child\.childName,\s*childAge:\s*child\.age\s*\}/m, 'use-child action must persist alias + child profile together');
+expectRegex(
+  'src/views/DeviceManagement.vue',
+  /\{\s*alias:\s*child\.childName,\s*childName:\s*child\.childName,\s*childAge:\s*child\.age,\s*childInterests,\s*learningStyle:\s*personality\.learningStyle\s*\|\|\s*'',\s*vocabularyLevel:\s*personality\.vocabularyLevel\s*\|\|\s*'',\s*parentCareer:\s*personality\.parentCareer\s*\|\|\s*'',\s*\}/m,
+  'use-child action must persist alias + full child profile/personality together',
+);
 expectContains('src/i18n/vi.js', "'device.childProfile'", 'Vietnamese device admin copy must include child profile');
 expectContains('src/i18n/en.js', "'device.childProfile'", 'English device admin copy must include child profile');
 
