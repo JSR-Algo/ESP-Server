@@ -12,7 +12,7 @@ const { InjectManifest } = require('workbox-webpack-plugin');
 
 const path = require('path')
 const browserE2E = process.env.REWARDS_ADMIN_BROWSER_E2E === '1';
-const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
+const browserE2ETarget = browserE2E ? process.env.NESTJS_TARGET : '';
  
 function resolve(dir) {
   return path.join(__dirname, dir)
@@ -21,7 +21,9 @@ function resolve(dir) {
 // 确保加载 .env 文件
 dotenv.config();
 // Load local dev overrides (NestJS proxy target + admin token; gitignored).
-dotenv.config({ path: '.env.development.local', override: true });
+if (!browserE2E) dotenv.config({ path: '.env.development.local', override: true });
+const nestjsTarget = browserE2ETarget || process.env.NESTJS_TARGET || 'http://localhost:3000';
+const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
 
 // 定义CDN资源列表，确保Service Worker也能访问
 const cdnResources = {
@@ -60,7 +62,7 @@ module.exports = defineConfig({
       // NESTJS_ADMIN_TOKEN in .env.development.local. Per-user NestJS login (and a
       // prod reverse-proxy route for /nestjs) is a later slice.
       '/nestjs': {
-        target: process.env.NESTJS_TARGET || 'http://localhost:3000',
+        target: nestjsTarget,
         changeOrigin: true,
         pathRewrite: { '^/nestjs': '' },
         onProxyReq(proxyReq) {

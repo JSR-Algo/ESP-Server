@@ -7,6 +7,32 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+export const defaultSecretPatterns = Object.freeze([
+  /Bearer\s+[A-Za-z0-9._~+/-]{8,}/gi,
+  /["']?nestjs_session_token["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi,
+  /["']?(?:password|totp|mfa_secret|session_token|session_key)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi,
+]);
+
+function replacePatterns(text, forbiddenPatterns) {
+  let sanitized = text;
+  for (const pattern of forbiddenPatterns) {
+    const copy = new RegExp(pattern.source, pattern.flags);
+    sanitized = sanitized.replace(copy, '[REDACTED]');
+  }
+  return sanitized;
+}
+
+export function redactSensitiveText(value, {
+  forbiddenValues = [],
+  forbiddenPatterns = defaultSecretPatterns,
+} = {}) {
+  let text = String(value);
+  for (const secret of forbiddenValues.filter((item) => typeof item === 'string' && item.length > 0)) {
+    text = text.split(secret).join('[REDACTED]');
+  }
+  return replacePatterns(text, forbiddenPatterns);
+}
+
 export function buildBrowserEnvironment({ baseEnv, backendUrl, managerPort }) {
   const environment = {
     ...baseEnv,
@@ -172,7 +198,14 @@ export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_
 
   function runTrackedCommand(command, args, options = {}) {
     return new Promise((resolveRun, reject) => {
-      const { captureOutput = false, timeout, ...spawnOptions } = options;
+      const {
+        captureOutput = false,
+        failureOutputTailChars = 4_000,
+        forbiddenPatterns = defaultSecretPatterns,
+        forbiddenValues = [],
+        timeout,
+        ...spawnOptions
+      } = options;
       const child = spawnTracked(command, args, spawnOptions);
       const tracked = children.get(child);
       tracked.retainUntilSettled = true;
@@ -196,13 +229,18 @@ export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_
         callback();
       };
       child.once('error', (error) => {
-        if (!timedOut) settle(() => reject(error));
+        if (!timedOut) settle(() => reject(new Error(redactSensitiveText(error, { forbiddenValues, forbiddenPatterns }))));
       });
       child.once('exit', (code, signal) => {
         if (timedOut) return;
         settle(() => {
           if (code === 0) resolveRun({ child, code, signal, stdout, stderr });
-          else reject(new Error(`${command} exited with ${code ?? signal ?? 'unknown status'}${stderr ? `: ${stderr.trim()}` : ''}`));
+          else {
+            const rawTail = `${stdout}${stdout && stderr ? '\n' : ''}${stderr}`.slice(-failureOutputTailChars);
+            const sanitizedTail = redactSensitiveText(rawTail, { forbiddenValues, forbiddenPatterns }).trim();
+            const status = code ?? signal ?? 'unknown status';
+            reject(new Error(`command failed with exit status ${status}${sanitizedTail ? `\nSanitized output tail:\n${sanitizedTail}` : ''}`));
+          }
         });
       });
       if (Number.isFinite(timeout) && timeout > 0) {
@@ -332,18 +370,15 @@ export function sanitizeArtifactBuffer(buffer, forbiddenValues = []) {
   return changed ? Buffer.from(text) : buffer;
 }
 
-function redactError(error, forbiddenValues) {
-  let message = error instanceof Error ? error.message : String(error);
-  for (const value of forbiddenValues.filter((item) => typeof item === 'string' && item.length > 0)) {
-    message = message.split(value).join('[REDACTED]');
-  }
-  return message;
+function redactError(error, forbiddenValues, forbiddenPatterns) {
+  return redactSensitiveText(error instanceof Error ? error.message : error, { forbiddenValues, forbiddenPatterns });
 }
 
 export async function executeWithArtifactFinalization({
   runWorkflow,
   finalizeArtifacts,
   forbiddenValues = [],
+  forbiddenPatterns = defaultSecretPatterns,
 }) {
   let result;
   let workflowError;
@@ -360,8 +395,8 @@ export async function executeWithArtifactFinalization({
   }
   if (workflowError || artifactError) {
     const messages = [];
-    if (workflowError) messages.push(`Workflow failed: ${redactError(workflowError, forbiddenValues)}`);
-    if (artifactError) messages.push(`Artifact finalization failed: ${redactError(artifactError, forbiddenValues)}`);
+    if (workflowError) messages.push(`Workflow failed: ${redactError(workflowError, forbiddenValues, forbiddenPatterns)}`);
+    if (artifactError) messages.push(`Artifact finalization failed: ${redactError(artifactError, forbiddenValues, forbiddenPatterns)}`);
     throw new Error(messages.join('\n'));
   }
   return result;
@@ -380,6 +415,7 @@ export async function executeWithSignalFinalization({
   cleanup,
   cleanupRawArtifacts = async () => undefined,
   forbiddenValues = [],
+  forbiddenPatterns = defaultSecretPatterns,
 }) {
   let receivedSignal;
   let executionError;
@@ -421,20 +457,28 @@ export async function executeWithSignalFinalization({
       },
       finalizeArtifacts,
       forbiddenValues,
+      forbiddenPatterns,
     });
   } catch (error) {
     executionError = error;
   } finally {
+    const cleanupErrors = [];
     try {
       await cleanup();
     } catch (error) {
-      executionError ??= error;
+      cleanupErrors.push(`Cleanup failed: ${redactError(error, forbiddenValues, forbiddenPatterns)}`);
     } finally {
       try {
         await cleanupRawArtifacts();
       } catch (error) {
-        executionError ??= error;
+        cleanupErrors.push(`Raw artifact cleanup failed: ${redactError(error, forbiddenValues, forbiddenPatterns)}`);
       }
+    }
+    if (cleanupErrors.length) {
+      const messages = [];
+      if (executionError) messages.push(redactError(executionError, forbiddenValues, forbiddenPatterns));
+      messages.push(...cleanupErrors);
+      executionError = new Error(messages.join('\n'));
     }
     await Promise.allSettled([...signalActions]);
     for (const [signal, handler] of handlers) processTarget.off(signal, handler);

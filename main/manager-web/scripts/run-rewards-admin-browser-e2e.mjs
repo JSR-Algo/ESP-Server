@@ -7,10 +7,12 @@ import {
   buildBackendEnvironment,
   computeTotp,
   createProcessLifecycle,
+  defaultSecretPatterns,
   executeWithSignalFinalization,
   extractListeningPort,
   finalizeArtifactPrivacy,
   findFreePort,
+  redactSensitiveText,
   scanArtifactPrivacy,
 } from './_lib/rewards-admin-browser-lifecycle.mjs';
 
@@ -55,7 +57,7 @@ function captureLogs(child, label) {
 
 function runCommand(command, args, options = {}) {
   return lifecycle.runTrackedCommand(command, args, {
-    cwd: options.cwd,
+    ...options,
     env: options.env ?? process.env,
     stdio: options.stdio ?? 'inherit',
     timeout: options.timeout ?? 180_000,
@@ -207,13 +209,10 @@ async function runPrivacyScan() {
   return result;
 }
 
-function redactText(value) {
-  let text = String(value);
-  for (const secret of [adminEmail, adminPassword, adminMfaSecret, browserTotp].filter(Boolean)) {
-    text = text.split(secret).join('[REDACTED]');
-  }
-  return text;
-}
+const redactText = (value) => redactSensitiveText(value, {
+    forbiddenValues: [adminEmail, adminPassword, adminMfaSecret, browserTotp],
+    forbiddenPatterns: defaultSecretPatterns,
+  });
 
 const forbiddenArtifactValues = [adminEmail, adminPassword, adminMfaSecret];
 
@@ -264,6 +263,11 @@ const outcome = await executeWithSignalFinalization({
         REWARDS_ADMIN_TOTP: browserTotp,
         REWARDS_ADMIN_FAILURE_INJECTION: process.env.REWARDS_ADMIN_FAILURE_INJECTION ?? '',
       },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      captureOutput: true,
+      forbiddenValues: forbiddenArtifactValues,
+      forbiddenPatterns: defaultSecretPatterns,
+      failureOutputTailChars: 8_000,
       timeout: 240_000,
     });
   },
@@ -274,6 +278,7 @@ const outcome = await executeWithSignalFinalization({
   cleanup: () => lifecycle.cleanup(),
   cleanupRawArtifacts: () => rm(rawTraceDir, { recursive: true, force: true }),
   forbiddenValues: forbiddenArtifactValues,
+  forbiddenPatterns: defaultSecretPatterns,
 });
 
 try {
@@ -281,7 +286,7 @@ try {
   console.info('Authenticated rewards admin browser round-trip passed with sanitized artifacts.');
 } catch (error) {
   for (const [label, logs] of childLogs) {
-    if (logs.length) process.stderr.write(`\n${label} log tail:\n${redactText(logs.join(''))}`);
+    if (logs.length) process.stderr.write(`\n${label} log tail:\n${redactText(logs.join('').slice(-8_000))}`);
   }
   if (!outcome.interrupted) throw error;
   process.stderr.write(`${redactText(error instanceof Error ? error.message : error)}\n`);

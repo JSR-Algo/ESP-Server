@@ -143,6 +143,48 @@ test('browser environment removes every shared Nest admin-token fallback', () =>
   assert.equal(environment.PRESERVED, 'yes');
 });
 
+test('Vue E2E proxy preserves the runner target over a conflicting local dotenv override', async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'rewards-admin-vue-config-'));
+  const configPath = resolve(import.meta.dirname, '../../vue.config.js');
+  await writeFile(resolve(directory, '.env.development.local'), 'NESTJS_TARGET=http://127.0.0.1:39999\n');
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, ['-e', [
+      `const config = require(${JSON.stringify(configPath)})`,
+      "process.stdout.write(config.devServer.proxy['/nestjs'].target)",
+    ].join(';')], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        REWARDS_ADMIN_BROWSER_E2E: '1',
+        NESTJS_TARGET: 'http://127.0.0.1:41237',
+      },
+    });
+    assert.equal(stdout, 'http://127.0.0.1:41237');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Vue normal development proxy still accepts the local dotenv override', async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'rewards-admin-vue-config-'));
+  const configPath = resolve(import.meta.dirname, '../../vue.config.js');
+  await writeFile(resolve(directory, '.env.development.local'), 'NESTJS_TARGET=http://127.0.0.1:39999\n');
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, ['-e', [
+      `const config = require(${JSON.stringify(configPath)})`,
+      "process.stdout.write(config.devServer.proxy['/nestjs'].target)",
+    ].join(';')], {
+      cwd: directory,
+      env: { ...process.env, REWARDS_ADMIN_BROWSER_E2E: '', NESTJS_TARGET: 'http://127.0.0.1:41237' },
+    });
+    assert.equal(stdout, 'http://127.0.0.1:39999');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('backend environment uses development key fallback when a private fixture file is absent', () => {
   const environment = buildBackendEnvironment({
     baseEnv: { ADMIN_AUTH_DISABLED: 'true', NESTJS_ADMIN_TOKEN: 'shared-token' },
@@ -259,6 +301,46 @@ test('owned command direct exit settles once and leaves no tracked process', asy
   assert.equal(result.code, 0);
   assert.equal(lifecycle.trackedCount(), 0);
   await lifecycle.cleanup();
+});
+
+test('owned command buffers and redacts split Playwright output before reporting a bounded failure', async () => {
+  const lifecycle = createProcessLifecycle({ cleanupContainer: async () => undefined });
+  const secrets = {
+    email: 'browser-admin-secret@invalid.test',
+    password: 'Browser-Password-Secret-91!',
+    totp: '654321',
+    session: '"nestjs_session_token":"raw-session-secret-value"',
+    bearer: 'Bearer raw.bearer.secret-value',
+  };
+  const script = [
+    `const values = ${JSON.stringify(Object.values(secrets))}`,
+    "process.stdout.write(values[0].slice(0, 12))",
+    "setTimeout(() => process.stdout.write(values[0].slice(12) + '\\n' + values[1] + '\\n'), 5)",
+    "setTimeout(() => process.stderr.write(values.slice(2).join('\\n') + '\\npassword=structured-secret'), 10)",
+    'setTimeout(() => process.exit(1), 20)',
+  ].join(';');
+
+  try {
+    await assert.rejects(
+      lifecycle.runTrackedCommand(process.execPath, ['-e', script], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        captureOutput: true,
+        forbiddenValues: [secrets.email, secrets.password, secrets.totp, 'raw-session-secret-value'],
+        forbiddenPatterns: lifecycle.defaultSecretPatterns,
+        failureOutputTailChars: 220,
+        timeout: 1_000,
+      }),
+      (error) => {
+        assert.match(error.message, /command failed/);
+        assert.equal(error.message.length < 500, true);
+        for (const secret of Object.values(secrets)) assert.equal(error.message.includes(secret), false);
+        assert.doesNotMatch(error.message, /structured-secret|raw\.bearer\.secret-value/i);
+        return true;
+      },
+    );
+  } finally {
+    await lifecycle.cleanup();
+  }
 });
 
 test('owned command timeout kills detached shell parent and TERM-resistant grandchild before untracking', async () => {
@@ -558,4 +640,23 @@ test('signal during artifact finalization completes privacy cleanup before setti
   assert.equal(finalized, 1);
   assert.equal(cleaned, 1);
   assert.equal(rawCleaned, 1);
+});
+
+test('cleanup and raw-cleanup failures are both redacted with exact values and structured patterns', async () => {
+  const secret = 'cleanup-exact-secret';
+  const outcome = await executeWithSignalFinalization({
+    processTarget: new EventEmitter(),
+    runWorkflow: async () => 'complete',
+    finalizeArtifacts: async () => undefined,
+    abortWorkflow: async () => undefined,
+    escalateAbort: async () => undefined,
+    cleanup: async () => { throw new Error(`cleanup password=${secret}`); },
+    cleanupRawArtifacts: async () => { throw new Error('raw Bearer raw.cleanup.bearer-secret'); },
+    forbiddenValues: [secret],
+    forbiddenPatterns: lifecycle.defaultSecretPatterns,
+  });
+
+  assert.match(outcome.error.message, /Cleanup failed/);
+  assert.match(outcome.error.message, /Raw artifact cleanup failed/);
+  assert.doesNotMatch(outcome.error.message, /cleanup-exact-secret|raw\.cleanup\.bearer-secret/i);
 });

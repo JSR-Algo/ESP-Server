@@ -127,21 +127,26 @@ async function sanitizeTraceArchive(rawTracePath, deliverableTracePath, forbidde
 async function loginWithRealAdminSession(page, fixture) {
   await page.route('**/tbot/**', (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname.endsWith('/user/captcha')) {
+    if (url.pathname === '/tbot/user/captcha') {
       return route.fulfill({ status: 200, contentType: 'image/gif', body: transparentGif });
     }
-    let data = [];
-    if (url.pathname.endsWith('/user/pub-config')) {
-      data = { sm2PublicKey: shellPublicKey, enableMobileRegister: false, allowUserRegister: false };
-    } else if (url.pathname.endsWith('/user/login')) {
-      data = { token: 'shell-session-route-gate-only' };
-    } else if (url.pathname.endsWith('/user/info')) {
-      data = { username: shellLogin.username, superAdmin: true };
+    const responses = {
+      '/tbot/user/pub-config': { sm2PublicKey: shellPublicKey, enableMobileRegister: false, allowUserRegister: false },
+      '/tbot/user/login': { token: 'shell-session-route-gate-only' },
+      '/tbot/user/info': { username: shellLogin.username, superAdmin: true },
+      '/tbot/agent/list': { data: [] },
+    };
+    if (!Object.prototype.hasOwnProperty.call(responses, url.pathname)) {
+      return route.fulfill({
+        status: 501,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 1, msg: `Unexpected legacy mock endpoint: ${url.pathname}` }),
+      });
     }
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ code: 0, data }),
+      body: JSON.stringify({ code: 0, data: responses[url.pathname] }),
     });
   });
   await page.goto('/login');
@@ -303,8 +308,47 @@ async function assertExactPreview(page) {
   return preview.payload;
 }
 
-async function runRequiredSimulations(page) {
+function expectedSimulationTrace(manifest, projection, preset) {
+  const interactiveEvents = {
+    Correct: (maxAttempts) => [{ outcome: 'correct', attempt: 1, action: 'advance' }],
+    'Near miss': (maxAttempts) => [{ outcome: 'near_miss', attempt: 1, action: 'advance' }],
+    'Brave try': (maxAttempts) => [{ outcome: 'brave_try', attempt: 1, action: 'advance' }],
+    'Incorrect to fallback': (maxAttempts) => Array.from({ length: maxAttempts }, (_, index) => ({
+      outcome: 'incorrect', attempt: index + 1, action: index + 1 < maxAttempts ? 'retry' : 'fallback_advance',
+    })),
+    'Retry then correct': (maxAttempts) => [
+      { outcome: 'retry', attempt: 1, action: 'retry' },
+      { outcome: 'correct', attempt: 2, action: 'advance' },
+    ],
+    Timeout: (maxAttempts) => [{ outcome: 'timeout', attempt: 1, action: 'fallback_advance' }],
+    Completion: (maxAttempts) => [{ attempt: 1, action: 'fallback_advance' }],
+  };
+  const trace = [];
+  for (const step of manifest.steps) {
+    if (step.completionClass === 'passive') {
+      trace.push({ stepKey: step.id, action: 'auto_advance' });
+      continue;
+    }
+    const maxAttempts = projection.steps[step.id].maxAttempts;
+    for (const event of interactiveEvents[preset](maxAttempts)) trace.push({ stepKey: step.id, ...event });
+  }
+  trace.push({ stepKey: 'lesson', action: 'lesson_completed' });
+  return trace;
+}
+
+function simulationTraceContract(trace) {
+  return trace.map(({ stepKey, outcome, attempt, action }) => ({
+    stepKey,
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(attempt === undefined ? {} : { attempt }),
+    action,
+  }));
+}
+
+async function runRequiredSimulations(page, manifest) {
   const presets = ['Correct', 'Near miss', 'Brave try', 'Incorrect to fallback', 'Retry then correct', 'Timeout', 'Completion'];
+  const payloadSignatures = new Set();
+  const responseSignatures = new Set();
   let finalPayload;
   for (const preset of presets) {
     await page.getByRole('radio', { name: preset, exact: true }).first().click();
@@ -312,11 +356,19 @@ async function runRequiredSimulations(page) {
       method: 'POST',
       pathPattern: /\/v1\/admin\/lessons\/[^/]+\/simulate$/,
     }, () => page.getByRole('button', { name: 'Simulate' }).click());
-    expect(simulation.payload.simulation).toEqual(expect.objectContaining({ terminated: true }));
-    expect(simulation.payload.simulation.trace).toEqual(expect.any(Array));
-    expect(simulation.payload.simulation.trace.length).toBeGreaterThan(0);
+    const requestPayload = simulation.response.request().postDataJSON();
+    const expectedTrace = expectedSimulationTrace(manifest, requestPayload.projection, preset);
+    expect(simulation.payload.simulation).toEqual(expect.objectContaining({
+      terminated: true,
+      terminationReason: 'lesson_completed',
+    }));
+    expect(simulationTraceContract(simulation.payload.simulation.trace)).toEqual(expectedTrace);
+    payloadSignatures.add(JSON.stringify(requestPayload.outcomes));
+    responseSignatures.add(JSON.stringify(simulationTraceContract(simulation.payload.simulation.trace)));
     finalPayload = simulation.payload;
   }
+  expect(payloadSignatures.size, 'all seven presets must submit distinct outcome mappings').toBe(presets.length);
+  expect(responseSignatures.size, 'all seven presets must prove distinct backend branch traces').toBe(presets.length);
   return finalPayload;
 }
 
@@ -391,7 +443,7 @@ test('admin customizes the canonical lesson without mutating v1', async ({ page,
     await editRequiredFields(page);
     await reviewAndCloneSharedVisual(page);
     preview = await assertExactPreview(page);
-    simulation = await runRequiredSimulations(page);
+    simulation = await runRequiredSimulations(page, preview.manifest);
     published = await publishAndAssertOriginalImmutable(page);
 
     await waitForAdminResponse(page, {
