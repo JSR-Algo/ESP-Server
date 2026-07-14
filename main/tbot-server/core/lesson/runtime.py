@@ -2584,6 +2584,7 @@ class LessonRuntime:
                 await asyncio.sleep(poll)
             return await call_sync_once()
 
+        sync_started_at = time.monotonic()
         try:
             result = await call_sync()
         except Exception as exc:
@@ -2606,22 +2607,63 @@ class LessonRuntime:
                     f"robot SD sync recovery failed: {type(retry_exc).__name__}",
                 )
                 return False
-        return self._sd_asset_sync_result_ready(result)
+        duration_ms = max(0, int(round((time.monotonic() - sync_started_at) * 1000)))
+        attestation = self._sd_asset_sync_attestation(result, pack)
+        if attestation is None:
+            self._log("warning", "robot SD sync returned invalid attestation")
+            return False
+        marker_fields = (
+            f"cacheKey={attestation['cacheKey']} "
+            f"assetCount={attestation['assetCount']} "
+            f"downloadedCount={attestation['downloadedCount']} "
+            f"skippedCount={attestation['skippedCount']} "
+            f"failedCount={attestation['failedCount']} "
+            f"durationMs={duration_ms}"
+        )
+        self._log("info", f"lesson_preload_ready {marker_fields}")
+        self._log(
+            "info",
+            "checksum_verified "
+            f"cacheKey={attestation['cacheKey']} "
+            f"manifestChecksum={self.manifest_checksum} "
+            f"assetCount={attestation['assetCount']}",
+        )
+        if (
+            attestation["downloadedCount"] == 0
+            and attestation["skippedCount"] == attestation["assetCount"]
+        ):
+            self._log("info", f"asset_cache_hit {marker_fields}")
+        return True
 
-    def _sd_asset_sync_result_ready(self, result: Any) -> bool:
+    def _sd_asset_sync_attestation(
+        self, result: Any, requested_pack: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         if isinstance(result, str):
             try:
                 result = json.loads(result)
             except json.JSONDecodeError:
-                return False
+                return None
         if not isinstance(result, dict):
-            return False
-        if result.get("ready") is False:
-            return False
-        failed = result.get("failedCount")
-        if isinstance(failed, int) and failed > 0:
-            return False
-        return True
+            return None
+        assets = requested_pack.get("assets")
+        expected_cache_key = requested_pack.get("cacheKey")
+        if not isinstance(assets, list) or not isinstance(expected_cache_key, str):
+            return None
+        if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+            return None
+        counts = {}
+        for key in ("downloadedCount", "skippedCount", "failedCount"):
+            value = result.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            counts[key] = value
+        if counts["failedCount"] != 0 or sum(counts.values()) != len(assets):
+            return None
+        return {
+            "cacheKey": expected_cache_key,
+            "assetCount": len(assets),
+            **counts,
+        }
 
     def _ack_reports_asset_pack_ready(self, ack_body: Dict[str, Any]) -> bool:
         pack = ack_body.get("assetPack")
@@ -2696,6 +2738,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     lesson_cfg = _lesson_config(config)
     server_cfg = _server_config(config)
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
+    if isinstance(base_url, str):
+        base_url = base_url.rstrip("/")
     device_id = getattr(conn, "device_id", None)
     logger = getattr(conn, "logger", None)
     _log_context: Dict[str, Any] = {}
@@ -2784,6 +2828,13 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             _log("warning", "lesson backend identity unavailable")
             return None
         token = minted_token
+        _log(
+            "info",
+            "lesson backend identity resolved "
+            f"apiBase={base_url} "
+            f"deviceMac={device_id} "
+            f"backendDeviceId={backend_device_id}",
+        )
         # Best-effort: address the child by name in plain CONVERSATION. The name
         # the parent sets in the mobile app lives in the backend child profile, NOT
         # the esp manager-api ``ai_device.child_name`` the agent-models config
@@ -2952,6 +3003,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"assignmentVersion={assignment.get('assignmentVersion')} "
         f"manifestChecksum={new_manifest_checksum} "
         f"profile={manifest.get('profile') or profile} "
+        f"courseId={manifest.get('courseId', '')} "
         f"deviceId={device_id} "
         f"backendDeviceId={backend_device_id} "
         f"childId={assignment.get('childId', '')} "

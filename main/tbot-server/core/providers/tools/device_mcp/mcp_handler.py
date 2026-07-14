@@ -16,6 +16,23 @@ TAG = __name__
 logger = setup_logging()
 
 
+def _message_metadata(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return f"payloadType={type(payload).__name__}"
+    method = payload.get("method")
+    message_id = payload.get("id")
+    params = payload.get("params")
+    tool_name = params.get("name") if isinstance(params, dict) else None
+    parts = [f"id={message_id}", f"method={method or '-'}"]
+    if isinstance(tool_name, str) and tool_name:
+        parts.append(f"tool={tool_name}")
+    if "result" in payload:
+        parts.append(f"resultType={type(payload.get('result')).__name__}")
+    if "error" in payload:
+        parts.append("error=true")
+    return " ".join(parts)
+
+
 class MCPClient:
     """Device-side MCP client for managing MCP status and tools"""
 
@@ -110,16 +127,18 @@ async def send_mcp_message(conn: "ConnectionHandler", payload: dict):
 
     try:
         await conn.websocket.send(message)
-        logger.bind(tag=TAG).debug(f"Successfully sent MCP message: {message}")
+        logger.bind(tag=TAG).debug(f"Successfully sent MCP message {_message_metadata(payload)}")
     except Exception as e:
-        logger.bind(tag=TAG).error(f"Send MCP message failed: {e}")
+        logger.bind(tag=TAG).error(
+            f"Send MCP message failed {_message_metadata(payload)} errorType={type(e).__name__}"
+        )
 
 
 async def handle_mcp_message(
     conn: "ConnectionHandler", mcp_client: MCPClient, payload: dict
 ):
     """Handle MCP messages, including initialization, tool list, tool call responses, etc."""
-    logger.bind(tag=TAG).debug(f"Handle MCP message: {str(payload)[:100]}")
+    logger.bind(tag=TAG).debug(f"Handle MCP message {_message_metadata(payload)}")
 
     if not isinstance(payload, dict):
         logger.bind(tag=TAG).error("MCP message missing payload field or invalid format")
@@ -133,7 +152,7 @@ async def handle_mcp_message(
         # Check for tool call response first
         if msg_id in mcp_client.call_results:
             logger.bind(tag=TAG).debug(
-                f"Received tool call response, ID: {msg_id}, result: {result}"
+                f"Received tool call response id={msg_id} resultType={type(result).__name__}"
             )
             await mcp_client.resolve_call_result(msg_id, result)
             return
@@ -206,7 +225,7 @@ async def handle_mcp_message(
 
                 next_cursor = result.get("nextCursor", "")
                 if next_cursor:
-                    logger.bind(tag=TAG).debug(f"More tools available, nextCursor: {next_cursor}")
+                    logger.bind(tag=TAG).debug("More MCP tools available")
                     await send_mcp_tools_list_continue_request(conn, next_cursor)
                 else:
                     await mcp_client.set_ready(True)
@@ -228,8 +247,12 @@ async def handle_mcp_message(
 
     elif "error" in payload:
         error_data = payload["error"]
-        error_msg = error_data.get("message", "Unknown error")
-        logger.bind(tag=TAG).error(f"Received MCP error response: {error_msg}")
+        error_msg = (
+            error_data.get("message", "Unknown error")
+            if isinstance(error_data, dict)
+            else "Unknown error"
+        )
+        logger.bind(tag=TAG).error(f"Received MCP error response id={payload.get('id', 0)}")
 
         msg_id = int(payload.get("id", 0))
         if msg_id in mcp_client.call_results:
@@ -292,7 +315,7 @@ async def send_mcp_tools_list_continue_request(conn: "ConnectionHandler", cursor
         "method": "tools/list",
         "params": {"cursor": cursor},
     }
-    logger.bind(tag=TAG).info(f"Send MCP tool list request with cursor: {cursor}")
+    logger.bind(tag=TAG).info("Send MCP tool list continuation request")
     await send_mcp_message(conn, payload)
 
 
@@ -344,12 +367,12 @@ async def call_mcp_tool(
                             if merged_dict:
                                 arguments = merged_dict
                             else:
-                                raise ValueError(f"Cannot parse any valid JSON object: {args}")
+                                raise ValueError("Cannot parse any valid JSON object")
                         else:
-                            raise ValueError(f"Parameter JSON parse failed: {args}")
+                            raise ValueError("Parameter JSON parse failed")
                     except Exception as e:
                         logger.bind(tag=TAG).error(
-                            f"Parameter JSON parse failed: {str(e)}, raw parameters: {args}"
+                            f"Parameter JSON parse failed errorType={type(e).__name__}"
                         )
                         raise ValueError(f"Parameter JSON parse failed: {str(e)}")
         elif isinstance(args, dict):
@@ -374,7 +397,9 @@ async def call_mcp_tool(
         "params": {"name": actual_name, "arguments": arguments},
     }
 
-    logger.bind(tag=TAG).info(f"Send client mcp tool call request: {actual_name}, parameters: {args}")
+    logger.bind(tag=TAG).info(
+        f"Send client MCP tool call request tool={actual_name} argumentCount={len(arguments)}"
+    )
     try:
         await send_mcp_message(conn, payload)
     except Exception:
@@ -385,7 +410,7 @@ async def call_mcp_tool(
         # Wait for response or timeout
         raw_result = await asyncio.wait_for(result_future, timeout=timeout)
         logger.bind(tag=TAG).info(
-            f"Client mcp tool call {actual_name} succeeded, raw result: {raw_result}"
+            f"Client MCP tool call succeeded tool={actual_name} resultType={type(raw_result).__name__}"
         )
 
         if isinstance(raw_result, dict):

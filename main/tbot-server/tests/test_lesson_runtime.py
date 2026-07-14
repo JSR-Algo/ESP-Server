@@ -401,6 +401,26 @@ class _DummyLogger:
         return None
 
 
+class _CapturingLogger(_DummyLogger):
+    def __init__(self):
+        self.events = []
+
+    def _capture(self, level, message, *args, **kwargs):
+        self.events.append((level, str(message)))
+
+    def info(self, message, *args, **kwargs):
+        self._capture("info", message, *args, **kwargs)
+
+    def debug(self, message, *args, **kwargs):
+        self._capture("debug", message, *args, **kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        self._capture("warning", message, *args, **kwargs)
+
+    def error(self, message, *args, **kwargs):
+        self._capture("error", message, *args, **kwargs)
+
+
 class _FakeWebSocket:
     def __init__(self):
         self.sent = []
@@ -2376,7 +2396,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn, asset_cache=_VerboseLiveAssetPackCache(ready=True))
 
         async def sync_ready(*_args, **_kwargs):
-            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 20,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
         with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
             await rt.start()
@@ -2418,7 +2444,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn, asset_cache=_MaximumAssetPackCache(ready=True))
 
         async def sync_ready(*_args, **_kwargs):
-            return {"ready": True, "downloadedCount": 64, "failedCount": 0}
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 64,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
         with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
             await rt.start()
@@ -2535,7 +2567,15 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "sent_before_call": list(conn.websocket.sent),
                 }
             )
-            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "downloadedCount": 3,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                }
+            )
 
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
@@ -2556,6 +2596,113 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
         )
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_cold_sync_emits_authoritative_attestation_markers(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+
+        async def cold_sync(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=cold_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("lesson_preload_ready", messages)
+        self.assertIn("checksum_verified", messages)
+        self.assertIn("downloadedCount=3", messages)
+        self.assertIn("skippedCount=0", messages)
+        self.assertIn("assetCount=3", messages)
+        self.assertIn("durationMs=", messages)
+        self.assertNotIn("asset_cache_hit", messages)
+
+    async def test_sd_asset_pack_warm_sync_emits_cache_hit_only_for_all_skipped(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+
+        async def warm_sync(*_args, **_kwargs):
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "downloadedCount": 0,
+                    "skippedCount": 3,
+                    "failedCount": 0,
+                }
+            )
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=warm_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("lesson_preload_ready", messages)
+        self.assertIn("checksum_verified", messages)
+        self.assertIn("asset_cache_hit", messages)
+        self.assertIn("downloadedCount=0", messages)
+        self.assertIn("skippedCount=3", messages)
+
+    async def test_sd_asset_pack_rejects_invalid_attestation_without_success_markers(self):
+        invalid_results = (
+            {
+                "ready": False,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "wrong-cache-key",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 2,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": -1,
+                "failedCount": 1,
+            },
+        )
+
+        for result in invalid_results:
+            with self.subTest(result=result):
+                conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.mcp_client = _ReadyLessonAssetMcpClient()
+                conn.logger = _CapturingLogger()
+
+                async def invalid_sync(*_args, _result=result, **_kwargs):
+                    return _result
+
+                rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+                with patch("core.lesson.runtime.call_mcp_tool", new=invalid_sync):
+                    self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+
+                messages = "\n".join(message for _level, message in conn.logger.events)
+                self.assertNotIn("lesson_preload_ready", messages)
+                self.assertNotIn("checksum_verified", messages)
+                self.assertNotIn("asset_cache_hit", messages)
 
     async def test_sd_asset_pack_waits_for_mcp_discovery_before_prepare(self):
         class _EventuallyReadyMcpClient(_ReadyLessonAssetMcpClient):
@@ -2580,7 +2727,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         async def capture_call(*args, **kwargs):
             calls.append((args, kwargs, list(conn.websocket.sent)))
-            return {"ready": True, "downloadedCount": 3, "failedCount": 0}
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
         with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
@@ -2606,7 +2759,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             sync_calls.append((args, kwargs))
             if len(sync_calls) == 1:
                 raise RuntimeError("MCP tools disabled during lesson")
-            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
         conn.request_lesson_preload_reset = request_lesson_preload_reset
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
@@ -2633,7 +2792,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def voice_preemptible_sync(*_args, **_kwargs):
             nonlocal attempts
             attempts += 1
-            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
         conn.is_realtime_busy = is_realtime_busy
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
@@ -2664,7 +2829,15 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "sent_before_call": list(conn.websocket.sent),
                 }
             )
-            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "downloadedCount": 3,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                }
+            )
 
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
@@ -6085,6 +6258,58 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(assignment_calls, [("backend-device-uuid", "device-token")])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+
+    async def test_identity_and_manifest_logs_use_authoritative_normalized_fields(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn(api_base="http://backend.test/v1///")
+        conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.logger = _CapturingLogger()
+        backend_device_id = "14140000-0000-4000-8000-000000000004"
+        manifest = {**_build_manifest(), "courseId": "course-from-manifest"}
+        assignment = {**_build_assignment(), "courseId": "must-not-be-logged-as-authoritative"}
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return backend_device_id, "device-token"
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            return None
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return assignment
+
+        async def _get_manifest(*args, **kwargs):
+            return manifest, f'"lesson-3-espTft-{_manifest_checksum()}"'
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+            ) = saved
+
+        self.assertIsNotNone(result)
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("apiBase=http://backend.test/v1", messages)
+        self.assertIn("deviceMac=AA:BB:CC:DD:EE:FF", messages)
+        self.assertIn(f"backendDeviceId={backend_device_id}", messages)
+        self.assertIn("courseId=course-from-manifest", messages)
+        self.assertNotIn("must-not-be-logged-as-authoritative", messages)
 
     async def test_no_current_assignment_sets_user_visible_start_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect

@@ -46,6 +46,22 @@ class _Conn(SimpleNamespace):
         )
 
 
+class _CapturingLogger:
+    def __init__(self):
+        self.messages = []
+
+    def bind(self, **_kwargs):
+        return self
+
+    def _capture(self, message, *_args, **_kwargs):
+        self.messages.append(str(message))
+
+    debug = _capture
+    info = _capture
+    warning = _capture
+    error = _capture
+
+
 class DeviceMCPHandlerClientTest(unittest.IsolatedAsyncioTestCase):
     async def test_client_tracks_tools_cache_and_result_futures(self):
         client = mcp_handler.MCPClient()
@@ -83,6 +99,49 @@ class DeviceMCPHandlerClientTest(unittest.IsolatedAsyncioTestCase):
 
 
 class DeviceMCPHandlerMessageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_device_mcp_logs_only_metadata_and_never_payload_secrets(self):
+        sentinel = "SENTINEL-DEVICE-MCP-SECRET"
+        logger = _CapturingLogger()
+        conn = _Conn()
+        client = mcp_handler.MCPClient()
+        response = asyncio.Future()
+        await client.register_call_result_future(77, response)
+
+        with patch.object(mcp_handler, "logger", logger):
+            await mcp_handler.send_mcp_message(
+                conn,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 76,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "self.private.tool",
+                        "arguments": {"token": sentinel, "content": sentinel},
+                    },
+                },
+            )
+            await mcp_handler.handle_mcp_message(
+                conn,
+                client,
+                {
+                    "id": 77,
+                    "result": {"content": [{"text": sentinel}], "token": sentinel},
+                },
+            )
+            await mcp_handler.handle_mcp_message(
+                conn,
+                client,
+                {"id": 78, "error": {"message": sentinel}},
+            )
+
+        self.assertEqual(
+            json.loads(conn.websocket.sent[0])["payload"]["params"]["arguments"]["token"],
+            sentinel,
+        )
+        self.assertEqual(response.result()["content"][0]["text"], sentinel)
+        self.assertTrue(logger.messages)
+        self.assertNotIn(sentinel, "\n".join(logger.messages))
+
     async def test_send_mcp_message_respects_feature_flag_and_send_errors(self):
         disabled = _Conn(mcp=False)
         failing = _Conn(websocket=_WebSocket(fail=True))
@@ -262,6 +321,21 @@ class DeviceMCPHandlerCallToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct, "raw")
         self.assertEqual(direct_sent[0]["params"]["arguments"], {"c": 3})
         self.assertEqual(direct_sent[0]["params"]["name"], "self.tool")
+
+    async def test_call_mcp_tool_logs_metadata_without_arguments_or_result_content(self):
+        sentinel = "SENTINEL-CALL-SECRET"
+        logger = _CapturingLogger()
+
+        with patch.object(mcp_handler, "logger", logger):
+            result, sent, _ = await self._call_with_result(
+                {"token": sentinel, "content": sentinel},
+                {"content": [{"text": sentinel}]},
+            )
+
+        self.assertEqual(result, sentinel)
+        self.assertEqual(sent[0]["params"]["arguments"]["token"], sentinel)
+        self.assertTrue(logger.messages)
+        self.assertNotIn(sentinel, "\n".join(logger.messages))
 
     async def test_call_mcp_tool_handles_error_results_timeouts_and_send_exceptions(self):
         conn = _Conn()
