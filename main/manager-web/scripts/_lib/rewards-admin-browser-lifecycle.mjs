@@ -137,7 +137,7 @@ export function isExpectedBrowserHttpFailure({ url, status, traceStarted }) {
 export function isUnexpectedBrowserConsole({ type, text }) {
   if (String(text).startsWith('Failed to load resource:')) return false;
   if (type === 'error') return true;
-  return /\b(?:uncaught|unhandled|exception|(?:type|reference|range|syntax)error)\b/i.test(String(text));
+  return /\b(?:uncaught|unhandled|exception|(?:aggregate|eval|range|reference|syntax|type|uri)?error)\b/i.test(String(text));
 }
 
 export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_000 }) {

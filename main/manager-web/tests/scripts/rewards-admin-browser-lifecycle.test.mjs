@@ -276,6 +276,10 @@ test('browser HTTP failure classification allows only pre-auth admin 401s and kn
 
 test('browser console classification catches exception-like log messages regardless of console type', () => {
   assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch TypeError: data.data.map is not a function' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch Error: boom' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch URIError: malformed URI' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch EvalError: bad eval' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch AggregateError: multiple failures' }), true);
   assert.equal(isUnexpectedBrowserConsole({ type: 'warning', text: 'Unhandled promise rejection' }), true);
   assert.equal(isUnexpectedBrowserConsole({ type: 'error', text: 'unexpected failure' }), true);
   assert.equal(isUnexpectedBrowserConsole({ type: 'error', text: 'Failed to load resource: 404' }), false);
