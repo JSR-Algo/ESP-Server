@@ -24,6 +24,7 @@ import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from core.lesson.errors import (
     LessonError,
@@ -2297,13 +2298,48 @@ class LessonRuntime:
         if self._use_sd_asset_pack():
             pack = getattr(self.asset_cache, "asset_pack_manifest", None)
             if callable(pack):
-                body["assetPack"] = pack(
-                    assignment_version=self.assignment_version,
-                    lesson_id=self.lesson_id,
-                    lesson_version=self.lesson_version,
-                    manifest_checksum=self.manifest_checksum,
+                body["assetPack"] = self._prepare_asset_pack_payload(
+                    pack(
+                        assignment_version=self.assignment_version,
+                        lesson_id=self.lesson_id,
+                        lesson_version=self.lesson_version,
+                        manifest_checksum=self.manifest_checksum,
+                    )
                 )
         return body
+
+    @staticmethod
+    def _prepare_asset_pack_payload(pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only fields consumed by firmware's prepare-time SD attestation."""
+        top_level_keys = (
+            "assignmentVersion",
+            "lessonId",
+            "lessonVersion",
+            "manifestChecksum",
+            "cacheKey",
+            "localRoot",
+            "ready",
+        )
+        payload = {key: pack[key] for key in top_level_keys if key in pack}
+        asset_keys = ("key", "state", "checksumOk", "size")
+        local_root = str(pack.get("localRoot") or "").rstrip("/")
+        payload_assets = []
+        for asset in pack.get("assets", []):
+            if not isinstance(asset, dict):
+                continue
+            compact = {key: asset[key] for key in asset_keys if key in asset}
+            key = asset.get("key")
+            local_path = asset.get("localPath")
+            derived_path = (
+                f"{local_root}/{quote(key, safe='')}"
+                if local_root and isinstance(key, str) and key
+                else None
+            )
+            if isinstance(local_path, str) and local_path and local_path != derived_path:
+                compact["localPath"] = local_path
+            payload_assets.append(compact)
+        payload["assets"] = payload_assets
+        return payload
 
     def _critical_assets_payload(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -2490,8 +2526,23 @@ class LessonRuntime:
             features = getattr(self.conn, "features", {}) or {}
             return not bool(features.get("mcp"))
         is_ready = getattr(mcp_client, "is_ready", None)
-        if callable(is_ready) and not await is_ready():
-            return False
+        if callable(is_ready):
+            lesson_cfg = _lesson_config(getattr(self.conn, "config", {}) or {})
+            ready_timeout = _finite_float_or_default(
+                lesson_cfg.get("sd_sync_ready_timeout_sec", 8.0), 8.0
+            )
+            ready_poll = max(
+                0.001,
+                _finite_float_or_default(
+                    lesson_cfg.get("sd_sync_ready_poll_sec", 0.05), 0.05
+                ),
+            )
+            deadline = time.monotonic() + max(0.0, ready_timeout)
+            while not await is_ready():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                await asyncio.sleep(min(ready_poll, remaining))
         pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
         if not callable(pack_builder):
             return False
@@ -2503,29 +2554,58 @@ class LessonRuntime:
         )
         if not isinstance(pack, dict) or not pack.get("assets"):
             return False
-        try:
+
+        async def call_sync_once() -> Any:
             has_tool = getattr(mcp_client, "has_tool", None)
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
-                result = await call_mcp_tool(
+                return await call_mcp_tool(
                     self.conn,
                     mcp_client,
                     SD_ASSET_SYNC_TOOL,
                     {"assetPack": pack},
                     timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
                 )
-            else:
-                from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+            from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
-                result = await _call_raw_mcp_tool(
-                    self.conn,
-                    mcp_client,
-                    "self.lesson_assets.sync_to_sd",
-                    {"assetPack": pack},
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
-                )
+            return await _call_raw_mcp_tool(
+                self.conn,
+                mcp_client,
+                "self.lesson_assets.sync_to_sd",
+                {"assetPack": pack},
+                timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+            )
+
+        async def call_sync() -> Any:
+            busy_check = getattr(self.conn, "is_realtime_busy", None)
+            if not callable(busy_check):
+                return await call_sync_once()
+            poll = 0.05
+            while busy_check():
+                await asyncio.sleep(poll)
+            return await call_sync_once()
+
+        try:
+            result = await call_sync()
         except Exception as exc:
-            self._log("warning", f"robot SD sync failed: {type(exc).__name__}")
-            return False
+            reset = getattr(self.conn, "request_lesson_preload_reset", None)
+            if "MCP tools disabled during lesson" not in str(exc) or not callable(reset):
+                self._log("warning", f"robot SD sync failed: {type(exc).__name__}")
+                return False
+            try:
+                recovered = await reset(
+                    assignment_id=self.assignment_id,
+                    lesson_id=self.lesson_id,
+                    profile=self.profile,
+                )
+                if not recovered:
+                    return False
+                result = await call_sync()
+            except Exception as retry_exc:
+                self._log(
+                    "warning",
+                    f"robot SD sync recovery failed: {type(retry_exc).__name__}",
+                )
+                return False
         return self._sd_asset_sync_result_ready(result)
 
     def _sd_asset_sync_result_ready(self, result: Any) -> bool:
@@ -2651,7 +2731,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         _log("info", "lesson pull-on-connect skipped: no api_base or device_id")
         return None
 
-    token = lesson_cfg.get("device_token")  # D-RUNTOKEN: optional, ops/backend follow-up.
+    token = lesson_cfg.get("device_token")
 
     try:
         import httpx
@@ -2686,10 +2766,24 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         limits=httpx.Limits(max_keepalive_connections=0),
         follow_redirects=True,
     ) as client:
-        # Use the WebSocket device identity directly. The robot voice path must not
-        # depend on dynamic DeviceToken minting; unclaimed devices can make the
-        # backend pull fail without blocking the realtime connection.
-        backend_device_id = device_id
+        try:
+            from config.device_token_client import resolve_device_identity
+
+            backend_device_id, minted_token = await resolve_device_identity(
+                client, base_url, device_id, logger=logger
+            )
+        except Exception as exc:  # pragma: no cover - client is fail-soft by contract
+            _backend_unavailable("identity", exc)
+            return None
+        if not backend_device_id or not minted_token:
+            _set_lesson_start_status(
+                conn,
+                "BACKEND_UNAVAILABLE",
+                "Robot chưa kết nối được máy chủ bài học. Con thử lại sau nhé.",
+            )
+            _log("warning", "lesson backend identity unavailable")
+            return None
+        token = minted_token
         # Best-effort: address the child by name in plain CONVERSATION. The name
         # the parent sets in the mobile app lives in the backend child profile, NOT
         # the esp manager-api ``ai_device.child_name`` the agent-models config
@@ -3069,15 +3163,15 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
     conn.lesson_runtime_candidate = runtime
     try:
-        enter_lesson = getattr(conn, "enter_lesson_mode", None)
-        if callable(enter_lesson):
-            await enter_lesson(reason="lesson_start")
         preload_only = getattr(runtime, "preload_only", None)
         start_protocol = getattr(runtime, "start_protocol", None)
         split_start = callable(preload_only) and callable(start_protocol)
         if split_start:
             preloaded = await preload_only()
         else:  # Compatibility for injected/legacy runtime implementations.
+            enter_lesson = getattr(conn, "enter_lesson_mode", None)
+            if callable(enter_lesson):
+                await enter_lesson(reason="lesson_start")
             conn.lesson_runtime = runtime
             conn.lesson_runtime_candidate = None
             await runtime.start()
@@ -3104,6 +3198,9 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 await runtime.close()
                 return republish_previous
         if split_start:
+            enter_lesson = getattr(conn, "enter_lesson_mode", None)
+            if callable(enter_lesson):
+                await enter_lesson(reason="lesson_start")
             conn.lesson_runtime = runtime
             conn.lesson_runtime_candidate = None
             await start_protocol(preloaded=True)
@@ -3121,9 +3218,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     except LessonError as err:
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson start refused: {err.code}")
-        release_lesson = getattr(conn, "release_lesson_mode", None)
-        if callable(release_lesson):
-            await release_lesson(reason="lesson_start_refused")
+        if republish_previous is None:
+            release_lesson = getattr(conn, "release_lesson_mode", None)
+            if callable(release_lesson):
+                await release_lesson(reason="lesson_start_refused")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
         if getattr(conn, "lesson_runtime", None) is runtime:
@@ -3140,6 +3238,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     except Exception as exc:  # noqa: BLE001 - candidate failure must preserve active runtime
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson candidate crashed: {type(exc).__name__}")
+        if republish_previous is None:
+            release_lesson = getattr(conn, "release_lesson_mode", None)
+            if callable(release_lesson):
+                await release_lesson(reason="lesson_start_failed")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
         if getattr(conn, "lesson_runtime", None) is runtime:

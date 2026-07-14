@@ -611,27 +611,24 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pack["ready"])
         self.assertEqual(pack["cacheKey"], "sample")
         self.assertEqual(pack["localRoot"], "sd://tbot/lesson-assets/sample-barn")
-        pack_assets = {asset["path"]: asset for asset in pack["assets"]}
+        pack_assets = {asset["key"]: asset for asset in pack["assets"]}
         self.assertEqual(
             set(pack_assets),
             {
-                "barn-round-field-poster.jpg",
-                "barn.png",
-                "bright-teach.png",
-                "bright-listening.png",
-                "bright-thinking.png",
-                "bright-celebrate.png",
+                "backgroundScene.poster",
+                "teachingObject.sample",
+                "robotOverlay.teaching",
+                "robotOverlay.listening",
+                "robotOverlay.thinking",
+                "robotOverlay.celebrating",
             },
         )
         self.assertEqual(
-            pack_assets["barn-round-field-poster.jpg"]["localPath"],
+            pack_assets["backgroundScene.poster"]["localPath"],
             "sd://tbot/lesson-assets/sample-barn/barn-round-field-poster.jpg",
         )
-        self.assertEqual(
-            pack_assets["barn-round-field-poster.jpg"]["url"],
-            "https://esp.example/sample/assets/background/barn-round-field-poster.jpg",
-        )
-        self.assertTrue(all(asset.get("url") for asset in pack_assets.values()))
+        self.assertTrue(all(asset.get("localPath") for asset in pack_assets.values()))
+        self.assertTrue(all("url" not in asset for asset in pack_assets.values()))
 
         await runtime.on_lesson_ack(
             {

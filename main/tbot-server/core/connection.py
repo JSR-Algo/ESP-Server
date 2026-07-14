@@ -11,6 +11,7 @@ import threading
 import traceback
 import subprocess
 from contextlib import suppress
+from datetime import datetime, timezone
 import websockets
 
 from core.utils.util import (
@@ -183,6 +184,7 @@ class ConnectionHandler:
         self.google_live_audio_out_started_at = None
         self.google_live_turn_started_at = None
         self.voice_metric_samples = deque(maxlen=100)
+        self._lesson_asset_audio_inflight = 0
 
         # Thread task related
         self.loop = None  # in handle_connection Get running fromEventLoop
@@ -223,6 +225,7 @@ class ConnectionHandler:
         # Holds the per-device lesson session state when a lesson is in flight.
         self.lesson_runtime = None
         self.lesson_pull_task = None
+        self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
         # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
@@ -507,6 +510,15 @@ class ConnectionHandler:
             self.asr_audio_queue.put(message)
 
     async def _route_audio_message(self, message: bytes) -> bool:
+        self._lesson_asset_audio_inflight += 1
+        try:
+            return await self._route_audio_message_impl(message)
+        finally:
+            self._lesson_asset_audio_inflight = max(
+                0, self._lesson_asset_audio_inflight - 1
+            )
+
+    async def _route_audio_message_impl(self, message: bytes) -> bool:
         """Route one inbound audio frame through the single audio-channel owner.
 
         `LESSON` owns the channel exclusively, so Live/classic voice does not see
@@ -624,6 +636,62 @@ class ConnectionHandler:
         # reconnect flicker just as the device starts rendering the lesson.
         await self._persist_live_resumption_handle()
         self._set_session_mode(SessionMode.LESSON, reason=reason)
+
+    async def request_lesson_preload_reset(
+        self, *, assignment_id: str, lesson_id: str, profile: str
+    ) -> bool:
+        """Quiesce a stale firmware lesson before retrying the internal SD sync."""
+        ws = self.websocket
+        if ws is None:
+            return False
+        session_id = f"preload-reset-{uuid.uuid4()}"
+        future = asyncio.get_running_loop().create_future()
+        self._lesson_preload_reset_waiter = {
+            "sessionId": session_id,
+            "future": future,
+        }
+        frame = {
+            "protocolVersion": "teebot-lesson-renderer.v1",
+            "type": "lesson_prepare",
+            "assignmentId": assignment_id,
+            "lessonId": lesson_id,
+            "sessionId": session_id,
+            "sequence": 1,
+            "stepId": None,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "body": {
+                "assignmentVersion": 0,
+                "profile": profile,
+                "preloadResetOnly": True,
+            },
+        }
+        lesson_cfg = self.config.get("lesson", {}) if isinstance(self.config, dict) else {}
+        timeout = lesson_cfg.get("sd_sync_reset_timeout_sec", 3.0) if isinstance(lesson_cfg, dict) else 3.0
+        try:
+            await ws.send(json.dumps(frame, ensure_ascii=False))
+            return bool(await asyncio.wait_for(future, timeout=max(0.1, float(timeout))))
+        except (asyncio.TimeoutError, TypeError, ValueError):
+            return False
+        finally:
+            if self._lesson_preload_reset_waiter is not None and self._lesson_preload_reset_waiter.get(
+                "sessionId"
+            ) == session_id:
+                self._lesson_preload_reset_waiter = None
+
+    def _accept_lesson_preload_reset_ack(self, msg_json: Dict[str, Any]) -> bool:
+        waiter = self._lesson_preload_reset_waiter
+        if not isinstance(waiter, dict) or msg_json.get("type") != "lesson_ack":
+            return False
+        if msg_json.get("sessionId") != waiter.get("sessionId"):
+            return False
+        body = msg_json.get("body") or {}
+        if body.get("acks") != 1:
+            return False
+        future = waiter.get("future")
+        if future is None or future.done():
+            return False
+        future.set_result(True)
+        return True
 
     async def release_lesson_mode(self, *, reason: str = "lesson_terminal") -> None:
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
@@ -2150,9 +2218,10 @@ class ConnectionHandler:
         """Realtime guard source (plan §6.2.6): the voice path always wins, so lesson
         asset downloads PAUSE during any voice turn.
 
-        Exhaustive-by-default: ANY non-IDLE interaction state pauses (incl.
+        Passive LISTENING is download-safe; the transient voice flags below still
+        pause immediately when audio starts. Active interaction states such as
         WAITING_MODEL / MUSIC_PLAYING / INTERRUPTING / RECONNECTING / FALLBACK /
-        MUTED). Plus two provider-independent fallback signals that also cover the
+        MUTED pause downloads. Plus two provider-independent fallback signals that cover the
         classic pipeline (which has no interaction controller):
         - ``client_is_speaking`` — the robot is mid-TTS playback (output turn).
         - ``client_have_voice``  — VAD currently hears the child (input turn).
@@ -2168,8 +2237,10 @@ class ConnectionHandler:
             return True
         if getattr(self, "client_have_voice", False):
             return True
+        if getattr(self, "_lesson_asset_audio_inflight", 0) > 0:
+            return True
         state = self._realtime_interaction_state()
-        if state is not None and state != "IDLE":
+        if state is not None and state not in ("IDLE", "LISTENING"):
             return True
         return False
 

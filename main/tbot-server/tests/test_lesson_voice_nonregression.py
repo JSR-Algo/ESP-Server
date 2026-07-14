@@ -10,8 +10,8 @@ fall through ConnectionHandler._route_message to the classic text handler
   * the Google-Live native route,
   * the Google-Live route with an active classic fallback provider,
 
-and that the realtime busy-guard pauses lesson asset work for every non-IDLE
-interaction state, plus that the lesson registry mapping / handler dispatch is
+and that the realtime busy-guard pauses lesson asset work for active interaction
+states while passive LISTENING remains preload-safe, plus that registry dispatch is
 wired to TextMessageType.LESSON_*.
 
 Importing ``test_connection_voice_provider_routing`` installs the sys.modules
@@ -326,14 +326,14 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(recorded, list(LESSON_JSONS))
 
-    # ---- Realtime guard: pauses for every non-IDLE state ----------------
-    async def test_is_realtime_busy_pauses_for_every_non_idle_state(self):
+    # ---- Realtime guard: passive listening leaves preload runnable -------
+    async def test_is_realtime_busy_allows_idle_and_passive_listening_states(self):
         handler = _build_handler()
         handler.client_is_speaking = False
 
         for member in InteractionState:
             handler.voice_provider = _FakeStateProvider(member)
-            expected = member is not InteractionState.IDLE
+            expected = member not in (InteractionState.IDLE, InteractionState.LISTENING)
             self.assertEqual(
                 handler.is_realtime_busy(),
                 expected,

@@ -1887,7 +1887,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 pack["assets"] = [
                     {
-                        "key": f"teachingObject.extra{i}",
+                        "key": f"teachingObject.{'extra' * 50}{i}",
                         "path": f"objects/extra-{i}.png",
                         "sha256": "a" * 64,
                         "mediaType": "image/png",
@@ -2289,9 +2289,11 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             set(pack_assets),
             {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
         )
-        self.assertEqual(pack_assets["backgroundScene.poster"]["localPath"], local_urls[poster_source])
-        self.assertEqual(pack_assets["teachingObject.barn"]["localPath"], local_urls[object_source])
-        self.assertEqual(pack_assets["robotOverlay.teach"]["localPath"], local_urls[overlay_source])
+        self.assertNotIn("localPath", pack_assets["backgroundScene.poster"])
+        self.assertEqual(
+            prepare["body"]["assetPack"]["localRoot"],
+            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12",
+        )
 
         await rt.on_lesson_ack(
             _ack(
@@ -2328,6 +2330,101 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await rt.on_lesson_ack(_ack(4, 5))
         self.assertEqual(rt.state, "COMPLETED")
+
+    async def test_sd_asset_pack_prepare_compacts_verbose_live_pack_under_frame_limit(self):
+        class _VerboseLiveAssetPackCache(_FakeAssetCache):
+            def asset_pack_manifest(
+                self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
+            ):
+                pack = super().asset_pack_manifest(
+                    assignment_version=assignment_version,
+                    lesson_id=lesson_id,
+                    lesson_version=lesson_version,
+                    manifest_checksum=manifest_checksum,
+                )
+                pack["assets"] = [
+                    {
+                        "key": f"robotOverlay.lesson-asset-{index:02d}@v1",
+                        "path": f"lesson-assets/{'a' * 64}",
+                        "url": (
+                            "http://192.168.1.25:8180/lesson-assets/"
+                            + ("b" * 64)
+                            + f"?asset={index}"
+                        ),
+                        "sha256": "c" * 64,
+                        "sourceSha256": "d" * 64,
+                        "size": 1024 + index,
+                        "mediaType": "image/png",
+                        "critical": index < 8,
+                        "layer": "robotOverlay",
+                        "role": "pose",
+                        "state": "READY",
+                        "checksumOk": True,
+                        "localPath": (
+                            "sd://tbot/lesson-assets/pip-farm-3m/"
+                            "v1-521760af6bb2cecd244932cab52c3ca5badeaf3d67561da1e4323af3cb404a28/"
+                            f"robotOverlay.lesson-asset-{index:02d}%40v1"
+                        ),
+                    }
+                    for index in range(20)
+                ]
+                return pack
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        rt = self._runtime(conn=conn, asset_cache=_VerboseLiveAssetPackCache(ready=True))
+
+        async def sync_ready(*_args, **_kwargs):
+            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
+            await rt.start()
+
+        sent = self._sent_frames(conn)
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])
+        self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
+        self.assertEqual(
+            set(sent[0]["body"]["assetPack"]["assets"][0]),
+            {"key", "state", "checksumOk", "localPath", "size"},
+        )
+
+    async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):
+        class _MaximumAssetPackCache(_FakeAssetCache):
+            def asset_pack_manifest(
+                self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
+            ):
+                pack = super().asset_pack_manifest(
+                    assignment_version=assignment_version,
+                    lesson_id=lesson_id,
+                    lesson_version=lesson_version,
+                    manifest_checksum=manifest_checksum,
+                )
+                pack["assets"] = [
+                    {
+                        "key": f"asset-{index:02d}-" + ("k" * 48),
+                        "size": 1024,
+                        "state": "READY",
+                        "checksumOk": True,
+                        "localPath": f"{pack['localRoot']}/asset-{index:02d}-" + ("k" * 48),
+                    }
+                    for index in range(64)
+                ]
+                return pack
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        rt = self._runtime(conn=conn, asset_cache=_MaximumAssetPackCache(ready=True))
+
+        async def sync_ready(*_args, **_kwargs):
+            return {"ready": True, "downloadedCount": 64, "failedCount": 0}
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
+            await rt.start()
+
+        self.assertEqual([frame["type"] for frame in self._sent_frames(conn)], ["lesson_prepare"])
+        self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
 
     async def test_sd_asset_pack_rewrites_all_layer_image_sources_to_local_paths(self):
         manifest = _build_manifest()
@@ -2460,6 +2557,96 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
 
+    async def test_sd_asset_pack_waits_for_mcp_discovery_before_prepare(self):
+        class _EventuallyReadyMcpClient(_ReadyLessonAssetMcpClient):
+            def __init__(self):
+                super().__init__()
+                self.ready_checks = 0
+
+            async def is_ready(self):
+                self.ready_checks += 1
+                return self.ready_checks >= 2
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "sd_sync_ready_timeout_sec": 1,
+                "sd_sync_ready_poll_sec": 0.001,
+            }
+        }
+        conn.mcp_client = _EventuallyReadyMcpClient()
+        calls = []
+
+        async def capture_call(*args, **kwargs):
+            calls.append((args, kwargs, list(conn.websocket.sent)))
+            return {"ready": True, "downloadedCount": 3, "failedCount": 0}
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+            await rt.start()
+
+        self.assertGreaterEqual(conn.mcp_client.ready_checks, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], [])
+        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_recovers_stale_firmware_lesson_before_retrying_sync(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        resets = []
+        sync_calls = []
+
+        async def request_lesson_preload_reset(**kwargs):
+            resets.append(kwargs)
+            return True
+
+        async def sync_after_reset(*args, **kwargs):
+            sync_calls.append((args, kwargs))
+            if len(sync_calls) == 1:
+                raise RuntimeError("MCP tools disabled during lesson")
+            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_after_reset):
+            await rt.start()
+
+        self.assertEqual(len(resets), 1)
+        self.assertEqual(resets[0]["assignment_id"], rt.assignment_id)
+        self.assertEqual(resets[0]["lesson_id"], rt.lesson_id)
+        self.assertEqual(len(sync_calls), 2)
+        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_sync_waits_for_voice_idle_before_starting(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        busy = True
+        attempts = 0
+
+        def is_realtime_busy():
+            return busy
+
+        async def voice_preemptible_sync(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {"ready": True, "downloadedCount": 20, "failedCount": 0}
+
+        conn.is_realtime_busy = is_realtime_busy
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=voice_preemptible_sync):
+            sync_task = asyncio.create_task(rt._sync_sd_asset_pack_to_robot())
+            await asyncio.sleep(0.08)
+            self.assertEqual(attempts, 0)
+            busy = False
+            self.assertTrue(await asyncio.wait_for(sync_task, timeout=1))
+
+        self.assertEqual(attempts, 1)
+
     async def test_sd_asset_pack_raw_syncs_unlisted_internal_robot_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
@@ -2543,7 +2730,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     features=features,
                     session_id=FIX["frames"]["lesson_prepare"]["sessionId"],
                 )
-                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.config = {
+                    "lesson": {
+                        "asset_delivery_mode": "sd_pack",
+                        "sd_sync_ready_timeout_sec": 0,
+                    }
+                }
                 conn.mcp_client = mcp_client
                 rt = self._runtime(
                     conn=conn,
@@ -5837,7 +6029,7 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
-    async def test_assignment_pull_uses_device_id_without_minting_device_token(self):
+    async def test_assignment_pull_mints_backend_identity_and_threads_device_token(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
         import config.device_token_client as dtc
@@ -5846,8 +6038,9 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         conn.device_id = "AA:BB:CC:DD:EE:FF"
         assignment_calls = []
 
-        async def _resolve_device_identity(*args, **kwargs):
-            raise AssertionError("lesson pull must not mint a device token")
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            self.assertEqual(device_id, "AA:BB:CC:DD:EE:FF")
+            return "backend-device-uuid", "device-token"
 
         async def _get_child_name(client, base_url, device_id, *, token=None):
             return None
@@ -5866,7 +6059,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             renderer_capabilities=None,
             lesson_version=None,
         ):
-            self.assertIsNone(token)
+            self.assertEqual(token, "device-token")
             return _build_manifest(), f'"lesson-3-espTft-{_manifest_checksum()}"'
 
         saved = (
@@ -5890,7 +6083,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             ) = saved
 
         self.assertIsNotNone(result)
-        self.assertEqual(assignment_calls, [("AA:BB:CC:DD:EE:FF", None)])
+        self.assertEqual(assignment_calls, [("backend-device-uuid", "device-token")])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
 
     async def test_no_current_assignment_sets_user_visible_start_status(self):
@@ -6096,7 +6289,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent, [])
         self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("lesson backend assignment unavailable" in message for _level, message in events),
+            any("lesson backend identity unavailable" in message for _level, message in events),
             events,
         )
 
@@ -6133,7 +6326,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent, [])
         self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("lesson backend assignment unavailable" in message for _level, message in events),
+            any("lesson backend identity unavailable" in message for _level, message in events),
             events,
         )
 
@@ -6501,6 +6694,110 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prior.closed)
         self.assertEqual(entered, ["lesson_start"])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+
+    async def test_connect_preload_keeps_conversation_mode_until_assets_are_ready(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "CONVERSATION"
+        entered = []
+        modes_seen_during_preload = []
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn.session_mode = "LESSON"
+
+        async def blocked_preload(_runtime):
+            modes_seen_during_preload.append(conn.session_mode)
+            return False
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(runtime_module.LessonRuntime, "preload_only", new=blocked_preload):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(modes_seen_during_preload, ["CONVERSATION"])
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.lesson_start_status["code"], "START_REFUSED")
+
+    async def test_start_protocol_crash_releases_lesson_mode_when_no_prior_runtime(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        entered = []
+        released = []
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def crash_start_protocol(_runtime, *, preloaded=False):
+            self.assertTrue(preloaded)
+            raise RuntimeError("prepare send crashed")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=crash_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, ["lesson_start_failed"])
+        self.assertIsNone(conn.lesson_runtime)
+
+    async def test_candidate_lesson_error_keeps_prior_runtime_in_lesson_mode(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        released = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def reject_preload(_runtime):
+            raise LessonError("ASSET_CHECKSUM_MISMATCH", "bad candidate")
+
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(runtime_module.LessonRuntime, "preload_only", new=reject_preload):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, prior)
+        self.assertIs(conn.lesson_runtime, prior)
+        self.assertEqual(released, [])
+        self.assertFalse(prior.closed)
 
     async def test_start_refused_releases_lesson_mode_and_surfaces_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -7041,12 +7338,17 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pull_uses_server_api_url_fallback_and_fetches_esptft_manifest(self):
         import config.manage_api_client as mac
+        import config.device_token_client as dtc
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         conn = _RepublishConn(api_base=None)
         conn.config["lesson"].pop("api_base", None)
         conn.config["server"] = {"api_url": "http://course-backend.test/v1"}
         calls = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            calls.append(("identity", base_url, device_id))
+            return "backend-device-uuid", "device-token"
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
             calls.append(("assignment", base_url, device_id, token))
@@ -7065,17 +7367,18 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             calls.append(("manifest", base_url, lesson_id, profile, token, lesson_version))
             return _build_manifest(), '"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'
 
-        saved = (mac.get_current_assignment, mac.get_lesson_manifest)
+        saved = (mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity)
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
+        dtc.resolve_device_identity = _resolve_device_identity
         try:
             result = await maybe_start_lesson_on_connect(conn)
         finally:
-            mac.get_current_assignment, mac.get_lesson_manifest = saved
+            mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity = saved
 
         self.assertIsNotNone(result)
         self.assertIn(
-            ("assignment", "http://course-backend.test/v1", "dev-republish", None),
+            ("assignment", "http://course-backend.test/v1", "backend-device-uuid", "device-token"),
             calls,
         )
         self.assertIn(
@@ -7084,7 +7387,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 "http://course-backend.test/v1",
                 FIX["frames"]["lesson_prepare"]["lessonId"],
                 "espTft",
-                None,
+                "device-token",
                 3,
             ),
             calls,

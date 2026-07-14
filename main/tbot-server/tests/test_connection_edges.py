@@ -1477,10 +1477,64 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handler.is_realtime_busy())
         handler.voice_provider._interaction.state = types.SimpleNamespace(value="IDLE")
         self.assertFalse(handler.is_realtime_busy())
+        handler.voice_provider._interaction.state = types.SimpleNamespace(value="LISTENING")
+        self.assertFalse(handler.is_realtime_busy())
         handler.voice_provider = types.SimpleNamespace(
             _fallback_provider=types.SimpleNamespace(_interaction=types.SimpleNamespace(state="MUSIC_PLAYING"))
         )
         self.assertTrue(handler.is_realtime_busy())
+
+    async def test_realtime_busy_covers_audio_decode_while_state_is_listening(self):
+        handler = _build_handler()
+        handler.session_mode = connection_module.SessionMode.CONVERSATION
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle_audio_bytes(_audio):
+            started.set()
+            await release.wait()
+            return True
+
+        handler.voice_provider = types.SimpleNamespace(
+            _interaction=types.SimpleNamespace(state=types.SimpleNamespace(value="LISTENING")),
+            handle_audio_bytes=handle_audio_bytes,
+        )
+
+        route_task = asyncio.create_task(handler._route_audio_message(b"opus-frame"))
+        await started.wait()
+        self.assertTrue(handler.is_realtime_busy())
+        release.set()
+        self.assertTrue(await route_task)
+        self.assertFalse(handler.is_realtime_busy())
+
+    async def test_lesson_preload_reset_waits_for_matching_firmware_ack(self):
+        handler = _build_handler()
+        handler.websocket = _SendWebSocket()
+        handler.device_id = "AA:BB:CC:DD:EE:FF"
+
+        reset_task = asyncio.create_task(
+            handler.request_lesson_preload_reset(
+                assignment_id="assignment-1",
+                lesson_id="lesson-1",
+                profile="espTft",
+            )
+        )
+        while not handler.websocket.sent:
+            await asyncio.sleep(0)
+
+        frame = handler.websocket.sent[0]
+        self.assertEqual(frame["type"], "lesson_prepare")
+        self.assertTrue(frame["body"]["preloadResetOnly"])
+        self.assertTrue(
+            handler._accept_lesson_preload_reset_ack(
+                {
+                    "type": "lesson_ack",
+                    "sessionId": frame["sessionId"],
+                    "body": {"acks": 1},
+                }
+            )
+        )
+        self.assertTrue(await reset_task)
 
     async def test_lesson_pull_on_connect_swallows_runtime_import_or_start_failures(self):
         handler = _build_handler()
