@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -15,6 +16,7 @@ import {
   computeTotp,
   createProcessLifecycle,
   executeWithArtifactFinalization,
+  executeWithSignalFinalization,
   extractListeningPort,
   finalizeArtifactPrivacy,
   findFreePort,
@@ -52,6 +54,74 @@ async function waitForProcessExit(pid, timeoutMs = 2_000) {
     await sleep(20);
   }
   assert.fail(`process ${pid} survived cleanup`);
+}
+
+async function waitForPath(path, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await pathExists(path)) return;
+    await sleep(20);
+  }
+  assert.fail(`path ${path} was not created`);
+}
+
+async function runSignalFixture({ signal, repeated = false, privacyFailure = false }) {
+  const directory = await mkdtemp(resolve(tmpdir(), 'rewards-admin-signal-'));
+  const fixture = resolve(import.meta.dirname, 'fixtures/rewards-admin-signal-fixture.mjs');
+  const ready = resolve(directory, 'ready');
+  const finalized = resolve(directory, 'finalized');
+  const servicePidFile = resolve(directory, 'service.pid');
+  const child = spawn(process.execPath, [fixture, directory], {
+    env: { ...process.env, SIGNAL_FIXTURE_PRIVACY_FAILURE: privacyFailure ? '1' : '' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exitPromise = new Promise((resolveExit, reject) => {
+    child.once('error', reject);
+    child.once('exit', (exitCode, receivedSignal) => resolveExit([exitCode, receivedSignal]));
+  });
+  const boundedExit = async () => {
+    let timer;
+    try {
+      return await Promise.race([
+        exitPromise,
+        new Promise((resolveTimeout, reject) => {
+          timer = setTimeout(() => reject(new Error('signal fixture did not exit within 5 seconds')), 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  try {
+    await waitForPath(ready);
+    child.kill(signal);
+    if (repeated) {
+      await sleep(30);
+      child.kill(signal);
+    }
+    const [code, exitSignal] = await boundedExit();
+    const servicePid = Number(await readFile(servicePidFile, 'utf8'));
+    await waitForProcessExit(servicePid);
+    return { code, directory, exitSignal, finalized, stderr };
+  } catch (error) {
+    child.kill('SIGKILL');
+    await Promise.race([exitPromise, sleep(1_000)]);
+    if (await pathExists(servicePidFile)) {
+      const servicePid = Number(await readFile(servicePidFile, 'utf8'));
+      try {
+        process.kill(process.platform === 'win32' ? servicePid : -servicePid, 'SIGKILL');
+      } catch (killError) {
+        if (killError?.code !== 'ESRCH') throw killError;
+      }
+      await waitForProcessExit(servicePid);
+    }
+    await rm(directory, { recursive: true, force: true });
+    throw new Error(`${error.message}\nFixture stderr:\n${stderr}`);
+  }
 }
 
 test('browser environment removes every shared Nest admin-token fallback', () => {
@@ -414,4 +484,78 @@ test('privacy scanner failure removes deliverables and reports original plus pri
     },
   );
   assert.equal(await pathExists(directory), false);
+});
+
+test('SIGTERM after raw trace and screenshot unwinds through privacy finalization before exit 143', async () => {
+  const result = await runSignalFixture({ signal: 'SIGTERM' });
+  try {
+    assert.equal(result.code, 143);
+    assert.equal(result.exitSignal, null);
+    assert.equal(await pathExists(result.finalized), true);
+    assert.deepEqual(await readdir(resolve(result.directory, 'artifacts')), ['summary.json']);
+    assert.equal(await pathExists(resolve(result.directory, 'raw')), false);
+    assert.doesNotMatch(result.stderr, /fixture-secret/);
+  } finally {
+    await rm(result.directory, { recursive: true, force: true });
+  }
+});
+
+test('SIGINT privacy failure fails closed but preserves signal exit 130 after finalization', async () => {
+  const result = await runSignalFixture({ signal: 'SIGINT', privacyFailure: true });
+  try {
+    assert.equal(result.code, 130);
+    assert.equal(result.exitSignal, null);
+    assert.equal(await pathExists(result.finalized), true);
+    assert.equal(await pathExists(resolve(result.directory, 'artifacts')), false);
+    assert.equal(await pathExists(resolve(result.directory, 'raw')), false);
+    assert.doesNotMatch(result.stderr, /fixture-secret/);
+  } finally {
+    await rm(result.directory, { recursive: true, force: true });
+  }
+});
+
+test('repeated SIGTERM escalates child termination without bypassing artifact cleanup', async () => {
+  const result = await runSignalFixture({ signal: 'SIGTERM', repeated: true });
+  try {
+    assert.equal(result.code, 143);
+    assert.equal(result.exitSignal, null);
+    assert.equal(await pathExists(result.finalized), true);
+    assert.deepEqual(await readdir(resolve(result.directory, 'artifacts')), ['summary.json']);
+    assert.equal(await pathExists(resolve(result.directory, 'raw')), false);
+    assert.doesNotMatch(result.stderr, /fixture-secret/);
+  } finally {
+    await rm(result.directory, { recursive: true, force: true });
+  }
+});
+
+test('signal during artifact finalization completes privacy cleanup before setting exit code', async () => {
+  const processTarget = new EventEmitter();
+  processTarget.exitCode = 0;
+  let aborted = 0;
+  let cleaned = 0;
+  let finalized = 0;
+  let rawCleaned = 0;
+
+  const outcome = await executeWithSignalFinalization({
+    processTarget,
+    runWorkflow: async () => 'complete',
+    finalizeArtifacts: async () => {
+      processTarget.emit('SIGTERM');
+      await sleep(20);
+      finalized += 1;
+    },
+    abortWorkflow: async () => { aborted += 1; },
+    escalateAbort: async () => undefined,
+    cleanup: async () => { cleaned += 1; },
+    cleanupRawArtifacts: async () => { rawCleaned += 1; },
+  });
+
+  assert.equal(outcome.error, undefined);
+  assert.equal(outcome.interrupted, true);
+  assert.equal(outcome.signal, 'SIGTERM');
+  assert.equal(processTarget.exitCode, 143);
+  assert.equal(aborted, 1);
+  assert.equal(finalized, 1);
+  assert.equal(cleaned, 1);
+  assert.equal(rawCleaned, 1);
 });

@@ -7,7 +7,7 @@ import {
   buildBackendEnvironment,
   computeTotp,
   createProcessLifecycle,
-  executeWithArtifactFinalization,
+  executeWithSignalFinalization,
   extractListeningPort,
   finalizeArtifactPrivacy,
   findFreePort,
@@ -215,85 +215,74 @@ function redactText(value) {
   return text;
 }
 
-let handlingSignal = false;
-for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
-  process.on(signal, async () => {
-    if (handlingSignal) return;
-    handlingSignal = true;
-    try {
-      await lifecycle.cleanup();
-    } finally {
-      process.exit(exitCode);
-    }
-  });
-}
-
 const forbiddenArtifactValues = [adminEmail, adminPassword, adminMfaSecret];
 
+const outcome = await executeWithSignalFinalization({
+  processTarget: process,
+  abortWorkflow: (signal) => lifecycle.abort(signal),
+  escalateAbort: () => lifecycle.forceKill(),
+  runWorkflow: async () => {
+    await rm(artifactDir, { recursive: true, force: true });
+    await rm(rawTraceDir, { recursive: true, force: true });
+    await mkdir(rawTraceDir, { recursive: true });
+    await outputCommand('docker', [
+      'run', '--rm', '-d', '--name', containerName,
+      '-e', 'POSTGRES_USER=tbot',
+      '-e', 'POSTGRES_PASSWORD=tbot',
+      '-e', 'POSTGRES_DB=tbot',
+      '-p', '127.0.0.1::5432',
+      postgresImage,
+    ], { timeout: 30_000 });
+    await waitForDatabase();
+    const portOutput = await outputCommand('docker', ['port', containerName, '5432/tcp']);
+    const postgresPort = portOutput.match(/:(\d+)$/)?.[1];
+    if (!postgresPort) throw new Error(`Unable to parse disposable PostgreSQL port: ${portOutput}`);
+    const databaseUrl = `postgresql://tbot:tbot@127.0.0.1:${postgresPort}/tbot`;
+
+    await runCommand('npm', ['run', 'migrate'], {
+      cwd: backendRoot,
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      timeout: 180_000,
+    });
+    await seedAdmin(databaseUrl);
+    await runCommand('npm', ['run', 'build'], { cwd: backendRoot, timeout: 180_000 });
+    const backend = await startBackend(databaseUrl);
+    const managerPort = await findFreePort();
+    await startManager(backend.url, managerPort);
+    browserTotp = computeTotp(adminMfaSecret);
+    forbiddenArtifactValues.push(browserTotp);
+
+    await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.config.js'], {
+      cwd: managerRoot,
+      env: {
+        ...buildBrowserEnvironment({ baseEnv: process.env, backendUrl: backend.url, managerPort }),
+        REWARDS_ADMIN_BASE_URL: `http://127.0.0.1:${managerPort}`,
+        REWARDS_ADMIN_ARTIFACT_DIR: artifactDir,
+        REWARDS_ADMIN_RAW_TRACE_DIR: rawTraceDir,
+        REWARDS_ADMIN_EMAIL: adminEmail,
+        REWARDS_ADMIN_PASSWORD: adminPassword,
+        REWARDS_ADMIN_TOTP: browserTotp,
+        REWARDS_ADMIN_FAILURE_INJECTION: process.env.REWARDS_ADMIN_FAILURE_INJECTION ?? '',
+      },
+      timeout: 240_000,
+    });
+  },
+  finalizeArtifacts: ({ workflowSucceeded }) => finalizeArtifactPrivacy(artifactDir, {
+    workflowSucceeded,
+    scanPrivacy: runPrivacyScan,
+  }),
+  cleanup: () => lifecycle.cleanup(),
+  cleanupRawArtifacts: () => rm(rawTraceDir, { recursive: true, force: true }),
+  forbiddenValues: forbiddenArtifactValues,
+});
+
 try {
-  await executeWithArtifactFinalization({
-    runWorkflow: async () => {
-      await rm(artifactDir, { recursive: true, force: true });
-      await rm(rawTraceDir, { recursive: true, force: true });
-      await mkdir(rawTraceDir, { recursive: true });
-      await outputCommand('docker', [
-        'run', '--rm', '-d', '--name', containerName,
-        '-e', 'POSTGRES_USER=tbot',
-        '-e', 'POSTGRES_PASSWORD=tbot',
-        '-e', 'POSTGRES_DB=tbot',
-        '-p', '127.0.0.1::5432',
-        postgresImage,
-      ], { timeout: 30_000 });
-      await waitForDatabase();
-      const portOutput = await outputCommand('docker', ['port', containerName, '5432/tcp']);
-      const postgresPort = portOutput.match(/:(\d+)$/)?.[1];
-      if (!postgresPort) throw new Error(`Unable to parse disposable PostgreSQL port: ${portOutput}`);
-      const databaseUrl = `postgresql://tbot:tbot@127.0.0.1:${postgresPort}/tbot`;
-
-      await runCommand('npm', ['run', 'migrate'], {
-        cwd: backendRoot,
-        env: { ...process.env, DATABASE_URL: databaseUrl },
-        timeout: 180_000,
-      });
-      await seedAdmin(databaseUrl);
-      await runCommand('npm', ['run', 'build'], { cwd: backendRoot, timeout: 180_000 });
-      const backend = await startBackend(databaseUrl);
-      const managerPort = await findFreePort();
-      await startManager(backend.url, managerPort);
-      browserTotp = computeTotp(adminMfaSecret);
-      forbiddenArtifactValues.push(browserTotp);
-
-      await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.config.js'], {
-        cwd: managerRoot,
-        env: {
-          ...buildBrowserEnvironment({ baseEnv: process.env, backendUrl: backend.url, managerPort }),
-          REWARDS_ADMIN_BASE_URL: `http://127.0.0.1:${managerPort}`,
-          REWARDS_ADMIN_ARTIFACT_DIR: artifactDir,
-          REWARDS_ADMIN_RAW_TRACE_DIR: rawTraceDir,
-          REWARDS_ADMIN_EMAIL: adminEmail,
-          REWARDS_ADMIN_PASSWORD: adminPassword,
-          REWARDS_ADMIN_TOTP: browserTotp,
-          REWARDS_ADMIN_FAILURE_INJECTION: process.env.REWARDS_ADMIN_FAILURE_INJECTION ?? '',
-        },
-        timeout: 240_000,
-      });
-    },
-    finalizeArtifacts: ({ workflowSucceeded }) => finalizeArtifactPrivacy(artifactDir, {
-      workflowSucceeded,
-      scanPrivacy: runPrivacyScan,
-    }),
-    forbiddenValues: forbiddenArtifactValues,
-  });
+  if (outcome.error) throw outcome.error;
   console.info('Authenticated rewards admin browser round-trip passed with sanitized artifacts.');
 } catch (error) {
   for (const [label, logs] of childLogs) {
     if (logs.length) process.stderr.write(`\n${label} log tail:\n${redactText(logs.join(''))}`);
   }
-  throw error;
-} finally {
-  try {
-    await lifecycle.cleanup();
-  } finally {
-    await rm(rawTraceDir, { recursive: true, force: true });
-  }
+  if (!outcome.interrupted) throw error;
+  process.stderr.write(`${redactText(error instanceof Error ? error.message : error)}\n`);
 }

@@ -111,8 +111,10 @@ export function isExpectedBrowserHttpFailure({ url, status, traceStarted }) {
 export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_000 }) {
   const children = new Map();
   let cleanupPromise;
+  let abortSignal;
 
   function spawnTracked(command, args, options = {}) {
+    if (abortSignal) throw new Error(`Workflow aborted by ${abortSignal}`);
     const child = spawn(command, args, {
       ...options,
       detached: process.platform !== 'win32',
@@ -231,7 +233,23 @@ export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_
     return cleanupPromise;
   }
 
-  return { cleanup, runTrackedCommand, spawnTracked, trackedCount: () => children.size };
+  function abort(signal) {
+    abortSignal ??= signal;
+    return cleanup();
+  }
+
+  async function forceKill() {
+    for (const tracked of [...children.values()].reverse()) signalProcessGroup(tracked, 'SIGKILL');
+  }
+
+  return {
+    abort,
+    cleanup,
+    forceKill,
+    runTrackedCommand,
+    spawnTracked,
+    trackedCount: () => children.size,
+  };
 }
 
 async function listFiles(directory, root = directory) {
@@ -347,6 +365,83 @@ export async function executeWithArtifactFinalization({
     throw new Error(messages.join('\n'));
   }
   return result;
+}
+
+function signalExitCode(signal) {
+  return signal === 'SIGINT' ? 130 : 143;
+}
+
+export async function executeWithSignalFinalization({
+  processTarget = process,
+  runWorkflow,
+  finalizeArtifacts,
+  abortWorkflow,
+  escalateAbort,
+  cleanup,
+  cleanupRawArtifacts = async () => undefined,
+  forbiddenValues = [],
+}) {
+  let receivedSignal;
+  let executionError;
+  let result;
+  let rejectAbort;
+  let firstAbortAction;
+  let workflowSettled = false;
+  const signalActions = new Set();
+  const abortPromise = new Promise((resolveAbort, reject) => { rejectAbort = reject; });
+
+  const trackSignalAction = (action) => {
+    const promise = Promise.resolve().then(action);
+    signalActions.add(promise);
+    promise.catch(() => undefined).finally(() => signalActions.delete(promise));
+    return promise;
+  };
+  const handlers = new Map(['SIGINT', 'SIGTERM'].map((signal) => [signal, () => {
+    if (!receivedSignal) {
+      receivedSignal = signal;
+      firstAbortAction = trackSignalAction(() => abortWorkflow?.(signal));
+      if (!workflowSettled) rejectAbort(new Error(`Workflow interrupted by ${signal}`));
+      return;
+    }
+    trackSignalAction(() => escalateAbort?.(signal));
+  }]));
+  for (const [signal, handler] of handlers) processTarget.on(signal, handler);
+
+  try {
+    result = await executeWithArtifactFinalization({
+      runWorkflow: async () => {
+        try {
+          return await Promise.race([runWorkflow(), abortPromise]);
+        } catch (error) {
+          if (firstAbortAction) await firstAbortAction;
+          throw error;
+        } finally {
+          workflowSettled = true;
+        }
+      },
+      finalizeArtifacts,
+      forbiddenValues,
+    });
+  } catch (error) {
+    executionError = error;
+  } finally {
+    try {
+      await cleanup();
+    } catch (error) {
+      executionError ??= error;
+    } finally {
+      try {
+        await cleanupRawArtifacts();
+      } catch (error) {
+        executionError ??= error;
+      }
+    }
+    await Promise.allSettled([...signalActions]);
+    for (const [signal, handler] of handlers) processTarget.off(signal, handler);
+  }
+
+  if (receivedSignal) processTarget.exitCode = signalExitCode(receivedSignal);
+  return { error: executionError, interrupted: Boolean(receivedSignal), result, signal: receivedSignal };
 }
 
 export async function finalizeArtifactPrivacy(directory, {
