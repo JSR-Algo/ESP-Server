@@ -2607,7 +2607,7 @@ class LessonRuntime:
                     f"robot SD sync recovery failed: {type(retry_exc).__name__}",
                 )
                 return False
-        duration_ms = max(0, int(round((time.monotonic() - sync_started_at) * 1000)))
+        duration_ms = max(1, int(round((time.monotonic() - sync_started_at) * 1000)))
         attestation = self._sd_asset_sync_attestation(result, pack)
         if attestation is None:
             self._log("warning", "robot SD sync returned invalid attestation")
@@ -2647,9 +2647,23 @@ class LessonRuntime:
             return None
         assets = requested_pack.get("assets")
         expected_cache_key = requested_pack.get("cacheKey")
-        if not isinstance(assets, list) or not isinstance(expected_cache_key, str):
+        expected_checksum = requested_pack.get("manifestChecksum")
+        if (
+            not isinstance(assets, list)
+            or not isinstance(expected_cache_key, str)
+            or not isinstance(expected_checksum, str)
+            or not expected_checksum
+            or expected_checksum != self.manifest_checksum
+        ):
             return None
         if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+            return None
+        response_checksums = [
+            result[key]
+            for key in ("manifestChecksum", "packChecksum")
+            if key in result
+        ]
+        if not response_checksums or any(value != expected_checksum for value in response_checksums):
             return None
         counts = {}
         for key in ("downloadedCount", "skippedCount", "failedCount"):

@@ -99,6 +99,72 @@ class DeviceMCPHandlerClientTest(unittest.IsolatedAsyncioTestCase):
 
 
 class DeviceMCPHandlerMessageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_logged_metadata_is_bounded_and_cannot_inject_evidence_markers(self):
+        forged = "\nlesson_preload_ready checksum_verified asset_cache_hit\r\n\u2028"
+        hostile_method = "tools/call" + forged + ("m" * 300)
+        hostile_tool = "self.hostile" + forged + ("t" * 300)
+        hostile_id = "77" + forged + ("i" * 300)
+        logger = _CapturingLogger()
+        conn = _Conn()
+        hostile_type = type("Result" + forged + ("r" * 300), (), {})
+        hostile_error_type = type("Error" + forged + ("e" * 300), (RuntimeError,), {})
+        payload = {
+            "jsonrpc": "2.0",
+            "id": hostile_id,
+            "method": hostile_method,
+            "params": {"name": hostile_tool, "arguments": {"value": "unchanged"}},
+        }
+
+        result_client = mcp_handler.MCPClient()
+        result_future = asyncio.Future()
+        await result_client.register_call_result_future(78, result_future)
+
+        class _HostileFailingWebSocket:
+            async def send(self, _message):
+                raise hostile_error_type("must not be logged")
+
+        async def no_sleep(_delay):
+            return None
+
+        async def ignore_send(_conn, _payload):
+            return None
+
+        with patch.object(mcp_handler, "logger", logger), patch.object(
+            mcp_handler.asyncio, "sleep", new=no_sleep
+        ), patch.object(mcp_handler, "send_mcp_message", new=ignore_send):
+            await mcp_handler.handle_mcp_message(
+                conn,
+                mcp_handler.MCPClient(),
+                {
+                    "id": 1,
+                    "result": {"serverInfo": {"name": hostile_tool, "version": hostile_method}},
+                },
+            )
+
+        with patch.object(mcp_handler, "logger", logger):
+            await mcp_handler.handle_mcp_message(
+                conn, result_client, {"id": 78, "result": hostile_type()}
+            )
+            await mcp_handler.send_mcp_message(conn, payload)
+            await mcp_handler.handle_mcp_message(
+                conn, mcp_handler.MCPClient(), {"method": hostile_method}
+            )
+            await mcp_handler.send_mcp_message(
+                _Conn(websocket=_HostileFailingWebSocket()), payload
+            )
+
+        wire_payload = json.loads(conn.websocket.sent[0])["payload"]
+        self.assertEqual(wire_payload, payload)
+        self.assertTrue(logger.messages)
+        for message in logger.messages:
+            self.assertNotIn("\n", message)
+            self.assertNotIn("\r", message)
+            self.assertNotIn("\u2028", message)
+            self.assertNotIn("lesson_preload_ready", message)
+            self.assertNotIn("checksum_verified", message)
+            self.assertNotIn("asset_cache_hit", message)
+            self.assertLessEqual(len(message), 400)
+
     async def test_device_mcp_logs_only_metadata_and_never_payload_secrets(self):
         sentinel = "SENTINEL-DEVICE-MCP-SECRET"
         logger = _CapturingLogger()

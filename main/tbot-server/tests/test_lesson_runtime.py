@@ -16,6 +16,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -2399,6 +2400,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 20,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2447,6 +2449,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 64,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2571,6 +2574,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "ready": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
                     "skippedCount": 0,
                     "failedCount": 0,
@@ -2607,6 +2611,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2622,7 +2627,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("downloadedCount=3", messages)
         self.assertIn("skippedCount=0", messages)
         self.assertIn("assetCount=3", messages)
-        self.assertIn("durationMs=", messages)
+        duration_match = re.search(r"durationMs=(\d+)", messages)
+        self.assertIsNotNone(duration_match)
+        self.assertGreaterEqual(int(duration_match.group(1)), 1)
         self.assertNotIn("asset_cache_hit", messages)
 
     async def test_sd_asset_pack_warm_sync_emits_cache_hit_only_for_all_skipped(self):
@@ -2636,6 +2643,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "ready": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "packChecksum": _manifest_checksum(),
                     "downloadedCount": 0,
                     "skippedCount": 3,
                     "failedCount": 0,
@@ -2665,6 +2673,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {
                 "ready": True,
                 "cacheKey": "wrong-cache-key",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2672,6 +2681,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 2,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2679,9 +2689,34 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": -1,
                 "failedCount": 1,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": "forged-checksum",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
+                "packChecksum": "contradictory-checksum",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
             },
         )
 
@@ -2730,6 +2765,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2762,6 +2798,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2795,6 +2832,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2833,6 +2871,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "ready": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
                     "skippedCount": 0,
                     "failedCount": 0,

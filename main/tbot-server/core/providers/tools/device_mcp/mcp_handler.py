@@ -15,19 +15,42 @@ if TYPE_CHECKING:
 TAG = __name__
 logger = setup_logging()
 
+_LOG_FIELD_LIMIT = 80
+_EVIDENCE_MARKER_RE = re.compile(
+    r"lesson_preload_ready|checksum_verified|asset_cache_hit",
+    re.IGNORECASE,
+)
+
+
+def _safe_log_field(value: object) -> str:
+    text = "-" if value is None else str(value)
+    text = _EVIDENCE_MARKER_RE.sub("<blocked-marker>", text)
+    text = "".join(
+        char if char.isprintable() and not char.isspace() else "_"
+        for char in text
+    )
+    if len(text) > _LOG_FIELD_LIMIT:
+        text = text[: _LOG_FIELD_LIMIT - 3] + "..."
+    return text
+
 
 def _message_metadata(payload: object) -> str:
     if not isinstance(payload, dict):
-        return f"payloadType={type(payload).__name__}"
+        return f"payloadType={_safe_log_field(type(payload).__name__)}"
     method = payload.get("method")
     message_id = payload.get("id")
     params = payload.get("params")
     tool_name = params.get("name") if isinstance(params, dict) else None
-    parts = [f"id={message_id}", f"method={method or '-'}"]
+    parts = [
+        f"id={_safe_log_field(message_id)}",
+        f"method={_safe_log_field(method)}",
+    ]
     if isinstance(tool_name, str) and tool_name:
-        parts.append(f"tool={tool_name}")
+        parts.append(f"tool={_safe_log_field(tool_name)}")
     if "result" in payload:
-        parts.append(f"resultType={type(payload.get('result')).__name__}")
+        parts.append(
+            f"resultType={_safe_log_field(type(payload.get('result')).__name__)}"
+        )
     if "error" in payload:
         parts.append("error=true")
     return " ".join(parts)
@@ -130,7 +153,8 @@ async def send_mcp_message(conn: "ConnectionHandler", payload: dict):
         logger.bind(tag=TAG).debug(f"Successfully sent MCP message {_message_metadata(payload)}")
     except Exception as e:
         logger.bind(tag=TAG).error(
-            f"Send MCP message failed {_message_metadata(payload)} errorType={type(e).__name__}"
+            "Send MCP message failed "
+            f"{_message_metadata(payload)} errorType={_safe_log_field(type(e).__name__)}"
         )
 
 
@@ -152,7 +176,9 @@ async def handle_mcp_message(
         # Check for tool call response first
         if msg_id in mcp_client.call_results:
             logger.bind(tag=TAG).debug(
-                f"Received tool call response id={msg_id} resultType={type(result).__name__}"
+                "Received tool call response "
+                f"id={_safe_log_field(msg_id)} "
+                f"resultType={_safe_log_field(type(result).__name__)}"
             )
             await mcp_client.resolve_call_result(msg_id, result)
             return
@@ -164,7 +190,8 @@ async def handle_mcp_message(
                 name = server_info.get("name")
                 version = server_info.get("version")
                 logger.bind(tag=TAG).debug(
-                    f"Client MCP server info: name={name}, version={version}"
+                    "Client MCP server info: "
+                    f"name={_safe_log_field(name)}, version={_safe_log_field(version)}"
                 )
 
             await asyncio.sleep(1)
@@ -207,7 +234,9 @@ async def handle_mcp_message(
                         "inputSchema": input_schema,
                     }
                     await mcp_client.add_tool(new_tool)
-                    logger.bind(tag=TAG).debug(f"Client tool #{i+1}: {name}")
+                    logger.bind(tag=TAG).debug(
+                        f"Client tool #{i+1}: {_safe_log_field(name)}"
+                    )
 
                 # Replace all toolsDescriptionTools inName
                 for tool_data in mcp_client.tools.values():
@@ -243,7 +272,9 @@ async def handle_mcp_message(
     # Handle method calls (requests from the client)
     elif "method" in payload:
         method = payload["method"]
-        logger.bind(tag=TAG).info(f"Received MCP client request: {method}")
+        logger.bind(tag=TAG).info(
+            f"Received MCP client request: {_safe_log_field(method)}"
+        )
 
     elif "error" in payload:
         error_data = payload["error"]
@@ -252,7 +283,9 @@ async def handle_mcp_message(
             if isinstance(error_data, dict)
             else "Unknown error"
         )
-        logger.bind(tag=TAG).error(f"Received MCP error response id={payload.get('id', 0)}")
+        logger.bind(tag=TAG).error(
+            f"Received MCP error response id={_safe_log_field(payload.get('id', 0))}"
+        )
 
         msg_id = int(payload.get("id", 0))
         if msg_id in mcp_client.call_results:
@@ -372,7 +405,8 @@ async def call_mcp_tool(
                             raise ValueError("Parameter JSON parse failed")
                     except Exception as e:
                         logger.bind(tag=TAG).error(
-                            f"Parameter JSON parse failed errorType={type(e).__name__}"
+                            "Parameter JSON parse failed "
+                            f"errorType={_safe_log_field(type(e).__name__)}"
                         )
                         raise ValueError(f"Parameter JSON parse failed: {str(e)}")
         elif isinstance(args, dict):
@@ -398,7 +432,8 @@ async def call_mcp_tool(
     }
 
     logger.bind(tag=TAG).info(
-        f"Send client MCP tool call request tool={actual_name} argumentCount={len(arguments)}"
+        "Send client MCP tool call request "
+        f"tool={_safe_log_field(actual_name)} argumentCount={len(arguments)}"
     )
     try:
         await send_mcp_message(conn, payload)
@@ -410,7 +445,9 @@ async def call_mcp_tool(
         # Wait for response or timeout
         raw_result = await asyncio.wait_for(result_future, timeout=timeout)
         logger.bind(tag=TAG).info(
-            f"Client MCP tool call succeeded tool={actual_name} resultType={type(raw_result).__name__}"
+            "Client MCP tool call succeeded "
+            f"tool={_safe_log_field(actual_name)} "
+            f"resultType={_safe_log_field(type(raw_result).__name__)}"
         )
 
         if isinstance(raw_result, dict):
