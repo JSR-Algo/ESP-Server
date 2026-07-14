@@ -16,6 +16,8 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert '"8102:8002"' in compose
     assert "local/tbot-backend:lesson-studio-e2e" in compose
     assert "local/tbot-server-web:lesson-studio-e2e" in compose
+    assert "/src/lessons/fixtures/tvideo-raw-code/assets:/usr/share/nginx/html/tvideo-demo:ro" in compose
+    assert "LESSON_ASSET_ORIGIN_BASE: http://127.0.0.1:8102/tvideo-demo" in compose
     assert "LESSON_SHARED_VISUAL_AUTHORING_ENABLED: \"true\"" in compose
     assert "LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: \"true\"" in compose
     assert 'TBOT_E2E_CAPTCHA_ENABLED: "true"' in compose
@@ -23,6 +25,18 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "condition: service_healthy" in compose
     assert "/tbot/user/captcha" not in compose
     assert "http://127.0.0.1:8002/login" in compose
+
+
+def test_lesson_studio_seed_includes_real_response_visual_sources():
+    seed = (ROOT / "docs/docker/lesson-studio-e2e/seed-postgres.sql").read_text()
+    for asset_key in (
+        "feedback.correct.star",
+        "feedback.near-miss.spark",
+        "feedback.incorrect.try-again",
+        "ending.farm.parade",
+    ):
+        assert asset_key in seed
+    assert "4e2f33a3eada6222b814bb226042e614fcd81f876efa42327b5c2196d1caa9c4" in seed
 
 
 def test_nestjs_proxy_recovers_quickly_from_docker_dns_startup_races():

@@ -41,6 +41,26 @@
         <div class="kv"><span class="muted">{{ $t('lesson.checksum') }}</span><span class="mono">{{ preview.checksum }}</span></div>
         <div class="kv"><span class="muted">etag</span><span class="mono">{{ preview.etag }}</span></div>
       </el-card>
+      <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
+        <div class="canonical-demo__copy">
+          <span class="eyebrow">SOURCE / ADMIN DEMO</span>
+          <h3>Original farm scene</h3>
+          <p>The video is an author reference only. The exact robot preview uses the pinned static poster and overlays.</p>
+          <span class="mono small">{{ canonicalDemo.sourceFolder }}/{{ canonicalDemo.adminPreview.sourcePath }}</span>
+          <div class="canonical-demo__sources" aria-label="Canonical source assets">
+            <img v-for="asset in canonicalDemo.sourceAssets" :key="asset.sourcePath" data-testid="canonical-source-asset" :src="asset.url" :alt="asset.sourcePath" />
+          </div>
+        </div>
+        <video
+          data-testid="canonical-source-video"
+          muted
+          controls
+          playsinline
+          preload="metadata"
+          :poster="canonicalDemo.adminPreview.posterUrl"
+          :src="canonicalDemo.adminPreview.url"
+        />
+      </section>
 
       <section v-if="lesson" class="lesson-studio">
         <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
@@ -346,6 +366,7 @@ import {
 } from '@/components/lesson/lesson-step-editor-state';
 import Api from '@/apis/api';
 import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
+import { loadCanonicalDemoContext } from '@/utils/canonicalDemoContext.mjs';
 import { createAuthoringDirtyHandle } from '@/utils/serviceWorkerUpdateSafety.mjs';
 
 export default {
@@ -366,6 +387,8 @@ export default {
     return {
       lesson: null,
       lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
+      canonicalDemo: null,
+      canonicalDemoLoadSequence: 0,
       steps: [],
       stepTypes: [],
       loading: false,
@@ -530,6 +553,9 @@ export default {
     },
   },
   watch: {
+    '$route.query.demoSource'() {
+      this.loadCanonicalDemo();
+    },
     hasPendingAuthoringChanges: {
       immediate: true,
       handler(value) {
@@ -551,12 +577,25 @@ export default {
       return;
     }
     this.loadLessonCapabilities();
+    this.loadCanonicalDemo();
     this.fetchAll();
   },
   beforeDestroy() {
+    this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
   methods: {
+    async loadCanonicalDemo() {
+      const sequence = ++this.canonicalDemoLoadSequence;
+      try {
+        const demo = await loadCanonicalDemoContext(this.$route.query.demoSource);
+        if (sequence === this.canonicalDemoLoadSequence && !this._isBeingDestroyed) this.canonicalDemo = demo;
+      } catch (error) {
+        if (sequence !== this.canonicalDemoLoadSequence || this._isBeingDestroyed) return;
+        this.canonicalDemo = null;
+        this.$message.warning(error instanceof Error ? error.message : 'Canonical demo could not be loaded');
+      }
+    },
     async loadLessonCapabilities() {
       this.lessonCapabilities = await loadLessonRolloutCapabilities();
       if (this.lessonCapabilities.sharedVisualAuthoring) this.fetchSharedVisualAssets();
@@ -854,6 +893,12 @@ export default {
 .muted { color: #909399; }
 .danger-text { color: #f56c6c; }
 .preview-card { margin-bottom: 16px; }
+.canonical-demo { align-items:center; background:#17312d; border-radius:20px; color:#fff8df; display:grid; gap:20px; grid-template-columns:minmax(220px,.75fr) minmax(320px,1.25fr); margin-bottom:18px; overflow:hidden; padding:18px; }
+.canonical-demo__copy h3 { font-family:Georgia,serif; font-size:25px; margin:5px 0 8px; }
+.canonical-demo__copy p { color:#c7d7d1; line-height:1.5; margin:0 0 12px; max-width:480px; }
+.canonical-demo__sources { display:flex; gap:8px; margin-top:14px; }
+.canonical-demo__sources img { background:#f6ecd1; border:1px solid rgba(255,255,255,.2); border-radius:9px; height:58px; object-fit:contain; width:76px; }
+.canonical-demo video { background:#0c1c19; border-radius:14px; display:block; max-height:360px; object-fit:cover; width:100%; }
 .choice-group { display: block; }
 .choice-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
@@ -869,5 +914,5 @@ export default {
 .preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }
 @media (max-width:1100px) { .lesson-studio__workbench { grid-template-columns:1fr; } }
-@media (max-width:760px) { .lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
+@media (max-width:760px) { .canonical-demo,.lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
 </style>

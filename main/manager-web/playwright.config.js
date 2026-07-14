@@ -17,5 +17,6 @@ module.exports = defineConfig({
     video: 'retain-on-failure',
     serviceWorkers: 'block',
     ...devices['Desktop Chrome'],
+    channel: process.env.LESSON_STUDIO_E2E_BROWSER_CHANNEL || undefined,
   },
 });

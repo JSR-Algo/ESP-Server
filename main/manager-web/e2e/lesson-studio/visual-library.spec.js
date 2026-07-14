@@ -86,6 +86,15 @@ function visibleOption(page, text) {
   return page.locator('.el-select-dropdown__item:visible').filter({ hasText: text });
 }
 
+async function chooseSingleSelect(page, testId, optionText, expectedValue) {
+  const select = page.getByTestId(testId);
+  await select.click();
+  const option = visibleOption(page, optionText).last();
+  await expect(option).toBeVisible();
+  await option.evaluate((element) => element.click());
+  await expect(select.locator('input')).toHaveValue(expectedValue);
+}
+
 test('admin manages disposable shared visuals across clone, selected, global, and published versions', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   test.setTimeout(120_000);
@@ -127,12 +136,12 @@ test('admin manages disposable shared visuals across clone, selected, global, an
 
   await expect(page.getByTestId('visual-detail-facts')).toContainText('640 × 480');
   await expect(page.getByTestId('visual-detail-comparison')).toContainText('160 × 120');
-  await page.getByTestId('visual-detail-source-version').click();
-  await visibleOption(page, /^v1 · espTft · published$/).click();
+  await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
   await expect(page.getByTestId('visual-detail-usage-table').getByRole('row')).toHaveCount(5);
   await page.getByTestId('visual-detail-target-version').click();
   await expect(page.locator('.el-select-dropdown__item:visible').filter({ hasText: /mobile/ })).toHaveCount(0);
-  await visibleOption(page, /^v2 · espTft · published$/).click();
+  await visibleOption(page, /^v2 · espTft · published$/).last().evaluate((element) => element.click());
+  await expect(page.getByTestId('visual-detail-target-version').locator('input')).toHaveValue('v2 · espTft · published');
 
   await page.getByTestId('visual-detail-replacement-mode').getByText('cloneForLesson').click();
   await page.getByTestId('visual-detail-lessons').click();
@@ -144,11 +153,10 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   const clonedDetail = await visualDetail(page, cloneResult.clonedAssetKey, cloneResult.clonedVersionId);
   expect(clonedDetail.usages.map((usage) => usage.lessonId)).toEqual([fixtures.clone.lesson.id]);
 
-  await page.goto(`/login#/lesson-visual-library/${encodeURIComponent(assetKey)}`);
-  await page.getByTestId('visual-detail-source-version').click();
-  await visibleOption(page, /^v1 · espTft · published$/).click();
-  await page.getByTestId('visual-detail-target-version').click();
-  await visibleOption(page, /^v2 · espTft · published$/).click();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: assetKey })).toBeVisible();
+  await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
+  await chooseSingleSelect(page, 'visual-detail-target-version', /^v2 · espTft · published$/, 'v2 · espTft · published');
   await page.getByTestId('visual-detail-replacement-mode').getByText('selectedLessons').click();
   await page.getByTestId('visual-detail-lessons').click();
   await visibleOption(page, new RegExp(`e2e-visual-selected-${runId}`)).click();
@@ -166,10 +174,8 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   expect(targetDetail.usages.map((usage) => usage.lessonId)).toEqual(expect.arrayContaining([fixtures.selected.lesson.id, selectedResult.branchedLessonIds[0]]));
 
   await page.reload();
-  await page.getByTestId('visual-detail-source-version').click();
-  await visibleOption(page, /^v1 · espTft · published$/).click();
-  await page.getByTestId('visual-detail-target-version').click();
-  await visibleOption(page, /^v2 · espTft · published$/).click();
+  await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
+  await chooseSingleSelect(page, 'visual-detail-target-version', /^v2 · espTft · published$/, 'v2 · espTft · published');
   await page.getByTestId('visual-detail-replacement-mode').getByText('global').click();
   await page.getByTestId('visual-detail-review-replacement').click();
   await expect(page.getByTestId('visual-impact-dialog')).toBeVisible();

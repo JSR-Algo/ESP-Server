@@ -1,12 +1,19 @@
 const { existsSync, readFileSync } = require('fs');
+const { createHash } = require('crypto');
 const { resolve } = require('path');
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 
 const apiRoot = '/nestjs/v1/admin';
+const responseVisualSourceIds = {
+  'feedback.correct.star': '00000006-0016-4000-8000-000000000011',
+  'feedback.near-miss.spark': '00000006-0016-4000-8000-000000000012',
+  'feedback.incorrect.try-again': '00000006-0016-4000-8000-000000000013',
+  'ending.farm.parade': '00000006-0016-4000-8000-000000000014',
+};
 
-function loadCanonicalSource() {
+function loadCanonicalFixture() {
   const candidates = [
     process.env.TBOT_BACKEND_WORKTREE,
     resolve(process.cwd(), '../../../../tbot-backend/production-lesson-studio'),
@@ -14,7 +21,10 @@ function loadCanonicalSource() {
   ].filter(Boolean);
   const root = candidates.find((candidate) => existsSync(resolve(candidate, 'src/lessons/fixtures/tvideo-raw-code/course.json')));
   if (!root) throw new Error(`Set TBOT_BACKEND_WORKTREE; canonical backend source not found in: ${candidates.join(', ')}`);
-  return JSON.parse(readFileSync(resolve(root, 'src/lessons/fixtures/tvideo-raw-code/course.json'), 'utf8'));
+  return {
+    source: JSON.parse(readFileSync(resolve(root, 'src/lessons/fixtures/tvideo-raw-code/course.json'), 'utf8')),
+    assetManifest: JSON.parse(readFileSync(resolve(root, 'src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json'), 'utf8')),
+  };
 }
 
 async function api(page, method, path, data) {
@@ -30,7 +40,21 @@ async function api(page, method, path, data) {
   return body.data;
 }
 
-async function createVisualVersions(page, source, runId) {
+function espTftAssetForKey(assetManifest, assetKey) {
+  const matches = assetManifest.espTft.filter((asset) => asset.keys.includes(assetKey));
+  expect(matches, `one pinned espTft derivative must exist for ${assetKey}`).toHaveLength(1);
+  return matches[0];
+}
+
+async function assertServedAsset(page, path, expected) {
+  const response = await page.request.get(`http://127.0.0.1:8102/tvideo-demo/${path}`);
+  expect(response.ok(), `GET tvideo demo asset ${path}`).toBe(true);
+  const bytes = await response.body();
+  expect(bytes).toHaveLength(expected.bytes);
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe(expected.sha256);
+}
+
+async function createVisualVersions(page, source, assetManifest, runId) {
   const categories = {
     backgroundScene: 'scene',
     teachingObject: 'teachingObject',
@@ -39,21 +63,22 @@ async function createVisualVersions(page, source, runId) {
   const keys = new Map();
   for (const [slot, assetKey] of Object.entries(source.visuals)) keys.set(assetKey, { slot, category: categories[slot] });
   for (const assetKey of Object.values(source.teachingObjects)) keys.set(assetKey, { slot: 'teachingObject', category: 'teachingObject' });
+  for (const [slot, assetKey] of Object.entries(source.responseVisuals)) keys.set(assetKey, { slot, category: slot });
   const versions = new Map();
-  let index = 0;
   for (const [assetKey, meta] of keys) {
-    index += 1;
     const e2eKey = `canonical.${runId}.${assetKey}`;
+    const asset = espTftAssetForKey(assetManifest, assetKey);
+    await assertServedAsset(page, asset.path, asset);
     const version = await api(page, 'POST', `/lesson-visual-assets/${encodeURIComponent(e2eKey)}/versions`, {
       category: meta.category,
       title: `Canonical ${assetKey}`,
       profile: 'espTft',
-      storagePath: 'http://127.0.0.1:8102/favicon.ico',
-      sha256: index.toString(16).padStart(64, '0'),
-      mimeType: 'image/png',
-      bytes: 5430,
-      width: 64,
-      height: 64,
+      storagePath: `http://127.0.0.1:8102/tvideo-demo/${asset.path}`,
+      sha256: asset.sha256,
+      mimeType: asset.mediaType,
+      bytes: asset.bytes,
+      width: asset.width,
+      height: asset.height,
       publicationState: 'published',
     });
     versions.set(assetKey, version.id);
@@ -61,7 +86,7 @@ async function createVisualVersions(page, source, runId) {
   return versions;
 }
 
-async function importCanonicalDraft(page, source, runId) {
+async function importCanonicalDraft(page, source, assetManifest, runId) {
   const sourceCourseId = '00000006-0001-0000-0000-000000000001';
   const course = await api(page, 'POST', `/courses/${sourceCourseId}/clone`, {
     courseKey: `e2e-canonical-${runId}`,
@@ -81,7 +106,12 @@ async function importCanonicalDraft(page, source, runId) {
     difficultyBand: source.lesson.difficultyBand,
     topicTags: source.lesson.topicTags,
   });
-  const versions = await createVisualVersions(page, source, runId);
+  for (const assetKey of Object.values(source.responseVisuals)) {
+    const sourceAssetId = responseVisualSourceIds[assetKey];
+    expect(sourceAssetId, `seeded response visual source must exist for ${assetKey}`).toBeTruthy();
+    await api(page, 'POST', `/lessons/${lesson.id}/assets`, { profile: 'espTft', sourceAssetId });
+  }
+  const versions = await createVisualVersions(page, source, assetManifest, runId);
   const createdSteps = [];
   for (const sourceStep of source.steps) {
     const step = await api(page, 'POST', `/lessons/${lesson.id}/steps`, {
@@ -158,18 +188,57 @@ async function chooseSelect(page, item, label) {
 test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   test.setTimeout(240_000);
-  const source = loadCanonicalSource();
+  const { source, assetManifest } = loadCanonicalFixture();
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   await loginAsLessonAuthor(page);
-  const fixture = await importCanonicalDraft(page, source, runId);
+  expect(source.demo.adminPreview).toEqual(assetManifest.adminPreview);
+  expect(assetManifest.adminPreview).toMatchObject({
+    sourcePath: 'assets/scenes/deep-barn-farm-background-6s.mp4',
+    mediaType: 'video/mp4',
+    sha256: '53d3ac70d166ba83029d5d122493dc48304d2caf933e03c09b0907152531f5f1',
+    bytes: 6228276,
+    width: 1280,
+    height: 720,
+  });
+  await assertServedAsset(page, assetManifest.adminPreview.path, assetManifest.adminPreview);
+  const fixture = await importCanonicalDraft(page, source, assetManifest, runId);
 
   const validation = await api(page, 'POST', `/lessons/${fixture.lesson.id}/validate`);
   expect(validation.valid).toBe(true);
   const before = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   expect(before.manifest.steps).toHaveLength(9);
+  expect(JSON.stringify(before.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
+  for (const assetKey of Object.values(source.responseVisuals)) {
+    expect(before.manifest.assets).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: assetKey,
+      path: 'esp-tft/robots-bright-alive-k3-glowface-192.png',
+      sha256: '4e2f33a3eada6222b814bb226042e614fcd81f876efa42327b5c2196d1caa9c4',
+      mediaType: 'image/png',
+      critical: false,
+    })]));
+  }
 
-  await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
+  await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}&demoSource=tvideo-raw-code`);
   await expect(page.getByRole('heading', { name: new RegExp(source.lesson.title) })).toBeVisible();
+  const sourceVideo = page.getByTestId('canonical-source-video');
+  await expect(sourceVideo).toBeVisible();
+  await expect(sourceVideo).toHaveAttribute('src', `/tvideo-demo/${assetManifest.adminPreview.path}`);
+  await expect(sourceVideo).toHaveAttribute('poster', `/tvideo-demo/${assetManifest.adminPreview.posterPath}`);
+  const sourceAssets = page.getByTestId('canonical-source-asset');
+  await expect(sourceAssets).toHaveCount(3);
+  for (const [index, asset] of assetManifest.espTft.entries()) {
+    await expect(sourceAssets.nth(index)).toHaveAttribute('src', `/tvideo-demo/${asset.sourceCopyPath}`);
+  }
+  await expect.poll(() => sourceVideo.evaluate((video) => (
+    video.readyState >= 1 && Number.isFinite(video.duration) ? video.duration : null
+  ))).toBeCloseTo(assetManifest.adminPreview.durationMs / 1000, 1);
+  await sourceVideo.evaluate(async (video) => {
+    video.currentTime = 0;
+    await video.play();
+  });
+  await expect.poll(() => sourceVideo.evaluate((video) => video.paused), { timeout: 10_000 }).toBe(false);
+  await expect.poll(() => sourceVideo.evaluate((video) => video.currentTime), { timeout: 10_000 }).toBeGreaterThan(0);
+  await sourceVideo.evaluate((video) => video.pause());
   const customizedTitle = `${source.lesson.title} UI ${runId}`;
   await page.getByRole('button', { name: 'Rename' }).click();
   const renameDialog = page.getByRole('dialog', { name: 'Rename' });
@@ -266,6 +335,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
 
   const persisted = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+  expect(JSON.stringify(persisted.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
   const customizedStep = persisted.manifest.steps[3];
   const persistedSteps = await api(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
   expect(persisted.manifest.title).toBe(customizedTitle);
@@ -324,6 +394,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByRole('button', { name: '+ Add step' })).toHaveCount(0);
   await expect(page.getByTestId('lesson-step-prompt')).toBeDisabled();
   const publishedProjection = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+  expect(JSON.stringify(publishedProjection.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
   const publishedPinnedVisuals = pinnedVisualIdentity(publishedProjection.manifest);
 
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
