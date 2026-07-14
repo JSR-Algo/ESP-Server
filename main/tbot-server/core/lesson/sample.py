@@ -564,6 +564,11 @@ async def start_sample_lesson(conn: Any) -> Optional[Any]:
     connect pull and a spoken sample start can never create two runtimes / emit
     duplicate lesson_prepare. The lazy-init is atomic under asyncio (no await between
     the getattr and the assignment), so racers share one lock."""
+    from core.providers.tools.product_toolset import sample_lesson_config_enabled
+
+    if not sample_lesson_config_enabled(conn):
+        _set_status(conn, "ROLLOUT_BLOCKED", "Robot chưa được bật bài học mẫu.")
+        return None
     lock = getattr(conn, "_lesson_pull_lock", None)
     if lock is None:
         lock = asyncio.Lock()

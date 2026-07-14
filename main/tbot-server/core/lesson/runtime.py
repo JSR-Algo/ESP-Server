@@ -639,6 +639,20 @@ def _positive_int(value: Any) -> Optional[int]:
         return parsed if parsed > 0 else None
     return None
 
+
+def _bounded_non_negative_number(value: Any, maximum: int = 0xFFFFFFFF) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0 or value > maximum:
+        return None
+    return value
+
+
+def _operations_motion_result(value: Any) -> Optional[str]:
+    if value in {"success", "failed", "skipped"}:
+        return value
+    return None
+
 def _finite_float_or_default(value: Any, default: float) -> float:
     if isinstance(value, bool):
         return default
@@ -971,7 +985,48 @@ class LessonRuntime:
             return
         self._outstanding.pop(acked, None)
         self._cancel_frame_ack_timeout()
+        self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
+
+    def _forward_lesson_step_ack_telemetry(
+        self,
+        frame: Dict[str, Any],
+        ack_body: Dict[str, Any],
+        inbound_sequence: Any,
+    ) -> None:
+        if frame.get("type") != "lesson_step":
+            return
+        telemetry = ack_body.get("telemetry")
+        telemetry = telemetry if isinstance(telemetry, dict) else {}
+        event: Dict[str, Any] = {
+            "type": "step_started",
+            "sequence": inbound_sequence if isinstance(inbound_sequence, int) and not isinstance(inbound_sequence, bool) else None,
+            "stepId": frame.get("stepId"),
+            "retryCount": max(0, min(_int_or_default(frame.get("retryCount"), 0), 1000)),
+        }
+        degraded_reason = telemetry.get("degradedReason")
+        explicit_render_degraded = telemetry.get("renderDegraded")
+        if isinstance(explicit_render_degraded, bool):
+            event["renderDegraded"] = explicit_render_degraded
+        elif degraded_reason in {
+            "backgroundUnavailable",
+            "objectUnavailable",
+            "overlayUnavailable",
+            "optionalLayerMissing",
+        }:
+            event["renderDegraded"] = True
+        elif degraded_reason == "" and ack_body.get("degraded") is False:
+            event["renderDegraded"] = False
+        sram_free = _bounded_non_negative_number(telemetry.get("internalMinimumFreeBytes"))
+        if sram_free is not None:
+            event["sramFreeBytes"] = sram_free
+        psram_free = _bounded_non_negative_number(telemetry.get("psramFreeBytes"))
+        if psram_free is not None:
+            event["psramFreeBytes"] = psram_free
+        motion_result = _operations_motion_result(telemetry.get("motionDispatch"))
+        if motion_result is not None:
+            event["motionDispatch"] = motion_result
+        self._forward(event)
 
     def _legacy_empty_ack_outstanding_seq(self, msg_json: Dict[str, Any], body: Dict[str, Any]) -> Optional[int]:
         if msg_json.get("type") != "lesson_ack":
@@ -2731,6 +2786,11 @@ async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
     await between the getattr and the assignment), so two schedulers racing here both
     end up using the same lock, then run the impl serially — the loser re-reads
     conn.lesson_runtime and returns the winner's session instead of duplicating it."""
+    from core.providers.tools.product_toolset import lesson_runtime_enabled
+
+    if not lesson_runtime_enabled(conn):
+        _set_lesson_start_status(conn, "ROLLOUT_BLOCKED", "Robot chưa được bật bài học.")
+        return None
     lock = getattr(conn, "_lesson_pull_lock", None)
     if lock is None:
         lock = asyncio.Lock()

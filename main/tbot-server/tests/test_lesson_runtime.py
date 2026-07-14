@@ -1081,6 +1081,314 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
     def _sent_frames(self, conn):
         return [json.loads(p) for p in conn.websocket.sent]
 
+    async def test_lesson_step_ack_forwards_bounded_operations_telemetry(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[9] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 2,
+        }
+        rt.conn.device_id = "robot-01"
+        rt.conn.config = {
+            "lesson": {
+                "motion_presets_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                9,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 9,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {
+                        "internalMinimumFreeBytes": 24_576,
+                        "psramFreeBytes": 1_500_000,
+                        "renderElapsedMs": 321,
+                        "degradedReason": "motionPreset",
+                        "motionDispatch": "failed",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(
+            forwarder.batches,
+            [
+                {
+                    "assignmentId": rt.assignment_id,
+                    "lessonId": rt.lesson_id,
+                    "lessonVersion": rt.lesson_version,
+                    "sessionId": rt.session_id,
+                    "events": [
+                        {
+                            "type": "step_started",
+                            "sequence": 1,
+                            "stepId": "s4",
+                            "sramFreeBytes": 24_576,
+                            "psramFreeBytes": 1_500_000,
+                            "retryCount": 2,
+                            "motionDispatch": "failed",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    async def test_lesson_step_ack_telemetry_rejects_invalid_and_unapproved_fields(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[4] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": -3,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                4,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 4,
+                    "degraded": "yes",
+                    "motionDispatch": "success",
+                    "transcript": "secret child speech",
+                    "telemetry": {
+                        "internalMinimumFreeBytes": -1,
+                        "psramFreeBytes": True,
+                        "motionDispatch": "applied",
+                        "authorization": "Bearer secret",
+                        "childResponse": "secret child speech",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(
+            forwarder.batches[0]["events"],
+            [{"type": "step_started", "sequence": 1, "stepId": "s4", "retryCount": 0}],
+        )
+        serialized = json.dumps(forwarder.batches[0])
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("robot-01", serialized)
+
+    async def test_lesson_step_ack_maps_only_firmware_motion_dispatch_enum(self):
+        from unittest.mock import AsyncMock
+
+        for firmware_value in ("success", "failed", "skipped"):
+            with self.subTest(firmware_value=firmware_value):
+                forwarder = _FakeForwarder()
+                rt = self._runtime(forwarder=forwarder)
+                rt.conn.device_id = "robot-01"
+                rt.conn.config = {
+                    "lesson": {
+                        "motion_presets_enabled": True,
+                        "rollout_device_allowlist": ["robot-01"],
+                    }
+                }
+                rt._outstanding[3] = {
+                    "type": "lesson_step",
+                    "stepId": "s4",
+                    "body": {"motion": {"present": "teach"}},
+                    "retryCount": 0,
+                }
+                rt._on_frame_acked = AsyncMock()
+
+                await rt.on_lesson_ack(
+                    _ack(
+                        3,
+                        1,
+                        step_id="s4",
+                        extra={
+                            "acks": 3,
+                            "rendered": True,
+                            "degraded": False,
+                            "telemetry": {
+                                "internalMinimumFreeBytes": 30_000,
+                                "psramFreeBytes": 2_000_000,
+                                "degradedReason": "",
+                                "motionDispatch": firmware_value,
+                            },
+                        },
+                    )
+                )
+
+                self.assertEqual(
+                    forwarder.batches[0]["events"][0]["motionDispatch"],
+                    firmware_value,
+                )
+
+    async def test_lesson_step_ack_does_not_infer_motion_success_when_enum_is_missing(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": False,
+                    "telemetry": {"degradedReason": ""},
+                },
+            )
+        )
+
+        self.assertNotIn("motionDispatch", forwarder.batches[0]["events"][0])
+
+    async def test_lesson_step_ack_marks_visual_degradation_from_firmware_reason(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {"degradedReason": "objectUnavailable"},
+                },
+            )
+        )
+
+        self.assertIs(forwarder.batches[0]["events"][0]["renderDegraded"], True)
+
+    async def test_lesson_step_ack_prefers_explicit_firmware_render_degraded_boolean(self):
+        from unittest.mock import AsyncMock
+
+        for render_degraded in (True, False):
+            with self.subTest(render_degraded=render_degraded):
+                forwarder = _FakeForwarder()
+                rt = self._runtime(forwarder=forwarder)
+                rt._outstanding[3] = {
+                    "type": "lesson_step",
+                    "stepId": "s4",
+                    "body": {"motion": {"present": "teach"}},
+                    "retryCount": 0,
+                }
+                rt._on_frame_acked = AsyncMock()
+
+                await rt.on_lesson_ack(
+                    _ack(
+                        3,
+                        1,
+                        step_id="s4",
+                        extra={
+                            "acks": 3,
+                            "rendered": True,
+                            "degraded": True,
+                            "telemetry": {
+                                "degradedReason": "motionPreset",
+                                "motionDispatch": "failed",
+                                "renderDegraded": render_degraded,
+                            },
+                        },
+                    )
+                )
+
+                self.assertIs(
+                    forwarder.batches[0]["events"][0]["renderDegraded"],
+                    render_degraded,
+                )
+
+    async def test_lesson_step_ack_omits_legacy_motion_reason_that_may_mask_visual_failure(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {
+                        "degradedReason": "motionPreset",
+                        "motionDispatch": "failed",
+                    },
+                },
+            )
+        )
+
+        self.assertNotIn("renderDegraded", forwarder.batches[0]["events"][0])
+
+    async def test_lesson_step_ack_omits_render_metric_for_ambiguous_degraded_ack(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {"degradedReason": ""},
+                },
+            )
+        )
+
+        self.assertNotIn("renderDegraded", forwarder.batches[0]["events"][0])
+
     async def test_preload_reports_ready_and_failed_critical_assets_to_backend(self):
         class _PreloadStatusCache(_FakeAssetCache):
             def synthesize_preload_status(self, assignment_version):
@@ -6248,6 +6556,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RepublishConn()
         conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         assignment_calls = []
 
         async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
@@ -6305,6 +6614,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RepublishConn(api_base="http://backend.test/v1///")
         conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         conn.logger = _CapturingLogger()
         backend_device_id = "14140000-0000-4000-8000-000000000004"
         manifest = {**_build_manifest(), "courseId": "course-from-manifest"}
@@ -6521,6 +6831,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RepublishConn()
         conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         events = []
 
         class _CapturingLogger(_DummyLogger):
@@ -6608,7 +6919,13 @@ class _RepublishConn:
         self.session_id = FIX["frames"]["lesson_prepare"]["sessionId"]
         self.device_id = "dev-republish"
         self.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
-        self.config = {"lesson": {"api_base": api_base, "runtime_enabled": True}}
+        self.config = {
+            "lesson": {
+                "api_base": api_base,
+                "runtime_enabled": True,
+                "rollout_device_allowlist": [self.device_id],
+            }
+        }
         self.lesson_runtime = None
         self.lesson_voice_alarm = None
         self._busy = busy

@@ -54,7 +54,14 @@ class _FakeConn:
         self.session_id = "sess-sample-1"
         self.device_id = "device-sample-1"
         self.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
-        self.config = config if config is not None else {}
+        if config is None:
+            config = {}
+        self.config = config
+        if isinstance(self.config, dict):
+            lesson_cfg = self.config.setdefault("lesson", {})
+            if isinstance(lesson_cfg, dict):
+                lesson_cfg.setdefault("sample_lesson", True)
+                lesson_cfg.setdefault("rollout_device_allowlist", [self.device_id])
         self.lesson_runtime = None
         self.lesson_start_status = None
         self.finished = []
@@ -783,13 +790,13 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(interactive_steps)
 
-    async def test_start_sample_lesson_defaults_malformed_lesson_config(self):
+    async def test_start_sample_lesson_blocks_malformed_lesson_config(self):
         conn = _FakeConn(config={"lesson": "bad"})
 
         runtime = await start_sample_lesson(conn)
 
-        self.assertIsNotNone(runtime)
-        self.assertEqual(runtime.lesson_id, INTERACTIVE_SAMPLE_LESSON_ID)
+        self.assertIsNone(runtime)
+        self.assertEqual(conn.lesson_start_status["code"], "ROLLOUT_BLOCKED")
 
     async def test_start_sample_lesson_falls_back_from_infinite_sample_dwell_config(self):
         conn = _FakeConn(

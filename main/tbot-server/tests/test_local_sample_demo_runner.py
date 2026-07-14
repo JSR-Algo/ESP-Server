@@ -154,16 +154,21 @@ def test_guarded_runner_builds_server_command_with_lan_endpoint():
     module = _load_script()
 
     command = module.build_server_command(
-        lan_ip="192.168.0.104", ws_port=8000, http_port=8003
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        device_id="28:84:85:85:1A:80",
     )
 
-    assert command[-6:] == [
+    assert command[-8:] == [
         "--lan-ip",
         "192.168.0.104",
         "--ws-port",
         "8000",
         "--http-port",
         "8003",
+        "--device-id",
+        "28:84:85:85:1A:80",
     ]
     assert command[1].endswith("local_sample_demo_server.py")
 
@@ -179,7 +184,12 @@ def test_start_server_suppresses_child_output(monkeypatch):
 
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
 
-    module.start_server(lan_ip="192.168.0.104", ws_port=8000, http_port=8003)
+    module.start_server(
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        device_id="28:84:85:85:1a:80",
+    )
 
     assert captured["kwargs"]["stdout"] == module.subprocess.DEVNULL
     assert captured["kwargs"]["stderr"] == module.subprocess.DEVNULL
@@ -195,7 +205,12 @@ def test_start_server_isolates_process_group(monkeypatch):
 
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
 
-    module.start_server(lan_ip="192.168.0.104", ws_port=8000, http_port=8003)
+    module.start_server(
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        device_id="28:84:85:85:1a:80",
+    )
 
     assert captured["kwargs"]["start_new_session"] is True
 

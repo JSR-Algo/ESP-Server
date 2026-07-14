@@ -2096,16 +2096,18 @@ class ConnectionHandler:
         """Lesson-runtime admission gate. The config loader may auto-enable this when
         production lesson prerequisites are present; an explicit false keeps the
         lesson layer dark."""
-        lesson_cfg = _lesson_config(self.config)
-        return bool(lesson_cfg.get("runtime_enabled", False))
+        from core.providers.tools.product_toolset import lesson_runtime_config_enabled
+
+        return lesson_runtime_config_enabled(self)
 
     def _sample_lesson_enabled(self) -> bool:
         """DEMO gate: when lesson.sample_lesson (env LESSON_SAMPLE_ENABLED) is on, the
         spoken start_lesson trigger loads the built-in sample lesson IGNORING any backend
-        assignment. Default ON in robot config; never consulted at connect-time
+        assignment. Default OFF in robot config; never consulted at connect-time
         (only the explicit start_lesson tool path) so production behavior is unchanged."""
-        lesson_cfg = _lesson_config(self.config)
-        return bool(lesson_cfg.get("sample_lesson", False))
+        from core.providers.tools.product_toolset import sample_lesson_config_enabled
+
+        return sample_lesson_config_enabled(self)
 
     @staticmethod
     def _consume_cancelled_task(task) -> None:

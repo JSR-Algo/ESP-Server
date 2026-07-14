@@ -6,7 +6,9 @@ import pytest
 import yaml
 
 from config.config_loader import _apply_lesson_env_overrides
+from core.lesson import runtime as lesson_runtime
 from core.lesson.runtime import LessonRuntime
+from core.providers.tools.product_toolset import lesson_runtime_enabled, product_tool_names
 
 
 def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
@@ -69,6 +71,61 @@ def test_empty_allowlist_blocks_an_explicitly_enabled_control():
         lesson={"motion_presets_enabled": True, "rollout_device_allowlist": []},
     )
     assert runtime._lesson_rollout_control_enabled("motion_presets_enabled") is False
+
+
+def _connection_runtime_gate(*, device_id, allowlist):
+    return SimpleNamespace(
+        device_id=device_id,
+        config={
+            "lesson": {
+                "runtime_enabled": True,
+                "rollout_device_allowlist": allowlist,
+            }
+        },
+    )
+
+
+def test_lesson_runtime_admission_is_fail_closed_to_the_one_robot_allowlist():
+    allowed = _connection_runtime_gate(device_id="28:84:85:85:1A:80", allowlist=["28:84:85:85:1a:80"])
+    blocked = _connection_runtime_gate(device_id="robot-02", allowlist=["robot-01"])
+    missing_identity = _connection_runtime_gate(device_id=None, allowlist=["robot-01"])
+    empty_allowlist = _connection_runtime_gate(device_id="robot-01", allowlist=[])
+
+    assert lesson_runtime_enabled(allowed) is True
+    assert lesson_runtime_enabled(blocked) is False
+    assert lesson_runtime_enabled(missing_identity) is False
+    assert lesson_runtime_enabled(empty_allowlist) is False
+    assert "start_lesson" in product_tool_names(allowed)
+    assert "start_lesson" not in product_tool_names(blocked)
+
+
+@pytest.mark.asyncio
+async def test_non_allowlisted_robot_cannot_bypass_admission_to_pull_or_prepare(monkeypatch):
+    conn = _connection_runtime_gate(device_id="robot-02", allowlist=["robot-01"])
+    calls = []
+
+    async def fake_impl(candidate):
+        calls.append(candidate)
+        return object()
+
+    monkeypatch.setattr(lesson_runtime, "_maybe_start_lesson_on_connect_impl", fake_impl)
+
+    assert await lesson_runtime.maybe_start_lesson_on_connect(conn) is None
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_robot_can_pull_and_prepare(monkeypatch):
+    conn = _connection_runtime_gate(device_id="robot-01", allowlist=["robot-01"])
+    expected = object()
+
+    async def fake_impl(candidate):
+        assert candidate is conn
+        return expected
+
+    monkeypatch.setattr(lesson_runtime, "_maybe_start_lesson_on_connect_impl", fake_impl)
+
+    assert await lesson_runtime.maybe_start_lesson_on_connect(conn) is expected
 
 
 def test_enabled_rollout_control_requires_exactly_one_device(monkeypatch):

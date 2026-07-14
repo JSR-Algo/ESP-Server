@@ -23,9 +23,9 @@ services:
       - LESSON_ASSET_PACK_MOUNT_ROOT=${LESSON_ASSET_PACK_MOUNT_ROOT:-}
       - LESSON_SD_FANOUT_CONCURRENCY=${LESSON_SD_FANOUT_CONCURRENCY:-4}
       # Built-in interactive "say the word" speaking lesson (start_lesson loads it with
-      # no backend assignment). Defaults match config.yaml so Docker does not silently
-      # disable the spoken sample flow.
-      - LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-true}
+      # no backend assignment). Dark by default; explicitly enable it for one allowlisted
+      # demo robot only.
+      - LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}
       - LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-interactive}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - TBOT_GOOGLE_LIVE_API_KEY=${TBOT_GOOGLE_LIVE_API_KEY:-}

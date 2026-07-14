@@ -44,6 +44,7 @@ _LESSON_ENV = (
     "LESSON_SAMPLE_ENABLED",
     "LESSON_SAMPLE_ASSET_BASE",
     "LESSON_SAMPLE_MODE",
+    "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
     "TBOT_DEVICE_MINT_SECRET",
 )
 
@@ -97,11 +98,11 @@ def test_asset_pack_mount_root_override_strips_trailing_slash(monkeypatch):
 # ── built-in sample-lesson demo flags ────────────────────────────────────────────
 
 
-def test_default_config_starts_interactive_sample_lesson():
-    """Default robot config maps spoken start_lesson to the interactive sample demo."""
+def test_default_config_keeps_interactive_sample_lesson_disabled():
+    """Shipped robot config keeps the assignment-bypassing sample demo dark."""
     config = read_config(f"{get_project_dir()}config.yaml")
 
-    assert config["lesson"]["sample_lesson"] is True
+    assert config["lesson"]["sample_lesson"] is False
     assert config["lesson"]["sample_mode"] == "interactive"
     assert config["lesson"]["asset_delivery_mode"] == "sd_pack"
     assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"
@@ -115,13 +116,15 @@ def test_empty_boolean_env_is_absent_not_false(monkeypatch):
     assert _parse_bool_env("LESSON_SAMPLE_ENABLED") is None
 
 
-def test_production_compose_disables_sample_while_local_compose_preserves_demo():
-    """Production must not expose the assignment-bypassing sample lesson by default."""
+def test_all_compose_defaults_disable_sample_lesson():
+    """No compose entry point may expose the assignment-bypassing demo by default."""
     project_dir = Path(get_project_dir())
     local_compose = (project_dir / "docker-compose.yml").read_text()
+    all_compose = (project_dir / "docker-compose_all.yml").read_text()
     prod_compose = (project_dir.parents[1] / "deploy" / "docker-compose.prod.yml").read_text()
 
-    assert "LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}" not in local_compose
+    assert "LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}" in local_compose
+    assert "LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}" in all_compose
     assert "LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-passive}" not in local_compose
     assert "LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}" in prod_compose
     assert "LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-passive}" not in prod_compose
@@ -147,12 +150,26 @@ def test_prod_env_example_declares_shared_lesson_runtime_secrets():
 def test_sample_enabled_override_sets_sample_lesson_bool(monkeypatch):
     """LESSON_SAMPLE_ENABLED -> lesson.sample_lesson (bool); NOT coupled to runtime_enabled."""
     monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "true")
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", " Robot-01 ")
 
     config = _apply_lesson_env_overrides({"lesson": {}})
 
     assert config["lesson"]["sample_lesson"] is True
+    assert config["lesson"]["rollout_device_allowlist"] == ["robot-01"]
     # The sample flag must NEVER auto-enable the production runtime.
     assert config["lesson"].get("runtime_enabled") in (None, False)
+
+
+def test_sample_enabled_env_requires_exactly_one_rollout_device(monkeypatch):
+    monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "true")
+
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {}})
+
+
+def test_sample_enabled_file_config_requires_exactly_one_rollout_device():
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {"sample_lesson": True}})
 
 
 def test_sample_asset_base_override_strips_trailing_slash(monkeypatch):

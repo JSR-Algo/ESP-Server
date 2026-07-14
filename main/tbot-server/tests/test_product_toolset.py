@@ -71,11 +71,13 @@ class _ToolsetConn:
             "lesson": {
                 "runtime_enabled": runtime_enabled,
                 "sample_lesson": sample_enabled,
+                "rollout_device_allowlist": ["robot-01"],
             },
             "plugins": {},
             "voice_mode": {"type": "google_live"},
         }
         self.logger = _DummyLogger()
+        self.device_id = "robot-01"
         self.func_handler = None
 
     def _lesson_runtime_enabled(self):

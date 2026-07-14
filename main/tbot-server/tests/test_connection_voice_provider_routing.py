@@ -571,7 +571,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_handle_connection_schedules_lesson_pull_on_boot_without_blocking_voice_route(self):
         handler = self._build_handler()
-        handler.config["lesson"] = {"runtime_enabled": True}
+        handler.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": ["robot-01"],
+        }
         allow_route_return = asyncio.Event()
         route_called = asyncio.Event()
         lesson_pull_started = asyncio.Event()
@@ -604,9 +607,9 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler._lesson_pull_on_connect = fake_lesson_pull_on_connect
         handler._save_and_close = fake_save_and_close
 
-        handle_task = asyncio.create_task(
-            handler.handle_connection(_FakeWebSocket(['{"type":"listen"}']))
-        )
+        websocket = _FakeWebSocket(['{"type":"listen"}'])
+        websocket.request.headers["device-id"] = "robot-01"
+        handle_task = asyncio.create_task(handler.handle_connection(websocket))
 
         await asyncio.wait_for(route_called.wait(), timeout=0.5)
         await asyncio.wait_for(lesson_pull_started.wait(), timeout=0.5)

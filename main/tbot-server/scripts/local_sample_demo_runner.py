@@ -17,7 +17,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def build_server_command(*, lan_ip: str, ws_port: int, http_port: int) -> list[str]:
+def build_server_command(
+    *, lan_ip: str, ws_port: int, http_port: int, device_id: str
+) -> list[str]:
     return [
         sys.executable,
         str(SCRIPT_DIR / "local_sample_demo_server.py"),
@@ -27,6 +29,8 @@ def build_server_command(*, lan_ip: str, ws_port: int, http_port: int) -> list[s
         str(ws_port),
         "--http-port",
         str(http_port),
+        "--device-id",
+        device_id,
     ]
 
 
@@ -50,9 +54,14 @@ def _run_json_command(command: list[str]) -> dict:
     return payload
 
 
-def start_server(*, lan_ip: str, ws_port: int, http_port: int):
+def start_server(*, lan_ip: str, ws_port: int, http_port: int, device_id: str):
     return subprocess.Popen(
-        build_server_command(lan_ip=lan_ip, ws_port=ws_port, http_port=http_port),
+        build_server_command(
+            lan_ip=lan_ip,
+            ws_port=ws_port,
+            http_port=http_port,
+            device_id=device_id,
+        ),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -126,7 +135,12 @@ def run_guarded(
     run_nudge=run_nudge,
     sleep=time.sleep,
 ) -> dict:
-    server = start_server(lan_ip=lan_ip, ws_port=ws_port, http_port=http_port)
+    server = start_server(
+        lan_ip=lan_ip,
+        ws_port=ws_port,
+        http_port=http_port,
+        device_id=device_id,
+    )
     last = None
     try:
         poll_interval = max(1, poll_seconds)

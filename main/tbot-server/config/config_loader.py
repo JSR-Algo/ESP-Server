@@ -570,6 +570,7 @@ def _apply_lesson_env_overrides(config):
         if (
             lesson_cfg.get("motion_presets_enabled") is True
             or lesson_cfg.get("playful_interactions_enabled") is True
+            or lesson_cfg.get("sample_lesson") is True
         ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
             raise ValueError("enabled lesson rollout controls require exactly one device")
         return config
@@ -662,6 +663,7 @@ def _apply_lesson_env_overrides(config):
     if (
         lesson_cfg.get("motion_presets_enabled") is True
         or lesson_cfg.get("playful_interactions_enabled") is True
+        or lesson_cfg.get("sample_lesson") is True
     ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
         raise ValueError("enabled lesson rollout controls require exactly one device")
     # Auto-enable ONLY when an EXPLICIT backend URL env (course_url) is present — the

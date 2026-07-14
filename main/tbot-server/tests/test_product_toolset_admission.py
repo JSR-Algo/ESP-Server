@@ -17,6 +17,7 @@ from core.providers.tools.product_toolset import (
     ALWAYS_INCLUDE,
     ALWAYS_INCLUDE_WHEN_LESSON_ENABLED,
     product_tool_names,
+    sample_lesson_config_enabled,
 )
 
 
@@ -27,8 +28,15 @@ class _MethodFlagConn:
     def __init__(self, runtime_enabled, sample_enabled=False):
         self._enabled = runtime_enabled
         self._sample_enabled = sample_enabled
+        self.device_id = "robot-01"
         # No Intent profile configured -> only ALWAYS_INCLUDE (+ lesson when on).
-        self.config = {}
+        self.config = {
+            "lesson": {
+                "runtime_enabled": runtime_enabled,
+                "sample_lesson": sample_enabled,
+                "rollout_device_allowlist": [self.device_id],
+            }
+        }
 
     def _lesson_runtime_enabled(self):
         return self._enabled
@@ -41,15 +49,34 @@ class _ConfigFlagConn:
     """Connection with no flag method; flags live in config['lesson']."""
 
     def __init__(self, runtime_enabled, sample_enabled=False):
+        self.device_id = "robot-01"
         self.config = {
             "lesson": {
                 "runtime_enabled": runtime_enabled,
                 "sample_lesson": sample_enabled,
+                "rollout_device_allowlist": ["robot-01"],
             }
         }
 
 
 class StartLessonAdmissionListTest(unittest.TestCase):
+    def test_sample_requires_exactly_one_matching_normalized_device(self):
+        conn = _ConfigFlagConn(runtime_enabled=False, sample_enabled=True)
+        conn.device_id = " ROBOT-01 "
+        conn.config["lesson"]["rollout_device_allowlist"] = [" Robot-01 ", "robot-01"]
+
+        self.assertTrue(sample_lesson_config_enabled(conn))
+
+    def test_sample_rejects_missing_empty_multiple_and_nonmatching_allowlists(self):
+        conn = _ConfigFlagConn(runtime_enabled=False, sample_enabled=True)
+
+        for allowlist in (None, [], ["robot-01", "robot-02"], ["robot-02"]):
+            if allowlist is None:
+                conn.config["lesson"].pop("rollout_device_allowlist", None)
+            else:
+                conn.config["lesson"]["rollout_device_allowlist"] = allowlist
+            self.assertFalse(sample_lesson_config_enabled(conn), allowlist)
+
     def test_start_lesson_omitted_from_admission_list_when_runtime_disabled(self):
         names = product_tool_names(_MethodFlagConn(runtime_enabled=False))
 

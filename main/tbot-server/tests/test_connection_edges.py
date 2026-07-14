@@ -1450,7 +1450,11 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.config["lesson"] = "bad"
         self.assertFalse(handler._lesson_runtime_enabled())
         self.assertFalse(handler._sample_lesson_enabled())
-        handler.config["lesson"] = {"runtime_enabled": True}
+        handler.device_id = "robot-01"
+        handler.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": ["robot-01"],
+        }
         self.assertTrue(handler._lesson_runtime_enabled())
         handler._disable_lesson_runtime()
         self.assertFalse(handler.config["lesson"]["runtime_enabled"])

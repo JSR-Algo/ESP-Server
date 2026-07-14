@@ -27,6 +27,13 @@ class _Conn:
         self.pull_calls = 0
         self._enabled = enabled
         self._pull = pull
+        self.device_id = "robot-01"
+        self.config = {
+            "lesson": {
+                "runtime_enabled": enabled,
+                "rollout_device_allowlist": [self.device_id],
+            }
+        }
 
     def _lesson_runtime_enabled(self):
         return self._enabled

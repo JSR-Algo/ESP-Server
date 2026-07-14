@@ -464,7 +464,7 @@ lesson:
   # Spoken start_lesson demo path: when true, start_lesson ignores backend assignment
   # and starts the built-in sample lesson. Interactive mode waits for child speech
   # through Google Live child-response windows.
-  sample_lesson: true
+  sample_lesson: false
   sample_mode: interactive
   # Default child quiet-window when a step omits responseTimeoutSec (sample overrides).
   child_response_timeout_sec: 12.0

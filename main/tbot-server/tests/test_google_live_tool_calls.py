@@ -844,6 +844,11 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
     def _make_provider(self):
         handler = _FakeFuncHandler(ActionResponse(action=Action.NONE, response="ok"))
         conn = _ProviderConn(func_handler=handler)
+        conn.device_id = "robot-01"
+        conn.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": [conn.device_id],
+        }
         conn._lesson_runtime_enabled = lambda: True
         provider = GoogleLiveProvider(conn)
 
@@ -1970,6 +1975,13 @@ class StartLessonNoAssignmentFeedbackTest(unittest.IsolatedAsyncioTestCase):
                 self.voice_provider = _VoiceProvider()
                 self.lesson_pull_task = None
                 self.lesson_start_status = None
+                self.device_id = "robot-01"
+                self.config = {
+                    "lesson": {
+                        "runtime_enabled": True,
+                        "rollout_device_allowlist": [self.device_id],
+                    }
+                }
 
             def _lesson_runtime_enabled(self):
                 return True

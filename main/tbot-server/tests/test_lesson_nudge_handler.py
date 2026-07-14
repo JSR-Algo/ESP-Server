@@ -366,6 +366,7 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         prep = FIX["frames"]["lesson_prepare"]
         conn = _RepublishConn(api_base="https://backend.test/v1")
         conn.device_id = "14:c1:9f:d1:a8:48"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         conn.logger = _CapturingLogger()
         assignment = {
             "assignmentId": prep["assignmentId"],
@@ -382,8 +383,8 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
             return "backend-device-uuid", "device-token"
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
-            self.assertEqual(device_id, "14:c1:9f:d1:a8:48")
-            self.assertIsNone(token)
+            self.assertEqual(device_id, "backend-device-uuid")
+            self.assertEqual(token, "device-token")
             return assignment
 
         async def _get_manifest(
@@ -399,7 +400,7 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lesson_id, prep["lessonId"])
             self.assertEqual(lesson_version, prep["lessonVersion"])
             self.assertEqual(profile, "espTft")
-            self.assertIsNone(token)
+            self.assertEqual(token, "device-token")
             return _build_manifest(), f'"lesson-3-espTft-{_manifest_checksum()}"'
 
         saved = (dtc.resolve_device_identity, mac.get_current_assignment, mac.get_lesson_manifest)
