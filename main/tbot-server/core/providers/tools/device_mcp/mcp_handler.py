@@ -16,6 +16,8 @@ TAG = __name__
 logger = setup_logging()
 
 _LOG_FIELD_LIMIT = 80
+_MAX_REQUEST_ID = 2_147_483_647
+_MAX_REQUEST_ID_DIGITS = len(str(_MAX_REQUEST_ID))
 _EVIDENCE_MARKER_RE = re.compile(
     r"lesson_preload_ready|checksum_verified|asset_cache_hit",
     re.IGNORECASE,
@@ -23,7 +25,16 @@ _EVIDENCE_MARKER_RE = re.compile(
 
 
 def _safe_log_field(value: object) -> str:
-    text = "-" if value is None else str(value)
+    if value is None:
+        text = "-"
+    elif isinstance(value, bool):
+        text = str(value)
+    elif isinstance(value, int):
+        text = str(value) if abs(value) <= _MAX_REQUEST_ID else "<out-of-range-int>"
+    elif isinstance(value, (str, float)):
+        text = str(value)
+    else:
+        text = f"<{type(value).__name__}>"
     text = _EVIDENCE_MARKER_RE.sub("<blocked-marker>", text)
     text = "".join(
         char if char.isprintable() and not char.isspace() else "_"
@@ -32,6 +43,25 @@ def _safe_log_field(value: object) -> str:
     if len(text) > _LOG_FIELD_LIMIT:
         text = text[: _LOG_FIELD_LIMIT - 3] + "..."
     return text
+
+
+def _coerce_request_id(value: object):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= _MAX_REQUEST_ID else None
+    if not isinstance(value, str):
+        return None
+    if (
+        not value
+        or len(value) > _MAX_REQUEST_ID_DIGITS
+        or not value.isascii()
+        or not value.isdecimal()
+        or (len(value) > 1 and value.startswith("0"))
+    ):
+        return None
+    parsed = int(value)
+    return parsed if parsed <= _MAX_REQUEST_ID else None
 
 
 def _message_metadata(payload: object) -> str:
@@ -171,7 +201,7 @@ async def handle_mcp_message(
     # Handle result
     if "result" in payload:
         result = payload["result"]
-        msg_id = int(payload.get("id", 0))
+        msg_id = _coerce_request_id(payload.get("id"))
 
         # Check for tool call response first
         if msg_id in mcp_client.call_results:
@@ -287,7 +317,7 @@ async def handle_mcp_message(
             f"Received MCP error response id={_safe_log_field(payload.get('id', 0))}"
         )
 
-        msg_id = int(payload.get("id", 0))
+        msg_id = _coerce_request_id(payload.get("id"))
         if msg_id in mcp_client.call_results:
             await mcp_client.reject_call_result(
                 msg_id, Exception(f"MCP error: {error_msg}")

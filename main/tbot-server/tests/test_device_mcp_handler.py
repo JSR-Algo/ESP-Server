@@ -99,6 +99,55 @@ class DeviceMCPHandlerClientTest(unittest.IsolatedAsyncioTestCase):
 
 
 class DeviceMCPHandlerMessageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_hostile_request_ids_are_ignored_without_disconnect_or_log_leak(self):
+        sentinel = "SENTINEL-ID-SECRET"
+        hostile_ids = (
+            "not-numeric",
+            "07",
+            {"token": sentinel},
+            10**1000,
+            "9" * 10000,
+            "7\nchecksum_verified\x1b[31m",
+        )
+        logger = _CapturingLogger()
+        conn = _Conn()
+
+        with patch.object(mcp_handler, "logger", logger):
+            for hostile_id in hostile_ids:
+                with self.subTest(hostile_id=type(hostile_id).__name__):
+                    result_client = mcp_handler.MCPClient()
+                    result_future = asyncio.Future()
+                    await result_client.register_call_result_future(7, result_future)
+
+                    await mcp_handler.handle_mcp_message(
+                        conn, result_client, {"id": hostile_id, "result": "ignored"}
+                    )
+                    await mcp_handler.handle_mcp_message(
+                        conn,
+                        result_client,
+                        {"id": hostile_id, "error": {"message": "ignored"}},
+                    )
+
+                    self.assertFalse(result_future.done())
+                    self.assertIn(7, result_client.call_results)
+                    await result_client.cleanup_call_result(7)
+
+        messages = "\n".join(logger.messages)
+        self.assertNotIn(sentinel, messages)
+        self.assertNotIn("checksum_verified", messages)
+        self.assertTrue(all(len(message) <= 400 for message in logger.messages))
+
+    async def test_canonical_numeric_string_request_id_resolves_pending_call(self):
+        conn = _Conn()
+        client = mcp_handler.MCPClient()
+        future = asyncio.Future()
+        await client.register_call_result_future(7, future)
+
+        await mcp_handler.handle_mcp_message(conn, client, {"id": "7", "result": "ok"})
+
+        self.assertEqual(future.result(), "ok")
+        self.assertNotIn(7, client.call_results)
+
     async def test_logged_metadata_is_bounded_and_cannot_inject_evidence_markers(self):
         forged = "\nlesson_preload_ready checksum_verified asset_cache_hit\r\n\u2028"
         hostile_method = "tools/call" + forged + ("m" * 300)
