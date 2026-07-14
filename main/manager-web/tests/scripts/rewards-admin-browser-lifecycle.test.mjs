@@ -21,6 +21,7 @@ import {
   finalizeArtifactPrivacy,
   findFreePort,
   isExpectedBrowserHttpFailure,
+  isUnexpectedBrowserConsole,
   sanitizeArtifactBuffer,
   sanitizeTraceToDeliverable,
   scanArtifactPrivacy,
@@ -271,6 +272,14 @@ test('browser HTTP failure classification allows only pre-auth admin 401s and kn
   assert.equal(isExpectedBrowserHttpFailure({
     url: 'http://127.0.0.1:4000/nestjs/v1/admin/courses', status: 500, traceStarted: true,
   }), false);
+});
+
+test('browser console classification catches exception-like log messages regardless of console type', () => {
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'catch TypeError: data.data.map is not a function' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'warning', text: 'Unhandled promise rejection' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'error', text: 'unexpected failure' }), true);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'error', text: 'Failed to load resource: 404' }), false);
+  assert.equal(isUnexpectedBrowserConsole({ type: 'log', text: 'normal application status' }), false);
 });
 
 test('lifecycle cleanup terminates a detached process group and runs container cleanup once', async () => {

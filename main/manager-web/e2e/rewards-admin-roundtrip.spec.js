@@ -134,7 +134,7 @@ async function loginWithRealAdminSession(page, fixture) {
       '/tbot/user/pub-config': { sm2PublicKey: shellPublicKey, enableMobileRegister: false, allowUserRegister: false },
       '/tbot/user/login': { token: 'shell-session-route-gate-only' },
       '/tbot/user/info': { username: shellLogin.username, superAdmin: true },
-      '/tbot/agent/list': { data: [] },
+      '/tbot/agent/list': [],
     };
     if (!Object.prototype.hasOwnProperty.call(responses, url.pathname)) {
       return route.fulfill({
@@ -394,7 +394,7 @@ async function publishAndAssertOriginalImmutable(page) {
 
 test('admin customizes the canonical lesson without mutating v1', async ({ page, context }) => {
   const fixture = requiredFixture();
-  const { isExpectedBrowserHttpFailure } = await lifecycleModulePromise;
+  const { isExpectedBrowserHttpFailure, isUnexpectedBrowserConsole } = await lifecycleModulePromise;
   const requests = [];
   const consoleEntries = [];
   const failures = [];
@@ -409,8 +409,7 @@ test('admin customizes the canonical lesson without mutating v1', async ({ page,
   page.on('console', (message) => {
     const entry = { type: message.type(), text: message.text().slice(0, 500) };
     consoleEntries.push(entry);
-    const resourceError = entry.text.startsWith('Failed to load resource:');
-    if (message.type() === 'error' && !resourceError) failures.push(`console: ${entry.text}`);
+    if (isUnexpectedBrowserConsole(entry)) failures.push(`console: ${entry.text}`);
   });
   page.on('requestfailed', (request) => {
     if (request.url().includes('/tbot/') && request.failure()?.errorText === 'net::ERR_ABORTED') return;

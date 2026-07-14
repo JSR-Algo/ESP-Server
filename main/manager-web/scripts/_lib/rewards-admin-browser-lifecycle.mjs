@@ -134,6 +134,12 @@ export function isExpectedBrowserHttpFailure({ url, status, traceStarted }) {
   return status === 404 && seededAssetPaths.has(pathname);
 }
 
+export function isUnexpectedBrowserConsole({ type, text }) {
+  if (String(text).startsWith('Failed to load resource:')) return false;
+  if (type === 'error') return true;
+  return /\b(?:uncaught|unhandled|exception|(?:type|reference|range|syntax)error)\b/i.test(String(text));
+}
+
 export function createProcessLifecycle({ cleanupContainer, cleanupTimeoutMs = 5_000 }) {
   const children = new Map();
   let cleanupPromise;
