@@ -35,6 +35,78 @@ def write_png(path: Path, width=480, height=320, color=(0, 0, 0)):
     )
 
 
+def authentic_soak_logs(session_sizes=(40, 40, 20), *, repeated_step_ids=False):
+    server_lines = []
+    serial_lines = []
+    for session_index, step_count in enumerate(session_sizes, start=1):
+        assignment = f"assignment-{session_index}"
+        session = f"session-{session_index}"
+        for step_index in range(1, step_count + 1):
+            step_id = f"step-{step_index}" if repeated_step_ids else f"s{session_index}-{step_index}"
+            sequence = step_index + 2
+            server_lines.append(
+                "[LessonRuntime]-INFO-emit lesson_step "
+                f"stepId={step_id} stepType=model assignment_id={assignment} "
+                f"session_id={session}"
+            )
+            serial_lines.extend([
+                f"I (1) WS: ws text lesson frame type=lesson_step seq={sequence} bytes=100",
+                (
+                    "I (2) SystemInfo: heap_checkpoint phase=lesson_render.complete "
+                    f"internal_free=30000 lifetime_min_internal=25000 "
+                    f"phase_min_internal={24576 - (step_index % 3)} "
+                    f"largest_internal=20000 psram_free={8_000_000 - step_index * 128}"
+                ),
+                (
+                    "I (3) Lesson: lesson_step rendered "
+                    f"stepId={step_id} passive=0 degraded=0 renderElapsedMs=12"
+                ),
+            ])
+    return "\n".join(serial_lines), "\n".join(server_lines)
+
+
+def authentic_soak_timeline(session_sizes=(40, 40, 20)):
+    lines = []
+    timestamp = 1
+    for session_index, step_count in enumerate(session_sizes, start=1):
+        assignment = f"assignment-{session_index}"
+        session = f"session-{session_index}"
+        lines.append(
+            f"{timestamp} server [LessonRuntime]-INFO-emit lesson_prepare stepId= "
+            f"assignment_id={assignment} session_id={session}"
+        )
+        timestamp += 1
+        lines.append(
+            f"{timestamp} serial I (1) WS: ws text lesson frame type=lesson_prepare seq=1 bytes=100"
+        )
+        timestamp += 1
+        for step_index in range(1, step_count + 1):
+            step_id = f"step-{step_index}"
+            sequence = step_index + 2
+            lines.extend([
+                (
+                    f"{timestamp} server [LessonRuntime]-INFO-emit lesson_step "
+                    f"stepId={step_id} assignment_id={assignment} session_id={session}"
+                ),
+                (
+                    f"{timestamp + 1} serial I (2) WS: ws text lesson frame "
+                    f"type=lesson_step seq={sequence} bytes=100"
+                ),
+                (
+                    f"{timestamp + 2} serial I (3) SystemInfo: heap_checkpoint "
+                    "phase=lesson_render.complete internal_free=30000 "
+                    "lifetime_min_internal=25000 phase_min_internal=24576 "
+                    f"largest_internal=20000 psram_free={8_000_000 - step_index * 128}"
+                ),
+                (
+                    f"{timestamp + 3} serial I (4) Lesson: lesson_step rendered "
+                    f"stepId={step_id} passive=0 degraded=0 renderElapsedMs=12"
+                ),
+            ])
+            timestamp += 4
+    return "\n".join(lines)
+
+
 def complete_result(tmp_path: Path) -> dict:
     preview = tmp_path / "preview.png"
     hardware = tmp_path / "hardware.png"
@@ -51,11 +123,13 @@ def complete_result(tmp_path: Path) -> dict:
         "firmwareVersion": "2.2.37",
         "deviceId": "28:84:85:85:1a:80",
         "assignmentId": "assignment-1",
+        "sessionId": "session-1",
         "assignmentVersion": 1,
         "lessonId": "lesson-1",
         "lessonVersion": 1,
         "manifestChecksum": "d" * 64,
         "packChecksum": "d" * 64,
+        "cacheKey": "lesson-1/v1-" + "d" * 64,
         "internalSramMin": 32768,
         "psramFirst": 8_000_000,
         "psramLast": 7_999_000,
@@ -73,9 +147,59 @@ def complete_result(tmp_path: Path) -> dict:
     }
 
 
+def cold_raw_evidence(result):
+    return "\n".join([
+        (
+            "assignment/current active assignmentId={assignmentId} lessonId={lessonId} "
+            "deviceId={deviceId}"
+        ).format(**result),
+        (
+            "lesson_preload_ready cacheKey={cacheKey} assetCount=2 downloadedCount=2 "
+            "skippedCount=0 failedCount=0 durationMs={elapsedMs} "
+            "assignment_id={assignmentId} session_id={sessionId}"
+        ).format(**result),
+        (
+            "checksum_verified cacheKey={cacheKey} manifestChecksum={manifestChecksum} "
+            "assetCount=2 assignment_id={assignmentId} session_id={sessionId}"
+        ).format(**result),
+    ])
+
+
+def warm_raw_evidence(result):
+    return "\n".join([
+        (
+            "assignment/current active assignmentId={assignmentId} lessonId={lessonId} "
+            "deviceId={deviceId}"
+        ).format(**result),
+        (
+            "asset_cache_hit cacheKey={cacheKey} assetCount=2 downloadedCount=0 "
+            "skippedCount=2 failedCount=0 durationMs={elapsedMs} "
+            "assignment_id={assignmentId} session_id={sessionId}"
+        ).format(**result),
+    ])
+
+
+def checksum_raw_evidence(result):
+    return "\n".join([
+        (
+            "assignment/current active assignmentId={assignmentId} lessonId={lessonId} "
+            "deviceId={deviceId}"
+        ).format(**result),
+        (
+            "checksum_mismatch cacheKey={cacheKey} manifestChecksum={manifestChecksum} "
+            "mismatchDetected=true partialCleaned=true ready=false "
+            "assignment_id={assignmentId} session_id={sessionId}"
+        ).format(**result),
+        (
+            "partial_cleaned cacheKey={cacheKey} manifestChecksum={manifestChecksum} "
+            "assignment_id={assignmentId} session_id={sessionId}"
+        ).format(**result),
+    ])
+
+
 def test_common_metadata_requires_real_screenshots_and_release_fields(tmp_path):
     result = complete_result(tmp_path)
-    assert fault.validate_result("cold", result, "lesson_preload_ready checksum_verified") == []
+    assert fault.validate_result("cold", result, cold_raw_evidence(result)) == []
     result["screenshots"] = [{"role": "hardware", "path": str(tmp_path / "missing.png")}]
     errors = fault.validate_result("cold", result, "lesson_preload_ready checksum_verified")
     assert "screenshots must reference non-empty regular files" in errors
@@ -121,7 +245,7 @@ def test_malformed_scenario_fields_fail_closed_instead_of_crashing(tmp_path):
 
 def test_evidence_report_hashes_screenshots(tmp_path):
     result = complete_result(tmp_path)
-    evidence = fault.build_evidence_report("cold", result, {}, "lesson_preload_ready checksum_verified")
+    evidence = fault.build_evidence_report("cold", result, {}, cold_raw_evidence(result))
     assert evidence["status"] == "PASS"
     assert len(evidence["screenshots"]) == 2
     assert all(len(item["sha256"]) == 64 for item in evidence["screenshots"])
@@ -133,7 +257,7 @@ def test_relative_screenshot_paths_resolve_from_evidence_directory(tmp_path):
     result = complete_result(tmp_path)
     result["screenshots"] = [{"role": "hardware", "path": "hardware.png"}]
     report = fault.build_evidence_report(
-        "cold", result, {}, "lesson_preload_ready checksum_verified", tmp_path
+        "cold", result, {}, cold_raw_evidence(result), tmp_path
     )
     assert report["status"] == "PASS"
     assert report["screenshots"][0]["path"] == str(screenshot)
@@ -282,6 +406,102 @@ def test_soak_rejects_large_psram_loss_with_small_recovery_blips():
     assert report["checks"]["no_psram_loss_above_tolerance"] is False
 
 
+def test_soak_accepts_authentic_three_session_transitions_with_sequence_resets():
+    serial_log, server_log = authentic_soak_logs()
+
+    report = soak.analyze_logs(serial_log, server_log, count=99)
+
+    assert report["status"] == "PASS"
+    assert report["metrics"]["transitions"] == 100
+    assert report["metrics"]["sessions"] == 3
+    assert report["metrics"]["internalSramMin"] == 24574
+
+
+def test_production_soak_requires_timeline_instead_of_zip_binding_sources():
+    serial_log, server_log = authentic_soak_logs()
+    foreign_server = server_log.replace("assignment-", "foreign-assignment-").replace(
+        "session-", "foreign-session-"
+    )
+
+    for candidate in (server_log, foreign_server):
+        report = soak.analyze_logs(serial_log, candidate)
+        assert report["status"] == "NOT_PASS"
+        assert report["checks"]["timeline_binding_required"] is False
+
+
+def test_soak_fails_closed_when_cross_source_transition_binding_is_incomplete():
+    serial_log, server_log = authentic_soak_logs()
+    server_log = server_log.replace(" assignment_id=assignment-2", "", 1)
+
+    report = soak.analyze_logs(serial_log, server_log)
+
+    assert report["status"] == "NOT_PASS"
+    assert report["checks"]["transition_binding_complete"] is False
+
+
+def test_soak_reads_camel_case_ack_telemetry_heap_samples():
+    serial_log, server_log = authentic_soak_logs()
+    serial_log = "\n".join(
+        line for line in serial_log.splitlines() if "heap_checkpoint" not in line
+    )
+    telemetry = "\n".join(
+        '{"type":"lesson_ack","body":{"telemetry":{"internalMinimumFreeBytes":24576,'
+        f'"psramFreeBytes":{8_000_000 - index}}}}}'
+        for index in range(100)
+    )
+
+    report = soak.analyze_logs(
+        serial_log + "\n" + telemetry + "\nlifetime_min_internal=24576",
+        server_log,
+        count=99,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["metrics"]["internalSramMin"] == 24576
+
+
+def test_soak_lifetime_internal_sram_below_gate_blocks_release():
+    serial_log, server_log = authentic_soak_logs()
+    serial_log = serial_log.replace("lifetime_min_internal=25000", "lifetime_min_internal=1024")
+
+    report = soak.analyze_logs(serial_log, server_log)
+
+    assert report["status"] == "NOT_PASS"
+    assert report["checks"]["lifetime_internal_sram_above_gate"] is False
+    assert report["metrics"]["activeInternalSramMin"] == 24574
+    assert report["metrics"]["lifetimeInternalSramMin"] == 1024
+
+
+def test_soak_missing_lifetime_internal_sram_fails_closed():
+    serial_log, server_log = authentic_soak_logs()
+    serial_log = "\n".join(
+        line.replace(" lifetime_min_internal=25000", "")
+        for line in serial_log.splitlines()
+    )
+
+    report = soak.analyze_logs(serial_log, server_log)
+
+    assert report["status"] == "NOT_PASS"
+    assert report["checks"]["lifetime_internal_sram_present"] is False
+
+
+def test_soak_requires_timeline_for_repeated_step_ids_across_sessions():
+    serial_log, server_log = authentic_soak_logs(repeated_step_ids=True)
+
+    report = soak.analyze_logs(serial_log, server_log)
+
+    assert report["status"] == "NOT_PASS"
+    assert report["checks"]["transition_binding_unambiguous"] is False
+
+
+def test_soak_timeline_binds_repeated_step_ids_to_their_session_boundaries():
+    report = soak.analyze_timeline(authentic_soak_timeline())
+
+    assert report["status"] == "PASS"
+    assert report["metrics"]["transitions"] == 100
+    assert report["metrics"]["sessions"] == 3
+
+
 def test_log_audit_rejects_firmware_crash_and_heap_corruption_markers():
     for marker in (
         "assert failed: runtime.cpp:42",
@@ -310,6 +530,131 @@ def test_log_audit_detects_duplicate_progress_regardless_of_field_order():
     }]
 
 
+def test_log_audit_requires_both_sources_and_one_hundred_bound_transitions():
+    serial_log, server_log = authentic_soak_logs()
+    timeline = authentic_soak_timeline()
+
+    assert audit.audit_logs(serial_log, server_log)["status"] == "NOT_PASS"
+    assert audit.audit_logs(serial_log, server_log, timeline_text=timeline)["status"] == "PASS"
+    assert audit.audit_logs(serial_log, "")["status"] == "NOT_PASS"
+    short_serial, short_server = authentic_soak_logs((33, 33, 33))
+    short_timeline = authentic_soak_timeline((33, 33, 33))
+    assert audit.audit_logs(
+        short_serial, short_server, timeline_text=short_timeline
+    )["status"] == "NOT_PASS"
+
+
+def test_log_audit_uses_timeline_session_boundaries_for_repeated_step_ids():
+    serial_log, server_log = authentic_soak_logs(repeated_step_ids=True)
+
+    assert audit.audit_logs(serial_log, server_log)["status"] == "NOT_PASS"
+    report = audit.audit_logs(
+        serial_log,
+        server_log,
+        timeline_text=authentic_soak_timeline(),
+    )
+
+    assert report["status"] == "PASS"
+    assert report["metrics"] == {"transitions": 100, "sessions": 3}
+
+
+def test_log_audit_recognizes_actual_runtime_failure_vocabulary_and_drop_deltas():
+    serial_log, server_log = authentic_soak_logs()
+    failures = (
+        "Failed to allocate download buffer",
+        "lesson image: decoded JPEG rejected; skipping",
+        "sequence gap: got 7, expected 6",
+        "audio_metrics decode_drop=0 encode_drop=0",
+        "audio_metrics decode_drop=1 encode_drop=0",
+    )
+
+    report = audit.audit_logs(serial_log + "\n" + "\n".join(failures), server_log)
+
+    assert report["status"] == "NOT_PASS"
+    assert report["findings"]["allocationFailure"] == 1
+    assert report["findings"]["decodeFailure"] == 1
+    assert report["findings"]["sequenceDivergence"] == 1
+    assert report["findings"]["audioUnderrun"] == 1
+
+
+def test_fault_driver_rejects_unscoped_operator_marker_text_for_cold(tmp_path):
+    result = complete_result(tmp_path)
+
+    errors = fault.validate_result(
+        "cold",
+        result,
+        "lesson_preload_ready checksum_verified operator says downloadedCount=2",
+    )
+
+    assert "cold raw evidence is not bound to result identity and cache" in errors
+
+
+def test_fault_driver_rejects_cross_session_cold_markers(tmp_path):
+    result = complete_result(tmp_path)
+    raw = cold_raw_evidence(result).replace("session_id=session-1", "session_id=session-other")
+
+    errors = fault.validate_result("cold", result, raw)
+
+    assert "cold raw evidence is not bound to result identity and cache" in errors
+
+
+def test_fault_driver_binds_warm_and_checksum_decisive_fields_to_raw_logs(tmp_path):
+    warm = complete_result(tmp_path)
+    warm.update({
+        "scenario": "warm",
+        "cacheHit": True,
+        "bytesDownloaded": 0,
+        "logMarkers": ["asset_cache_hit"],
+    })
+    assert fault.validate_result("warm", warm, warm_raw_evidence(warm), tmp_path) == []
+    warm_errors = fault.validate_result(
+        "warm",
+        warm,
+        warm_raw_evidence(warm).replace(warm["cacheKey"], "wrong-cache"),
+        tmp_path,
+    )
+    assert "warm raw evidence is not bound to result identity and cache" in warm_errors
+
+    checksum = complete_result(tmp_path)
+    checksum.update({
+        "scenario": "checksum",
+        "mismatchDetected": True,
+        "partialCleaned": True,
+        "ready": False,
+        "logMarkers": ["checksum_mismatch", "partial_cleaned"],
+    })
+    assert fault.validate_result("checksum", checksum, checksum_raw_evidence(checksum), tmp_path) == []
+    checksum_errors = fault.validate_result(
+        "checksum",
+        checksum,
+        checksum_raw_evidence(checksum).replace("partialCleaned=true", "partialCleaned=false"),
+        tmp_path,
+    )
+    assert "checksum raw evidence is not bound to result identity and cache" in checksum_errors
+    cleanup_cache_errors = fault.validate_result(
+        "checksum",
+        checksum,
+        checksum_raw_evidence(checksum).replace(
+            "partial_cleaned cacheKey=" + checksum["cacheKey"],
+            "partial_cleaned cacheKey=foreign-cache",
+        ),
+        tmp_path,
+    )
+    assert "checksum raw evidence is not bound to result identity and cache" in cleanup_cache_errors
+    cleanup_checksum_errors = fault.validate_result(
+        "checksum",
+        checksum,
+        checksum_raw_evidence(checksum).replace(
+            "partial_cleaned cacheKey={cacheKey} manifestChecksum={manifestChecksum}".format(**checksum),
+            "partial_cleaned cacheKey={cacheKey} manifestChecksum={wrong}".format(
+                **checksum, wrong="e" * 64
+            ),
+        ),
+        tmp_path,
+    )
+    assert "checksum raw evidence is not bound to result identity and cache" in cleanup_checksum_errors
+
+
 def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     probes = (ROOT / "docs" / "lesson-studio-task14-probes.md").read_text()
     matrix = (ROOT / "docs" / "TEST_MATRIX_TASK14.md").read_text()
@@ -320,6 +665,8 @@ def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     assert '"role": "preview"' in probes
     assert "480x320" in probes
     assert "10 MiB" in probes
+    assert "canonical `partial_cleaned` line must bind" in probes
+    assert "`cacheKey`, `manifestChecksum`, `assignment_id`, and `session_id`" in probes
     statuses = [line for line in live.splitlines() if line.startswith("| `")]
     assert statuses
     assert all("NOT PASS" in line for line in statuses)

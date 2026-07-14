@@ -12,8 +12,8 @@ COMMIT=re.compile(r'^[0-9a-f]{7,40}$')
 MAX_SCREENSHOT_BYTES=10*1024*1024
 COMMON_FIELDS=(
     'utcStart','utcEnd','backendCommit','espServerCommit','firmwareCommit',
-    'firmwareVersion','deviceId','assignmentId','assignmentVersion','lessonId',
-    'lessonVersion','manifestChecksum','packChecksum','internalSramMin',
+    'firmwareVersion','deviceId','assignmentId','sessionId','assignmentVersion','lessonId',
+    'lessonVersion','manifestChecksum','packChecksum','cacheKey','internalSramMin',
     'psramFirst','psramLast','screenshots','operator','commandExitCode','logMarkers',
 )
 SCENARIO_LOG_MARKERS={
@@ -29,6 +29,83 @@ SCENARIO_LOG_MARKERS={
     'slave-unavailable':('motion_degraded',),
     'rollback':('rollback_activated','old_files_reattested'),
 }
+
+def _raw_field(line,name):
+    match=re.search(
+        rf'(?<![A-Za-z0-9_]){re.escape(name)}["\']?\s*[:=]\s*["\']?([^,\s"\'}}]+)',
+        line,
+        re.I,
+    )
+    return match.group(1) if match else None
+
+def _line_has_fields(line,fields):
+    return all(_raw_field(line,name)==str(value) for name,value in fields.items())
+
+def _positive_int_field(line,name):
+    value=_raw_field(line,name)
+    try:return int(value) if value is not None and int(value)>0 else None
+    except ValueError:return None
+
+def _zero_int_field(line,name):
+    value=_raw_field(line,name)
+    try:return value is not None and int(value)==0
+    except ValueError:return False
+
+def _identity_bound(lines,result):
+    fields={
+        'assignmentId':result['assignmentId'],
+        'lessonId':result['lessonId'],
+        'deviceId':result['deviceId'],
+    }
+    return any(_line_has_fields(line,fields) for line in lines)
+
+def _scenario_raw_evidence_bound(scenario,result,raw_logs):
+    if scenario not in ('cold','warm','checksum'):
+        return True
+    lines=raw_logs.splitlines()
+    if not _identity_bound(lines,result):
+        return False
+    scoped={
+        'cacheKey':result['cacheKey'],
+        'assignment_id':result['assignmentId'],
+        'session_id':result['sessionId'],
+    }
+    if scenario == 'cold':
+        preload=next((line for line in lines if 'lesson_preload_ready' in line.lower() and _line_has_fields(line,scoped)),None)
+        checksum_fields={**scoped,'manifestChecksum':result['manifestChecksum']}
+        checksum=next((line for line in lines if 'checksum_verified' in line.lower() and _line_has_fields(line,checksum_fields)),None)
+        return bool(
+            preload
+            and checksum
+            and _positive_int_field(preload,'downloadedCount')
+            and _zero_int_field(preload,'failedCount')
+            and _raw_field(preload,'durationMs')==str(result.get('elapsedMs'))
+        )
+    if scenario == 'warm':
+        cache_hit=next((line for line in lines if 'asset_cache_hit' in line.lower() and _line_has_fields(line,scoped)),None)
+        return bool(
+            cache_hit
+            and _zero_int_field(cache_hit,'downloadedCount')
+            and _zero_int_field(cache_hit,'failedCount')
+            and _raw_field(cache_hit,'durationMs')==str(result.get('elapsedMs'))
+        )
+    mismatch_fields={**scoped,'manifestChecksum':result['manifestChecksum']}
+    mismatch=next((line for line in lines if 'checksum_mismatch' in line.lower() and _line_has_fields(line,mismatch_fields)),None)
+    cleanup_scope={
+        'cacheKey':result['cacheKey'],
+        'manifestChecksum':result['manifestChecksum'],
+        'assignment_id':result['assignmentId'],
+        'session_id':result['sessionId'],
+    }
+    cleanup=any('partial_cleaned' in line.lower() and _line_has_fields(line,cleanup_scope) for line in lines)
+    return bool(
+        mismatch
+        and cleanup
+        and _raw_field(mismatch,'mismatchDetected')=='true'
+        and _raw_field(mismatch,'partialCleaned')=='true'
+        and _raw_field(mismatch,'ready')=='false'
+    )
+
 def scenario_valid(s,r):
     try:
         checks={
@@ -99,7 +176,7 @@ def validate_result(scenario,result,raw_logs,base_dir=None):
         if not isinstance(result[name],str) or not COMMIT.fullmatch(result[name]):errors.append(f'invalid {name}')
     for name in ('manifestChecksum','packChecksum'):
         if not isinstance(result[name],str) or not SHA256.fullmatch(result[name]):errors.append(f'invalid {name}')
-    for name in ('firmwareVersion','deviceId','assignmentId','lessonId','operator'):
+    for name in ('firmwareVersion','deviceId','assignmentId','sessionId','lessonId','cacheKey','operator'):
         if not isinstance(result[name],str) or not result[name].strip():errors.append(f'invalid {name}')
     try:
         start=datetime.fromisoformat(result['utcStart'].replace('Z','+00:00'))
@@ -132,6 +209,8 @@ def validate_result(scenario,result,raw_logs,base_dir=None):
     if result.get('scenario') != scenario:errors.append('result scenario does not match command')
     if result.get('status') != 'PASS':errors.append('result status is not PASS')
     if not scenario_valid(scenario,result):errors.append(f'{scenario} decisive signals are incomplete')
+    if not _scenario_raw_evidence_bound(scenario,result,raw_logs):
+        errors.append(f'{scenario} raw evidence is not bound to result identity and cache')
     return errors
 
 def _stream_sha256(path):

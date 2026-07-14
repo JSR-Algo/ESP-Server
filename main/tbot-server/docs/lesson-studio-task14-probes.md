@@ -41,3 +41,6 @@ from the scenario evidence directory.
 `optional_asset_missing` + `render_degraded`, `sd_full_refused` +
 `previous_pack_retained`, `motion_degraded`, or `rollback_activated` +
 `old_files_reattested`. Every declared marker must occur in a raw log.
+For the checksum scenario, the canonical `partial_cleaned` line must bind
+`cacheKey`, `manifestChecksum`, `assignment_id`, and `session_id` to the same
+result identity as `checksum_mismatch`; an unscoped cleanup marker is not proof.
