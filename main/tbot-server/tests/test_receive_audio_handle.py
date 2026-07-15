@@ -1,8 +1,15 @@
+import asyncio
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from core.handle import receiveAudioHandle
+from core.activity_lease import (
+    ActivityLeaseCoordinator,
+    ActivityOperation,
+    ExclusiveDisposition,
+)
 from core.providers.tts.dto.dto import SentenceType
 
 
@@ -32,9 +39,11 @@ class _Queue:
 class _Executor:
     def __init__(self):
         self.calls = []
+        self.future = Future()
 
     def submit(self, fn, *args):
         self.calls.append((fn, args))
+        return self.future
 
 
 def _conn(**overrides):
@@ -69,6 +78,20 @@ def _conn(**overrides):
 
 
 class ReceiveAudioHandleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_lease_drops_queued_classic_audio_during_cache_eviction(self):
+        conn = _conn()
+        conn.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        lease = conn.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        await receiveAudioHandle.handleAudioMessage(conn, b"stale-audio")
+
+        conn.vad.is_vad.assert_not_called()
+        conn.asr.receive_audio.assert_not_awaited()
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
     async def test_handle_audio_message_resumes_vad_after_wakeup_without_forwarding_audio(self):
         conn = _conn(just_woken_up=True)
         created = []
@@ -107,6 +130,44 @@ class ReceiveAudioHandleTest(unittest.IsolatedAsyncioTestCase):
 
 
 class StartToChatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_lease_follows_exact_classic_chat_future_lifetime(self):
+        conn = _conn()
+        conn.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        intent_entered = asyncio.Event()
+
+        async def intent(_conn, _text):
+            self.assertTrue(conn.activity_leases.has_voice_leases())
+            intent_entered.set()
+            return False
+
+        with patch.object(receiveAudioHandle, "handle_user_intent", new=intent), patch.object(
+            receiveAudioHandle, "send_stt_message", new=AsyncMock()
+        ):
+            await receiveAudioHandle.startToChat(conn, "hello")
+
+        self.assertTrue(intent_entered.is_set())
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        self.assertEqual(conn.executor.calls, [(conn.chat, ("hello",))])
+
+        conn.executor.future.set_result(None)
+        await asyncio.sleep(0)
+
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_releases_when_exact_classic_chat_future_cancels(self):
+        conn = _conn()
+        conn.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        with patch.object(
+            receiveAudioHandle, "handle_user_intent", new=AsyncMock(return_value=False)
+        ), patch.object(receiveAudioHandle, "send_stt_message", new=AsyncMock()):
+            await receiveAudioHandle.startToChat(conn, "hello")
+
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        self.assertTrue(conn.executor.future.cancel())
+        conn.executor.future.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
     async def test_google_live_start_to_chat_does_not_enter_classic_pipeline(self):
         conn = _conn(config={"voice_mode": {"type": "google_live"}})
         sent = []

@@ -11,7 +11,7 @@ import asyncio
 import threading
 import traceback
 import subprocess
-from contextlib import suppress
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import websockets
 
@@ -53,7 +53,7 @@ from core.utils.util import get_system_error_response
 from core.utils import textUtils
 from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
-from core.activity_lease import ActivityLeaseCoordinator
+from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation
 
 
 TAG = __name__
@@ -485,14 +485,22 @@ class ConnectionHandler:
             and self._google_live_mode_configured()
             and self._is_listen_control_message(message)
         ):
-            await self._wait_for_voice_provider_ready()
-            if self.voice_provider is not None:
-                await self.voice_provider.handle_text_message(message)
+            with self.voice_activity_lease(ActivityOperation.CONNECTION_LISTEN) as allowed:
+                if not allowed:
+                    self._discard_refused_voice_input(message)
+                    return
+                await self._wait_for_voice_provider_ready()
+                if self.voice_provider is not None:
+                    await self.voice_provider.handle_text_message(message)
             return
 
         if isinstance(message, bytes) and self._google_live_mode_configured():
-            await self._wait_for_voice_provider_ready()
-            await self._route_audio_message(message)
+            with self.voice_activity_lease(ActivityOperation.CONNECTION_AUDIO) as allowed:
+                if not allowed:
+                    self._discard_refused_voice_input(message)
+                    return
+                await self._wait_for_voice_provider_ready()
+                await self._route_audio_message(message)
             return
 
         if isinstance(message, str) and (
@@ -500,6 +508,7 @@ class ConnectionHandler:
             or self._is_ping_message(message)
             or self._is_mcp_message(message)
             or self._is_lesson_control_message(message)
+            or self._is_abort_message(message)
         ):
             await handleTextMessage(self, message)
             return
@@ -520,33 +529,45 @@ class ConnectionHandler:
             await self._discard_message_with_bind_prompt()
             return
 
-        # No binding needed, continue processingMessage
-        await self._wait_for_voice_provider_ready()
-
         if isinstance(message, str):
-            if self.voice_provider is not None:
-                handled = await self.voice_provider.handle_text_message(message)
-                if handled:
+            operation = (
+                ActivityOperation.CONNECTION_LISTEN
+                if self._is_listen_control_message(message)
+                else ActivityOperation.CONNECTION_TEXT
+            )
+            with self.voice_activity_lease(operation) as allowed:
+                if not allowed:
+                    self._discard_refused_voice_input(message)
                     return
-            if self._google_live_mode_configured():
-                return
-            await handleTextMessage(self, message)
+                await self._wait_for_voice_provider_ready()
+                if self.voice_provider is not None:
+                    handled = await self.voice_provider.handle_text_message(message)
+                    if handled:
+                        return
+                if self._google_live_mode_configured():
+                    return
+                await handleTextMessage(self, message)
         elif isinstance(message, bytes):
-            handled = await self._route_audio_message(message)
-            if handled:
-                return
-
-            if self.vad is None or self.asr is None:
-                return
-
-            # Handle FromMQTTgateway audio packet
-            if self.conn_from_mqtt_gateway and len(message) >= 16:
-                handled = await self._process_mqtt_audio_message(message)
+            with self.voice_activity_lease(ActivityOperation.CONNECTION_AUDIO) as allowed:
+                if not allowed:
+                    self._discard_refused_voice_input(message)
+                    return
+                await self._wait_for_voice_provider_ready()
+                handled = await self._route_audio_message(message)
                 if handled:  # pragma: no cover - MQTT gateway handled branch covered in integration
-                    return  # pragma: no cover - MQTT gateway handled branch covered in integration
+                    return
 
-            # When no header processing needed or no header, process raw directlyMessage
-            self.asr_audio_queue.put(message)
+                if self.vad is None or self.asr is None:
+                    return
+
+                # Handle FromMQTTgateway audio packet
+                if self.conn_from_mqtt_gateway and len(message) >= 16:
+                    handled = await self._process_mqtt_audio_message(message)
+                    if handled:  # pragma: no cover - MQTT gateway handled branch covered in integration
+                        return  # pragma: no cover - MQTT gateway handled branch covered in integration
+
+                # When no header processing needed or no header, process raw directlyMessage
+                self.asr_audio_queue.put(message)
 
     async def _route_audio_message(self, message: bytes) -> bool:
         self._lesson_asset_audio_inflight += 1
@@ -639,6 +660,14 @@ class ConnectionHandler:
         return mode
 
     async def enter_conversation_mode(self, *, reason: str = "conversation") -> bool:
+        with self.voice_activity_lease(
+            ActivityOperation.CONNECTION_CONVERSATION
+        ) as allowed:
+            if not allowed:
+                return False
+            return await self._enter_conversation_mode(reason=reason)
+
+    async def _enter_conversation_mode(self, *, reason: str) -> bool:
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
             return False
         self._set_session_mode(SessionMode.CONVERSATION, reason=reason)
@@ -737,6 +766,20 @@ class ConnectionHandler:
             await self.enter_dormant_mode(reason=reason)
 
     async def finish_lesson_mode(self, *, reason: str = "lesson_completed") -> None:
+        if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
+            return
+        lesson_cfg = _lesson_config(self.config)
+        if not lesson_cfg.get("return_to_conversation", True):
+            await self._finish_lesson_mode(reason=reason)
+            return
+        with self.voice_activity_lease(
+            ActivityOperation.CONNECTION_CONVERSATION
+        ) as allowed:
+            if not allowed:
+                return
+            await self._finish_lesson_mode(reason=reason)
+
+    async def _finish_lesson_mode(self, *, reason: str) -> None:
         """Lesson terminal transition: show an appropriate face on the device, then
         return to normal CONVERSATION mode (re-opening Live) so the child can keep
         talking instead of seeing a silent dormant hop.
@@ -909,6 +952,13 @@ class ConnectionHandler:
             "lesson_error",
         }
 
+    def _is_abort_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "abort"
+
     async def _wait_for_voice_provider_ready(self):
         """In manager mode, keep early user input on the selected voice provider path."""
         if not self.read_config_from_api:
@@ -982,27 +1032,32 @@ class ConnectionHandler:
     async def _initialize_voice_session_async(self):
         """Resolve per-connection config and bootstrap selected voice provider."""
         try:
-            await self._initialize_private_config_async()
-            resolved_provider = create_voice_session_provider(self)
-            if (
-                self.voice_provider is not None
-                and type(resolved_provider) is type(self.voice_provider)
-            ):
-                return
+            with self.voice_activity_lease(
+                ActivityOperation.CONNECTION_CONVERSATION
+            ) as allowed:
+                if not allowed:
+                    return
+                await self._initialize_private_config_async()
+                resolved_provider = create_voice_session_provider(self)
+                if (
+                    self.voice_provider is not None
+                    and type(resolved_provider) is type(self.voice_provider)
+                ):
+                    return
 
-            old_provider = self.voice_provider
-            switching_to_google_live = (
-                old_provider is not None
-                and type(resolved_provider) is not type(old_provider)
-                and self._google_live_mode_configured()
-            )
-            if switching_to_google_live:
-                self.voice_provider = None
-            await resolved_provider.start_session()
-            if self.voice_provider is old_provider or self.voice_provider is None:
-                self.voice_provider = resolved_provider
-            if old_provider is not None and old_provider is not self.voice_provider:
-                await old_provider.close()
+                old_provider = self.voice_provider
+                switching_to_google_live = (
+                    old_provider is not None
+                    and type(resolved_provider) is not type(old_provider)
+                    and self._google_live_mode_configured()
+                )
+                if switching_to_google_live:
+                    self.voice_provider = None
+                await resolved_provider.start_session()
+                if self.voice_provider is old_provider or self.voice_provider is None:
+                    self.voice_provider = resolved_provider
+                if old_provider is not None and old_provider is not self.voice_provider:
+                    await old_provider.close()
         except Exception as e:
             self.logger.bind(tag=TAG).error(
                 f"Voice session initialization failed: {e}"
@@ -2325,6 +2380,55 @@ class ConnectionHandler:
         self.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
         return self.activity_leases
 
+    def try_acquire_voice_lease(self, operation):
+        coordinator = self._ensure_activity_leases()
+        lease = (
+            coordinator.try_acquire_voice(operation)
+            if coordinator is not None
+            else None
+        )
+        if lease is None:
+            operation_name = getattr(operation, "value", str(operation))
+            self.logger.bind(tag=TAG).info(
+                "voice_activity_refused operation={} reason=lesson_cache_eviction",
+                operation_name,
+            )
+        return lease
+
+    @contextmanager
+    def voice_activity_lease(self, operation):
+        lease = self.try_acquire_voice_lease(operation)
+        if lease is None:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lease.release()
+
+    def _discard_refused_voice_input(self, message=None):
+        self.reset_audio_states()
+        while True:
+            try:
+                self.asr_audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        if not isinstance(message, str):
+            return
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        if not (
+            isinstance(payload, dict)
+            and payload.get("type") == "listen"
+            and payload.get("state") == "stop"
+        ):
+            return
+        discard = getattr(self.voice_provider, "discard_refused_voice_input", None)
+        if callable(discard):
+            discard()
+
     def _close_activity_leases(self):
         if self._activity_leases_closed:
             return
@@ -2411,17 +2515,72 @@ class ConnectionHandler:
             )
             return None
 
+    async def _close_voice_provider_for_teardown(self):
+        if self.voice_provider is None:
+            return
+        try:
+            await self.voice_provider.close()
+        except Exception as provider_cleanup_error:
+            self.logger.bind(tag=TAG).error(
+                f"Error cleaning voice provider: {provider_cleanup_error}"
+            )
+
+    async def _drain_voice_provider_task_for_teardown(self):
+        task = self.voice_provider_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+
+        async def cancel_and_drain():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as task_cleanup_error:  # pragma: no cover - task failure safety net
+                self.logger.bind(tag=TAG).error(
+                    f"Error draining voice provider task: {task_cleanup_error}"
+                )
+
+        drain_task = asyncio.create_task(cancel_and_drain())
+        caller_cancelled = False
+        while True:
+            try:
+                await asyncio.shield(drain_task)
+                break
+            except asyncio.CancelledError:
+                caller_cancelled = True
+                if drain_task.done():
+                    break
+                task.cancel()
+        if caller_cancelled:
+            raise asyncio.CancelledError()
+
+    def _shutdown_executor_for_teardown(self):
+        executor = self.executor
+        if executor is None:
+            return
+        try:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+        except Exception as executor_error:  # pragma: no cover - executor shutdown safety net
+            self.logger.bind(tag=TAG).error(
+                f"Error closing thread pool: {executor_error}"
+            )
+        finally:
+            self.executor = None
+
     async def close(self, ws=None):
         """Resource cleanup method"""
+        voice_provider_closed = False
+        voice_provider_task_drained = False
         try:
             if self.stop_event:
                 self.stop_event.set()
 
             # Stop every path that can use MCP before cleaning its tool clients.
-            try:
-                await self._close_connection_owned_mcp_callers()
-            finally:
-                self._close_activity_leases()
+            await self._close_connection_owned_mcp_callers()
 
             # Clean VAD Connection Resource
             if (
@@ -2453,18 +2612,11 @@ class ConnectionHandler:
                         f"Error cleaning tool handler: {cleanup_error}"
                     )
 
-            if self.voice_provider is not None:
-                try:
-                    await self.voice_provider.close()
-                except Exception as provider_cleanup_error:
-                    self.logger.bind(tag=TAG).error(
-                        f"Error cleaning voice provider: {provider_cleanup_error}"
-                    )
+            await self._close_voice_provider_for_teardown()
+            voice_provider_closed = True
 
-            if self.voice_provider_task and not self.voice_provider_task.done():
-                self.voice_provider_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.voice_provider_task
+            await self._drain_voice_provider_task_for_teardown()
+            voice_provider_task_drained = True
 
             # Clear task queue
             self.clear_queues()
@@ -2512,15 +2664,6 @@ class ConnectionHandler:
             if self.asr:
                 await self.asr.close()
 
-            # Finally close thread pool (avoid blocking)
-            if self.executor:
-                try:
-                    self.executor.shutdown(wait=False)
-                except Exception as executor_error:  # pragma: no cover - executor shutdown safety net
-                    self.logger.bind(tag=TAG).error(
-                        f"Error closing thread pool: {executor_error}"
-                    )
-                self.executor = None
             self.logger.bind(tag=TAG).info("Connection resources released")
         except Exception as e:  # pragma: no cover - close outer safety net
             self.logger.bind(tag=TAG).error(f"Error closing connection: {e}")
@@ -2528,6 +2671,18 @@ class ConnectionHandler:
             # Ensure StopEventSet
             if self.stop_event:
                 self.stop_event.set()
+            try:
+                if not voice_provider_closed:
+                    await self._close_voice_provider_for_teardown()
+            finally:
+                try:
+                    if not voice_provider_task_drained:
+                        await self._drain_voice_provider_task_for_teardown()
+                finally:
+                    try:
+                        self._shutdown_executor_for_teardown()
+                    finally:
+                        self._close_activity_leases()
 
     def clear_queues(self):
         """Clear all task queues"""

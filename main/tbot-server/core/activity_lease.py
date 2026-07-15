@@ -117,6 +117,7 @@ class ActivityLease:
 class ActivityLeaseCoordinator:
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
+        self._close_requested = False
         self._closed = False
         self._next_lease_id = 1
         self._handles: Dict[int, _HandleState] = {}
@@ -126,7 +127,7 @@ class ActivityLeaseCoordinator:
 
     def try_acquire_voice(self, operation: str) -> Optional[ActivityLease]:
         normalized_operation = self._normalize_operation(operation)
-        if self._closed or normalized_operation is None:
+        if self._close_requested or normalized_operation is None:
             return None
         owner = self._require_owner_task()
         if self._exclusive_lease_id is not None:
@@ -153,17 +154,25 @@ class ActivityLeaseCoordinator:
         busy_probe: Callable[[], bool],
     ) -> Optional[ActivityLease]:
         normalized_operation = self._normalize_operation(operation)
-        if self._closed or normalized_operation is None:
+        if self._close_requested or normalized_operation is None:
             return None
         owner = self._require_owner_task()
-        if self._closed or self._exclusive_lease_id is not None or self._voice_records_by_owner:
+        if (
+            self._close_requested
+            or self._exclusive_lease_id is not None
+            or self._voice_records_by_owner
+        ):
             return None
         try:
             if bool(busy_probe()):
                 return None
         except Exception:
             return None
-        if self._closed or self._exclusive_lease_id is not None or self._voice_records_by_owner:
+        if (
+            self._close_requested
+            or self._exclusive_lease_id is not None
+            or self._voice_records_by_owner
+        ):
             return None
         lease = self._create_handle(
             LeaseKind.EVICTION_EXCLUSIVE,
@@ -212,14 +221,15 @@ class ActivityLeaseCoordinator:
         }
 
     def close(self) -> None:
-        if self._closed:
+        if self._close_requested:
             return
         self._require_owner_loop()
-        self._closed = True
-        self._handles.clear()
-        self._voice_records_by_owner.clear()
+        self._close_requested = True
+        if self._exclusive_lease_id is not None:
+            self._handles.pop(self._exclusive_lease_id, None)
         self._exclusive_lease_id = None
         self._exclusive_sticky = False
+        self._finalize_close_if_drained()
 
     def _create_handle(
         self,
@@ -340,6 +350,13 @@ class ActivityLeaseCoordinator:
         record.depth = len(record.handle_ids)
         if record.depth == 0:
             self._voice_records_by_owner.pop(state.owner_task)
+        self._finalize_close_if_drained()
+
+    def _finalize_close_if_drained(self) -> None:
+        if not self._close_requested or self._voice_records_by_owner:
+            return
+        self._handles.clear()
+        self._closed = True
 
     @staticmethod
     def _normalize_operation(operation: Any) -> Optional[str]:

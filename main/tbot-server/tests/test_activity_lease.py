@@ -430,18 +430,51 @@ async def test_exclusive_ambiguous_is_sticky_until_close():
 
 
 @pytest.mark.asyncio
-async def test_close_clears_all_records_and_refuses_new_acquisition():
+async def test_close_request_retains_nested_voice_and_refuses_new_acquisition():
     coordinator = _coordinator()
-    voice = coordinator.try_acquire_voice(VOICE_OP)
-    assert voice is not None
+    first = coordinator.try_acquire_voice(VOICE_OP)
+    second = coordinator.try_acquire_voice(ALT_VOICE_OP)
+    assert first is not None and second is not None
+
     coordinator.close()
 
-    assert not coordinator.has_voice_leases()
+    assert coordinator.has_voice_leases()
     assert not coordinator.has_exclusive_lease()
+    assert coordinator.diagnostic_snapshot()["closed"] is False
+    assert coordinator.diagnostic_snapshot()["voiceLeaseCount"] == 2
     assert coordinator.try_acquire_voice(VOICE_OP) is None
     assert coordinator.try_acquire_eviction(EVICT_OP, busy_probe=lambda: False) is None
-    with pytest.raises(ActivityLeaseInvariantError, match="closed"):
-        voice.release()
+
+    second.release()
+    assert coordinator.diagnostic_snapshot()["closed"] is False
+    first.release()
+    assert coordinator.diagnostic_snapshot() == {
+        "closed": True,
+        "voiceLeaseCount": 0,
+        "voiceOwners": [],
+        "exclusive": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_close_request_finalizes_only_after_out_of_order_voice_releases_reach_zero():
+    coordinator = _coordinator()
+    first = coordinator.try_acquire_voice(VOICE_OP)
+    middle = coordinator.try_acquire_voice(ALT_VOICE_OP)
+    last = coordinator.try_acquire_voice("google.send_text")
+    assert first is not None and middle is not None and last is not None
+
+    coordinator.close()
+    middle.release()
+    first.release()
+
+    assert coordinator.has_voice_leases()
+    assert coordinator.diagnostic_snapshot()["closed"] is False
+
+    last.release()
+
+    assert not coordinator.has_voice_leases()
+    assert coordinator.diagnostic_snapshot()["closed"] is True
 
 
 @pytest.mark.asyncio
@@ -481,7 +514,26 @@ async def test_callback_registration_invariant_drops_raw_exception_cause():
 
 
 @pytest.mark.asyncio
-async def test_thread_future_completion_after_close_does_not_schedule_on_loop(monkeypatch):
+async def test_asyncio_future_completion_after_close_request_finalizes_coordinator():
+    coordinator = _coordinator()
+    voice = coordinator.try_acquire_voice(VOICE_OP)
+    delegated = asyncio.get_running_loop().create_future()
+    assert voice is not None
+    voice.release_when_done(delegated)
+
+    coordinator.close()
+    assert coordinator.has_voice_leases()
+    assert coordinator.diagnostic_snapshot()["closed"] is False
+
+    delegated.set_result(None)
+    await asyncio.sleep(0)
+
+    assert not coordinator.has_voice_leases()
+    assert coordinator.diagnostic_snapshot()["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_thread_future_completion_after_close_request_finalizes_on_owner_loop():
     coordinator = _coordinator()
     voice = coordinator.try_acquire_voice(VOICE_OP)
     delegated = concurrent.futures.Future()
@@ -489,15 +541,14 @@ async def test_thread_future_completion_after_close_does_not_schedule_on_loop(mo
     voice.release_when_done(delegated)
     coordinator.close()
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(
-            asyncio.get_running_loop(),
-            "call_soon_threadsafe",
-            lambda *_args: pytest.fail("closed coordinator must not schedule cleanup"),
-        )
-        delegated.set_result(None)
+    worker = threading.Thread(target=lambda: delegated.set_result(None))
+    worker.start()
+    worker.join(timeout=1)
+    for _ in range(3):
+        await asyncio.sleep(0)
 
     assert not coordinator.has_voice_leases()
+    assert coordinator.diagnostic_snapshot()["closed"] is True
 
 
 @pytest.mark.asyncio
