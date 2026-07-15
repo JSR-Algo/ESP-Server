@@ -59,8 +59,31 @@ class ActivityLease:
 ```
 
 `try_acquire_*` never waits. It returns `None` on conflict. The coordinator is
-created by `ConnectionHandler` on the connection event loop and is closed during
-connection teardown.
+created by `ConnectionHandler` on the connection event loop. Its `close()` method
+is a close request with `OPEN -> CLOSING -> CLOSED` behavior, not an eager record
+wipe, so teardown may safely be invoked from a task that already owns a voice
+lease.
+
+## Deferred Close Lifecycle
+
+- A close request immediately refuses every new voice or eviction acquisition.
+- Teardown clears the exclusive record, including sticky ambiguity, because a
+  connection close is the terminal condition for destructive-operation state.
+- Existing voice handles and delegated futures remain valid while the coordinator
+  is `CLOSING`; their normal owner release and exact-future callbacks must still
+  pass all ownership and identity checks.
+- The coordinator transitions to `CLOSED` only after the final retained voice
+  handle or delegated future completes. If no voice record exists, close is
+  immediate.
+- Late concurrent-future callbacks marshal to the owner loop while closing. Once
+  fully closed, callbacks are safe no-ops.
+- Connection teardown closes the provider, cancels and drains provider-owned
+  asyncio tasks, initiates executor shutdown, and only then requests coordinator
+  close. Repeated cancellation of teardown must not bypass that ordering.
+
+This deferred transition prevents classic silence/direct-exit paths from closing
+the coordinator inside their own lease and then failing the legitimate owner
+release as the call stack unwinds.
 
 ## Ownership And Reentrancy
 
@@ -127,10 +150,12 @@ mismatched key, and any uncorrelated exception are ambiguous.
 
 On ambiguity, call
 `complete_exclusive(ExclusiveDisposition.AMBIGUOUS)`. The exclusive lease remains
-sticky until `ActivityLeaseCoordinator.close()` during connection teardown. The
-lesson lock may then be released; subsequent lesson mutation obtains the lock but
-refuses because the sticky exclusive lease remains. No retry is allowed on that
-connection.
+sticky until the `ActivityLeaseCoordinator.close()` request during connection
+teardown, which clears exclusive/sticky state immediately. The
+lesson lock may be released before teardown; subsequent lesson mutation obtains
+the lock but refuses because the sticky exclusive lease remains. No retry is
+allowed on that connection. Once teardown requests close, clearing that sticky
+record is terminal and no new acquisition is admitted.
 
 ## Lesson Mutation
 
@@ -184,8 +209,8 @@ between a send completing and the interaction state becoming busy.
 
 Core tests use real asyncio tasks and controlled futures to prove shared voice,
 exclusive eviction, task ownership, nested depth, wrong-task release refusal,
-thread-safe done callbacks, delegated cancellation, sticky ambiguity, and teardown
-cleanup.
+thread-safe done callbacks, delegated cancellation, sticky ambiguity, deferred
+close, self-close, repeated-cancellation teardown, and final cleanup.
 
 Integration tests hold MCP, Google, ASR, or executor futures on events and prove:
 

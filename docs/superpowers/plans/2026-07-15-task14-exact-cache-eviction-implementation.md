@@ -192,8 +192,11 @@ loop.call_soon_threadsafe(coordinator._complete_delegated, lease_id, future)
 ```
 
 `ExclusiveDisposition.DEFINITIVE` removes the exclusive record.
-`ExclusiveDisposition.AMBIGUOUS` marks it sticky and keeps it until `close()`.
-Never log operation arguments or exception text.
+`ExclusiveDisposition.AMBIGUOUS` marks it sticky and keeps it until the `close()`
+request. Close immediately clears exclusive/sticky state but retains existing
+voice/delegated records in `CLOSING` until their valid release or exact-future
+callback transitions the coordinator to `CLOSED`. Never log operation arguments
+or exception text.
 
 - [ ] **Step 5: Run GREEN core tests and commit the isolated core**
 
@@ -357,6 +360,12 @@ In `startToChat`, retain the lease through intent and submission, then call
 `release_when_done(chat_future)`. Do not release it in the scheduling coroutine's
 `finally` after delegation.
 
+Connection teardown must remain valid when invoked inside that same leased task
+(for example classic silence timeout or direct exit). It rejects new acquisition,
+drains provider asyncio tasks through repeated cancellation, initiates executor
+shutdown, clears exclusive/sticky state, and defers final coordinator closure
+until the last retained voice/delegated record unwinds.
+
 - [ ] **Step 3: Write RED Google Live task-lifetime tests**
 
 Hold each operation on an event and assert a lease exists for the complete task:
@@ -409,6 +418,8 @@ git commit -m "fix(server): guard voice with task-owned activity leases"
 
 Expected: no refused voice operation queues, replays, mutates mode, or leaks a
 lease; existing passive listening remains accepted when no exclusive lease exists.
+Self-close paths must not raise `closed-coordinator`, and close-request callbacks
+must finalize `CLOSED` only after the last valid voice record completes.
 
 ### Task 1D: Lease Safety Regression Gate
 
