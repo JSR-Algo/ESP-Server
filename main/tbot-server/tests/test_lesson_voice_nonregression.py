@@ -491,7 +491,11 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_disable_lesson_runtime_flips_flag_off(self):
         handler = _build_handler()
         # Enable then auto-disable; the flag is the rollback lever (plan §11.2/§12.1).
-        handler.config["lesson"] = {"runtime_enabled": True}
+        handler.device_id = "robot-rollback-test"
+        handler.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": [handler.device_id],
+        }
         self.assertTrue(handler._lesson_runtime_enabled())
         handler._disable_lesson_runtime()
         self.assertFalse(handler._lesson_runtime_enabled())
