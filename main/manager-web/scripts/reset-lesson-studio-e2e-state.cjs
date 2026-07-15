@@ -31,15 +31,22 @@ function resetOptionsFromEnvironment(env = process.env) {
     : {};
 }
 
+function composeEnvironment(env = process.env) {
+  return {
+    ...env,
+    JWT_PUBLIC_KEY: env.JWT_PUBLIC_KEY || 'not-used-by-e2e-reset',
+    TBOT_DEVICE_MINT_SECRET: env.TBOT_DEVICE_MINT_SECRET || 'not-used-by-e2e-reset',
+    LESSON_ASSET_ORIGIN_BASE: env.LESSON_ASSET_ORIGIN_BASE || 'http://127.0.0.1:8102/tvideo-demo',
+    ROBOT_ESP_BASE_URL: env.ROBOT_ESP_BASE_URL || 'not-used-by-e2e-reset',
+  };
+}
+
 function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   for (const [command, ...args] of buildResetCommands(options)) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
       stdio: 'inherit',
-      env: {
-        ...process.env,
-        JWT_PUBLIC_KEY: process.env.JWT_PUBLIC_KEY || 'not-used-by-e2e-reset',
-      },
+      env: composeEnvironment(),
     });
 
     if (result.error) throw result.error;
@@ -53,4 +60,9 @@ if (require.main === module) {
   resetLessonStudioE2EState();
 }
 
-module.exports = { buildResetCommands, resetLessonStudioE2EState, resetOptionsFromEnvironment };
+module.exports = {
+  buildResetCommands,
+  composeEnvironment,
+  resetLessonStudioE2EState,
+  resetOptionsFromEnvironment,
+};

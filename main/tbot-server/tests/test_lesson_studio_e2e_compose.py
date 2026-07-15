@@ -16,8 +16,15 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert '"8102:8002"' in compose
     assert "local/tbot-backend:lesson-studio-e2e" in compose
     assert "local/tbot-server-web:lesson-studio-e2e" in compose
-    assert "/src/lessons/fixtures/tvideo-raw-code/assets:/usr/share/nginx/html/tvideo-demo:ro" in compose
-    assert "LESSON_ASSET_ORIGIN_BASE: http://127.0.0.1:8102/tvideo-demo" in compose
+    assert "/src/lessons/fixtures/tvideo-raw-code/assets:/usr/share/nginx/html/tvideo-demo:ro" not in compose
+    assert "/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro" in compose
+    assert "/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro" in compose
+    assert "/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro" in compose
+    assert "/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro" in compose
+    assert "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin}" in compose
+    assert "TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}" in compose
+    assert "ROBOT_ESP_BASE_URL: ${ROBOT_ESP_BASE_URL:?export the live robot ESP fan-out URL}" in compose
+    assert "TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}" in compose
     assert "LESSON_SHARED_VISUAL_AUTHORING_ENABLED: \"true\"" in compose
     assert "LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: \"true\"" in compose
     assert 'TBOT_E2E_CAPTCHA_ENABLED: "true"' in compose

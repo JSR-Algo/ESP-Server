@@ -73,7 +73,7 @@ async function createVisualVersions(page, source, assetManifest, runId) {
       category: meta.category,
       title: `Canonical ${assetKey}`,
       profile: 'espTft',
-      storagePath: `http://127.0.0.1:8102/tvideo-demo/${asset.path}`,
+      storagePath: asset.path,
       sha256: asset.sha256,
       mimeType: asset.mediaType,
       bytes: asset.bytes,
@@ -173,6 +173,25 @@ function pinnedVisualIdentity(manifest) {
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
 }
 
+async function assertManifestVisualAssetsServed(page, manifest) {
+  const visualsByUrl = new Map();
+  for (const visual of pinnedVisualIdentity(manifest)) {
+    expect(visual.src).toMatch(/^https?:\/\//);
+    expect(visual.src.match(/https?:\/\//g)).toHaveLength(1);
+    const existingSha = visualsByUrl.get(visual.src);
+    expect(existingSha ?? visual.sha256, `one URL must not identify multiple assets: ${visual.src}`)
+      .toBe(visual.sha256);
+    visualsByUrl.set(visual.src, visual.sha256);
+  }
+  expect(visualsByUrl.size).toBeGreaterThan(0);
+  for (const [url, sha256] of visualsByUrl) {
+    const response = await page.request.get(url);
+    expect(response.ok(), `GET manifest visual ${url}`).toBe(true);
+    const bytes = await response.body();
+    expect(createHash('sha256').update(bytes).digest('hex'), `SHA-256 for ${url}`).toBe(sha256);
+  }
+}
+
 async function chooseSelect(page, item, label) {
   const input = item.locator('.el-select input');
   await input.click();
@@ -208,6 +227,9 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const before = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   expect(before.manifest.steps).toHaveLength(9);
   expect(JSON.stringify(before.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
+  const authoredVisuals = pinnedVisualIdentity(before.manifest);
+  expect(authoredVisuals.length).toBeGreaterThan(0);
+  await assertManifestVisualAssetsServed(page, before.manifest);
   for (const assetKey of Object.values(source.responseVisuals)) {
     expect(before.manifest.assets).toEqual(expect.arrayContaining([expect.objectContaining({
       id: assetKey,
@@ -395,6 +417,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByTestId('lesson-step-prompt')).toBeDisabled();
   const publishedProjection = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   expect(JSON.stringify(publishedProjection.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
+  await assertManifestVisualAssetsServed(page, publishedProjection.manifest);
   const publishedPinnedVisuals = pinnedVisualIdentity(publishedProjection.manifest);
 
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
