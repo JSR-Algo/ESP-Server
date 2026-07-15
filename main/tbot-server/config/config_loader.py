@@ -141,6 +141,7 @@ GOOGLE_LIVE_DEFAULTS = {
     },
 }
 DEFAULT_EDGE_TTS_VOICE = "vi-VN-HoaiMyNeural"
+DEFAULT_ENABLE_WEBSOCKET_PING = True
 
 
 def get_project_dir():
@@ -152,6 +153,37 @@ def read_config(config_path):
     with open(config_path, encoding="utf-8") as file:
         config = yaml.safe_load(file)
     return config
+
+
+def _manager_api_source_config(default_config, custom_config):
+    """Carry only local operational flags needed beside manager-owned config."""
+    source = dict(custom_config) if isinstance(custom_config, Mapping) else {}
+    if "enable_websocket_ping" not in source and isinstance(default_config, Mapping):
+        default_value = default_config.get("enable_websocket_ping")
+        if isinstance(default_value, bool):
+            source["enable_websocket_ping"] = default_value
+    return source
+
+
+def _apply_websocket_ping_policy(config_data, local_config):
+    """Normalize heartbeat without merging unrelated local manager-domain keys."""
+    local_value = (
+        local_config.get("enable_websocket_ping")
+        if isinstance(local_config, Mapping)
+        else None
+    )
+    remote_value = (
+        config_data.get("enable_websocket_ping")
+        if isinstance(config_data, Mapping)
+        else None
+    )
+    if isinstance(local_value, bool):
+        config_data["enable_websocket_ping"] = local_value
+    elif isinstance(remote_value, bool):
+        config_data["enable_websocket_ping"] = remote_value
+    else:
+        config_data["enable_websocket_ping"] = DEFAULT_ENABLE_WEBSOCKET_PING
+    return config_data
 
 
 def normalize_voice_config(config):
@@ -1002,10 +1034,11 @@ def load_config():
         custom_config = {}
 
     if custom_config.get("manager-api", {}).get("url"):
+        manager_source = _manager_api_source_config(default_config, custom_config)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            config = asyncio.run(get_config_from_api_async(custom_config))
+            config = asyncio.run(get_config_from_api_async(manager_source))
         else:
             raise RuntimeError(
                 "load_config() cannot fetch manager-api config from a running event loop; "
@@ -1045,7 +1078,8 @@ async def load_config_async():
         custom_config = {}
 
     if custom_config.get("manager-api", {}).get("url"):
-        config = await get_config_from_api_async(custom_config)
+        manager_source = _manager_api_source_config(default_config, custom_config)
+        config = await get_config_from_api_async(manager_source)
     else:
         config = merge_configs(default_config, custom_config)
     config = _apply_server_endpoint_env_overrides(config)
@@ -1098,6 +1132,7 @@ async def get_config_from_api_async(config):
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    config_data = _apply_websocket_ping_policy(config_data, config)
     config_data = _apply_base_google_live_policy(config_data, config)
     # Manager-api payloads often omit lesson SD-pack / public asset knobs. Preserve
     # local data/.config.yaml (and later env overrides) so production lab/prod can

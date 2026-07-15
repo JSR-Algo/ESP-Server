@@ -477,6 +477,67 @@ def test_load_config_manager_api_sync_path_and_cache(monkeypatch):
     assert calls[1] == ("ensure", result)
 
 
+def test_load_config_manager_api_passes_only_default_websocket_ping_operational_flag(monkeypatch):
+    calls = []
+
+    def read_config(path):
+        if path.endswith("data/.config.yaml"):
+            return {
+                "manager-api": {"url": "http://manager", "secret": "s"},
+                "selected_module": {"LLM": "local-should-not-leak"},
+            }
+        return {
+            "enable_websocket_ping": False,
+            "selected_module": {"LLM": "default-should-not-leak"},
+        }
+
+    async def fake_api_config(manager_source):
+        calls.append(manager_source)
+        return {
+            "enable_websocket_ping": manager_source.get("enable_websocket_ping"),
+            "server": {"auth": {"enabled": False}},
+        }
+
+    monkeypatch.setattr(config_loader, "read_config", read_config)
+    monkeypatch.setattr(config_loader, "get_project_dir", lambda: "/project/")
+    monkeypatch.setattr(config_loader, "get_config_from_api_async", fake_api_config)
+    monkeypatch.setattr(config_loader, "ensure_directories", lambda _config: None)
+
+    result = config_loader.load_config()
+
+    assert result["enable_websocket_ping"] is False
+    assert calls[0]["enable_websocket_ping"] is False
+    assert calls[0]["selected_module"] == {"LLM": "local-should-not-leak"}
+
+
+@pytest.mark.asyncio
+async def test_manager_api_websocket_ping_preserves_local_boolean_and_defaults_safe(monkeypatch):
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+
+    async def server_config():
+        return {
+            "server": {"auth": {"enabled": False}},
+            "selected_module": {"LLM": "remote-authority"},
+        }
+
+    monkeypatch.setattr(config_loader, "get_server_config", server_config)
+
+    explicit = await config_loader.get_config_from_api_async(
+        {
+            "manager-api": {"url": "http://m", "secret": "s"},
+            "enable_websocket_ping": False,
+            "selected_module": {"LLM": "local-must-not-override"},
+        }
+    )
+    defaulted = await config_loader.get_config_from_api_async(
+        {"manager-api": {"url": "http://m", "secret": "s"}}
+    )
+
+    assert explicit["enable_websocket_ping"] is False
+    assert explicit["selected_module"] == {"LLM": "remote-authority"}
+    assert defaulted["enable_websocket_ping"] is True
+
+
 @pytest.mark.asyncio
 async def test_load_config_async_paths_and_cache(monkeypatch):
     calls = []
