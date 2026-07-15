@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import re
 from collections import defaultdict, deque
 from pathlib import Path
+
+FIXTURE_VERSION = '2026-07-11.1'
+COURSE_ID = 'production-farm-english-358'
+LESSON_IDS = ('pip-farm-3m', 'pip-farm-5m', 'pip-farm-8m')
 
 LEGACY_TRANSITION = re.compile(
     r'(?i)(?:lesson_step_started|lesson_step_transition).*?'
@@ -338,11 +343,72 @@ def _source_logs(paths):
     return serial or '', server or ''
 
 
+def _stream_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_live_attestation(
+    fixtureVersion, courseId, lessonId, capture_script, verifier_script
+):
+    metadata = {
+        'fixtureVersion': fixtureVersion,
+        'courseId': courseId,
+        'lessonId': lessonId,
+    }
+    errors = []
+    if fixtureVersion != FIXTURE_VERSION:
+        errors.append(f'fixtureVersion must equal {FIXTURE_VERSION}')
+    if courseId != COURSE_ID:
+        errors.append(f'courseId must equal {COURSE_ID}')
+    if lessonId not in LESSON_IDS:
+        errors.append('lessonId is not an approved Task 14 fixture lesson')
+    for field, flag, path in (
+        ('captureScriptSha256', '--capture-script', capture_script),
+        ('verifierScriptSha256', '--verifier-script', verifier_script),
+    ):
+        try:
+            candidate = Path(path) if path is not None else None
+            if candidate is None or candidate.is_symlink() or not candidate.is_file():
+                raise OSError
+            metadata[field] = _stream_sha256(candidate)
+        except (OSError, ValueError):
+            errors.append(f'cannot hash {flag}')
+    return metadata, errors
+
+
+def add_live_attestation_args(parser):
+    parser.add_argument('--fixture-version')
+    parser.add_argument('--course-id')
+    parser.add_argument('--lesson-id')
+    parser.add_argument('--capture-script', type=Path)
+    parser.add_argument('--verifier-script', type=Path)
+
+
+def attest_report(report, args):
+    metadata, errors = validate_live_attestation(
+        args.fixture_version,
+        args.course_id,
+        args.lesson_id,
+        args.capture_script,
+        args.verifier_script,
+    )
+    report.update(metadata)
+    report['attestationErrors'] = errors
+    if errors:
+        report['status'] = 'NOT_PASS'
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('logs', nargs='*', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--timeline-log', type=Path)
+    add_live_attestation_args(parser)
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
@@ -352,6 +418,7 @@ def main():
         parser.error('serial and server logs required')
     serial, server = _source_logs(args.logs)
     report = analyze_timeline(args.timeline_log.read_text(errors='replace')) if args.timeline_log else analyze_logs(serial, server)
+    attest_report(report, args)
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:

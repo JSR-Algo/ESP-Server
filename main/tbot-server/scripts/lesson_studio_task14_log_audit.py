@@ -11,6 +11,7 @@ SOAK_SPEC = importlib.util.spec_from_file_location('lesson_studio_task14_soak_sh
 SOAK = importlib.util.module_from_spec(SOAK_SPEC)
 assert SOAK_SPEC.loader is not None
 SOAK_SPEC.loader.exec_module(SOAK)
+validate_live_attestation = SOAK.validate_live_attestation
 
 MARKERS = {
     'allocationFailure': r'alloc(?:ation)? failed|failed to alloc(?:ate|ation)|out of memory|malloc failed',
@@ -119,6 +120,7 @@ def main():
     parser.add_argument('logs', nargs='*', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--timeline-log', type=Path)
+    SOAK.add_live_attestation_args(parser)
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
@@ -129,6 +131,7 @@ def main():
     serial, server = SOAK._source_logs(args.logs)
     timeline = args.timeline_log.read_text(errors='replace') if args.timeline_log else None
     report = audit_logs(serial, server, timeline_text=timeline)
+    SOAK.attest_report(report, args)
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:

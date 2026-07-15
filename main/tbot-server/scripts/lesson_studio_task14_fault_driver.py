@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail-closed evidence collector; it never injects a fault or contacts production."""
-import argparse, hashlib, json, re
+import argparse, hashlib, json, re, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image, UnidentifiedImageError
@@ -10,11 +10,16 @@ REQUIRED=('serial.log','server.log','command.txt','result.json')
 SHA256=re.compile(r'^[0-9a-f]{64}$')
 COMMIT=re.compile(r'^[0-9a-f]{7,40}$')
 MAX_SCREENSHOT_BYTES=10*1024*1024
+FIXTURE_VERSION='2026-07-11.1'
+COURSE_ID='production-farm-english-358'
+LESSON_IDS=('pip-farm-3m','pip-farm-5m','pip-farm-8m')
 COMMON_FIELDS=(
     'utcStart','utcEnd','backendCommit','espServerCommit','firmwareCommit',
-    'firmwareVersion','deviceId','assignmentId','sessionId','assignmentVersion','lessonId',
-    'lessonVersion','manifestChecksum','packChecksum','cacheKey','internalSramMin',
-    'psramFirst','psramLast','screenshots','operator','commandExitCode','logMarkers',
+    'firmwareVersion','deviceId','assignmentId','sessionId','assignmentVersion',
+    'fixtureVersion','courseId','lessonId','lessonVersion','manifestChecksum',
+    'packChecksum','cacheKey','captureScriptSha256','verifierScriptSha256',
+    'internalSramMin','psramFirst','psramLast','screenshots','operator',
+    'commandExitCode','logMarkers',
 )
 SCENARIO_LOG_MARKERS={
     'preview-parity':('lesson_step_started','motion_preset'),
@@ -168,15 +173,52 @@ def _inspect_screenshots(entries,base_dir=None):
             errors.append('screenshots must reference non-empty regular files')
     return inspected,errors
 
-def validate_result(scenario,result,raw_logs,base_dir=None):
+def _fixture_errors(result):
+    errors=[]
+    if result.get('fixtureVersion') != FIXTURE_VERSION:
+        errors.append(f'fixtureVersion must equal {FIXTURE_VERSION}')
+    if result.get('courseId') != COURSE_ID:
+        errors.append(f'courseId must equal {COURSE_ID}')
+    if result.get('lessonId') not in LESSON_IDS:
+        errors.append('lessonId is not an approved Task 14 fixture lesson')
+    return errors
+
+def _script_hash_errors(result,capture_script=None,verifier_script=None):
+    errors=[]
+    for field,flag,path in (
+        ('captureScriptSha256','--capture-script',capture_script),
+        ('verifierScriptSha256','--verifier-script',verifier_script),
+    ):
+        declared=result.get(field)
+        if not isinstance(declared,str) or not SHA256.fullmatch(declared):
+            errors.append(f'invalid {field}')
+        if path is None:
+            continue
+        try:
+            candidate=Path(path)
+            if candidate.is_symlink() or not candidate.is_file():
+                raise OSError
+            actual=_stream_sha256(candidate)
+        except (OSError,ValueError):
+            errors.append(f'cannot hash {flag}')
+            continue
+        if isinstance(declared,str) and declared != actual:
+            errors.append(f'{field} does not match {flag}')
+    return errors
+
+def validate_result(
+    scenario,result,raw_logs,base_dir=None,capture_script=None,verifier_script=None
+):
     if not isinstance(result,dict):return ['result.json must contain an object']
     errors=[f'missing common metadata: {name}' for name in COMMON_FIELDS if name not in result]
     if errors:return errors
+    errors.extend(_fixture_errors(result))
+    errors.extend(_script_hash_errors(result,capture_script,verifier_script))
     for name in ('backendCommit','espServerCommit','firmwareCommit'):
         if not isinstance(result[name],str) or not COMMIT.fullmatch(result[name]):errors.append(f'invalid {name}')
     for name in ('manifestChecksum','packChecksum'):
         if not isinstance(result[name],str) or not SHA256.fullmatch(result[name]):errors.append(f'invalid {name}')
-    for name in ('firmwareVersion','deviceId','assignmentId','sessionId','lessonId','cacheKey','operator'):
+    for name in ('firmwareVersion','deviceId','assignmentId','sessionId','fixtureVersion','courseId','lessonId','cacheKey','operator'):
         if not isinstance(result[name],str) or not result[name].strip():errors.append(f'invalid {name}')
     try:
         start=datetime.fromisoformat(result['utcStart'].replace('Z','+00:00'))
@@ -222,8 +264,12 @@ def _stream_sha256(path):
 def _hash_file(path):
     return {'path':str(path),'sha256':_stream_sha256(path)}
 
-def build_evidence_report(scenario,result,files,raw_logs,base_dir=None):
-    errors=validate_result(scenario,result,raw_logs,base_dir)
+def build_evidence_report(
+    scenario,result,files,raw_logs,base_dir=None,capture_script=None,verifier_script=None
+):
+    errors=validate_result(
+        scenario,result,raw_logs,base_dir,capture_script,verifier_script
+    )
     screenshots,_=_inspect_screenshots(result.get('screenshots') if isinstance(result,dict) else None,base_dir)
     return {
       'scenario':scenario,'status':'PASS' if not errors else 'NOT_PASS',
@@ -233,18 +279,30 @@ def build_evidence_report(scenario,result,files,raw_logs,base_dir=None):
     }
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('scenario',choices=SCENARIOS); p.add_argument('--evidence-dir',required=True,type=Path); p.add_argument('--output',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('scenario',choices=SCENARIOS); p.add_argument('--evidence-dir',required=True,type=Path); p.add_argument('--output',type=Path); p.add_argument('--capture-script',type=Path); p.add_argument('--verifier-script',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
     if a.self_test:
         valid={'preview-parity':{'previewLayerRects':{'background':[0,0,480,320]},'hardwareLayerRects':{'background':[0,0,480,320]},'previewWordText':'BARN','hardwareWordText':'BARN','previewPathOutcome':'correct','hardwarePathOutcome':'correct','previewMotionTimeline':['teach','listen'],'hardwareMotionTimeline':['teach','listen']},'cold':{'bytesDownloaded':1,'elapsedMs':1,'ready':True,'checksumVerified':True,'manifestChecksum':'a','packChecksum':'a'},'warm':{'cacheHit':True,'bytesDownloaded':0,'elapsedMs':1,'ready':True,'manifestChecksum':'a','packChecksum':'a'},'offline':{'networkAvailable':False,'completed':True,'source':'sd'},'checksum':{'mismatchDetected':True,'partialCleaned':True,'ready':False},'interrupted':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'power-loss':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'missing-optional':{'optionalAssetMissing':True,'degraded':True,'advanced':True,'logMarkers':['optional_asset_missing','render_degraded']},'sd-full':{'freeRatio':0.04,'refused':True,'activePackRetained':True,'previousPackRetained':True},'slave-unavailable':{'motionDegraded':True,'completed':True,'logMarkers':['motion_degraded']},'rollback':{'activeVersion':1,'previousVersion':1,'activeChecksum':'a','previousChecksum':'a','oldFilesReattested':True,'ready':True}}
         for scenario in SCENARIOS: assert scenario_valid(scenario,valid[scenario]); assert not scenario_valid(scenario,{})
-        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2})); return 0
+        fixture={'fixtureVersion':FIXTURE_VERSION,'courseId':COURSE_ID,'lessonId':LESSON_IDS[0]}
+        assert not _fixture_errors(fixture)
+        for field,foreign in (('fixtureVersion','foreign'),('courseId','foreign'),('lessonId','foreign')):
+            candidate={**fixture,field:foreign}; assert _fixture_errors(candidate)
+        with tempfile.TemporaryDirectory() as directory:
+            capture=Path(directory)/'capture.py'; verifier=Path(directory)/'verify.py'
+            capture.write_bytes(b'capture\n'); verifier.write_bytes(b'verify\n')
+            hashes={'captureScriptSha256':_stream_sha256(capture),'verifierScriptSha256':_stream_sha256(verifier)}
+            assert not _script_hash_errors(hashes,capture,verifier)
+            assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
+        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2})); return 0
+    if a.capture_script is None or a.verifier_script is None:
+        p.error('--capture-script and --verifier-script are required unless --self-test is used')
     files={name:a.evidence_dir/name for name in REQUIRED}; missing=[name for name,path in files.items() if not path.is_file() or path.stat().st_size==0]
     result_data={}
     if not missing:
         try: result_data=json.loads(files['result.json'].read_text())
         except Exception: missing.append('valid result.json')
     raw_logs='\n'.join(files[name].read_text(errors='replace') for name in ('serial.log','server.log') if files[name].is_file())
-    report=build_evidence_report(a.scenario,result_data,files,raw_logs,a.evidence_dir)
+    report=build_evidence_report(a.scenario,result_data,files,raw_logs,a.evidence_dir,a.capture_script,a.verifier_script)
     report['missingEvidence']=missing
     if missing:report['status']='NOT_PASS'
     data=json.dumps(report,indent=2)+'\n'; print(data,end=''); a.output and a.output.write_text(data); return 0 if report['status']=='PASS' else 1

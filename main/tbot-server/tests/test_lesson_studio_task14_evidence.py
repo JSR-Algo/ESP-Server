@@ -1,5 +1,7 @@
 import importlib.util
+import hashlib
 import json
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -112,6 +114,10 @@ def complete_result(tmp_path: Path) -> dict:
     hardware = tmp_path / "hardware.png"
     write_png(preview, color=(1, 2, 3))
     write_png(hardware, color=(3, 2, 1))
+    capture_script = tmp_path / "lesson_e2e_live_capture.py"
+    verifier_script = tmp_path / "lesson_e2e_log_verify.py"
+    capture_script.write_text("# deterministic capture fixture\n")
+    verifier_script.write_text("# deterministic verifier fixture\n")
     return {
         "scenario": "cold",
         "status": "PASS",
@@ -125,11 +131,15 @@ def complete_result(tmp_path: Path) -> dict:
         "assignmentId": "assignment-1",
         "sessionId": "session-1",
         "assignmentVersion": 1,
-        "lessonId": "lesson-1",
+        "fixtureVersion": "2026-07-11.1",
+        "courseId": "production-farm-english-358",
+        "lessonId": "pip-farm-3m",
         "lessonVersion": 1,
         "manifestChecksum": "d" * 64,
         "packChecksum": "d" * 64,
-        "cacheKey": "lesson-1/v1-" + "d" * 64,
+        "cacheKey": "pip-farm-3m/v1-" + "d" * 64,
+        "captureScriptSha256": hashlib.sha256(capture_script.read_bytes()).hexdigest(),
+        "verifierScriptSha256": hashlib.sha256(verifier_script.read_bytes()).hexdigest(),
         "internalSramMin": 32768,
         "psramFirst": 8_000_000,
         "psramLast": 7_999_000,
@@ -145,6 +155,13 @@ def complete_result(tmp_path: Path) -> dict:
         "checksumVerified": True,
         "logMarkers": ["lesson_preload_ready", "checksum_verified"],
     }
+
+
+def helper_script_paths(tmp_path: Path):
+    return (
+        tmp_path / "lesson_e2e_live_capture.py",
+        tmp_path / "lesson_e2e_log_verify.py",
+    )
 
 
 def cold_raw_evidence(result):
@@ -203,6 +220,138 @@ def test_common_metadata_requires_real_screenshots_and_release_fields(tmp_path):
     result["screenshots"] = [{"role": "hardware", "path": str(tmp_path / "missing.png")}]
     errors = fault.validate_result("cold", result, "lesson_preload_ready checksum_verified")
     assert "screenshots must reference non-empty regular files" in errors
+
+
+def test_all_scenarios_reject_foreign_fixture_course_and_lesson(tmp_path):
+    foreign_values = {
+        "fixtureVersion": "2026-07-11.2",
+        "courseId": "foreign-course",
+        "lessonId": "foreign-lesson",
+    }
+    expected_errors = {
+        "fixtureVersion": "fixtureVersion must equal 2026-07-11.1",
+        "courseId": "courseId must equal production-farm-english-358",
+        "lessonId": "lessonId is not an approved Task 14 fixture lesson",
+    }
+
+    for scenario in fault.SCENARIOS:
+        for field, foreign_value in foreign_values.items():
+            result = complete_result(tmp_path)
+            result["scenario"] = scenario
+            result[field] = foreign_value
+            errors = fault.validate_result(scenario, result, "")
+            assert expected_errors[field] in errors, (scenario, field, errors)
+
+
+def test_helper_script_hashes_are_computed_from_explicit_paths(tmp_path):
+    result = complete_result(tmp_path)
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+
+    assert fault.validate_result(
+        "cold",
+        result,
+        cold_raw_evidence(result),
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    ) == []
+
+    result["captureScriptSha256"] = "0" * 64
+    errors = fault.validate_result(
+        "cold",
+        result,
+        cold_raw_evidence(result),
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    )
+    assert "captureScriptSha256 does not match --capture-script" in errors
+
+    result = complete_result(tmp_path)
+    verifier_script.write_text("# changed after operator recorded the hash\n")
+    errors = fault.validate_result(
+        "cold",
+        result,
+        cold_raw_evidence(result),
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    )
+    assert "verifierScriptSha256 does not match --verifier-script" in errors
+
+
+def test_helper_script_hash_validation_fails_closed_for_missing_paths(tmp_path):
+    result = complete_result(tmp_path)
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    capture_script.unlink()
+
+    errors = fault.validate_result(
+        "cold",
+        result,
+        cold_raw_evidence(result),
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    )
+
+    assert "cannot hash --capture-script" in errors
+
+
+def test_soak_attestation_rejects_foreign_fixture_course_and_lesson(tmp_path):
+    complete_result(tmp_path)
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    expected = {
+        "fixtureVersion": "2026-07-11.1",
+        "courseId": "production-farm-english-358",
+        "lessonId": "pip-farm-5m",
+    }
+
+    metadata, errors = soak.validate_live_attestation(
+        **expected,
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    )
+    assert errors == []
+    assert metadata["captureScriptSha256"] == hashlib.sha256(capture_script.read_bytes()).hexdigest()
+    assert metadata["verifierScriptSha256"] == hashlib.sha256(verifier_script.read_bytes()).hexdigest()
+
+    for field, foreign_value in (
+        ("fixtureVersion", "2026-07-11.2"),
+        ("courseId", "foreign-course"),
+        ("lessonId", "foreign-lesson"),
+    ):
+        foreign = {**expected, field: foreign_value}
+        _metadata, errors = soak.validate_live_attestation(
+            **foreign,
+            capture_script=capture_script,
+            verifier_script=verifier_script,
+        )
+        assert errors, field
+
+
+def test_soak_attestation_fails_closed_when_helper_cannot_be_hashed(tmp_path):
+    complete_result(tmp_path)
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    verifier_script.unlink()
+
+    _metadata, errors = soak.validate_live_attestation(
+        fixtureVersion="2026-07-11.1",
+        courseId="production-farm-english-358",
+        lessonId="pip-farm-8m",
+        capture_script=capture_script,
+        verifier_script=verifier_script,
+    )
+
+    assert "cannot hash --verifier-script" in errors
+
+
+def test_log_audit_uses_shared_live_attestation_validator(tmp_path):
+    complete_result(tmp_path)
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    kwargs = {
+        "fixtureVersion": "foreign",
+        "courseId": "production-farm-english-358",
+        "lessonId": "pip-farm-3m",
+        "capture_script": capture_script,
+        "verifier_script": verifier_script,
+    }
+    assert audit.validate_live_attestation(**kwargs) == soak.validate_live_attestation(**kwargs)
 
 
 def test_scenario_markers_must_be_present_in_raw_logs(tmp_path):
@@ -667,6 +816,36 @@ def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     assert "10 MiB" in probes
     assert "canonical `partial_cleaned` line must bind" in probes
     assert "`cacheKey`, `manifestChecksum`, `assignment_id`, and `session_id`" in probes
-    statuses = [line for line in live.splitlines() if line.startswith("| `")]
-    assert statuses
-    assert all("NOT PASS" in line for line in statuses)
+    expected_rows = [
+        ("T14-LIVE-01", "preview-parity", "NOT PASS - live run required"),
+        ("T14-LIVE-02", "cold", "NOT PASS - live run required"),
+        ("T14-LIVE-03", "warm", "NOT PASS - live run required"),
+        ("T14-LIVE-04", "offline", "NOT PASS - live run required"),
+        ("T14-LIVE-05", "checksum", "NOT PASS - live run required"),
+        ("T14-LIVE-06", "interrupted", "NOT PASS - live run required"),
+        ("T14-LIVE-07", "power-loss", "NOT PASS - live run required"),
+        ("T14-LIVE-08", "missing-optional", "NOT PASS - live run required"),
+        ("T14-LIVE-09", "sd-full", "NOT PASS - live run required"),
+        ("T14-LIVE-10", "slave-unavailable", "NOT PASS - live run required"),
+        ("T14-LIVE-11", "rollback", "NOT PASS - live run required"),
+        ("T14-LIVE-12", "soak", "NOT PASS - live run required"),
+        ("T14-LIVE-13", "log audit", "NOT PASS - live run required"),
+    ]
+    actual_rows = []
+    for line in live.splitlines():
+        match = re.fullmatch(
+            r"\| (T14-LIVE-\d{2}) (?:`([^`]+)`|(soak|log audit)) \|.*"
+            r"\| ([^|]+) \|",
+            line,
+        )
+        if match:
+            actual_rows.append((match.group(1), match.group(2) or match.group(3), match.group(4)))
+    assert actual_rows == expected_rows
+    assert '"fixtureVersion": "2026-07-11.1"' in live
+    assert '"courseId": "production-farm-english-358"' in live
+    assert '"captureScriptSha256": "<sha256-of---capture-script>"' in live
+    assert '"verifierScriptSha256": "<sha256-of---verifier-script>"' in live
+    assert "--capture-script" in live
+    assert "--verifier-script" in live
+    assert "report.json.fixtureVersion" in live
+    assert "audit.json.fixtureVersion" in live
