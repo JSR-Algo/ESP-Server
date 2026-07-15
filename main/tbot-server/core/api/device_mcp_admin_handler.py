@@ -1,4 +1,5 @@
 import asyncio
+from typing import Callable, Optional
 
 from aiohttp import web
 
@@ -18,6 +19,43 @@ _ROBOT_MOTION_TOOL_PREFIXES = (
     "self.robot.both_arms_",
 )
 
+
+class MCPUnknownToolError(RuntimeError):
+    """Privacy-safe proof that a correlated MCP response rejected the tool."""
+
+    def __init__(self):
+        super().__init__("mcp-unknown-tool")
+
+
+def _is_correlated_unknown_tool_result(raw_result, tool_name: str) -> bool:
+    if not isinstance(raw_result, dict) or raw_result.get("isError") is not True:
+        return False
+    error = raw_result.get("error")
+    if isinstance(error, dict):
+        code = str(error.get("code") or "").strip().lower().replace("-", "_")
+        rejected_tool = error.get("toolName") or error.get("tool") or error.get("name")
+        return code in {"unknown_tool", "tool_not_found", "unlisted_tool"} and rejected_tool == tool_name
+    if not isinstance(error, str) or tool_name not in error:
+        return False
+    normalized = error.casefold().replace("-", " ").replace("_", " ")
+    return any(
+        marker in normalized
+        for marker in ("unknown tool", "tool not found", "unlisted tool")
+    )
+
+
+async def _cleanup_registered_call(mcp_client, tool_call_id: int) -> None:
+    async def cleanup() -> None:
+        await mcp_client.cleanup_call_result(tool_call_id)
+
+    cleanup_task = asyncio.create_task(cleanup())
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    await asyncio.gather(cleanup_task, return_exceptions=True)
+
 def _mcp_call_timeout(tool_name: str) -> float:
     return MOTION_TOOL_ACK_TIMEOUT_SEC if tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES) else 30
 
@@ -26,7 +64,15 @@ def _is_robot_motion_tool(tool_name: str) -> bool:
     return tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES)
 
 
-async def _call_raw_mcp_tool(conn, mcp_client, tool_name: str, args: dict, *, timeout: int = 30):
+async def _call_raw_mcp_tool(
+    conn,
+    mcp_client,
+    tool_name: str,
+    args: dict,
+    *,
+    timeout: int = 30,
+    on_dispatched: Optional[Callable[[], None]] = None,
+):
     if not isinstance(args, dict):
         raise ValueError(f"Parameters must be dictionary type, actual type: {type(args)}")
 
@@ -41,15 +87,19 @@ async def _call_raw_mcp_tool(conn, mcp_client, tool_name: str, args: dict, *, ti
     }
 
     try:
+        if on_dispatched is not None:
+            on_dispatched()
         await send_mcp_message(conn, payload)
         raw_result = await asyncio.wait_for(result_future, timeout=timeout)
-    except Exception:
-        await mcp_client.cleanup_call_result(tool_call_id)
+    except BaseException:
+        await _cleanup_registered_call(mcp_client, tool_call_id)
         raise
 
     if isinstance(raw_result, dict):
         if raw_result.get("isError") is True:
-            raise RuntimeError(str(raw_result.get("error") or "Tool call returned error"))
+            if _is_correlated_unknown_tool_result(raw_result, tool_name):
+                raise MCPUnknownToolError() from None
+            raise RuntimeError("mcp-tool-call-failed")
         content = raw_result.get("content")
         if isinstance(content, list) and content and isinstance(content[0], dict) and "text" in content[0]:
             return content[0]["text"]

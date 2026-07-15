@@ -2,8 +2,10 @@ import asyncio
 import json
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation, ExclusiveDisposition
 from core.lesson.sample import (
     DEFAULT_SAMPLE_STEP_DWELL_SEC,
     DEFAULT_SAMPLE_STEP_TIMEOUT_SEC,
@@ -1452,6 +1454,46 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
         self.assertNotIn("lesson_abandoned", sent_types)
         self.assertEqual(sent_types[-1], "lesson_stop")
+
+
+class ActivityLeaseSampleMutationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_start_refuses_exclusive_lease_inside_shared_lock(self):
+        from core.lesson import sample as sample_module
+
+        lock = asyncio.Lock()
+        await lock.acquire()
+        conn = SimpleNamespace(
+            _lesson_pull_lock=lock,
+            activity_leases=ActivityLeaseCoordinator(asyncio.get_running_loop()),
+        )
+        async def forbidden(_conn):
+            self.fail("sample mutation must not run during exclusive eviction")
+
+        with patch(
+            "core.providers.tools.product_toolset.sample_lesson_config_enabled",
+            return_value=True,
+        ), patch.object(sample_module, "_start_sample_lesson_impl", forbidden):
+            task = asyncio.create_task(sample_module.start_sample_lesson(conn))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                lease = conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+                lock.release()
+                result = await task
+            finally:
+                if lock.locked():
+                    lock.release()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "CACHE_EVICTION_RESERVED")
 
 
 if __name__ == "__main__":

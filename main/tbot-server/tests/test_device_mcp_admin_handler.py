@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import unittest
@@ -20,6 +21,118 @@ async def _response_json(response):
 
 
 class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_call_raises_privacy_safe_typed_unknown_tool(self):
+        from core.api.device_mcp_admin_handler import (
+            MCPUnknownToolError,
+            _call_raw_mcp_tool,
+        )
+
+        tool_name = "self.lesson_assets.evict_cache_key"
+
+        class _Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, future):
+                self.future = future
+
+            async def cleanup_call_result(self, _call_id):
+                pass
+
+        client = _Client()
+
+        async def unknown_tool_result(_conn, _payload):
+            client.future.set_result(
+                {
+                    "isError": True,
+                    "error": f"Unknown tool: {tool_name} token=private-secret",
+                }
+            )
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message",
+            unknown_tool_result,
+        ):
+            with self.assertRaises(MCPUnknownToolError) as caught:
+                await _call_raw_mcp_tool(
+                    object(),
+                    client,
+                    tool_name,
+                    {},
+                )
+
+        self.assertEqual(str(caught.exception), "mcp-unknown-tool")
+        self.assertNotIn("private-secret", repr(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+
+    async def test_raw_call_cancellation_after_registration_cleans_result(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+        sent = asyncio.Event()
+        cleaned = []
+
+        class _Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                pass
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        async def send_then_wait(_conn, _payload):
+            sent.set()
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message",
+            send_then_wait,
+        ):
+            task = asyncio.create_task(
+                _call_raw_mcp_tool(object(), _Client(), "self.tool", {}, timeout=30)
+            )
+            await asyncio.wait_for(sent.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(cleaned, [42])
+
+    async def test_raw_call_marks_dispatch_immediately_before_send(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+        events = []
+
+        class _Client:
+            async def get_next_id(self):
+                events.append("id")
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                events.append("register")
+
+            async def cleanup_call_result(self, _call_id):
+                events.append("cleanup")
+
+        async def failing_send(_conn, _payload):
+            events.append("send")
+            raise RuntimeError("transport failed")
+
+        with patch("core.api.device_mcp_admin_handler.send_mcp_message", failing_send):
+            with self.assertRaisesRegex(RuntimeError, "transport failed"):
+                await _call_raw_mcp_tool(
+                    object(),
+                    _Client(),
+                    "self.lesson_assets.evict_cache_key",
+                    {"cacheKey": "key"},
+                    on_dispatched=lambda: events.append("dispatched"),
+                )
+
+        self.assertEqual(
+            events,
+            ["id", "register", "dispatched", "send", "cleanup"],
+        )
+
     async def test_rejects_missing_or_wrong_mint_secret(self):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 

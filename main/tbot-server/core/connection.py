@@ -53,6 +53,7 @@ from core.utils.util import get_system_error_response
 from core.utils import textUtils
 from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.activity_lease import ActivityLeaseCoordinator
 
 
 TAG = __name__
@@ -256,6 +257,13 @@ class ConnectionHandler:
         self.mcp_client = None
         self.mcp_background_tasks = set()
         self.mcp_tasks_closed = False
+        self._lesson_pull_lock = asyncio.Lock()
+        self.activity_leases = None
+        self._activity_leases_closed = False
+        try:
+            self.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        except RuntimeError:
+            pass
         # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
         # lazily created on the first lesson pull. None until a lesson runs.
         self.lesson_voice_alarm = None
@@ -315,6 +323,7 @@ class ConnectionHandler:
         try:
             # Get runningEventLoop (must be in async context)
             self.loop = asyncio.get_running_loop()
+            self._ensure_activity_leases()
 
             # Get and validateheaders
             self.headers = dict(ws.request.headers)
@@ -2308,6 +2317,21 @@ class ConnectionHandler:
         task.add_done_callback(self._mcp_background_task_done)
         return task
 
+    def _ensure_activity_leases(self):
+        if self.activity_leases is not None:
+            return self.activity_leases
+        if self._activity_leases_closed:
+            return None
+        self.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        return self.activity_leases
+
+    def _close_activity_leases(self):
+        if self._activity_leases_closed:
+            return
+        self._activity_leases_closed = True
+        if self.activity_leases is not None:
+            self.activity_leases.close()
+
     def _mcp_background_task_done(self, task):
         self.mcp_background_tasks.discard(task)
         if task.cancelled():
@@ -2394,7 +2418,10 @@ class ConnectionHandler:
                 self.stop_event.set()
 
             # Stop every path that can use MCP before cleaning its tool clients.
-            await self._close_connection_owned_mcp_callers()
+            try:
+                await self._close_connection_owned_mcp_callers()
+            finally:
+                self._close_activity_leases()
 
             # Clean VAD Connection Resource
             if (

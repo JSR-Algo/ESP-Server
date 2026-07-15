@@ -21,8 +21,10 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation, ExclusiveDisposition
 from core.lesson.asset_cache import AssetCache, FAILED, READY
 from core.lesson.errors import LessonError
 from core.lesson.runtime import (
@@ -9522,6 +9524,47 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(opened_windows), len(interactive_steps))
         self.assertEqual(rt.state, "COMPLETED")
         self.assertEqual(rt._steps_completed, 9)
+
+class ActivityLeaseLessonMutationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_start_refuses_exclusive_lease_inside_shared_lock(self):
+        from core.lesson import runtime as runtime_module
+
+        lock = asyncio.Lock()
+        await lock.acquire()
+        conn = SimpleNamespace(
+            _lesson_pull_lock=lock,
+            activity_leases=ActivityLeaseCoordinator(asyncio.get_running_loop()),
+        )
+        async def forbidden(_conn):
+            self.fail("lesson mutation must not run during exclusive eviction")
+
+        task = None
+        with patch(
+            "core.providers.tools.product_toolset.lesson_runtime_enabled",
+            return_value=True,
+        ), patch.object(runtime_module, "_maybe_start_lesson_on_connect_impl", forbidden):
+            task = asyncio.create_task(runtime_module.maybe_start_lesson_on_connect(conn))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                lease = conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+                lock.release()
+                result = await task
+            finally:
+                if lock.locked():
+                    lock.release()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "CACHE_EVICTION_RESERVED")
+
 
 if __name__ == "__main__":
     unittest.main()

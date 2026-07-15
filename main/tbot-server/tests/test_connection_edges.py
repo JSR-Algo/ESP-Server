@@ -10,6 +10,8 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
+from core.activity_lease import ActivityOperation, ExclusiveDisposition
+
 _ROUTING_TESTS_PATH = Path(__file__).with_name("test_connection_voice_provider_routing.py")
 _ROUTING_SPEC = importlib.util.spec_from_file_location(
     "test_connection_voice_provider_routing", _ROUTING_TESTS_PATH
@@ -248,6 +250,77 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_lease_coordinator_uses_connection_loop_and_single_lesson_lock(self):
+        handler = _build_handler()
+
+        self.assertIs(handler.activity_leases._loop, asyncio.get_running_loop())
+        lock = handler._lesson_pull_lock
+        self.assertIsNotNone(lock)
+        self.assertIs(handler._ensure_activity_leases(), handler.activity_leases)
+        self.assertIs(handler._lesson_pull_lock, lock)
+
+    async def test_activity_lease_sticky_exclusive_closes_exactly_once_on_teardown(self):
+        handler = _build_handler()
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        self.assertIsNotNone(lease)
+        lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+        self.assertTrue(handler.activity_leases.has_exclusive_lease())
+        close_calls = []
+        original_close = handler.activity_leases.close
+
+        def close_once():
+            close_calls.append(True)
+            original_close()
+
+        handler.activity_leases.close = close_once
+        await handler.close()
+        await handler.close()
+
+        self.assertEqual(close_calls, [True])
+        self.assertFalse(handler.activity_leases.has_exclusive_lease())
+
+    async def test_activity_lease_teardown_drains_tracked_eviction_before_close(self):
+        handler = _build_handler()
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        close_observations = []
+        original_close = handler.activity_leases.close
+
+        async def tracked_eviction():
+            async with handler._lesson_pull_lock:
+                lease = handler.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+                    lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+
+        def observing_close():
+            close_observations.append(
+                (cancelled.is_set(), len(handler.mcp_background_tasks))
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        task = handler.schedule_mcp_background_task(tracked_eviction())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        await handler.close()
+        await handler.close()
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(handler.mcp_background_tasks, set())
+        self.assertEqual(close_observations, [(True, 0)])
+        self.assertFalse(handler.activity_leases.has_exclusive_lease())
+
     def test_websocket_timeout_allows_sixty_minute_live_sessions(self):
         handler = _build_handler()
 

@@ -2815,6 +2815,14 @@ async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
         lock = asyncio.Lock()
         conn._lesson_pull_lock = lock
     async with lock:
+        activity_leases = getattr(conn, "activity_leases", None)
+        if activity_leases is not None and activity_leases.has_exclusive_lease():
+            _set_lesson_start_status(
+                conn,
+                "CACHE_EVICTION_RESERVED",
+                "Robot đang xác minh bộ nhớ bài học.",
+            )
+            return None
         return await _maybe_start_lesson_on_connect_impl(conn)
 
 

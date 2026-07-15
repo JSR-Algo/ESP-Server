@@ -574,6 +574,14 @@ async def start_sample_lesson(conn: Any) -> Optional[Any]:
         lock = asyncio.Lock()
         conn._lesson_pull_lock = lock
     async with lock:
+        activity_leases = getattr(conn, "activity_leases", None)
+        if activity_leases is not None and activity_leases.has_exclusive_lease():
+            _set_status(
+                conn,
+                "CACHE_EVICTION_RESERVED",
+                "Robot đang xác minh bộ nhớ bài học.",
+            )
+            return None
         return await _start_sample_lesson_impl(conn)
 
 

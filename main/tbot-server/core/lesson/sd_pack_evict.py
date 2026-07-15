@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Dict, Optional
+
+from core.activity_lease import ActivityOperation, ExclusiveDisposition
 
 CACHE_KEY_RE = re.compile(
     r"(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)/"
@@ -115,6 +118,14 @@ def parse_firmware_result(expected_key: str, raw: Any) -> Dict[str, Any]:
     if cache_key != expected_key:
         raise CacheEvictionRefused("firmware-key-mismatch")
     if status in _FIRMWARE_REFUSALS:
+        coherent_refusal = (
+            evicted is False
+            and not_found is False
+            and file_count == 0
+            and reason == status
+        )
+        if not coherent_refusal:
+            raise CacheEvictionRefused("firmware-malformed-result")
         raise CacheEvictionRefused("firmware-refused")
 
     coherent_evicted = status == "evicted" and evicted is True and not_found is False and reason == "evicted"
@@ -154,48 +165,125 @@ async def evict_exact_cache_key(
             "reason": "device-offline",
         }
 
-    if _voice_busy(conn):
-        _log(conn, "warning", cache_key, "voice-busy")
-        raise CacheEvictionRefused("voice-busy")
-    if _lesson_render_busy(conn):
-        _log(conn, "warning", cache_key, "lesson-render-busy")
-        raise CacheEvictionRefused("lesson-render-busy")
-    protected_reason = protected_cache_keys(conn).get(cache_key)
-    if protected_reason is not None:
-        _log(conn, "warning", cache_key, protected_reason)
-        raise CacheEvictionRefused(protected_reason)
-
-    mcp_client = getattr(conn, "mcp_client", None)
-    if mcp_client is None:
+    operation = _evict_exact_cache_key_operation(conn, cache_key, raw_mcp_call)
+    try:
+        task = conn.schedule_mcp_background_task(operation)
+    except Exception:
+        operation.close()
+        _log(conn, "warning", cache_key, "firmware-refused")
+        raise CacheEvictionRefused("firmware-refused") from None
+    if task is None:
         _log(conn, "warning", cache_key, "firmware-refused")
         raise CacheEvictionRefused("firmware-refused")
-    if raw_mcp_call is None:
-        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+    return await asyncio.shield(task)
 
-        raw_mcp_call = _call_raw_mcp_tool
 
-    try:
-        raw = await raw_mcp_call(
-            conn,
-            mcp_client,
-            EVICT_TOOL,
-            {"cacheKey": cache_key},
-            timeout=EVICT_TIMEOUT_SEC,
+async def _evict_exact_cache_key_operation(
+    conn: Any,
+    cache_key: str,
+    raw_mcp_call: Optional[Callable[..., Awaitable[Any]]],
+) -> Dict[str, Any]:
+    lock = conn._lesson_pull_lock
+    async with lock:
+        coordinator = conn.activity_leases
+        if coordinator.has_voice_leases() or _voice_busy(conn):
+            _log(conn, "warning", cache_key, "voice-busy")
+            raise CacheEvictionRefused("voice-busy")
+
+        mcp_client = getattr(conn, "mcp_client", None)
+        if mcp_client is None:
+            _log(conn, "warning", cache_key, "firmware-refused")
+            raise CacheEvictionRefused("firmware-refused")
+        uses_default_raw_call = raw_mcp_call is None
+        default_unknown_tool_error = None
+        if uses_default_raw_call:
+            try:
+                from core.api.device_mcp_admin_handler import (
+                    MCPUnknownToolError,
+                    _call_raw_mcp_tool,
+                )
+            except Exception:
+                _log(conn, "warning", cache_key, "firmware-refused")
+                raise CacheEvictionRefused("firmware-refused") from None
+            raw_mcp_call = _call_raw_mcp_tool
+            default_unknown_tool_error = MCPUnknownToolError
+
+        if _lesson_render_busy(conn):
+            _log(conn, "warning", cache_key, "lesson-render-busy")
+            raise CacheEvictionRefused("lesson-render-busy")
+        protected_reason = protected_cache_keys(conn).get(cache_key)
+        if protected_reason is not None:
+            _log(conn, "warning", cache_key, protected_reason)
+            raise CacheEvictionRefused(protected_reason)
+
+        lease = coordinator.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: _voice_busy(conn),
         )
-        result = parse_firmware_result(cache_key, raw)
-    except (asyncio.TimeoutError, TimeoutError):
-        _log(conn, "warning", cache_key, "firmware-timeout")
-        raise CacheEvictionRefused("firmware-timeout") from None
-    except CacheEvictionRefused as exc:
-        _log(conn, "warning", cache_key, exc.code)
-        raise
-    except Exception as exc:
-        code = "firmware-unknown-tool" if "unknown tool" in str(exc).lower() else "firmware-refused"
-        _log(conn, "warning", cache_key, code)
-        raise CacheEvictionRefused(code) from None
+        if lease is None:
+            code = (
+                "voice-busy"
+                if coordinator.has_voice_leases() or _voice_busy(conn)
+                else "firmware-refused"
+            )
+            _log(conn, "warning", cache_key, code)
+            raise CacheEvictionRefused(code)
 
-    _log(conn, "info", cache_key, result["status"], result["fileCount"])
-    return result
+        disposition = ExclusiveDisposition.DEFINITIVE
+        try:
+            if uses_default_raw_call:
+
+                def mark_dispatched() -> None:
+                    nonlocal disposition
+                    disposition = ExclusiveDisposition.AMBIGUOUS
+
+                raw_kwargs = {
+                    "timeout": EVICT_TIMEOUT_SEC,
+                    "on_dispatched": mark_dispatched,
+                }
+            else:
+                raw_kwargs = {"timeout": EVICT_TIMEOUT_SEC}
+            remote_result = raw_mcp_call(
+                conn,
+                mcp_client,
+                EVICT_TOOL,
+                {"cacheKey": cache_key},
+                **raw_kwargs,
+            )
+            if not inspect.isawaitable(remote_result):
+                _log(conn, "warning", cache_key, "firmware-refused")
+                raise CacheEvictionRefused("firmware-refused")
+            if not uses_default_raw_call:
+                disposition = ExclusiveDisposition.AMBIGUOUS
+            raw = await remote_result
+            try:
+                result = parse_firmware_result(cache_key, raw)
+            except CacheEvictionRefused as exc:
+                if exc.code == "firmware-refused":
+                    disposition = ExclusiveDisposition.DEFINITIVE
+                _log(conn, "warning", cache_key, exc.code)
+                raise
+            disposition = ExclusiveDisposition.DEFINITIVE
+            _log(conn, "info", cache_key, result["status"], result["fileCount"])
+            return result
+        except (asyncio.TimeoutError, TimeoutError):
+            _log(conn, "warning", cache_key, "firmware-timeout")
+            raise CacheEvictionRefused("firmware-timeout") from None
+        except CacheEvictionRefused:
+            raise
+        except Exception as exc:
+            correlated_unknown_tool = (
+                uses_default_raw_call
+                and default_unknown_tool_error is not None
+                and isinstance(exc, default_unknown_tool_error)
+            )
+            if correlated_unknown_tool:
+                disposition = ExclusiveDisposition.DEFINITIVE
+            code = "firmware-unknown-tool" if correlated_unknown_tool else "firmware-refused"
+            _log(conn, "warning", cache_key, code)
+            raise CacheEvictionRefused(code) from None
+        finally:
+            lease.complete_exclusive(disposition)
 
 
 def _runtime_cache_key(runtime: Any) -> Any:
