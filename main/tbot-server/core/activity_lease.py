@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import re
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, Set
-
-
-_OPERATION_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 
 
 class LeaseKind(str, Enum):
@@ -22,6 +18,25 @@ class LeaseKind(str, Enum):
 class ExclusiveDisposition(str, Enum):
     DEFINITIVE = "definitive"
     AMBIGUOUS = "ambiguous"
+
+
+class ActivityOperation(str, Enum):
+    LESSON_CACHE_EVICT = "lesson_cache.evict"
+    CONNECTION_AUDIO = "connection.audio"
+    CONNECTION_TEXT = "connection.text"
+    CONNECTION_LISTEN = "connection.listen"
+    CONNECTION_CONVERSATION = "connection.conversation"
+    CLASSIC_AUDIO = "classic.audio"
+    CLASSIC_TEXT = "classic.text"
+    CLASSIC_LISTEN = "classic.listen"
+    CLASSIC_CONVERSATION = "classic.conversation"
+    CLASSIC_START_TO_CHAT = "classic.start_to_chat"
+    GOOGLE_OPEN = "google.open"
+    GOOGLE_RECONNECT = "google.reconnect"
+    GOOGLE_HARD_RECONNECT = "google.hard_reconnect"
+    GOOGLE_PREWARM = "google.prewarm"
+    GOOGLE_SEND_TEXT = "google.send_text"
+    GOOGLE_WAKE_GREETING = "google.wake_greeting"
 
 
 class ActivityLeaseInvariantError(RuntimeError):
@@ -110,17 +125,18 @@ class ActivityLeaseCoordinator:
         self._exclusive_sticky = False
 
     def try_acquire_voice(self, operation: str) -> Optional[ActivityLease]:
-        if self._closed or not self._valid_operation(operation):
+        normalized_operation = self._normalize_operation(operation)
+        if self._closed or normalized_operation is None:
             return None
         owner = self._require_owner_task()
         if self._exclusive_lease_id is not None:
             return None
-        lease = self._create_handle(LeaseKind.VOICE, operation, owner)
+        lease = self._create_handle(LeaseKind.VOICE, normalized_operation, owner)
         record = self._voice_records_by_owner.get(owner)
         if record is None:
             record = _VoiceOwnerState(
                 record_id=lease.lease_id,
-                operation=operation,
+                operation=normalized_operation,
                 owner_task=owner,
                 depth=0,
                 handle_ids=set(),
@@ -136,7 +152,8 @@ class ActivityLeaseCoordinator:
         *,
         busy_probe: Callable[[], bool],
     ) -> Optional[ActivityLease]:
-        if self._closed or not self._valid_operation(operation):
+        normalized_operation = self._normalize_operation(operation)
+        if self._closed or normalized_operation is None:
             return None
         owner = self._require_owner_task()
         if self._closed or self._exclusive_lease_id is not None or self._voice_records_by_owner:
@@ -150,7 +167,7 @@ class ActivityLeaseCoordinator:
             return None
         lease = self._create_handle(
             LeaseKind.EVICTION_EXCLUSIVE,
-            operation,
+            normalized_operation,
             owner,
         )
         self._exclusive_lease_id = lease.lease_id
@@ -260,11 +277,14 @@ class ActivityLeaseCoordinator:
             raise ActivityLeaseInvariantError("future-type")
 
         state.delegated_future = future
+        callback_failed = False
         try:
             future.add_done_callback(done_callback)
-        except Exception as exc:
+        except Exception:
             state.delegated_future = None
-            raise ActivityLeaseInvariantError("future-callback") from exc
+            callback_failed = True
+        if callback_failed:
+            raise ActivityLeaseInvariantError("future-callback") from None
 
     def _complete_delegated(self, lease_id: int, future: Any) -> None:
         if self._closed:
@@ -322,8 +342,11 @@ class ActivityLeaseCoordinator:
             self._voice_records_by_owner.pop(state.owner_task)
 
     @staticmethod
-    def _valid_operation(operation: Any) -> bool:
-        return isinstance(operation, str) and _OPERATION_RE.fullmatch(operation) is not None
+    def _normalize_operation(operation: Any) -> Optional[str]:
+        try:
+            return ActivityOperation(operation).value
+        except (TypeError, ValueError):
+            return None
 
     def _require_owner_task(self) -> asyncio.Task:
         self._require_owner_loop()
