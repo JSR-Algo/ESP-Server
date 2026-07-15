@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import re
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
+
+
+_OPERATION_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 
 
 class LeaseKind(str, Enum):
@@ -30,10 +34,18 @@ class _HandleState:
     kind: LeaseKind
     operation: str
     owner_task: asyncio.Task
-    nesting_depth: int
     handle: "ActivityLease"
     delegated_future: Any = None
     sticky: bool = False
+
+
+@dataclass
+class _VoiceOwnerState:
+    record_id: int
+    operation: str
+    owner_task: asyncio.Task
+    depth: int
+    handle_ids: Set[int]
 
 
 class ActivityLease:
@@ -93,19 +105,29 @@ class ActivityLeaseCoordinator:
         self._closed = False
         self._next_lease_id = 1
         self._handles: Dict[int, _HandleState] = {}
-        self._voice_depth_by_owner: Dict[asyncio.Task, int] = {}
+        self._voice_records_by_owner: Dict[asyncio.Task, _VoiceOwnerState] = {}
         self._exclusive_lease_id: Optional[int] = None
         self._exclusive_sticky = False
 
     def try_acquire_voice(self, operation: str) -> Optional[ActivityLease]:
-        if self._closed:
+        if self._closed or not self._valid_operation(operation):
             return None
         owner = self._require_owner_task()
         if self._exclusive_lease_id is not None:
             return None
-        depth = self._voice_depth_by_owner.get(owner, 0) + 1
-        lease = self._create_handle(LeaseKind.VOICE, operation, owner, depth)
-        self._voice_depth_by_owner[owner] = depth
+        lease = self._create_handle(LeaseKind.VOICE, operation, owner)
+        record = self._voice_records_by_owner.get(owner)
+        if record is None:
+            record = _VoiceOwnerState(
+                record_id=lease.lease_id,
+                operation=operation,
+                owner_task=owner,
+                depth=0,
+                handle_ids=set(),
+            )
+            self._voice_records_by_owner[owner] = record
+        record.handle_ids.add(lease.lease_id)
+        record.depth = len(record.handle_ids)
         return lease
 
     def try_acquire_eviction(
@@ -114,27 +136,28 @@ class ActivityLeaseCoordinator:
         *,
         busy_probe: Callable[[], bool],
     ) -> Optional[ActivityLease]:
-        if self._closed:
+        if self._closed or not self._valid_operation(operation):
             return None
         owner = self._require_owner_task()
-        if self._exclusive_lease_id is not None or self._voice_depth_by_owner:
+        if self._closed or self._exclusive_lease_id is not None or self._voice_records_by_owner:
             return None
         try:
             if bool(busy_probe()):
                 return None
         except Exception:
             return None
+        if self._closed or self._exclusive_lease_id is not None or self._voice_records_by_owner:
+            return None
         lease = self._create_handle(
             LeaseKind.EVICTION_EXCLUSIVE,
             operation,
             owner,
-            1,
         )
         self._exclusive_lease_id = lease.lease_id
         return lease
 
     def has_voice_leases(self) -> bool:
-        return bool(self._voice_depth_by_owner)
+        return bool(self._voice_records_by_owner)
 
     def has_exclusive_lease(self) -> bool:
         return self._exclusive_lease_id is not None
@@ -151,11 +174,23 @@ class ActivityLeaseCoordinator:
                     "leaseIdSuffix": format(state.lease_id, "x")[-6:],
                     "ownerTaskIdSuffix": format(id(state.owner_task), "x")[-6:],
                 }
+        voice_owners = [
+            {
+                "kind": LeaseKind.VOICE.value,
+                "operation": state.operation,
+                "depth": state.depth,
+                "recordIdSuffix": format(state.record_id, "x")[-6:],
+                "ownerTaskIdSuffix": format(id(state.owner_task), "x")[-6:],
+            }
+            for state in sorted(
+                self._voice_records_by_owner.values(),
+                key=lambda item: item.record_id,
+            )
+        ]
         return {
             "closed": self._closed,
-            "voiceLeaseCount": sum(
-                1 for state in self._handles.values() if state.kind is LeaseKind.VOICE
-            ),
+            "voiceLeaseCount": sum(state.depth for state in self._voice_records_by_owner.values()),
+            "voiceOwners": voice_owners,
             "exclusive": exclusive,
         }
 
@@ -165,7 +200,7 @@ class ActivityLeaseCoordinator:
         self._require_owner_loop()
         self._closed = True
         self._handles.clear()
-        self._voice_depth_by_owner.clear()
+        self._voice_records_by_owner.clear()
         self._exclusive_lease_id = None
         self._exclusive_sticky = False
 
@@ -174,7 +209,6 @@ class ActivityLeaseCoordinator:
         kind: LeaseKind,
         operation: str,
         owner: asyncio.Task,
-        depth: int,
     ) -> ActivityLease:
         lease_id = self._next_lease_id
         self._next_lease_id += 1
@@ -182,9 +216,8 @@ class ActivityLeaseCoordinator:
         self._handles[lease_id] = _HandleState(
             lease_id=lease_id,
             kind=kind,
-            operation=str(operation),
+            operation=operation,
             owner_task=owner,
-            nesting_depth=depth,
             handle=lease,
         )
         return lease
@@ -279,12 +312,18 @@ class ActivityLeaseCoordinator:
         return state
 
     def _remove_voice_state(self, state: _HandleState) -> None:
+        record = self._voice_records_by_owner.get(state.owner_task)
+        if record is None or state.lease_id not in record.handle_ids:
+            raise ActivityLeaseInvariantError("voice-owner-record")
         self._handles.pop(state.lease_id)
-        depth = self._voice_depth_by_owner.get(state.owner_task, 0)
-        if depth <= 1:
-            self._voice_depth_by_owner.pop(state.owner_task, None)
-        else:
-            self._voice_depth_by_owner[state.owner_task] = depth - 1
+        record.handle_ids.remove(state.lease_id)
+        record.depth = len(record.handle_ids)
+        if record.depth == 0:
+            self._voice_records_by_owner.pop(state.owner_task)
+
+    @staticmethod
+    def _valid_operation(operation: Any) -> bool:
+        return isinstance(operation, str) and _OPERATION_RE.fullmatch(operation) is not None
 
     def _require_owner_task(self) -> asyncio.Task:
         self._require_owner_loop()

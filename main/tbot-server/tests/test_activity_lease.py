@@ -115,6 +115,121 @@ async def test_busy_probe_true_or_exception_refuses_without_state_change():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("probe_kind", ["voice", "exclusive"])
+async def test_reentrant_busy_probe_cannot_install_voice_and_exclusive_together(probe_kind):
+    coordinator = _coordinator()
+    acquired = []
+
+    def reentrant_probe():
+        if probe_kind == "voice":
+            acquired.append(coordinator.try_acquire_voice("probe.voice"))
+        else:
+            acquired.append(
+                coordinator.try_acquire_eviction(
+                    "probe.eviction",
+                    busy_probe=lambda: False,
+                )
+            )
+        return False
+
+    outer = coordinator.try_acquire_eviction("outer.eviction", busy_probe=reentrant_probe)
+
+    assert outer is None
+    assert acquired[0] is not None
+    assert not (coordinator.has_voice_leases() and coordinator.has_exclusive_lease())
+    if probe_kind == "voice":
+        acquired[0].release()
+    else:
+        acquired[0].complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+
+@pytest.mark.asyncio
+async def test_busy_probe_closing_coordinator_cannot_install_exclusive():
+    coordinator = _coordinator()
+
+    def closing_probe():
+        coordinator.close()
+        return False
+
+    assert coordinator.try_acquire_eviction("outer.eviction", busy_probe=closing_probe) is None
+    assert not coordinator.has_exclusive_lease()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "",
+        "UPPER",
+        " leading",
+        "trailing ",
+        "child transcript",
+        "parent@example.com",
+        "voice/start",
+        "voice\nstart",
+        "a" * 65,
+        None,
+    ],
+)
+async def test_invalid_operation_tokens_fail_closed_without_snapshot_leak(operation):
+    coordinator = _coordinator()
+    probe_calls = []
+
+    assert coordinator.try_acquire_voice(operation) is None
+    assert (
+        coordinator.try_acquire_eviction(
+            operation,
+            busy_probe=lambda: probe_calls.append(True) or False,
+        )
+        is None
+    )
+    snapshot = coordinator.diagnostic_snapshot()
+    assert snapshot["voiceOwners"] == []
+    assert snapshot["exclusive"] is None
+    assert probe_calls == []
+    if isinstance(operation, str) and operation:
+        assert operation not in str(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_operation_token_accepts_stable_boundary_value():
+    coordinator = _coordinator()
+    operation = "a" + "b" * 62 + "9"
+
+    voice = coordinator.try_acquire_voice(operation)
+
+    assert voice is not None
+    assert coordinator.diagnostic_snapshot()["voiceOwners"][0]["operation"] == operation
+    voice.release()
+
+
+@pytest.mark.asyncio
+async def test_nested_voice_uses_one_authoritative_owner_record_with_current_depth():
+    coordinator = _coordinator()
+    first = coordinator.try_acquire_voice("voice.root")
+    middle = coordinator.try_acquire_voice("voice.middle")
+    last = coordinator.try_acquire_voice("voice.last")
+    assert first is not None and middle is not None and last is not None
+
+    snapshot = coordinator.diagnostic_snapshot()
+    assert snapshot["voiceLeaseCount"] == 3
+    assert len(snapshot["voiceOwners"]) == 1
+    assert snapshot["voiceOwners"][0]["depth"] == 3
+    assert snapshot["voiceOwners"][0]["operation"] == "voice.root"
+
+    middle.release()
+    snapshot = coordinator.diagnostic_snapshot()
+    assert snapshot["voiceLeaseCount"] == 2
+    assert len(snapshot["voiceOwners"]) == 1
+    assert snapshot["voiceOwners"][0]["depth"] == 2
+
+    last.release()
+    assert coordinator.diagnostic_snapshot()["voiceOwners"][0]["depth"] == 1
+    first.release()
+    assert coordinator.diagnostic_snapshot()["voiceOwners"] == []
+
+
+@pytest.mark.asyncio
 async def test_wrong_task_release_raises_without_mutating_state():
     coordinator = _coordinator()
     lease = coordinator.try_acquire_voice("voice.owner")
@@ -301,6 +416,7 @@ async def test_exclusive_ambiguous_is_sticky_until_close():
     assert coordinator.diagnostic_snapshot() == {
         "closed": True,
         "voiceLeaseCount": 0,
+        "voiceOwners": [],
         "exclusive": None,
     }
 
