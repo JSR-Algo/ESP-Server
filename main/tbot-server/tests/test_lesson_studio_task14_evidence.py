@@ -1,11 +1,21 @@
-import importlib.util
 import hashlib
+import importlib.util
 import json
+import os
+import pty
 import re
+import select
+import shutil
+import signal
 import struct
+import subprocess
+import sys
+import time
 import zlib
 from pathlib import Path
+from typing import Any, Dict, List
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +32,21 @@ def load_script(name: str):
 fault = load_script("lesson_studio_task14_fault_driver.py")
 soak = load_script("lesson_studio_task14_soak.py")
 audit = load_script("lesson_studio_task14_log_audit.py")
+
+
+def test_fault_driver_self_test_needs_no_live_arguments(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["lesson_studio_task14_fault_driver.py", "--self-test"])
+
+    assert fault.main() == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+
+
+def test_cold_eviction_validator_has_stable_typed_contract():
+    assert fault._cold_eviction_errors.__annotations__ == {
+        "result": Dict[str, Any],
+        "raw_logs": str,
+        "return": List[str],
+    }
 
 
 def write_png(path: Path, width=480, height=320, color=(0, 0, 0)):
@@ -118,7 +143,7 @@ def complete_result(tmp_path: Path) -> dict:
     verifier_script = tmp_path / "lesson_e2e_log_verify.py"
     capture_script.write_text("# deterministic capture fixture\n")
     verifier_script.write_text("# deterministic verifier fixture\n")
-    return {
+    result = {
         "scenario": "cold",
         "status": "PASS",
         "utcStart": "2026-07-12T00:00:00Z",
@@ -131,6 +156,9 @@ def complete_result(tmp_path: Path) -> dict:
         "assignmentId": "assignment-1",
         "sessionId": "session-1",
         "assignmentVersion": 1,
+        "assignmentBackendDeviceId": "14140000-0000-4000-8000-000000000004",
+        "assignmentChildId": "14140000-0000-4000-8000-000000000003",
+        "assignmentProfile": "espTft",
         "fixtureVersion": "2026-07-11.1",
         "courseId": "production-farm-english-358",
         "lessonId": "pip-farm-3m",
@@ -153,8 +181,64 @@ def complete_result(tmp_path: Path) -> dict:
         "elapsedMs": 1000,
         "ready": True,
         "checksumVerified": True,
-        "logMarkers": ["lesson_preload_ready", "checksum_verified"],
+        "evictionRequestedCacheKey": "pip-farm-3m/v1-" + "d" * 64,
+        "evictionResult": {
+            "cacheKey": "pip-farm-3m/v1-" + "d" * 64,
+            "status": "evicted",
+            "evicted": True,
+            "notFound": False,
+            "fileCount": 4,
+            "reason": "evicted",
+        },
+        "evictionCompletedUtc": "2026-07-12T00:01:00Z",
+        "coldCaptureStartedUtc": "2026-07-12T00:01:01Z",
+        "assignmentCreatedUtc": "2026-07-12T00:01:02Z",
+        "logMarkers": ["lesson_cache_evict", "lesson_preload_ready", "checksum_verified"],
     }
+    write_cold_artifacts(tmp_path, result)
+    return result
+
+
+def write_cold_artifacts(tmp_path: Path, result: dict):
+    response = tmp_path / "eviction-response.json"
+    response.write_text(json.dumps({"data": result["evictionResult"]}, sort_keys=True) + "\n")
+    response_hash = hashlib.sha256(response.read_bytes()).hexdigest()
+    (tmp_path / "eviction-response.sha256").write_text(f"{response_hash}  {response}\n")
+    (tmp_path / "utc-start.txt").write_text(result["utcStart"] + "\n")
+    (tmp_path / "eviction-completed-utc.txt").write_text(
+        result["evictionCompletedUtc"] + "\n"
+    )
+    (tmp_path / "cold-capture-started-utc.txt").write_text(
+        result["coldCaptureStartedUtc"] + "\n"
+    )
+    assignment = tmp_path / "assignment-create-response.json"
+    assignment.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "assignment": {
+                        "assignmentId": result["assignmentId"],
+                        "assignmentVersion": result["assignmentVersion"],
+                        "deviceId": result["assignmentBackendDeviceId"],
+                        "childId": result["assignmentChildId"],
+                        "lessonId": result["lessonId"],
+                        "lessonTitle": "Pip Farm 3m",
+                        "lessonVersion": result["lessonVersion"],
+                        "manifestChecksum": result["manifestChecksum"],
+                        "profile": result["assignmentProfile"],
+                        "state": "ASSIGNED",
+                        "createdAt": result["assignmentCreatedUtc"],
+                    }
+                }
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
 
 
 def helper_script_paths(tmp_path: Path):
@@ -166,6 +250,9 @@ def helper_script_paths(tmp_path: Path):
 
 def cold_raw_evidence(result):
     return "\n".join([
+        (
+            "lesson_cache_evict cache_key={cacheKey} code={status} file_count={fileCount}"
+        ).format(**result["evictionResult"]),
         (
             "assignment/current active assignmentId={assignmentId} lessonId={lessonId} "
             "deviceId={deviceId}"
@@ -180,6 +267,670 @@ def cold_raw_evidence(result):
             "assetCount=2 assignment_id={assignmentId} session_id={sessionId}"
         ).format(**result),
     ])
+
+
+def test_cold_requires_complete_exact_eviction_attestation(tmp_path):
+    required = (
+        "evictionRequestedCacheKey",
+        "evictionResult",
+        "evictionCompletedUtc",
+        "coldCaptureStartedUtc",
+        "assignmentCreatedUtc",
+        "assignmentBackendDeviceId",
+        "assignmentChildId",
+        "assignmentProfile",
+    )
+
+    for field in required:
+        result = complete_result(tmp_path)
+        del result[field]
+        errors = fault.validate_result("cold", result, cold_raw_evidence(complete_result(tmp_path)))
+        assert f"cold eviction evidence missing: {field}" in errors
+
+
+def test_cold_accepts_coherent_evicted_and_not_found_results(tmp_path):
+    evicted = complete_result(tmp_path)
+    assert fault.validate_result("cold", evicted, cold_raw_evidence(evicted)) == []
+
+    not_found = complete_result(tmp_path)
+    not_found["evictionResult"] = {
+        "cacheKey": not_found["cacheKey"],
+        "status": "not_found",
+        "evicted": False,
+        "notFound": True,
+        "fileCount": 0,
+        "reason": "not_found",
+    }
+    write_cold_artifacts(tmp_path, not_found)
+    assert fault.validate_result("cold", not_found, cold_raw_evidence(not_found)) == []
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "eviction-response.json",
+        "eviction-response.sha256",
+        "utc-start.txt",
+        "eviction-completed-utc.txt",
+        "cold-capture-started-utc.txt",
+        "assignment-create-response.json",
+        "assignment-create-response.sha256",
+    ],
+)
+def test_cold_requires_each_bound_artifact(tmp_path, artifact):
+    result = complete_result(tmp_path)
+    (tmp_path / artifact).unlink()
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert f"cold evidence artifact missing: {artifact}" in errors
+
+
+def test_cold_rejects_tampered_eviction_response_and_checksum_artifact(tmp_path):
+    result = complete_result(tmp_path)
+    response = tmp_path / "eviction-response.json"
+    response.write_text('{"data":{"cacheKey":"private-foreign"}}\n')
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold eviction response does not exactly match result" in errors
+    assert "cold eviction response checksum does not match artifact" in errors
+
+
+def test_cold_rejects_checksum_bound_to_foreign_same_named_path(tmp_path):
+    result = complete_result(tmp_path)
+    response = tmp_path / "eviction-response.json"
+    response_hash = hashlib.sha256(response.read_bytes()).hexdigest()
+    (tmp_path / "eviction-response.sha256").write_text(
+        f"{response_hash}  /tmp/foreign/eviction-response.json\n"
+    )
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold eviction response checksum does not match artifact" in errors
+
+
+def test_cold_rejects_declared_timestamp_mismatch_with_artifacts(tmp_path):
+    result = complete_result(tmp_path)
+    (tmp_path / "eviction-completed-utc.txt").write_text("2026-07-12T00:01:00.123456Z\n")
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold artifact timestamps do not match result" in errors
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("assignmentId", "stale-assignment-id"),
+        ("createdAt", "2026-07-12T00:00:30.000000Z"),
+    ],
+)
+def test_cold_rejects_forged_or_stale_assignment_creation_artifact(
+    tmp_path, field, foreign
+):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    payload = json.loads(assignment.read_text())
+    payload["data"]["assignment"][field] = foreign
+    assignment.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold assignment creation response does not match result" in errors
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("state", "COMPLETED"),
+        ("profile", "mobile"),
+        ("lessonId", "foreign-lesson"),
+        ("lessonVersion", 2),
+        ("manifestChecksum", "e" * 64),
+        ("assignmentVersion", 2),
+        ("childId", "14140000-0000-4000-8000-000000000099"),
+        ("deviceId", "14140000-0000-4000-8000-000000000098"),
+    ],
+)
+def test_cold_rejects_semantically_mismatched_assignment_creation(
+    tmp_path, field, foreign
+):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    payload = json.loads(assignment.read_text())
+    payload["data"]["assignment"][field] = foreign
+    assignment.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
+
+    report = fault.build_evidence_report(
+        "cold", result, {}, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold assignment creation response does not match result" in report[
+        "validationErrors"
+    ]
+    assert "assignment-create-response.json" not in report["files"]
+    assert "assignment-create-response.sha256" not in report["files"]
+
+
+def test_cold_rejects_assignment_checksum_bound_to_foreign_path(tmp_path):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  /tmp/foreign/assignment-create-response.json\n"
+    )
+
+    errors = fault.validate_result(
+        "cold", result, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert "cold assignment creation checksum does not match artifact" in errors
+
+
+@pytest.mark.parametrize(
+    "credential_mutation",
+    [
+        {"metadata": {"authorization": "private"}},
+        {"metadata": {"token": "private"}},
+        {"metadata": {"accessToken": "private"}},
+        {"metadata": {"refreshToken": "private"}},
+        {"lessonTitle": "Bearer private-secret"},
+        {"lessonTitle": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.signature123"},
+    ],
+)
+def test_cold_rejects_credential_bearing_assignment_artifact(
+    tmp_path, credential_mutation
+):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    payload = json.loads(assignment.read_text())
+    payload["data"]["assignment"].update(credential_mutation)
+    assignment.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
+
+    report = fault.build_evidence_report(
+        "cold", result, {}, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert report["status"] == "NOT_PASS"
+    assert "cold assignment response contains forbidden credential material" in report[
+        "validationErrors"
+    ]
+    assert "assignment-create-response.json" not in report["files"]
+    assert "assignment-create-response.sha256" not in report["files"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-json Authorization: Bearer private-secret\n",
+        "not-json eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.signature123\n",
+    ],
+)
+def test_cold_rejects_raw_malformed_credential_assignment_artifact(tmp_path, raw):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    assignment.write_text(raw)
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
+
+    report = fault.build_evidence_report(
+        "cold", result, {}, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert report["status"] == "NOT_PASS"
+    assert "cold assignment response contains forbidden credential material" in report[
+        "validationErrors"
+    ]
+    assert "private-secret" not in json.dumps(report)
+    assert "eyJhbGci" not in json.dumps(report)
+    assert "assignment-create-response.json" not in report["files"]
+    assert "assignment-create-response.sha256" not in report["files"]
+
+
+def test_cold_omits_malformed_assignment_artifacts_even_without_credentials(tmp_path):
+    result = complete_result(tmp_path)
+    assignment = tmp_path / "assignment-create-response.json"
+    assignment.write_text("not-json but no credentials\n")
+    assignment_hash = hashlib.sha256(assignment.read_bytes()).hexdigest()
+    (tmp_path / "assignment-create-response.sha256").write_text(
+        f"{assignment_hash}  {assignment}\n"
+    )
+
+    report = fault.build_evidence_report(
+        "cold", result, {}, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert report["status"] == "NOT_PASS"
+    assert "cold assignment creation response does not match result" in report[
+        "validationErrors"
+    ]
+    assert "assignment-create-response.json" not in report["files"]
+    assert "assignment-create-response.sha256" not in report["files"]
+
+
+def test_cold_evidence_report_hashes_all_cold_artifacts(tmp_path):
+    result = complete_result(tmp_path)
+
+    report = fault.build_evidence_report(
+        "cold", result, {}, cold_raw_evidence(result), base_dir=tmp_path
+    )
+
+    assert {
+        "eviction-response.json",
+        "eviction-response.sha256",
+        "utc-start.txt",
+        "eviction-completed-utc.txt",
+        "cold-capture-started-utc.txt",
+        "assignment-create-response.json",
+        "assignment-create-response.sha256",
+    } <= set(report["files"])
+
+
+def test_cold_rejects_requested_result_and_capture_cache_key_mismatch(tmp_path):
+    for mutation in ("requested", "result", "capture"):
+        result = complete_result(tmp_path)
+        foreign = "pip-farm-5m/v2-" + "e" * 64
+        if mutation == "requested":
+            result["evictionRequestedCacheKey"] = foreign
+        elif mutation == "result":
+            result["evictionResult"]["cacheKey"] = foreign
+        else:
+            result["cacheKey"] = foreign
+        errors = fault.validate_result("cold", result, cold_raw_evidence(result))
+        assert "cold eviction cache keys must match exactly" in errors
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"status": "lesson_runtime_active", "reason": "lesson_runtime_active"},
+        {"evicted": False},
+        {"notFound": True},
+        {"reason": "private-error"},
+        {"fileCount": -1},
+        {"fileCount": True},
+        {"status": "not_found", "evicted": False, "notFound": True, "fileCount": 1, "reason": "not_found"},
+    ],
+)
+def test_cold_rejects_refusal_malformed_or_contradictory_eviction_result(tmp_path, updates):
+    result = complete_result(tmp_path)
+    result["evictionResult"].update(updates)
+
+    errors = fault.validate_result("cold", result, cold_raw_evidence(result))
+
+    assert "cold eviction result is not coherent" in errors
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("evictionCompletedUtc", "2026-07-11T23:59:59Z"),
+        ("coldCaptureStartedUtc", "2026-07-12T00:01:00Z"),
+        ("assignmentCreatedUtc", "2026-07-12T00:01:01Z"),
+        ("assignmentCreatedUtc", "2026-07-12T00:10:00Z"),
+        ("evictionCompletedUtc", "2026-07-12T07:01:00+07:00"),
+        ("coldCaptureStartedUtc", "not-a-time"),
+    ],
+)
+def test_cold_rejects_timestamps_outside_strict_utc_interval_or_order(tmp_path, field, value):
+    result = complete_result(tmp_path)
+    result[field] = value
+
+    errors = fault.validate_result("cold", result, cold_raw_evidence(result))
+
+    assert "cold eviction timestamps must be strict UTC and correctly ordered" in errors
+
+
+def test_cold_rejects_foreign_eviction_log_marker(tmp_path):
+    result = complete_result(tmp_path)
+    raw_logs = cold_raw_evidence(result).replace(result["cacheKey"], "pip-farm-8m/v9-" + "f" * 64, 1)
+
+    errors = fault.validate_result("cold", result, raw_logs)
+
+    assert "cold eviction log marker does not match result" in errors
+
+
+def test_cold_rejects_forged_camel_case_eviction_marker(tmp_path):
+    result = complete_result(tmp_path)
+    raw_logs = cold_raw_evidence(result).replace(
+        "cache_key=", "cacheKey=", 1
+    ).replace("code=", "status=", 1).replace("file_count=", "fileCount=", 1)
+
+    errors = fault.validate_result("cold", result, raw_logs)
+
+    assert "cold eviction log marker does not match result" in errors
+
+
+@pytest.mark.parametrize(
+    "forged_token",
+    [
+        "not_lesson_cache_evict",
+        "prefixlesson_cache_evict",
+        "lesson_cache_evict_suffix",
+    ],
+)
+def test_cold_rejects_embedded_or_prefixed_eviction_marker_token(tmp_path, forged_token):
+    result = complete_result(tmp_path)
+    raw_logs = cold_raw_evidence(result).replace("lesson_cache_evict", forged_token, 1)
+
+    errors = fault.validate_result("cold", result, raw_logs)
+
+    assert "cold eviction log marker does not match result" in errors
+
+
+def test_cold_runbook_records_strict_fractional_utc_and_maps_result_fields():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    assert "datetime.now(timezone.utc)" in runbook
+    assert 'timespec="microseconds"' in runbook
+    assert "timedelta(microseconds=1)" in runbook
+    assert "record_strict_utc" in runbook
+    assert "eviction-completed-utc.txt" in runbook
+    assert "cold-capture-started-utc.txt" in runbook
+    assert "evictionCompletedUtc" in runbook
+    assert "coldCaptureStartedUtc" in runbook
+
+
+def test_cold_runbook_fails_closed_unless_mint_secret_is_exported():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    assert 'os.environ.get("TBOT_DEVICE_MINT_SECRET")' in runbook
+    assert 'X-Mint-Secret: ${TBOT_DEVICE_MINT_SECRET}' in runbook
+    assert "must be exported" in runbook
+
+
+def test_cold_runbook_records_authoritative_assignment_creation_response():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    assert 'os.environ.get("TBOT_PARENT_JWT")' in runbook
+    assert 'Authorization: Bearer ${TBOT_PARENT_JWT}' in runbook
+    assert '"$BACKEND_URL/devices/${BACKEND_DEVICE_ID}/assignments"' in runbook
+    assert '\\"childId\\":\\"${CHILD_ID}\\"' in runbook
+    assert '\\"lessonId\\":\\"${LESSON_ID}\\"' in runbook
+    assert 'tee "$EVIDENCE_ROOT/cold/assignment-create-response.json"' in runbook
+    assert '.data.assignment.assignmentId' in runbook
+    assert '.data.assignment.createdAt' in runbook
+    assert '.data.assignment.state == "ASSIGNED"' in runbook
+    assert '.data.assignment.profile == "espTft"' in runbook
+    assert '.data.assignment.deviceId == $deviceId' in runbook
+    assert '.data.assignment.childId == $childId' in runbook
+    assert '.data.assignment.lessonId == $lessonId' in runbook
+    assert '.data.assignment.lessonVersion == $lessonVersion' in runbook
+    assert '.data.assignment.manifestChecksum == $manifestChecksum' in runbook
+    assert "assignmentBackendDeviceId" in runbook
+    assert "assignmentChildId" in runbook
+    assert "assignmentProfile" in runbook
+    assert 'assignment-create-response.sha256' in runbook
+    cold_started = runbook.index("cold-capture-started-utc.txt")
+    assignment_post = runbook.index(
+        '"$BACKEND_URL/devices/${BACKEND_DEVICE_ID}/assignments"'
+    )
+    lesson_wait = runbook.index('wait "$CAPTURE_PID" # explicit wait/stop before validation')
+    assert cold_started < assignment_post < lesson_wait
+
+
+def test_cold_runbook_starts_and_verifies_both_streams_before_eviction():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    secret_check = runbook.index('os.environ.get("TBOT_DEVICE_MINT_SECRET")')
+    start_marker = runbook.index("# BEGIN TASK14_COLD_CAPTURE_START")
+    end_marker = runbook.index("# END TASK14_COLD_CAPTURE_START")
+    capture_block = runbook[start_marker:end_marker]
+    assert "--duration 240" in capture_block
+    assert 'python3 - "$@" > "$capture_log" 2>&1 <<\'PY\' &' in capture_block
+    assert "CAPTURE_PID=$!" in capture_block
+    assert "os.setsid()" in capture_block
+    assert "CAPTURE_PGID=$CAPTURE_PID" in capture_block
+    assert "scripts/lesson_e2e_live_capture.py" in capture_block
+    capture_start = runbook.index(
+        'launch_capture_session \\\n  "$EVIDENCE_ROOT/cold/capture-driver.log"',
+        start_marker,
+    )
+    server_ready = runbook.index('test -f "$EVIDENCE_ROOT/cold/capture/esp-server.log"')
+    serial_ready = runbook.index('test -f "$EVIDENCE_ROOT/cold/capture/firmware-serial.log"')
+    eviction = runbook.index("curl --fail-with-body --silent --show-error")
+    assert secret_check < capture_start < server_ready < eviction
+    assert capture_start < serial_ready < eviction
+    assert runbook.index('kill -0 "$CAPTURE_PID"') < eviction
+    assert runbook.index('pgrep -P "$CAPTURE_PID"') < eviction
+    assert runbook.index('lsof "$SERIAL_PORT"') < eviction
+
+
+def _documented_cleanup_block():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    start = runbook.index("# BEGIN TASK14_CAPTURE_CLEANUP")
+    end = runbook.index("# END TASK14_CAPTURE_CLEANUP")
+    return runbook[start:end]
+
+
+def _documented_session_helper_block():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    start = runbook.index("# BEGIN TASK14_CAPTURE_SESSION_HELPERS")
+    end = runbook.index("# END TASK14_CAPTURE_SESSION_HELPERS")
+    return runbook[start:end]
+
+
+def _run_interactive_pty(shell, script, *, ready_path, signal_number, timeout=8):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(shell, [shell, "-i", "-c", script])
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    status = None
+    signal_sent = False
+    try:
+        while time.monotonic() < deadline:
+            if not signal_sent and ready_path.is_file():
+                os.kill(pid, signal_number)
+                signal_sent = True
+            waited, child_status = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                status = child_status
+                break
+            readable, _, _ = select.select([fd], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(fd, 65536))
+                except OSError:
+                    pass
+        if status is None:
+            os.kill(pid, 9)
+            _, status = os.waitpid(pid, 0)
+            raise AssertionError(f"interactive shell timed out: {output.decode(errors='replace')}")
+    finally:
+        os.close(fd)
+    return os.waitstatus_to_exitcode(status), output.decode(errors="replace")
+
+
+@pytest.mark.parametrize("shell", [path for path in (shutil.which("bash"), shutil.which("zsh")) if path])
+@pytest.mark.parametrize(("signal_name", "exit_code"), [("INT", 130), ("TERM", 143)])
+def test_documented_session_launch_works_with_interactive_job_control(
+    tmp_path, shell, signal_name, exit_code
+):
+    lifecycle = tmp_path / "lifecycle.sh"
+    lifecycle.write_text(_documented_cleanup_block() + _documented_session_helper_block())
+    capture_script = tmp_path / "capture_like.py"
+    child_file = tmp_path / "capture-child.pid"
+    parent_file = tmp_path / "capture-parent.pid"
+    capture_script.write_text(
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child=subprocess.Popen(['sh','-c','trap \\\"\\\" TERM; echo $$ > \\\"$1\\\"; while :; do sleep 30; done','sh',sys.argv[1]])\n"
+        "while True: time.sleep(1)\n"
+    )
+    script = f'''
+source "{lifecycle}"
+case $- in *m*) ;; *) exit 91;; esac
+trap 'cleanup_capture $?' EXIT
+trap 'cleanup_capture 130' INT
+trap 'cleanup_capture 143' TERM
+launch_capture_session "{tmp_path / 'capture.log'}" "{capture_script}" "{child_file}"
+case $- in *m*) ;; *) exit 92;; esac
+echo "$CAPTURE_PID" > "{parent_file}"
+for _ in $(seq 1 100); do test -s "{child_file}" && break; sleep 0.02; done
+test -s "{child_file}"
+test "$(ps -o pgid= -p "$CAPTURE_PID" | tr -d ' ')" = "$CAPTURE_PGID"
+touch "{tmp_path / 'shell-ready'}"
+while :; do sleep 1; done
+'''
+    unrelated = subprocess.Popen(["sleep", "30"])
+    try:
+        return_code, output = _run_interactive_pty(
+            shell,
+            script,
+            ready_path=tmp_path / "shell-ready",
+            signal_number=getattr(signal, f"SIG{signal_name}"),
+        )
+        assert return_code == exit_code, output
+        assert unrelated.poll() is None
+    finally:
+        if parent_file.is_file():
+            try:
+                os.killpg(int(parent_file.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+        unrelated.terminate()
+        unrelated.wait(timeout=3)
+    for path in (parent_file, child_file):
+        pid = int(path.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def test_documented_capture_block_is_valid_bash():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    start = runbook.index("# BEGIN TASK14_COLD_CAPTURE_START")
+    end = runbook.index("# END TASK14_COLD_CAPTURE_START")
+
+    completed = subprocess.run(
+        ["bash", "-n"],
+        input=runbook[start:end],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(("signal_name", "exit_code"), [("INT", 130), ("TERM", 143)])
+def test_documented_cleanup_is_bounded_and_reaps_real_process_tree(
+    tmp_path, signal_name, exit_code
+):
+    parent_file = tmp_path / "parent.pid"
+    child_file = tmp_path / "child.pid"
+    script = _documented_cleanup_block() + _documented_session_helper_block() + r'''
+python3 - "$CHILD_FILE" <<'PY' &
+import os
+import sys
+
+os.setsid()
+os.execvp(
+    "sh",
+    ["sh", "-c", 'trap "" TERM; while :; do sleep 30 & echo $! > "$1"; wait; done', "sh", sys.argv[1]],
+)
+PY
+CAPTURE_PID=$!
+CAPTURE_PGID=$CAPTURE_PID
+echo "$CAPTURE_PID" > "$PARENT_FILE"
+trap 'cleanup_capture $?' EXIT
+trap 'cleanup_capture 130' INT
+trap 'cleanup_capture 143' TERM
+for _ in $(seq 1 50); do
+  test -s "$CHILD_FILE" && break
+  sleep 0.02
+done
+test -s "$CHILD_FILE"
+kill -"$SIGNAL_NAME" $$
+'''
+    started = time.monotonic()
+    unrelated = subprocess.Popen(["sleep", "30"])
+    try:
+        completed = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **os.environ,
+                "PARENT_FILE": str(parent_file),
+                "CHILD_FILE": str(child_file),
+                "SIGNAL_NAME": signal_name,
+            },
+            check=False,
+            timeout=8,
+        )
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=3)
+
+    assert completed.returncode == exit_code
+    assert time.monotonic() - started < 5
+    for path in (parent_file, child_file):
+        pid = int(path.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def test_documented_cleanup_targets_only_capture_process_group():
+    cleanup = _documented_cleanup_block()
+
+    assert "pgrep -P" not in cleanup
+    assert "capture_tracked" not in cleanup
+    assert 'kill -TERM -- "-$CAPTURE_PGID"' in cleanup
+    assert 'kill -KILL -- "-$CAPTURE_PGID"' in cleanup
+
+
+def test_cold_runbook_traps_and_explicitly_stops_capture_before_validation():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    start_marker = runbook.index("# BEGIN TASK14_COLD_CAPTURE_START")
+    capture_start = runbook.index(
+        'launch_capture_session \\\n  "$EVIDENCE_ROOT/cold/capture-driver.log"',
+        start_marker,
+    )
+    trap = runbook.index("trap 'cleanup_capture $?' EXIT")
+    eviction = runbook.index("curl --fail-with-body --silent --show-error")
+    explicit_stop = runbook.index('wait "$CAPTURE_PID" # explicit wait/stop before validation')
+    validator = runbook.rindex("python3 scripts/lesson_studio_task14_fault_driver.py cold")
+    assert trap < capture_start < eviction
+    assert eviction < explicit_stop < validator
+    assert 'wait "$CAPTURE_PID"' in runbook
+    assert "trap 'cleanup_capture 130' INT" in runbook
+    assert "trap 'cleanup_capture 143' TERM" in runbook
+
+
+def test_cold_still_rejects_zero_download_and_missing_checksum_attestation(tmp_path):
+    result = complete_result(tmp_path)
+    result["bytesDownloaded"] = 0
+    result["checksumVerified"] = False
+
+    errors = fault.validate_result("cold", result, cold_raw_evidence(result))
+
+    assert "cold decisive signals are incomplete" in errors
 
 
 def warm_raw_evidence(result):

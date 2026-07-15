@@ -1,18 +1,35 @@
 #!/usr/bin/env python3
 """Fail-closed evidence collector; it never injects a fault or contacts production."""
-import argparse, hashlib, json, re, tempfile
+import argparse
+import hashlib
+import json
+import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List
+
 from PIL import Image, UnidentifiedImageError
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
 REQUIRED=('serial.log','server.log','command.txt','result.json')
+COLD_REQUIRED=(
+    'eviction-response.json','eviction-response.sha256','utc-start.txt',
+    'eviction-completed-utc.txt','cold-capture-started-utc.txt',
+    'assignment-create-response.json','assignment-create-response.sha256',
+)
 SHA256=re.compile(r'^[0-9a-f]{64}$')
 COMMIT=re.compile(r'^[0-9a-f]{7,40}$')
 MAX_SCREENSHOT_BYTES=10*1024*1024
 FIXTURE_VERSION='2026-07-11.1'
 COURSE_ID='production-farm-english-358'
 LESSON_IDS=('pip-farm-3m','pip-farm-5m','pip-farm-8m')
+ASSIGNMENT_RESPONSE_FIELDS={
+    'assignmentId','assignmentVersion','deviceId','childId','lessonId',
+    'lessonTitle','lessonVersion','manifestChecksum','profile','state','createdAt',
+}
+SECRET_FIELD_NAMES={'authorization','token','accesstoken','refreshtoken'}
+JWT_VALUE=re.compile(r'(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])')
 COMMON_FIELDS=(
     'utcStart','utcEnd','backendCommit','espServerCommit','firmwareCommit',
     'firmwareVersion','deviceId','assignmentId','sessionId','assignmentVersion',
@@ -23,7 +40,7 @@ COMMON_FIELDS=(
 )
 SCENARIO_LOG_MARKERS={
     'preview-parity':('lesson_step_started','motion_preset'),
-    'cold':('lesson_preload_ready','checksum_verified'),
+    'cold':('lesson_cache_evict','lesson_preload_ready','checksum_verified'),
     'warm':('asset_cache_hit',),
     'offline':('offline_replay','sd://'),
     'checksum':('checksum_mismatch','partial_cleaned'),
@@ -206,6 +223,290 @@ def _script_hash_errors(result,capture_script=None,verifier_script=None):
             errors.append(f'{field} does not match {flag}')
     return errors
 
+def _strict_utc(value):
+    if not isinstance(value,str) or not re.fullmatch(
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z',value
+    ):
+        raise ValueError
+    parsed=datetime.fromisoformat(value[:-1]+'+00:00')
+    if parsed.tzinfo != timezone.utc:
+        raise ValueError
+    return parsed
+
+def _cold_artifact_root(result,base_dir=None):
+    if base_dir is not None:
+        return Path(base_dir)
+    screenshots=result.get('screenshots') if isinstance(result,dict) else None
+    if isinstance(screenshots,list):
+        for entry in screenshots:
+            if isinstance(entry,dict) and isinstance(entry.get('path'),str):
+                return Path(entry['path']).parent
+    return None
+
+def _cold_artifact_errors(result,base_dir=None):
+    errors=[]
+    root=_cold_artifact_root(result,base_dir)
+    if root is None:
+        return [f'cold evidence artifact missing: {name}' for name in COLD_REQUIRED]
+    paths={name:root/name for name in COLD_REQUIRED}
+    available={}
+    for name,path in paths.items():
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+                raise OSError
+            available[name]=path
+        except OSError:
+            errors.append(f'cold evidence artifact missing: {name}')
+
+    response=available.get('eviction-response.json')
+    if response is not None:
+        try:
+            response_data=json.loads(response.read_text())
+        except (OSError,TypeError,ValueError,json.JSONDecodeError):
+            response_data=None
+        if response_data != {'data':result.get('evictionResult')}:
+            errors.append('cold eviction response does not exactly match result')
+
+    checksum=available.get('eviction-response.sha256')
+    if response is not None and checksum is not None:
+        try:
+            parts=checksum.read_text().strip().split(maxsplit=1)
+            declared_hash=parts[0]
+            declared_path=Path(parts[1].lstrip('*'))
+            if not declared_path.is_absolute():
+                declared_path=checksum.parent/declared_path
+            valid_checksum=(
+                len(parts)==2
+                and SHA256.fullmatch(declared_hash) is not None
+                and declared_path.resolve()==response.resolve()
+                and declared_hash==_stream_sha256(response)
+            )
+        except (IndexError,OSError,ValueError):
+            valid_checksum=False
+        if not valid_checksum:
+            errors.append('cold eviction response checksum does not match artifact')
+
+    assignment_response=available.get('assignment-create-response.json')
+    if assignment_response is not None:
+        assignment_payload,assignment_has_credentials=_read_assignment_artifact(
+            assignment_response
+        )
+        if assignment_has_credentials:
+            errors.append('cold assignment response contains forbidden credential material')
+        valid_assignment_shape=_assignment_payload_matches(assignment_payload,result)
+        if not assignment_has_credentials and not valid_assignment_shape:
+            errors.append('cold assignment creation response does not match result')
+
+    assignment_checksum=available.get('assignment-create-response.sha256')
+    if assignment_response is not None and assignment_checksum is not None:
+        try:
+            parts=assignment_checksum.read_text().strip().split(maxsplit=1)
+            declared_hash=parts[0]
+            declared_path=Path(parts[1].lstrip('*'))
+            if not declared_path.is_absolute():
+                declared_path=assignment_checksum.parent/declared_path
+            valid_assignment_checksum=(
+                len(parts)==2
+                and SHA256.fullmatch(declared_hash) is not None
+                and declared_path.resolve()==assignment_response.resolve()
+                and declared_hash==_stream_sha256(assignment_response)
+            )
+        except (IndexError,OSError,ValueError):
+            valid_assignment_checksum=False
+        if not valid_assignment_checksum:
+            errors.append('cold assignment creation checksum does not match artifact')
+
+    timestamp_fields={
+        'utc-start.txt':'utcStart',
+        'eviction-completed-utc.txt':'evictionCompletedUtc',
+        'cold-capture-started-utc.txt':'coldCaptureStartedUtc',
+    }
+    artifact_times={}
+    timestamps_match=True
+    for name,field in timestamp_fields.items():
+        path=available.get(name)
+        if path is None:
+            timestamps_match=False
+            continue
+        try:
+            value=path.read_text().strip()
+            artifact_times[field]=_strict_utc(value)
+            if value != result.get(field):
+                timestamps_match=False
+        except (OSError,TypeError,ValueError):
+            timestamps_match=False
+    if len(artifact_times)==3:
+        try:
+            assignment=_strict_utc(result.get('assignmentCreatedUtc'))
+            end=_strict_utc(result.get('utcEnd'))
+            if not (
+                artifact_times['utcStart']
+                <= artifact_times['evictionCompletedUtc']
+                < artifact_times['coldCaptureStartedUtc']
+                < assignment
+                < end
+            ):
+                timestamps_match=False
+        except (TypeError,ValueError):
+            timestamps_match=False
+    if not timestamps_match:
+        errors.append('cold artifact timestamps do not match result')
+    return errors
+
+def _contains_credential_material(value):
+    if isinstance(value,dict):
+        for key,item in value.items():
+            normalized=re.sub(r'[^a-z0-9]','',str(key).lower())
+            if normalized in SECRET_FIELD_NAMES:
+                return True
+            if _contains_credential_material(item):
+                return True
+        return False
+    if isinstance(value,list):
+        return any(_contains_credential_material(item) for item in value)
+    if isinstance(value,str):
+        return bool(re.search(r'(?i)\bbearer\s+\S+',value) or JWT_VALUE.search(value))
+    return False
+
+def _raw_contains_credential_material(raw):
+    if not isinstance(raw,str):
+        return False
+    if _contains_credential_material(raw):
+        return True
+    return bool(
+        re.search(
+            r'(?i)(?:authorization|access[_-]?token|refresh[_-]?token|token)\s*["\']?\s*[:=]',
+            raw,
+        )
+    )
+
+def _read_assignment_artifact(path):
+    try:
+        raw=path.read_text()
+    except (OSError,UnicodeError):
+        return None,False
+    has_credentials=_raw_contains_credential_material(raw)
+    try:
+        payload=json.loads(raw)
+    except (TypeError,ValueError,json.JSONDecodeError):
+        return None,has_credentials
+    return payload,has_credentials or _contains_credential_material(payload)
+
+def _assignment_payload_matches(payload,result):
+    if not isinstance(payload,dict) or set(payload)!={'data'}:
+        return False
+    data=payload.get('data')
+    if not isinstance(data,dict) or set(data)!={'assignment'}:
+        return False
+    assignment=data.get('assignment')
+    valid=(
+        isinstance(assignment,dict)
+        and set(assignment)==ASSIGNMENT_RESPONSE_FIELDS
+        and all(
+            isinstance(assignment.get(name),str) and bool(assignment.get(name).strip())
+            for name in (
+                'assignmentId','deviceId','childId','lessonId','lessonTitle',
+                'manifestChecksum','profile','state','createdAt',
+            )
+        )
+        and all(
+            type(assignment.get(name)) is int and assignment.get(name)>0
+            for name in ('assignmentVersion','lessonVersion')
+        )
+        and isinstance(result,dict)
+        and assignment.get('assignmentId')==result.get('assignmentId')
+        and assignment.get('assignmentVersion')==result.get('assignmentVersion')
+        and assignment.get('deviceId')==result.get('assignmentBackendDeviceId')
+        and assignment.get('childId')==result.get('assignmentChildId')
+        and assignment.get('lessonId')==result.get('lessonId')
+        and assignment.get('lessonVersion')==result.get('lessonVersion')
+        and assignment.get('manifestChecksum')==result.get('manifestChecksum')
+        and assignment.get('profile')==result.get('assignmentProfile')=='espTft'
+        and assignment.get('state')=='ASSIGNED'
+        and assignment.get('createdAt')==result.get('assignmentCreatedUtc')
+    )
+    if not valid:
+        return False
+    try:
+        _strict_utc(assignment.get('createdAt'))
+    except (TypeError,ValueError):
+        return False
+    return True
+
+def _cold_eviction_errors(result: Dict[str, Any], raw_logs: str) -> List[str]:
+    errors=[]
+    fields=(
+        'evictionRequestedCacheKey','evictionResult','evictionCompletedUtc',
+        'coldCaptureStartedUtc','assignmentCreatedUtc','assignmentBackendDeviceId',
+        'assignmentChildId','assignmentProfile',
+    )
+    missing=[name for name in fields if name not in result]
+    errors.extend(f'cold eviction evidence missing: {name}' for name in missing)
+    if missing:
+        return errors
+
+    eviction=result.get('evictionResult')
+    expected_fields={'cacheKey','status','evicted','notFound','fileCount','reason'}
+    coherent=False
+    if isinstance(eviction,dict) and set(eviction)==expected_fields:
+        file_count=eviction.get('fileCount')
+        typed=(
+            isinstance(eviction.get('cacheKey'),str)
+            and isinstance(eviction.get('status'),str)
+            and type(eviction.get('evicted')) is bool
+            and type(eviction.get('notFound')) is bool
+            and type(file_count) is int
+            and file_count >= 0
+            and isinstance(eviction.get('reason'),str)
+        )
+        coherent_evicted=(
+            eviction.get('status')=='evicted'
+            and eviction.get('evicted') is True
+            and eviction.get('notFound') is False
+            and eviction.get('reason')=='evicted'
+        )
+        coherent_not_found=(
+            eviction.get('status')=='not_found'
+            and eviction.get('evicted') is False
+            and eviction.get('notFound') is True
+            and file_count==0
+            and eviction.get('reason')=='not_found'
+        )
+        coherent=typed and (coherent_evicted or coherent_not_found)
+    if not coherent:
+        errors.append('cold eviction result is not coherent')
+
+    eviction_key=eviction.get('cacheKey') if isinstance(eviction,dict) else None
+    if not (
+        result.get('evictionRequestedCacheKey')
+        == eviction_key
+        == result.get('cacheKey')
+    ):
+        errors.append('cold eviction cache keys must match exactly')
+
+    try:
+        start=_strict_utc(result.get('utcStart'))
+        completed=_strict_utc(result.get('evictionCompletedUtc'))
+        capture=_strict_utc(result.get('coldCaptureStartedUtc'))
+        assignment=_strict_utc(result.get('assignmentCreatedUtc'))
+        end=_strict_utc(result.get('utcEnd'))
+        if not start <= completed < capture < assignment < end:
+            raise ValueError
+    except (TypeError,ValueError):
+        errors.append('cold eviction timestamps must be strict UTC and correctly ordered')
+
+    if coherent:
+        marker_pattern=re.compile(
+            r'(?<![A-Za-z0-9_])lesson_cache_evict '
+            rf'cache_key={re.escape(str(eviction_key))} '
+            rf'code={re.escape(str(eviction.get("status")))} '
+            rf'file_count={re.escape(str(eviction.get("fileCount")))}(?=\s|$)'
+        )
+        marker_found=any(marker_pattern.search(line) for line in raw_logs.splitlines())
+        if not marker_found:
+            errors.append('cold eviction log marker does not match result')
+    return errors
+
 def validate_result(
     scenario,result,raw_logs,base_dir=None,capture_script=None,verifier_script=None
 ):
@@ -250,6 +551,9 @@ def validate_result(
             if marker.lower() not in lowered:errors.append(f'raw logs missing declared marker: {marker}')
     if result.get('scenario') != scenario:errors.append('result scenario does not match command')
     if result.get('status') != 'PASS':errors.append('result status is not PASS')
+    if scenario == 'cold':
+        errors.extend(_cold_eviction_errors(result,raw_logs))
+        errors.extend(_cold_artifact_errors(result,base_dir))
     if not scenario_valid(scenario,result):errors.append(f'{scenario} decisive signals are incomplete')
     if not _scenario_raw_evidence_bound(scenario,result,raw_logs):
         errors.append(f'{scenario} raw evidence is not bound to result identity and cache')
@@ -271,15 +575,30 @@ def build_evidence_report(
         scenario,result,raw_logs,base_dir,capture_script,verifier_script
     )
     screenshots,_=_inspect_screenshots(result.get('screenshots') if isinstance(result,dict) else None,base_dir)
+    report_files=dict(files)
+    if scenario == 'cold':
+        root=_cold_artifact_root(result,base_dir)
+        if root is not None:
+            for name in COLD_REQUIRED:
+                report_files.setdefault(name,root/name)
+            assignment_path=root/'assignment-create-response.json'
+            assignment_payload,assignment_has_credentials=_read_assignment_artifact(
+                assignment_path
+            )
+            if assignment_has_credentials or not _assignment_payload_matches(
+                assignment_payload,result
+            ):
+                report_files.pop('assignment-create-response.json',None)
+                report_files.pop('assignment-create-response.sha256',None)
     return {
       'scenario':scenario,'status':'PASS' if not errors else 'NOT_PASS',
       'capturedAt':datetime.now(timezone.utc).isoformat(),'validationErrors':errors,
-      'files':{name:_hash_file(path) for name,path in files.items() if path.is_file()},
+      'files':{name:_hash_file(path) for name,path in report_files.items() if path.is_file() and not path.is_symlink()},
       'screenshots':[{**_hash_file(item['path']),'role':item['role'],'type':item['type'],'width':item['dimensions'][0],'height':item['dimensions'][1]} for item in screenshots],
     }
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('scenario',choices=SCENARIOS); p.add_argument('--evidence-dir',required=True,type=Path); p.add_argument('--output',type=Path); p.add_argument('--capture-script',type=Path); p.add_argument('--verifier-script',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('scenario',nargs='?',choices=SCENARIOS); p.add_argument('--evidence-dir',type=Path); p.add_argument('--output',type=Path); p.add_argument('--capture-script',type=Path); p.add_argument('--verifier-script',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
     if a.self_test:
         valid={'preview-parity':{'previewLayerRects':{'background':[0,0,480,320]},'hardwareLayerRects':{'background':[0,0,480,320]},'previewWordText':'BARN','hardwareWordText':'BARN','previewPathOutcome':'correct','hardwarePathOutcome':'correct','previewMotionTimeline':['teach','listen'],'hardwareMotionTimeline':['teach','listen']},'cold':{'bytesDownloaded':1,'elapsedMs':1,'ready':True,'checksumVerified':True,'manifestChecksum':'a','packChecksum':'a'},'warm':{'cacheHit':True,'bytesDownloaded':0,'elapsedMs':1,'ready':True,'manifestChecksum':'a','packChecksum':'a'},'offline':{'networkAvailable':False,'completed':True,'source':'sd'},'checksum':{'mismatchDetected':True,'partialCleaned':True,'ready':False},'interrupted':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'power-loss':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'missing-optional':{'optionalAssetMissing':True,'degraded':True,'advanced':True,'logMarkers':['optional_asset_missing','render_degraded']},'sd-full':{'freeRatio':0.04,'refused':True,'activePackRetained':True,'previousPackRetained':True},'slave-unavailable':{'motionDegraded':True,'completed':True,'logMarkers':['motion_degraded']},'rollback':{'activeVersion':1,'previousVersion':1,'activeChecksum':'a','previousChecksum':'a','oldFilesReattested':True,'ready':True}}
         for scenario in SCENARIOS: assert scenario_valid(scenario,valid[scenario]); assert not scenario_valid(scenario,{})
@@ -294,9 +613,12 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2})); return 0
+    if a.scenario is None or a.evidence_dir is None:
+        p.error('scenario and --evidence-dir are required unless --self-test is used')
     if a.capture_script is None or a.verifier_script is None:
         p.error('--capture-script and --verifier-script are required unless --self-test is used')
-    files={name:a.evidence_dir/name for name in REQUIRED}; missing=[name for name,path in files.items() if not path.is_file() or path.stat().st_size==0]
+    required=REQUIRED+COLD_REQUIRED if a.scenario=='cold' else REQUIRED
+    files={name:a.evidence_dir/name for name in required}; missing=[name for name,path in files.items() if not path.is_file() or path.stat().st_size==0]
     result_data={}
     if not missing:
         try: result_data=json.loads(files['result.json'].read_text())
