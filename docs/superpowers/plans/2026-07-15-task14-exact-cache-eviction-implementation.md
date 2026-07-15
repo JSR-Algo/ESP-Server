@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an authenticated, fail-closed exact lesson-cache eviction flow from the ESP internal API to a user-only firmware MCP tool, then bind its result to Task 14 cold-preload evidence.
+**Goal:** Add an authenticated, fail-closed exact lesson-cache eviction flow with a task-owned per-connection activity lease, then bind its result to Task 14 cold-preload evidence.
 
-**Architecture:** ESP independently validates the canonical key, resolves the attended connection, computes every protected identity, enforces voice/render safety, calls one fixed MCP tool, and attests the structured reply. Firmware independently validates the key, refuses active lesson runtime, scans and deletes only the exact flat leaf below `/sdcard/tbot/lesson-assets`, and returns privacy-safe structured evidence. The Task 14 cold validator accepts eviction only as a prerequisite; it still requires a fresh assignment and `downloadedCount > 0`.
+**Architecture:** ESP uses one `ActivityLeaseCoordinator` per connection: voice operations take non-waiting shared leases and exact eviction takes a non-waiting exclusive lease while lesson mutation remains serialized by `_lesson_pull_lock`. The eviction operation is owned by a connection-tracked task, survives caller cancellation, releases only on a definitive remote result, and stays exclusive until teardown after an ambiguous result. Firmware independently validates and deletes only the exact flat leaf; Task 14 still requires a fresh assignment and `downloadedCount > 0`.
 
 **Tech Stack:** Python 3.10, aiohttp, asyncio, Pytest; ESP-IDF 5.5.2, C++17, cJSON, POSIX dirent/stat/unlink/rmdir; Docker Compose; ESP32-S3 attended-device validation.
 
@@ -37,7 +37,418 @@ The other idempotent success is `status=not_found`, `evicted=false`, `notFound=t
 
 Responses and logs must not contain filesystem paths, asset URLs, tokens, child data, transcripts, arbitrary exception strings, or unmasked configuration values.
 
-### Task 1: Implement the ESP Parser, Protected Set, and Orchestrator
+## Approved Connection Activity Lease Amendment
+
+Source of truth: `docs/superpowers/specs/2026-07-16-connection-activity-lease-design.md`.
+
+Commit `60a92a97` is the parser/protected-set/orchestrator baseline. Before any
+further implementation, remove the current uncommitted ad-hoc boolean/counter
+experiment from the ten named Python files and replace it through the RED/GREEN
+tasks below. Preserve `main/manager-web/output/` as untracked and untouched.
+
+### Task 0: Preserve Then Remove the Ad-hoc Lease Experiment
+
+**Files:**
+- Revert only uncommitted changes in:
+  `core/connection.py`, `core/handle/receiveAudioHandle.py`,
+  `core/lesson/runtime.py`, `core/lesson/sample.py`,
+  `core/lesson/sd_pack_evict.py`,
+  `core/voice/session_provider/google_live.py`, and their four modified tests.
+- Do not modify: `main/manager-web/output/`
+
+- [ ] **Step 1: Preserve the current experiment as a local review artifact**
+
+Run from `main/tbot-server`:
+
+```bash
+FILES=(
+  core/connection.py
+  core/handle/receiveAudioHandle.py
+  core/lesson/runtime.py
+  core/lesson/sample.py
+  core/lesson/sd_pack_evict.py
+  core/voice/session_provider/google_live.py
+  tests/test_connection_edges.py
+  tests/test_google_live_provider_edges.py
+  tests/test_lesson_sd_pack_evict.py
+  tests/test_receive_audio_handle.py
+)
+git diff -- "${FILES[@]}" > /tmp/task14-ad-hoc-lease-before-coordinator.patch
+test -s /tmp/task14-ad-hoc-lease-before-coordinator.patch
+shasum -a 256 /tmp/task14-ad-hoc-lease-before-coordinator.patch
+```
+
+Expected: the patch is non-empty and its SHA-256 is recorded in the execution log.
+
+- [ ] **Step 2: Remove only that preserved uncommitted diff**
+
+```bash
+git apply --reverse --check /tmp/task14-ad-hoc-lease-before-coordinator.patch
+git apply --reverse /tmp/task14-ad-hoc-lease-before-coordinator.patch
+git diff -- "${FILES[@]}"
+git status --short
+```
+
+Expected: the named files have no diff; `main/manager-web/output/` remains the only
+untracked output. Do not use `git reset --hard`, `git checkout --`, or delete the
+saved patch.
+
+- [ ] **Step 3: Re-run the committed baseline**
+
+```bash
+python3 -m pytest tests/test_lesson_sd_pack_evict.py -q
+```
+
+Expected: the committed baseline passes before coordinator work begins. Do not
+commit Task 0 because it only removes an uncommitted experiment.
+
+### Task 1A: Build the Activity Lease Coordinator Core
+
+**Files:**
+- Create: `main/tbot-server/core/activity_lease.py`
+- Create: `main/tbot-server/tests/test_activity_lease.py`
+
+- [ ] **Step 1: Write RED tests for acquisition, ownership, and nesting**
+
+Define tests with real `asyncio.Task` owners for this public surface:
+
+```python
+class LeaseKind(str, Enum):
+    VOICE = "voice"
+    EVICTION_EXCLUSIVE = "eviction-exclusive"
+
+class ExclusiveDisposition(str, Enum):
+    DEFINITIVE = "definitive"
+    AMBIGUOUS = "ambiguous"
+
+coordinator = ActivityLeaseCoordinator(asyncio.get_running_loop())
+voice = coordinator.try_acquire_voice("classic.start_to_chat")
+exclusive = coordinator.try_acquire_eviction(
+    "lesson_cache.evict", busy_probe=lambda: False
+)
+```
+
+Prove shared voice across tasks, same-task nested voice depth, exclusive refusal
+while voice exists, voice refusal while exclusive exists, non-reentrant exclusive,
+wrong-task release refusal, duplicate release refusal, and fail-closed busy-probe
+exceptions.
+
+```bash
+python3 -m pytest tests/test_activity_lease.py -k 'acquire or owner or nested' -q
+```
+
+Expected RED: `core.activity_lease` does not exist.
+
+- [ ] **Step 2: Implement the minimal task-owned coordinator**
+
+Use exact public signatures:
+
+```python
+class ActivityLeaseCoordinator:
+    def __init__(self, loop: asyncio.AbstractEventLoop): ...
+    def try_acquire_voice(self, operation: str) -> Optional[ActivityLease]: ...
+    def try_acquire_eviction(
+        self,
+        operation: str,
+        *,
+        busy_probe: Callable[[], bool],
+    ) -> Optional[ActivityLease]: ...
+    def has_voice_leases(self) -> bool: ...
+    def has_exclusive_lease(self) -> bool: ...
+    def close(self) -> None: ...
+
+class ActivityLease:
+    @property
+    def owner_task(self) -> asyncio.Task: ...
+    def release(self) -> None: ...
+    def release_when_done(self, future: Any) -> None: ...
+    def complete_exclusive(self, disposition: ExclusiveDisposition) -> None: ...
+```
+
+Store records by opaque integer lease id and voice owner task identity. Each
+returned handle is one-shot. Voice handles decrement nested depth; exclusive
+handles reject ordinary `release()` and require `complete_exclusive`.
+
+- [ ] **Step 3: Write RED tests for async and thread-future cleanup**
+
+Cover an `asyncio.Future`, a `concurrent.futures.Future`, cancellation of the
+scheduling coroutine after delegation, exact future-identity validation, sticky
+`AMBIGUOUS`, definitive release, and `close()` cleanup. A thread-future callback
+must not mutate coordinator state directly from its worker thread.
+
+```bash
+python3 -m pytest tests/test_activity_lease.py -k 'future or ambiguous or close' -q
+```
+
+Expected RED: future delegation and sticky exclusive behavior are absent.
+
+- [ ] **Step 4: Implement delegated cleanup and sticky ambiguity**
+
+`release_when_done` records the exact future and installs a one-shot callback.
+For `concurrent.futures.Future`, use:
+
+```python
+loop.call_soon_threadsafe(coordinator._complete_delegated, lease_id, future)
+```
+
+`ExclusiveDisposition.DEFINITIVE` removes the exclusive record.
+`ExclusiveDisposition.AMBIGUOUS` marks it sticky and keeps it until `close()`.
+Never log operation arguments or exception text.
+
+- [ ] **Step 5: Run GREEN core tests and commit the isolated core**
+
+```bash
+python3 -m pytest tests/test_activity_lease.py -q
+git add core/activity_lease.py tests/test_activity_lease.py
+git commit -m "feat(server): add connection activity lease coordinator"
+```
+
+Expected: all coordinator tests pass; the commit contains only the new core and
+test files.
+
+### Task 1B: Integrate Exclusive Eviction And Lesson Mutation
+
+**Files:**
+- Modify: `main/tbot-server/core/connection.py`
+- Modify: `main/tbot-server/core/lesson/sd_pack_evict.py`
+- Modify: `main/tbot-server/core/lesson/runtime.py`
+- Modify: `main/tbot-server/core/lesson/sample.py`
+- Modify: `main/tbot-server/tests/test_lesson_sd_pack_evict.py`
+- Modify: `main/tbot-server/tests/test_connection_edges.py`
+- Modify: `main/tbot-server/tests/test_lesson_runtime.py`
+- Modify: `main/tbot-server/tests/test_sample_lesson.py`
+
+- [ ] **Step 1: Write RED tests for connection ownership and teardown**
+
+Assert `ConnectionHandler` creates one coordinator on its event loop, reuses one
+`_lesson_pull_lock`, and calls `activity_leases.close()` during teardown. Assert a
+sticky exclusive lease disappears only when that connection closes.
+
+```bash
+python3 -m pytest tests/test_connection_edges.py -k activity_lease -q
+```
+
+Expected RED: the connection has no coordinator.
+
+- [ ] **Step 2: Wire the coordinator without voice integration**
+
+Initialize:
+
+```python
+self._lesson_pull_lock = asyncio.Lock()
+self.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+```
+
+If construction occurs outside a running loop in a test, initialize the
+coordinator at `handle_connection` before publishing voice work, not with a global
+or cross-loop fallback. Close it exactly once in connection cleanup.
+
+- [ ] **Step 3: Write RED eviction tests for operation-task ownership**
+
+Hold the raw MCP call on events and prove:
+
+```text
+voice lease first -> voice-busy, no MCP
+eviction first -> exclusive lease visible before dispatch
+caller cancellation -> operation task continues and lease stays held
+coherent matching success/refusal -> definitive release
+local pre-dispatch failure -> definitive release
+timeout/disconnect/malformed/key mismatch -> sticky until connection close
+second eviction during sticky state -> refused, no MCP retry
+lesson mutation waits on _lesson_pull_lock and rechecks after acquiring it
+```
+
+```bash
+python3 -m pytest tests/test_lesson_sd_pack_evict.py -k 'lease or cancel or ambiguous' -q
+```
+
+Expected RED: the baseline orchestrator has no exclusive lease or tracked owner
+task.
+
+- [ ] **Step 4: Move the destructive lifecycle into a tracked task**
+
+Create a private operation coroutine that owns `_lesson_pull_lock` and the
+exclusive lease. `evict_exact_cache_key` schedules it through
+`conn.schedule_mcp_background_task(...)` and awaits it with `asyncio.shield`.
+Caller cancellation propagates to the caller only. The operation task drains the
+remote result and calls exactly one of:
+
+```python
+lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+```
+
+Treat coherent matching firmware results and correlated unknown-tool/no-execution
+responses as definitive. Treat timeout, post-dispatch transport loss, malformed
+result, missing/mismatched key, and uncorrelated exceptions as ambiguous. Release
+`_lesson_pull_lock` when the operation task ends even if the exclusive lease is
+sticky.
+
+- [ ] **Step 5: Gate lesson mutation inside the shared lock**
+
+After acquiring `_lesson_pull_lock`, both lesson entry points must execute:
+
+```python
+if conn.activity_leases.has_exclusive_lease():
+    set_status("CACHE_EVICTION_RESERVED", "Robot đang xác minh bộ nhớ bài học.")
+    return None
+```
+
+Then run the existing implementation. Do not add a second lesson lock or wait on
+the activity coordinator.
+
+- [ ] **Step 6: Run GREEN integration tests and commit**
+
+```bash
+python3 -m pytest \
+  tests/test_activity_lease.py \
+  tests/test_lesson_sd_pack_evict.py \
+  tests/test_connection_edges.py \
+  tests/test_lesson_runtime.py \
+  tests/test_sample_lesson.py -q
+git add core/connection.py core/lesson/sd_pack_evict.py \
+  core/lesson/runtime.py core/lesson/sample.py \
+  tests/test_lesson_sd_pack_evict.py tests/test_connection_edges.py \
+  tests/test_lesson_runtime.py tests/test_sample_lesson.py
+git commit -m "fix(server): serialize cache eviction with lesson mutation"
+```
+
+Expected: definitive operations leave no lease; ambiguous operations remain
+exclusive until tested teardown.
+
+### Task 1C: Integrate Non-waiting Voice Leases
+
+**Files:**
+- Modify: `main/tbot-server/core/connection.py`
+- Modify: `main/tbot-server/core/handle/receiveAudioHandle.py`
+- Modify: `main/tbot-server/core/voice/session_provider/google_live.py`
+- Modify: `main/tbot-server/tests/test_connection_edges.py`
+- Modify: `main/tbot-server/tests/test_receive_audio_handle.py`
+- Modify: `main/tbot-server/tests/test_google_live_provider_edges.py`
+
+- [ ] **Step 1: Write RED ingress and classic lifetime tests**
+
+With an exclusive lease held, assert voice audio/listen/start/detect is consumed
+with no ASR/provider/LLM call and is never replayed. Assert `hello`, `ping`, `mcp`,
+lesson ACK/progress/error, and `abort` still dispatch. Assert `listen/stop` clears
+local buffered input without finalizing ASR or a Google Live user stream.
+
+Hold `conn.chat` in a real executor future. Assert `startToChat` acquires before
+intent initiation, delegates the lease to the exact returned future, and retains
+it until the future completes or cancels.
+
+```bash
+python3 -m pytest \
+  tests/test_connection_edges.py \
+  tests/test_receive_audio_handle.py -k 'activity_lease or cache_eviction' -q
+```
+
+Expected RED: voice paths do not use the coordinator.
+
+- [ ] **Step 2: Add one connection-level voice lease helper**
+
+Use a small context helper that calls
+`activity_leases.try_acquire_voice(operation)`. Conflict returns `False` and logs
+only `operation` plus `reason=lesson_cache_eviction`; it never waits. Wrap inbound
+voice routing for the full await lifetime. Reacquire in `handleAudioMessage` so
+classic frames already queued before eviction are dropped rather than replayed.
+
+In `startToChat`, retain the lease through intent and submission, then call
+`release_when_done(chat_future)`. Do not release it in the scheduling coroutine's
+`finally` after delegation.
+
+- [ ] **Step 3: Write RED Google Live task-lifetime tests**
+
+Hold each operation on an event and assert a lease exists for the complete task:
+
+```text
+initial connect/open and prewarm
+reconnect and hard reconnect
+user text send
+wake greeting including the 250 ms delay
+conversation-mode entry
+lesson-finish return to conversation
+```
+
+Prove same-task nested helpers are reentrant, eviction refuses while any task is
+held, and eviction-first causes immediate `False`/drop without creating a client,
+changing session mode, or scheduling replay.
+
+```bash
+python3 -m pytest tests/test_google_live_provider_edges.py -k activity_lease -q
+```
+
+Expected RED: Google operations can cross the eviction check without a lease.
+
+- [ ] **Step 4: Wrap Google connect, send, and greeting operations**
+
+Acquire in the actual background task, not merely in the scheduler. Wrap the full
+await lifetime of Live open/reconnect, `_client.send_text`, and
+`_send_wake_greeting`, including its initial delay. Before releasing the outermost
+send lease, require that the operation is complete or canonical interaction state
+is already busy (`WAITING_MODEL`, output active, or reconnecting).
+
+Gate `enter_conversation_mode` and lesson-finish return before changing
+`session_mode`. A refused attempt remains in its prior stable mode.
+
+- [ ] **Step 5: Run GREEN voice tests and commit**
+
+```bash
+python3 -m pytest \
+  tests/test_activity_lease.py \
+  tests/test_connection_edges.py \
+  tests/test_receive_audio_handle.py \
+  tests/test_google_live_provider_edges.py \
+  tests/test_lesson_voice_nonregression.py -q
+git add core/connection.py core/handle/receiveAudioHandle.py \
+  core/voice/session_provider/google_live.py \
+  tests/test_connection_edges.py tests/test_receive_audio_handle.py \
+  tests/test_google_live_provider_edges.py
+git commit -m "fix(server): guard voice with task-owned activity leases"
+```
+
+Expected: no refused voice operation queues, replays, mutates mode, or leaks a
+lease; existing passive listening remains accepted when no exclusive lease exists.
+
+### Task 1D: Lease Safety Regression Gate
+
+**Files:**
+- Modify only if a focused RED test reproduces a defect.
+
+- [ ] **Step 1: Run all lease and exact-eviction tests together**
+
+```bash
+python3 -m pytest \
+  tests/test_activity_lease.py \
+  tests/test_lesson_sd_pack_evict.py \
+  tests/test_connection_edges.py \
+  tests/test_receive_audio_handle.py \
+  tests/test_google_live_provider_edges.py \
+  tests/test_lesson_runtime.py \
+  tests/test_sample_lesson.py \
+  tests/test_lesson_voice_nonregression.py -q
+```
+
+Expected: all pass with no pending-task, unawaited-coroutine, cross-loop, or
+thread-callback warnings.
+
+- [ ] **Step 2: Run the complete ESP server suite**
+
+```bash
+python3 -m pytest tests -q
+git diff --check
+git status --short
+```
+
+Expected: complete suite passes; only intentional source/test changes and the
+untracked `main/manager-web/output/` remain. Continue to the internal route only
+after this gate is green.
+
+### Baseline Task 1: ESP Parser, Protected Set, and Orchestrator (Committed)
+
+> Historical baseline only. Commit `60a92a97` completed this task. Do not rerun
+> its RED steps or create its commit again; retain the details below as the parser,
+> protected-set, attestation, and privacy contract amended by Tasks 1A-1D.
 
 **Files:**
 - Create: `main/tbot-server/core/lesson/sd_pack_evict.py`
