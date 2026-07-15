@@ -39,11 +39,13 @@ class _Voice:
 class _Conn:
     def __init__(self):
         self.session_id = "session-1"
+        self.device_id = "safe-speaking-device"
         self.features = {"lesson": True, "renderer": ["teebot-lesson-renderer.v1"]}
         self.config = {
             "lesson": {
                 "motion_presets_enabled": True,
                 "playful_interactions_enabled": True,
+                "rollout_device_allowlist": [self.device_id],
             }
         }
         self.voice_provider = _Voice()

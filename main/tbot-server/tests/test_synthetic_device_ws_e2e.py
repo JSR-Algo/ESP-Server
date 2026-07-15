@@ -271,7 +271,11 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "auth": {"enabled": False},
             },
             "voice_mode": {"type": "google_live"},
-            "lesson": {"runtime_enabled": True, "api_base": API_BASE},
+            "lesson": {
+                "runtime_enabled": True,
+                "api_base": API_BASE,
+                "rollout_device_allowlist": [DEVICE_ID],
+            },
             # Collapse the lesson voice-prompt guard/window timing so the real
             # provider opens the child-response window PROMPTLY instead of waiting
             # the production 20s output-idle guard per interactive step (the Live
