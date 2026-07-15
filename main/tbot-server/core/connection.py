@@ -1,6 +1,7 @@
 import os
 import sys
 import copy
+import hashlib
 import json
 import re
 import uuid
@@ -114,6 +115,29 @@ def _private_config_log_summary(private_config: Dict[str, Any]) -> Dict[str, Any
         "has_plugins": bool(private_config.get("plugins")),
     }
 
+
+def _connection_close_log_metadata(exc) -> str:
+    """Return useful close evidence without logging peer-controlled reason text."""
+    close_frame = getattr(exc, "rcvd", None)
+    if close_frame is None:
+        close_frame = getattr(exc, "sent", None)
+    code = getattr(close_frame, "code", None)
+    if not isinstance(code, int) or isinstance(code, bool):
+        code = "-"
+    reason = getattr(close_frame, "reason", "")
+    if not isinstance(reason, str):
+        reason = ""
+    reason_hash = (
+        hashlib.sha256(reason.encode("utf-8", errors="replace")).hexdigest()[:12]
+        if reason
+        else "-"
+    )
+    return (
+        f"close_code={code} close_reason_sha256={reason_hash} "
+        f"close_reason_length={len(reason)}"
+    )
+
+
 auto_import_modules("plugins_func.functions")
 
 
@@ -224,10 +248,14 @@ class ConnectionHandler:
         # US-006 lesson runtime (additive; dark unless lesson.runtime_enabled).
         # Holds the per-device lesson session state when a lesson is in flight.
         self.lesson_runtime = None
+        self.lesson_runtime_candidate = None
         self.lesson_pull_task = None
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
+        self.mcp_client = None
+        self.mcp_background_tasks = set()
+        self.mcp_tasks_closed = False
         # S13 voice-latency-during-preload auto-disable alarm (plan §11.2 / CP-8);
         # lazily created on the first lesson pull. None until a lesson runs.
         self.lesson_voice_alarm = None
@@ -342,9 +370,11 @@ class ConnectionHandler:
             try:
                 async for message in self.websocket:
                     await self._route_message(message)
-            except websockets.exceptions.ConnectionClosed:  # pragma: no cover - websocket integration close path
+            except websockets.exceptions.ConnectionClosed as close_exc:  # pragma: no cover - websocket integration close path
                 self.logger.bind(tag=TAG).info(
-                    f"Client disconnected device_id={self.device_id or ''} client_ip={self.client_ip or ''}"
+                    f"Client disconnected device_id={self.device_id or ''} "
+                    f"client_ip={self.client_ip or ''} "
+                    f"{_connection_close_log_metadata(close_exc)}"
                 )
 
         except AuthenticationError as e:  # pragma: no cover - auth middleware integration path
@@ -2266,6 +2296,82 @@ class ConnectionHandler:
             return
         self.sd_pack_sync_task = asyncio.create_task(self._sync_cached_lesson_assets_to_sd())
 
+    def schedule_mcp_background_task(self, coro):
+        """Attach MCP work to this connection so teardown can drain it."""
+        if self.mcp_tasks_closed:
+            if hasattr(coro, "close"):
+                coro.close()
+            return None
+
+        task = asyncio.create_task(coro)
+        self.mcp_background_tasks.add(task)
+        task.add_done_callback(self._mcp_background_task_done)
+        return task
+
+    def _mcp_background_task_done(self, task):
+        self.mcp_background_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self.logger.bind(tag=TAG).warning(
+                f"MCP background task failed errorType={type(exc).__name__}"
+            )
+
+    async def _close_mcp_background_tasks(self):
+        self.mcp_tasks_closed = True
+        tasks = tuple(self.mcp_background_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.mcp_background_tasks.clear()
+
+    async def _close_connection_owned_mcp_callers(self):
+        """Stop every connection-owned path that can use device/server MCP."""
+        await self._close_mcp_background_tasks()
+
+        tasks = []
+        for attr in ("lesson_pull_task", "sd_pack_sync_task"):
+            task = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        runtimes = []
+        runtime_ids = set()
+        for attr in ("lesson_runtime", "lesson_runtime_candidate"):
+            runtime = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if runtime is not None and id(runtime) not in runtime_ids:
+                runtime_ids.add(id(runtime))
+                runtimes.append(runtime)
+        for runtime in runtimes:
+            try:
+                await runtime.close()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).error(
+                    f"Error cleaning lesson runtime: {type(exc).__name__}"
+                )
+
+        forwarder = self.safety_event_forwarder
+        self.safety_event_forwarder = None
+        if forwarder is not None:
+            try:
+                await forwarder.aclose()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).error(
+                    f"Error cleaning safety event forwarder: {type(exc).__name__}"
+                )
+
     async def _sync_cached_lesson_assets_to_sd(self):
         try:
             from core.lesson.sd_pack_fanout import drain_pending_for_connection
@@ -2286,6 +2392,9 @@ class ConnectionHandler:
         try:
             if self.stop_event:
                 self.stop_event.set()
+
+            # Stop every path that can use MCP before cleaning its tool clients.
+            await self._close_connection_owned_mcp_callers()
 
             # Clean VAD Connection Resource
             if (
@@ -2329,30 +2438,6 @@ class ConnectionHandler:
                 self.voice_provider_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self.voice_provider_task
-
-            # US-006 lesson runtime teardown (own dispatch path + asset client).
-            if self.lesson_pull_task and not self.lesson_pull_task.done():
-                self.lesson_pull_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.lesson_pull_task
-            if self.sd_pack_sync_task and not self.sd_pack_sync_task.done():
-                self.sd_pack_sync_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.sd_pack_sync_task
-            if self.lesson_runtime is not None:
-                try:
-                    await self.lesson_runtime.close()
-                except Exception as lesson_cleanup_error:
-                    self.logger.bind(tag=TAG).error(
-                        f"Error cleaning lesson runtime: {lesson_cleanup_error}"
-                    )
-            if self.safety_event_forwarder is not None:
-                try:
-                    await self.safety_event_forwarder.aclose()
-                except Exception as safety_cleanup_error:
-                    self.logger.bind(tag=TAG).error(
-                        f"Error cleaning safety event forwarder: {safety_cleanup_error}"
-                    )
 
             # Clear task queue
             self.clear_queues()

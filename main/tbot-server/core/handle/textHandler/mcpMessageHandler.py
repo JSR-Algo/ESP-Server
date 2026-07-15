@@ -1,4 +1,3 @@
-import asyncio
 from typing import Dict, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,6 +16,6 @@ class McpTextMessageHandler(TextMessageHandler):
 
     async def handle(self, conn: "ConnectionHandler", msg_json: Dict[str, Any]) -> None:
         if "payload" in msg_json:
-            asyncio.create_task(
+            conn.schedule_mcp_background_task(
                 handle_mcp_message(conn, conn.mcp_client, msg_json["payload"])
             )

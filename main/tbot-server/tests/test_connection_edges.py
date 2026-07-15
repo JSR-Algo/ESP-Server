@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import importlib.util
 import json
 import queue
@@ -1311,8 +1312,10 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _AsyncClose(fail=True)
         handler.voice_provider_task = asyncio.create_task(asyncio.sleep(60))
         handler.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
-        handler.lesson_runtime = _AsyncClose(fail=True)
-        handler.safety_event_forwarder = _AsyncAClose(fail=True)
+        lesson_runtime = _AsyncClose(fail=True)
+        safety_forwarder = _AsyncAClose(fail=True)
+        handler.lesson_runtime = lesson_runtime
+        handler.safety_event_forwarder = safety_forwarder
         handler.audio_rate_controller = types.SimpleNamespace(
             reset=lambda: setattr(handler, "rate_reset", True),
             stop_sending_and_wait=lambda: _future_result(),
@@ -1333,13 +1336,188 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.audio_buffer, bytearray())
         self.assertIsNone(handler.timeout_task)
         self.assertTrue(handler.func_handler.cleaned)
-        self.assertTrue(handler.lesson_runtime.closed)
-        self.assertTrue(handler.safety_event_forwarder.closed)
+        self.assertTrue(lesson_runtime.closed)
+        self.assertTrue(safety_forwarder.closed)
+        self.assertIsNone(handler.lesson_runtime)
+        self.assertIsNone(handler.safety_event_forwarder)
         self.assertTrue(handler.rate_reset)
         self.assertTrue(handler.rate_stopped)
         self.assertTrue(handler.tts.closed)
         self.assertTrue(handler.asr.closed)
         self.assertIsNone(handler.executor)
+
+    async def test_close_cancels_mcp_tasks_before_tool_cleanup(self):
+        handler = _build_handler()
+        task_started = asyncio.Event()
+        task_cancelled = asyncio.Event()
+        release_work = asyncio.Event()
+        post_close_calls = []
+        cleanup_observations = []
+
+        async def blocked_mcp_work():
+            task_started.set()
+            try:
+                await release_work.wait()
+                post_close_calls.append("device-tool-call")
+            finally:
+                task_cancelled.set()
+
+        class ObservingToolHandler:
+            async def cleanup(self):
+                cleanup_observations.append(
+                    (task_cancelled.is_set(), len(handler.mcp_background_tasks))
+                )
+
+        handler.func_handler = ObservingToolHandler()
+        task = handler.schedule_mcp_background_task(blocked_mcp_work())
+        await asyncio.wait_for(task_started.wait(), timeout=0.5)
+
+        await handler.close()
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(cleanup_observations, [(True, 0)])
+        self.assertTrue(handler.mcp_tasks_closed)
+        release_work.set()
+        await asyncio.sleep(0)
+        self.assertEqual(post_close_calls, [])
+
+        async def late_mcp_work():
+            post_close_calls.append("post-close-send")
+
+        self.assertIsNone(handler.schedule_mcp_background_task(late_mcp_work()))
+        await asyncio.sleep(0)
+        self.assertEqual(post_close_calls, [])
+
+    async def test_close_stops_all_lesson_mcp_callers_before_tool_cleanup(self):
+        handler = _build_handler()
+        release = asyncio.Event()
+        stopped = set()
+        post_cleanup_sends = []
+        cleanup_started = False
+
+        async def caller(name):
+            try:
+                await release.wait()
+                if cleanup_started:
+                    post_cleanup_sends.append(name)
+            finally:
+                stopped.add(name)
+
+        class Runtime:
+            def __init__(self, name):
+                self.name = name
+                self.closed = False
+
+            async def close(self):
+                await asyncio.sleep(0)
+                self.closed = True
+                stopped.add(self.name)
+
+        class Forwarder:
+            def __init__(self):
+                self.closed = False
+
+            async def aclose(self):
+                await asyncio.sleep(0)
+                self.closed = True
+                stopped.add("safety-forwarder")
+
+        active = Runtime("active-runtime")
+        candidate = Runtime("candidate-runtime")
+        forwarder = Forwarder()
+        handler.lesson_runtime = active
+        handler.lesson_runtime_candidate = candidate
+        handler.safety_event_forwarder = forwarder
+        handler.lesson_pull_task = asyncio.create_task(caller("lesson-pull"))
+        handler.sd_pack_sync_task = asyncio.create_task(caller("sd-pack-sync"))
+
+        class ObservingToolHandler:
+            async def cleanup(self):
+                nonlocal cleanup_started
+                cleanup_started = True
+                self_snapshot = {
+                    "stopped": set(stopped),
+                    "lesson_pull_task": handler.lesson_pull_task,
+                    "sd_pack_sync_task": handler.sd_pack_sync_task,
+                    "lesson_runtime": handler.lesson_runtime,
+                    "lesson_runtime_candidate": handler.lesson_runtime_candidate,
+                    "safety_event_forwarder": handler.safety_event_forwarder,
+                }
+                handler.tool_cleanup_snapshot = self_snapshot
+
+        handler.func_handler = ObservingToolHandler()
+        await asyncio.sleep(0)
+
+        await handler.close()
+        release.set()
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            handler.tool_cleanup_snapshot["stopped"],
+            {
+                "lesson-pull",
+                "sd-pack-sync",
+                "active-runtime",
+                "candidate-runtime",
+                "safety-forwarder",
+            },
+        )
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_pull_task"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["sd_pack_sync_task"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_runtime"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_runtime_candidate"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["safety_event_forwarder"])
+        self.assertTrue(active.closed)
+        self.assertTrue(candidate.closed)
+        self.assertTrue(forwarder.closed)
+        self.assertEqual(post_cleanup_sends, [])
+
+    async def test_failed_mcp_task_exception_is_retrieved_and_logged_by_type_only(self):
+        handler = _build_handler()
+        finished = asyncio.Event()
+        loop_contexts = []
+        loop = asyncio.get_running_loop()
+        prior_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+
+        async def fail():
+            finished.set()
+            raise RuntimeError("parent@example.com token=secret")
+
+        try:
+            handler.schedule_mcp_background_task(fail())
+            await asyncio.wait_for(finished.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(prior_handler)
+
+        self.assertEqual(loop_contexts, [])
+        warning_messages = [
+            str(args[0])
+            for level, args, _kwargs in handler.logger.messages
+            if level == "warning" and args
+        ]
+        self.assertEqual(
+            warning_messages,
+            ["MCP background task failed errorType=RuntimeError"],
+        )
+        self.assertNotIn("parent@example.com", warning_messages[0])
+        self.assertNotIn("secret", warning_messages[0])
+
+    async def test_completed_mcp_task_is_removed_from_connection_tracking(self):
+        handler = _build_handler()
+
+        async def complete():
+            return "done"
+
+        task = handler.schedule_mcp_background_task(complete())
+        self.assertIn(task, handler.mcp_background_tasks)
+        self.assertEqual(await task, "done")
+        await asyncio.sleep(0)
+
+        self.assertEqual(handler.mcp_background_tasks, set())
 
     async def test_check_timeout_uses_bind_first_activity_and_logs_close_errors(self):
         handler = _build_handler()
