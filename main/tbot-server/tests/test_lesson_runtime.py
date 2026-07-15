@@ -20,6 +20,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from core.lesson.asset_cache import AssetCache, FAILED, READY
@@ -1067,16 +1068,17 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         prep = FIX["frames"]["lesson_prepare"]
         conn = conn or _FakeConn(session_id=prep["sessionId"])
-        return LessonRuntime(
-            conn,
-            assignment=_build_assignment(),
-            manifest=manifest or _build_manifest(),
-            asset_cache=asset_cache or _FakeAssetCache(ready=True),
-            forwarder=forwarder or _FakeForwarder(),
-            manifest_checksum=_manifest_checksum(),
-            alarm=alarm,
-            **runtime_kwargs,
-        )
+        with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            return LessonRuntime(
+                conn,
+                assignment=_build_assignment(),
+                manifest=manifest or _build_manifest(),
+                asset_cache=asset_cache or _FakeAssetCache(ready=True),
+                forwarder=forwarder or _FakeForwarder(),
+                manifest_checksum=_manifest_checksum(),
+                alarm=alarm,
+                **runtime_kwargs,
+            )
 
     def _sent_frames(self, conn):
         return [json.loads(p) for p in conn.websocket.sent]
@@ -3547,7 +3549,15 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn)
 
         await rt.start()
-        await rt.on_lesson_ack({"type": "lesson_ack"})
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": rt.session_id,
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+            }
+        )
 
         self.assertIsNotNone(rt._preload_task)
         await rt._preload_task
@@ -3558,11 +3568,50 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn)
 
         await rt.start()
-        await rt.on_lesson_ack({"type": "lesson_ack", "sequence": 1})
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": rt.session_id,
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+                "sequence": 1,
+            }
+        )
 
         self.assertIsNotNone(rt._preload_task)
         await rt._preload_task
         self.assertIn("lesson_start", [f["type"] for f in self._sent_frames(conn)])
+
+    async def test_stale_legacy_empty_lesson_ack_without_current_identity_is_ignored(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack({"type": "lesson_ack", "sequence": 1})
+
+        self.assertIsNone(rt._preload_task)
+        self.assertEqual([f["type"] for f in self._sent_frames(conn)], ["lesson_prepare"])
+
+    async def test_delayed_legacy_empty_lesson_ack_from_prior_session_is_ignored(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+                "sequence": 1,
+            }
+        )
+
+        self.assertEqual(set(rt._outstanding), {1})
+        self.assertIsNone(rt._preload_task)
+        self.assertEqual([f["type"] for f in self._sent_frames(conn)], ["lesson_prepare"])
 
     # 3) lesson_start gated until ready ------------------------------------------
 
@@ -6993,22 +7042,34 @@ class _PinnedRuntime:
         assignment_version,
         manifest_checksum=None,
         state="RUNNING",
+        session_id="11111111-1111-4111-8111-111111111111",
+        terminal_pending=False,
+        terminal_replay_result=True,
     ):
         self.assignment_id = assignment_id
         self.lesson_version = lesson_version
         self.assignment_version = assignment_version
         self.manifest_checksum = manifest_checksum or _manifest_checksum()
         self.state = state
+        self.session_id = session_id
         self.asset_cache = _EvictableCache()
         self.closed = False
         self.terminal_replay_calls = 0
+        self.terminal_replay_result = terminal_replay_result
+        self.forwarder = type(
+            "_PinnedForwarder",
+            (),
+            {"pending_terminal_batch": {"events": [{"type": "lesson_failed"}]} if terminal_pending else None},
+        )()
 
     async def close(self):
         self.closed = True
 
     async def replay_pending_terminal_event(self):
         self.terminal_replay_calls += 1
-        return True
+        if self.terminal_replay_result:
+            self.forwarder.pending_terminal_batch = None
+        return self.terminal_replay_result
 
 
 class _EvictableCache:
@@ -7023,6 +7084,27 @@ class _EvictableCache:
 
 
 class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import core.lesson.forwarder as forwarder_module
+
+        self._saved_terminal_store = forwarder_module._DEFAULT_TERMINAL_STORE
+        self._saved_pending_terminal_batches = dict(
+            forwarder_module._PENDING_TERMINAL_BATCHES
+        )
+        forwarder_module._PENDING_TERMINAL_BATCHES.clear()
+        forwarder_module._DEFAULT_TERMINAL_STORE = (
+            forwarder_module.MemoryTerminalReplayStore()
+        )
+
+    def tearDown(self):
+        import core.lesson.forwarder as forwarder_module
+
+        forwarder_module._PENDING_TERMINAL_BATCHES.clear()
+        forwarder_module._PENDING_TERMINAL_BATCHES.update(
+            self._saved_pending_terminal_batches
+        )
+        forwarder_module._DEFAULT_TERMINAL_STORE = self._saved_terminal_store
+
     def _patch_backend(self, assignment, manifest, etag='"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'):
         """Monkeypatch the REAL config.manage_api_client attributes the runtime
         resolves at call time (conftest does NOT stub this module). Returns an undo callable."""
@@ -7071,10 +7153,19 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         return _undo
 
-    def _assignment(self, *, lesson_version, assignment_version, state="ASSIGNED", manifest_checksum=None):
+    def _assignment(
+        self,
+        *,
+        lesson_version,
+        assignment_version,
+        state="ASSIGNED",
+        manifest_checksum=None,
+        assignment_id=None,
+        session_id=None,
+    ):
         prep = FIX["frames"]["lesson_prepare"]
-        return {
-            "assignmentId": prep["assignmentId"],
+        assignment = {
+            "assignmentId": assignment_id or prep["assignmentId"],
             "assignmentVersion": assignment_version,
             "lessonId": prep["lessonId"],
             "lessonVersion": lesson_version,
@@ -7082,6 +7173,73 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             "profile": "espTft",
             "state": state,
         }
+        if session_id is not None:
+            assignment["sessionId"] = session_id
+        return assignment
+
+    async def test_new_assignment_on_same_websocket_mints_run_uuid_for_frames_and_events(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        conversational_session = conn.session_id
+        historical_assignment_session = "22222222-2222-4222-8222-222222222222"
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
+        undo = self._patch_backend(
+            self._assignment(
+                lesson_version=3,
+                assignment_version=1,
+                assignment_id="new-assignment",
+                session_id=historical_assignment_session,
+            ),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(uuid.UUID(result.session_id).version, 4)
+        self.assertNotEqual(result.session_id, conversational_session)
+        self.assertNotEqual(result.session_id, historical_assignment_session)
+        self.assertEqual(conn.session_id, conversational_session)
+        self.assertTrue(prior.closed)
+        frames = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual({frame["sessionId"] for frame in frames}, {result.session_id})
+
+        forwarder = _FakeForwarder()
+        result.forwarder = forwarder
+        result._forward({"type": "lesson_started"})
+        self.assertEqual(forwarder.batches[0]["sessionId"], result.session_id)
+
+    async def test_reconnect_ignores_historical_assignment_session_and_mints_new_run_uuid(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        historical_assignment_session = "33333333-3333-4333-8333-333333333333"
+        undo = self._patch_backend(
+            self._assignment(
+                lesson_version=3,
+                assignment_version=1,
+                session_id=historical_assignment_session,
+            ),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertEqual(uuid.UUID(result.session_id).version, 4)
+        self.assertNotEqual(result.session_id, historical_assignment_session)
+        self.assertNotEqual(result.session_id, conn.session_id)
 
     async def test_missing_config_skips_lesson_start_with_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -7356,6 +7514,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             assignment_version=1,
         )
         conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
         released = []
 
         async def release_lesson_mode(*, reason):
@@ -7377,8 +7537,62 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(result, prior)
         self.assertIs(conn.lesson_runtime, prior)
+        self.assertEqual(prior.session_id, prior_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
         self.assertEqual(released, [])
         self.assertFalse(prior.closed)
+
+    async def test_candidate_preload_failure_is_silent_until_activation(self):
+        import core.lesson.asset_cache as asset_cache_module
+        import core.lesson.forwarder as forwarder_module
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"]["asset_delivery_mode"] = "sd_pack"
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
+        released = []
+        candidate_forwarders = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        class _CandidateForwarder(_FakeForwarder):
+            def __init__(self, **_kwargs):
+                super().__init__()
+                candidate_forwarders.append(self)
+
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(forwarder_module, "LessonEventForwarder", _CandidateForwarder), patch.object(
+                asset_cache_module,
+                "AssetCache",
+                side_effect=lambda **_kwargs: _FakeAssetCache(
+                    preload_error=LessonError("ASSET_CHECKSUM_MISMATCH", "bad candidate")
+                ),
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, prior)
+        self.assertIs(conn.lesson_runtime, prior)
+        self.assertEqual(prior.session_id, prior_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
+        self.assertFalse(prior.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(released, [])
+        self.assertEqual(candidate_forwarders[0].batches, [])
 
     async def test_start_refused_releases_lesson_mode_and_surfaces_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -7548,6 +7762,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             assignment_id=prep["assignmentId"], lesson_version=3, assignment_version=1
         )
         conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        conversational_session_id = conn.session_id
 
         undo = self._patch_backend(
             self._assignment(lesson_version=3, assignment_version=1), _build_manifest()
@@ -7560,6 +7776,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         # Same version -> idempotent no-op: existing kept, NOT torn down, NO new frame.
         self.assertIs(result, pinned)
         self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
         self.assertFalse(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.websocket.sent, [])
@@ -7619,11 +7837,517 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
         self.assertIs(conn.lesson_runtime, result)
-        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertEqual(pinned.terminal_replay_calls, 0)
         self.assertTrue(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
+
+    async def test_unchanged_failed_session_with_local_pending_terminal_blocks_restart_on_replay_failure(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_pending=True,
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_unchanged_failed_session_with_local_pending_terminal_skips_restart_after_replay_success(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_pending=True,
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_unchanged_failed_session_rechecks_terminal_pending_after_manifest_fetch_failure(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_unchanged_failed_session_rechecks_terminal_pending_after_manifest_fetch_success(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_terminal_pending_after_manifest_fetch_failure(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_terminal_pending_after_manifest_fetch_success(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_candidate_preload_failure(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        candidates = []
+        entered = []
+
+        async def inject_pending_during_preload(candidate):
+            candidates.append(candidate)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=inject_pending_during_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_candidate_preload_success(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+        candidates = []
+        entered = []
+
+        async def inject_pending_during_preload(candidate):
+            candidates.append(candidate)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=inject_pending_during_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_enter_mode_failure(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "CONVERSATION"
+        conn.audio_channel_owner = "CONVERSATION"
+        mode_changes = []
+
+        def set_session_mode(mode, *, reason=""):
+            conn.session_mode = mode
+            conn.audio_channel_owner = mode
+            mode_changes.append((mode, reason))
+            return mode
+
+        conn._set_session_mode = set_session_mode
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        candidates = []
+        entered = []
+        released = []
+
+        async def preload(candidate):
+            candidates.append(candidate)
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn._set_session_mode("LESSON", reason=reason)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime, "preload_only", new=preload
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, [])
+        self.assertEqual(conn.session_mode, "CONVERSATION")
+        self.assertEqual(conn.audio_channel_owner, "CONVERSATION")
+        self.assertEqual(mode_changes[-1], ("CONVERSATION", "lesson_candidate_aborted"))
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_enter_mode_success(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "LESSON"
+        conn.audio_channel_owner = "LESSON"
+        mode_changes = []
+
+        def set_session_mode(mode, *, reason=""):
+            conn.session_mode = mode
+            conn.audio_channel_owner = mode
+            mode_changes.append((mode, reason))
+            return mode
+
+        conn._set_session_mode = set_session_mode
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+        candidates = []
+        entered = []
+        released = []
+
+        async def preload(candidate):
+            candidates.append(candidate)
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn._set_session_mode("LESSON", reason=reason)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime, "preload_only", new=preload
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, [])
+        self.assertEqual(conn.session_mode, "LESSON")
+        self.assertEqual(conn.audio_channel_owner, "LESSON")
+        self.assertEqual(mode_changes[-1], ("LESSON", "lesson_candidate_aborted"))
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
 
     async def test_unchanged_completed_session_replays_pending_terminal_event_on_reconnect_once(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -7635,6 +8359,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             lesson_version=3,
             assignment_version=1,
             state="COMPLETED",
+            terminal_pending=True,
         )
         conn.lesson_runtime = pinned
 
@@ -7649,12 +8374,14 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, pinned)
         self.assertEqual(pinned.terminal_replay_calls, 1)
         self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
 
     async def test_fresh_reconnect_replays_dead_lettered_terminal_event_before_restart(self):
         import httpx
         import config.manage_api_client as mac
         import config.device_token_client as dtc
-        from core.lesson.forwarder import LessonEventForwarder
+        from core.lesson.forwarder import LessonEventForwarder, get_terminal_replay_store
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         prep = FIX["frames"]["lesson_prepare"]
@@ -7705,8 +8432,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
         mac.post_lesson_event = _post_lesson_event
+        conn = _RepublishConn()
         try:
-            result = await maybe_start_lesson_on_connect(_RepublishConn())
+            result = await maybe_start_lesson_on_connect(conn)
         finally:
             (
                 dtc.resolve_device_identity,
@@ -7715,8 +8443,80 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 mac.post_lesson_event,
             ) = saved
 
+        await get_terminal_replay_store().clear("dev-republish", terminal)
+
         self.assertIsNone(result)
         self.assertEqual(replayed, [terminal])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_fresh_reconnect_blocks_restart_when_terminal_replay_post_fails(self):
+        import httpx
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+        from core.lesson.forwarder import LessonEventForwarder, get_terminal_replay_store
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        prep = FIX["frames"]["lesson_prepare"]
+        terminal = {
+            "assignmentId": prep["assignmentId"],
+            "sessionId": "sess_reconnect_terminal_failed",
+            "events": [{"type": "lesson_completed", "completedAt": 1_700_000_000_000}],
+        }
+
+        async def _fail_post(_client, _base_url, _device_id, _batch, *, token=None):
+            request = httpx.Request("POST", "http://backend.test/v1/devices/dev-republish/lesson-events")
+            response = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError("backend hiccup", request=request, response=response)
+
+        old_forwarder = LessonEventForwarder(
+            device_id="dev-republish",
+            base_url="http://backend.test/v1",
+            post_fn=_fail_post,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=0,
+        )
+        old_forwarder.enqueue(terminal)
+        await old_forwarder._queue.join()
+        await old_forwarder.aclose()
+
+        manifest_calls = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED")
+
+        async def _get_manifest(*_args, **_kwargs):
+            manifest_calls.append(True)
+            return _build_manifest(), '"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+            mac.post_lesson_event,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        mac.post_lesson_event = _fail_post
+        conn = _RepublishConn()
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+                mac.post_lesson_event,
+            ) = saved
+
+        await get_terminal_replay_store().clear("dev-republish", terminal)
+
+        self.assertIsNone(result)
+        self.assertEqual(manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
 
     async def test_fresh_reconnect_replays_dead_lettered_child_inactivity_before_restart(self):
         import httpx
@@ -7990,7 +8790,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn = _RepublishConn()
         undo = self._patch_backend(assignment, _build_manifest())
         try:
-            rt = await maybe_start_lesson_on_connect(conn)
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                rt = await maybe_start_lesson_on_connect(conn)
         finally:
             undo()
 
@@ -8072,8 +8873,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = _RecordingLessonVoiceProvider()
         undo = self._patch_backend(assignment, manifest)
         try:
-            response = start_lesson_module.start_lesson(conn)
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                response = start_lesson_module.start_lesson(conn)
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -8185,8 +8987,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = _RecordingLessonVoiceProvider()
         undo = self._patch_backend(assignment, manifest)
         try:
-            response = start_lesson_module.start_lesson(conn)
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                response = start_lesson_module.start_lesson(conn)
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -8317,8 +9120,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("bắt đầu khoá học")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("bắt đầu khoá học")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -8448,8 +9252,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("học bài đi")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("học bài đi")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -8641,8 +9446,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         )
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("bắt đầu bài học")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("bắt đầu bài học")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
             asset_cache_mod.AssetCache = saved_asset_cache

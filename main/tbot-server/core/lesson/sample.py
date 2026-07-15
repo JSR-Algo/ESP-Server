@@ -617,7 +617,6 @@ async def _start_sample_lesson_impl(conn: Any) -> Optional[Any]:
         "lessonId": lesson_id,
         "lessonVersion": 1,
         "profile": "espTft",
-        "sessionId": getattr(conn, "session_id", None),
         "manifestChecksum": "sample",
     }
 

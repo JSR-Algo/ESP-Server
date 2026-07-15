@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from core.lesson.asset_cache import AssetCache, DOWNLOADING, READY
 from core.lesson.runtime import LessonRuntime
@@ -257,14 +258,15 @@ def _sent_codes(conn):
 class RuntimeTerminalGuardTest(unittest.IsolatedAsyncioTestCase):
     async def _running_runtime(self, step_timeout=0.05):
         conn = _FakeConn()
-        rt = LessonRuntime(
-            conn,
-            assignment={"assignmentId": "a", "assignmentVersion": 1, "lessonId": "w01-d01-barn-say-it",
-                        "lessonVersion": 3, "profile": "espTft", "state": "ASSIGNED"},
-            manifest=_manifest(step_timeout),
-            asset_cache=_FakeAssetCache(),
-            forwarder=_FakeForwarder(),
-        )
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=RUNTIME_SESSION_ID):
+            rt = LessonRuntime(
+                conn,
+                assignment={"assignmentId": "a", "assignmentVersion": 1, "lessonId": "w01-d01-barn-say-it",
+                            "lessonVersion": 3, "profile": "espTft", "state": "ASSIGNED"},
+                manifest=_manifest(step_timeout),
+                asset_cache=_FakeAssetCache(),
+                forwarder=_FakeForwarder(),
+            )
         await rt.start()                      # prepare seq1
         await rt.on_lesson_ack(_ack(1, 1))    # prepare-ack -> preload
         await rt._preload_task                # -> lesson_start seq2

@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -156,14 +157,15 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         conn = _OrderingConn(log, session_id=prep["sessionId"])
         manifest = L._build_full_seed_story_manifest()
         forwarder = L._FakeForwarder()
-        rt = LessonRuntime(
-            conn,
-            assignment=L._build_assignment(),
-            manifest=manifest,
-            asset_cache=L._FakeAssetCache(ready=True),
-            forwarder=forwarder,
-            manifest_checksum=L._manifest_checksum(),
-        )
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            rt = LessonRuntime(
+                conn,
+                assignment=L._build_assignment(),
+                manifest=manifest,
+                asset_cache=L._FakeAssetCache(ready=True),
+                forwarder=forwarder,
+                manifest_checksum=L._manifest_checksum(),
+            )
 
         await rt.start()
         await rt.on_lesson_ack(self._ack(1, 1))   # prepare-ack -> preload
@@ -254,14 +256,16 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             [("s4", "repeat", "interactive"), ("s8", "feedback", "passive")]
         )
         forwarder = _RealBoundaryForwarder()
-        rt = LessonRuntime(
-            conn,
-            assignment=L._build_assignment(),
-            manifest=manifest,
-            asset_cache=L._FakeAssetCache(ready=True),
-            forwarder=forwarder,
-            manifest_checksum=L._manifest_checksum(),
-        )
+        prep = FIX["frames"]["lesson_prepare"]
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            rt = LessonRuntime(
+                conn,
+                assignment=L._build_assignment(),
+                manifest=manifest,
+                asset_cache=L._FakeAssetCache(ready=True),
+                forwarder=forwarder,
+                manifest_checksum=L._manifest_checksum(),
+            )
 
         await rt.start()
         await rt.on_lesson_ack(self._ack(1, 1))

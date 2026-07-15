@@ -42,6 +42,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -64,14 +65,15 @@ BASE = "http://assets.test"
 
 def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
     conn = conn or T._FakeConn(session_id="sess")
-    return LessonRuntime(
-        conn,
-        assignment=T._build_assignment(),
-        manifest=manifest or T._build_manifest(),
-        asset_cache=asset_cache if asset_cache is not None else T._FakeAssetCache(ready=True),
-        forwarder=forwarder if forwarder is not None else T._FakeForwarder(),
-        manifest_checksum=T._manifest_checksum(),
-    )
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn,
+            assignment=T._build_assignment(),
+            manifest=manifest or T._build_manifest(),
+            asset_cache=asset_cache if asset_cache is not None else T._FakeAssetCache(ready=True),
+            forwarder=forwarder if forwarder is not None else T._FakeForwarder(),
+            manifest_checksum=T._manifest_checksum(),
+        )
 
 
 class RuntimeHelperCoverageTest(unittest.IsolatedAsyncioTestCase):

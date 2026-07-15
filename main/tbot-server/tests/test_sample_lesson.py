@@ -1,6 +1,8 @@
 import asyncio
 import json
 import unittest
+import uuid
+from unittest.mock import patch
 
 from core.lesson.sample import (
     DEFAULT_SAMPLE_STEP_DWELL_SEC,
@@ -86,11 +88,13 @@ class _FakeConn:
 
 
 def _ack(conn, acks, env_seq, *, step_id=None):
+    runtime = getattr(conn, "lesson_runtime", None)
+    session_id = getattr(runtime, "session_id", None) or conn.session_id
     return {
         "type": "lesson_ack",
         "protocolVersion": "teebot-lesson-renderer.v1",
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
-        "sessionId": conn.session_id,
+        "sessionId": session_id,
         "lessonId": SAMPLE_LESSON_ID,
         "lessonVersion": 1,
         "stepId": step_id,
@@ -376,7 +380,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(runtime)
         self.assertEqual(conn.events[:2], ["prepare_voice", "enter:sample_lesson_start"])
 
-    async def test_sample_lesson_plays_all_steps_to_completed_then_finishes(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_sample_lesson_plays_all_steps_to_completed_then_finishes(self, _uuid4):
         conn = _FakeConn()
         # dwell_sec=0 -> passive steps advance immediately on ack (no per-step pacing);
         # this exercises the completion path. Pacing is covered separately below.
@@ -432,7 +437,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timeouts)
         self.assertGreaterEqual(min(timeouts), 75.0)
 
-    async def test_passive_dwell_delays_auto_advance_then_completes(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_dwell_delays_auto_advance_then_completes(self, _uuid4):
         import asyncio
 
         conn = _FakeConn()
@@ -475,7 +481,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         # Every sample step carried a dwellSec so the scene paces on the device.
         self.assertTrue(all(s.get("dwellSec") == 0.02 for s in manifest["steps"]))
 
-    async def test_passive_step_waits_for_prompt_audio_idle_before_auto_advance(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_step_waits_for_prompt_audio_idle_before_auto_advance(self, _uuid4):
         class _BlockingPromptIdleProvider:
             def __init__(self):
                 self.prompts = []
@@ -541,7 +548,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             if not ack_task.done():
                 await asyncio.wait_for(ack_task, timeout=1.0)
 
-    async def test_passive_dwell_starts_after_prompt_audio_idle(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_dwell_starts_after_prompt_audio_idle(self, _uuid4):
         class _BlockingPromptIdleProvider:
             def __init__(self):
                 self.wait_started = asyncio.Event()
@@ -642,7 +650,7 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
                 "type": "lesson_ack",
                 "protocolVersion": "teebot-lesson-renderer.v1",
                 "assignmentId": SAMPLE_ASSIGNMENT_ID,
-                "sessionId": conn.session_id,
+                "sessionId": runtime.session_id,
                 "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
                 "lessonVersion": 1,
                 "stepId": None,
@@ -693,7 +701,7 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
                 "type": "lesson_ack",
                 "protocolVersion": "teebot-lesson-renderer.v1",
                 "assignmentId": SAMPLE_ASSIGNMENT_ID,
-                "sessionId": conn.session_id,
+                "sessionId": runtime.session_id,
                 "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
                 "lessonVersion": 1,
                 "stepId": None,
@@ -747,6 +755,9 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(runtime)
         self.assertIs(conn.lesson_runtime, runtime)
+        self.assertEqual(uuid.UUID(runtime.session_id).version, 4)
+        self.assertNotEqual(runtime.session_id, conn.session_id)
+        self.assertEqual(json.loads(conn.websocket.sent[0])["sessionId"], runtime.session_id)
         self.assertEqual(conn.entered, ["sample_lesson_start"])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
@@ -826,6 +837,7 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         second = await start_sample_lesson(conn)
 
         self.assertIsNot(second, first)
+        self.assertNotEqual(second.session_id, first.session_id)
         self.assertIs(conn.lesson_runtime, second)
         self.assertTrue(first._closed)
         self.assertIsNone(first._step_timeout_task)
@@ -1009,11 +1021,13 @@ def _make_real_google_live_provider(conn):
 
 def _iack(conn, acks, env_seq, *, step_id=None):
     """lesson_ack carrying the INTERACTIVE sample's lessonId."""
+    runtime = getattr(conn, "lesson_runtime", None)
+    session_id = getattr(runtime, "session_id", None) or conn.session_id
     return {
         "type": "lesson_ack",
         "protocolVersion": "teebot-lesson-renderer.v1",
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
-        "sessionId": conn.session_id,
+        "sessionId": session_id,
         "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
         "lessonVersion": 1,
         "stepId": step_id,

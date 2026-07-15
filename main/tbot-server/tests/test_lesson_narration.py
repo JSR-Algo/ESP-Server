@@ -27,6 +27,7 @@ pytest-asyncio markers), mirroring the neighboring lesson suites.
 
 import json
 import unittest
+from unittest import mock
 
 from core.voice.session_provider.google_live import (
     GoogleLiveProvider,
@@ -56,15 +57,16 @@ from tests.test_lesson_runtime import (
 def _runtime(conn, manifest):
     from core.lesson.runtime import LessonRuntime
 
-    return LessonRuntime(
-        conn,
-        assignment=_build_assignment(),
-        manifest=manifest,
-        asset_cache=_FakeAssetCache(ready=True),
-        forwarder=_FakeForwarder(),
-        manifest_checksum=_manifest_checksum(),
-        alarm=None,
-    )
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn,
+            assignment=_build_assignment(),
+            manifest=manifest,
+            asset_cache=_FakeAssetCache(ready=True),
+            forwarder=_FakeForwarder(),
+            manifest_checksum=_manifest_checksum(),
+            alarm=None,
+        )
 
 
 async def _drive_to_running(rt):

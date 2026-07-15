@@ -123,16 +123,17 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         conn = _Conn()
         forwarder = _Forwarder()
         step = _safe_step()
-        rt = LessonRuntime(
-            conn,
-            assignment={
-                "assignmentId": "a1", "assignmentVersion": 1, "lessonId": "l1",
-                "lessonVersion": 1, "profile": "espTft", "sessionId": "session-1",
-            },
-            manifest={"manifestVersion": "teebot-lesson-renderer.v1", "steps": [step]},
-            asset_cache=object(),
-            forwarder=forwarder,
-        )
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value="session-1"):
+            rt = LessonRuntime(
+                conn,
+                assignment={
+                    "assignmentId": "a1", "assignmentVersion": 1, "lessonId": "l1",
+                    "lessonVersion": 1, "profile": "espTft", "sessionId": "session-1",
+                },
+                manifest={"manifestVersion": "teebot-lesson-renderer.v1", "steps": [step]},
+                asset_cache=object(),
+                forwarder=forwarder,
+            )
         conn.lesson_runtime = rt
         rt.state = S_RUNNING
         rt._step = step

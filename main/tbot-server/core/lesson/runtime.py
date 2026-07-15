@@ -22,6 +22,7 @@ import json
 import math
 import time
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
@@ -765,10 +766,10 @@ class LessonRuntime:
         self.lesson_id = assignment.get("lessonId")
         self.lesson_version = int(assignment.get("lessonVersion", 1))
         self.profile = assignment.get("profile", "espTft")
-        # sessionId SHOULD equal the WS session_id; a fresh WS connection already
-        # mints a fresh session_id, which cleanly resumes the (assignmentId,sessionId)
-        # sequence namespace on ESP restart (plan §6.3.5 — "fresh sessionId" option).
-        self.session_id = assignment.get("sessionId") or getattr(conn, "session_id", None)
+        # A lesson run owns its protocol/event identity. It must not inherit either
+        # the conversational websocket session or a historical assignment payload,
+        # because a reconnect or republish starts a fresh sequence namespace.
+        self.session_id = str(uuid.uuid4())
         self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
         self.manifest = manifest
         self.manifest_checksum = manifest_checksum
@@ -939,6 +940,12 @@ class LessonRuntime:
         candidate = getattr(self.conn, "lesson_runtime_candidate", None)
         return current is None or current is self or candidate is self
 
+    def _is_pre_activation_fallback_candidate(self) -> bool:
+        """True while a replacement is preloading behind a live fallback runtime."""
+        current = getattr(self.conn, "lesson_runtime", None)
+        candidate = getattr(self.conn, "lesson_runtime_candidate", None)
+        return candidate is self and current is not None and current is not self
+
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
         if not callable(replay):
@@ -1040,7 +1047,7 @@ class LessonRuntime:
             ("lessonVersion", self.lesson_version),
         )
         for key, expected in expected_fields:
-            if key in msg_json and expected is not None and msg_json.get(key) != expected:
+            if expected is not None and msg_json.get(key) != expected:
                 return None
         if len(self._outstanding) != 1:
             return None
@@ -1467,6 +1474,12 @@ class LessonRuntime:
             await self._notify_lesson_terminal("lesson_completed")
 
     async def _notify_lesson_terminal(self, reason: str) -> None:
+        if self._is_pre_activation_fallback_candidate():
+            self._log(
+                "warning",
+                f"candidate terminal side effects suppressed before activation reason={reason}",
+            )
+            return
         # Only real terminal states may leave LESSON mode. Non-terminal callers
         # (historically online-fallback miswired as a notify) must not kick the
         # child out mid-start.
@@ -2319,6 +2332,12 @@ class LessonRuntime:
         await self._notify_lesson_terminal("lesson_frame_too_large")
 
     async def _emit_error(self, err: LessonError) -> None:
+        if self._is_pre_activation_fallback_candidate():
+            self._log(
+                "warning",
+                f"candidate lesson_error suppressed before activation code={err.code}",
+            )
+            return
         seq = self._next_seq()
         frame = self._envelope("lesson_error", step_id=None, sequence=seq, body=err.to_body())
         await self._send(json.dumps(frame, ensure_ascii=False))
@@ -2975,22 +2994,79 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         # non-empty str (else we returned at metadata_errors); the false edge of this
         # defensive guard is unreachable on this path.
         if isinstance(assignment_id, str) and assignment_id:  # pragma: no cover - assignmentId non-empty str enforced upstream
+            existing_runtime = getattr(conn, "lesson_runtime", None)
+            existing_forwarder = getattr(existing_runtime, "forwarder", None)
+            local_terminal_pending = getattr(
+                existing_forwarder, "pending_terminal_batch", None
+            )
+            if (
+                getattr(existing_runtime, "assignment_id", None) == assignment_id
+                and local_terminal_pending is not None
+            ):
+                replay_local = getattr(existing_runtime, "replay_pending_terminal_event", None)
+                replayed_local = False
+                if callable(replay_local):
+                    try:
+                        replayed_local = bool(await replay_local())
+                    except Exception as exc:
+                        _log(
+                            "warning",
+                            f"local terminal lesson event replay failed: {type(exc).__name__}",
+                        )
+                if replayed_local:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAYED",
+                        "Robot đã đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("info", "replayed local pending terminal lesson event; skipping lesson restart")
+                else:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAY_PENDING",
+                        "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("warning", "local pending terminal lesson event blocks lesson restart")
+                return existing_runtime
             try:
-                from core.lesson.forwarder import replay_stored_terminal_event
-
-                replayed_terminal = await replay_stored_terminal_event(
-                    device_id=backend_device_id,
-                    assignment_id=assignment_id,
-                    base_url=base_url,
-                    token=token,
-                    client=client,
-                    logger=logger,
+                from core.lesson.forwarder import (
+                    get_terminal_replay_store,
+                    replay_stored_terminal_event,
                 )
-            except Exception as exc:  # pragma: no cover - replay is best-effort
+
+                terminal_store = get_terminal_replay_store()
+                pending_terminal = await terminal_store.load(backend_device_id, assignment_id)
+                if pending_terminal is None:
+                    terminal_replay_state = "none"
+                else:
+                    replayed_terminal = await replay_stored_terminal_event(
+                        device_id=backend_device_id,
+                        assignment_id=assignment_id,
+                        base_url=base_url,
+                        token=token,
+                        client=client,
+                        logger=logger,
+                        terminal_store=terminal_store,
+                    )
+                    terminal_replay_state = "replayed" if replayed_terminal else "blocked"
+            except Exception as exc:
                 _log("warning", f"stored terminal lesson event replay failed: {type(exc).__name__}")
-                replayed_terminal = False
-            if replayed_terminal:
-                _log("info", "replayed pending terminal lesson event; skipping lesson restart")
+                terminal_replay_state = "blocked"
+            if terminal_replay_state != "none":
+                if terminal_replay_state == "replayed":
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAYED",
+                        "Robot đã đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("info", "replayed pending terminal lesson event; skipping lesson restart")
+                else:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAY_PENDING",
+                        "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("warning", "pending terminal lesson event blocks lesson restart")
                 return None
         profile = assignment.get("profile", "espTft")
         try:
@@ -3087,18 +3163,47 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     )
     republish_previous = None
     if existing is not None and getattr(existing, "assignment_id", None) == assignment.get("assignmentId"):
+        # Re-check after the awaited store/manifest calls above. A terminal
+        # forwarder can acquire a local pending batch during that window even
+        # when the earlier durable/local checks observed none. This barrier must
+        # run before the unchanged/republish split so neither path can replace the
+        # runtime while its terminal event still needs durable acknowledgement.
+        existing_forwarder = getattr(existing, "forwarder", None)
+        local_terminal_pending = getattr(
+            existing_forwarder, "pending_terminal_batch", None
+        )
+        if local_terminal_pending is not None:
+            replay = getattr(existing, "replay_pending_terminal_event", None)
+            replayed_terminal = False
+            if callable(replay):
+                try:
+                    replayed_terminal = bool(await replay())
+                except Exception as exc:
+                    _log(
+                        "warning",
+                        f"terminal lesson event replay failed: {type(exc).__name__}",
+                    )
+            if replayed_terminal:
+                _set_lesson_start_status(
+                    conn,
+                    "TERMINAL_REPLAYED",
+                    "Robot đã đồng bộ kết quả bài học trước đó.",
+                )
+                _log("info", "replayed terminal lesson event after manifest fetch")
+            else:
+                _set_lesson_start_status(
+                    conn,
+                    "TERMINAL_REPLAY_PENDING",
+                    "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                )
+                _log("warning", "pending terminal lesson event blocks runtime replacement")
+            return existing
         unchanged = (
             existing.lesson_version == new_lesson_version
             and existing.assignment_version == new_assignment_version
             and getattr(existing, "manifest_checksum", "") == new_manifest_checksum
         )
         if unchanged:
-            replay = getattr(existing, "replay_pending_terminal_event", None)
-            if getattr(existing, "state", None) in (S_COMPLETED, S_FAILED) and callable(replay):
-                try:
-                    await replay()
-                except Exception as exc:  # pragma: no cover - replay is best-effort
-                    _log("warning", f"terminal lesson event replay failed: {type(exc).__name__}")
             if getattr(existing, "state", None) in (S_PAUSED, S_FAILED):
                 _log(
                     "info",
@@ -3288,6 +3393,70 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
     conn.lesson_runtime_candidate = runtime
+    mode_not_captured = object()
+
+    async def _abort_candidate_for_fallback_terminal(
+        phase: str, *, restore_mode: Any = mode_not_captured
+    ) -> bool:
+        previous_forwarder = getattr(republish_previous, "forwarder", None)
+        previous_terminal_pending = getattr(
+            previous_forwarder, "pending_terminal_batch", None
+        )
+        if republish_previous is None or previous_terminal_pending is None:
+            return False
+        replay_previous = getattr(
+            republish_previous, "replay_pending_terminal_event", None
+        )
+        replayed_previous = False
+        if callable(replay_previous):
+            try:
+                replayed_previous = bool(await replay_previous())
+            except Exception as exc:
+                _log(
+                    "warning",
+                    f"{phase} terminal lesson event replay failed: {type(exc).__name__}",
+                )
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
+        if activation is not None:
+            activation.abort_candidate()
+        try:
+            await runtime.close()
+        except Exception as exc:
+            _log(
+                "warning",
+                f"terminal-barrier candidate teardown failed: {type(exc).__name__}",
+            )
+        if restore_mode is not mode_not_captured:
+            set_session_mode = getattr(conn, "_set_session_mode", None)
+            if callable(set_session_mode):
+                try:
+                    set_session_mode(restore_mode, reason="lesson_candidate_aborted")
+                except Exception as exc:
+                    _log(
+                        "warning",
+                        f"lesson candidate mode rollback failed: {type(exc).__name__}",
+                    )
+            elif hasattr(conn, "session_mode"):
+                conn.session_mode = restore_mode
+                if hasattr(conn, "audio_channel_owner"):
+                    conn.audio_channel_owner = restore_mode
+        if replayed_previous:
+            _set_lesson_start_status(
+                conn,
+                "TERMINAL_REPLAYED",
+                "Robot đã đồng bộ kết quả bài học trước đó.",
+            )
+            _log("info", f"replayed fallback terminal lesson event phase={phase}")
+        else:
+            _set_lesson_start_status(
+                conn,
+                "TERMINAL_REPLAY_PENDING",
+                "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+            )
+            _log("warning", f"fallback terminal lesson event blocks candidate phase={phase}")
+        return True
+
     try:
         preload_only = getattr(runtime, "preload_only", None)
         start_protocol = getattr(runtime, "start_protocol", None)
@@ -3313,7 +3482,34 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             if activation is not None:
                 activation.abort_candidate()
             return republish_previous
-        if activation is not None and candidate_identity is not None:
+        if split_start and await _abort_candidate_for_fallback_terminal("post_preload"):
+            return republish_previous
+        if split_start:
+            enter_lesson = getattr(conn, "enter_lesson_mode", None)
+            previous_session_mode = getattr(conn, "session_mode", mode_not_captured)
+            if callable(enter_lesson):
+                await enter_lesson(reason="lesson_start")
+            if await _abort_candidate_for_fallback_terminal(
+                "post_enter_lesson_mode", restore_mode=previous_session_mode
+            ):
+                return republish_previous
+            # No await is allowed between this final terminal check, synchronous
+            # asset activation, and the runtime swap.
+            if activation is not None and candidate_identity is not None:
+                if not activation.verify_for_activation(candidate_identity) or not activation.activate_candidate(
+                    candidate_identity
+                ):
+                    _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
+                    if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                        conn.lesson_runtime_candidate = None
+                    activation.abort_candidate()
+                    await runtime.close()
+                    return republish_previous
+            conn.lesson_runtime = runtime
+            conn.lesson_runtime_candidate = None
+            await start_protocol(preloaded=True)
+        elif activation is not None and candidate_identity is not None:
+            # Preserve compatibility-runtime ordering: legacy start() already ran.
             if not activation.verify_for_activation(candidate_identity) or not activation.activate_candidate(
                 candidate_identity
             ):
@@ -3323,13 +3519,6 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 activation.abort_candidate()
                 await runtime.close()
                 return republish_previous
-        if split_start:
-            enter_lesson = getattr(conn, "enter_lesson_mode", None)
-            if callable(enter_lesson):
-                await enter_lesson(reason="lesson_start")
-            conn.lesson_runtime = runtime
-            conn.lesson_runtime_candidate = None
-            await start_protocol(preloaded=True)
         _set_lesson_start_status(conn, "STARTED")
         if republish_previous is not None:
             old_cache = getattr(republish_previous, "asset_cache", None)

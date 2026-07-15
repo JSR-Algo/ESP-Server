@@ -46,14 +46,15 @@ from core.lesson.runtime import (  # noqa: E402
 
 def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
     conn = conn or T._FakeConn(session_id="sess")
-    return LessonRuntime(
-        conn,
-        assignment=T._build_assignment(),
-        manifest=manifest or T._build_manifest(),
-        asset_cache=asset_cache if asset_cache is not None else T._FakeAssetCache(ready=True),
-        forwarder=forwarder if forwarder is not None else T._FakeForwarder(),
-        manifest_checksum=T._manifest_checksum(),
-    )
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn,
+            assignment=T._build_assignment(),
+            manifest=manifest or T._build_manifest(),
+            asset_cache=asset_cache if asset_cache is not None else T._FakeAssetCache(ready=True),
+            forwarder=forwarder if forwarder is not None else T._FakeForwarder(),
+            manifest_checksum=T._manifest_checksum(),
+        )
 
 
 class StripScoringDetailListArmTest(unittest.TestCase):
@@ -201,8 +202,7 @@ class _ReplayingTerminalRuntime(R._FakeExistingRuntime):
 
 
 class RepublishUnchangedTerminalReplayTest(unittest.IsolatedAsyncioTestCase):
-    # ── 1681-1682: unchanged version + terminal existing + callable replay -> replay ─
-    async def test_unchanged_version_terminal_runtime_replays_pending_event(self):
+    async def test_unchanged_version_terminal_runtime_without_pending_skips_replay(self):
         R._FakeNewRuntime.instances = []
         calls = []
         conn = R._FakeConn(busy=False)
@@ -224,11 +224,10 @@ class RepublishUnchangedTerminalReplayTest(unittest.IsolatedAsyncioTestCase):
             for p in patches:
                 p.stop()
 
-        # Unchanged version is the no-op keep-session path, but because the existing
-        # runtime is terminal AND exposes a callable replay, the pending terminal event
-        # is replayed (1681-1682) before the session is kept.
-        self.assertEqual(existing.replayed, 1)
-        self.assertIn("replay", calls)
+        # A callable replay method alone is not evidence of a pending terminal batch.
+        # The unchanged completed session is kept without an unnecessary POST.
+        self.assertEqual(existing.replayed, 0)
+        self.assertNotIn("replay", calls)
         # No eviction / no fresh re-pull: the session is kept.
         self.assertNotIn("evict", calls)
         self.assertNotIn("close", calls)
