@@ -230,6 +230,16 @@ EOF
 bash "$EVIDENCE_ROOT/cold/command.txt"
 ```
 
+Only `evicted` or `not_found` may proceed to fresh assignment creation. A
+`503 LESSON_CACHE_MAINTENANCE_REQUIRED` response with status and reason
+`partial_evict_recovery_required` is truthful evidence that mutation started
+but did not finish. Stop the cold run immediately: do not create an assignment,
+retry or repair the exact cache key shown in `.data.cacheKey` while attended,
+then rerun the exact eviction endpoint and retain only a fresh coherent
+`evicted` or `not_found` response for the cold evidence bundle. Never rewrite
+the partial `fileCount`, or treat the partial response as evicted, not-found, or
+cold-cache evidence.
+
 `DEVICE_ID` is the attended robot MAC exported above and therefore resolves
 directly in the ESP server's live connection map. `command.txt` must contain
 `${TBOT_DEVICE_MINT_SECRET}` literally and must

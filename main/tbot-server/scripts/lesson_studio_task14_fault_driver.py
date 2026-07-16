@@ -448,6 +448,11 @@ def _cold_eviction_errors(result: Dict[str, Any], raw_logs: str) -> List[str]:
     eviction=result.get('evictionResult')
     expected_fields={'cacheKey','status','evicted','notFound','fileCount','reason'}
     coherent=False
+    if (
+        isinstance(eviction,dict)
+        and eviction.get('status')=='partial_evict_recovery_required'
+    ):
+        errors.append('cold partial eviction requires attended retry or repair')
     if isinstance(eviction,dict) and set(eviction)==expected_fields:
         file_count=eviction.get('fileCount')
         typed=(

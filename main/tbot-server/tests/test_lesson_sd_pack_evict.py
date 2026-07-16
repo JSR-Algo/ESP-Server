@@ -338,12 +338,24 @@ VALID_NOT_FOUND = {
     "fileCount": 0,
     "reason": "not_found",
 }
+VALID_PARTIAL = {
+    "cacheKey": CANONICAL,
+    "status": "partial_evict_recovery_required",
+    "evicted": False,
+    "notFound": False,
+    "fileCount": 2,
+    "reason": "partial_evict_recovery_required",
+}
 
 
 @pytest.mark.parametrize("raw", [VALID_EVICTED, json.dumps(VALID_NOT_FOUND)])
 def test_parse_firmware_result_accepts_only_coherent_successes(raw):
     expected = VALID_EVICTED if isinstance(raw, dict) else VALID_NOT_FOUND
     assert parse_firmware_result(CANONICAL, raw) == expected
+
+
+def test_parse_firmware_result_preserves_coherent_partial_recovery_result():
+    assert parse_firmware_result(CANONICAL, VALID_PARTIAL) == VALID_PARTIAL
 
 
 @pytest.mark.parametrize(
@@ -366,6 +378,12 @@ def test_parse_firmware_result_accepts_only_coherent_successes(raw):
         {**VALID_EVICTED, "reason": "not_found"},
         {**VALID_NOT_FOUND, "fileCount": 1},
         {**VALID_NOT_FOUND, "evicted": True},
+        {**VALID_PARTIAL, "evicted": True},
+        {**VALID_PARTIAL, "notFound": True},
+        {**VALID_PARTIAL, "fileCount": -1},
+        {**VALID_PARTIAL, "fileCount": True},
+        {**VALID_PARTIAL, "reason": "private remote text"},
+        {**VALID_PARTIAL, "status": "unknown_partial_code"},
     ],
 )
 def test_parse_firmware_result_rejects_malformed_payloads(raw):
@@ -376,6 +394,9 @@ def test_parse_firmware_result_rejects_malformed_payloads(raw):
 def test_parse_firmware_result_rejects_key_mismatch_separately():
     with pytest.raises(CacheEvictionRefused, match="^firmware-key-mismatch$"):
         parse_firmware_result(CANONICAL, {**VALID_EVICTED, "cacheKey": OTHER})
+
+    with pytest.raises(CacheEvictionRefused, match="^firmware-key-mismatch$"):
+        parse_firmware_result(CANONICAL, {**VALID_PARTIAL, "cacheKey": OTHER})
 
 
 @pytest.mark.parametrize(

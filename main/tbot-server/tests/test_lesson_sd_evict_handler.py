@@ -247,6 +247,48 @@ async def test_success_returns_only_normalized_result(result, expected):
 
 
 @pytest.mark.asyncio
+async def test_partial_eviction_returns_sanitized_maintenance_failure_with_exact_result():
+    from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
+
+    handler = LessonSdEvictHandler({}, {})
+    handler._shared._find_connection = AsyncMock(return_value=object())
+    result = {
+        "cacheKey": CANONICAL,
+        "status": "partial_evict_recovery_required",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 2,
+        "reason": "partial_evict_recovery_required",
+        "privatePath": "/sdcard/private",
+        "remoteText": "secret remote failure",
+    }
+
+    with patch(
+        "core.api.lesson_sd_evict_handler.evict_exact_cache_key",
+        new=AsyncMock(return_value=result),
+    ):
+        response = await handler.handle_post(_FakeRequest())
+
+    assert response.status == 503
+    assert _payload(response) == {
+        "error": "LESSON_CACHE_MAINTENANCE_REQUIRED",
+        "message": (
+            "Retry or repair the exact lesson cache key before creating a fresh assignment."
+        ),
+        "data": {
+            "cacheKey": CANONICAL,
+            "status": "partial_evict_recovery_required",
+            "evicted": False,
+            "notFound": False,
+            "fileCount": 2,
+            "reason": "partial_evict_recovery_required",
+        },
+    }
+    assert "/sdcard" not in response.text
+    assert "secret remote failure" not in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "updates",
     [

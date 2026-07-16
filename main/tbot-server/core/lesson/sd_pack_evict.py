@@ -146,7 +146,13 @@ def parse_firmware_result(expected_key: str, raw: Any) -> Dict[str, Any]:
     coherent_not_found = (
         status == "not_found" and evicted is False and not_found is True and file_count == 0 and reason == "not_found"
     )
-    if not coherent_evicted and not coherent_not_found:
+    coherent_partial = (
+        status == "partial_evict_recovery_required"
+        and evicted is False
+        and not_found is False
+        and reason == "partial_evict_recovery_required"
+    )
+    if not coherent_evicted and not coherent_not_found and not coherent_partial:
         raise CacheEvictionRefused("firmware-malformed-result")
     return {
         "cacheKey": cache_key,

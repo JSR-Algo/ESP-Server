@@ -91,6 +91,18 @@ class LessonSdEvictHandler:
             normalized = parse_firmware_result(cache_key, normalized)
         except CacheEvictionRefused:
             return _refusal("firmware-refused", status=409)
+        if normalized["status"] == "partial_evict_recovery_required":
+            return web.json_response(
+                {
+                    "error": "LESSON_CACHE_MAINTENANCE_REQUIRED",
+                    "message": (
+                        "Retry or repair the exact lesson cache key before creating "
+                        "a fresh assignment."
+                    ),
+                    "data": normalized,
+                },
+                status=503,
+            )
         return web.json_response({"data": normalized}, status=200)
 
 

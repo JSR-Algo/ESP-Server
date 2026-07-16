@@ -8,7 +8,7 @@ and operator timestamps.
 | Scenario | Probe | Status |
 |---|---|---|
 | preview-parity | `scripts/lesson_studio_task14_fault_driver.py preview-parity --evidence-dir <dir>` | NOT PASS - live evidence required |
-| cold | authenticated exact-key eviction plus fresh `ASSIGNED`/`espTft` assignment response bound to assignment/device/child/lesson/version/checksum/profile metadata and `createdAt`; strict UTC order, response checksums, positive download, and checksum proof through `scripts/lesson_studio_task14_fault_driver.py cold --evidence-dir <dir>` | NOT PASS - live evidence required |
+| cold | authenticated exact-key eviction plus fresh `ASSIGNED`/`espTft` assignment response bound to assignment/device/child/lesson/version/checksum/profile metadata and `createdAt`; strict UTC order, response checksums, positive download, and checksum proof through `scripts/lesson_studio_task14_fault_driver.py cold --evidence-dir <dir>`; `partial_evict_recovery_required` is a maintenance stop that requires attended retry/repair of the exact key and can never proceed as cold evidence | NOT PASS - live evidence required |
 | warm, offline | `scripts/lesson_studio_task14_fault_driver.py <scenario> --evidence-dir <dir>` | NOT PASS - live evidence required |
 | checksum, interrupted, power-loss | same driver; scenario-specific recovery fields required | NOT PASS - live evidence required |
 | missing-optional, sd-full, slave-unavailable, rollback | same driver; fail-closed invariants required | NOT PASS - live evidence required |

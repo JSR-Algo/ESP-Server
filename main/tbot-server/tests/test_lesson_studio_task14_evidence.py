@@ -586,6 +586,23 @@ def test_cold_rejects_refusal_malformed_or_contradictory_eviction_result(tmp_pat
     assert "cold eviction result is not coherent" in errors
 
 
+def test_cold_rejects_coherent_partial_eviction_as_cold_evidence(tmp_path):
+    result = complete_result(tmp_path)
+    result["evictionResult"] = {
+        "cacheKey": result["cacheKey"],
+        "status": "partial_evict_recovery_required",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 2,
+        "reason": "partial_evict_recovery_required",
+    }
+
+    errors = fault.validate_result("cold", result, cold_raw_evidence(result))
+
+    assert "cold partial eviction requires attended retry or repair" in errors
+    assert "cold eviction result is not coherent" in errors
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -692,6 +709,20 @@ def test_cold_runbook_records_authoritative_assignment_creation_response():
     )
     lesson_wait = runbook.index('wait "$CAPTURE_PID" # explicit wait/stop before validation')
     assert cold_started < assignment_post < lesson_wait
+
+
+def test_cold_runbook_stops_partial_eviction_before_fresh_assignment():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+
+    partial = runbook.index("partial_evict_recovery_required")
+    retry = runbook.index("retry or repair the exact cache key")
+    assignment_post = runbook.index(
+        '"$BACKEND_URL/devices/${BACKEND_DEVICE_ID}/assignments"'
+    )
+
+    assert partial < retry < assignment_post
+    assert "LESSON_CACHE_MAINTENANCE_REQUIRED" in runbook
+    assert "Only `evicted` or `not_found`" in runbook
 
 
 def test_cold_runbook_starts_and_verifies_both_streams_before_eviction():
