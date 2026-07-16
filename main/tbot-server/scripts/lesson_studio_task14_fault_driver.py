@@ -707,6 +707,8 @@ def validate_hil_storage_result(scenario,result):
             'triggerResponseAbsent':True,'successMarkerBeforeLoss':False,
             'rebootCaptured':True,'armClearedAfterReboot':True,
             'postRebootInspected':True,'retryStatus':'ready',
+            'triggerPendingAtMarker':True,'powerCutConfirmed':True,
+            'disconnectAfterPowerCut':True,
         }
         for name,expected in exact.items():
             if result.get(name) != expected or type(result.get(name)) is not type(expected):
@@ -849,7 +851,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready'}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'powerCutConfirmed':True,'disconnectAfterPowerCut':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
         assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))

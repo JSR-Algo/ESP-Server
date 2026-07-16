@@ -4,11 +4,13 @@
 import argparse
 import concurrent.futures
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
 import re
 import selectors
+import socket
 import subprocess
 import sys
 import tempfile
@@ -130,6 +132,10 @@ class HilTimeoutError(HilValidationError):
 
 
 class HilTransportError(HilValidationError):
+    pass
+
+
+class HilDisconnectError(HilTransportError):
     pass
 
 
@@ -358,6 +364,9 @@ def validate_power_loss_result(value):
         "rebootCaptured": True,
         "postRebootInspected": True,
         "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "powerCutConfirmed": True,
+        "disconnectAfterPowerCut": True,
     }
     for name, expected in required.items():
         require(value.get(name) == expected and type(value.get(name)) is type(expected), f"invalid power-loss field: {name}")
@@ -523,7 +532,7 @@ def sanitized_command_text(argv, secrets=()):
                 parsed = urllib.parse.urlsplit(rendered)
                 host = parsed.hostname or "redacted-host"
                 port = f":{parsed.port}" if parsed.port is not None else ""
-                rendered = urllib.parse.urlunsplit((parsed.scheme, host + port, parsed.path, "", ""))
+                rendered = urllib.parse.urlunsplit((parsed.scheme, host + port, "", "", ""))
             except (ValueError, UnicodeError):
                 rendered = "<redacted-url>"
         sanitized.append(rendered)
@@ -573,9 +582,54 @@ class RawMcpTransport:
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds + 2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, UnicodeError, ValueError, urllib.error.HTTPError) as exc:
-            raise HilTransportError(redact_text(type(exc).__name__, (self._mint_secret,))) from None
+        except urllib.error.HTTPError:
+            raise HilTransportError("HIL_HTTP_ERROR") from None
+        except urllib.error.URLError as exc:
+            if isinstance(
+                exc.reason,
+                (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    http.client.RemoteDisconnected,
+                ),
+            ):
+                raise HilDisconnectError("HIL_TRANSPORT_DISCONNECTED") from None
+            raise HilTransportError("HIL_TRANSPORT_FAILED") from None
+        except (
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionRefusedError,
+            ConnectionResetError,
+            http.client.RemoteDisconnected,
+        ):
+            raise HilDisconnectError("HIL_TRANSPORT_DISCONNECTED") from None
+        except (TimeoutError, socket.timeout):
+            raise HilTransportError("HIL_TRANSPORT_TIMEOUT") from None
+        except (OSError, UnicodeError, ValueError):
+            raise HilTransportError("HIL_TRANSPORT_FAILED") from None
         return parse_internal_mcp_response(payload)
+
+
+def await_power_loss_disconnect(future, operator_cut, *, timeout_seconds):
+    require(not future.done(), "trigger completed before power cut")
+    operator_cut()
+    try:
+        result = future.result(timeout=timeout_seconds)
+    except HilDisconnectError:
+        return {
+            "triggerPendingAtMarker": True,
+            "powerCutConfirmed": True,
+            "disconnectAfterPowerCut": True,
+        }
+    except concurrent.futures.TimeoutError:
+        raise HilTimeoutError("trigger remained pending after power cut") from None
+    except Exception:
+        raise HilValidationError("non-disconnect failure after power cut") from None
+    raise HilValidationError(
+        f"trigger returned after power cut: {type(result).__name__}"
+    )
 
 
 class HilToolClient:
@@ -877,13 +931,17 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                     while "HIL_STORAGE_FAULT_CONSUMED" not in sequence_log and time.monotonic() < sequence_deadline:
                         sequence_log += monitor.read_new()
                         time.sleep(0.02)
-                    operator_input("Reached exact checkpoint. Remove robot power now, then press Enter.")
-                    power_removed_utc = utc_now()
-                    try:
-                        trigger = future.result(timeout=10)
-                    except Exception:
-                        trigger = None
-                    require(trigger is None, "power loss unexpectedly returned a trigger response")
+                    def confirm_power_cut():
+                        nonlocal power_removed_utc
+                        operator_input("Reached exact checkpoint. Remove robot power now, then press Enter.")
+                        power_removed_utc = utc_now()
+
+                    disconnect_evidence = await_power_loss_disconnect(
+                        future,
+                        confirm_power_cut,
+                        timeout_seconds=10,
+                    )
+                    trigger = None
                     reboot_start = len(monitor.snapshot())
                     operator_input("Restore robot power, wait for boot, then press Enter.")
                     deadline = time.monotonic() + 45
@@ -911,6 +969,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                         "postRebootInspected": True,
                         "retryStatus": "ready" if isinstance(retry, dict) else "failed",
                         "retryResponse": retry,
+                        **disconnect_evidence,
                     }
                     validate_power_loss_result(power_data)
                 else:

@@ -79,6 +79,9 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "armClearedAfterReboot": True,
         "postRebootInspected": True,
         "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "powerCutConfirmed": True,
+        "disconnectAfterPowerCut": True,
     }
 
     assert fault.validate_hil_storage_result(result["scenario"], result) == []

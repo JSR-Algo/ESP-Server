@@ -2,10 +2,11 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -279,6 +280,9 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         "postRebootStatus": exact_status("idle"),
         "postRebootInspected": True,
         "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "powerCutConfirmed": True,
+        "disconnectAfterPowerCut": True,
     }
     assert hil.validate_power_loss_result(result) == result
     for field, invalid in (
@@ -508,14 +512,55 @@ def test_command_serialization_redacts_url_credentials_query_and_explicit_secret
         [
             "runner.py",
             "--asset-url",
-            "http://user:password@192.168.0.2/a.png?token=query-secret",
+            "http://user:password@192.168.0.2/signed/path-api-key-123/a.png?token=query-secret",
             "--note",
             secret,
         ],
         (secret,),
     )
-    for forbidden in ("user", "password", "query-secret", secret):
+    for forbidden in ("user", "password", "query-secret", "path-api-key-123", "/signed/", secret):
         assert forbidden not in command
+
+
+def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disconnect():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    future = Future()
+
+    def cut_power():
+        future.set_exception(hil.HilDisconnectError("connection reset"))
+
+    evidence = hil.await_power_loss_disconnect(future, cut_power, timeout_seconds=0.1)
+    assert evidence == {
+        "triggerPendingAtMarker": True,
+        "powerCutConfirmed": True,
+        "disconnectAfterPowerCut": True,
+    }
+
+
+def test_power_loss_rejects_precut_completion_and_semantic_failures():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+
+    completed = Future()
+    completed.set_result({"ready": False})
+    with pytest.raises(hil.HilValidationError, match="completed before power cut"):
+        hil.await_power_loss_disconnect(completed, lambda: None, timeout_seconds=0.1)
+
+    failed = Future()
+    failed.set_exception(hil.HilTransportError("HIL_HTTP_ERROR"))
+    with pytest.raises(hil.HilValidationError, match="completed before power cut"):
+        hil.await_power_loss_disconnect(failed, lambda: None, timeout_seconds=0.1)
+
+    semantic_after_cut = Future()
+
+    def cut_then_semantic_failure():
+        semantic_after_cut.set_exception(hil.HilValidationError("bad response schema"))
+
+    with pytest.raises(hil.HilValidationError, match="non-disconnect failure after power cut"):
+        hil.await_power_loss_disconnect(
+            semantic_after_cut,
+            cut_then_semantic_failure,
+            timeout_seconds=0.1,
+        )
 
 
 def test_capture_limits_fail_closed_by_bytes_and_lines():
