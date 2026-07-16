@@ -1772,6 +1772,84 @@ def test_production_evidence_binds_104_transition_requirement_and_build_identity
     assert calls == [(build_manifest, "production")]
 
 
+@pytest.mark.parametrize("module", (soak, audit))
+@pytest.mark.parametrize("manifest_kind", ("missing", "invalid-json", "hil"))
+def test_production_evidence_cli_replaces_stale_output_on_invalid_build_manifest(
+    module, manifest_kind, tmp_path
+):
+    serial_log, server_log = authentic_soak_logs((35, 35, 34))
+    serial_path = tmp_path / "serial.log"
+    server_path = tmp_path / "server.log"
+    timeline_path = tmp_path / "timeline.log"
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    output_path = tmp_path / "report.json"
+    serial_path.write_text(serial_log)
+    server_path.write_text(server_log)
+    timeline_path.write_text(authentic_soak_timeline((35, 35, 34)))
+    capture_script.write_text("capture\n")
+    verifier_script.write_text("verify\n")
+    output_path.write_text("STALE OUTPUT\n")
+    if manifest_kind == "missing":
+        build_manifest = tmp_path / "missing" / "lesson-storage-hil-build.json"
+    elif manifest_kind == "invalid-json":
+        build_dir = tmp_path / "invalid"
+        build_dir.mkdir()
+        build_manifest = build_dir / "lesson-storage-hil-build.json"
+        build_manifest.write_text("{invalid json\n")
+        (build_dir / "lesson-storage-hil-build.sha256").write_text(
+            f"{hashlib.sha256(build_manifest.read_bytes()).hexdigest()}  {build_manifest.name}\n"
+        )
+    else:
+        helper_path = ROOT / "tests" / "test_lesson_studio_task14_hil_storage.py"
+        helper_spec = importlib.util.spec_from_file_location(
+            f"task14_hil_fixture_{module.__name__}", helper_path
+        )
+        helper = importlib.util.module_from_spec(helper_spec)
+        assert helper_spec.loader is not None
+        helper_spec.loader.exec_module(helper)
+        build_manifest, _manifest, _paths = helper.task6_manifest(tmp_path / "hil")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            module.__file__,
+            str(serial_path),
+            str(server_path),
+            "--timeline-log",
+            str(timeline_path),
+            "--minimum-transitions",
+            "104",
+            "--build-manifest",
+            str(build_manifest),
+            "--fixture-version",
+            soak.FIXTURE_VERSION,
+            "--course-id",
+            soak.COURSE_ID,
+            "--lesson-id",
+            soak.LESSON_IDS[0],
+            "--capture-script",
+            str(capture_script),
+            "--verifier-script",
+            str(verifier_script),
+            "--output",
+            str(output_path),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert "Traceback" not in completed.stderr
+    assert "build identity" in completed.stderr.lower()
+    report = json.loads(output_path.read_text())
+    assert report["status"] == "NOT_PASS"
+    assert report["minimumTransitionsRequired"] == 104
+    assert report["metrics"]["minimumTransitionsRequired"] == 104
+    assert report["buildIdentity"] is None
+    assert report["buildIdentityErrors"]
+
+
 def test_log_audit_rejects_firmware_crash_and_heap_corruption_markers():
     for marker in (
         "assert failed: runtime.cpp:42",

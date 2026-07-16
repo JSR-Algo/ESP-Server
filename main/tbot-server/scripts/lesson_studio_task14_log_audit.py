@@ -146,13 +146,17 @@ def main():
     SOAK.attest_report(report, args)
     report['minimumTransitionsRequired'] = args.minimum_transitions
     report.setdefault('metrics', {})['minimumTransitionsRequired'] = args.minimum_transitions
-    report['buildIdentity'] = load_build_identity(
-        args.build_manifest, expected_profile='production'
-    )
+    try:
+        report['buildIdentity'] = load_build_identity(
+            args.build_manifest, expected_profile='production'
+        )
+        report['buildIdentityErrors'] = []
+    except SOAK.BUILD_IDENTITY_EXCEPTIONS as exc:
+        return SOAK.record_build_identity_failure(report, args, exc)
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:
-        args.output.write_text(data)
+        SOAK.atomic_write_json(args.output, report)
     return 0 if report['status'] == 'PASS' else 1
 
 

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -15,6 +16,14 @@ BUILD_IDENTITY = importlib.util.module_from_spec(BUILD_IDENTITY_SPEC)
 assert BUILD_IDENTITY_SPEC.loader is not None
 BUILD_IDENTITY_SPEC.loader.exec_module(BUILD_IDENTITY)
 load_build_identity = BUILD_IDENTITY.load_build_identity
+atomic_write_json = BUILD_IDENTITY.atomic_write_json
+BuildIdentityError = BUILD_IDENTITY.BuildIdentityError
+BUILD_IDENTITY_EXCEPTIONS = (
+    BuildIdentityError,
+    OSError,
+    UnicodeError,
+    json.JSONDecodeError,
+)
 
 PRODUCTION_MINIMUM_TRANSITIONS = 104
 
@@ -423,7 +432,21 @@ def bind_production_evidence(report, args):
     report['buildIdentity'] = load_build_identity(
         args.build_manifest, expected_profile='production'
     )
+    report['buildIdentityErrors'] = []
     return report
+
+
+def record_build_identity_failure(report, args, exc):
+    report['status'] = 'NOT_PASS'
+    report['minimumTransitionsRequired'] = args.minimum_transitions
+    report.setdefault('metrics', {})['minimumTransitionsRequired'] = args.minimum_transitions
+    report['buildIdentity'] = None
+    report['buildIdentityErrors'] = [str(exc)]
+    if args.output:
+        atomic_write_json(args.output, report)
+    print(f'task14 production build identity: FAIL: {exc}', file=sys.stderr)
+    print(json.dumps(report, indent=2))
+    return 1
 
 
 def attest_report(report, args):
@@ -464,11 +487,14 @@ def main():
         args.timeline_log.read_text(errors='replace'), count=args.minimum_transitions
     ) if args.timeline_log else analyze_logs(serial, server, count=args.minimum_transitions)
     attest_report(report, args)
-    bind_production_evidence(report, args)
+    try:
+        bind_production_evidence(report, args)
+    except BUILD_IDENTITY_EXCEPTIONS as exc:
+        return record_build_identity_failure(report, args, exc)
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:
-        args.output.write_text(data)
+        atomic_write_json(args.output, report)
     return 0 if report['status'] == 'PASS' else 1
 
 
