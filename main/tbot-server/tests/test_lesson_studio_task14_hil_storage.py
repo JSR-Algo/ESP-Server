@@ -3,6 +3,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -532,28 +535,49 @@ def test_artifact_credential_scanner_rejects_secret_marker_and_jwt():
         hil.assert_artifacts_sanitized({"server.log": b"aaa.bbb.ccc"}, ())
 
 
-def test_server_log_capture_timeout_does_not_call_blocking_stdout_read(monkeypatch):
+def test_bounded_process_output_kills_running_producer_immediately_at_byte_cap():
     hil = load_script("lesson_studio_task14_hil_storage.py")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'x'*4096); time.sleep(10)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    started = time.monotonic()
 
-    class _Stdout:
-        def read(self, _size):
-            raise AssertionError("blocking read must not be used")
+    with pytest.raises(hil.HilCaptureLimitError, match="TEST_BYTES"):
+        hil._bounded_process_output(
+            process,
+            timeout_seconds=5,
+            max_bytes=1024,
+            max_lines=100,
+            code="TEST",
+        )
 
-    class _Process:
-        stdout = _Stdout()
-        returncode = None
-        killed = False
+    assert time.monotonic() - started < 2
+    assert process.poll() is not None
 
-        def communicate(self, timeout):
-            assert timeout == 20
-            raise hil.subprocess.TimeoutExpired("docker logs", timeout)
 
-        def kill(self):
-            self.killed = True
+def test_bounded_process_output_enforces_deadline_on_stalled_process():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    started = time.monotonic()
 
-    process = _Process()
-    monkeypatch.setattr(hil.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    with pytest.raises(hil.HilTimeoutError, match="TEST_TIMEOUT"):
+        hil._bounded_process_output(
+            process,
+            timeout_seconds=0.05,
+            max_bytes=1024,
+            max_lines=100,
+            code="TEST",
+        )
 
-    with pytest.raises(hil.HilTimeoutError, match="server log capture timeout"):
-        hil._server_logs("container", "2026-01-01T00:00:00Z", ())
-    assert process.killed is True
+    assert time.monotonic() - started < 2
+    assert process.poll() is not None

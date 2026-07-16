@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import re
+import selectors
 import subprocess
 import sys
 import tempfile
@@ -696,18 +697,13 @@ def _server_logs(container, since_utc, secrets):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    try:
-        output, _unused_stderr = process.communicate(timeout=20)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        if hasattr(process, "wait"):
-            with suppress(Exception):
-                process.wait(timeout=2)
-        raise HilTimeoutError("server log capture timeout") from None
-    require(process.returncode == 0, "server log capture command failed")
-    require(isinstance(output, bytes), "server log capture returned invalid output")
-    if len(output) > MAX_SERVER_CAPTURE_BYTES:
-        raise HilCaptureLimitError("HIL_SERVER_CAPTURE_LIMIT_BYTES")
+    output = _bounded_process_output(
+        process,
+        timeout_seconds=20,
+        max_bytes=MAX_SERVER_CAPTURE_BYTES,
+        max_lines=MAX_CAPTURE_LINES,
+        code="HIL_SERVER_CAPTURE_LIMIT",
+    )
     text = output.decode("utf-8", errors="replace")
     text = enforce_capture_limit(
         text,
@@ -716,6 +712,69 @@ def _server_logs(container, since_utc, secrets):
         code="HIL_SERVER_CAPTURE_LIMIT",
     )
     return redact_text(text, secrets)
+
+
+def _terminate_process(process):
+    if process.poll() is None:
+        with suppress(Exception):
+            process.kill()
+    with suppress(Exception):
+        process.wait(timeout=2)
+
+
+def _bounded_process_output(
+    process,
+    *,
+    timeout_seconds,
+    max_bytes,
+    max_lines,
+    code,
+):
+    require(process.stdout is not None, f"{code}_STDOUT")
+    require(timeout_seconds > 0 and max_bytes > 0 and max_lines > 0, f"{code}_CONFIG")
+    descriptor = process.stdout.fileno()
+    selector = selectors.DefaultSelector()
+    chunks = []
+    total_bytes = 0
+    total_lines = 0
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        os.set_blocking(descriptor, False)
+        selector.register(descriptor, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HilTimeoutError(f"{code}_TIMEOUT")
+            events = selector.select(timeout=min(0.1, remaining))
+            if not events:
+                continue
+            try:
+                chunk = os.read(descriptor, min(65536, max_bytes + 1))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                remaining = max(0.001, deadline - time.monotonic())
+                try:
+                    return_code = process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    raise HilTimeoutError(f"{code}_TIMEOUT") from None
+                if return_code != 0:
+                    raise HilTransportError(f"{code}_PROCESS_FAILED")
+                return b"".join(chunks)
+            next_bytes = total_bytes + len(chunk)
+            if next_bytes > max_bytes:
+                raise HilCaptureLimitError(f"{code}_BYTES")
+            next_lines = total_lines + chunk.count(b"\n")
+            if next_lines > max_lines:
+                raise HilCaptureLimitError(f"{code}_LINES")
+            chunks.append(chunk)
+            total_bytes = next_bytes
+            total_lines = next_lines
+    except BaseException:
+        _terminate_process(process)
+        raise
+    finally:
+        selector.close()
 
 
 def _asset_pack(arguments, cache_key):
