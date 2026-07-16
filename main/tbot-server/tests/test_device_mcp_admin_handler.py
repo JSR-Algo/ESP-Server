@@ -590,7 +590,7 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             timeout=30,
         )
 
-    async def test_non_hil_call_failure_does_not_echo_exception_secrets_or_paths(self):
+    async def test_non_hil_call_failure_preserves_existing_exception_message(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
         handler, _ = self._hil_handler(allowlist=[])
         leak = "Bearer jwt.secret /Users/private/key.pem password=hunter2"
@@ -607,11 +607,33 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             )
 
         payload = await _response_json(response)
-        rendered = json.dumps(payload)
         self.assertEqual(response.status, 409)
-        self.assertEqual(payload["error"], "MCP_CALL_FAILED")
-        for secret in ("jwt.secret", "/Users/private", "hunter2"):
-            self.assertNotIn(secret, rendered)
+        self.assertEqual(
+            payload,
+            {"error": "MCP_CALL_FAILED", "message": leak},
+        )
+
+    async def test_non_hil_timeout_preserves_existing_exception_message(self):
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        handler, _ = self._hil_handler(allowlist=[])
+        message = "Tool call request timed out"
+
+        with patch(
+            "core.api.device_mcp_admin_handler.call_mcp_tool",
+            AsyncMock(side_effect=TimeoutError(message)),
+        ):
+            response = await handler.handle_post(
+                _FakeRequest(
+                    device_id="route-device-uuid",
+                    body={"toolName": "self.tool", "args": {}},
+                )
+            )
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            await _response_json(response),
+            {"error": "MCP_CALL_FAILED", "message": message},
+        )
 
     async def test_hil_failures_and_timeouts_never_echo_exception_secrets_or_paths(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"

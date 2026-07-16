@@ -262,7 +262,7 @@ class DeviceMCPAdminHandler:
                 result = await _call_raw_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
             else:
                 result = await call_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
-        except TimeoutError:
+        except TimeoutError as exc:
             if is_hil_timeout_path:
                 return _hil_error("HIL_MCP_TIMEOUT", status=409)
             if _is_robot_motion_tool(tool_name):
@@ -271,14 +271,14 @@ class DeviceMCPAdminHandler:
                     status=202,
                 )
             return web.json_response(
-                {"error": "MCP_CALL_FAILED", "message": "Device MCP call timed out"},
+                {"error": "MCP_CALL_FAILED", "message": str(exc)},
                 status=409,
             )
-        except Exception:
+        except Exception as exc:
             if is_hil_timeout_path:
                 return _hil_error("HIL_MCP_FAILED", status=409)
             return web.json_response(
-                {"error": "MCP_CALL_FAILED", "message": "Device MCP call failed"},
+                {"error": "MCP_CALL_FAILED", "message": str(exc)},
                 status=409,
             )
 
