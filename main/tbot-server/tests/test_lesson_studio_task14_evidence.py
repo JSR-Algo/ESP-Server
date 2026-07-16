@@ -60,13 +60,20 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "scenario": fault.HIL_STORAGE_SCENARIOS[-1],
         "status": "PASS",
         "buildIdentity": build,
+        "cacheKey": f"hil-task14/v1-{'d' * 64}",
         "armSequence": 1,
         "reachedSequence": 2,
         "consumedSequence": 3,
         "events": list(fault.HIL_EVENT_ORDER),
+        "operation": "sync",
+        "checkpoint": "before_commit_rename",
+        "faultAction": "pause",
+        "expectedProgress": 0,
+        "checkpointExercised": True,
+        "triggerResponseAbsent": True,
+        "triggerOutcome": None,
         "powerLoss": True,
         "checkpointReached": True,
-        "triggerResponseAbsent": True,
         "successMarkerBeforeLoss": False,
         "rebootCaptured": True,
         "armClearedAfterReboot": True,
@@ -85,6 +92,48 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     assert fault.validate_hil_release_order(
         ["hil-flash", "production-soak", "production-reflash"]
     )
+
+
+def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
+    build = {
+        "sourceCommit": "a" * 40,
+        "profile": "hil",
+        "configEnabled": True,
+        "sdkconfigSha256": "b" * 64,
+        "binarySha256": "c" * 64,
+        "elfSha256": "d" * 64,
+        "mapSha256": "e" * 64,
+        "archiveSha256": "f" * 64,
+        "binaryBytes": 1,
+        "appPartitionFreeBytes": 1,
+    }
+    base = {
+        "scenario": "evict-before-first-unlink-fail",
+        "status": "PASS",
+        "buildIdentity": build,
+        "cacheKey": f"hil-task14/v1-{'d' * 64}",
+        "armSequence": 1,
+        "reachedSequence": 2,
+        "consumedSequence": 3,
+        "events": list(fault.HIL_EVENT_ORDER),
+        "operation": "evict",
+        "checkpoint": "before_first_unlink",
+        "faultAction": "fail",
+        "checkpointExercised": True,
+        "expectedProgress": 0,
+        "triggerResponseAbsent": False,
+        "triggerOutcome": {
+            "cacheKey": KEY if "KEY" in globals() else f"hil-task14/v1-{'d' * 64}",
+            "status": "unlink_failed",
+            "evicted": False,
+            "notFound": False,
+            "fileCount": 0,
+            "reason": "unlink_failed",
+        },
+    }
+    assert fault.validate_hil_storage_result(base["scenario"], base) == []
+    false_green = {**base, "triggerOutcome": {**base["triggerOutcome"], "status": "evicted", "reason": "evicted", "evicted": True, "fileCount": 1}}
+    assert fault.validate_hil_storage_result(base["scenario"], false_green)
 
 
 def test_fault_driver_self_test_needs_no_live_arguments(monkeypatch, capsys):

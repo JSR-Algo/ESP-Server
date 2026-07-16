@@ -4,6 +4,7 @@
 import argparse
 import concurrent.futures
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -102,6 +104,20 @@ JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}(?![A-Za-z0-9_-])"
 )
 ABSOLUTE_PATH_RE = re.compile(r"/(?:Users|home|private|opt|tmp)/[^\s,;]+")
+MAX_SERIAL_CAPTURE_BYTES = 2 * 1024 * 1024
+MAX_SERVER_CAPTURE_BYTES = 2 * 1024 * 1024
+MAX_CAPTURE_LINES = 50_000
+SCENARIO_EXPECTED_PROGRESS = {
+    "evict-before-first-unlink-fail": 0,
+    "evict-after-unlinks-fail": 1,
+    "evict-before-rmdir-fail": 1,
+    "evict-after-unlinks-sd-removal": 1,
+    "sync-before-download-write-no-space": 0,
+    "sync-after-download-bytes-no-space": 1,
+    "sync-before-checksum-corrupt-staging": 0,
+    "sync-before-commit-rename-fail": 0,
+    "sync-before-commit-rename-power-loss": 0,
+}
 
 
 class HilValidationError(RuntimeError):
@@ -113,6 +129,10 @@ class HilTimeoutError(HilValidationError):
 
 
 class HilTransportError(HilValidationError):
+    pass
+
+
+class HilCaptureLimitError(HilValidationError):
     pass
 
 
@@ -237,10 +257,29 @@ def redact_text(value, secrets=()):
     return rendered
 
 
-def poll_checkpoint(read_chunk, *, operation, checkpoint, timeout_seconds, monotonic=time.monotonic, sleep=time.sleep):
+def _checkpoint_marker_pattern(operation, checkpoint, cache_key, expected_count):
+    return re.compile(
+        rf"HIL_STORAGE_CHECKPOINT_REACHED operation={re.escape(operation)} "
+        rf"checkpoint={re.escape(checkpoint)} cache_key={re.escape(cache_key)} "
+        rf"count={expected_count} reached_sequence=([1-9][0-9]*)(?:\s|$)"
+    )
+
+
+def poll_checkpoint(
+    read_chunk,
+    *,
+    operation,
+    checkpoint,
+    cache_key,
+    expected_count,
+    timeout_seconds,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+):
     require(type(timeout_seconds) in (int, float) and not isinstance(timeout_seconds, bool), "invalid marker timeout")
     require(0 < timeout_seconds <= 90, "invalid marker timeout")
-    marker = f"HIL_STORAGE_CHECKPOINT_REACHED operation={operation} checkpoint={checkpoint}"
+    _exact_int(expected_count, "expected checkpoint count")
+    marker = _checkpoint_marker_pattern(operation, checkpoint, cache_key, expected_count)
     deadline = monotonic() + timeout_seconds
     captured = []
     while monotonic() < deadline:
@@ -248,7 +287,7 @@ def poll_checkpoint(read_chunk, *, operation, checkpoint, timeout_seconds, monot
         if chunk:
             captured.append(str(chunk))
             combined = "".join(captured)
-            if any(marker in line for line in combined.splitlines()):
+            if any(marker.search(line) for line in combined.splitlines()):
                 return combined
         sleep(0.02)
     raise HilTimeoutError("checkpoint marker timeout")
@@ -418,6 +457,99 @@ def validate_trigger_response(operation, value, cache_key, *, require_ready=None
     return value
 
 
+def validate_scenario_outcome(scenario, trigger_response, *, cache_key):
+    require(scenario in HIL_STORAGE_SCENARIOS, "unknown scenario outcome")
+    if scenario == POWER_LOSS_SCENARIO:
+        require(trigger_response is None, "power-loss scenario received a trigger response")
+        return {
+            "checkpointExercised": True,
+            "triggerResponseAbsent": True,
+            "triggerOutcome": None,
+        }
+    require(trigger_response is not None, "ordinary scenario lost its trigger response")
+    operation = SCENARIO_SPECS[scenario][0]
+    response = validate_trigger_response(operation, trigger_response, cache_key)
+    if operation == "evict":
+        expected = {
+            "evict-before-first-unlink-fail": ("unlink_failed", 0, False),
+            "evict-after-unlinks-fail": ("unlink_failed", 1, False),
+            "evict-before-rmdir-fail": ("rmdir_failed", 1, False),
+            "evict-after-unlinks-sd-removal": ("evicted", 1, True),
+        }[scenario]
+        require(
+            (response["status"], response["fileCount"], response["evicted"]) == expected,
+            "eviction trigger did not produce the scenario-specific outcome",
+        )
+        require(response["notFound"] is False, "eviction fault falsely reported not_found")
+    else:
+        require(response["ready"] is False, "sync fault falsely reported ready")
+        require(response["downloadedCount"] == 0, "sync fault falsely reported a download")
+        require(response["skippedCount"] == 0, "sync fixture caused the asset to be skipped")
+        require(response["failedCount"] == 1, "sync fault did not fail exactly one asset")
+        require(response["totalBytes"] == 0, "failed sync falsely committed bytes")
+        require(len(response["files"]) == 1 and response["files"][0]["state"] == "FAILED", "sync fault lacks FAILED asset evidence")
+        require(response["files"][0].get("error") == "asset transfer failed", "sync fault error is not sanitized/decisive")
+        require("manifestChecksum" not in response, "failed sync emitted checksum attestation")
+    return {
+        "checkpointExercised": True,
+        "triggerResponseAbsent": False,
+        "triggerOutcome": response,
+    }
+
+
+def validate_lab_url(value, *, require_path):
+    require(isinstance(value, str) and value and not any(ord(char) < 0x20 for char in value), "invalid lab URL")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname
+        address = ipaddress.ip_address(host or "")
+    except (ValueError, UnicodeError):
+        raise HilValidationError("lab URL must use a literal private IP") from None
+    require(parsed.scheme in {"http", "https"}, "invalid lab URL scheme")
+    require(parsed.username is None and parsed.password is None, "lab URL userinfo is forbidden")
+    require(not parsed.query and not parsed.fragment, "lab URL query and fragment are forbidden")
+    require(address.is_private or address.is_loopback, "lab URL must use a private or loopback IP")
+    require(not require_path or parsed.path not in {"", "/"}, "asset URL path is required")
+    return value
+
+
+def sanitized_command_text(argv, secrets=()):
+    sanitized = []
+    for token in argv:
+        rendered = redact_text(token, secrets)
+        if "://" in rendered:
+            try:
+                parsed = urllib.parse.urlsplit(rendered)
+                host = parsed.hostname or "redacted-host"
+                port = f":{parsed.port}" if parsed.port is not None else ""
+                rendered = urllib.parse.urlunsplit((parsed.scheme, host + port, parsed.path, "", ""))
+            except (ValueError, UnicodeError):
+                rendered = "<redacted-url>"
+        sanitized.append(rendered)
+    return " ".join(repr(item) for item in sanitized) + "\n"
+
+
+def enforce_capture_limit(value, *, max_bytes, max_lines, code):
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) > max_bytes:
+        raise HilCaptureLimitError(f"{code}_BYTES")
+    if value.count("\n") > max_lines:
+        raise HilCaptureLimitError(f"{code}_LINES")
+    return value
+
+
+def assert_artifacts_sanitized(payloads, secrets):
+    for name, data in payloads.items():
+        require(isinstance(data, bytes), f"invalid artifact for credential scan: {name}")
+        text = data.decode("utf-8", errors="replace")
+        for secret in secrets:
+            require(not secret or secret not in text, f"credential marker in artifact: {name}")
+        require(JWT_RE.search(text) is None, f"JWT marker in artifact: {name}")
+        require(re.search(r"https?://[^/\s:@]+:[^/\s@]+@", text) is None, f"URL userinfo in artifact: {name}")
+        require(re.search(r"[?&](?:token|key|secret|password)=", text, re.I) is None, f"query credential in artifact: {name}")
+    return payloads
+
+
 class RawMcpTransport:
     def __init__(self, base_url, device_uuid, mint_secret):
         self.base_url = str(base_url).rstrip("/")
@@ -492,6 +624,9 @@ class SerialMonitor:
         self._offset = 0
         self._stop = threading.Event()
         self._thread = None
+        self._bytes = 0
+        self._lines = 0
+        self._overflow = None
 
     def start(self):
         try:
@@ -507,7 +642,18 @@ class SerialMonitor:
                         connection = serial.Serial(self.port, self.baud, timeout=0.1)
                     data = connection.read(4096)
                     if data:
-                        self._buffer.append(data.decode("utf-8", errors="replace"))
+                        text = data.decode("utf-8", errors="replace")
+                        self._bytes += len(data)
+                        self._lines += text.count("\n")
+                        if self._bytes > MAX_SERIAL_CAPTURE_BYTES:
+                            self._overflow = "HIL_SERIAL_CAPTURE_LIMIT_BYTES"
+                            self._stop.set()
+                            continue
+                        if self._lines > MAX_CAPTURE_LINES:
+                            self._overflow = "HIL_SERIAL_CAPTURE_LIMIT_LINES"
+                            self._stop.set()
+                            continue
+                        self._buffer.append(text)
                 except Exception:
                     if connection is not None:
                         with suppress(Exception):
@@ -522,12 +668,16 @@ class SerialMonitor:
         return self
 
     def read_new(self):
+        if self._overflow:
+            raise HilCaptureLimitError(self._overflow)
         combined = "".join(self._buffer)
         chunk = combined[self._offset :]
         self._offset = len(combined)
         return chunk
 
     def snapshot(self):
+        if self._overflow:
+            raise HilCaptureLimitError(self._overflow)
         return "".join(self._buffer)
 
     def stop(self):
@@ -541,15 +691,39 @@ def utc_now():
 
 
 def _server_logs(container, since_utc, secrets):
-    result = subprocess.run(
+    process = subprocess.Popen(
         ["docker", "logs", "--since", since_utc, container],
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        check=False,
-        timeout=20,
     )
-    return redact_text(result.stdout, secrets)
+    chunks = []
+    size = 0
+    deadline = time.monotonic() + 20
+    require(process.stdout is not None, "server log capture unavailable")
+    while time.monotonic() < deadline:
+        chunk = process.stdout.read(65536)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_SERVER_CAPTURE_BYTES:
+            process.kill()
+            raise HilCaptureLimitError("HIL_SERVER_CAPTURE_LIMIT_BYTES")
+        chunks.append(chunk)
+    if process.poll() is None:
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise HilTimeoutError("server log capture timeout") from None
+    require(process.returncode == 0, "server log capture command failed")
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    text = enforce_capture_limit(
+        text,
+        max_bytes=MAX_SERVER_CAPTURE_BYTES,
+        max_lines=MAX_CAPTURE_LINES,
+        code="HIL_SERVER_CAPTURE_LIMIT",
+    )
+    return redact_text(text, secrets)
 
 
 def _asset_pack(arguments, cache_key):
@@ -583,10 +757,6 @@ def _trigger(client, operation, cache_key, arguments):
     args = {"cacheKey": cache_key} if operation == "evict" else _asset_pack(arguments, cache_key)
     response = client.transport.call(TRIGGER_TOOLS[operation], args, 75)
     return validate_trigger_response(operation, response, cache_key)
-
-
-def _command_text(argv):
-    return " ".join(repr(item) for item in argv) + "\n"
 
 
 def _validator_report(scenario, result):
@@ -645,6 +815,8 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                     monitor.read_new,
                     operation=operation,
                     checkpoint=checkpoint,
+                    cache_key=cache_key,
+                    expected_count=SCENARIO_EXPECTED_PROGRESS[scenario],
                     timeout_seconds=min(75, pause_seconds + 20),
                 )
                 checkpoint_utc = utc_now()
@@ -712,6 +884,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             arm, sequence_log,
             operation=operation, checkpoint=checkpoint, cache_key=cache_key,
         ) if power_loss else validate_sequences(arm, status_after)
+        outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         ended = utc_now()
         serial_log = redact_text(monitor.snapshot(), (secret,))
         server_log = _server_logs(arguments.server_container, started, (secret,))
@@ -728,6 +901,11 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             "reachedSequence": sequences["reached"],
             "consumedSequence": sequences["consumed"],
             "events": events,
+            "operation": operation,
+            "checkpoint": checkpoint,
+            "faultAction": action,
+            "expectedProgress": SCENARIO_EXPECTED_PROGRESS[scenario],
+            **outcome,
         }
         if power_data:
             result.update(power_data)
@@ -735,7 +913,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         evidence, validator_script = _validator_report(scenario, result)
         payloads.update(
             {
-                "command.txt": _command_text(sys.argv).encode("utf-8"),
+                "command.txt": sanitized_command_text(sys.argv, (secret,)).encode("utf-8"),
                 "serial.log": (serial_log or "<no serial output>\n").encode("utf-8"),
                 "server.log": (server_log or "<no server output>\n").encode("utf-8"),
                 "timeline.log": ("\n".join(f"{index + 1} {name}" for index, name in enumerate(events)) + "\n").encode("utf-8"),
@@ -764,11 +942,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             )
         else:
             payloads["trigger-response.json"] = json_bytes(trigger)
-        secret_bytes = secret.encode("utf-8")
-        require(
-            all(secret_bytes not in data for data in payloads.values()),
-            "mint secret would be persisted in evidence",
-        )
+        assert_artifacts_sanitized(payloads, (secret,))
         finalize_scenario_directory(scenario_dir, payloads, power_loss=power_loss)
         validator = subprocess.run(
             [
@@ -783,6 +957,12 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         )
         # The validator rewrites evidence, so refresh exit code and the final checksum last.
         atomic_write_bytes(scenario_dir / "validator-exit-code.txt", f"{validator.returncode}\n".encode("ascii"))
+        final_artifacts = {
+            name: (scenario_dir / name).read_bytes()
+            for name in scenario_artifact_names(power_loss=power_loss)
+            if name != "SHA256SUMS"
+        }
+        assert_artifacts_sanitized(final_artifacts, (secret,))
         checksum_lines = []
         for name in scenario_artifact_names(power_loss=power_loss):
             if name != "SHA256SUMS":
@@ -807,6 +987,8 @@ def preflight(arguments):
     require(re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", arguments.device_uuid) is not None, "invalid device UUID")
     require(SHA256_RE.fullmatch(arguments.asset_sha256) is not None, "invalid asset SHA-256")
     require(type(arguments.asset_bytes) is int and arguments.asset_bytes > 0, "invalid asset byte count")
+    validate_lab_url(arguments.esp_base_url, require_path=False)
+    validate_lab_url(arguments.asset_url, require_path=True)
     client = HilToolClient(RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret))
     status = client.status()
     require(status["status"] == "idle", "HIL controller is not idle")

@@ -45,6 +45,17 @@ HIL_RELEASE_ORDER=(
     'hil-flash','hil-matrix-pass','production-reflash',
     'production-attest','production-soak',
 )
+HIL_SCENARIO_CONTRACT={
+    'evict-before-first-unlink-fail':('evict','before_first_unlink','fail',0),
+    'evict-after-unlinks-fail':('evict','after_unlinks','fail',1),
+    'evict-before-rmdir-fail':('evict','before_rmdir','fail',1),
+    'evict-after-unlinks-sd-removal':('evict','after_unlinks','pause',1),
+    'sync-before-download-write-no-space':('sync','before_download_write','no_space',0),
+    'sync-after-download-bytes-no-space':('sync','after_download_bytes','no_space',1),
+    'sync-before-checksum-corrupt-staging':('sync','before_checksum_verify','corrupt_staging',0),
+    'sync-before-commit-rename-fail':('sync','before_commit_rename','fail',0),
+    'sync-before-commit-rename-power-loss':('sync','before_commit_rename','pause',0),
+}
 REQUIRED=('serial.log','server.log','command.txt','result.json')
 COLD_REQUIRED=(
     'eviction-response.json','eviction-response.sha256','utc-start.txt',
@@ -641,6 +652,54 @@ def validate_hil_storage_result(scenario,result):
         errors.append('HIL sequences must be strictly increasing')
     if result.get('events') != list(HIL_EVENT_ORDER):
         errors.append('HIL event order is invalid')
+    operation,checkpoint,action,progress=HIL_SCENARIO_CONTRACT[scenario]
+    for name,expected in (
+        ('operation',operation),('checkpoint',checkpoint),
+        ('faultAction',action),('expectedProgress',progress),
+    ):
+        if result.get(name) != expected or type(result.get(name)) is not type(expected):
+            errors.append(f'HIL scenario contract mismatch: {name}')
+    if result.get('checkpointExercised') is not True:
+        errors.append('HIL checkpoint was not exercised')
+    trigger=result.get('triggerOutcome')
+    absent=result.get('triggerResponseAbsent')
+    cache_key=result.get('cacheKey')
+    if not isinstance(cache_key,str) or not re.fullmatch(r'hil-[a-z0-9-]*/v[1-9][0-9]*-[0-9a-f]{64}',cache_key):
+        errors.append('invalid HIL cacheKey')
+    if scenario == HIL_POWER_LOSS_SCENARIO:
+        if absent is not True or trigger is not None:
+            errors.append('power-loss trigger response must be absent')
+    else:
+        if absent is not False or not isinstance(trigger,dict):
+            errors.append('ordinary HIL trigger response is missing')
+        elif trigger.get('cacheKey') != cache_key:
+            errors.append('HIL trigger cache key mismatch')
+        elif operation == 'evict':
+            expected={
+                'evict-before-first-unlink-fail':('unlink_failed',0,False),
+                'evict-after-unlinks-fail':('unlink_failed',1,False),
+                'evict-before-rmdir-fail':('rmdir_failed',1,False),
+                'evict-after-unlinks-sd-removal':('evicted',1,True),
+            }[scenario]
+            actual=(trigger.get('status'),trigger.get('fileCount'),trigger.get('evicted'))
+            if actual != expected or trigger.get('notFound') is not False:
+                errors.append('eviction HIL trigger outcome mismatch')
+        else:
+            files=trigger.get('files')
+            valid_file=(
+                isinstance(files,list) and len(files)==1 and
+                isinstance(files[0],dict) and files[0].get('state')=='FAILED' and
+                files[0].get('error')=='asset transfer failed'
+            )
+            if not (
+                trigger.get('ready') is False and
+                type(trigger.get('downloadedCount')) is int and trigger['downloadedCount']==0 and
+                type(trigger.get('skippedCount')) is int and trigger['skippedCount']==0 and
+                type(trigger.get('failedCount')) is int and trigger['failedCount']==1 and
+                type(trigger.get('totalBytes')) is int and trigger['totalBytes']==0 and
+                'manifestChecksum' not in trigger and valid_file
+            ):
+                errors.append('sync HIL trigger outcome mismatch')
     if scenario == HIL_POWER_LOSS_SCENARIO:
         exact={
             'powerLoss':True,'checkpointReached':True,
@@ -687,6 +746,14 @@ def _hil_storage_artifact_errors(scenario,evidence_dir,result):
         try:
             if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:raise OSError
         except OSError:errors.append(f'HIL artifact missing or invalid: {name}')
+    for name in required:
+        if name=='SHA256SUMS':continue
+        path=root/name
+        if not path.is_file():continue
+        text=path.read_text(errors='replace')
+        if JWT_VALUE.search(text):errors.append(f'HIL artifact contains JWT marker: {name}')
+        if re.search(r'https?://[^/\s:@]+:[^/\s@]+@',text):errors.append(f'HIL artifact contains URL userinfo: {name}')
+        if re.search(r'[?&](?:token|key|secret|password)=',text,re.I):errors.append(f'HIL artifact contains query credential: {name}')
     build_path=root/'build-manifest.json'
     build_sha=root/'build-manifest.sha256'
     if build_path.is_file() and build_sha.is_file():
@@ -781,7 +848,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'powerLoss':True,'checkpointReached':True,'triggerResponseAbsent':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready'}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready'}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
         assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))

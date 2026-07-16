@@ -201,12 +201,18 @@ def test_raw_mcp_wrapper_parses_only_exact_internal_response_and_redacts_credent
 
 def test_checkpoint_polling_is_bounded_and_requires_exact_marker():
     hil = load_script("lesson_studio_task14_hil_storage.py")
-    chunks = iter(["noise\n", "HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks count=1\n"])
+    chunks = iter([
+        "noise\n",
+        "HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks "
+        f"cache_key={KEY} count=1 reached_sequence=2\n",
+    ])
     now = iter([0.0, 0.1, 0.2, 0.3])
     text = hil.poll_checkpoint(
         lambda: next(chunks, ""),
         operation="evict",
         checkpoint="after_unlinks",
+        cache_key=KEY,
+        expected_count=1,
         timeout_seconds=1,
         monotonic=lambda: next(now),
         sleep=lambda _seconds: None,
@@ -217,6 +223,8 @@ def test_checkpoint_polling_is_bounded_and_requires_exact_marker():
             lambda: "foreign marker",
             operation="sync",
             checkpoint="before_commit_rename",
+            cache_key=KEY,
+            expected_count=0,
             timeout_seconds=1,
             monotonic=iter([0.0, 2.0]).__next__,
             sleep=lambda _seconds: None,
@@ -367,3 +375,158 @@ def test_release_order_requires_hil_matrix_then_production_reflash_then_soak():
     assert identity.validate_release_order(events) == events
     with pytest.raises(identity.BuildIdentityError):
         identity.validate_release_order(["hil-flash", "production-soak", "production-reflash"])
+
+
+def eviction_result(status, file_count, *, evicted=False):
+    return {
+        "cacheKey": KEY,
+        "status": status,
+        "evicted": evicted,
+        "notFound": False,
+        "fileCount": file_count,
+        "reason": status,
+    }
+
+
+def failed_sync_result(*, ready=False, skipped=0, state="FAILED"):
+    result = {
+        "cacheKey": KEY,
+        "ready": ready,
+        "downloadedCount": 0,
+        "skippedCount": skipped,
+        "failedCount": 0 if ready else 1,
+        "totalBytes": 0,
+        "files": [
+            {
+                "key": "hil-asset.png",
+                "path": "hil-asset.png",
+                "localPath": f"/sdcard/tbot/lesson-assets/{KEY}/hil-asset.png",
+                "state": state,
+                **({"error": "asset transfer failed"} if state == "FAILED" else {}),
+            }
+        ],
+    }
+    if ready:
+        result["manifestChecksum"] = "d" * 64
+    return result
+
+
+@pytest.mark.parametrize(
+    "scenario,response",
+    (
+        ("evict-before-first-unlink-fail", eviction_result("unlink_failed", 0)),
+        ("evict-after-unlinks-fail", eviction_result("unlink_failed", 1)),
+        ("evict-before-rmdir-fail", eviction_result("rmdir_failed", 1)),
+        ("evict-after-unlinks-sd-removal", eviction_result("evicted", 1, evicted=True)),
+        ("sync-before-download-write-no-space", failed_sync_result()),
+        ("sync-after-download-bytes-no-space", failed_sync_result()),
+        ("sync-before-checksum-corrupt-staging", failed_sync_result()),
+        ("sync-before-commit-rename-fail", failed_sync_result()),
+    ),
+)
+def test_scenario_outcomes_require_the_exact_injected_failure(scenario, response):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    outcome = hil.validate_scenario_outcome(scenario, response, cache_key=KEY)
+    assert outcome["checkpointExercised"] is True
+    assert outcome["triggerOutcome"] == response
+
+
+def test_scenario_outcomes_reject_false_green_success_skip_and_wrong_partial_count():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    cases = (
+        ("evict-before-first-unlink-fail", eviction_result("evicted", 1, evicted=True)),
+        ("evict-after-unlinks-fail", eviction_result("unlink_failed", 0)),
+        ("evict-before-rmdir-fail", eviction_result("unlink_failed", 1)),
+        ("sync-before-download-write-no-space", failed_sync_result(ready=True, state="SKIPPED")),
+        ("sync-after-download-bytes-no-space", failed_sync_result(skipped=1, state="SKIPPED")),
+    )
+    for scenario, response in cases:
+        with pytest.raises(hil.HilValidationError), pytest.MonkeyPatch.context():
+            hil.validate_scenario_outcome(scenario, response, cache_key=KEY)
+    with pytest.raises(hil.HilValidationError):
+        hil.validate_scenario_outcome(
+            "sync-before-commit-rename-power-loss",
+            failed_sync_result(),
+            cache_key=KEY,
+        )
+    assert hil.validate_scenario_outcome(
+        "sync-before-commit-rename-power-loss", None, cache_key=KEY
+    )["triggerResponseAbsent"] is True
+
+
+def test_checkpoint_marker_binds_cache_count_and_sequence_not_stale_or_foreign():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    exact = (
+        "W HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks "
+        f"cache_key={KEY} count=1 reached_sequence=2\n"
+    )
+    chunks = iter(
+        [
+            exact.replace(KEY, SIBLING),
+            exact.replace("count=1", "count=0"),
+            exact,
+        ]
+    )
+    now = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    captured = hil.poll_checkpoint(
+        lambda: next(chunks, ""),
+        operation="evict",
+        checkpoint="after_unlinks",
+        cache_key=KEY,
+        expected_count=1,
+        timeout_seconds=1,
+        monotonic=lambda: next(now),
+        sleep=lambda _seconds: None,
+    )
+    assert exact in captured
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://user:password@127.0.0.1:8003",
+        "http://127.0.0.1:8003/?token=secret",
+        "http://127.0.0.1:8003/#fragment",
+        "http://8.8.8.8/asset.png",
+        "http://127.0.0.1:8003/\nheader",
+    ),
+)
+def test_lab_url_validation_rejects_credentials_query_fragment_public_and_controls(url):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    with pytest.raises(hil.HilValidationError):
+        hil.validate_lab_url(url, require_path=False)
+    assert hil.validate_lab_url("http://192.168.100.209:8102/demo/asset.png", require_path=True)
+
+
+def test_command_serialization_redacts_url_credentials_query_and_explicit_secrets():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    secret = "mint-secret-value"
+    command = hil.sanitized_command_text(
+        [
+            "runner.py",
+            "--asset-url",
+            "http://user:password@192.168.0.2/a.png?token=query-secret",
+            "--note",
+            secret,
+        ],
+        (secret,),
+    )
+    for forbidden in ("user", "password", "query-secret", secret):
+        assert forbidden not in command
+
+
+def test_capture_limits_fail_closed_by_bytes_and_lines():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    assert hil.enforce_capture_limit("a\nb\n", max_bytes=10, max_lines=2, code="TEST") == "a\nb\n"
+    with pytest.raises(hil.HilCaptureLimitError, match="TEST_BYTES"):
+        hil.enforce_capture_limit("x" * 11, max_bytes=10, max_lines=20, code="TEST")
+    with pytest.raises(hil.HilCaptureLimitError, match="TEST_LINES"):
+        hil.enforce_capture_limit("a\nb\nc\n", max_bytes=20, max_lines=2, code="TEST")
+
+
+def test_artifact_credential_scanner_rejects_secret_marker_and_jwt():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    with pytest.raises(hil.HilValidationError):
+        hil.assert_artifacts_sanitized({"server.log": b"mint-secret-value"}, ("mint-secret-value",))
+    with pytest.raises(hil.HilValidationError):
+        hil.assert_artifacts_sanitized({"server.log": b"aaa.bbb.ccc"}, ())
