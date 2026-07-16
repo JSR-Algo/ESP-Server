@@ -1696,10 +1696,11 @@ def test_soak_timeline_binds_repeated_step_ids_to_their_session_boundaries():
 
 
 @pytest.mark.parametrize("module", (soak, audit))
-def test_production_evidence_cli_rejects_transition_minimum_below_104(module):
+def test_production_evidence_cli_requires_transition_minimum_exactly_104(module):
     assert module.minimum_transition_count("104") == 104
-    with pytest.raises(argparse.ArgumentTypeError):
-        module.minimum_transition_count("103")
+    for invalid in ("103", "105"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            module.minimum_transition_count(invalid)
 
 
 @pytest.mark.parametrize("module", (soak, audit))

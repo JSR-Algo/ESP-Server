@@ -405,9 +405,9 @@ def minimum_transition_count(value):
         count = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError('minimum transitions must be an integer') from exc
-    if count < PRODUCTION_MINIMUM_TRANSITIONS:
+    if count != PRODUCTION_MINIMUM_TRANSITIONS:
         raise argparse.ArgumentTypeError(
-            f'minimum transitions must be at least {PRODUCTION_MINIMUM_TRANSITIONS}'
+            f'minimum transitions must equal {PRODUCTION_MINIMUM_TRANSITIONS}'
         )
     return count
 
