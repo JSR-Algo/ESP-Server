@@ -13,7 +13,7 @@ import sys
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -80,8 +80,10 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "postRebootInspected": True,
         "retryStatus": "ready",
         "triggerPendingAtMarker": True,
-        "powerCutConfirmed": True,
-        "disconnectAfterPowerCut": True,
+        "triggerPendingAtCutBoundary": True,
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectAfterPowerCutBoundary": True,
     }
 
     assert fault.validate_hil_storage_result(result["scenario"], result) == []
@@ -148,9 +150,9 @@ def test_fault_driver_self_test_needs_no_live_arguments(monkeypatch, capsys):
 
 def test_cold_eviction_validator_has_stable_typed_contract():
     assert fault._cold_eviction_errors.__annotations__ == {
-        "result": Dict[str, Any],
+        "result": dict[str, Any],
         "raw_logs": str,
-        "return": List[str],
+        "return": list[str],
     }
 
 

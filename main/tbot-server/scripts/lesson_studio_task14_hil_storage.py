@@ -10,7 +10,6 @@ import json
 import os
 import re
 import selectors
-import socket
 import subprocess
 import sys
 import tempfile
@@ -365,11 +364,17 @@ def validate_power_loss_result(value):
         "postRebootInspected": True,
         "retryStatus": "ready",
         "triggerPendingAtMarker": True,
-        "powerCutConfirmed": True,
-        "disconnectAfterPowerCut": True,
+        "triggerPendingAtCutBoundary": True,
+        "disconnectAfterPowerCutBoundary": True,
     }
     for name, expected in required.items():
         require(value.get(name) == expected and type(value.get(name)) is type(expected), f"invalid power-loss field: {name}")
+    try:
+        boundary = datetime.fromisoformat(value["powerCutBoundaryUtc"].replace("Z", "+00:00"))
+        disconnected = datetime.fromisoformat(value["disconnectObservedUtc"].replace("Z", "+00:00"))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise HilValidationError("invalid power-loss boundary timestamps") from None
+    require(disconnected >= boundary, "disconnect predates power-cut boundary")
     status = validate_status_response(value.get("postRebootStatus"), expected_cache_key=None)
     require(status["status"] == "idle", "volatile HIL arm survived reboot")
     return value
@@ -605,30 +610,43 @@ class RawMcpTransport:
             http.client.RemoteDisconnected,
         ):
             raise HilDisconnectError("HIL_TRANSPORT_DISCONNECTED") from None
-        except (TimeoutError, socket.timeout):
+        except TimeoutError:
             raise HilTransportError("HIL_TRANSPORT_TIMEOUT") from None
         except (OSError, UnicodeError, ValueError):
             raise HilTransportError("HIL_TRANSPORT_FAILED") from None
         return parse_internal_mcp_response(payload)
 
 
-def await_power_loss_disconnect(future, operator_cut, *, timeout_seconds):
-    require(not future.done(), "trigger completed before power cut")
-    operator_cut()
+def await_power_loss_disconnect(
+    future,
+    ready_prompt,
+    remove_power_prompt,
+    *,
+    timeout_seconds,
+    utc_clock=None,
+):
+    clock = utc_clock or utc_now
+    require(not future.done(), "trigger completed before READY boundary")
+    ready_prompt()
+    require(not future.done(), "trigger completed during READY prompt")
+    boundary_utc = clock()
+    remove_power_prompt()
     try:
         result = future.result(timeout=timeout_seconds)
     except HilDisconnectError:
         return {
             "triggerPendingAtMarker": True,
-            "powerCutConfirmed": True,
-            "disconnectAfterPowerCut": True,
+            "triggerPendingAtCutBoundary": True,
+            "powerCutBoundaryUtc": boundary_utc,
+            "disconnectObservedUtc": clock(),
+            "disconnectAfterPowerCutBoundary": True,
         }
     except concurrent.futures.TimeoutError:
-        raise HilTimeoutError("trigger remained pending after power cut") from None
+        raise HilTimeoutError("trigger remained pending after cut boundary") from None
     except Exception:
-        raise HilValidationError("non-disconnect failure after power cut") from None
+        raise HilValidationError("non-disconnect failure after cut boundary") from None
     raise HilValidationError(
-        f"trigger returned after power cut: {type(result).__name__}"
+        f"trigger returned after cut boundary: {type(result).__name__}"
     )
 
 
@@ -931,17 +949,28 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                     while "HIL_STORAGE_FAULT_CONSUMED" not in sequence_log and time.monotonic() < sequence_deadline:
                         sequence_log += monitor.read_new()
                         time.sleep(0.02)
-                    def confirm_power_cut():
-                        nonlocal power_removed_utc
-                        operator_input("Reached exact checkpoint. Remove robot power now, then press Enter.")
-                        power_removed_utc = utc_now()
+                    def ready_for_power_cut():
+                        operator_input(
+                            "Reached exact checkpoint. Prepare to remove power, but do not remove it yet. "
+                            "Press Enter when ready."
+                        )
+
+                    def remove_power_now():
+                        operator_input(
+                            "READY boundary recorded. Remove robot power now, then press Enter."
+                        )
 
                     disconnect_evidence = await_power_loss_disconnect(
                         future,
-                        confirm_power_cut,
+                        ready_for_power_cut,
+                        remove_power_now,
                         timeout_seconds=10,
                     )
                     trigger = None
+                    power_removed_utc = disconnect_evidence["disconnectObservedUtc"]
+                    operator_input(
+                        "Disconnect observed after the READY boundary. Confirm power is removed, then press Enter."
+                    )
                     reboot_start = len(monitor.snapshot())
                     operator_input("Restore robot power, wait for boot, then press Enter.")
                     deadline = time.monotonic() + 45

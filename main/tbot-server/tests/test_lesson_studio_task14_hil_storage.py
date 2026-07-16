@@ -281,8 +281,10 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         "postRebootInspected": True,
         "retryStatus": "ready",
         "triggerPendingAtMarker": True,
-        "powerCutConfirmed": True,
-        "disconnectAfterPowerCut": True,
+        "triggerPendingAtCutBoundary": True,
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectAfterPowerCutBoundary": True,
     }
     assert hil.validate_power_loss_result(result) == result
     for field, invalid in (
@@ -525,15 +527,24 @@ def test_command_serialization_redacts_url_credentials_query_and_explicit_secret
 def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disconnect():
     hil = load_script("lesson_studio_task14_hil_storage.py")
     future = Future()
+    clock = iter(["2026-07-17T00:00:01Z", "2026-07-17T00:00:02Z"]).__next__
 
-    def cut_power():
+    def remove_power():
         future.set_exception(hil.HilDisconnectError("connection reset"))
 
-    evidence = hil.await_power_loss_disconnect(future, cut_power, timeout_seconds=0.1)
+    evidence = hil.await_power_loss_disconnect(
+        future,
+        lambda: None,
+        remove_power,
+        timeout_seconds=0.1,
+        utc_clock=clock,
+    )
     assert evidence == {
         "triggerPendingAtMarker": True,
-        "powerCutConfirmed": True,
-        "disconnectAfterPowerCut": True,
+        "triggerPendingAtCutBoundary": True,
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectAfterPowerCutBoundary": True,
     }
 
 
@@ -542,24 +553,60 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
 
     completed = Future()
     completed.set_result({"ready": False})
-    with pytest.raises(hil.HilValidationError, match="completed before power cut"):
-        hil.await_power_loss_disconnect(completed, lambda: None, timeout_seconds=0.1)
+    with pytest.raises(hil.HilValidationError, match="completed before READY boundary"):
+        hil.await_power_loss_disconnect(
+            completed, lambda: None, lambda: None, timeout_seconds=0.1
+        )
 
     failed = Future()
     failed.set_exception(hil.HilTransportError("HIL_HTTP_ERROR"))
-    with pytest.raises(hil.HilValidationError, match="completed before power cut"):
-        hil.await_power_loss_disconnect(failed, lambda: None, timeout_seconds=0.1)
+    with pytest.raises(hil.HilValidationError, match="completed before READY boundary"):
+        hil.await_power_loss_disconnect(
+            failed, lambda: None, lambda: None, timeout_seconds=0.1
+        )
+
+    disconnected_during_ready = Future()
+
+    def ready_too_late():
+        disconnected_during_ready.set_exception(hil.HilDisconnectError("early reset"))
+
+    with pytest.raises(hil.HilValidationError, match="completed during READY prompt"):
+        hil.await_power_loss_disconnect(
+            disconnected_during_ready,
+            ready_too_late,
+            lambda: None,
+            timeout_seconds=0.1,
+        )
 
     semantic_after_cut = Future()
 
-    def cut_then_semantic_failure():
+    def remove_then_semantic_failure():
         semantic_after_cut.set_exception(hil.HilValidationError("bad response schema"))
 
-    with pytest.raises(hil.HilValidationError, match="non-disconnect failure after power cut"):
+    with pytest.raises(hil.HilValidationError, match="non-disconnect failure after cut boundary"):
         hil.await_power_loss_disconnect(
             semantic_after_cut,
-            cut_then_semantic_failure,
+            lambda: None,
+            remove_then_semantic_failure,
             timeout_seconds=0.1,
+        )
+
+    response_after_cut = Future()
+    with pytest.raises(hil.HilValidationError, match="trigger returned after cut boundary"):
+        hil.await_power_loss_disconnect(
+            response_after_cut,
+            lambda: None,
+            lambda: response_after_cut.set_result({"ready": False}),
+            timeout_seconds=0.1,
+        )
+
+    still_pending = Future()
+    with pytest.raises(hil.HilTimeoutError, match="pending after cut boundary"):
+        hil.await_power_loss_disconnect(
+            still_pending,
+            lambda: None,
+            lambda: None,
+            timeout_seconds=0.01,
         )
 
 
