@@ -299,6 +299,35 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         with pytest.raises(hil.HilValidationError):
             hil.validate_power_loss_result({**result, field: invalid})
 
+
+def test_power_loss_result_is_validated_only_after_complete_assembly():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    base = {
+        "utcStart": "2026-07-17T00:00:00Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
+    }
+    power_data = {
+        "powerLoss": True,
+        "checkpointReached": True,
+        "triggerResponseAbsent": True,
+        "successMarkerBeforeLoss": False,
+        "rebootCaptured": True,
+        "postRebootInspected": True,
+        "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "triggerPendingAtCutBoundary": True,
+        "disconnectAfterPowerCutBoundary": True,
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "postRebootStatus": exact_status("idle"),
+    }
+
+    result = hil.finalize_power_loss_result(base, power_data)
+
+    assert result["checkpointReachedUtc"] == power_data["checkpointReachedUtc"]
+    assert result["armClearedAfterReboot"] is True
+
     for field, invalid in (
         ("checkpointReachedUtc", None),
         ("checkpointReachedUtc", "not-a-timestamp"),

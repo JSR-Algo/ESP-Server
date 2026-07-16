@@ -388,6 +388,13 @@ def validate_power_loss_result(value):
     return value
 
 
+def finalize_power_loss_result(result, power_data):
+    result.update(power_data)
+    result["armClearedAfterReboot"] = True
+    validate_power_loss_result(result)
+    return result
+
+
 def validate_event_order(events):
     expected = [
         "status-before", "inspect-before", "stage", "arm", "trigger",
@@ -1006,9 +1013,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                         "postRebootInspected": True,
                         "retryStatus": "ready" if isinstance(retry, dict) else "failed",
                         "retryResponse": retry,
+                        "checkpointReachedUtc": checkpoint_utc,
                         **disconnect_evidence,
                     }
-                    validate_power_loss_result(power_data)
                 else:
                     operator_input("Remove and reinsert the SD card within the pause window, then press Enter.")
                     trigger = future.result(timeout=pause_seconds + 10)
@@ -1055,8 +1062,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             **outcome,
         }
         if power_data:
-            result.update(power_data)
-            result["armClearedAfterReboot"] = True
+            finalize_power_loss_result(result, power_data)
         evidence, validator_script = _validator_report(scenario, result)
         payloads.update(
             {

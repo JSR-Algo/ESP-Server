@@ -192,6 +192,67 @@ def test_power_loss_timestamp_artifacts_bind_exactly_to_result(tmp_path):
     assert fault._power_loss_timestamp_artifact_errors(result, tmp_path)
 
 
+def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
+    tmp_path, monkeypatch
+):
+    build = {
+        "sourceCommit": "a" * 40,
+        "profile": "hil",
+        "configEnabled": True,
+        "sdkconfigSha256": "b" * 64,
+        "binarySha256": "c" * 64,
+        "elfSha256": "d" * 64,
+        "mapSha256": "e" * 64,
+        "archiveSha256": "f" * 64,
+        "binaryBytes": 1,
+        "appPartitionFreeBytes": 1,
+    }
+    result = {
+        "buildIdentity": build,
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+    }
+    monkeypatch.setattr(fault, "validate_hil_storage_result", lambda *_: [])
+    for name in fault.HIL_POWER_REQUIRED:
+        if name != "SHA256SUMS":
+            (tmp_path / name).write_text("x\n")
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    (tmp_path / "build-manifest.json").write_text(json.dumps(build))
+    build_digest = hashlib.sha256((tmp_path / "build-manifest.json").read_bytes()).hexdigest()
+    (tmp_path / "build-manifest.sha256").write_text(
+        f"{build_digest}  build-manifest.json\n"
+    )
+    (tmp_path / "validator-exit-code.txt").write_text("0\n")
+    (tmp_path / "serial.log").write_text("HIL_STORAGE_CHECKPOINT_REACHED\n")
+    (tmp_path / "checkpoint-reached-utc.txt").write_text(
+        result["checkpointReachedUtc"] + "\n"
+    )
+    (tmp_path / "power-removed-utc.txt").write_text(
+        result["disconnectObservedUtc"] + "\n"
+    )
+
+    def rewrite_checksums():
+        rows = []
+        for name in fault.HIL_POWER_REQUIRED:
+            if name != "SHA256SUMS":
+                digest = hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+                rows.append(f"{digest}  {name}\n")
+        (tmp_path / "SHA256SUMS").write_text("".join(rows))
+
+    rewrite_checksums()
+    assert fault.build_hil_storage_report(fault.HIL_POWER_LOSS_SCENARIO, tmp_path)[
+        "status"
+    ] == "PASS"
+
+    (tmp_path / "checkpoint-reached-utc.txt").write_text(
+        "2026-07-17T00:00:01Z\n"
+    )
+    rewrite_checksums()
+    report = fault.build_hil_storage_report(fault.HIL_POWER_LOSS_SCENARIO, tmp_path)
+    assert report["status"] == "NOT_PASS"
+    assert any("timestamp artifact mismatch" in error for error in report["validationErrors"])
+
+
 def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
     build = {
         "sourceCommit": "a" * 40,
