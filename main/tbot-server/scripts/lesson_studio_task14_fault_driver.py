@@ -12,6 +12,39 @@ from typing import Any, Dict, List
 from PIL import Image, UnidentifiedImageError
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
+HIL_STORAGE_SCENARIOS=(
+    'evict-before-first-unlink-fail','evict-after-unlinks-fail',
+    'evict-before-rmdir-fail','evict-after-unlinks-sd-removal',
+    'sync-before-download-write-no-space','sync-after-download-bytes-no-space',
+    'sync-before-checksum-corrupt-staging','sync-before-commit-rename-fail',
+    'sync-before-commit-rename-power-loss',
+)
+HIL_POWER_LOSS_SCENARIO=HIL_STORAGE_SCENARIOS[-1]
+HIL_ORDINARY_REQUIRED=(
+    'command.txt','serial.log','server.log','timeline.log','build-manifest.json',
+    'build-manifest.sha256','status-before.json','inspect-before.json',
+    'stage-response.json','arm-response.json','trigger-response.json',
+    'status-after.json','inspect-after.json','cleanup-response.json','result.json',
+    'evidence.json','validator-exit-code.txt','SHA256SUMS',
+)
+HIL_POWER_REQUIRED=tuple(
+    name for name in HIL_ORDINARY_REQUIRED if name != 'trigger-response.json'
+)[:-1]+(
+    'checkpoint-reached-utc.txt','power-removed-utc.txt','reboot-serial.log',
+    'post-reboot-inspect.json','SHA256SUMS',
+)
+HIL_BUILD_FIELDS={
+    'sourceCommit','profile','configEnabled','sdkconfigSha256','binarySha256',
+    'elfSha256','mapSha256','archiveSha256','binaryBytes','appPartitionFreeBytes',
+}
+HIL_EVENT_ORDER=(
+    'status-before','inspect-before','stage','arm','trigger',
+    'status-after','inspect-after','cleanup',
+)
+HIL_RELEASE_ORDER=(
+    'hil-flash','hil-matrix-pass','production-reflash',
+    'production-attest','production-soak',
+)
 REQUIRED=('serial.log','server.log','command.txt','result.json')
 COLD_REQUIRED=(
     'eviction-response.json','eviction-response.sha256','utc-start.txt',
@@ -573,6 +606,136 @@ def _stream_sha256(path):
 def _hash_file(path):
     return {'path':str(path),'sha256':_stream_sha256(path)}
 
+def _hil_build_identity_errors(value):
+    errors=[]
+    if not isinstance(value,dict) or set(value) != HIL_BUILD_FIELDS:
+        return ['invalid HIL build identity fields']
+    if value.get('profile') != 'hil' or value.get('configEnabled') is not True:
+        errors.append('HIL evidence must bind an enabled HIL build')
+    if not isinstance(value.get('sourceCommit'),str) or not re.fullmatch(r'[0-9a-f]{40}',value['sourceCommit']):
+        errors.append('invalid HIL source commit')
+    for name in ('sdkconfigSha256','binarySha256','elfSha256','mapSha256','archiveSha256'):
+        if not isinstance(value.get(name),str) or not SHA256.fullmatch(value[name]):
+            errors.append(f'invalid HIL build hash: {name}')
+    for name in ('binaryBytes','appPartitionFreeBytes'):
+        if type(value.get(name)) is not int or value[name] <= 0:
+            errors.append(f'invalid HIL build integer: {name}')
+    return errors
+
+def validate_hil_storage_result(scenario,result):
+    errors=[]
+    if scenario not in HIL_STORAGE_SCENARIOS:
+        return ['unknown HIL storage scenario']
+    if not isinstance(result,dict):
+        return ['HIL result must be an object']
+    if result.get('scenario') != scenario:errors.append('HIL result scenario mismatch')
+    if result.get('status') != 'PASS':errors.append('HIL result status is not PASS')
+    errors.extend(_hil_build_identity_errors(result.get('buildIdentity')))
+    sequences=[]
+    for name in ('armSequence','reachedSequence','consumedSequence'):
+        value=result.get(name)
+        if type(value) is not int or value <= 0:
+            errors.append(f'invalid {name}')
+        else:sequences.append(value)
+    if len(sequences)==3 and not sequences[0] < sequences[1] < sequences[2]:
+        errors.append('HIL sequences must be strictly increasing')
+    if result.get('events') != list(HIL_EVENT_ORDER):
+        errors.append('HIL event order is invalid')
+    if scenario == HIL_POWER_LOSS_SCENARIO:
+        exact={
+            'powerLoss':True,'checkpointReached':True,
+            'triggerResponseAbsent':True,'successMarkerBeforeLoss':False,
+            'rebootCaptured':True,'armClearedAfterReboot':True,
+            'postRebootInspected':True,'retryStatus':'ready',
+        }
+        for name,expected in exact.items():
+            if result.get(name) != expected or type(result.get(name)) is not type(expected):
+                errors.append(f'invalid power-loss evidence: {name}')
+    return errors
+
+def validate_hil_release_order(events):
+    if not isinstance(events,list) or any(not isinstance(item,str) for item in events):
+        return ['invalid HIL release event list']
+    positions=[]; errors=[]
+    for event in HIL_RELEASE_ORDER:
+        if events.count(event)!=1:errors.append(f'HIL release event missing or duplicated: {event}')
+        else:positions.append(events.index(event))
+    if not errors and positions != sorted(positions):errors.append('HIL-to-production release order is invalid')
+    return errors
+
+def _atomic_text(path,data):
+    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+    descriptor,temporary=tempfile.mkstemp(prefix=f'.{path.name}.',dir=path.parent)
+    try:
+        with os.fdopen(descriptor,'w',encoding='utf-8') as output:
+            output.write(data); output.flush(); os.fsync(output.fileno())
+        os.replace(temporary,path)
+    except BaseException:
+        try:os.unlink(temporary)
+        except FileNotFoundError:pass
+        raise
+
+def _hil_storage_artifact_errors(scenario,evidence_dir,result):
+    errors=[]
+    root=Path(evidence_dir)
+    required=HIL_POWER_REQUIRED if scenario==HIL_POWER_LOSS_SCENARIO else HIL_ORDINARY_REQUIRED
+    try:actual={path.name for path in root.iterdir()}
+    except OSError:return ['HIL evidence directory is unreadable']
+    if actual != set(required):errors.append('HIL evidence directory layout is not exact')
+    for name in required:
+        path=root/name
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:raise OSError
+        except OSError:errors.append(f'HIL artifact missing or invalid: {name}')
+    build_path=root/'build-manifest.json'
+    build_sha=root/'build-manifest.sha256'
+    if build_path.is_file() and build_sha.is_file():
+        try:
+            build=json.loads(build_path.read_text())
+            parts=build_sha.read_text().strip().split()
+            if build != result.get('buildIdentity'):
+                errors.append('HIL build manifest does not match result')
+            if len(parts)!=2 or parts[1].lstrip('*')!='build-manifest.json' or parts[0]!=_stream_sha256(build_path):
+                errors.append('HIL build manifest checksum mismatch')
+        except (OSError,ValueError,json.JSONDecodeError):errors.append('invalid HIL build manifest artifact')
+    checksum_path=root/'SHA256SUMS'
+    if checksum_path.is_file():
+        try:
+            rows=[line.split() for line in checksum_path.read_text().splitlines() if line.strip()]
+            declared={parts[1].lstrip('*'):parts[0] for parts in rows if len(parts)==2}
+            expected=set(required)-{'SHA256SUMS'}
+            if set(declared)!=expected:errors.append('HIL SHA256SUMS file set mismatch')
+            for name in expected:
+                if name in declared and (not SHA256.fullmatch(declared[name]) or declared[name]!=_stream_sha256(root/name)):
+                    errors.append(f'HIL artifact checksum mismatch: {name}')
+        except (OSError,ValueError):errors.append('invalid HIL SHA256SUMS')
+    validator=root/'validator-exit-code.txt'
+    if validator.is_file() and validator.read_text().strip()!='0':
+        errors.append('HIL validator exit code is not zero')
+    serial=''
+    for name in ('serial.log','reboot-serial.log'):
+        path=root/name
+        if path.is_file():serial+='\n'+path.read_text(errors='replace')
+    if scenario==HIL_POWER_LOSS_SCENARIO:
+        if 'HIL_STORAGE_CHECKPOINT_REACHED' not in serial:
+            errors.append('power-loss evidence missing reached marker')
+        before_loss=(root/'serial.log').read_text(errors='replace') if (root/'serial.log').is_file() else ''
+        if 'HIL_STORAGE_OPERATION_SUCCESS' in before_loss:
+            errors.append('power-loss evidence contains success before loss')
+    return errors
+
+def build_hil_storage_report(scenario,evidence_dir):
+    root=Path(evidence_dir); errors=[]; result={}
+    try:result=json.loads((root/'result.json').read_text())
+    except (OSError,ValueError,json.JSONDecodeError):errors.append('invalid HIL result.json')
+    errors.extend(validate_hil_storage_result(scenario,result))
+    errors.extend(_hil_storage_artifact_errors(scenario,root,result))
+    return {
+        'scenario':scenario,'status':'PASS' if not errors else 'NOT_PASS',
+        'capturedAt':datetime.now(timezone.utc).isoformat(),
+        'validationErrors':errors,
+    }
+
 def build_evidence_report(
     scenario,result,files,raw_logs,base_dir=None,capture_script=None,verifier_script=None
 ):
@@ -603,7 +766,7 @@ def build_evidence_report(
     }
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('scenario',nargs='?',choices=SCENARIOS); p.add_argument('--evidence-dir',type=Path); p.add_argument('--output',type=Path); p.add_argument('--capture-script',type=Path); p.add_argument('--verifier-script',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('scenario',nargs='?',choices=SCENARIOS); p.add_argument('--hil-storage-scenario',choices=HIL_STORAGE_SCENARIOS); p.add_argument('--evidence-dir',type=Path); p.add_argument('--output',type=Path); p.add_argument('--capture-script',type=Path); p.add_argument('--verifier-script',type=Path); p.add_argument('--self-test',action='store_true'); a=p.parse_args()
     if a.self_test:
         valid={'preview-parity':{'previewLayerRects':{'background':[0,0,480,320]},'hardwareLayerRects':{'background':[0,0,480,320]},'previewWordText':'BARN','hardwareWordText':'BARN','previewPathOutcome':'correct','hardwarePathOutcome':'correct','previewMotionTimeline':['teach','listen'],'hardwareMotionTimeline':['teach','listen']},'cold':{'bytesDownloaded':1,'elapsedMs':1,'ready':True,'checksumVerified':True,'manifestChecksum':'a','packChecksum':'a'},'warm':{'cacheHit':True,'bytesDownloaded':0,'elapsedMs':1,'ready':True,'manifestChecksum':'a','packChecksum':'a'},'offline':{'networkAvailable':False,'completed':True,'source':'sd'},'checksum':{'mismatchDetected':True,'partialCleaned':True,'ready':False},'interrupted':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'power-loss':{'recovered':True,'partialCleaned':True,'readyBeforeVerify':False,'readyAfterRecovery':True},'missing-optional':{'optionalAssetMissing':True,'degraded':True,'advanced':True,'logMarkers':['optional_asset_missing','render_degraded']},'sd-full':{'freeRatio':0.04,'refused':True,'activePackRetained':True,'previousPackRetained':True},'slave-unavailable':{'motionDegraded':True,'completed':True,'logMarkers':['motion_degraded']},'rollback':{'activeVersion':1,'previousVersion':1,'activeChecksum':'a','previousChecksum':'a','oldFilesReattested':True,'ready':True}}
         for scenario in SCENARIOS: assert scenario_valid(scenario,valid[scenario]); assert not scenario_valid(scenario,{})
@@ -617,7 +780,19 @@ def main():
             hashes={'captureScriptSha256':_stream_sha256(capture),'verifierScriptSha256':_stream_sha256(verifier)}
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
-        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2})); return 0
+        hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'powerLoss':True,'checkpointReached':True,'triggerResponseAbsent':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready'}
+        assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
+        assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
+        assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))
+        assert validate_hil_release_order(['hil-flash','production-soak','production-reflash'])
+        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'hilStorageScenarios':HIL_STORAGE_SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2})); return 0
+    if a.hil_storage_scenario is not None:
+        if a.evidence_dir is None:p.error('--evidence-dir is required for HIL storage validation')
+        report=build_hil_storage_report(a.hil_storage_scenario,a.evidence_dir)
+        data=json.dumps(report,indent=2)+'\n'; print(data,end='')
+        if a.output:_atomic_text(a.output,data)
+        return 0 if report['status']=='PASS' else 1
     if a.scenario is None or a.evidence_dir is None:
         p.error('scenario and --evidence-dir are required unless --self-test is used')
     if a.capture_script is None or a.verifier_script is None:

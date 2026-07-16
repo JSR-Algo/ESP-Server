@@ -34,6 +34,59 @@ soak = load_script("lesson_studio_task14_soak.py")
 audit = load_script("lesson_studio_task14_log_audit.py")
 
 
+def test_fault_driver_hil_storage_extension_remains_validation_only():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    source = (ROOT / "scripts" / "lesson_studio_task14_fault_driver.py").read_text()
+
+    assert fault.HIL_STORAGE_SCENARIOS == hil.HIL_STORAGE_SCENARIOS
+    for forbidden in ("urlopen(", "requests.post(", "serial.Serial(", "tools/call", "arm_fault"):
+        assert forbidden not in source
+
+
+def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
+    build = {
+        "sourceCommit": "a" * 40,
+        "profile": "hil",
+        "configEnabled": True,
+        "sdkconfigSha256": "b" * 64,
+        "binarySha256": "c" * 64,
+        "elfSha256": "d" * 64,
+        "mapSha256": "e" * 64,
+        "archiveSha256": "f" * 64,
+        "binaryBytes": 1,
+        "appPartitionFreeBytes": 1,
+    }
+    result = {
+        "scenario": fault.HIL_STORAGE_SCENARIOS[-1],
+        "status": "PASS",
+        "buildIdentity": build,
+        "armSequence": 1,
+        "reachedSequence": 2,
+        "consumedSequence": 3,
+        "events": list(fault.HIL_EVENT_ORDER),
+        "powerLoss": True,
+        "checkpointReached": True,
+        "triggerResponseAbsent": True,
+        "successMarkerBeforeLoss": False,
+        "rebootCaptured": True,
+        "armClearedAfterReboot": True,
+        "postRebootInspected": True,
+        "retryStatus": "ready",
+    }
+
+    assert fault.validate_hil_storage_result(result["scenario"], result) == []
+    assert fault.validate_hil_storage_result(
+        result["scenario"], {**result, "reachedSequence": 1}
+    )
+    assert fault.validate_hil_storage_result(
+        result["scenario"], {**result, "triggerResponseAbsent": False}
+    )
+    assert fault.validate_hil_release_order(list(fault.HIL_RELEASE_ORDER)) == []
+    assert fault.validate_hil_release_order(
+        ["hil-flash", "production-soak", "production-reflash"]
+    )
+
+
 def test_fault_driver_self_test_needs_no_live_arguments(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["lesson_studio_task14_fault_driver.py", "--self-test"])
 
