@@ -141,6 +141,82 @@ async def test_offline_returns_202_without_deletion_claim():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "updates",
+    [
+        {"evicted": 0},
+        {"notFound": 0},
+        {"fileCount": False},
+        {"fileCount": 0.0},
+    ],
+)
+async def test_offline_rejects_bool_int_and_numeric_type_substitutions(updates):
+    from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
+
+    handler = LessonSdEvictHandler({}, {})
+    result = {
+        "cacheKey": CANONICAL,
+        "status": "device-offline",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 0,
+        "reason": "device-offline",
+    }
+    result.update(updates)
+
+    with patch(
+        "core.api.lesson_sd_evict_handler.evict_exact_cache_key",
+        new=AsyncMock(return_value=result),
+    ):
+        response = await handler.handle_post(_FakeRequest())
+
+    assert response.status == 409
+    assert _payload(response) == {
+        "data": {
+            "evicted": False,
+            "notFound": False,
+            "fileCount": 0,
+            "reason": "firmware-refused",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_offline_rejects_missing_field_but_sanitizes_extra_fields():
+    from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
+
+    handler = LessonSdEvictHandler({}, {})
+    offline = {
+        "cacheKey": CANONICAL,
+        "status": "device-offline",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 0,
+        "reason": "device-offline",
+    }
+
+    with patch(
+        "core.api.lesson_sd_evict_handler.evict_exact_cache_key",
+        new=AsyncMock(return_value={**offline, "privatePath": "/sdcard/private"}),
+    ):
+        accepted = await handler.handle_post(_FakeRequest())
+
+    missing_reason = dict(offline)
+    missing_reason.pop("reason")
+    with patch(
+        "core.api.lesson_sd_evict_handler.evict_exact_cache_key",
+        new=AsyncMock(return_value=missing_reason),
+    ):
+        rejected = await handler.handle_post(_FakeRequest())
+
+    assert accepted.status == 202
+    assert _payload(accepted) == {"data": offline}
+    assert "/sdcard/private" not in accepted.text
+    assert rejected.status == 409
+    assert _payload(rejected)["data"]["reason"] == "firmware-refused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "reason",
     [
         "voice-busy",

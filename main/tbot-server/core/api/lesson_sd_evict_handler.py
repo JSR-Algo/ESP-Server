@@ -77,14 +77,7 @@ class LessonSdEvictHandler:
             return _refusal("firmware-refused", status=409)
         normalized: Dict[str, Any] = {name: result.get(name) for name in _RESULT_FIELDS}
         if normalized["status"] == "device-offline":
-            if normalized != {
-                "cacheKey": cache_key,
-                "status": "device-offline",
-                "evicted": False,
-                "notFound": False,
-                "fileCount": 0,
-                "reason": "device-offline",
-            }:
+            if not _is_strict_offline_result(cache_key, normalized):
                 return _refusal("firmware-refused", status=409)
             return web.json_response({"data": normalized}, status=202)
         try:
@@ -110,6 +103,20 @@ def _invalid_request() -> web.Response:
     return web.json_response(
         {"error": "INVALID_REQUEST", "message": "Body must contain a canonical cacheKey"},
         status=400,
+    )
+
+
+def _is_strict_offline_result(cache_key: str, result: Dict[str, Any]) -> bool:
+    return (
+        result.get("cacheKey") == cache_key
+        and result.get("status") == "device-offline"
+        and type(result.get("evicted")) is bool
+        and result.get("evicted") is False
+        and type(result.get("notFound")) is bool
+        and result.get("notFound") is False
+        and type(result.get("fileCount")) is int
+        and result.get("fileCount") == 0
+        and result.get("reason") == "device-offline"
     )
 
 
