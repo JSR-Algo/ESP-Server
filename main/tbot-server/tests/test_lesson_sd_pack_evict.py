@@ -32,6 +32,32 @@ def test_validate_cache_key_accepts_canonical_values(value):
 @pytest.mark.parametrize(
     "value",
     [
+        f"{'a' * 128}/v1-{CHECKSUM}",
+        f"slug/v9999999999-{CHECKSUM}",
+        f"{'a' * 128}/v9999999999-{CHECKSUM}",
+    ],
+)
+def test_validate_cache_key_accepts_exact_protocol_boundaries(value):
+    assert len(value.encode("ascii")) <= 205
+    assert validate_cache_key(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"{'a' * 129}/v1-{CHECKSUM}",
+        f"slug/v99999999999-{CHECKSUM}",
+    ],
+)
+def test_validate_cache_key_rejects_values_beyond_protocol_boundaries(value):
+    with pytest.raises(CacheEvictionRefused, match="^invalid_cache_key$") as exc_info:
+        validate_cache_key(value)
+    assert value not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
         None,
         7,
         b"pip",
@@ -39,6 +65,7 @@ def test_validate_cache_key_accepts_canonical_values(value):
         " " + CANONICAL,
         CANONICAL + " ",
         "Pip-farm/v1-" + CHECKSUM,
+        "píp-farm/v1-" + CHECKSUM,
         "pip--farm/v1-" + CHECKSUM,
         "-pip/v1-" + CHECKSUM,
         "pip-/v1-" + CHECKSUM,
