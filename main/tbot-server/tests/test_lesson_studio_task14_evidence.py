@@ -81,8 +81,11 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "retryStatus": "ready",
         "triggerPendingAtMarker": True,
         "triggerPendingAtCutBoundary": True,
+        "utcStart": "2026-07-17T00:00:00Z",
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
         "disconnectAfterPowerCutBoundary": True,
     }
 
@@ -97,6 +100,96 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     assert fault.validate_hil_release_order(
         ["hil-flash", "production-soak", "production-reflash"]
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("checkpointReachedUtc", None),
+        ("checkpointReachedUtc", "not-a-timestamp"),
+        ("checkpointReachedUtc", "2026-07-16T23:59:59Z"),
+        ("powerCutBoundaryUtc", "2026-07-17T00:00:00.250000Z"),
+        ("disconnectObservedUtc", "2026-07-17T00:00:00.750000Z"),
+        ("utcEnd", "2026-07-17T00:00:01.500000Z"),
+    ),
+)
+def test_fault_driver_rejects_missing_malformed_or_out_of_order_power_timestamps(
+    field, value
+):
+    result = {
+        "scenario": fault.HIL_POWER_LOSS_SCENARIO,
+        "status": "PASS",
+        "buildIdentity": {
+            "sourceCommit": "a" * 40,
+            "profile": "hil",
+            "configEnabled": True,
+            "sdkconfigSha256": "b" * 64,
+            "binarySha256": "c" * 64,
+            "elfSha256": "d" * 64,
+            "mapSha256": "e" * 64,
+            "archiveSha256": "f" * 64,
+            "binaryBytes": 1,
+            "appPartitionFreeBytes": 1,
+        },
+        "cacheKey": f"hil-task14/v1-{'d' * 64}",
+        "armSequence": 1,
+        "reachedSequence": 2,
+        "consumedSequence": 3,
+        "events": list(fault.HIL_EVENT_ORDER),
+        "operation": "sync",
+        "checkpoint": "before_commit_rename",
+        "faultAction": "pause",
+        "expectedProgress": 0,
+        "checkpointExercised": True,
+        "triggerResponseAbsent": True,
+        "triggerOutcome": None,
+        "powerLoss": True,
+        "checkpointReached": True,
+        "successMarkerBeforeLoss": False,
+        "rebootCaptured": True,
+        "armClearedAfterReboot": True,
+        "postRebootInspected": True,
+        "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "triggerPendingAtCutBoundary": True,
+        "utcStart": "2026-07-17T00:00:00Z",
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
+        "disconnectAfterPowerCutBoundary": True,
+    }
+
+    assert fault.validate_hil_storage_result(
+        result["scenario"], {**result, field: value}
+    )
+
+
+def test_power_loss_timestamp_artifacts_bind_exactly_to_result(tmp_path):
+    result = {
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+    }
+    checkpoint = tmp_path / "checkpoint-reached-utc.txt"
+    removed = tmp_path / "power-removed-utc.txt"
+    checkpoint.write_text(result["checkpointReachedUtc"] + "\n")
+    removed.write_text(result["disconnectObservedUtc"] + "\n")
+
+    assert fault._power_loss_timestamp_artifact_errors(result, tmp_path) == []
+
+    for path, value in (
+        (checkpoint, "2026-07-17T00:00:01Z\n"),
+        (removed, "2026-07-17T00:00:03Z\n"),
+        (checkpoint, result["checkpointReachedUtc"] + " \n"),
+        (removed, result["disconnectObservedUtc"] + "\n\n"),
+    ):
+        checkpoint.write_text(result["checkpointReachedUtc"] + "\n")
+        removed.write_text(result["disconnectObservedUtc"] + "\n")
+        path.write_text(value)
+        assert fault._power_loss_timestamp_artifact_errors(result, tmp_path)
+
+    checkpoint.unlink()
+    assert fault._power_loss_timestamp_artifact_errors(result, tmp_path)
 
 
 def test_fault_driver_rejects_false_green_hil_trigger_outcomes():

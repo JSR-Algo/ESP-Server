@@ -370,11 +370,19 @@ def validate_power_loss_result(value):
     for name, expected in required.items():
         require(value.get(name) == expected and type(value.get(name)) is type(expected), f"invalid power-loss field: {name}")
     try:
-        boundary = datetime.fromisoformat(value["powerCutBoundaryUtc"].replace("Z", "+00:00"))
-        disconnected = datetime.fromisoformat(value["disconnectObservedUtc"].replace("Z", "+00:00"))
+        ordered = [
+            datetime.fromisoformat(value[name].replace("Z", "+00:00"))
+            for name in (
+                "utcStart",
+                "checkpointReachedUtc",
+                "powerCutBoundaryUtc",
+                "disconnectObservedUtc",
+                "utcEnd",
+            )
+        ]
     except (AttributeError, KeyError, TypeError, ValueError):
         raise HilValidationError("invalid power-loss boundary timestamps") from None
-    require(disconnected >= boundary, "disconnect predates power-cut boundary")
+    require(ordered == sorted(ordered), "invalid power-loss timestamp order")
     status = validate_status_response(value.get("postRebootStatus"), expected_cache_key=None)
     require(status["status"] == "idle", "volatile HIL arm survived reboot")
     return value

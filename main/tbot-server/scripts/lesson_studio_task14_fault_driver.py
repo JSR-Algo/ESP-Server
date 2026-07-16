@@ -714,9 +714,11 @@ def validate_hil_storage_result(scenario,result):
             if result.get(name) != expected or type(result.get(name)) is not type(expected):
                 errors.append(f'invalid power-loss evidence: {name}')
         try:
-            boundary=_strict_utc(result.get('powerCutBoundaryUtc'))
-            disconnected=_strict_utc(result.get('disconnectObservedUtc'))
-            if disconnected < boundary:errors.append('power-loss disconnect predates READY boundary')
+            ordered=[_strict_utc(result.get(name)) for name in (
+                'utcStart','checkpointReachedUtc','powerCutBoundaryUtc',
+                'disconnectObservedUtc','utcEnd',
+            )]
+            if ordered != sorted(ordered):errors.append('invalid power-loss timestamp order')
         except (TypeError,ValueError):errors.append('invalid power-loss boundary timestamps')
     return errors
 
@@ -741,6 +743,22 @@ def _atomic_text(path,data):
         try:os.unlink(temporary)
         except FileNotFoundError:pass
         raise
+
+def _power_loss_timestamp_artifact_errors(result,evidence_dir):
+    root=Path(evidence_dir); errors=[]
+    expected={
+        'checkpoint-reached-utc.txt':result.get('checkpointReachedUtc'),
+        'power-removed-utc.txt':result.get('disconnectObservedUtc'),
+    }
+    for name,value in expected.items():
+        path=root/name
+        try:actual=path.read_text()
+        except OSError:
+            errors.append(f'HIL timestamp artifact missing: {name}')
+            continue
+        if not isinstance(value,str) or actual != value+'\n':
+            errors.append(f'HIL timestamp artifact mismatch: {name}')
+    return errors
 
 def _hil_storage_artifact_errors(scenario,evidence_dir,result):
     errors=[]
@@ -792,6 +810,7 @@ def _hil_storage_artifact_errors(scenario,evidence_dir,result):
         path=root/name
         if path.is_file():serial+='\n'+path.read_text(errors='replace')
     if scenario==HIL_POWER_LOSS_SCENARIO:
+        errors.extend(_power_loss_timestamp_artifact_errors(result,root))
         if 'HIL_STORAGE_CHECKPOINT_REACHED' not in serial:
             errors.append('power-loss evidence missing reached marker')
         before_loss=(root/'serial.log').read_text(errors='replace') if (root/'serial.log').is_file() else ''
@@ -856,7 +875,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:02Z','disconnectAfterPowerCutBoundary':True}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
         assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))

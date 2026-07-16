@@ -282,8 +282,11 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         "retryStatus": "ready",
         "triggerPendingAtMarker": True,
         "triggerPendingAtCutBoundary": True,
+        "utcStart": "2026-07-17T00:00:00Z",
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
         "disconnectAfterPowerCutBoundary": True,
     }
     assert hil.validate_power_loss_result(result) == result
@@ -292,6 +295,17 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         ("successMarkerBeforeLoss", True),
         ("rebootCaptured", False),
         ("retryStatus", "failed"),
+    ):
+        with pytest.raises(hil.HilValidationError):
+            hil.validate_power_loss_result({**result, field: invalid})
+
+    for field, invalid in (
+        ("checkpointReachedUtc", None),
+        ("checkpointReachedUtc", "not-a-timestamp"),
+        ("checkpointReachedUtc", "2026-07-16T23:59:59Z"),
+        ("powerCutBoundaryUtc", "2026-07-17T00:00:00.250000Z"),
+        ("disconnectObservedUtc", "2026-07-17T00:00:00.750000Z"),
+        ("utcEnd", "2026-07-17T00:00:01.500000Z"),
     ):
         with pytest.raises(hil.HilValidationError):
             hil.validate_power_loss_result({**result, field: invalid})
