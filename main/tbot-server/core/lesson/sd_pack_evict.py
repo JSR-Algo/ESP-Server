@@ -26,10 +26,9 @@ _RESULT_FIELDS = frozenset({"cacheKey", "status", "evicted", "notFound", "fileCo
 _FIRMWARE_REFUSALS = frozenset(
     {
         "invalid_cache_key",
-        "lesson_runtime_active",
+        "lesson_session_active",
         "path_mismatch",
         "nested_directory",
-        "symlink_rejected",
         "unexpected_node_type",
         "scan_failed",
         "unlink_failed",
@@ -150,6 +149,7 @@ def parse_firmware_result(expected_key: str, raw: Any) -> Dict[str, Any]:
         status == "partial_evict_recovery_required"
         and evicted is False
         and not_found is False
+        and file_count > 0
         and reason == "partial_evict_recovery_required"
     )
     if not coherent_evicted and not coherent_not_found and not coherent_partial:

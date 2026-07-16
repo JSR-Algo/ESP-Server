@@ -381,6 +381,7 @@ def test_parse_firmware_result_preserves_coherent_partial_recovery_result():
         {**VALID_PARTIAL, "evicted": True},
         {**VALID_PARTIAL, "notFound": True},
         {**VALID_PARTIAL, "fileCount": -1},
+        {**VALID_PARTIAL, "fileCount": 0},
         {**VALID_PARTIAL, "fileCount": True},
         {**VALID_PARTIAL, "reason": "private remote text"},
         {**VALID_PARTIAL, "status": "unknown_partial_code"},
@@ -403,10 +404,9 @@ def test_parse_firmware_result_rejects_key_mismatch_separately():
     "status",
     [
         "invalid_cache_key",
-        "lesson_runtime_active",
+        "lesson_session_active",
         "path_mismatch",
         "nested_directory",
-        "symlink_rejected",
         "unexpected_node_type",
         "scan_failed",
         "unlink_failed",
@@ -429,12 +429,27 @@ def test_parse_firmware_result_maps_known_refusals(status):
 def test_parse_firmware_result_rejects_incoherent_known_refusal():
     raw = {
         "cacheKey": CANONICAL,
-        "status": "lesson_runtime_active",
+        "status": "lesson_session_active",
         "evicted": True,
         "notFound": False,
         "fileCount": 1,
         "reason": "evicted",
     }
+    with pytest.raises(CacheEvictionRefused, match="^firmware-malformed-result$"):
+        parse_firmware_result(CANONICAL, raw)
+
+
+@pytest.mark.parametrize("status", ["lesson_runtime_active", "symlink_rejected"])
+def test_parse_firmware_result_rejects_obsolete_refusal_codes(status):
+    raw = {
+        "cacheKey": CANONICAL,
+        "status": status,
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 0,
+        "reason": status,
+    }
+
     with pytest.raises(CacheEvictionRefused, match="^firmware-malformed-result$"):
         parse_firmware_result(CANONICAL, raw)
 
@@ -834,11 +849,11 @@ async def test_injected_unknown_tool_exceptions_remain_ambiguous():
 async def test_coherent_firmware_refusal_is_definitive():
     refusal = {
         "cacheKey": CANONICAL,
-        "status": "lesson_runtime_active",
+        "status": "lesson_session_active",
         "evicted": False,
         "notFound": False,
         "fileCount": 0,
-        "reason": "lesson_runtime_active",
+        "reason": "lesson_session_active",
     }
     conn = _conn()
     entered = asyncio.Event()

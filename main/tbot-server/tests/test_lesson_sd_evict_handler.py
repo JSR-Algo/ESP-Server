@@ -289,6 +289,40 @@ async def test_partial_eviction_returns_sanitized_maintenance_failure_with_exact
 
 
 @pytest.mark.asyncio
+async def test_lesson_session_refusal_returns_zero_count_without_remote_text():
+    from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
+
+    handler = LessonSdEvictHandler({}, {})
+    handler._shared._find_connection = AsyncMock(return_value=object())
+    result = {
+        "cacheKey": CANONICAL,
+        "status": "lesson_session_active",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 0,
+        "reason": "lesson_session_active",
+        "remoteText": "private firmware detail",
+    }
+
+    with patch(
+        "core.api.lesson_sd_evict_handler.evict_exact_cache_key",
+        new=AsyncMock(return_value=result),
+    ):
+        response = await handler.handle_post(_FakeRequest())
+
+    assert response.status == 409
+    assert _payload(response) == {
+        "data": {
+            "evicted": False,
+            "notFound": False,
+            "fileCount": 0,
+            "reason": "firmware-refused",
+        }
+    }
+    assert "private firmware detail" not in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "updates",
     [
