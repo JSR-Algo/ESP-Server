@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterator, Optional, Set
 from urllib.parse import quote
 
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
 from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
@@ -163,11 +164,13 @@ async def _call_sd_pack_sync_with_voice_guard(
 async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: Dict[str, Any]) -> Any:
     from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
+    mcp_pack = build_firmware_sync_pack(pack)
+
     return await _call_raw_mcp_tool(
         conn,
         mcp_client,
         SD_PACK_SYNC_TOOL,
-        {"assetPack": pack},
+        {"assetPack": mcp_pack},
         timeout=SD_PACK_SYNC_TIMEOUT_SEC,
     )
 

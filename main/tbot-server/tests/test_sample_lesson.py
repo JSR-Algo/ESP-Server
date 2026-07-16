@@ -208,6 +208,108 @@ class SampleManifestTest(unittest.TestCase):
         self.assertEqual(SampleAssetCache(preload_timeout_sec=0).preload_timeout_sec, 30.0)
         self.assertEqual(SampleAssetCache(preload_timeout_sec=float("inf")).preload_timeout_sec, 30.0)
 
+    def test_sd_sample_cache_exposes_fixed_firmware_sync_capability(self):
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+
+        self.assertEqual(
+            cache.firmware_sample_sync_request(),
+            {"base_url": "https://cdn.example/sample"},
+        )
+        files = cache.firmware_sample_sync_files()
+        records = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        self.assertEqual(len(files), 6)
+        self.assertTrue(cache.validate_firmware_sample_sync_result({
+            "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+            "downloadedCount": 6,
+            "files": [
+                {"file": name, "bytes": 1, "sha256": records[name]}
+                for name in files
+            ],
+        }))
+
+    def test_sd_sample_cache_rejects_non_exact_firmware_attestations(self):
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        manifest_assets = cache.asset_pack_manifest(
+            assignment_version=1,
+            lesson_id="sample-barn-say-it",
+            lesson_version=1,
+            manifest_checksum="a" * 64,
+        )["assets"]
+        files = [
+            {
+                "file": asset["path"],
+                "bytes": asset["size"],
+                "sha256": asset["sha256"],
+            }
+            for asset in manifest_assets
+        ]
+
+        invalid_files = {
+            "missing digest": [{key: value for key, value in files[0].items() if key != "sha256"}, *files[1:]],
+            "wrong digest": [{**files[0], "sha256": "0" * 64}, *files[1:]],
+            "uppercase digest": [{**files[0], "sha256": files[0]["sha256"].upper()}, *files[1:]],
+            "duplicate digest": [{**files[0], "sha256": files[1]["sha256"]}, *files[1:]],
+            "duplicate filename": [{**files[0]}, {**files[0]}, *files[2:]],
+            "missing asset": files[:-1],
+            "extra asset": [*files, {"file": "extra.png", "bytes": 1, "sha256": "0" * 64}],
+            "zero bytes": [{**files[0], "bytes": 0}, *files[1:]],
+            "boolean bytes": [{**files[0], "bytes": True}, *files[1:]],
+        }
+        for label, candidate_files in invalid_files.items():
+            with self.subTest(label=label):
+                self.assertFalse(cache.validate_firmware_sample_sync_result({
+                    "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                    "downloadedCount": len(candidate_files),
+                    "files": candidate_files,
+                }))
+
+    def test_sample_firmware_sync_request_requires_safe_http_base(self):
+        valid_bases = (
+            "http://cdn.example/sample",
+            "https://cdn.example:8443/sample/",
+        )
+        for base in valid_bases:
+            with self.subTest(base=base):
+                self.assertEqual(
+                    SampleAssetCache(sd_pack=True, asset_base=base).firmware_sample_sync_request(),
+                    {"base_url": base.rstrip("/")},
+                )
+
+        invalid_bases = (
+            "file:///tmp/sample",
+            "ftp://cdn.example/sample",
+            "//cdn.example/sample",
+            "https:///sample",
+            "https://user:secret@cdn.example/sample",
+            "https://cdn.example\\attacker.example/sample",
+            "https://cdn.example/sample\x00suffix",
+            "https://cdn.example/sample\nheader: value",
+            " https://cdn.example/sample",
+            "https://cdn.example/sample ",
+            "https://cdn.example/sample path",
+            "https://cdn.example/sample?version=1",
+            "https://cdn.example/sample#section",
+        )
+        for base in invalid_bases:
+            with self.subTest(base=base):
+                self.assertIsNone(
+                    SampleAssetCache(sd_pack=True, asset_base=base).firmware_sample_sync_request()
+                )
+
+    def test_sample_cache_without_sd_or_base_has_no_firmware_sync_request(self):
+        self.assertIsNone(
+            SampleAssetCache(sd_pack=False, asset_base="https://cdn.example").firmware_sample_sync_request()
+        )
+        self.assertIsNone(SampleAssetCache(sd_pack=True, asset_base="").firmware_sample_sync_request())
+
     def test_interactive_sample_finishes_with_lesson_completion_announcement(self):
         manifest = build_interactive_sample_manifest()
 

@@ -45,9 +45,14 @@ from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
 from core.lesson.motion_presets import dispatch_motion_preset
+from core.lesson.sd_pack_mcp_payload import (
+    FirmwareSyncPackError,
+    build_firmware_sync_pack,
+)
 
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
+SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 SD_ASSET_SYNC_TIMEOUT_SEC = 120
 
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
@@ -2617,26 +2622,63 @@ class LessonRuntime:
                 if remaining <= 0:
                     return False
                 await asyncio.sleep(min(ready_poll, remaining))
-        pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
-        if not callable(pack_builder):
-            return False
-        pack = pack_builder(
-            assignment_version=self.assignment_version,
-            lesson_id=self.lesson_id,
-            lesson_version=self.lesson_version,
-            manifest_checksum=self.manifest_checksum,
+        sample_request_builder = getattr(
+            self.asset_cache, "firmware_sample_sync_request", None
         )
-        if not isinstance(pack, dict) or not pack.get("assets"):
-            return False
+        sample_result_validator = getattr(
+            self.asset_cache, "validate_firmware_sample_sync_result", None
+        )
+        sample_request = None
+        pack = None
+        mcp_pack = None
+        if callable(sample_request_builder):
+            sample_request = sample_request_builder()
+            if not isinstance(sample_request, dict) or not callable(sample_result_validator):
+                return False
+        else:
+            pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
+            if not callable(pack_builder):
+                return False
+            pack = pack_builder(
+                assignment_version=self.assignment_version,
+                lesson_id=self.lesson_id,
+                lesson_version=self.lesson_version,
+                manifest_checksum=self.manifest_checksum,
+            )
+            if not isinstance(pack, dict) or not pack.get("assets"):
+                return False
+            try:
+                mcp_pack = build_firmware_sync_pack(pack)
+            except FirmwareSyncPackError:
+                self._log("warning", "robot SD sync pack invalid")
+                return False
 
         async def call_sync_once() -> Any:
             has_tool = getattr(mcp_client, "has_tool", None)
+            if sample_request is not None:
+                if callable(has_tool) and has_tool(SAMPLE_SD_ASSET_SYNC_TOOL):
+                    return await call_mcp_tool(
+                        self.conn,
+                        mcp_client,
+                        SAMPLE_SD_ASSET_SYNC_TOOL,
+                        sample_request,
+                        timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    )
+                from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+                return await _call_raw_mcp_tool(
+                    self.conn,
+                    mcp_client,
+                    "self.lesson_assets.sync_sample_to_sd",
+                    sample_request,
+                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                )
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
                 return await call_mcp_tool(
                     self.conn,
                     mcp_client,
                     SD_ASSET_SYNC_TOOL,
-                    {"assetPack": pack},
+                    {"assetPack": mcp_pack},
                     timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
                 )
             from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
@@ -2645,7 +2687,7 @@ class LessonRuntime:
                 self.conn,
                 mcp_client,
                 "self.lesson_assets.sync_to_sd",
-                {"assetPack": pack},
+                {"assetPack": mcp_pack},
                 timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
             )
 
@@ -2682,6 +2724,12 @@ class LessonRuntime:
                 )
                 return False
         duration_ms = max(1, int(round((time.monotonic() - sync_started_at) * 1000)))
+        if sample_request is not None:
+            if not sample_result_validator(result):
+                self._log("warning", "robot sample SD sync returned invalid result")
+                return False
+            self._log("info", f"sample_sd_sync_ready durationMs={duration_ms}")
+            return True
         attestation = self._sd_asset_sync_attestation(result, pack)
         if attestation is None:
             self._log("warning", "robot SD sync returned invalid attestation")

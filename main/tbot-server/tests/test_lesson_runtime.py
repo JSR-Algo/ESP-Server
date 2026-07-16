@@ -23,6 +23,7 @@ import unittest
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import quote
 
 from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation, ExclusiveDisposition
 from core.lesson.asset_cache import AssetCache, FAILED, READY
@@ -32,6 +33,7 @@ from core.lesson.runtime import (
     _child_response_success_prompt,
     _classify_child_response_intent,
 )
+from core.lesson.sample import SampleAssetCache
 
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
@@ -481,7 +483,7 @@ class _FakeAssetCache:
         local_urls=None,
     ):
         self.preload_timeout_sec = 90
-        self.cache_key = "w01-d01-barn-say-it/v3-abcdef12"
+        self.cache_key = "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"
         self.asset_pack_local_root = "sd://sdcard/tbot/lesson-assets"
         self._ready = ready
         self._preload_error = preload_error
@@ -555,7 +557,8 @@ class _FakeAssetCache:
                     {
                         "key": key,
                         "path": source,
-                        "sha256": "abc",
+                        "url": f"https://assets.example/{source}",
+                        "sha256": "a" * 64,
                         "mediaType": media_type,
                         "critical": critical,
                         "layer": layer,
@@ -570,7 +573,8 @@ class _FakeAssetCache:
                 {
                     "key": key,
                     "path": source,
-                    "sha256": "abc",
+                    "url": f"https://assets.example/{source}",
+                    "sha256": "a" * 64,
                     "mediaType": media_type,
                     "critical": critical,
                     "layer": layer,
@@ -2132,7 +2136,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     def test_sd_pack_source_validation_helper_edges(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn)
 
         self.assertFalse(rt._is_sd_asset_pack_source(None))
@@ -2235,7 +2239,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return pack
 
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_HugeAssetPackCache(ready=True))
 
         await rt.start()
@@ -2318,13 +2322,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_pack_missing_verified_layer_mapping_fails_before_sending_lesson_step(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.voice_provider = _RecordingLessonVoiceProvider()
         manifest = _build_manifest()
         scene = manifest["steps"][0]["scene"]
         local_urls = {
-            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
+            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
         }
         rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True, local_urls=local_urls))
 
@@ -2352,16 +2356,16 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_pack_rejects_manifest_sd_layer_source_without_cache_attestation(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.voice_provider = _RecordingLessonVoiceProvider()
         manifest = _build_manifest()
         scene = manifest["steps"][0]["scene"]
         local_urls = {
-            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
+            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
         }
         fake_overlay_local = (
-            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach"
+            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach"
         )
         scene["robotOverlay"]["atlas"]["image"] = fake_overlay_local
         scene["robotOverlay"]["asset"]["src"] = fake_overlay_local
@@ -2601,12 +2605,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         object_source = scene["teachingObject"]["asset"]["src"]
         overlay_source = scene["robotOverlay"]["atlas"]["image"]
         local_urls = {
-            poster_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            object_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            overlay_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            poster_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            object_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            overlay_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2616,7 +2620,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.start()
         prepare = self._sent_frames(conn)[-1]
         self.assertEqual(prepare["type"], "lesson_prepare")
-        self.assertEqual(prepare["body"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(prepare["body"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         pack_assets = {asset["key"]: asset for asset in prepare["body"]["assetPack"]["assets"]}
         self.assertEqual(
             set(pack_assets),
@@ -2625,7 +2629,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("localPath", pack_assets["backgroundScene.poster"])
         self.assertEqual(
             prepare["body"]["assetPack"]["localRoot"],
-            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12",
+            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
         )
 
         await rt.on_lesson_ack(
@@ -2635,7 +2639,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 extra={
                     "acks": 1,
                     "rendered": True,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )
@@ -2704,14 +2708,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return pack
 
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         rt = self._runtime(conn=conn, asset_cache=_VerboseLiveAssetPackCache(ready=True))
 
         async def sync_ready(*_args, **_kwargs):
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 20,
                 "skippedCount": 0,
@@ -2753,14 +2757,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return pack
 
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         rt = self._runtime(conn=conn, asset_cache=_MaximumAssetPackCache(ready=True))
 
         async def sync_ready(*_args, **_kwargs):
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 64,
                 "skippedCount": 0,
@@ -2784,12 +2788,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "sha256": "40f9c095b11a67c023f62847f498cc557e7fcef45762d41787dafffd96a60b34",
         }
         local_urls = {
-            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2817,12 +2821,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }
         scene["robotOverlay"]["atlas"] = {"image": "https://cdn.test/poses/bright-teach.png"}
         local_urls = {
-            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2848,7 +2852,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return True
 
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _MaterializingAssetCache()
         rt = self._runtime(conn=conn, asset_cache=cache)
 
@@ -2867,7 +2871,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_calls_robot_mcp_sync_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/opt/tbot-esp32-server/data/lesson-packs",
+            }
+        }
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         calls = []
 
@@ -2885,7 +2894,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
-                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
                     "skippedCount": 0,
@@ -2905,24 +2914,40 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["sent_before_call"], [])
         self.assertGreaterEqual(calls[0]["timeout"], 60)
         pack = calls[0]["args"]["assetPack"]
-        self.assertEqual(pack["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(pack["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         self.assertTrue(pack["ready"])
         self.assertEqual(
             {asset["key"] for asset in pack["assets"]},
             {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
         )
-        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+        self.assertTrue(pack["localRoot"].startswith("/sdcard/tbot/lesson-assets/"))
+        self.assertTrue(
+            all(asset["localPath"].startswith(pack["localRoot"] + "/") for asset in pack["assets"])
+        )
+        prepare = self._sent_frames(conn)[-1]
+        self.assertEqual(prepare["type"], "lesson_prepare")
+        self.assertTrue(prepare["body"]["assetPack"]["localRoot"].startswith("sd://"))
+        render_root = prepare["body"]["assetPack"]["localRoot"].rstrip("/")
+        self.assertTrue(
+            all(
+                (
+                    asset.get("localPath")
+                    or f"{render_root}/{quote(asset['key'], safe='')}"
+                ).startswith("sd://")
+                for asset in prepare["body"]["assetPack"]["assets"]
+            )
+        )
 
     async def test_sd_asset_pack_cold_sync_emits_authoritative_attestation_markers(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         conn.logger = _CapturingLogger()
 
         async def cold_sync(*_args, **_kwargs):
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -2944,9 +2969,143 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(int(duration_match.group(1)), 1)
         self.assertNotIn("asset_cache_hit", messages)
 
-    async def test_sd_asset_pack_warm_sync_emits_cache_hit_only_for_all_skipped(self):
+    async def test_sd_sample_uses_fixed_advertised_sync_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def capture_call(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return {
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][0], "self_lesson_assets_sync_sample_to_sd")
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_sample_uses_fixed_raw_sync_tool_when_unlisted(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _MissingLessonAssetToolMcpClient()
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def raw_call(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return json.dumps({
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            })
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", new=raw_call):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][0], "self.lesson_assets.sync_sample_to_sd")
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_sample_rejects_malformed_fixed_sync_result(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        rt = self._runtime(conn=conn, asset_cache=cache)
+
+        async def malformed(*_args, **_kwargs):
+            return {"directory": "/wrong", "downloadedCount": 6, "files": []}
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=malformed):
+            self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+
+    async def test_sd_sample_rejects_invalid_base_before_any_tool_dispatch(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="file:///tmp/sample")
+        calls = []
+
+        async def unexpected_dispatch(*_args, **_kwargs):
+            calls.append((_args, _kwargs))
+            return {"directory": "/wrong", "downloadedCount": 0, "files": []}
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=unexpected_dispatch):
+            self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+        self.assertEqual(calls, [])
+
+    async def test_sd_sample_normalizes_only_trailing_slashes_before_dispatch(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample///")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def capture_dispatch(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return {
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_dispatch):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_asset_pack_warm_sync_emits_cache_hit_only_for_all_skipped(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         conn.logger = _CapturingLogger()
 
@@ -2954,7 +3113,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
-                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "packChecksum": _manifest_checksum(),
                     "downloadedCount": 0,
                     "skippedCount": 3,
@@ -2977,7 +3136,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         invalid_results = (
             {
                 "ready": False,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -2992,7 +3151,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 2,
                 "skippedCount": 0,
@@ -3000,7 +3159,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": -1,
@@ -3008,14 +3167,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
             },
             {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": "forged-checksum",
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3023,7 +3182,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "packChecksum": "contradictory-checksum",
                 "downloadedCount": 3,
@@ -3035,7 +3194,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         for result in invalid_results:
             with self.subTest(result=result):
                 conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
                 conn.mcp_client = _ReadyLessonAssetMcpClient()
                 conn.logger = _CapturingLogger()
 
@@ -3065,6 +3224,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         conn.config = {
             "lesson": {
                 "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
                 "sd_sync_ready_timeout_sec": 1,
                 "sd_sync_ready_poll_sec": 0.001,
             }
@@ -3076,7 +3236,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             calls.append((args, kwargs, list(conn.websocket.sent)))
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3094,7 +3254,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_recovers_stale_firmware_lesson_before_retrying_sync(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         resets = []
         sync_calls = []
@@ -3109,7 +3269,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("MCP tools disabled during lesson")
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3130,7 +3290,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_sync_waits_for_voice_idle_before_starting(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         busy = True
         attempts = 0
@@ -3143,7 +3303,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             attempts += 1
             return {
                 "ready": True,
-                "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3164,7 +3324,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_raw_syncs_unlisted_internal_robot_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _MissingLessonAssetToolMcpClient()
         calls = []
 
@@ -3182,7 +3342,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
-                    "cacheKey": "w01-d01-barn-say-it/v3-abcdef12",
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
                     "skippedCount": 0,
@@ -3199,7 +3359,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["tool_name"], "self.lesson_assets.sync_to_sd")
         self.assertEqual(calls[0]["sent_before_call"], [])
         self.assertGreaterEqual(calls[0]["timeout"], 60)
-        self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
 
     async def test_sd_asset_pack_mcp_sync_failure_falls_back_to_online_urls(self):
@@ -3209,7 +3369,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         object_source = scene["teachingObject"]["asset"]["src"]
         overlay_source = scene["robotOverlay"]["atlas"]["image"]
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True))
 
@@ -3284,7 +3444,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_not_ready_falls_back_to_online_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         finished = []
 
         async def finish_lesson_mode(*, reason):
@@ -3312,7 +3472,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             # Device claims MCP so a missing client is a real sync failure.
             features={"lesson": True, "renderer": "teebot-lesson-renderer.v1", "mcp": True},
         )
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = None  # sync cannot run → online fallback
         finished = []
 
@@ -3334,7 +3494,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_preload_error_fails_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             asset_cache=_FakeAssetCache(
@@ -3351,7 +3511,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_materialize_crash_emits_retryable_error_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             asset_cache=_FakeAssetCache(preload_error=OSError("sdcard full")),
@@ -3367,7 +3527,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_must_report_ready_before_start(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
         await rt.start()
@@ -3381,7 +3541,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_must_match_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
         await rt.start()
@@ -3405,7 +3565,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_requires_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = ""
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -3418,7 +3578,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 extra={
                     "acks": 1,
                     "rendered": True,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )
@@ -3431,7 +3591,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_rejects_non_string_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = 123
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -3457,7 +3617,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_rejects_blank_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = "   "
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -4586,12 +4746,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "s9": ("celebrate", "robotOverlay.celebrate", "bright-celebrate.png"),
         }
         local_urls = {
-            "barn-round-field-poster.jpg": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            "barn.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
-            "bright-listening.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.listening",
-            "bright-thinking.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.thinking",
-            "bright-celebrate.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.celebrate",
+            "barn-round-field-poster.jpg": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            "barn.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
+            "bright-listening.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.listening",
+            "bright-thinking.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.thinking",
+            "bright-celebrate.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.celebrate",
         }
         local_urls.update(
             {
@@ -4653,7 +4813,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "acks": prepare["sequence"],
                     "rendered": True,
                     "degraded": False,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )

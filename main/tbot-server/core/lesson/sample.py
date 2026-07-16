@@ -25,8 +25,10 @@ sample SD directory populated by
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 TAG = "SampleLesson"
 
@@ -42,6 +44,7 @@ _OVERLAY_THINK_FILE = "assets/robot/poses/bright-thinking.png"
 _OVERLAY_CELEBRATE_FILE = "assets/robot/poses/bright-celebrate.png"
 _SAMPLE_SD_CACHE_KEY = "sample"
 _SAMPLE_SD_ROOT = "sd://tbot/lesson-assets/sample-barn"
+_SAMPLE_FIRMWARE_SD_ROOT = "/sdcard/tbot/lesson-assets/sample-barn"
 _SAMPLE_ASSET_RECORDS = [
     {
         "key": "backgroundScene.poster",
@@ -421,7 +424,9 @@ class SampleAssetCache:
         self.cache_key = _SAMPLE_SD_CACHE_KEY
         self.asset_pack_local_root = "sd://tbot/lesson-assets"
         self.sd_pack = bool(sd_pack)
-        self.asset_base = str(asset_base or "").strip().rstrip("/")
+        raw_asset_base = str(asset_base or "")
+        self.asset_base = raw_asset_base.strip().rstrip("/")
+        self._firmware_asset_base = raw_asset_base.rstrip("/")
 
     async def preload(self) -> bool:
         return True
@@ -484,8 +489,73 @@ class SampleAssetCache:
             ],
         }
 
+    def firmware_sample_sync_files(self) -> tuple[str, ...]:
+        return tuple(record["path"].rsplit("/", 1)[-1] for record in _SAMPLE_ASSET_RECORDS)
+
+    def firmware_sample_sync_request(self) -> Optional[Dict[str, str]]:
+        if not self.sd_pack or not _is_safe_http_base(self._firmware_asset_base):
+            return None
+        return {"base_url": self._firmware_asset_base}
+
+    def validate_firmware_sample_sync_result(self, result: Any) -> bool:
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (TypeError, ValueError):
+                return False
+        if not isinstance(result, dict):
+            return False
+        expected = {
+            record["path"].rsplit("/", 1)[-1]: record["sha256"]
+            for record in _SAMPLE_ASSET_RECORDS
+        }
+        files = result.get("files")
+        if (
+            result.get("directory") != _SAMPLE_FIRMWARE_SD_ROOT
+            or type(result.get("downloadedCount")) is not int
+            or result.get("downloadedCount") != len(expected)
+            or not isinstance(files, list)
+            or len(files) != len(expected)
+        ):
+            return False
+        names = []
+        for item in files:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("file"), str)
+                or type(item.get("bytes")) is not int
+                or item.get("bytes") <= 0
+                or item.get("sha256") != expected.get(item.get("file"))
+            ):
+                return False
+            names.append(item["file"])
+        return len(set(names)) == len(names) and set(names) == set(expected)
+
     async def aclose(self) -> None:
         return None
+
+
+def _is_safe_http_base(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    if any(ord(char) <= 0x20 or ord(char) == 0x7F for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.netloc)
+        and bool(hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and (port is None or port > 0)
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 class NoOpLessonForwarder:

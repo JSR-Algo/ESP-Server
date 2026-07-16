@@ -96,6 +96,51 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
 
 
 @pytest.mark.asyncio
+async def test_raw_mcp_dispatch_uses_physical_copy_and_preserves_render_pack(monkeypatch):
+    checksum = "a" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack = {
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "localRoot": f"sd://tbot/lesson-assets/{cache_key}",
+        "assets": [
+            {
+                "key": "folder/poster one.png",
+                "path": "assets/poster one.png",
+                "url": "https://assets.example/poster.png",
+                "sha256": "b" * 64,
+                "localPath": f"sd://tbot/lesson-assets/{cache_key}/folder%2Fposter%20one.png",
+            }
+        ],
+    }
+    original = json.loads(json.dumps(pack))
+    calls = []
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_pack_mount_root": "/opt/tbot-esp32-server/data/lesson-packs"
+            }
+        }
+
+    async def capture(_conn, _client, tool, arguments, timeout):
+        calls.append((tool, arguments, timeout))
+        return {"ready": True}
+
+    monkeypatch.setattr(
+        "core.api.device_mcp_admin_handler._call_raw_mcp_tool", capture
+    )
+    await sd_pack_sync.call_sd_pack_sync_tool(Conn(), object(), pack)
+
+    assert pack == original
+    sent = calls[0][1]["assetPack"]
+    assert sent["localRoot"] == f"/sdcard/tbot/lesson-assets/{cache_key}"
+    assert sent["assets"][0]["localPath"].endswith(
+        "/folder%2Fposter%20one.png"
+    )
+
+
+@pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_skips_when_sd_pack_disabled(tmp_path):
     class Conn:
         config = {"lesson": {"asset_delivery_mode": "http_pull"}}
