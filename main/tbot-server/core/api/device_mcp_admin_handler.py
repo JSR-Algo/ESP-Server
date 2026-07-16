@@ -3,7 +3,8 @@ from typing import Callable, Optional
 
 from aiohttp import web
 
-from core.api.lesson_nudge_handler import LessonNudgeHandler
+from core.api.lesson_nudge_handler import LessonNudgeHandler, _conn_mac
+from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool, send_mcp_message
 
 MOTION_TOOL_ACK_TIMEOUT_SEC = 0.25
@@ -18,6 +19,25 @@ _ROBOT_MOTION_TOOL_PREFIXES = (
     "self.robot.right_arm_",
     "self.robot.both_arms_",
 )
+
+_HIL_TOOL_PREFIX = "self.lesson_assets.hil."
+_HIL_TOOLS = frozenset(
+    {
+        "self.lesson_assets.hil.arm_fault",
+        "self.lesson_assets.hil.status",
+        "self.lesson_assets.hil.stage_fixture",
+        "self.lesson_assets.hil.cleanup_fixture",
+        "self.lesson_assets.hil.inspect",
+    }
+)
+_HIL_TRIGGER_TOOLS = frozenset(
+    {
+        "self.lesson_assets.evict_cache_key",
+        "self.lesson_assets.sync_to_sd",
+    }
+)
+_HIL_MIN_TIMEOUT_SEC = 5
+_HIL_MAX_TIMEOUT_SEC = 75
 
 
 class MCPUnknownToolError(RuntimeError):
@@ -62,6 +82,64 @@ def _mcp_call_timeout(tool_name: str) -> float:
 
 def _is_robot_motion_tool(tool_name: str) -> bool:
     return tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES)
+
+
+def _normalize_mac(value) -> Optional[str]:
+    value = str(value or "").strip().lower()
+    parts = value.split(":")
+    if len(parts) != 6 or any(
+        len(part) != 2 or any(char not in "0123456789abcdef" for char in part)
+        for part in parts
+    ):
+        return None
+    return ":".join(parts)
+
+
+def _hil_device_is_allowlisted(config: dict, conn) -> bool:
+    lesson = config.get("lesson") if isinstance(config, dict) else None
+    allowlist = (
+        lesson.get("storage_hil_device_allowlist")
+        if isinstance(lesson, dict)
+        else None
+    )
+    if not isinstance(allowlist, list) or len(allowlist) != 1:
+        return False
+    allowed_mac = _normalize_mac(allowlist[0])
+    resolved_mac = _normalize_mac(_conn_mac(conn))
+    return bool(allowed_mac and resolved_mac and allowed_mac == resolved_mac)
+
+
+def _has_canonical_hil_cache_key(tool_name: str, args) -> bool:
+    if not isinstance(args, dict):
+        return False
+    if tool_name == "self.lesson_assets.evict_cache_key":
+        candidate = args.get("cacheKey")
+    elif tool_name == "self.lesson_assets.sync_to_sd":
+        asset_pack = args.get("assetPack")
+        candidate = asset_pack.get("cacheKey") if isinstance(asset_pack, dict) else None
+    else:
+        return False
+    try:
+        cache_key = validate_cache_key(candidate)
+    except CacheEvictionRefused:
+        return False
+    return cache_key.split("/", 1)[0].startswith("hil-")
+
+
+def _hil_timeout(body: dict) -> Optional[int]:
+    if "timeoutSeconds" not in body:
+        return None
+    timeout = body.get("timeoutSeconds")
+    if type(timeout) is not int or not _HIL_MIN_TIMEOUT_SEC <= timeout <= _HIL_MAX_TIMEOUT_SEC:
+        raise ValueError("invalid-hil-timeout")
+    return timeout
+
+
+def _hil_error(code: str, *, status: int) -> web.Response:
+    return web.json_response(
+        {"error": code, "message": "HIL MCP request rejected"},
+        status=status,
+    )
 
 
 async def _call_raw_mcp_tool(
@@ -121,13 +199,21 @@ class DeviceMCPAdminHandler:
             body = await request.json()
         except Exception:
             body = {}
+        if not isinstance(body, dict):
+            body = {}
 
-        tool_name = str((body or {}).get("toolName") or "").strip()
+        tool_name = str(body.get("toolName") or "").strip()
         if not tool_name:
             return web.json_response(
                 {"error": "TOOL_NAME_REQUIRED", "message": "Body field 'toolName' is required"},
                 status=400,
             )
+
+        is_hil_tool = tool_name in _HIL_TOOLS
+        if tool_name.startswith(_HIL_TOOL_PREFIX) and not is_hil_tool:
+            return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+        if is_hil_tool and body.get("allowUnlisted") is not True:
+            return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         device_id = request.match_info.get("deviceId", "")
         conn = await self._shared._find_connection(device_id)
@@ -144,26 +230,55 @@ class DeviceMCPAdminHandler:
                 status=409,
             )
 
-        args = (body or {}).get("args", {})
+        args = body.get("args", {})
         timeout = _mcp_call_timeout(tool_name)
+        is_hil_timeout_path = False
+        if is_hil_tool:
+            if not isinstance(args, dict):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            if not _hil_device_is_allowlisted(self.config, conn):
+                return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+            try:
+                override = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            if override is not None:
+                timeout = override
+            is_hil_timeout_path = True
+        elif "timeoutSeconds" in body:
+            if tool_name not in _HIL_TRIGGER_TOOLS or not _has_canonical_hil_cache_key(
+                tool_name, args
+            ):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            if not _hil_device_is_allowlisted(self.config, conn):
+                return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+            try:
+                timeout = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            is_hil_timeout_path = True
         try:
-            if bool((body or {}).get("allowUnlisted")):
+            if is_hil_tool or bool(body.get("allowUnlisted")):
                 result = await _call_raw_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
             else:
                 result = await call_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
-        except TimeoutError as exc:
+        except TimeoutError:
+            if is_hil_timeout_path:
+                return _hil_error("HIL_MCP_TIMEOUT", status=409)
             if _is_robot_motion_tool(tool_name):
                 return web.json_response(
                     {"data": {"called": True, "result": "sent_unconfirmed"}},
                     status=202,
                 )
             return web.json_response(
-                {"error": "MCP_CALL_FAILED", "message": str(exc)},
+                {"error": "MCP_CALL_FAILED", "message": "Device MCP call timed out"},
                 status=409,
             )
-        except Exception as exc:
+        except Exception:
+            if is_hil_timeout_path:
+                return _hil_error("HIL_MCP_FAILED", status=409)
             return web.json_response(
-                {"error": "MCP_CALL_FAILED", "message": str(exc)},
+                {"error": "MCP_CALL_FAILED", "message": "Device MCP call failed"},
                 status=409,
             )
 

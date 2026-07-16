@@ -45,6 +45,7 @@ _LESSON_ENV = (
     "LESSON_SAMPLE_ASSET_BASE",
     "LESSON_SAMPLE_MODE",
     "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
+    "LESSON_STORAGE_HIL_DEVICE_ALLOWLIST",
     "TBOT_DEVICE_MINT_SECRET",
 )
 
@@ -107,6 +108,49 @@ def test_default_config_keeps_interactive_sample_lesson_disabled():
     assert config["lesson"]["asset_delivery_mode"] == "sd_pack"
     assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"
     assert config["lesson"]["asset_pack_mount_root"] == "/sdcard/tbot/lesson-assets"
+    assert config["lesson"]["storage_hil_device_allowlist"] == []
+
+
+def test_storage_hil_allowlist_normalizes_one_mixed_case_colon_mac(monkeypatch):
+    monkeypatch.setenv("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST", " 28:84:85:85:1A:80 ")
+
+    config = _apply_lesson_env_overrides({"lesson": {}})
+
+    assert config["lesson"]["storage_hil_device_allowlist"] == ["28:84:85:85:1a:80"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "not-a-mac",
+        "28:84:85:85:1a",
+        "28:84:85:85:1a:80,28:84:85:85:1a:81",
+    ),
+)
+def test_storage_hil_allowlist_rejects_malformed_or_multiple_entries(monkeypatch, value):
+    monkeypatch.setenv("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST", value)
+
+    with pytest.raises(ValueError, match="storage HIL device allowlist"):
+        _apply_lesson_env_overrides({"lesson": {}})
+
+
+def test_storage_hil_file_allowlist_is_normalized_and_rejects_multiple():
+    config = _apply_lesson_env_overrides(
+        {"lesson": {"storage_hil_device_allowlist": ["28:84:85:85:1A:80"]}}
+    )
+    assert config["lesson"]["storage_hil_device_allowlist"] == ["28:84:85:85:1a:80"]
+
+    with pytest.raises(ValueError, match="storage HIL device allowlist"):
+        _apply_lesson_env_overrides(
+            {
+                "lesson": {
+                    "storage_hil_device_allowlist": [
+                        "28:84:85:85:1a:80",
+                        "28:84:85:85:1a:81",
+                    ]
+                }
+            }
+        )
 
 
 def test_empty_boolean_env_is_absent_not_false(monkeypatch):
@@ -128,6 +172,11 @@ def test_all_compose_defaults_disable_sample_lesson():
     assert "LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-passive}" not in local_compose
     assert "LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}" in prod_compose
     assert "LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-passive}" not in prod_compose
+    assert "LESSON_STORAGE_HIL_DEVICE_ALLOWLIST=${LESSON_STORAGE_HIL_DEVICE_ALLOWLIST:-}" in local_compose
+    assert "TBOT_PUBLIC_WEBSOCKET_URL=${TBOT_PUBLIC_WEBSOCKET_URL:-}" in local_compose
+    assert "LESSON_STORAGE_HIL_DEVICE_ALLOWLIST=${LESSON_STORAGE_HIL_DEVICE_ALLOWLIST:-}" in all_compose
+    assert "TBOT_PUBLIC_WEBSOCKET_URL=${TBOT_PUBLIC_WEBSOCKET_URL:-}" in all_compose
+    assert "LESSON_STORAGE_HIL_DEVICE_ALLOWLIST: ${LESSON_STORAGE_HIL_DEVICE_ALLOWLIST:-}" in prod_compose
 
 
 def test_prod_env_example_declares_shared_lesson_runtime_secrets():
@@ -143,6 +192,7 @@ def test_prod_env_example_declares_shared_lesson_runtime_secrets():
         "TBOT_REQUIRE_DEVICE_TOKEN",
         "JWT_PUBLIC_KEY",
         "LESSON_ASSET_ORIGIN_BASE",
+        "LESSON_STORAGE_HIL_DEVICE_ALLOWLIST",
     ):
         assert f"{key}=" in env_example
 

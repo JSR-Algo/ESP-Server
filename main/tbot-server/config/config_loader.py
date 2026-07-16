@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from collections.abc import Mapping
 
 import yaml
@@ -142,6 +143,7 @@ GOOGLE_LIVE_DEFAULTS = {
 }
 DEFAULT_EDGE_TTS_VOICE = "vi-VN-HoaiMyNeural"
 DEFAULT_ENABLE_WEBSOCKET_PING = True
+_COLON_MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
 
 def get_project_dir():
@@ -162,6 +164,18 @@ def _manager_api_source_config(default_config, custom_config):
         default_value = default_config.get("enable_websocket_ping")
         if isinstance(default_value, bool):
             source["enable_websocket_ping"] = default_value
+    default_lesson = default_config.get("lesson") if isinstance(default_config, Mapping) else None
+    source_lesson = source.get("lesson") if isinstance(source.get("lesson"), Mapping) else None
+    if isinstance(default_lesson, Mapping) or isinstance(source_lesson, Mapping):
+        source_lesson = dict(source_lesson or {})
+        if (
+            "storage_hil_device_allowlist" not in source_lesson
+            and isinstance(default_lesson, Mapping)
+        ):
+            source_lesson["storage_hil_device_allowlist"] = default_lesson.get(
+                "storage_hil_device_allowlist", []
+            )
+        source["lesson"] = source_lesson
     return source
 
 
@@ -491,6 +505,19 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
         if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
             raise ValueError(f"lesson.{key} must be a boolean")
 
+
+def _normalize_storage_hil_device_allowlist(value):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 1:
+        raise ValueError("lesson storage HIL device allowlist must contain at most one MAC")
+    if not value:
+        return []
+    mac = value[0]
+    if not isinstance(mac, str) or _COLON_MAC_RE.fullmatch(mac.strip()) is None:
+        raise ValueError("lesson storage HIL device allowlist must contain one colon MAC")
+    return [mac.strip().lower()]
+
 def _apply_lesson_env_overrides(config):
     """LESSON_RUNTIME_ENABLED dark-rollout flag + lesson endpoints, so an operator
     can enable/point the lesson runtime via env without editing config volumes.
@@ -523,6 +550,7 @@ def _apply_lesson_env_overrides(config):
     motion_presets_flag = _parse_strict_bool_env("LESSON_MOTION_PRESETS_ENABLED")
     playful_interactions_flag = _parse_strict_bool_env("LESSON_PLAYFUL_INTERACTIONS_ENABLED")
     rollout_allowlist_raw = _clean_env("LESSON_ROLLOUT_DEVICE_ALLOWLIST")
+    storage_hil_allowlist_raw = _clean_env("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST")
     course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
     asset_origin = _clean_env("LESSON_ASSET_ORIGIN_BASE")
     asset_public_base = _clean_env("LESSON_ASSET_PUBLIC_BASE_URL")
@@ -539,6 +567,14 @@ def _apply_lesson_env_overrides(config):
     existing_lesson = config.get("lesson")
     existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
     _validate_lesson_rollout_file_config(existing_lesson)
+    if storage_hil_allowlist_raw is not None:
+        storage_hil_allowlist = _normalize_storage_hil_device_allowlist(
+            [part.strip() for part in storage_hil_allowlist_raw.split(",") if part.strip()]
+        )
+    else:
+        storage_hil_allowlist = _normalize_storage_hil_device_allowlist(
+            existing_lesson.get("storage_hil_device_allowlist")
+        )
     effective_gc = sd_gc_free_percent if sd_gc_free_percent is not None else existing_lesson.get("sd_gc_free_percent", 20)
     effective_preload = (
         sd_preload_min_free_percent
@@ -591,6 +627,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.setdefault("motion_presets_enabled", False)
         lesson_cfg.setdefault("playful_interactions_enabled", False)
         lesson_cfg.setdefault("rollout_device_allowlist", [])
+        lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
         configured_allowlist = lesson_cfg["rollout_device_allowlist"]
         if not isinstance(configured_allowlist, list) or not all(
             isinstance(item, str) for item in configured_allowlist
@@ -614,6 +651,7 @@ def _apply_lesson_env_overrides(config):
     _validate_lesson_rollout_file_config(lesson_cfg)
     lesson_cfg.setdefault("motion_presets_enabled", False)
     lesson_cfg.setdefault("playful_interactions_enabled", False)
+    lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
     lesson_cfg["motion_presets_enabled"] = (
@@ -926,6 +964,7 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "motion_presets_enabled",
     "playful_interactions_enabled",
     "rollout_device_allowlist",
+    "storage_hil_device_allowlist",
 )
 
 

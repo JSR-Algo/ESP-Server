@@ -461,6 +461,8 @@ lesson:
   motion_presets_enabled: false
   playful_interactions_enabled: false
   rollout_device_allowlist: []
+  # Lab-only raw MCP gate. Empty by default; accepts at most one live robot MAC.
+  storage_hil_device_allowlist: []
   # Spoken start_lesson demo path: when true, start_lesson ignores backend assignment
   # and starts the built-in sample lesson. Interactive mode waits for child speech
   # through Google Live child-response windows.

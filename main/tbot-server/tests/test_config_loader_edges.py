@@ -539,6 +539,25 @@ async def test_manager_api_websocket_ping_preserves_local_boolean_and_defaults_s
 
 
 @pytest.mark.asyncio
+async def test_manager_config_preserves_local_storage_hil_allowlist(monkeypatch):
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+
+    async def server_config():
+        return {"server": {"auth": {"enabled": False}}, "lesson": {}}
+
+    monkeypatch.setattr(config_loader, "get_server_config", server_config)
+
+    config = await config_loader.get_config_from_api_async(
+        {
+            "manager-api": {"url": "http://m", "secret": "s"},
+            "lesson": {"storage_hil_device_allowlist": ["28:84:85:85:1a:80"]},
+        }
+    )
+
+    assert config["lesson"]["storage_hil_device_allowlist"] == ["28:84:85:85:1a:80"]
+
+
+@pytest.mark.asyncio
 async def test_load_config_async_paths_and_cache(monkeypatch):
     calls = []
     monkeypatch.setattr(config_loader, "get_project_dir", lambda: "/project/")
