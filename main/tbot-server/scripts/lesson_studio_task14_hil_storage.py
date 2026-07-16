@@ -472,8 +472,8 @@ def validate_scenario_outcome(scenario, trigger_response, *, cache_key):
     if operation == "evict":
         expected = {
             "evict-before-first-unlink-fail": ("unlink_failed", 0, False),
-            "evict-after-unlinks-fail": ("unlink_failed", 1, False),
-            "evict-before-rmdir-fail": ("rmdir_failed", 1, False),
+            "evict-after-unlinks-fail": ("partial_evict_recovery_required", 1, False),
+            "evict-before-rmdir-fail": ("partial_evict_recovery_required", 1, False),
             "evict-after-unlinks-sd-removal": ("evicted", 1, True),
         }[scenario]
         require(
@@ -696,27 +696,19 @@ def _server_logs(container, since_utc, secrets):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    chunks = []
-    size = 0
-    deadline = time.monotonic() + 20
-    require(process.stdout is not None, "server log capture unavailable")
-    while time.monotonic() < deadline:
-        chunk = process.stdout.read(65536)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > MAX_SERVER_CAPTURE_BYTES:
-            process.kill()
-            raise HilCaptureLimitError("HIL_SERVER_CAPTURE_LIMIT_BYTES")
-        chunks.append(chunk)
-    if process.poll() is None:
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raise HilTimeoutError("server log capture timeout") from None
+    try:
+        output, _unused_stderr = process.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        if hasattr(process, "wait"):
+            with suppress(Exception):
+                process.wait(timeout=2)
+        raise HilTimeoutError("server log capture timeout") from None
     require(process.returncode == 0, "server log capture command failed")
-    text = b"".join(chunks).decode("utf-8", errors="replace")
+    require(isinstance(output, bytes), "server log capture returned invalid output")
+    if len(output) > MAX_SERVER_CAPTURE_BYTES:
+        raise HilCaptureLimitError("HIL_SERVER_CAPTURE_LIMIT_BYTES")
+    text = output.decode("utf-8", errors="replace")
     text = enforce_capture_limit(
         text,
         max_bytes=MAX_SERVER_CAPTURE_BYTES,

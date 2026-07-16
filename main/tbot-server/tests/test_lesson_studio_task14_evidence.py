@@ -123,7 +123,7 @@ def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
         "expectedProgress": 0,
         "triggerResponseAbsent": False,
         "triggerOutcome": {
-            "cacheKey": KEY if "KEY" in globals() else f"hil-task14/v1-{'d' * 64}",
+            "cacheKey": f"hil-task14/v1-{'d' * 64}",
             "status": "unlink_failed",
             "evicted": False,
             "notFound": False,

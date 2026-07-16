@@ -415,8 +415,8 @@ def failed_sync_result(*, ready=False, skipped=0, state="FAILED"):
     "scenario,response",
     (
         ("evict-before-first-unlink-fail", eviction_result("unlink_failed", 0)),
-        ("evict-after-unlinks-fail", eviction_result("unlink_failed", 1)),
-        ("evict-before-rmdir-fail", eviction_result("rmdir_failed", 1)),
+        ("evict-after-unlinks-fail", eviction_result("partial_evict_recovery_required", 1)),
+        ("evict-before-rmdir-fail", eviction_result("partial_evict_recovery_required", 1)),
         ("evict-after-unlinks-sd-removal", eviction_result("evicted", 1, evicted=True)),
         ("sync-before-download-write-no-space", failed_sync_result()),
         ("sync-after-download-bytes-no-space", failed_sync_result()),
@@ -530,3 +530,30 @@ def test_artifact_credential_scanner_rejects_secret_marker_and_jwt():
         hil.assert_artifacts_sanitized({"server.log": b"mint-secret-value"}, ("mint-secret-value",))
     with pytest.raises(hil.HilValidationError):
         hil.assert_artifacts_sanitized({"server.log": b"aaa.bbb.ccc"}, ())
+
+
+def test_server_log_capture_timeout_does_not_call_blocking_stdout_read(monkeypatch):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+
+    class _Stdout:
+        def read(self, _size):
+            raise AssertionError("blocking read must not be used")
+
+    class _Process:
+        stdout = _Stdout()
+        returncode = None
+        killed = False
+
+        def communicate(self, timeout):
+            assert timeout == 20
+            raise hil.subprocess.TimeoutExpired("docker logs", timeout)
+
+        def kill(self):
+            self.killed = True
+
+    process = _Process()
+    monkeypatch.setattr(hil.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(hil.HilTimeoutError, match="server log capture timeout"):
+        hil._server_logs("container", "2026-01-01T00:00:00Z", ())
+    assert process.killed is True

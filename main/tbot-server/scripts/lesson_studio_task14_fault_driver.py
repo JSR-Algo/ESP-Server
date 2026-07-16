@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import tempfile
 from datetime import datetime, timezone
@@ -677,8 +678,8 @@ def validate_hil_storage_result(scenario,result):
         elif operation == 'evict':
             expected={
                 'evict-before-first-unlink-fail':('unlink_failed',0,False),
-                'evict-after-unlinks-fail':('unlink_failed',1,False),
-                'evict-before-rmdir-fail':('rmdir_failed',1,False),
+                'evict-after-unlinks-fail':('partial_evict_recovery_required',1,False),
+                'evict-before-rmdir-fail':('partial_evict_recovery_required',1,False),
                 'evict-after-unlinks-sd-removal':('evicted',1,True),
             }[scenario]
             actual=(trigger.get('status'),trigger.get('fileCount'),trigger.get('evicted'))
