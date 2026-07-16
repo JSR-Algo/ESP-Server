@@ -262,7 +262,7 @@ class DeviceMCPAdminHandler:
                 result = await _call_raw_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
             else:
                 result = await call_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             if is_hil_timeout_path:
                 return _hil_error("HIL_MCP_TIMEOUT", status=409)
             if _is_robot_motion_tool(tool_name):

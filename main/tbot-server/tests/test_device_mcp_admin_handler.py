@@ -665,6 +665,49 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
                 for secret in ("jwt.secret", "/Users/private", "hunter2"):
                     self.assertNotIn(secret, rendered)
 
+    async def test_real_asyncio_wait_for_timeout_maps_to_hil_timeout(self):
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        cleaned = []
+
+        class _NeverResolvingClient:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                return None
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        handler, conn = self._hil_handler()
+        conn.mcp_client = _NeverResolvingClient()
+
+        with patch(
+            "core.api.device_mcp_admin_handler._hil_timeout",
+            return_value=0.001,
+        ), patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message",
+            AsyncMock(return_value=None),
+        ):
+            response = await handler.handle_post(
+                _FakeRequest(
+                    device_id="route-device-uuid",
+                    body={
+                        "toolName": self.HIL_TOOLS[1],
+                        "allowUnlisted": True,
+                        "timeoutSeconds": 5,
+                        "args": {},
+                    },
+                )
+            )
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            (await _response_json(response))["error"],
+            "HIL_MCP_TIMEOUT",
+        )
+        self.assertEqual(cleaned, [42])
+
 
 if __name__ == "__main__":
     unittest.main()
