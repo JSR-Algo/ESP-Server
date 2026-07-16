@@ -12,6 +12,8 @@ SOAK = importlib.util.module_from_spec(SOAK_SPEC)
 assert SOAK_SPEC.loader is not None
 SOAK_SPEC.loader.exec_module(SOAK)
 validate_live_attestation = SOAK.validate_live_attestation
+minimum_transition_count = SOAK.minimum_transition_count
+load_build_identity = SOAK.load_build_identity
 
 MARKERS = {
     'allocationFailure': r'alloc(?:ation)? failed|failed to alloc(?:ate|ation)|out of memory|malloc failed',
@@ -121,17 +123,32 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--timeline-log', type=Path)
     SOAK.add_live_attestation_args(parser)
+    SOAK.add_production_evidence_args(parser)
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
         print('self-test PASS')
         return 0
+    if args.minimum_transitions is None:
+        parser.error('--minimum-transitions is required for live evidence')
+    if args.build_manifest is None:
+        parser.error('--build-manifest is required for live evidence')
     if len(args.logs) < 2:
         parser.error('serial and server logs required')
     serial, server = SOAK._source_logs(args.logs)
     timeline = args.timeline_log.read_text(errors='replace') if args.timeline_log else None
-    report = audit_logs(serial, server, timeline_text=timeline)
+    report = audit_logs(
+        serial,
+        server,
+        minimum_transitions=args.minimum_transitions,
+        timeline_text=timeline,
+    )
     SOAK.attest_report(report, args)
+    report['minimumTransitionsRequired'] = args.minimum_transitions
+    report.setdefault('metrics', {})['minimumTransitionsRequired'] = args.minimum_transitions
+    report['buildIdentity'] = load_build_identity(
+        args.build_manifest, expected_profile='production'
+    )
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:

@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -1694,6 +1695,82 @@ def test_soak_timeline_binds_repeated_step_ids_to_their_session_boundaries():
     assert report["metrics"]["sessions"] == 3
 
 
+@pytest.mark.parametrize("module", (soak, audit))
+def test_production_evidence_cli_rejects_transition_minimum_below_104(module):
+    assert module.minimum_transition_count("104") == 104
+    with pytest.raises(argparse.ArgumentTypeError):
+        module.minimum_transition_count("103")
+
+
+@pytest.mark.parametrize("module", (soak, audit))
+def test_production_evidence_binds_104_transition_requirement_and_build_identity(
+    module, tmp_path, monkeypatch, capsys
+):
+    serial_log, server_log = authentic_soak_logs((35, 35, 34))
+    serial_path = tmp_path / "serial.log"
+    server_path = tmp_path / "server.log"
+    timeline_path = tmp_path / "timeline.log"
+    capture_script, verifier_script = helper_script_paths(tmp_path)
+    capture_script.write_text("capture\n")
+    verifier_script.write_text("verify\n")
+    build_manifest = tmp_path / "lesson-storage-hil-build.json"
+    serial_path.write_text(serial_log)
+    server_path.write_text(server_log)
+    timeline_path.write_text(authentic_soak_timeline((35, 35, 34)))
+    build_identity = {
+        "sourceCommit": "a" * 40,
+        "profile": "production",
+        "configEnabled": False,
+        "sdkconfigSha256": "b" * 64,
+        "binarySha256": "c" * 64,
+        "elfSha256": "d" * 64,
+        "mapSha256": "e" * 64,
+        "archiveSha256": "f" * 64,
+        "binaryBytes": 1,
+        "appPartitionFreeBytes": 1,
+    }
+    calls = []
+
+    def fake_load(path, *, expected_profile=None):
+        calls.append((path, expected_profile))
+        return build_identity
+
+    monkeypatch.setattr(module, "load_build_identity", fake_load)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            module.__file__,
+            str(serial_path),
+            str(server_path),
+            "--timeline-log",
+            str(timeline_path),
+            "--minimum-transitions",
+            "104",
+            "--build-manifest",
+            str(build_manifest),
+            "--fixture-version",
+            soak.FIXTURE_VERSION,
+            "--course-id",
+            soak.COURSE_ID,
+            "--lesson-id",
+            soak.LESSON_IDS[0],
+            "--capture-script",
+            str(capture_script),
+            "--verifier-script",
+            str(verifier_script),
+        ],
+    )
+
+    assert module.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["minimumTransitionsRequired"] == 104
+    assert report["metrics"]["minimumTransitionsRequired"] == 104
+    assert report["buildIdentity"] == build_identity
+    assert report["metrics"]["transitions"] == 104
+    assert calls == [(build_manifest, "production")]
+
+
 def test_log_audit_rejects_firmware_crash_and_heap_corruption_markers():
     for marker in (
         "assert failed: runtime.cpp:42",
@@ -1892,3 +1969,9 @@ def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     assert "--verifier-script" in live
     assert "report.json.fixtureVersion" in live
     assert "audit.json.fixtureVersion" in live
+    assert "--capture-only" in live
+    assert live.count("--minimum-transitions 104") == 2
+    assert live.count('--build-manifest "$PRODUCTION_BUILD_MANIFEST"') == 2
+    assert "hil-matrix-pass -> production-reflash -> production-attest -> production-soak" in live
+    assert "/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-production-lesson-studio-continued" in live
+    assert "/Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued" in live

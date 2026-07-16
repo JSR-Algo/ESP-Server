@@ -26,9 +26,10 @@ bundle.
 
 ```bash
 export TBOT_ROOT=/Users/manhhodinh/Documents/TBOT
-export ESP_WORKTREE=/Users/manhhodinh/.config/superpowers/worktrees/esp32-server/production-lesson-studio
-export BACKEND_WORKTREE=/Users/manhhodinh/.config/superpowers/worktrees/tbot-backend/production-lesson-studio
-export FIRMWARE_WORKTREE=/Users/manhhodinh/.config/superpowers/worktrees/TBOT-Firmware/production-lesson-studio
+export ESP_WORKTREE=/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-production-lesson-studio-continued
+export BACKEND_WORKTREE=/Users/manhhodinh/Documents/TBOT/tbot-backend
+export FIRMWARE_WORKTREE=/Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued
+export PRODUCTION_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-production/lesson-storage-hil-build.json"
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
 export DEVICE_ID='28:84:85:85:1a:80' # exact live connection key used by the eviction route
@@ -430,31 +431,61 @@ python3 scripts/lesson_e2e_log_verify.py \
   --after-log-file "$EVIDENCE_ROOT/rollback/after-rollback.log"
 ```
 
-After at least 100 real step transitions, run both fail-closed audits:
+The attended release order is immutable:
+`hil-matrix-pass -> production-reflash -> production-attest -> production-soak`.
+Complete the HIL fault matrix first, reflash the clean production image built
+from the exact paired source commit, verify that the selected manifest has
+profile `production` and HIL disabled, and only then collect the production
+soak. Never count transitions captured from the HIL image toward production.
+
+Capture the raw production soak timeline without applying the single-lesson
+identity, marker, or verifier gates. Raw mode still requires non-empty serial
+and server streams for the whole bounded capture and fails on either source
+exiting early:
+
+```bash
+cd "$TBOT_ROOT/robot"
+python3 scripts/lesson_e2e_live_capture.py \
+  --capture-only \
+  --duration 900 \
+  --device-id "$DEVICE_ID" \
+  --device-alias "$DEVICE_ALIAS" \
+  --serial-port "$SERIAL_PORT" \
+  --server-log-command "docker logs --since 0m --tail 0 -f tbot-esp32-server" \
+  --out-dir "$EVIDENCE_ROOT/soak/capture"
+```
+
+After at least 104 real step transitions, run both fail-closed audits:
 
 ```bash
 cd "$ESP_WORKTREE/main/tbot-server"
 python3 scripts/lesson_studio_task14_soak.py \
-  "$EVIDENCE_ROOT/soak/serial.log" "$EVIDENCE_ROOT/soak/server.log" \
-  --timeline-log "$EVIDENCE_ROOT/soak/timeline.log" \
+  "$EVIDENCE_ROOT/soak/capture/firmware-serial.log" \
+  "$EVIDENCE_ROOT/soak/capture/esp-server.log" \
+  --timeline-log "$EVIDENCE_ROOT/soak/capture/timeline.log" \
   --fixture-version "$FIXTURE_VERSION" \
   --course-id "$COURSE_ID" \
   --lesson-id "$LESSON_ID" \
   --capture-script "$CAPTURE_SCRIPT" \
   --verifier-script "$VERIFIER_SCRIPT" \
+  --minimum-transitions 104 \
+  --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --output "$EVIDENCE_ROOT/soak/report.json"
 python3 scripts/lesson_studio_task14_log_audit.py \
-  "$EVIDENCE_ROOT/soak/serial.log" "$EVIDENCE_ROOT/soak/server.log" \
-  --timeline-log "$EVIDENCE_ROOT/soak/timeline.log" \
+  "$EVIDENCE_ROOT/soak/capture/firmware-serial.log" \
+  "$EVIDENCE_ROOT/soak/capture/esp-server.log" \
+  --timeline-log "$EVIDENCE_ROOT/soak/capture/timeline.log" \
   --fixture-version "$FIXTURE_VERSION" \
   --course-id "$COURSE_ID" \
   --lesson-id "$LESSON_ID" \
   --capture-script "$CAPTURE_SCRIPT" \
   --verifier-script "$VERIFIER_SCRIPT" \
+  --minimum-transitions 104 \
+  --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --output "$EVIDENCE_ROOT/soak/audit.json"
 ```
 
-The soak command requires at least 100 strictly increasing transition
+The soak command requires at least 104 strictly increasing transition
 identities (monotonic within each bound assignment/session), at least three
 PSRAM samples, no monotonic loss over 64 KiB, no reset marker, and both active
 phase and firmware-lifetime internal-SRAM minima at or above the provisional
@@ -463,6 +494,9 @@ to be recorded and agreed; the parser default alone does not establish it.
 When step IDs repeat across lesson sessions, `timeline.log` is mandatory so
 each server transition is bound inside its matching `lesson_prepare` session
 boundary instead of being correlated by file order alone.
+Both JSON reports must contain `minimumTransitionsRequired=104` and the exact
+flattened `buildIdentity` loaded from `PRODUCTION_BUILD_MANIFEST`; a HIL,
+unverified, stale, or foreign-profile manifest is a hard failure.
 
 ## Evidence schema
 

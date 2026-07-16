@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 from collections import defaultdict, deque
 from pathlib import Path
+
+BUILD_IDENTITY_PATH = Path(__file__).with_name('lesson_studio_task14_build_identity.py')
+BUILD_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    'lesson_studio_task14_build_identity_shared', BUILD_IDENTITY_PATH
+)
+BUILD_IDENTITY = importlib.util.module_from_spec(BUILD_IDENTITY_SPEC)
+assert BUILD_IDENTITY_SPEC.loader is not None
+BUILD_IDENTITY_SPEC.loader.exec_module(BUILD_IDENTITY)
+load_build_identity = BUILD_IDENTITY.load_build_identity
+
+PRODUCTION_MINIMUM_TRANSITIONS = 104
 
 FIXTURE_VERSION = '2026-07-11.1'
 COURSE_ID = 'production-farm-english-358'
@@ -388,6 +400,32 @@ def add_live_attestation_args(parser):
     parser.add_argument('--verifier-script', type=Path)
 
 
+def minimum_transition_count(value):
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('minimum transitions must be an integer') from exc
+    if count < PRODUCTION_MINIMUM_TRANSITIONS:
+        raise argparse.ArgumentTypeError(
+            f'minimum transitions must be at least {PRODUCTION_MINIMUM_TRANSITIONS}'
+        )
+    return count
+
+
+def add_production_evidence_args(parser):
+    parser.add_argument('--minimum-transitions', type=minimum_transition_count)
+    parser.add_argument('--build-manifest', type=Path)
+
+
+def bind_production_evidence(report, args):
+    report['minimumTransitionsRequired'] = args.minimum_transitions
+    report.setdefault('metrics', {})['minimumTransitionsRequired'] = args.minimum_transitions
+    report['buildIdentity'] = load_build_identity(
+        args.build_manifest, expected_profile='production'
+    )
+    return report
+
+
 def attest_report(report, args):
     metadata, errors = validate_live_attestation(
         args.fixture_version,
@@ -409,16 +447,24 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--timeline-log', type=Path)
     add_live_attestation_args(parser)
+    add_production_evidence_args(parser)
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
         print('self-test PASS')
         return 0
+    if args.minimum_transitions is None:
+        parser.error('--minimum-transitions is required for live evidence')
+    if args.build_manifest is None:
+        parser.error('--build-manifest is required for live evidence')
     if len(args.logs) < 2:
         parser.error('serial and server logs required')
     serial, server = _source_logs(args.logs)
-    report = analyze_timeline(args.timeline_log.read_text(errors='replace')) if args.timeline_log else analyze_logs(serial, server)
+    report = analyze_timeline(
+        args.timeline_log.read_text(errors='replace'), count=args.minimum_transitions
+    ) if args.timeline_log else analyze_logs(serial, server, count=args.minimum_transitions)
     attest_report(report, args)
+    bind_production_evidence(report, args)
     data = json.dumps(report, indent=2) + '\n'
     print(data, end='')
     if args.output:
