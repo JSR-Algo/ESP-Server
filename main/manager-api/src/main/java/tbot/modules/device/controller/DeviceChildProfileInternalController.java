@@ -8,9 +8,15 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.ObjectError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+
+import java.util.Objects;
 
 import jakarta.validation.Valid;
 import tbot.common.utils.Result;
+import tbot.common.exception.ErrorCode;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
 import tbot.modules.device.service.DeviceChildProfileProjectionService.DeviceNotFoundException;
@@ -48,5 +54,23 @@ public class DeviceChildProfileInternalController {
     ResponseEntity<Result<Void>> invalid(IllegalArgumentException exception) {
         return ResponseEntity.badRequest()
                 .body(new Result<Void>().error(HttpStatus.BAD_REQUEST.value(), exception.getMessage()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    ResponseEntity<Result<Void>> invalidBody(MethodArgumentNotValidException exception) {
+        String message = exception.getBindingResult().getAllErrors().stream()
+                .filter(Objects::nonNull)
+                .map(ObjectError::getDefaultMessage)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse("Invalid child profile projection");
+        return ResponseEntity.badRequest()
+                .body(new Result<Void>().error(ErrorCode.PARAM_VALUE_NULL, message));
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<Result<Void>> unreadableBody() {
+        return ResponseEntity.badRequest()
+                .body(new Result<Void>().error(ErrorCode.PARAM_VALUE_NULL, "Invalid child profile projection JSON"));
     }
 }

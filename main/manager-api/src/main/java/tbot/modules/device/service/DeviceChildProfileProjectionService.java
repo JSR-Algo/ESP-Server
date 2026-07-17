@@ -10,9 +10,9 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 
 import tbot.modules.device.dao.DeviceDao;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
-import tbot.modules.device.dto.DeviceChildProfileProjectionDTO.Profile;
 import tbot.modules.device.entity.DeviceEntity;
 import tbot.modules.robot.projection.ChildProfileProjectionCanonicalizer;
+import tbot.modules.robot.projection.ChildProfileProjectionCanonicalizer.ChildProfileProjection;
 
 @Service
 public class DeviceChildProfileProjectionService {
@@ -30,6 +30,9 @@ public class DeviceChildProfileProjectionService {
                 request.getProfile() == null ? null : request.getProfile().toCanonicalProfile());
         if (!canonical.sha256().equals(request.getPayloadHash())) {
             throw new IllegalArgumentException("payloadHash does not match canonical projection");
+        }
+        if (canonical.normalizedProfile() != null) {
+            validateProfileStorage(canonical.normalizedProfile());
         }
 
         DeviceEntity stored = deviceDao.selectChildProfileForUpdate(deviceId);
@@ -55,7 +58,7 @@ public class DeviceChildProfileProjectionService {
         if ("clear".equals(request.getMode())) {
             deviceDao.clearChildProfile(update);
         } else {
-            Profile profile = request.getProfile();
+            ChildProfileProjection profile = canonical.normalizedProfile();
             update.setChildProfileId(profile.childProfileId());
             update.setChildBirthYear(profile.birthYear());
             update.setChildName(profile.displayName());
@@ -80,12 +83,9 @@ public class DeviceChildProfileProjectionService {
         if (("replace".equals(request.getMode())) != (request.getProfile() != null)) {
             throw new IllegalArgumentException("mode/profile coherence violation");
         }
-        if (request.getProfile() != null) {
-            validateProfileStorage(request.getProfile());
-        }
     }
 
-    private static void validateProfileStorage(Profile profile) {
+    private static void validateProfileStorage(ChildProfileProjection profile) {
         if (profile.displayName() == null || profile.interests() == null) {
             throw new IllegalArgumentException("required profile fields are missing");
         }

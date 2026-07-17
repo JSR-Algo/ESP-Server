@@ -32,7 +32,10 @@ public final class ChildProfileProjectionCanonicalizer {
         }
     }
 
-    public record CanonicalProjectionEnvelope(String canonicalJson, String sha256) {
+    public record CanonicalProjectionEnvelope(
+            String canonicalJson,
+            String sha256,
+            ChildProfileProjection normalizedProfile) {
     }
 
     public static CanonicalProjectionEnvelope canonicalize(
@@ -52,13 +55,14 @@ public final class ChildProfileProjectionCanonicalizer {
             throw new IllegalArgumentException("clear mode requires a null profile");
         }
 
+        ChildProfileProjection normalizedProfile = profile == null ? null : normalizeProfile(profile);
         String canonicalJson = "{\"mode\":" + jsonString(mode)
-                + ",\"profile\":" + (profile == null ? "null" : canonicalProfile(profile))
+                + ",\"profile\":" + (normalizedProfile == null ? "null" : canonicalProfile(normalizedProfile))
                 + ",\"revision\":" + revision + "}";
-        return new CanonicalProjectionEnvelope(canonicalJson, sha256(canonicalJson));
+        return new CanonicalProjectionEnvelope(canonicalJson, sha256(canonicalJson), normalizedProfile);
     }
 
-    private static String canonicalProfile(ChildProfileProjection profile) {
+    private static ChildProfileProjection normalizeProfile(ChildProfileProjection profile) {
         if (!CANONICAL_UUID.matcher(profile.childProfileId()).matches()) {
             throw new IllegalArgumentException("childProfileId must be a canonical lowercase UUID");
         }
@@ -70,10 +74,21 @@ public final class ChildProfileProjectionCanonicalizer {
         interests = new ArrayList<>(new LinkedHashSet<>(interests));
         interests.sort(ChildProfileProjectionCanonicalizer::compareByCodePoint);
 
+        return new ChildProfileProjection(
+                profile.childProfileId(),
+                normalize(profile.displayName()),
+                profile.birthYear(),
+                interests,
+                normalizeNullable(profile.learningStyle()),
+                normalizeNullable(profile.vocabularyLevel()),
+                normalizeNullable(profile.parentCareer()));
+    }
+
+    private static String canonicalProfile(ChildProfileProjection profile) {
         return "{\"birthYear\":" + nullableInteger(profile.birthYear())
                 + ",\"childProfileId\":" + jsonString(profile.childProfileId())
-                + ",\"displayName\":" + jsonString(normalize(profile.displayName()))
-                + ",\"interests\":" + jsonStringArray(interests)
+                + ",\"displayName\":" + jsonString(profile.displayName())
+                + ",\"interests\":" + jsonStringArray(profile.interests())
                 + ",\"learningStyle\":" + nullableString(profile.learningStyle())
                 + ",\"parentCareer\":" + nullableString(profile.parentCareer())
                 + ",\"vocabularyLevel\":" + nullableString(profile.vocabularyLevel()) + "}";
@@ -126,7 +141,11 @@ public final class ChildProfileProjectionCanonicalizer {
     }
 
     private static String nullableString(String value) {
-        return value == null ? "null" : jsonString(normalize(value));
+        return value == null ? "null" : jsonString(value);
+    }
+
+    private static String normalizeNullable(String value) {
+        return value == null ? null : normalize(value);
     }
 
     private static String nullableInteger(Integer value) {

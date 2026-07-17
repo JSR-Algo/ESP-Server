@@ -8,6 +8,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 
 import java.util.List;
 
@@ -27,6 +28,8 @@ import com.fasterxml.jackson.core.json.JsonReadFeature;
 import tbot.modules.device.controller.DeviceChildProfileInternalController;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
+import tbot.modules.device.service.DeviceChildProfileProjectionService.ProjectionConflictException;
+import tbot.common.exception.RenExceptionHandler;
 
 class DeviceChildProfileInternalControllerTest {
     @Test
@@ -79,13 +82,58 @@ class DeviceChildProfileInternalControllerTest {
     void oversizedProfileIsReturnedAsBadRequestInsteadOfDatabaseFailure() throws Exception {
         DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
         when(service.apply(eq("device-1"), any())).thenThrow(new IllegalArgumentException("displayName exceeds storage capacity"));
-        MockMvc mvc = MockMvcBuilders.standaloneSetup(new DeviceChildProfileInternalController(service)).build();
+        MockMvc mvc = mvc(service);
         String json = replaceJson("2018").replace("\"An\"", "\"" + "x".repeat(65) + "\"");
 
         mvc.perform(put("/internal/devices/device-1/child-profile")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(json))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void beanValidationFailureOverridesGlobalHandlerWithHttp400() throws Exception {
+        String json = "{\"mode\":\"invalid\",\"revision\":1,\"payloadHash\":\""
+                + "0".repeat(64) + "\",\"profile\":null}";
+
+        mvc(mock(DeviceChildProfileProjectionService.class)).perform(
+                put("/internal/devices/device-1/child-profile")
+                        .contentType(MediaType.APPLICATION_JSON).content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").isNumber());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{",
+            "{\"mode\":\"clear\",\"revision\":1.5,\"payloadHash\":\"HASH\",\"profile\":null}",
+            "{\"mode\":\"clear\",\"revision\":\"1\",\"payloadHash\":\"HASH\",\"profile\":null}"
+    })
+    void unreadableProjectionJsonOverridesGlobalHandlerWithHttp400(String template) throws Exception {
+        String json = template.replace("HASH", "0".repeat(64));
+        mvc(mock(DeviceChildProfileProjectionService.class)).perform(
+                put("/internal/devices/device-1/child-profile")
+                        .contentType(MediaType.APPLICATION_JSON).content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").isNumber());
+    }
+
+    @Test
+    void projectionConflictRemainsHttp409WithGlobalHandlerInstalled() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+        when(service.apply(eq("device-1"), any())).thenThrow(new ProjectionConflictException("conflict"));
+        String json = "{\"mode\":\"clear\",\"revision\":1,\"payloadHash\":\""
+                + "0".repeat(64) + "\",\"profile\":null}";
+
+        mvc(service).perform(put("/internal/devices/device-1/child-profile")
+                .contentType(MediaType.APPLICATION_JSON).content(json))
+                .andExpect(status().isConflict());
+    }
+
+    private static MockMvc mvc(DeviceChildProfileProjectionService service) {
+        return MockMvcBuilders.standaloneSetup(new DeviceChildProfileInternalController(service))
+                .setControllerAdvice(new RenExceptionHandler())
+                .build();
     }
 
     private static String replaceJson(String birthYear) {

@@ -110,6 +110,25 @@ class DeviceChildProfileProjectionServiceTest {
         verify(deviceDao, never()).clearChildProfile(any());
     }
 
+    @Test
+    void persistsTheNormalizedProfileRepresentedByCanonicalBytes() {
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null));
+        Profile profile = new Profile(PROFILE_ID, "A\u0301n", 2018,
+                List.of("é", "z", "e\u0301", "a"), "cafe\u0301", "de\u0301butant", "inge\u0301nieur");
+        DeviceChildProfileProjectionDTO request = replace(3, profile);
+
+        service.apply(DEVICE_ID, request);
+
+        ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
+        verify(deviceDao).replaceChildProfile(captor.capture());
+        DeviceEntity stored = captor.getValue();
+        assertEquals("Án", stored.getChildName());
+        assertEquals("a,z,é", stored.getChildInterests());
+        assertEquals("café", stored.getLearningStyle());
+        assertEquals("débutant", stored.getVocabularyLevel());
+        assertEquals("ingénieur", stored.getParentCareer());
+    }
+
     @ParameterizedTest(name = "rejects profile storage overflow: {0}")
     @MethodSource("oversizedProfiles")
     void rejectsProfileFieldsThatExceedStorageBeforeLocking(String field, Profile profile) {

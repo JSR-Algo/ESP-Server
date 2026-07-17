@@ -89,13 +89,16 @@ class DeviceChildProfileMigrationTest {
         }
         SqlSessionFactoryBean factoryBean = new SqlSessionFactoryBean();
         factoryBean.setDataSource(dataSource);
+        org.apache.ibatis.session.Configuration mybatisConfiguration = new org.apache.ibatis.session.Configuration();
+        mybatisConfiguration.setMapUnderscoreToCamelCase(true);
+        factoryBean.setConfiguration(mybatisConfiguration);
         factoryBean.setMapperLocations(new ClassPathResource("mapper/device/DeviceDao.xml"));
         SqlSessionTemplate session = new SqlSessionTemplate(factoryBean.getObject());
         DeviceChildProfileProjectionService service = new DeviceChildProfileProjectionService(session.getMapper(DeviceDao.class));
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
 
-        Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174000", "An", 2018,
-                List.of("music", "robots"), "visual", "beginner", "engineer");
+        Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174000", "A\u0301n", 2018,
+                List.of("é", "z", "e\u0301", "a"), "cafe\u0301", "de\u0301butant", "inge\u0301nieur");
         String replaceHash = ChildProfileProjectionCanonicalizer.canonicalize("replace", 1, profile.toCanonicalProfile()).sha256();
         transaction.executeWithoutResult(status -> service.apply("mapped-device",
                 new DeviceChildProfileProjectionDTO("replace", 1, replaceHash, profile)));
@@ -105,11 +108,32 @@ class DeviceChildProfileMigrationTest {
             result.next();
             assertEquals(profile.childProfileId(), result.getString("child_profile_id"));
             assertEquals(2018, result.getInt("child_birth_year"));
-            assertEquals("An", result.getString("child_name"));
+            assertEquals("Án", result.getString("child_name"));
             assertEquals(Year.now().getValue() - 2018, result.getInt("child_age"));
-            assertEquals("music,robots", result.getString("child_interests"));
+            assertEquals("a,z,é", result.getString("child_interests"));
+            assertEquals("café", result.getString("learning_style"));
+            assertEquals("débutant", result.getString("vocabulary_level"));
+            assertEquals("ingénieur", result.getString("parent_career"));
             assertEquals(1, result.getLong("child_profile_revision"));
             assertEquals(replaceHash, result.getString("child_profile_payload_hash"));
+        }
+
+        Profile equivalentReplay = new Profile(profile.childProfileId(), "Án", 2018,
+                List.of("z", "a", "e\u0301", "é"), "café", "débutant", "ingénieur");
+        String replayHash = ChildProfileProjectionCanonicalizer.canonicalize(
+                "replace", 1, equivalentReplay.toCanonicalProfile()).sha256();
+        assertEquals(replaceHash, replayHash);
+        DeviceChildProfileProjectionService.Outcome replayOutcome = transaction.execute(status -> service.apply(
+                "mapped-device", new DeviceChildProfileProjectionDTO("replace", 1, replayHash, equivalentReplay)));
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, replayOutcome);
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("SELECT child_name, child_interests, learning_style, vocabulary_level, parent_career FROM ai_device WHERE id='mapped-device'")) {
+            result.next();
+            assertEquals("Án", result.getString("child_name"));
+            assertEquals("a,z,é", result.getString("child_interests"));
+            assertEquals("café", result.getString("learning_style"));
+            assertEquals("débutant", result.getString("vocabulary_level"));
+            assertEquals("ingénieur", result.getString("parent_career"));
         }
 
         String clearHash = ChildProfileProjectionCanonicalizer.canonicalize("clear", 2, null).sha256();
