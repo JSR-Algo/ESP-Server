@@ -358,6 +358,60 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs["timeout"], 30)
         listed_call.assert_not_awaited()
 
+    async def test_hil_firmware_client_identity_resolves_live_mac_connection(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        firmware_uuid = "fce7bec8-8478-4ab4-817f-7b87c41c1f91"
+
+        for identity_attributes in (
+            {"client_id": firmware_uuid, "headers": {}},
+            {"headers": {"client-id": firmware_uuid}},
+            {"headers": {"Client-Id": firmware_uuid}},
+        ):
+            with self.subTest(identity_attributes=identity_attributes):
+                conn = SimpleNamespace(
+                    device_id=self.HIL_MAC,
+                    mcp_client=object(),
+                    **identity_attributes,
+                )
+                handler = DeviceMCPAdminHandler(
+                    {"lesson": {"storage_hil_device_allowlist": [self.HIL_MAC]}},
+                    {self.HIL_MAC: conn},
+                )
+                raw_call = AsyncMock(return_value="ok")
+                backend_lookup = AsyncMock(
+                    side_effect=AssertionError("backend identity fallback must not run")
+                )
+
+                with patch(
+                    "core.api.device_mcp_admin_handler._call_raw_mcp_tool",
+                    raw_call,
+                ), patch.object(
+                    handler._shared,
+                    "_find_connection",
+                    backend_lookup,
+                ):
+                    response = await handler.handle_post(
+                        _FakeRequest(
+                            device_id=firmware_uuid,
+                            body={
+                                "toolName": "self.lesson_assets.hil.status",
+                                "allowUnlisted": True,
+                                "args": {},
+                            },
+                        )
+                    )
+
+                self.assertEqual(response.status, 202)
+                self.assertEqual(
+                    await _response_json(response),
+                    {"data": {"called": True, "result": "ok"}},
+                )
+                raw_call.assert_awaited_once()
+                self.assertIs(raw_call.await_args.args[0], conn)
+                backend_lookup.assert_not_awaited()
+
     async def test_hil_prefix_unknown_tool_and_non_exact_allow_unlisted_are_forbidden(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
         raw_call = AsyncMock(side_effect=AssertionError("must not dispatch"))

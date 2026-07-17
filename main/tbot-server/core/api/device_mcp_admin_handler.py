@@ -95,6 +95,14 @@ def _normalize_mac(value) -> Optional[str]:
     return ":".join(parts)
 
 
+def _conn_client_identity(conn):
+    client_id = getattr(conn, "client_id", None)
+    if client_id:
+        return client_id
+    headers = getattr(conn, "headers", None) or {}
+    return headers.get("client-id") or headers.get("Client-Id")
+
+
 def _hil_device_is_allowlisted(config: dict, conn) -> bool:
     lesson = config.get("lesson") if isinstance(config, dict) else None
     allowlist = (
@@ -190,6 +198,16 @@ class DeviceMCPAdminHandler:
         self.connections = connections
         self._shared = LessonNudgeHandler(config, connections)
 
+    async def _find_connection(self, device_id):
+        if self.connections is not None:
+            conn = self.connections.get(device_id)
+            if conn is not None:
+                return conn
+            for candidate in self.connections.values():
+                if _conn_client_identity(candidate) == device_id:
+                    return candidate
+        return await self._shared._find_connection(device_id)
+
     async def handle_post(self, request: web.Request) -> web.Response:
         auth_error = self._shared._authorize(request)
         if auth_error is not None:
@@ -216,7 +234,7 @@ class DeviceMCPAdminHandler:
             return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         device_id = request.match_info.get("deviceId", "")
-        conn = await self._shared._find_connection(device_id)
+        conn = await self._find_connection(device_id)
         if conn is None:
             return web.json_response(
                 {"data": {"called": False, "reason": "device-offline"}},
