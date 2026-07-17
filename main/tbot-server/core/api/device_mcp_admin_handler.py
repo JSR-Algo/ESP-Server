@@ -208,7 +208,7 @@ class DeviceMCPAdminHandler:
     async def _find_connection(self, device_id):
         if self.connections is not None:
             conn = self.connections.get(device_id)
-            if conn is not None:
+            if conn is not None and _normalize_mac(device_id) is not None:
                 return conn
             matched = None
             for candidate in self.connections.values():
@@ -216,6 +216,8 @@ class DeviceMCPAdminHandler:
                     if matched is not None:
                         raise MCPAmbiguousClientIdentityError()
                     matched = candidate
+            if conn is not None:
+                return conn
             if matched is not None:
                 return matched
         return await self._shared._find_connection(device_id)
