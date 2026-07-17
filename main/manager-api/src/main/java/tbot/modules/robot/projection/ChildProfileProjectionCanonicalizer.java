@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 public final class ChildProfileProjectionCanonicalizer {
+    private static final long JAVASCRIPT_MAX_SAFE_INTEGER = 9007199254740991L;
     private static final Pattern CANONICAL_UUID = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
 
@@ -38,6 +39,9 @@ public final class ChildProfileProjectionCanonicalizer {
             String mode,
             long revision,
             ChildProfileProjection profile) {
+        if (revision < 0 || revision > JAVASCRIPT_MAX_SAFE_INTEGER) {
+            throw new IllegalArgumentException("revision must be a nonnegative JavaScript safe integer");
+        }
         if (!"replace".equals(mode) && !"clear".equals(mode)) {
             throw new IllegalArgumentException("mode must be replace or clear");
         }
@@ -111,10 +115,14 @@ public final class ChildProfileProjectionCanonicalizer {
     }
 
     private static String jsonStringArray(List<String> values) {
-        return values.stream().map(ChildProfileProjectionCanonicalizer::jsonString)
-                .reduce((left, right) -> left + "," + right)
-                .map(value -> "[" + value + "]")
-                .orElse("[]");
+        StringBuilder encoded = new StringBuilder("[");
+        for (int index = 0; index < values.size(); index++) {
+            if (index > 0) {
+                encoded.append(',');
+            }
+            encoded.append(jsonString(values.get(index)));
+        }
+        return encoded.append(']').toString();
     }
 
     private static String nullableString(String value) {

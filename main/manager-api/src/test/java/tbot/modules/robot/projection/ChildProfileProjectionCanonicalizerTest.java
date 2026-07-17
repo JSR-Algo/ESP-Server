@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -83,6 +84,13 @@ class ChildProfileProjectionCanonicalizerTest {
                 Arguments.of("vocabularyLevel", "low", "\udc00"),
                 Arguments.of("parentCareer", "high", "\ud800"),
                 Arguments.of("parentCareer", "low", "\udc00"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = { -1L, 9007199254740992L, Long.MAX_VALUE })
+    void rejectsRevisionOutsideNonnegativeJavaScriptSafeIntegerRange(long revision) {
+        assertThrows(IllegalArgumentException.class,
+                () -> ChildProfileProjectionCanonicalizer.canonicalize("clear", revision, null));
     }
 
     private static JsonNode readFixture() throws Exception {
