@@ -16,6 +16,7 @@ BUILD_IDENTITY = importlib.util.module_from_spec(BUILD_IDENTITY_SPEC)
 assert BUILD_IDENTITY_SPEC.loader is not None
 BUILD_IDENTITY_SPEC.loader.exec_module(BUILD_IDENTITY)
 load_build_identity = BUILD_IDENTITY.load_build_identity
+load_release_order_artifact = BUILD_IDENTITY.load_release_order_artifact
 atomic_write_json = BUILD_IDENTITY.atomic_write_json
 BuildIdentityError = BUILD_IDENTITY.BuildIdentityError
 BUILD_IDENTITY_EXCEPTIONS = (
@@ -424,6 +425,7 @@ def minimum_transition_count(value):
 def add_production_evidence_args(parser):
     parser.add_argument('--minimum-transitions', type=minimum_transition_count)
     parser.add_argument('--build-manifest', type=Path)
+    parser.add_argument('--release-order-artifact', type=Path)
 
 
 def bind_production_evidence(report, args):
@@ -432,7 +434,11 @@ def bind_production_evidence(report, args):
     report['buildIdentity'] = load_build_identity(
         args.build_manifest, expected_profile='production'
     )
+    report['releaseOrderEvidence'] = load_release_order_artifact(
+        args.release_order_artifact, production_identity=report['buildIdentity']
+    )
     report['buildIdentityErrors'] = []
+    report['releaseOrderErrors'] = []
     return report
 
 
@@ -442,6 +448,8 @@ def record_build_identity_failure(report, args, exc):
     report.setdefault('metrics', {})['minimumTransitionsRequired'] = args.minimum_transitions
     report['buildIdentity'] = None
     report['buildIdentityErrors'] = [str(exc)]
+    report['releaseOrderEvidence'] = None
+    report['releaseOrderErrors'] = [str(exc)]
     if args.output:
         atomic_write_json(args.output, report)
     print(f'task14 production build identity: FAIL: {exc}', file=sys.stderr)
@@ -480,6 +488,8 @@ def main():
         parser.error('--minimum-transitions is required for live evidence')
     if args.build_manifest is None:
         parser.error('--build-manifest is required for live evidence')
+    if args.release_order_artifact is None:
+        parser.error('--release-order-artifact is required for live evidence')
     if len(args.logs) < 2:
         parser.error('serial and server logs required')
     serial, server = _source_logs(args.logs)

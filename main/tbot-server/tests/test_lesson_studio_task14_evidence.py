@@ -92,12 +92,13 @@ def test_fault_driver_independently_binds_control_artifacts_and_serial_sequences
     }
     (tmp_path / "arm-response.json").write_text(json.dumps(arm))
     (tmp_path / "status-after.json").write_text(json.dumps(status))
-    (tmp_path / "serial.log").write_text(
+    serial = (
         "HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks "
         f"cache_key={cache_key} count=1 reached_sequence=11\n"
         "HIL_STORAGE_FAULT_CONSUMED operation=evict checkpoint=after_unlinks "
         f"action=fail cache_key={cache_key} consumed_sequence=12\n"
     )
+    (tmp_path / "serial.log").write_text(serial)
 
     assert fault._hil_control_artifact_errors(
         "evict-after-unlinks-fail", tmp_path, result
@@ -110,6 +111,16 @@ def test_fault_driver_independently_binds_control_artifacts_and_serial_sequences
     )
 
     (tmp_path / "arm-response.json").write_text(json.dumps(arm))
+    for tampered_serial in (
+        serial.replace("count=1", "count=0"),
+        serial.replace("action=fail", "action=pause"),
+    ):
+        (tmp_path / "serial.log").write_text(tampered_serial)
+        assert fault._hil_control_artifact_errors(
+            "evict-after-unlinks-fail", tmp_path, result
+        )
+
+    (tmp_path / "serial.log").write_text(serial)
     (tmp_path / "status-after.json").write_text(json.dumps({**status, "reachedSequence": 12}))
     assert fault._hil_control_artifact_errors(
         "evict-after-unlinks-fail", tmp_path, result
@@ -121,6 +132,113 @@ def test_fault_driver_independently_binds_control_artifacts_and_serial_sequences
         "evict-after-unlinks-fail", tmp_path, result
     )
 
+
+def test_fault_driver_semantically_validates_all_hil_artifacts_and_credentials(tmp_path):
+    cache_key = f"hil-task14/v1-{'d' * 64}"
+    sibling = f"hil-task14/v2-{'d' * 64}"
+    fixture = {
+        "cacheKey": cache_key,
+        "siblingCacheKey": sibling,
+        "fixture": "preservation_set",
+        "status": "staged",
+        "changed": True,
+    }
+    inspect = {
+        "cacheKey": cache_key,
+        "siblingCacheKey": sibling,
+        "status": "inspected",
+        "truncated": False,
+        "entries": [],
+    }
+    trigger = {
+        "cacheKey": cache_key,
+        "status": "partial_evict_recovery_required",
+        "evicted": False,
+        "notFound": False,
+        "fileCount": 1,
+        "reason": "partial_evict_recovery_required",
+    }
+    result = {
+        "cacheKey": cache_key,
+        "triggerOutcome": trigger,
+        "triggerResponseAbsent": False,
+    }
+    payloads = {
+        "stage-response.json": fixture,
+        "inspect-before.json": inspect,
+        "inspect-after.json": inspect,
+        "trigger-response.json": trigger,
+        "cleanup-response.json": {**fixture, "status": "cleaned"},
+    }
+    for name, payload in payloads.items():
+        (tmp_path / name).write_text(json.dumps(payload))
+
+    assert fault._hil_semantic_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    ) == []
+
+    for name, candidate in (
+        ("stage-response.json", {**fixture, "changed": False}),
+        ("inspect-after.json", {**inspect, "cacheKey": sibling}),
+        ("trigger-response.json", {**trigger, "fileCount": 0}),
+        ("cleanup-response.json", {**fixture, "status": "staged"}),
+    ):
+        original = (tmp_path / name).read_text()
+        (tmp_path / name).write_text(json.dumps(candidate))
+        assert fault._hil_semantic_artifact_errors(
+            "evict-after-unlinks-fail", tmp_path, result
+        )
+        (tmp_path / name).write_text(original)
+
+    credential_forms = (
+        "Authorization: Bearer opaque-value",
+        "Proxy-Authorization=Basic opaque-value",
+        "X-Mint-Secret: opaque-value",
+        "token: opaque-value",
+        "secret=opaque-value",
+    )
+    for credential in credential_forms:
+        (tmp_path / "server.log").write_text(credential + "\n")
+        assert fault._hil_artifact_credential_errors(tmp_path, ("server.log",))
+
+
+def test_fault_driver_power_artifacts_bind_post_reboot_inspection(tmp_path):
+    cache_key = f"hil-task14/v1-{'d' * 64}"
+    sibling = f"hil-task14/v2-{'d' * 64}"
+    inspect = {
+        "cacheKey": cache_key,
+        "siblingCacheKey": sibling,
+        "status": "inspected",
+        "truncated": False,
+        "entries": [],
+    }
+    for name in ("inspect-before.json", "inspect-after.json", "post-reboot-inspect.json"):
+        (tmp_path / name).write_text(json.dumps(inspect))
+    fixture = {
+        "cacheKey": cache_key,
+        "siblingCacheKey": sibling,
+        "fixture": "preservation_set",
+        "status": "staged",
+        "changed": True,
+    }
+    (tmp_path / "stage-response.json").write_text(json.dumps(fixture))
+    (tmp_path / "cleanup-response.json").write_text(
+        json.dumps({**fixture, "status": "cleaned"})
+    )
+    result = {
+        "cacheKey": cache_key,
+        "triggerOutcome": None,
+        "triggerResponseAbsent": True,
+    }
+    assert fault._hil_semantic_artifact_errors(
+        fault.HIL_POWER_LOSS_SCENARIO, tmp_path, result
+    ) == []
+    (tmp_path / "post-reboot-inspect.json").write_text(
+        json.dumps({**inspect, "siblingCacheKey": cache_key})
+    )
+    assert fault._hil_semantic_artifact_errors(
+        fault.HIL_POWER_LOSS_SCENARIO, tmp_path, result
+    )
 
 def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     build = {
@@ -310,6 +428,7 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
     }
     monkeypatch.setattr(fault, "validate_hil_storage_result", lambda *_: [])
     monkeypatch.setattr(fault, "_hil_control_artifact_errors", lambda *_: [])
+    monkeypatch.setattr(fault, "_hil_semantic_artifact_errors", lambda *_: [])
     for name in fault.HIL_POWER_REQUIRED:
         if name != "SHA256SUMS":
             (tmp_path / name).write_text("x\n")
@@ -1931,6 +2050,7 @@ def test_production_evidence_binds_104_transition_requirement_and_build_identity
     capture_script.write_text("capture\n")
     verifier_script.write_text("verify\n")
     build_manifest = tmp_path / "lesson-storage-hil-build.json"
+    release_order_artifact = tmp_path / "release-order.json"
     serial_path.write_text(serial_log)
     server_path.write_text(server_log)
     timeline_path.write_text(authentic_soak_timeline((35, 35, 34)))
@@ -1947,12 +2067,20 @@ def test_production_evidence_binds_104_transition_requirement_and_build_identity
         "appPartitionFreeBytes": 1,
     }
     calls = []
+    release_calls = []
 
     def fake_load(path, *, expected_profile=None):
         calls.append((path, expected_profile))
         return build_identity
 
     monkeypatch.setattr(module, "load_build_identity", fake_load)
+    monkeypatch.setattr(
+        module,
+        "load_release_order_artifact",
+        lambda path, *, production_identity: release_calls.append(
+            (path, production_identity)
+        ) or {"releaseOrder": list(fault.HIL_RELEASE_ORDER)},
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1966,6 +2094,8 @@ def test_production_evidence_binds_104_transition_requirement_and_build_identity
             "104",
             "--build-manifest",
             str(build_manifest),
+            "--release-order-artifact",
+            str(release_order_artifact),
             "--fixture-version",
             soak.FIXTURE_VERSION,
             "--course-id",
@@ -1984,8 +2114,31 @@ def test_production_evidence_binds_104_transition_requirement_and_build_identity
     assert report["minimumTransitionsRequired"] == 104
     assert report["metrics"]["minimumTransitionsRequired"] == 104
     assert report["buildIdentity"] == build_identity
+    assert report["releaseOrderEvidence"]["releaseOrder"] == list(fault.HIL_RELEASE_ORDER)
+    assert report["releaseOrderErrors"] == []
     assert report["metrics"]["transitions"] == 104
     assert calls == [(build_manifest, "production")]
+    assert release_calls == [(release_order_artifact, build_identity)]
+
+
+@pytest.mark.parametrize("module", (soak, audit))
+def test_production_evidence_cli_requires_release_order_artifact(module, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            module.__file__,
+            "serial.log",
+            "server.log",
+            "--minimum-transitions",
+            "104",
+            "--build-manifest",
+            "lesson-storage-hil-build.json",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("module", (soak, audit))
@@ -2037,6 +2190,8 @@ def test_production_evidence_cli_replaces_stale_output_on_invalid_build_manifest
             "104",
             "--build-manifest",
             str(build_manifest),
+            "--release-order-artifact",
+            str(tmp_path / "release-order.json"),
             "--fixture-version",
             soak.FIXTURE_VERSION,
             "--course-id",
@@ -2267,6 +2422,8 @@ def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     assert "--capture-only" in live
     assert live.count("--minimum-transitions 104") == 2
     assert live.count('--build-manifest "$PRODUCTION_BUILD_MANIFEST"') == 2
+    assert live.count('--release-order-artifact "$RELEASE_ORDER_ARTIFACT"') == 2
+    assert "lesson_studio_task14_build_identity.py release" in live
     assert "hil-matrix-pass -> production-reflash -> production-attest -> production-soak" in live
     assert "/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-production-lesson-studio-continued" in live
     assert "/Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued" in live

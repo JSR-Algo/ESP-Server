@@ -223,6 +223,40 @@ def validate_release_order(events):
     return events
 
 
+def _validate_flat_identity(value, expected_profile):
+    require(isinstance(value, dict) and set(value) == FLAT_FIELDS, "invalid flat build identity")
+    require(value.get("profile") == expected_profile, "foreign flat build profile")
+    require(value.get("configEnabled") is (expected_profile == "hil"), "flat build config mismatch")
+    require(isinstance(value.get("sourceCommit"), str) and COMMIT_RE.fullmatch(value["sourceCommit"]), "invalid flat source commit")
+    for name in ("sdkconfigSha256", "binarySha256", "elfSha256", "mapSha256", "archiveSha256"):
+        require(isinstance(value.get(name), str) and SHA256_RE.fullmatch(value[name]), f"invalid flat build hash: {name}")
+    for name in ("binaryBytes", "appPartitionFreeBytes"):
+        _exact_int(value.get(name), f"flat {name}", minimum=1)
+    return value
+
+
+def load_release_order_artifact(path, *, production_identity):
+    path = Path(path)
+    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release-order artifact missing")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BuildIdentityError("invalid release-order artifact JSON") from exc
+    require(
+        isinstance(value, dict)
+        and set(value) == {"sourceCommit", "hil", "production", "releaseOrder"},
+        "invalid release-order artifact fields",
+    )
+    hil = _validate_flat_identity(value.get("hil"), "hil")
+    production = _validate_flat_identity(value.get("production"), "production")
+    _validate_flat_identity(production_identity, "production")
+    require(production == production_identity, "release artifact production build mismatch")
+    require(value.get("sourceCommit") == hil["sourceCommit"] == production["sourceCommit"], "release artifact source mismatch")
+    require(hil["binarySha256"] != production["binarySha256"], "release artifact binaries must differ")
+    validate_release_order(value.get("releaseOrder"))
+    return value
+
+
 def atomic_write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

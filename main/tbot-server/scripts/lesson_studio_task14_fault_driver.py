@@ -2,6 +2,7 @@
 """Fail-closed evidence collector; it never injects a fault or contacts production."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -11,6 +12,19 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+
+HIL_VALIDATOR_PATH=Path(__file__).with_name('lesson_studio_task14_hil_storage.py')
+HIL_VALIDATOR_SPEC=importlib.util.spec_from_file_location(
+    'lesson_studio_task14_hil_pure_validators',HIL_VALIDATOR_PATH
+)
+HIL_VALIDATOR_MODULE=importlib.util.module_from_spec(HIL_VALIDATOR_SPEC)
+assert HIL_VALIDATOR_SPEC.loader is not None
+HIL_VALIDATOR_SPEC.loader.exec_module(HIL_VALIDATOR_MODULE)
+HilValidationError=HIL_VALIDATOR_MODULE.HilValidationError
+validate_fixture_response=HIL_VALIDATOR_MODULE.validate_fixture_response
+validate_inspect_response=HIL_VALIDATOR_MODULE.validate_inspect_response
+validate_scenario_outcome=HIL_VALIDATOR_MODULE.validate_scenario_outcome
+del HIL_VALIDATOR_MODULE
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
 HIL_STORAGE_SCENARIOS=(
@@ -885,16 +899,75 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
         if path.is_file():serial+='\n'+path.read_text(errors='replace')
     lines=serial.splitlines()
     marker_fields={'operation':operation,'checkpoint':checkpoint,'cache_key':cache_key}
+    reached_fields={**marker_fields,'count':HIL_SCENARIO_CONTRACT[scenario][3]}
+    consumed_fields={**marker_fields,'action':action}
     serial_reached=_hil_serial_sequence(
-        lines,'HIL_STORAGE_CHECKPOINT_REACHED',marker_fields,
+        lines,'HIL_STORAGE_CHECKPOINT_REACHED',reached_fields,
         'reached_sequence',errors,
     )
     serial_consumed=_hil_serial_sequence(
-        lines,'HIL_STORAGE_FAULT_CONSUMED',marker_fields,
+        lines,'HIL_STORAGE_FAULT_CONSUMED',consumed_fields,
         'consumed_sequence',errors,
     )
     if serial_reached!=reached or serial_consumed!=consumed:
         errors.append('HIL serial sequences do not match control artifacts')
+    return errors
+
+def _hil_artifact_credential_errors(root,names):
+    errors=[]; root=Path(root)
+    credential=re.compile(
+        r'(?im)\b(?:proxy-)?authorization\s*[:=]|\b(?:bearer|basic)\s+\S+|'
+        r'\b(?:x-mint-secret|token|secret)\s*["\']?\s*[:=]\s*\S+'
+    )
+    for name in names:
+        path=root/name
+        if not path.is_file():continue
+        text=path.read_text(errors='replace')
+        if JWT_VALUE.search(text):errors.append(f'HIL artifact contains JWT marker: {name}')
+        if re.search(r'https?://[^/\s:@]+:[^/\s@]+@',text):errors.append(f'HIL artifact contains URL userinfo: {name}')
+        if re.search(r'[?&](?:token|key|secret|password)=',text,re.I):errors.append(f'HIL artifact contains query credential: {name}')
+        if credential.search(text):errors.append(f'HIL artifact contains opaque credential: {name}')
+    return errors
+
+def _hil_semantic_artifact_errors(scenario,evidence_dir,result):
+    root=Path(evidence_dir); errors=[]
+    cache_key=result.get('cacheKey')
+    if not isinstance(cache_key,str) or '/v1-' not in cache_key:
+        return ['invalid HIL semantic artifact cache key']
+    sibling=cache_key.replace('/v1-','/v2-',1)
+    values={}
+    names=['stage-response.json','inspect-before.json','inspect-after.json','cleanup-response.json']
+    if scenario==HIL_POWER_LOSS_SCENARIO:names.append('post-reboot-inspect.json')
+    else:names.append('trigger-response.json')
+    for name in names:
+        values[name]=_load_hil_json(root/name,name,errors)
+    if errors:return errors
+    try:
+        validate_fixture_response(
+            values['stage-response.json'],cache_key,sibling,
+            'preservation_set','staged',
+        )
+        validate_inspect_response(values['inspect-before.json'],cache_key,sibling)
+        validate_inspect_response(values['inspect-after.json'],cache_key,sibling)
+        validate_fixture_response(
+            values['cleanup-response.json'],cache_key,sibling,
+            'preservation_set','cleaned',
+        )
+        if scenario==HIL_POWER_LOSS_SCENARIO:
+            post=validate_inspect_response(
+                values['post-reboot-inspect.json'],cache_key,sibling
+            )
+            if post!=values['inspect-after.json']:
+                errors.append('post-reboot inspection does not match inspect-after')
+            if result.get('triggerResponseAbsent') is not True or result.get('triggerOutcome') is not None:
+                errors.append('power-loss result contradicts absent trigger artifact')
+        else:
+            trigger=values['trigger-response.json']
+            validate_scenario_outcome(scenario,trigger,cache_key=cache_key)
+            if trigger!=result.get('triggerOutcome') or result.get('triggerResponseAbsent') is not False:
+                errors.append('trigger artifact does not match result')
+    except HilValidationError as exc:
+        errors.append(f'invalid HIL semantic artifact: {exc}')
     return errors
 
 def _hil_storage_artifact_errors(scenario,evidence_dir,result):
@@ -909,14 +982,7 @@ def _hil_storage_artifact_errors(scenario,evidence_dir,result):
         try:
             if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:raise OSError
         except OSError:errors.append(f'HIL artifact missing or invalid: {name}')
-    for name in required:
-        if name=='SHA256SUMS':continue
-        path=root/name
-        if not path.is_file():continue
-        text=path.read_text(errors='replace')
-        if JWT_VALUE.search(text):errors.append(f'HIL artifact contains JWT marker: {name}')
-        if re.search(r'https?://[^/\s:@]+:[^/\s@]+@',text):errors.append(f'HIL artifact contains URL userinfo: {name}')
-        if re.search(r'[?&](?:token|key|secret|password)=',text,re.I):errors.append(f'HIL artifact contains query credential: {name}')
+    errors.extend(_hil_artifact_credential_errors(root,required))
     build_path=root/'build-manifest.json'
     build_sha=root/'build-manifest.sha256'
     if build_path.is_file() and build_sha.is_file():
@@ -954,6 +1020,7 @@ def _hil_storage_artifact_errors(scenario,evidence_dir,result):
         if 'HIL_STORAGE_OPERATION_SUCCESS' in before_loss:
             errors.append('power-loss evidence contains success before loss')
     errors.extend(_hil_control_artifact_errors(scenario,root,result))
+    errors.extend(_hil_semantic_artifact_errors(scenario,root,result))
     return errors
 
 def build_hil_storage_report(scenario,evidence_dir):

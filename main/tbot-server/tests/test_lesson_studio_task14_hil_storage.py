@@ -563,7 +563,19 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
         command.extend(("--event", event))
     valid = subprocess.run(command, text=True, capture_output=True, check=False)
     assert valid.returncode == 0
-    assert json.loads(valid.stdout)["releaseOrder"] == events
+    release_artifact = json.loads(valid.stdout)
+    assert release_artifact["releaseOrder"] == events
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    artifact_path = tmp_path / "release-order.json"
+    artifact_path.write_text(json.dumps(release_artifact))
+    assert identity.load_release_order_artifact(
+        artifact_path, production_identity=release_artifact["production"]
+    ) == release_artifact
+    artifact_path.write_text(json.dumps({**release_artifact, "releaseOrder": events[::-1]}))
+    with pytest.raises(identity.BuildIdentityError):
+        identity.load_release_order_artifact(
+            artifact_path, production_identity=release_artifact["production"]
+        )
 
     invalid = subprocess.run(
         command[:-10] + [

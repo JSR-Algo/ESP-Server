@@ -14,6 +14,7 @@ SOAK_SPEC.loader.exec_module(SOAK)
 validate_live_attestation = SOAK.validate_live_attestation
 minimum_transition_count = SOAK.minimum_transition_count
 load_build_identity = SOAK.load_build_identity
+load_release_order_artifact = SOAK.load_release_order_artifact
 
 MARKERS = {
     'allocationFailure': r'alloc(?:ation)? failed|failed to alloc(?:ate|ation)|out of memory|malloc failed',
@@ -133,6 +134,8 @@ def main():
         parser.error('--minimum-transitions is required for live evidence')
     if args.build_manifest is None:
         parser.error('--build-manifest is required for live evidence')
+    if args.release_order_artifact is None:
+        parser.error('--release-order-artifact is required for live evidence')
     if len(args.logs) < 2:
         parser.error('serial and server logs required')
     serial, server = SOAK._source_logs(args.logs)
@@ -150,7 +153,11 @@ def main():
         report['buildIdentity'] = load_build_identity(
             args.build_manifest, expected_profile='production'
         )
+        report['releaseOrderEvidence'] = load_release_order_artifact(
+            args.release_order_artifact, production_identity=report['buildIdentity']
+        )
         report['buildIdentityErrors'] = []
+        report['releaseOrderErrors'] = []
     except SOAK.BUILD_IDENTITY_EXCEPTIONS as exc:
         return SOAK.record_build_identity_failure(report, args, exc)
     data = json.dumps(report, indent=2) + '\n'

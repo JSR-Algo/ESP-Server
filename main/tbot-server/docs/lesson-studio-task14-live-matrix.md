@@ -29,9 +29,11 @@ export TBOT_ROOT=/Users/manhhodinh/Documents/TBOT
 export ESP_WORKTREE=/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-production-lesson-studio-continued
 export BACKEND_WORKTREE=/Users/manhhodinh/Documents/TBOT/tbot-backend
 export FIRMWARE_WORKTREE=/Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued
+export HIL_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-hil/lesson-storage-hil-build.json"
 export PRODUCTION_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-production/lesson-storage-hil-build.json"
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
+export RELEASE_ORDER_ARTIFACT="$EVIDENCE_ROOT/release-order.json"
 export DEVICE_ID='28:84:85:85:1a:80' # exact live connection key used by the eviction route
 export DEVICE_ALIAS='fce7bec8-8478-4ab4-817f-7b87c41c1f91'
 export BACKEND_DEVICE_ID='14140000-0000-4000-8000-000000000004'
@@ -438,6 +440,23 @@ from the exact paired source commit, verify that the selected manifest has
 profile `production` and HIL disabled, and only then collect the production
 soak. Never count transitions captured from the HIL image toward production.
 
+After production attestation and before starting the soak, materialize the
+validated paired-build release order. The soak and audit commands reject a
+missing, reordered, foreign-build, or hand-edited contradictory artifact:
+
+```bash
+cd "$ESP_WORKTREE/main/tbot-server"
+python3 scripts/lesson_studio_task14_build_identity.py release \
+  --hil-manifest "$HIL_BUILD_MANIFEST" \
+  --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
+  --event hil-flash \
+  --event hil-matrix-pass \
+  --event production-reflash \
+  --event production-attest \
+  --event production-soak \
+  --output "$RELEASE_ORDER_ARTIFACT"
+```
+
 Capture the raw production soak timeline without applying the single-lesson
 identity, marker, or verifier gates. Raw mode still requires non-empty serial
 and server streams for the whole bounded capture and fails on either source
@@ -470,6 +489,7 @@ python3 scripts/lesson_studio_task14_soak.py \
   --verifier-script "$VERIFIER_SCRIPT" \
   --minimum-transitions 104 \
   --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
+  --release-order-artifact "$RELEASE_ORDER_ARTIFACT" \
   --output "$EVIDENCE_ROOT/soak/report.json"
 python3 scripts/lesson_studio_task14_log_audit.py \
   "$EVIDENCE_ROOT/soak/capture/firmware-serial.log" \
@@ -482,6 +502,7 @@ python3 scripts/lesson_studio_task14_log_audit.py \
   --verifier-script "$VERIFIER_SCRIPT" \
   --minimum-transitions 104 \
   --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
+  --release-order-artifact "$RELEASE_ORDER_ARTIFACT" \
   --output "$EVIDENCE_ROOT/soak/audit.json"
 ```
 
@@ -497,6 +518,8 @@ boundary instead of being correlated by file order alone.
 Both JSON reports must contain `minimumTransitionsRequired=104` and the exact
 flattened `buildIdentity` loaded from `PRODUCTION_BUILD_MANIFEST`; a HIL,
 unverified, stale, or foreign-profile manifest is a hard failure.
+Both reports must also contain `releaseOrderEvidence` loaded from
+`RELEASE_ORDER_ARTIFACT` and bound to that same production build identity.
 
 ## Evidence schema
 
