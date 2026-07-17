@@ -1771,7 +1771,9 @@ def test_publish_matrix_report_removes_output_when_inputs_change(tmp_path, monke
     (
         "scenario-set", "scenario-extra", "evidence-path", "evidence-hash", "scenario-status",
         "validator", "matrix-build", "matrix-device", "artifact-hash",
-        "checksum-manifest",
+        "checksum-manifest", "recovery-missing", "recovery-hash",
+        "recovery-content", "recovery-result", "quarantine-path",
+        "recovery-semantics", "validator-summary",
     ),
 )
 def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, mutation):
@@ -1803,6 +1805,70 @@ def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, muta
         report["connectionIdentity"]["deviceId"] = report["deviceId"]
     elif mutation == "artifact-hash":
         first["artifacts"]["result.json"] = "0" * 64
+    elif mutation == "recovery-missing":
+        (matrix_root / first["evidencePath"]).parent.joinpath(
+            "recovery-response.json"
+        ).unlink()
+    elif mutation == "recovery-hash":
+        first["artifacts"]["recovery-response.json"] = "0" * 64
+    elif mutation == "recovery-content":
+        recovery_path = (matrix_root / first["evidencePath"]).parent / "recovery-response.json"
+        recovery_path.write_text(json.dumps({"attempted": True}))
+    elif mutation == "recovery-result":
+        scenario_dir = (matrix_root / first["evidencePath"]).parent
+        recovery_path = scenario_dir / "recovery-response.json"
+        recovery = json.loads(recovery_path.read_text())
+        recovery["attempted"] = not recovery["attempted"]
+        recovery_path.write_text(json.dumps(recovery))
+        first["artifacts"]["recovery-response.json"] = sha256(recovery_path)
+        checksum_path = scenario_dir / "SHA256SUMS"
+        checksum_path.write_text("".join(
+            f"{first['artifacts'][name]}  {name}\n"
+            for name in identity.HIL_ORDINARY_ARTIFACTS
+            if name != "SHA256SUMS"
+        ))
+        first["sha256SumsSha256"] = sha256(checksum_path)
+    elif mutation == "quarantine-path":
+        first["evidencePath"] = (
+            "../storage-hil-failures/evict-before-first-unlink-fail/evidence.json"
+        )
+    elif mutation == "recovery-semantics":
+        record = report["scenarios"][1]
+        scenario_dir = (matrix_root / record["evidencePath"]).parent
+        recovery_path = scenario_dir / "recovery-response.json"
+        recovery = json.loads(recovery_path.read_text())
+        recovery["operation"] = "sync"
+        recovery_path.write_text(json.dumps(recovery))
+        result_path = scenario_dir / "result.json"
+        result = json.loads(result_path.read_text())
+        result["recovery"] = recovery
+        result_path.write_text(json.dumps(result))
+        for name in ("recovery-response.json", "result.json"):
+            record["artifacts"][name] = sha256(scenario_dir / name)
+        checksum_path = scenario_dir / "SHA256SUMS"
+        checksum_path.write_text("".join(
+            f"{record['artifacts'][name]}  {name}\n"
+            for name in identity.HIL_ORDINARY_ARTIFACTS
+            if name != "SHA256SUMS"
+        ))
+        record["sha256SumsSha256"] = sha256(checksum_path)
+    elif mutation == "validator-summary":
+        scenario_dir = (matrix_root / first["evidencePath"]).parent
+        evidence_path = scenario_dir / "evidence.json"
+        evidence_path.write_text(json.dumps({
+            "scenario": first["scenario"],
+            "status": "PASS",
+            "validationErrors": [],
+        }))
+        first["artifacts"]["evidence.json"] = sha256(evidence_path)
+        first["evidenceSha256"] = first["artifacts"]["evidence.json"]
+        checksum_path = scenario_dir / "SHA256SUMS"
+        checksum_path.write_text("".join(
+            f"{first['artifacts'][name]}  {name}\n"
+            for name in identity.HIL_ORDINARY_ARTIFACTS
+            if name != "SHA256SUMS"
+        ))
+        first["sha256SumsSha256"] = sha256(checksum_path)
     else:
         checksum = matrix_root / first["sha256SumsPath"]
         checksum.write_text(checksum.read_text() + "invalid\n")
@@ -1823,6 +1889,19 @@ def test_runbook_releases_generated_hil_matrix_report():
     assert '--evidence "$HIL_MATRIX_REPORT"' in runbook
 
 
+def test_runbook_uses_fresh_distinct_hil_roots_and_current_serial_port():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    matrix = runbook[runbook.index(
+        "lesson_studio_task14_hil_storage.py run-matrix"
+    ):runbook.index("The attended release order is immutable")]
+
+    assert "export SERIAL_PORT='/dev/cu.usbmodem1101'" in runbook
+    assert '--evidence-dir "$EVIDENCE_ROOT/storage-hil"' in matrix
+    assert '--failure-evidence-dir "$EVIDENCE_ROOT/storage-hil-failures"' in matrix
+    assert '--before default_reset --after hard_reset' in runbook
+    assert "Do not erase NVS" in runbook
+
+
 def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
     identity = load_script("lesson_studio_task14_build_identity.py")
     hil = load_script("lesson_studio_task14_hil_storage.py")
@@ -1835,7 +1914,6 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
         directory = Path(root) / scenario
         directory.mkdir()
         if storage_layout:
-            # Build-identity's duplicated release layout remains a Task 5 update.
             expected = hil.scenario_artifact_names(
                 power_loss=scenario == identity.HIL_STORAGE_SCENARIOS[-1]
             )
@@ -1861,20 +1939,30 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
             json.dumps({
                 "scenario": scenario,
                 "status": "PASS",
+                "cacheKey": KEY,
                 "buildIdentity": hil_identity,
                 "deviceId": device_id,
                 "deviceUuid": device_uuid,
                 "connectionIdentity": connection,
+                "recovery": _matrix_recovery_payload(scenario),
+                "cleanupInspection": {"status": "inspected"},
+                "finalStatus": {"status": "idle"},
             }, sort_keys=True) + "\n"
         ).encode()
         payloads["evidence.json"] = (
             json.dumps({
                 "scenario": scenario,
                 "status": "PASS",
+                "capturedAt": "2026-07-17T00:00:00+00:00",
                 "validationErrors": [],
+                "cleanupInspection": {"status": "inspected"},
+                "finalStatus": {"status": "idle"},
             }, sort_keys=True) + "\n"
         ).encode()
         payloads["validator-exit-code.txt"] = b"0\n"
+        payloads["recovery-response.json"] = (
+            json.dumps(_matrix_recovery_payload(scenario), sort_keys=True) + "\n"
+        ).encode()
         for name, data in payloads.items():
             (directory / name).write_bytes(data)
         artifacts = {
@@ -1905,6 +1993,40 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
         "deviceUuid": device_uuid,
         "connectionIdentity": connection,
         "scenarios": scenarios,
+    }
+
+
+def _matrix_recovery_payload(scenario):
+    attempted = scenario in {
+        "evict-after-unlinks-fail", "evict-before-rmdir-fail",
+    }
+    if not attempted:
+        return {
+            "attempted": False,
+            "operation": None,
+            "reason": None,
+            "response": None,
+            "inspection": None,
+        }
+    return {
+        "attempted": True,
+        "operation": "evict",
+        "reason": "expected_partial_eviction",
+        "response": {
+            "cacheKey": KEY,
+            "status": "evicted",
+            "reason": "evicted",
+            "evicted": True,
+            "notFound": False,
+            "fileCount": 0,
+        },
+        "inspection": {
+            "cacheKey": KEY,
+            "siblingCacheKey": SIBLING,
+            "status": "inspected",
+            "truncated": False,
+            "entries": [],
+        },
     }
 
 

@@ -34,7 +34,7 @@ export PRODUCTION_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-production/les
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
 export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger"
-export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/hil-matrix-report.json"
+export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/storage-hil/hil-matrix-report.json"
 export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
 export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
 export DEVICE_ID='28:84:85:85:1a:80' # exact live connection key used by the eviction route
@@ -49,12 +49,24 @@ export MANIFEST_CHECKSUM='<64-lowercase-hex-from-the-published-manifest>'
 export CACHE_KEY='<exact-cache-key-from-the-published-manifest>'
 export CAPTURE_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_live_capture.py"
 export VERIFIER_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_log_verify.py"
-export BACKEND_URL='http://192.168.1.25:3100/v1'
-export SERIAL_PORT='<serial-port>'
-export HIL_ESP_BASE_URL='<attended-ESP-base-URL>'
-export HIL_ASSET_URL='<attended-lab-asset-URL>'
-export HIL_ASSET_SHA256='<64-lowercase-hex-asset-SHA-256>'
-export HIL_ASSET_BYTES='<positive-asset-byte-count>'
+export BACKEND_URL='http://192.168.100.209:13100/v1'
+export SERIAL_PORT='/dev/cu.usbmodem1101'
+export HIL_ESP_BASE_URL='http://127.0.0.1:8003'
+export HIL_ASSET_URL='http://192.168.100.209:18102/tvideo-demo/esp-tft/barn-192.png'
+export HIL_ASSET_SHA256='0bc9825de6b18c76990127d0ced5ff8c93dfd0bd931aa5689b3ff46e9d812679'
+export HIL_ASSET_BYTES='42986'
+export LESSON_RUNTIME_ENABLED=true
+export LESSON_MOTION_PRESETS_ENABLED=true
+export LESSON_PLAYFUL_INTERACTIONS_ENABLED=true
+export LESSON_SAMPLE_ENABLED=true
+export LESSON_SAMPLE_MODE=interactive
+export LESSON_ROLLOUT_DEVICE_ALLOWLIST="$DEVICE_ID"
+export LESSON_STORAGE_HIL_DEVICE_ALLOWLIST="$DEVICE_ID"
+export COURSE_BACKEND_URL='http://192.168.100.209:13100/v1'
+export LESSON_ASSET_ORIGIN_BASE='http://192.168.100.209:18102/tvideo-demo'
+export LESSON_ASSET_PUBLIC_BASE_URL='http://192.168.100.209:18102/tvideo-demo'
+export LESSON_ASSET_DELIVERY_MODE=sd_pack
+export TBOT_PUBLIC_WEBSOCKET_URL='ws://192.168.100.209:8000/tbot/v1/'
 export SCENARIO='cold' # set to warm for the second fresh assignment
 mkdir -p "$EVIDENCE_ROOT"
 
@@ -443,10 +455,14 @@ python3 scripts/lesson_e2e_log_verify.py \
 Run the attended storage fault matrix with the HIL build still flashed. The
 orchestrator writes `hil-matrix-report.json` atomically only after all nine
 scenario directories have passed their validators and checksum binding. Do
-not create or edit this report by hand:
+not create or edit this report by hand. Both roots must be fresh, distinct, and
+non-overlapping; failure/quarantine bundles are never release evidence:
 
 ```bash
 cd "$ESP_WORKTREE/main/tbot-server"
+test ! -e "$EVIDENCE_ROOT/storage-hil"
+test ! -e "$EVIDENCE_ROOT/storage-hil-failures"
+mkdir -p "$EVIDENCE_ROOT/storage-hil" "$EVIDENCE_ROOT/storage-hil-failures"
 python3 scripts/lesson_studio_task14_hil_storage.py run-matrix \
   --device-id "$DEVICE_ID" \
   --device-uuid "$DEVICE_ALIAS" \
@@ -456,9 +472,24 @@ python3 scripts/lesson_studio_task14_hil_storage.py run-matrix \
   --asset-sha256 "$HIL_ASSET_SHA256" \
   --asset-bytes "$HIL_ASSET_BYTES" \
   --build-manifest "$HIL_BUILD_MANIFEST" \
-  --evidence-dir "$EVIDENCE_ROOT"
+  --evidence-dir "$EVIDENCE_ROOT/storage-hil" \
+  --failure-evidence-dir "$EVIDENCE_ROOT/storage-hil-failures"
 test -f "$HIL_MATRIX_REPORT"
 ```
+
+If an attended reset is required between HIL commands, use only this safe
+identity read/reset and retain its redacted output outside scenario bundles:
+
+```bash
+/Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
+  /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py \
+  --chip esp32s3 --port "$SERIAL_PORT" \
+  --before default_reset --after hard_reset read_mac \
+  > "$EVIDENCE_ROOT/post-hil-reset-read-mac.log" 2>&1
+```
+
+Do not erase NVS: never run `erase_flash`, `erase_region`, or substitute any
+reset sequence that bypasses the production recovery path.
 
 The attended release order is immutable:
 `hil-matrix-pass -> production-reflash -> production-attest -> production-soak`.

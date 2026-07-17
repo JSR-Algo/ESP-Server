@@ -46,15 +46,17 @@ HIL_ORDINARY_ARTIFACTS = (
     "build-manifest.json", "build-manifest.sha256", "status-before.json",
     "inspect-before.json", "stage-response.json", "arm-response.json",
     "trigger-response.json", "status-after.json", "inspect-after.json",
-    "cleanup-response.json", "result.json", "evidence.json",
+    "cleanup-response.json", "recovery-response.json", "result.json", "evidence.json",
     "validator-exit-code.txt", "SHA256SUMS",
 )
+_HIL_TRIGGER_INDEX = HIL_ORDINARY_ARTIFACTS.index("trigger-response.json")
 HIL_POWER_LOSS_ARTIFACTS = (
-    tuple(name for name in HIL_ORDINARY_ARTIFACTS if name != "trigger-response.json")[:-1]
+    HIL_ORDINARY_ARTIFACTS[:_HIL_TRIGGER_INDEX]
     + (
         "checkpoint-reached-utc.txt", "power-removed-utc.txt", "reboot-serial.log",
-        "post-reboot-inspect.json", "SHA256SUMS",
+        "post-reboot-inspect.json",
     )
+    + HIL_ORDINARY_ARTIFACTS[_HIL_TRIGGER_INDEX + 1 :]
 )
 HIL_MATRIX_RECORD_FIELDS = frozenset(
     {
@@ -349,6 +351,97 @@ def _matrix_checksums(directory, expected_names):
     return declared
 
 
+def _validate_matrix_recovery(scenario, scenario_dir, result):
+    recovery = _load_matrix_json(
+        scenario_dir / "recovery-response.json", "recovery response"
+    )
+    require(
+        set(recovery) == {
+            "attempted", "operation", "reason", "response", "inspection",
+        },
+        "invalid HIL matrix recovery fields",
+    )
+    require(
+        result.get("recovery") == recovery,
+        "HIL matrix recovery/result mismatch",
+    )
+    attempted = scenario in {
+        "evict-after-unlinks-fail", "evict-before-rmdir-fail",
+    }
+    require(
+        recovery.get("attempted") is attempted,
+        "HIL matrix recovery attempt mismatch",
+    )
+    if not attempted:
+        require(
+            recovery == {
+                "attempted": False,
+                "operation": None,
+                "reason": None,
+                "response": None,
+                "inspection": None,
+            },
+            "invalid HIL matrix no-recovery evidence",
+        )
+        return
+    response = recovery.get("response")
+    inspection = recovery.get("inspection")
+    require(
+        recovery.get("operation") == "evict"
+        and recovery.get("reason") == "expected_partial_eviction",
+        "invalid HIL matrix recovery operation",
+    )
+    require(
+        isinstance(response, dict)
+        and set(response) == {
+            "cacheKey", "status", "reason", "evicted", "notFound", "fileCount",
+        }
+        and response.get("cacheKey") == result.get("cacheKey")
+        and response.get("status") == "evicted"
+        and response.get("reason") == "evicted"
+        and response.get("evicted") is True
+        and response.get("notFound") is False
+        and response.get("fileCount") == 0,
+        "invalid HIL matrix recovery response",
+    )
+    require(
+        isinstance(inspection, dict)
+        and set(inspection) == {
+            "cacheKey", "siblingCacheKey", "status", "truncated", "entries",
+        }
+        and inspection.get("cacheKey") == result.get("cacheKey")
+        and inspection.get("status") == "inspected"
+        and inspection.get("truncated") is False
+        and isinstance(inspection.get("entries"), list),
+        "invalid HIL matrix recovery inspection",
+    )
+
+
+def _validate_matrix_validator_evidence(scenario, evidence, result):
+    require(
+        set(evidence) == {
+            "scenario", "status", "capturedAt", "validationErrors",
+            "cleanupInspection", "finalStatus",
+        },
+        "invalid independent HIL validator evidence fields",
+    )
+    captured_at = evidence.get("capturedAt")
+    require(isinstance(captured_at, str), "invalid independent HIL validator UTC")
+    try:
+        parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise BuildIdentityError("invalid independent HIL validator UTC") from None
+    require(parsed.tzinfo == timezone.utc, "invalid independent HIL validator UTC")
+    require(
+        evidence.get("scenario") == scenario
+        and evidence.get("status") == "PASS"
+        and evidence.get("validationErrors") == []
+        and evidence.get("cleanupInspection") == result.get("cleanupInspection")
+        and evidence.get("finalStatus") == result.get("finalStatus"),
+        "independent HIL validator evidence is not bound to the scenario result",
+    )
+
+
 def _validate_hil_matrix(value, pair, evidence_path):
     require(
         set(value) == {
@@ -440,12 +533,6 @@ def _validate_hil_matrix(value, pair, evidence_path):
             "HIL matrix scenario validator did not succeed",
         )
         scenario_value = _load_matrix_json(scenario_evidence, "evidence")
-        require(
-            scenario_value.get("scenario") == scenario
-            and scenario_value.get("status") == "PASS"
-            and scenario_value.get("validationErrors") == [],
-            "HIL matrix validator evidence is not PASS",
-        )
         result = _load_matrix_json(scenario_dir / "result.json", "result")
         require(
             result.get("scenario") == scenario and result.get("status") == "PASS",
@@ -458,6 +545,8 @@ def _validate_hil_matrix(value, pair, evidence_path):
             result.get("connectionIdentity") == connection,
             "HIL matrix scenario connection mismatch",
         )
+        _validate_matrix_validator_evidence(scenario, scenario_value, result)
+        _validate_matrix_recovery(scenario, scenario_dir, result)
         require(
             _load_matrix_json(scenario_dir / "build-manifest.json", "build manifest")
             == pair["hil"],
