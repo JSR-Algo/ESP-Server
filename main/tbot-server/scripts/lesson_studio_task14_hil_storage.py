@@ -682,6 +682,18 @@ def validate_bounded_failure_response(value, secrets=()):
     return value
 
 
+def record_validated_failure_response(context, name, validated_value, secrets=()):
+    require(
+        isinstance(context, dict)
+        and tuple(context) == FAILURE_RESPONSE_KEYS
+        and name in FAILURE_RESPONSE_KEYS,
+        "invalid failure response context",
+    )
+    validate_bounded_failure_response(validated_value, secrets)
+    context[name] = validated_value
+    return validated_value
+
+
 def _failure_directory_name(scenario, utc_failure):
     stamp = re.sub(r"[^0-9]", "", utc_failure)[:20]
     return f"{stamp}-{scenario}"
@@ -1865,17 +1877,21 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         monitor = SerialMonitor(arguments.serial_port).start()
         phase = "status"
         status_before = client.status()
-        responses["statusBefore"] = status_before
         require(status_before["status"] == "idle", "HIL controller is not idle before scenario")
+        record_validated_failure_response(
+            responses, "statusBefore", status_before, (secret,)
+        )
         events.append("status-before")
         phase = "inspect"
         inspect_before = client.inspect(cache_key, sibling)
-        responses["inspectBefore"] = inspect_before
+        record_validated_failure_response(
+            responses, "inspectBefore", inspect_before, (secret,)
+        )
         events.append("inspect-before")
         phase = "stage"
         stage_attempted = True
         stage = client.stage(cache_key, fixture, sibling)
-        responses["stage"] = stage
+        record_validated_failure_response(responses, "stage", stage, (secret,))
         events.append("stage")
         declared = arguments.asset_bytes if checkpoint == "after_download_bytes" else 0
         phase = "arm"
@@ -1888,7 +1904,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             declared_asset_bytes=declared,
             pause_seconds=pause_seconds,
         )
-        responses["arm"] = arm
+        record_validated_failure_response(responses, "arm", arm, (secret,))
         events.append("arm")
         trigger = None
         reboot_serial = ""
@@ -1983,16 +1999,21 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         phase = "trigger"
         outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         if trigger is not None:
-            validate_bounded_failure_response(trigger, (secret,))
-            responses["trigger"] = trigger
+            record_validated_failure_response(
+                responses, "trigger", trigger, (secret,)
+            )
         events.append("trigger")
         phase = "status"
         status_after = post_status if power_loss else client.status(cache_key)
-        responses["statusAfter"] = status_after
+        record_validated_failure_response(
+            responses, "statusAfter", status_after, (secret,)
+        )
         events.append("status-after")
         phase = "inspect"
         inspect_after = post_reboot_inspect if power_loss else client.inspect(cache_key, sibling)
-        responses["inspectAfter"] = inspect_after
+        record_validated_failure_response(
+            responses, "inspectAfter", inspect_after, (secret,)
+        )
         events.append("inspect-after")
         validate_preservation_inspections(
             scenario,
@@ -2020,14 +2041,18 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                 "response": retry,
                 "inspection": recovered_inspection,
             }
-            responses["recovery"] = recovery
+            record_validated_failure_response(
+                responses, "recovery", recovery, (secret,)
+            )
             recovery_blocked_cleanup = False
         if power_loss and operation == "sync":
             evicted_retry = _trigger(client, "evict", cache_key, arguments)
             require(evicted_retry.get("evicted") is True, "retry cache cleanup eviction failed")
         phase = "cleanup"
         cleanup = client.cleanup(cache_key, fixture, sibling)
-        responses["cleanup"] = cleanup
+        record_validated_failure_response(
+            responses, "cleanup", cleanup, (secret,)
+        )
         cleaned = True
         events.append("cleanup")
         cleanup_inspect = client.inspect(cache_key, sibling)
@@ -2127,7 +2152,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         secondary_events = []
         if client is not None and stage_attempted and not cleaned and not recovery_blocked_cleanup:
             try:
-                responses["cleanup"] = client.cleanup(cache_key, fixture, sibling)
+                cleanup_response = client.cleanup(cache_key, fixture, sibling)
+                record_validated_failure_response(
+                    responses, "cleanup", cleanup_response, (secret,)
+                )
                 events.append("cleanup")
             except BaseException:
                 secondary_events.append("secondary fixture cleanup also failed")
@@ -2247,7 +2275,13 @@ def run_matrix(arguments):
             phase_changed=set_failure_phase,
             context=context,
         )
-        responses["statusBefore"] = context["statusBefore"]
+        if context["statusBefore"] is not None:
+            record_validated_failure_response(
+                responses,
+                "statusBefore",
+                context["statusBefore"],
+                (context["secret"],),
+            )
         for current_scenario in HIL_STORAGE_SCENARIOS:
             scenario_active = True
             run_scenario(arguments, current_scenario)

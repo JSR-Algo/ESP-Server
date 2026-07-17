@@ -200,6 +200,7 @@ def hil_preservation_entries(cache_key, state, digest):
 def run_scenario_with_fakes(
     monkeypatch, tmp_path, scenario, *, recovery_response=None,
     recovered_inspection=None, injected_response=None, state=None, stage_error=None,
+    inspect_before_response=None, bounded_rejection=None,
 ):
     hil = load_script("lesson_studio_task14_hil_storage.py")
     operation, checkpoint, action, threshold, pause_seconds, power_loss = hil.SCENARIO_SPECS[scenario]
@@ -214,7 +215,7 @@ def run_scenario_with_fakes(
         "sync-before-commit-rename-fail": "full",
         "sync-before-commit-rename-power-loss": "full",
     }[scenario]
-    before = preservation_inspection("missing", "missing")
+    before = inspect_before_response or preservation_inspection("missing", "missing")
     after = preservation_inspection(primary_after)
     recovered = recovered_inspection or preservation_inspection("missing")
     cleanup_inspection = preservation_inspection("missing", "missing")
@@ -294,7 +295,7 @@ def run_scenario_with_fakes(
                 else ("inspect-before", "inspect-after", "cleanup-inspect")
             )
             calls.append(labels[self.inspect_count - 1])
-            return value
+            return hil.validate_inspect_response(value, KEY, SIBLING)
 
         def stage(self, *_args):
             calls.append("stage")
@@ -364,6 +365,17 @@ def run_scenario_with_fakes(
     monkeypatch.setattr(hil, "scenario_artifact_names", lambda **_kwargs: ("SHA256SUMS",))
     monkeypatch.setattr(hil, "atomic_write_bytes", lambda *_args: None)
     monkeypatch.setattr(hil.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    if bounded_rejection is not None:
+        original_bounded = hil.validate_bounded_failure_response
+
+        def reject_selected(value, secrets=()):
+            if bounded_rejection == "recovery" and value.get("attempted") is True:
+                raise hil.HilCaptureLimitError("RECOVERY_RESPONSE_BYTES")
+            if bounded_rejection == "cleanup" and value.get("status") == "cleaned":
+                raise hil.HilCaptureLimitError("CLEANUP_RESPONSE_BYTES")
+            return original_bounded(value, secrets)
+
+        monkeypatch.setattr(hil, "validate_bounded_failure_response", reject_selected)
     if state is not None:
         monkeypatch.setattr(
             hil,
@@ -647,6 +659,58 @@ def test_failure_evidence_trigger_capture_requires_valid_bounded_outcome(
     assert len(state["failure_evidence"]) == 1
     assert state["failure_evidence"][0]["last_responses"]["trigger"] is None
     assert state["published"] == []
+
+
+def test_failure_evidence_oversized_valid_inspection_stays_null_and_quarantines(
+    monkeypatch, tmp_path,
+):
+    state = {}
+    oversized = preservation_inspection("missing", "missing")
+    oversized["entries"].append({
+        "label": "protected/" + "x" * (300 * 1024),
+        "nodeType": "missing",
+        "bytes": 0,
+        "sha256": "",
+    })
+
+    with pytest.raises(Exception):
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            "evict-before-first-unlink-fail",
+            state=state,
+            inspect_before_response=oversized,
+        )
+
+    evidence = state["failure_evidence"][0]
+    assert evidence["phase"] == "inspect"
+    assert evidence["last_responses"]["inspectBefore"] is None
+    assert len(json.dumps(evidence["last_responses"]).encode()) < 256 * 1024
+
+
+@pytest.mark.parametrize("response_name", ("recovery", "cleanup"))
+def test_failure_evidence_non_trigger_bounded_rejection_keeps_slot_null_and_quarantines(
+    monkeypatch, tmp_path, response_name,
+):
+    state = {}
+    scenario = (
+        "evict-after-unlinks-fail"
+        if response_name == "recovery"
+        else "evict-before-first-unlink-fail"
+    )
+
+    with pytest.raises(Exception):
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            scenario,
+            state=state,
+            bounded_rejection=response_name,
+        )
+
+    evidence = state["failure_evidence"][0]
+    assert evidence["last_responses"][response_name] is None
+    assert len(json.dumps(evidence["last_responses"]).encode()) < 256 * 1024
 
 
 @pytest.mark.parametrize(
