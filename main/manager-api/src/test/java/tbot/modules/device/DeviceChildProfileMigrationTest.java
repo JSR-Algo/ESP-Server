@@ -304,6 +304,16 @@ class DeviceChildProfileMigrationTest {
             statement.setString(8, ",");
             statement.executeUpdate();
 
+            statement.setString(1, "upgrade-nonstring-json");
+            statement.setString(2, "123e4567-e89b-12d3-a456-426614174005");
+            statement.setInt(3, 2021);
+            statement.setLong(4, 6);
+            statement.setString(5, "5".repeat(64));
+            statement.setString(6, "Non-string JSON");
+            statement.setInt(7, 5);
+            statement.setString(8, "[1,null,{}]");
+            statement.executeUpdate();
+
             statement.setString(1, "upgrade-clear");
             statement.setNull(2, java.sql.Types.CHAR);
             statement.setNull(3, java.sql.Types.INTEGER);
@@ -340,7 +350,8 @@ class DeviceChildProfileMigrationTest {
                         "SELECT id, child_profile_id, child_birth_year, child_name, child_age, "
                                 + "child_interests, child_interests_json, learning_style, vocabulary_level, "
                                 + "parent_career, child_profile_revision, child_profile_payload_hash "
-                                + "FROM ai_device WHERE id IN ('upgrade-csv','upgrade-blank','upgrade-comma') "
+                                + "FROM ai_device WHERE id IN ('upgrade-csv','upgrade-blank','upgrade-comma',"
+                                + "'upgrade-nonstring-json') "
                                 + "ORDER BY id")) {
             while (result.next()) {
                 assertNull(result.getString("child_profile_id"), result.getString("id"));

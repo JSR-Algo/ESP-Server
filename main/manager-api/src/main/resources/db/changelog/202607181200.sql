@@ -8,7 +8,15 @@ WITH `projection_state` AS (
            (`child_profile_id` IS NOT NULL
             AND `child_interests` IS NOT NULL
             AND JSON_VALID(`child_interests`)
-            AND `child_interests` REGEXP '^[[:space:]]*\\[') AS `preserve_replace`,
+            AND `child_interests` REGEXP '^[[:space:]]*\\['
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM JSON_TABLE(
+                      IF(JSON_VALID(`child_interests`), `child_interests`, JSON_ARRAY(JSON_OBJECT())),
+                      '$[*]' COLUMNS (`interest` JSON PATH '$')
+                  ) AS `decoded_interests`
+                 WHERE JSON_TYPE(`decoded_interests`.`interest`) <> 'STRING'
+            )) AS `preserve_replace`,
            (`child_profile_id` IS NULL
             AND `child_birth_year` IS NULL
             AND `child_name` IS NULL
