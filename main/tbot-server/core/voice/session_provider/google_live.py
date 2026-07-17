@@ -1142,6 +1142,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if await self._open_live_session() is False:
                 return False
             self._schedule_func_handler_bootstrap("audio_live_open")
+            await asyncio.sleep(0)
             self.conn.voice_provider = self
             self._voice_consent_denied = False
             return True
