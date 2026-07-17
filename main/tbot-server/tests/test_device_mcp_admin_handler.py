@@ -325,6 +325,67 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.status, 409)
         self.assertEqual((await _response_json(failed))["error"], "MCP_CALL_FAILED")
 
+    async def test_exact_hil_tool_without_resolved_live_connection_fails_allowlist(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        handler = DeviceMCPAdminHandler(
+            {"lesson": {"storage_hil_device_allowlist": [self.HIL_MAC]}},
+            {},
+        )
+
+        response = await handler.handle_post(
+            _FakeRequest(
+                device_id="route-device-uuid",
+                body={
+                    "toolName": self.HIL_TOOLS[0],
+                    "allowUnlisted": True,
+                    "args": {},
+                },
+            )
+        )
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(
+            await _response_json(response),
+            {
+                "error": "HIL_DEVICE_NOT_ALLOWLISTED",
+                "message": "HIL MCP request rejected",
+            },
+        )
+
+    async def test_valid_hil_paths_without_mcp_client_return_sanitized_hil_failure(self):
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        handler, conn = self._hil_handler()
+        conn.mcp_client = None
+        requests = (
+            {
+                "toolName": self.HIL_TOOLS[0],
+                "allowUnlisted": True,
+                "args": {},
+            },
+            {
+                "toolName": "self.lesson_assets.evict_cache_key",
+                "timeoutSeconds": 75,
+                "args": {"cacheKey": self.HIL_CACHE_KEY},
+            },
+        )
+
+        for body in requests:
+            with self.subTest(tool_name=body["toolName"]):
+                response = await handler.handle_post(
+                    _FakeRequest(device_id="route-device-uuid", body=body)
+                )
+
+                self.assertEqual(response.status, 409)
+                self.assertEqual(
+                    await _response_json(response),
+                    {
+                        "error": "HIL_MCP_FAILED",
+                        "message": "HIL MCP request rejected",
+                    },
+                )
+
     async def test_exact_hil_tools_use_raw_dispatch_for_resolved_live_mac(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
         raw_call = AsyncMock(return_value="ok")

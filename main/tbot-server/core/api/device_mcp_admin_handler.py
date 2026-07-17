@@ -245,38 +245,12 @@ class DeviceMCPAdminHandler:
         if is_hil_tool and body.get("allowUnlisted") is not True:
             return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
-        device_id = request.match_info.get("deviceId", "")
-        try:
-            conn = await self._find_connection(device_id)
-        except MCPAmbiguousClientIdentityError:
-            return web.json_response(
-                {
-                    "error": "MCP_CLIENT_IDENTITY_AMBIGUOUS",
-                    "message": "Device MCP connection identity is ambiguous",
-                },
-                status=409,
-            )
-        if conn is None:
-            return web.json_response(
-                {"data": {"called": False, "reason": "device-offline"}},
-                status=202,
-            )
-
-        mcp_client = getattr(conn, "mcp_client", None)
-        if mcp_client is None:
-            return web.json_response(
-                {"error": "MCP_CLIENT_MISSING", "message": "Device MCP client is not available"},
-                status=409,
-            )
-
         args = body.get("args", {})
         timeout = _mcp_call_timeout(tool_name)
         is_hil_timeout_path = False
         if is_hil_tool:
             if not isinstance(args, dict):
                 return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            if not _hil_device_is_allowlisted(self.config, conn):
-                return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
             try:
                 override = _hil_timeout(body)
             except ValueError:
@@ -289,13 +263,42 @@ class DeviceMCPAdminHandler:
                 tool_name, args
             ):
                 return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            if not _hil_device_is_allowlisted(self.config, conn):
-                return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
             try:
                 timeout = _hil_timeout(body)
             except ValueError:
                 return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
             is_hil_timeout_path = True
+
+        device_id = request.match_info.get("deviceId", "")
+        try:
+            conn = await self._find_connection(device_id)
+        except MCPAmbiguousClientIdentityError:
+            return web.json_response(
+                {
+                    "error": "MCP_CLIENT_IDENTITY_AMBIGUOUS",
+                    "message": "Device MCP connection identity is ambiguous",
+                },
+                status=409,
+            )
+        if conn is None:
+            if is_hil_timeout_path:
+                return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+            return web.json_response(
+                {"data": {"called": False, "reason": "device-offline"}},
+                status=202,
+            )
+
+        if is_hil_timeout_path and not _hil_device_is_allowlisted(self.config, conn):
+            return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+
+        mcp_client = getattr(conn, "mcp_client", None)
+        if mcp_client is None:
+            if is_hil_timeout_path:
+                return _hil_error("HIL_MCP_FAILED", status=409)
+            return web.json_response(
+                {"error": "MCP_CLIENT_MISSING", "message": "Device MCP client is not available"},
+                status=409,
+            )
         try:
             if is_hil_tool or bool(body.get("allowUnlisted")):
                 result = await _call_raw_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
