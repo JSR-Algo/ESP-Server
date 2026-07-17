@@ -1,9 +1,9 @@
-name: tbot-ls-e2e
+name: ${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}
 
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: tbot-ls-e2e-pg
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-pg
     environment:
       POSTGRES_DB: tbot
       POSTGRES_USER: tbot
@@ -19,7 +19,7 @@ services:
 
   redis:
     image: redis:8-alpine
-    container_name: tbot-ls-e2e-redis
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-redis
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - lesson-studio-redis-data:/data
@@ -32,7 +32,7 @@ services:
 
   mysql:
     image: mysql:8.4
-    container_name: tbot-ls-e2e-mysql
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-mysql
     environment:
       MYSQL_ROOT_PASSWORD: "123456"
       MYSQL_DATABASE: tbot_esp32_server
@@ -52,7 +52,7 @@ services:
 
   backend:
     image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:-local/tbot-backend:lesson-studio-e2e}
-    container_name: tbot-ls-e2e-backend
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-backend
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
       LESSON_STUDIO_ROLLBACK_ASSIGNMENTS_ENABLED: "false"
       SKIP_MIGRATIONS: "false"
     ports:
-      - "3100:3000"
+      - "${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"
     healthcheck:
       test:
         - CMD
@@ -91,7 +91,7 @@ services:
 
   seed-postgres:
     image: postgres:16-alpine
-    container_name: tbot-ls-e2e-seed-pg
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-seed-pg
     depends_on:
       backend:
         condition: service_healthy
@@ -112,7 +112,7 @@ services:
 
   web:
     image: ${TBOT_LESSON_STUDIO_WEB_IMAGE:-local/tbot-server-web:lesson-studio-e2e}
-    container_name: tbot-ls-e2e-web
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-web
     depends_on:
       backend:
         condition: service_healthy
@@ -136,7 +136,7 @@ services:
       TBOT_E2E_CAPTCHA_ENABLED: "true"
       TBOT_E2E_CAPTCHA_CODE: E2E42
     ports:
-      - "8102:8002"
+      - "${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
     volumes:
       - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
       - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
@@ -152,7 +152,7 @@ services:
 
   seed-mysql:
     image: mysql:8.4
-    container_name: tbot-ls-e2e-seed-mysql
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-seed-mysql
     depends_on:
       web:
         condition: service_healthy
@@ -173,12 +173,12 @@ services:
 
 networks:
   lesson-studio-e2e:
-    name: tbot-ls-e2e
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}
 
 volumes:
   lesson-studio-pg-data:
-    name: tbot-ls-e2e-pg-data
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-pg-data
   lesson-studio-redis-data:
-    name: tbot-ls-e2e-redis-data
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-redis-data
   lesson-studio-mysql-data:
-    name: tbot-ls-e2e-mysql-data
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-mysql-data

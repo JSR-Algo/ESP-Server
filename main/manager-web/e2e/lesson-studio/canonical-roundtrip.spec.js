@@ -4,6 +4,7 @@ const { resolve } = require('path');
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
+const { lessonStudioAssetUrl } = require('../../scripts/lesson-studio-e2e-environment.cjs');
 
 const apiRoot = '/nestjs/v1/admin';
 const responseVisualSourceIds = {
@@ -47,7 +48,7 @@ function espTftAssetForKey(assetManifest, assetKey) {
 }
 
 async function assertServedAsset(page, path, expected) {
-  const response = await page.request.get(`http://127.0.0.1:8102/tvideo-demo/${path}`);
+  const response = await page.request.get(lessonStudioAssetUrl(path));
   expect(response.ok(), `GET tvideo demo asset ${path}`).toBe(true);
   const bytes = await response.body();
   expect(bytes).toHaveLength(expected.bytes);

@@ -31,11 +31,11 @@ test('resets auth throttling through compose service names', () => {
   ]);
 });
 
-test('allows the Compose project to follow a combined local E2E stack', () => {
+test('allows the reset commands to follow an isolated Compose project', () => {
   assert.deepEqual(resetOptionsFromEnvironment({
-    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'tbot-rewards-e2e',
+    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
   }), {
-    projectName: 'tbot-rewards-e2e',
+    projectName: 'task14-isolated',
   });
 });
 
@@ -46,6 +46,23 @@ test('reset and global setup supply parse-only fallbacks without overriding live
     JWT_PUBLIC_KEY: 'not-used-by-e2e-reset',
     TBOT_DEVICE_MINT_SECRET: 'not-used-by-e2e-reset',
     LESSON_ASSET_ORIGIN_BASE: 'http://127.0.0.1:8102/tvideo-demo',
+    ROBOT_ESP_BASE_URL: 'not-used-by-e2e-reset',
+  });
+  assert.deepEqual(composeEnvironment({
+    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
+    LESSON_STUDIO_E2E_BASE_URL: 'http://127.0.0.1:18102',
+    LESSON_STUDIO_E2E_RESOURCE_PREFIX: 'task14-isolated',
+    LESSON_STUDIO_E2E_BACKEND_HOST_PORT: '13100',
+    LESSON_STUDIO_E2E_WEB_HOST_PORT: '18102',
+  }), {
+    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
+    LESSON_STUDIO_E2E_BASE_URL: 'http://127.0.0.1:18102',
+    LESSON_STUDIO_E2E_RESOURCE_PREFIX: 'task14-isolated',
+    LESSON_STUDIO_E2E_BACKEND_HOST_PORT: '13100',
+    LESSON_STUDIO_E2E_WEB_HOST_PORT: '18102',
+    JWT_PUBLIC_KEY: 'not-used-by-e2e-reset',
+    TBOT_DEVICE_MINT_SECRET: 'not-used-by-e2e-reset',
+    LESSON_ASSET_ORIGIN_BASE: 'http://127.0.0.1:18102/tvideo-demo',
     ROBOT_ESP_BASE_URL: 'not-used-by-e2e-reset',
   });
   assert.deepEqual(composeEnvironment({

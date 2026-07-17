@@ -1,5 +1,6 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const { lessonStudioWebOrigin } = require('./lesson-studio-e2e-environment.cjs');
 
 const DEFAULT_COMPOSE_FILE = path.resolve(
   __dirname,
@@ -32,11 +33,12 @@ function resetOptionsFromEnvironment(env = process.env) {
 }
 
 function composeEnvironment(env = process.env) {
+  const webOrigin = lessonStudioWebOrigin(env);
   return {
     ...env,
     JWT_PUBLIC_KEY: env.JWT_PUBLIC_KEY || 'not-used-by-e2e-reset',
     TBOT_DEVICE_MINT_SECRET: env.TBOT_DEVICE_MINT_SECRET || 'not-used-by-e2e-reset',
-    LESSON_ASSET_ORIGIN_BASE: env.LESSON_ASSET_ORIGIN_BASE || 'http://127.0.0.1:8102/tvideo-demo',
+    LESSON_ASSET_ORIGIN_BASE: env.LESSON_ASSET_ORIGIN_BASE || `${webOrigin}/tvideo-demo`,
     ROBOT_ESP_BASE_URL: env.ROBOT_ESP_BASE_URL || 'not-used-by-e2e-reset',
   };
 }

@@ -1,4 +1,5 @@
 const { defineConfig, devices } = require('@playwright/test');
+const { lessonStudioWebOrigin } = require('./scripts/lesson-studio-e2e-environment.cjs');
 
 module.exports = defineConfig({
   testDir: './e2e/lesson-studio',
@@ -11,7 +12,7 @@ module.exports = defineConfig({
   retries: 0,
   reporter: [['list'], ['html', { outputFolder: './output/playwright-e2e/report', open: 'never' }]],
   use: {
-    baseURL: process.env.LESSON_STUDIO_E2E_BASE_URL || 'http://127.0.0.1:8102',
+    baseURL: lessonStudioWebOrigin(),
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
