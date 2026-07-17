@@ -110,7 +110,7 @@ class DeviceChildProfileMigrationTest {
             assertEquals(2018, result.getInt("child_birth_year"));
             assertEquals("Án", result.getString("child_name"));
             assertEquals(Year.now().getValue() - 2018, result.getInt("child_age"));
-            assertEquals("a,z,é", result.getString("child_interests"));
+            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests"));
             assertEquals("café", result.getString("learning_style"));
             assertEquals("débutant", result.getString("vocabulary_level"));
             assertEquals("ingénieur", result.getString("parent_career"));
@@ -131,11 +131,32 @@ class DeviceChildProfileMigrationTest {
                 ResultSet result = statement.executeQuery("SELECT child_name, child_interests, learning_style, vocabulary_level, parent_career FROM ai_device WHERE id='mapped-device'")) {
             result.next();
             assertEquals("Án", result.getString("child_name"));
-            assertEquals("a,z,é", result.getString("child_interests"));
+            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests"));
             assertEquals("café", result.getString("learning_style"));
             assertEquals("débutant", result.getString("vocabulary_level"));
             assertEquals("ingénieur", result.getString("parent_career"));
         }
+
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO ai_device (id) VALUES ('mapped-lossless')");
+        }
+        Profile lossless = new Profile(profile.childProfileId(), "An", 2018,
+                List.of("science, technology", ""), null, null, null);
+        String losslessHash = ChildProfileProjectionCanonicalizer.canonicalize(
+                "replace", 1, lossless.toCanonicalProfile()).sha256();
+        DeviceChildProfileProjectionService.ProjectionResult losslessResult = transaction.execute(status -> service.apply(
+                "mapped-lossless", new DeviceChildProfileProjectionDTO("replace", 1, losslessHash, lossless)));
+        assertEquals(List.of("", "science, technology"), losslessResult.profile().interests());
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT child_interests FROM ai_device WHERE id='mapped-lossless'")) {
+            result.next();
+            assertEquals("[\"\",\"science, technology\"]", result.getString("child_interests"));
+        }
+        DeviceChildProfileProjectionService.ProjectionResult losslessReplay = transaction.execute(status -> service.apply(
+                "mapped-lossless", new DeviceChildProfileProjectionDTO("replace", 1, losslessHash, lossless)));
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, losslessReplay.outcome());
+        assertEquals(List.of("", "science, technology"), losslessReplay.profile().interests());
 
         String clearHash = ChildProfileProjectionCanonicalizer.canonicalize("clear", 2, null).sha256();
         transaction.executeWithoutResult(status -> service.apply("mapped-device",

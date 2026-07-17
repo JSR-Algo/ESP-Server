@@ -1,7 +1,6 @@
 package tbot.modules.device.service;
 
 import java.time.Year;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -33,8 +32,11 @@ public class DeviceChildProfileProjectionService {
         if (!canonical.sha256().equals(request.getPayloadHash())) {
             throw new IllegalArgumentException("payloadHash does not match canonical projection");
         }
+        String encodedInterests = null;
         if (canonical.normalizedProfile() != null) {
-            validateProfileStorage(canonical.normalizedProfile());
+            encodedInterests = ChildInterestsCodec.encode(
+                    canonical.normalizedProfile().interests());
+            validateProfileStorage(canonical.normalizedProfile(), encodedInterests);
         }
 
         DeviceEntity stored = deviceDao.selectChildProfileForUpdate(deviceId);
@@ -65,7 +67,7 @@ public class DeviceChildProfileProjectionService {
             update.setChildBirthYear(profile.birthYear());
             update.setChildName(profile.displayName());
             update.setChildAge(legacyAge(profile.birthYear()));
-            update.setChildInterests(String.join(",", profile.interests()));
+            update.setChildInterests(encodedInterests);
             update.setLearningStyle(profile.learningStyle());
             update.setVocabularyLevel(profile.vocabularyLevel());
             update.setParentCareer(profile.parentCareer());
@@ -112,7 +114,7 @@ public class DeviceChildProfileProjectionService {
         if (interests == null || interests.isEmpty()) {
             return List.of();
         }
-        return List.copyOf(Arrays.asList(interests.split(",", -1)));
+        return ChildInterestsCodec.decodeJsonOrLegacy(interests);
     }
 
     private static void validateRequest(DeviceChildProfileProjectionDTO request) {
@@ -128,7 +130,9 @@ public class DeviceChildProfileProjectionService {
         }
     }
 
-    private static void validateProfileStorage(ChildProfileProjection profile) {
+    private static void validateProfileStorage(
+            ChildProfileProjection profile,
+            String encodedInterests) {
         if (profile.displayName() == null || profile.interests() == null) {
             throw new IllegalArgumentException("required profile fields are missing");
         }
@@ -136,7 +140,7 @@ public class DeviceChildProfileProjectionService {
             throw new IllegalArgumentException("interests cannot contain null values");
         }
         requireMaxLength("displayName", profile.displayName(), 64);
-        requireMaxLength("interests", String.join(",", profile.interests()), 255);
+        requireMaxLength("interests", encodedInterests, 255);
         requireMaxLength("learningStyle", profile.learningStyle(), 32);
         requireMaxLength("vocabularyLevel", profile.vocabularyLevel(), 32);
         requireMaxLength("parentCareer", profile.parentCareer(), 64);

@@ -37,6 +37,7 @@ import tbot.modules.agent.vo.AgentVoicePrintVO;
 import tbot.modules.correctword.vo.CorrectWordSimpleVO;
 import tbot.modules.config.service.ConfigService;
 import tbot.modules.device.entity.DeviceEntity;
+import tbot.modules.device.service.ChildInterestsCodec;
 import tbot.modules.device.service.DeviceService;
 import tbot.modules.model.entity.ModelConfigEntity;
 import tbot.modules.model.service.ModelConfigService;
@@ -266,14 +267,7 @@ public class ConfigServiceImpl implements ConfigService {
     }
 
     private List<String> splitProfileTags(String tags) {
-        if (StringUtils.isBlank(tags)) {
-            return Collections.emptyList();
-        }
-        return List.of(tags.split(","))
-                .stream()
-                .map(StringUtils::trimToNull)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+        return ChildInterestsCodec.decodeJsonOrLegacy(tags);
     }
 
     @Override

@@ -83,7 +83,7 @@ class DeviceChildProfileProjectionServiceTest {
         assertEquals(2018, updated.getChildBirthYear());
         assertEquals("An", updated.getChildName());
         assertEquals(Year.now().getValue() - 2018, updated.getChildAge());
-        assertEquals("music,robots", updated.getChildInterests());
+        assertEquals("[\"music\",\"robots\"]", updated.getChildInterests());
         assertEquals("visual", updated.getLearningStyle());
         assertEquals("beginner", updated.getVocabularyLevel());
         assertEquals("engineer", updated.getParentCareer());
@@ -188,10 +188,27 @@ class DeviceChildProfileProjectionServiceTest {
         verify(deviceDao).replaceChildProfile(captor.capture());
         DeviceEntity stored = captor.getValue();
         assertEquals("Án", stored.getChildName());
-        assertEquals("a,z,é", stored.getChildInterests());
+        assertEquals("[\"a\",\"z\",\"é\"]", stored.getChildInterests());
         assertEquals("café", stored.getLearningStyle());
         assertEquals("débutant", stored.getVocabularyLevel());
         assertEquals("ingénieur", stored.getParentCareer());
+    }
+
+    @Test
+    void losslesslyEncodesCommaAndEmptyInterestsAndReturnsTheStoredJsonProjection() {
+        Profile profile = new Profile(PROFILE_ID, "An", 2018,
+                List.of("science, technology", ""), null, null, null);
+        DeviceChildProfileProjectionDTO request = replace(4, profile);
+        DeviceEntity persisted = storedProfile(4, request.getPayloadHash(), PROFILE_ID, "An", 2018,
+                "[\"\",\"science, technology\"]", null, null, null);
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null), persisted);
+
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+
+        ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
+        verify(deviceDao).replaceChildProfile(captor.capture());
+        assertEquals("[\"\",\"science, technology\"]", captor.getValue().getChildInterests());
+        assertEquals(List.of("", "science, technology"), result.profile().interests());
     }
 
     @ParameterizedTest(name = "rejects profile storage overflow: {0}")
@@ -205,6 +222,7 @@ class DeviceChildProfileProjectionServiceTest {
     private static List<org.junit.jupiter.params.provider.Arguments> oversizedProfiles() {
         return List.of(
                 org.junit.jupiter.params.provider.Arguments.of("displayName", new Profile(PROFILE_ID, "x".repeat(65), 2018, List.of(), null, null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("interests encoded", new Profile(PROFILE_ID, "An", 2018, List.of("x".repeat(252)), null, null, null)),
                 org.junit.jupiter.params.provider.Arguments.of("interests", new Profile(PROFILE_ID, "An", 2018, List.of("x".repeat(256)), null, null, null)),
                 org.junit.jupiter.params.provider.Arguments.of("learningStyle", new Profile(PROFILE_ID, "An", 2018, List.of(), "x".repeat(33), null, null)),
                 org.junit.jupiter.params.provider.Arguments.of("vocabularyLevel", new Profile(PROFILE_ID, "An", 2018, List.of(), null, "x".repeat(33), null)),
