@@ -376,17 +376,16 @@ def validate_power_loss_result(value):
                 "utcStart",
                 "checkpointReachedUtc",
                 "powerCutBoundaryUtc",
-                "powerRemovedUtc",
                 "disconnectObservedUtc",
+                "powerRemovalConfirmedUtc",
                 "utcEnd",
             )
         ]
     except (AttributeError, KeyError, TypeError, ValueError):
         raise HilValidationError("invalid power-loss boundary timestamps") from None
-    require(
-        all(earlier < later for earlier, later in zip(ordered, ordered[1:])),
-        "invalid power-loss timestamp order",
-    )
+    start, checkpoint, boundary, disconnected, confirmed, end = ordered
+    require(start < checkpoint < boundary < disconnected, "invalid power-loss timestamp order")
+    require(disconnected <= confirmed < end, "invalid power-loss timestamp order")
     status = validate_status_response(value.get("postRebootStatus"), expected_cache_key=None)
     require(status["status"] == "idle", "volatile HIL arm survived reboot")
     return value
@@ -659,21 +658,57 @@ def await_power_loss_disconnect(
     utc_clock=None,
 ):
     clock = utc_clock or utc_now
+    completion_lock = threading.Lock()
+    completion_observed = {}
+    completion_recorded = threading.Event()
+
+    def record_completion(_future):
+        observed = clock()
+        with completion_lock:
+            completion_observed["utc"] = observed
+        completion_recorded.set()
+
+    def observed_completion_utc():
+        require(
+            completion_recorded.wait(timeout_seconds),
+            "disconnect completion timestamp unavailable",
+        )
+        with completion_lock:
+            return completion_observed.get("utc")
+
+    future.add_done_callback(record_completion)
     require(not future.done(), "trigger completed before READY boundary")
     ready_prompt()
     require(not future.done(), "trigger completed during READY prompt")
     boundary_utc = clock()
+    if future.done():
+        require(
+            _strict_utc(observed_completion_utc()) > _strict_utc(boundary_utc),
+            "trigger completed before power-cut boundary",
+        )
     remove_power_prompt()
-    power_removed_utc = clock()
+    removal_confirmed_utc = clock()
     try:
         result = future.result(timeout=timeout_seconds)
     except HilDisconnectError:
+        disconnect_observed_utc = observed_completion_utc()
+        boundary_time = _strict_utc(boundary_utc)
+        disconnect_time = _strict_utc(disconnect_observed_utc)
+        confirmation_time = _strict_utc(removal_confirmed_utc)
+        require(
+            disconnect_time > boundary_time,
+            "disconnect completed before power-cut boundary",
+        )
+        require(
+            disconnect_time <= confirmation_time,
+            "disconnect completed after removal confirmation",
+        )
         return {
             "triggerPendingAtMarker": True,
             "triggerPendingAtCutBoundary": True,
             "powerCutBoundaryUtc": boundary_utc,
-            "powerRemovedUtc": power_removed_utc,
-            "disconnectObservedUtc": clock(),
+            "disconnectObservedUtc": disconnect_observed_utc,
+            "powerRemovalConfirmedUtc": removal_confirmed_utc,
             "disconnectAfterPowerCutBoundary": True,
         }
     except concurrent.futures.TimeoutError:
@@ -963,7 +998,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         events.append("arm")
         trigger = None
         reboot_serial = ""
-        checkpoint_utc = power_removed_utc = None
+        checkpoint_utc = power_removal_confirmed_utc = None
         power_data = None
         post_status = post_reboot_inspect = None
         if action == "pause":
@@ -1002,7 +1037,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                         timeout_seconds=10,
                     )
                     trigger = None
-                    power_removed_utc = disconnect_evidence["powerRemovedUtc"]
+                    power_removal_confirmed_utc = disconnect_evidence["powerRemovalConfirmedUtc"]
                     operator_input(
                         "Disconnect observed after the READY boundary. Confirm power is removed, then press Enter."
                     )
@@ -1108,7 +1143,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             payloads.update(
                 {
                     "checkpoint-reached-utc.txt": f"{checkpoint_utc}\n".encode("ascii"),
-                    "power-removed-utc.txt": f"{power_removed_utc}\n".encode("ascii"),
+                    "power-removed-utc.txt": f"{power_removal_confirmed_utc}\n".encode("ascii"),
                     "reboot-serial.log": (redact_text(reboot_serial, (secret,)) or "<no reboot output>\n").encode("utf-8"),
                     "post-reboot-inspect.json": json_bytes(post_reboot_inspect),
                 }

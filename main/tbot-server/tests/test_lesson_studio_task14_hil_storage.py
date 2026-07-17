@@ -285,8 +285,8 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
         "utcStart": "2026-07-17T00:00:00Z",
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
-        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
-        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:01.500000Z",
+        "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
         "utcEnd": "2026-07-17T00:00:03Z",
         "disconnectAfterPowerCutBoundary": True,
     }
@@ -303,9 +303,8 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
     for earlier, later in (
         ("utcStart", "checkpointReachedUtc"),
         ("checkpointReachedUtc", "powerCutBoundaryUtc"),
-        ("powerCutBoundaryUtc", "powerRemovedUtc"),
-        ("powerRemovedUtc", "disconnectObservedUtc"),
-        ("disconnectObservedUtc", "utcEnd"),
+        ("powerCutBoundaryUtc", "disconnectObservedUtc"),
+        ("powerRemovalConfirmedUtc", "utcEnd"),
     ):
         with pytest.raises(hil.HilValidationError):
             hil.validate_power_loss_result({**result, later: result[earlier]})
@@ -330,8 +329,8 @@ def test_power_loss_result_is_validated_only_after_complete_assembly():
         "disconnectAfterPowerCutBoundary": True,
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
-        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
-        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:01.500000Z",
+        "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
         "postRebootStatus": exact_status("idle"),
     }
 
@@ -346,9 +345,9 @@ def test_power_loss_result_is_validated_only_after_complete_assembly():
         ("checkpointReachedUtc", "2026-07-17T00:00:00.500000+00:00"),
         ("checkpointReachedUtc", "2026-07-16T23:59:59Z"),
         ("powerCutBoundaryUtc", "2026-07-17T00:00:00.250000Z"),
-        ("powerRemovedUtc", "2026-07-17T00:00:00.750000Z"),
-        ("disconnectObservedUtc", "2026-07-17T00:00:01.250000Z"),
-        ("utcEnd", "2026-07-17T00:00:01.500000Z"),
+        ("disconnectObservedUtc", "2026-07-17T00:00:00.750000Z"),
+        ("powerRemovalConfirmedUtc", "2026-07-17T00:00:01.250000Z"),
+        ("utcEnd", "2026-07-17T00:00:01.750000Z"),
     ):
         with pytest.raises(hil.HilValidationError):
             hil.validate_power_loss_result({**result, field: invalid})
@@ -597,8 +596,9 @@ def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disco
         return value
 
     def remove_power():
-        events.append(("remove", "returned"))
+        events.append(("remove", "started"))
         future.set_exception(hil.HilDisconnectError("connection reset"))
+        events.append(("remove", "returned"))
 
     evidence = hil.await_power_loss_disconnect(
         future,
@@ -611,16 +611,89 @@ def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disco
         "triggerPendingAtMarker": True,
         "triggerPendingAtCutBoundary": True,
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
-        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
-        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:01.500000Z",
+        "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
         "disconnectAfterPowerCutBoundary": True,
     }
     assert events == [
         ("clock", "2026-07-17T00:00:01Z"),
-        ("remove", "returned"),
+        ("remove", "started"),
         ("clock", "2026-07-17T00:00:01.500000Z"),
+        ("remove", "returned"),
         ("clock", "2026-07-17T00:00:02Z"),
     ]
+
+
+def test_power_loss_rejects_disconnect_at_or_before_cut_boundary():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    future = Future()
+    clock = iter([
+        "2026-07-17T00:00:01Z",
+        "2026-07-17T00:00:01Z",
+        "2026-07-17T00:00:02Z",
+    ]).__next__
+
+    with pytest.raises(hil.HilValidationError, match="before power-cut boundary"):
+        hil.await_power_loss_disconnect(
+            future,
+            lambda: None,
+            lambda: future.set_exception(hil.HilDisconnectError("early reset")),
+            timeout_seconds=0.1,
+            utc_clock=clock,
+        )
+
+
+def test_power_loss_rejects_completion_during_boundary_clock_before_remove_prompt():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    future = Future()
+    events = []
+    calls = 0
+
+    def racing_clock():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            future.set_exception(hil.HilDisconnectError("pre-boundary reset"))
+            return "2026-07-17T00:00:01Z"
+        if calls == 2:
+            return "2026-07-17T00:00:00.500000Z"
+        return "2026-07-17T00:00:02Z"
+
+    with pytest.raises(hil.HilValidationError, match="before power-cut boundary"):
+        hil.await_power_loss_disconnect(
+            future,
+            lambda: None,
+            lambda: events.append("remove-prompt"),
+            timeout_seconds=0.1,
+            utc_clock=racing_clock,
+        )
+
+    assert events == []
+
+
+def test_power_loss_allows_disconnect_and_confirmation_at_same_captured_utc():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    result = {
+        "powerLoss": True,
+        "checkpointReached": True,
+        "triggerResponseAbsent": True,
+        "successMarkerBeforeLoss": False,
+        "rebootCaptured": True,
+        "postRebootStatus": exact_status("idle"),
+        "postRebootInspected": True,
+        "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "triggerPendingAtCutBoundary": True,
+        "utcStart": "2026-07-17T00:00:00Z",
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
+        "disconnectAfterPowerCutBoundary": True,
+    }
+
+    assert hil.validate_power_loss_result(result) == result
 
 
 def test_power_loss_rejects_precut_completion_and_semantic_failures():
@@ -641,17 +714,24 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
         )
 
     disconnected_during_ready = Future()
+    early_events = []
 
     def ready_too_late():
         disconnected_during_ready.set_exception(hil.HilDisconnectError("early reset"))
+
+    def early_clock():
+        early_events.append("completion-timestamped")
+        return "2026-07-17T00:00:00.500000Z"
 
     with pytest.raises(hil.HilValidationError, match="completed during READY prompt"):
         hil.await_power_loss_disconnect(
             disconnected_during_ready,
             ready_too_late,
-            lambda: None,
+            lambda: early_events.append("remove-prompt"),
             timeout_seconds=0.1,
+            utc_clock=early_clock,
         )
+    assert early_events == ["completion-timestamped"]
 
     semantic_after_cut = Future()
 
