@@ -658,6 +658,21 @@ def validate_evidence_roots(pass_root, failure_root, *, identity_sink=None):
 
 
 def validate_run_roots(arguments):
+    existing_pass = getattr(arguments, "_pass_evidence_root_identity", None)
+    existing_failure = getattr(arguments, "_failure_evidence_root_identity", None)
+    if existing_pass is not None or existing_failure is not None:
+        require(
+            existing_pass is not None and existing_failure is not None,
+            "incomplete pinned evidence root identities",
+        )
+        pass_root = revalidate_publication_root(existing_pass)
+        failure_root = revalidate_publication_root(existing_failure)
+        require(
+            Path(arguments.evidence_dir) == pass_root
+            and Path(arguments.failure_evidence_dir) == failure_root,
+            "evidence root changed during publication",
+        )
+        return pass_root, failure_root
     identities = {}
     pass_root, failure_root = validate_evidence_roots(
         arguments.evidence_dir,
@@ -687,6 +702,22 @@ def revalidate_publication_root(identity):
         "evidence root changed during publication",
     )
     return resolved
+
+
+def open_pinned_publication_root(identity):
+    require(hasattr(os, "O_DIRECTORY"), "directory fd publication is unsupported")
+    require(hasattr(os, "O_NOFOLLOW"), "no-follow directory fd publication is unsupported")
+    root_fd = os.open(
+        identity["resolved"],
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    observed = os.fstat(root_fd)
+    if (observed.st_dev, observed.st_ino) != (
+        identity.get("rootDev"), identity.get("rootIno"),
+    ):
+        os.close(root_fd)
+        raise HilValidationError("evidence root changed during publication")
+    return root_fd
 
 
 def _bounded_redacted_text(value, secrets, max_bytes):
@@ -1257,55 +1288,82 @@ def _matrix_scenario_record(evidence_root, scenario, preflight_result):
 def publish_matrix_report(arguments, preflight_result):
     evidence_root = Path(arguments.evidence_dir)
     root_identity = getattr(arguments, "_pass_evidence_root_identity", None)
-    if root_identity is not None:
+    root_fd = getattr(arguments, "_pass_evidence_root_fd", None)
+    owned_fd = False
+    if root_fd is None:
         require(
-            revalidate_publication_root(root_identity) == evidence_root,
-            "evidence root changed during publication",
+            hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW"),
+            "pinned matrix root publication is unsupported",
         )
-    scenarios = [
-        _matrix_scenario_record(evidence_root, scenario, preflight_result)
-        for scenario in HIL_STORAGE_SCENARIOS
-    ]
-    report = {
-        "status": "PASS",
-        "event": "hil-matrix-pass",
-        "buildIdentity": preflight_result["buildIdentity"],
-        "deviceId": preflight_result["deviceId"],
-        "deviceUuid": preflight_result["deviceUuid"],
-        "connectionIdentity": preflight_result["connectionIdentity"],
-        "scenarios": scenarios,
-    }
-    report_path = evidence_root / MATRIX_REPORT_NAME
-    report_stat = None
-
-    def verify_inputs():
         if root_identity is not None:
             revalidate_publication_root(root_identity)
-        observed = [
+        try:
+            root_fd = os.open(
+                evidence_root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError:
+            raise HilValidationError("evidence root changed during publication") from None
+        owned_fd = True
+    report_identity = None
+    try:
+        if root_identity is not None:
+            require(
+                revalidate_publication_root(root_identity) == evidence_root,
+                "evidence root changed during publication",
+            )
+            observed_root = os.fstat(root_fd)
+            require(
+                (observed_root.st_dev, observed_root.st_ino) == (
+                    root_identity["rootDev"], root_identity["rootIno"],
+                ),
+                "evidence root changed during publication",
+            )
+        scenarios = [
             _matrix_scenario_record(evidence_root, scenario, preflight_result)
             for scenario in HIL_STORAGE_SCENARIOS
         ]
-        require(observed == scenarios, "HIL matrix inputs changed during publication")
+        report = {
+            "status": "PASS",
+            "event": "hil-matrix-pass",
+            "buildIdentity": preflight_result["buildIdentity"],
+            "deviceId": preflight_result["deviceId"],
+            "deviceUuid": preflight_result["deviceUuid"],
+            "connectionIdentity": preflight_result["connectionIdentity"],
+            "scenarios": scenarios,
+        }
 
-    try:
+        def verify_inputs():
+            if root_identity is not None:
+                revalidate_publication_root(root_identity)
+            observed = [
+                _matrix_scenario_record(evidence_root, scenario, preflight_result)
+                for scenario in HIL_STORAGE_SCENARIOS
+            ]
+            require(observed == scenarios, "HIL matrix inputs changed during publication")
+
         verify_inputs()
         if root_identity is not None:
             revalidate_publication_root(root_identity)
-        atomic_write_bytes(report_path, json_bytes(report))
-        report_stat = report_path.stat()
+        _matrix_publish_boundary()
+        report_identity = _publish_matrix_report_pinned(root_fd, json_bytes(report))
         verify_inputs()
         if root_identity is not None:
             revalidate_publication_root(root_identity)
+        return report
     except BaseException:
-        if report_stat is not None:
+        if report_identity is not None:
             with suppress(Exception):
-                observed = os.lstat(report_path)
-                if (observed.st_dev, observed.st_ino) == (
-                    report_stat.st_dev, report_stat.st_ino,
-                ):
-                    report_path.unlink()
+                observed = os.stat(
+                    MATRIX_REPORT_NAME, dir_fd=root_fd, follow_symlinks=False
+                )
+                if (observed.st_dev, observed.st_ino) == report_identity:
+                    os.unlink(MATRIX_REPORT_NAME, dir_fd=root_fd)
+                    os.fsync(root_fd)
         raise
-    return report
+    finally:
+        if owned_fd:
+            os.close(root_fd)
 
 
 def validate_power_loss_result(value):
@@ -2361,9 +2419,73 @@ def preflight(arguments, *, phase_changed=None, context=None):
     return result
 
 
-def _remove_matrix_report(report_path):
-    with suppress(FileNotFoundError):
-        Path(report_path).unlink()
+def _remove_matrix_report(root_fd):
+    require(type(root_fd) is int, "missing pinned matrix root fd")
+    try:
+        os.unlink(MATRIX_REPORT_NAME, dir_fd=root_fd)
+    except FileNotFoundError:
+        pass
+    os.fsync(root_fd)
+
+
+def _matrix_publish_boundary():
+    return None
+
+
+def _write_all(descriptor, data):
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        require(written > 0, "matrix report write made no progress")
+        offset += written
+
+
+def _publish_matrix_report_pinned(root_fd, data):
+    require(type(root_fd) is int, "missing pinned matrix root fd")
+    require(hasattr(os, "link"), "dirfd no-replace publication is unsupported")
+    temporary = f".{MATRIX_REPORT_NAME}.{os.getpid()}.{time.time_ns()}"
+    descriptor = None
+    published = False
+    completed = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=root_fd,
+        )
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.link(
+            temporary,
+            MATRIX_REPORT_NAME,
+            src_dir_fd=root_fd,
+            dst_dir_fd=root_fd,
+            follow_symlinks=False,
+        )
+        published = True
+        os.unlink(temporary, dir_fd=root_fd)
+        os.fsync(root_fd)
+        observed = os.stat(
+            MATRIX_REPORT_NAME, dir_fd=root_fd, follow_symlinks=False
+        )
+        completed = True
+        return observed.st_dev, observed.st_ino
+    except FileExistsError:
+        raise HilValidationError("final HIL matrix report already exists") from None
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=root_fd)
+        if published and not completed:
+            with suppress(FileNotFoundError):
+                os.unlink(MATRIX_REPORT_NAME, dir_fd=root_fd)
+        with suppress(OSError):
+            os.fsync(root_fd)
 
 
 @contextmanager
@@ -2397,6 +2519,10 @@ def run_matrix(arguments):
     context = {"buildIdentity": None, "statusBefore": None, "secret": ""}
     responses = {key: None for key in FAILURE_RESPONSE_KEYS}
     scenario_active = False
+    root_fd = open_pinned_publication_root(
+        arguments._pass_evidence_root_identity
+    )
+    arguments._pass_evidence_root_fd = root_fd
 
     def set_failure_phase(value):
         nonlocal phase
@@ -2404,7 +2530,7 @@ def run_matrix(arguments):
 
     try:
         revalidate_publication_root(arguments._pass_evidence_root_identity)
-        _remove_matrix_report(Path(arguments.evidence_dir) / MATRIX_REPORT_NAME)
+        _remove_matrix_report(root_fd)
         revalidate_publication_root(arguments._pass_evidence_root_identity)
         phase = "setup"
         preflight_result = preflight(
@@ -2441,6 +2567,10 @@ def run_matrix(arguments):
                     server_logs_allowed=context["buildIdentity"] is not None,
                 )
         raise
+    finally:
+        with suppress(AttributeError):
+            del arguments._pass_evidence_root_fd
+        os.close(root_fd)
 
 
 def _add_live_arguments(parser):

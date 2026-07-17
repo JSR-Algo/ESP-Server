@@ -1900,6 +1900,111 @@ def test_failure_evidence_matrix_publication_rejects_post_validation_root_swap(
     assert not (original_root / hil.MATRIX_REPORT_NAME).exists()
 
 
+def test_failure_evidence_matrix_report_unlink_uses_pinned_root_fd(tmp_path):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    matrix_root = tmp_path / "matrix"
+    original_root = tmp_path / "matrix-original"
+    replacement_root = tmp_path / "replacement"
+    matrix_root.mkdir()
+    replacement_root.mkdir()
+    original_report = matrix_root / hil.MATRIX_REPORT_NAME
+    replacement_report = replacement_root / hil.MATRIX_REPORT_NAME
+    original_report.write_bytes(b"original-report\n")
+    replacement_report.write_bytes(b"replacement-sentinel\n")
+    root_fd = os.open(
+        matrix_root,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        matrix_root.rename(original_root)
+        matrix_root.symlink_to(replacement_root, target_is_directory=True)
+        hil._remove_matrix_report(root_fd)
+    finally:
+        os.close(root_fd)
+
+    assert not (original_root / hil.MATRIX_REPORT_NAME).exists()
+    assert replacement_report.read_bytes() == b"replacement-sentinel\n"
+
+
+def test_failure_evidence_matrix_publish_swap_never_overwrites_replacement_report(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    matrix_root = tmp_path / "matrix"
+    failure_root = tmp_path / "failures"
+    original_root = tmp_path / "matrix-original"
+    matrix_root.mkdir()
+    failure_root.mkdir()
+    arguments = SimpleNamespace(
+        evidence_dir=matrix_root,
+        failure_evidence_dir=failure_root,
+    )
+    hil.validate_run_roots(arguments)
+    root_fd = os.open(
+        matrix_root,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    arguments._pass_evidence_root_fd = root_fd
+    sentinel = b"replacement-sentinel\n"
+    swapped = False
+
+    def swap_before_publish():
+        nonlocal swapped
+        swapped = True
+        matrix_root.rename(original_root)
+        matrix_root.mkdir()
+        (matrix_root / hil.MATRIX_REPORT_NAME).write_bytes(sentinel)
+
+    monkeypatch.setattr(
+        hil, "_matrix_publish_boundary", swap_before_publish, raising=False
+    )
+    monkeypatch.setattr(
+        hil,
+        "_matrix_scenario_record",
+        lambda _root, scenario, _preflight: {"scenario": scenario},
+    )
+    preflight = {
+        "buildIdentity": {}, "deviceId": "device", "deviceUuid": "uuid",
+        "connectionIdentity": {},
+    }
+    try:
+        with pytest.raises(hil.HilValidationError, match="changed during publication"):
+            hil.publish_matrix_report(arguments, preflight)
+    finally:
+        os.close(root_fd)
+
+    assert swapped is True
+    assert (matrix_root / hil.MATRIX_REPORT_NAME).read_bytes() == sentinel
+
+
+def test_failure_evidence_matrix_nested_scenario_cannot_repin_replaced_root(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    original_root = tmp_path / "pass-original"
+
+    def preflight(_arguments, **_kwargs):
+        Path(arguments.evidence_dir).rename(original_root)
+        Path(arguments.evidence_dir).mkdir()
+        return {
+            "status": "PASS", "deviceId": "device", "deviceUuid": "uuid",
+            "connectionIdentity": {}, "buildIdentity": {},
+        }
+
+    monkeypatch.setattr(hil, "preflight", preflight)
+    monkeypatch.setattr(
+        hil,
+        "run_scenario",
+        lambda nested_arguments, _scenario: hil.validate_run_roots(nested_arguments),
+    )
+
+    with pytest.raises(hil.HilValidationError, match="changed during publication"):
+        hil.run_matrix(arguments)
+
+    assert not any(Path(arguments.evidence_dir).iterdir())
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
