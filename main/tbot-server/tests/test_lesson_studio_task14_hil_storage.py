@@ -770,6 +770,162 @@ def test_hil_storage_scenario_publication_uses_hidden_staging_and_requires_valid
     assert not list(tmp_path.glob(f".{failed.name}.staging-*"))
 
 
+def _publication_payloads(hil, *, power_loss):
+    return {
+        name: b"x\n"
+        for name in hil.scenario_artifact_names(power_loss=power_loss)
+        if name != "SHA256SUMS"
+    }
+
+
+def _passing_publication_validator(scenario, mutate=None):
+    def validator(command, **_kwargs):
+        staging = Path(command[command.index("--evidence-dir") + 1])
+        if mutate is not None:
+            mutate(staging)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps({
+            "scenario": scenario,
+            "status": "PASS",
+            "validationErrors": [],
+        }) + "\n")
+        return SimpleNamespace(returncode=0)
+
+    return validator
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ("finalize", "validator", "checksums", "verify", "staging-fsync", "rename", "parent-fsync"),
+)
+def test_hil_storage_publication_failure_rolls_back_staging_and_final(
+    tmp_path, monkeypatch, failure_point,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    final = tmp_path / "evict-after-unlinks-fail"
+    payloads = _publication_payloads(hil, power_loss=False)
+    marker = RuntimeError(f"failure-at-{failure_point}")
+    monkeypatch.setattr(
+        hil.subprocess,
+        "run",
+        _passing_publication_validator("evict-after-unlinks-fail"),
+    )
+
+    if failure_point == "finalize":
+        monkeypatch.setattr(hil, "finalize_scenario_directory", lambda *_a, **_k: (_ for _ in ()).throw(marker))
+    elif failure_point == "validator":
+        monkeypatch.setattr(hil.subprocess, "run", lambda *_a, **_k: (_ for _ in ()).throw(marker))
+    elif failure_point == "checksums":
+        monkeypatch.setattr(hil, "_rewrite_scenario_checksums", lambda *_a, **_k: (_ for _ in ()).throw(marker))
+    elif failure_point == "verify":
+        monkeypatch.setattr(hil, "_scenario_checksums", lambda *_a, **_k: (_ for _ in ()).throw(marker))
+    elif failure_point in {"staging-fsync", "parent-fsync"}:
+        calls = 0
+
+        def fail_fsync(_path):
+            nonlocal calls
+            calls += 1
+            target = 1 if failure_point == "staging-fsync" else 2
+            if calls == target:
+                raise marker
+
+        monkeypatch.setattr(hil, "_fsync_directory", fail_fsync)
+    elif failure_point == "rename":
+        monkeypatch.setattr(hil, "_rename_directory_noreplace", lambda *_a, **_k: (_ for _ in ()).throw(marker))
+
+    with pytest.raises(RuntimeError, match=f"failure-at-{failure_point}") as captured:
+        hil.publish_validated_scenario_directory(
+            final,
+            payloads,
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+
+    assert captured.value is marker
+    assert not os.path.lexists(final)
+    assert not list(tmp_path.glob(f".{final.name}.staging-*"))
+
+
+@pytest.mark.parametrize("power_loss", (False, True))
+@pytest.mark.parametrize("extra_kind", ("file", "directory", "symlink"))
+def test_hil_storage_post_validator_layout_rejects_extra_entry(
+    tmp_path, monkeypatch, power_loss, extra_kind,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    scenario = hil.POWER_LOSS_SCENARIO if power_loss else "evict-after-unlinks-fail"
+    final = tmp_path / scenario
+    payloads = _publication_payloads(hil, power_loss=power_loss)
+
+    def add_extra(staging):
+        extra = staging / "validator-extra"
+        if extra_kind == "file":
+            extra.write_text("extra\n")
+        elif extra_kind == "directory":
+            extra.mkdir()
+        else:
+            extra.symlink_to("missing-target")
+
+    monkeypatch.setattr(
+        hil.subprocess,
+        "run",
+        _passing_publication_validator(scenario, add_extra),
+    )
+    with pytest.raises(hil.HilValidationError, match="layout"):
+        hil.publish_validated_scenario_directory(
+            final,
+            payloads,
+            scenario=scenario,
+            power_loss=power_loss,
+            validator_script=tmp_path / "validator.py",
+        )
+    assert not os.path.lexists(final)
+    assert not list(tmp_path.glob(f".{final.name}.staging-*"))
+
+
+def test_hil_storage_noreplace_collision_rejects_broken_symlink_and_directory_race(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    payloads = _publication_payloads(hil, power_loss=False)
+    monkeypatch.setattr(
+        hil.subprocess,
+        "run",
+        _passing_publication_validator("evict-after-unlinks-fail"),
+    )
+    broken = tmp_path / "broken-collision"
+    broken.symlink_to("missing-target")
+    with pytest.raises(hil.HilValidationError, match="already exists"):
+        hil.publish_validated_scenario_directory(
+            broken,
+            payloads,
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+    assert broken.is_symlink()
+
+    raced = tmp_path / "raced-collision"
+    original_rename = hil._rename_directory_noreplace
+
+    def create_destination_then_publish(source, destination):
+        destination.mkdir()
+        return original_rename(source, destination)
+
+    monkeypatch.setattr(hil, "_rename_directory_noreplace", create_destination_then_publish)
+    with pytest.raises(hil.HilValidationError, match="already exists"):
+        hil.publish_validated_scenario_directory(
+            raced,
+            payloads,
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+    assert raced.is_dir()
+    assert not any(raced.iterdir())
+    assert not list(tmp_path.glob(f".{raced.name}.staging-*"))
+
+
 def test_power_loss_classification_requires_response_absence_reboot_clear_and_retry():
     hil = load_script("lesson_studio_task14_hil_storage.py")
     result = {

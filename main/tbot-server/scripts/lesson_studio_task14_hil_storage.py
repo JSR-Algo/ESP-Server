@@ -3,6 +3,8 @@
 
 import argparse
 import concurrent.futures
+import ctypes
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -11,6 +13,7 @@ import os
 import re
 import selectors
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -578,6 +581,40 @@ def _rewrite_scenario_checksums(directory, *, power_loss):
     atomic_write_bytes(directory / "SHA256SUMS", "".join(lines).encode("ascii"))
 
 
+def _validate_staging_layout(directory, expected_names):
+    directory = Path(directory)
+    entries = {entry.name: entry for entry in os.scandir(directory)}
+    require(set(entries) == set(expected_names), "staging scenario directory layout mismatch")
+    for name in expected_names:
+        mode = entries[name].stat(follow_symlinks=False).st_mode
+        require(stat.S_ISREG(mode), f"invalid staging scenario artifact: {name}")
+
+
+def _rename_directory_noreplace(source, destination):
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(library, "renamex_np", None)
+        arguments = (source_bytes, destination_bytes, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(library, "renameat2", None)
+        arguments = (-100, source_bytes, -100, destination_bytes, 0x00000001)
+    else:
+        rename = None
+        arguments = ()
+    require(rename is not None, "atomic no-replace directory publication is unsupported")
+    rename.restype = ctypes.c_int
+    if rename(*arguments) == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise HilValidationError("final HIL scenario directory already exists")
+    raise HilValidationError(
+        f"atomic no-replace directory publication failed: {os.strerror(error)}"
+    )
+
+
 def publish_validated_scenario_directory(
     final_directory,
     payloads,
@@ -590,9 +627,13 @@ def publish_validated_scenario_directory(
     final_directory = Path(final_directory)
     parent = final_directory.parent
     parent.mkdir(parents=True, exist_ok=True)
-    require(not final_directory.exists(), "final HIL scenario directory already exists")
+    require(
+        not os.path.lexists(final_directory),
+        "final HIL scenario directory already exists",
+    )
     staging = Path(tempfile.mkdtemp(prefix=f".{final_directory.name}.staging-", dir=parent))
     expected = scenario_artifact_names(power_loss=power_loss)
+    published = False
     try:
         finalize_scenario_directory(staging, payloads, power_loss=power_loss)
         validator = subprocess.run(
@@ -634,13 +675,17 @@ def publish_validated_scenario_directory(
             with (staging / name).open("rb") as artifact:
                 os.fsync(artifact.fileno())
         _fsync_directory(staging)
-        require(not final_directory.exists(), "final HIL scenario directory already exists")
-        os.rename(staging, final_directory)
+        _validate_staging_layout(staging, expected)
+        _rename_directory_noreplace(staging, final_directory)
+        published = True
         _fsync_directory(parent)
         return final_directory
     except BaseException:
+        cleanup = final_directory if published else staging
         with suppress(Exception):
-            shutil.rmtree(staging)
+            shutil.rmtree(cleanup)
+        with suppress(Exception):
+            _fsync_directory(parent)
         raise
 
 
