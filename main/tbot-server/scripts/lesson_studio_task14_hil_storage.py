@@ -690,6 +690,9 @@ def record_validated_failure_response(context, name, validated_value, secrets=()
         "invalid failure response context",
     )
     validate_bounded_failure_response(validated_value, secrets)
+    tentative = dict(context)
+    tentative[name] = validated_value
+    _bounded_json_bytes(tentative, secrets, sort_keys=False)
     context[name] = validated_value
     return validated_value
 

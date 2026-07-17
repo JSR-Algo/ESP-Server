@@ -713,6 +713,44 @@ def test_failure_evidence_non_trigger_bounded_rejection_keeps_slot_null_and_quar
     assert len(json.dumps(evidence["last_responses"]).encode()) < 256 * 1024
 
 
+def test_failure_evidence_recorder_rejects_aggregate_context_over_cap():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    responses = {key: None for key in hil.FAILURE_RESPONSE_KEYS}
+
+    def large_inspection(suffix):
+        value = {
+            "cacheKey": KEY,
+            "siblingCacheKey": SIBLING,
+            "status": "inspected",
+            "truncated": False,
+            "entries": [{
+                "label": f"protected/{suffix}-" + "x" * (150 * 1024),
+                "nodeType": "missing",
+                "bytes": 0,
+                "sha256": "",
+            }],
+        }
+        return hil.validate_inspect_response(value, KEY, SIBLING)
+
+    inspect_before = large_inspection("before")
+    inspect_after = large_inspection("after")
+    assert len(hil._bounded_json_bytes(inspect_before, ())) < hil.MAX_FAILURE_JSON_BYTES
+    assert len(hil._bounded_json_bytes(inspect_after, ())) < hil.MAX_FAILURE_JSON_BYTES
+
+    hil.record_validated_failure_response(
+        responses, "inspectBefore", inspect_before
+    )
+    with pytest.raises(hil.HilValidationError, match="failure JSON exceeds bounded size"):
+        hil.record_validated_failure_response(
+            responses, "inspectAfter", inspect_after
+        )
+
+    assert tuple(responses) == hil.FAILURE_RESPONSE_KEYS
+    assert responses["inspectBefore"] is inspect_before
+    assert responses["inspectAfter"] is None
+    assert len(hil._bounded_json_bytes(responses, ())) <= hil.MAX_FAILURE_JSON_BYTES
+
+
 @pytest.mark.parametrize(
     "scenario",
     ("evict-after-unlinks-fail", "evict-before-rmdir-fail"),
