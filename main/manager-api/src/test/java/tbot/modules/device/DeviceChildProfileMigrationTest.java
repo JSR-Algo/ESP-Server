@@ -311,7 +311,7 @@ class DeviceChildProfileMigrationTest {
             statement.setString(5, "5".repeat(64));
             statement.setString(6, "Non-string JSON");
             statement.setInt(7, 5);
-            statement.setString(8, "[1,null,{}]");
+            statement.setString(8, "[null]");
             statement.executeUpdate();
 
             statement.setString(1, "upgrade-clear");

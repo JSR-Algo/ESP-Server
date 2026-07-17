@@ -15,7 +15,8 @@ WITH `projection_state` AS (
                       IF(JSON_VALID(`child_interests`), `child_interests`, JSON_ARRAY(JSON_OBJECT())),
                       '$[*]' COLUMNS (`interest` JSON PATH '$')
                   ) AS `decoded_interests`
-                 WHERE JSON_TYPE(`decoded_interests`.`interest`) <> 'STRING'
+                 WHERE `decoded_interests`.`interest` IS NULL
+                    OR JSON_TYPE(`decoded_interests`.`interest`) <> 'STRING'
             )) AS `preserve_replace`,
            (`child_profile_id` IS NULL
             AND `child_birth_year` IS NULL
