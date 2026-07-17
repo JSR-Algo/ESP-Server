@@ -558,6 +558,7 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
             hil_identity,
             production_identity,
             ledger_path=ledger_path,
+            evidence_root=tmp_path,
         )
         evidence.write_text(json.dumps(payload))
         evidence_paths.append(evidence)
@@ -633,7 +634,8 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
     for index, event in enumerate(identity.RELEASE_ORDER[:-1]):
         event_evidence = tmp_path / f"{event}.json"
         event_evidence.write_text(json.dumps(release_evidence_payload(
-            event, hil_identity, production_identity, ledger_path=ledger
+            event, hil_identity, production_identity, ledger_path=ledger,
+            evidence_root=tmp_path,
         )))
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
@@ -656,7 +658,295 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
         )
 
 
-def release_evidence_payload(event, hil_identity, production_identity, ledger_path=None):
+def test_release_ledger_rejects_self_authored_hil_matrix_summary(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    hil_identity = identity.load_build_identity(hil_path, expected_profile="hil")
+    production_identity = identity.load_build_identity(
+        prod_path, expected_profile="production"
+    )
+    ledger = tmp_path / "ledger"
+    flash = tmp_path / "hil-flash.json"
+    flash.write_text(
+        json.dumps(release_evidence_payload(
+            "hil-flash", hil_identity, production_identity
+        ))
+    )
+    identity.append_release_receipt(
+        ledger,
+        hil_path,
+        prod_path,
+        event="hil-flash",
+        evidence_path=flash,
+        completed_at="2026-07-17T00:00:00Z",
+    )
+    summary = tmp_path / "self-authored-matrix.json"
+    summary.write_text(json.dumps({
+        "status": "PASS",
+        "event": "hil-matrix-pass",
+        "buildIdentity": hil_identity,
+        "scenarios": [
+            {"scenario": scenario, "status": "PASS"}
+            for scenario in identity.HIL_STORAGE_SCENARIOS
+        ],
+    }))
+
+    with pytest.raises(identity.BuildIdentityError):
+        identity.append_release_receipt(
+            ledger,
+            hil_path,
+            prod_path,
+            event="hil-matrix-pass",
+            evidence_path=summary,
+            completed_at="2026-07-17T00:00:01Z",
+        )
+
+
+def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatch):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    evidence_root = tmp_path / "matrix"
+    manifest = tmp_path / "build.json"
+    manifest.write_text("{}")
+    calls = []
+    preflight_result = {
+        "status": "PASS",
+        "deviceId": "28:84:85:85:1a:80",
+        "deviceUuid": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "connectionIdentity": {
+            "deviceId": "28:84:85:85:1a:80",
+            "clientId": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        },
+        "buildIdentity": {"profile": "hil"},
+    }
+
+    monkeypatch.setattr(hil, "preflight", lambda _arguments: preflight_result)
+    monkeypatch.setattr(
+        hil, "run_scenario", lambda _arguments, scenario: calls.append(scenario)
+    )
+    def publish(arguments, observed_preflight):
+        assert observed_preflight == preflight_result
+        hil.atomic_write_bytes(
+            Path(arguments.evidence_dir) / "hil-matrix-report.json",
+            b'{"status":"PASS"}\n',
+        )
+
+    monkeypatch.setattr(hil, "publish_matrix_report", publish, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(hil.__file__), "run-matrix",
+            "--device-id", "28:84:85:85:1a:80",
+            "--device-uuid", "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+            "--serial-port", "/dev/null",
+            "--esp-base-url", "http://127.0.0.1:8000",
+            "--asset-url", "http://127.0.0.1:8000/asset",
+            "--asset-sha256", "d" * 64,
+            "--asset-bytes", "1",
+            "--build-manifest", str(manifest),
+            "--evidence-dir", str(evidence_root),
+        ],
+    )
+
+    assert hil.main() == 0
+    assert calls == list(hil.HIL_STORAGE_SCENARIOS)
+    assert (evidence_root / "hil-matrix-report.json").is_file()
+
+
+def test_publish_matrix_report_binds_scenario_artifacts_and_attended_identity(tmp_path):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    hil_path, _manifest, _paths = task6_manifest(tmp_path / "hil", profile="hil")
+    identity = load_script("lesson_studio_task14_build_identity.py").load_build_identity(
+        hil_path, expected_profile="hil"
+    )
+    report_fixture = _matrix_evidence_payload(tmp_path / "matrix", identity)
+    preflight_result = {
+        key: report_fixture[key]
+        for key in ("status", "buildIdentity", "deviceId", "deviceUuid", "connectionIdentity")
+    }
+
+    report = hil.publish_matrix_report(
+        types.SimpleNamespace(evidence_dir=tmp_path / "matrix"), preflight_result
+    )
+
+    report_path = tmp_path / "matrix" / hil.MATRIX_REPORT_NAME
+    assert json.loads(report_path.read_text()) == report
+    assert report == report_fixture
+    assert not list((tmp_path / "matrix").glob(".hil-matrix-report.json.*"))
+
+
+def test_publish_matrix_report_removes_output_when_inputs_change(tmp_path, monkeypatch):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    calls = 0
+
+    def changing_record(_root, scenario, _preflight):
+        nonlocal calls
+        calls += 1
+        return {"scenario": scenario, "round": (calls - 1) // len(hil.HIL_STORAGE_SCENARIOS)}
+
+    monkeypatch.setattr(hil, "_matrix_scenario_record", changing_record)
+    arguments = types.SimpleNamespace(evidence_dir=tmp_path)
+    preflight_result = {
+        "buildIdentity": {},
+        "deviceId": "28:84:85:85:1a:80",
+        "deviceUuid": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "connectionIdentity": {
+            "deviceId": "28:84:85:85:1a:80",
+            "clientId": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        },
+    }
+
+    with pytest.raises(hil.HilValidationError, match="changed during publication"):
+        hil.publish_matrix_report(arguments, preflight_result)
+
+    assert not (tmp_path / hil.MATRIX_REPORT_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "scenario-set", "scenario-extra", "evidence-path", "evidence-hash", "scenario-status",
+        "validator", "matrix-build", "matrix-device", "artifact-hash",
+        "checksum-manifest",
+    ),
+)
+def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, mutation):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    pair = identity.validate_build_pair(hil_path, prod_path)
+    matrix_root = tmp_path / "matrix"
+    report = _matrix_evidence_payload(matrix_root, pair["hil"])
+    first = report["scenarios"][0]
+    if mutation == "scenario-set":
+        report["scenarios"].pop()
+    elif mutation == "scenario-extra":
+        report["scenarios"].append("ignored")
+    elif mutation == "evidence-path":
+        first["evidencePath"] = "../evidence.json"
+    elif mutation == "evidence-hash":
+        first["evidenceSha256"] = "0" * 64
+    elif mutation == "scenario-status":
+        first["status"] = "NOT_PASS"
+    elif mutation == "validator":
+        first["validatorExitCode"] = 1
+    elif mutation == "matrix-build":
+        report["buildIdentity"] = {**pair["hil"], "binarySha256": "0" * 64}
+    elif mutation == "matrix-device":
+        report["deviceId"] = "00:00:00:00:00:00"
+        report["connectionIdentity"]["deviceId"] = report["deviceId"]
+    elif mutation == "artifact-hash":
+        first["artifacts"]["result.json"] = "0" * 64
+    else:
+        checksum = matrix_root / first["sha256SumsPath"]
+        checksum.write_text(checksum.read_text() + "invalid\n")
+    report_path = matrix_root / "hil-matrix-report.json"
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(identity.BuildIdentityError):
+        identity._validate_hil_matrix(report, pair, report_path)
+
+
+def test_runbook_releases_generated_hil_matrix_report():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    matrix_command = runbook.index("lesson_studio_task14_hil_storage.py run-matrix")
+    release_command = runbook.index("--event hil-matrix-pass")
+
+    assert matrix_command < release_command
+    assert 'test -f "$HIL_MATRIX_REPORT"' in runbook
+    assert '--evidence "$HIL_MATRIX_REPORT"' in runbook
+
+
+def _matrix_evidence_payload(root, hil_identity):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    Path(root).mkdir(parents=True, exist_ok=True)
+    device_id = "28:84:85:85:1a:80"
+    device_uuid = "fce7bec8-8478-4ab4-817f-7b87c41c1f91"
+    connection = {"deviceId": device_id, "clientId": device_uuid}
+    scenarios = []
+    for scenario in identity.HIL_STORAGE_SCENARIOS:
+        directory = Path(root) / scenario
+        directory.mkdir()
+        expected = (
+            identity.HIL_POWER_LOSS_ARTIFACTS
+            if scenario == identity.HIL_STORAGE_SCENARIOS[-1]
+            else identity.HIL_ORDINARY_ARTIFACTS
+        )
+        payloads = {
+            name: b"artifact\n"
+            for name in expected
+            if name != "SHA256SUMS"
+        }
+        payloads["build-manifest.json"] = (
+            json.dumps(hil_identity, sort_keys=True) + "\n"
+        ).encode()
+        payloads["build-manifest.sha256"] = (
+            hashlib.sha256(payloads["build-manifest.json"]).hexdigest()
+            + "  build-manifest.json\n"
+        ).encode("ascii")
+        payloads["result.json"] = (
+            json.dumps({
+                "scenario": scenario,
+                "status": "PASS",
+                "buildIdentity": hil_identity,
+                "deviceId": device_id,
+                "deviceUuid": device_uuid,
+                "connectionIdentity": connection,
+            }, sort_keys=True) + "\n"
+        ).encode()
+        payloads["evidence.json"] = (
+            json.dumps({
+                "scenario": scenario,
+                "status": "PASS",
+                "validationErrors": [],
+            }, sort_keys=True) + "\n"
+        ).encode()
+        payloads["validator-exit-code.txt"] = b"0\n"
+        for name, data in payloads.items():
+            (directory / name).write_bytes(data)
+        artifacts = {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in payloads.items()
+        }
+        checksum_bytes = "".join(
+            f"{artifacts[name]}  {name}\n"
+            for name in expected
+            if name != "SHA256SUMS"
+        ).encode("ascii")
+        (directory / "SHA256SUMS").write_bytes(checksum_bytes)
+        scenarios.append({
+            "scenario": scenario,
+            "status": "PASS",
+            "evidencePath": f"{scenario}/evidence.json",
+            "evidenceSha256": artifacts["evidence.json"],
+            "sha256SumsPath": f"{scenario}/SHA256SUMS",
+            "sha256SumsSha256": hashlib.sha256(checksum_bytes).hexdigest(),
+            "validatorExitCode": 0,
+            "artifacts": artifacts,
+        })
+    return {
+        "status": "PASS",
+        "event": "hil-matrix-pass",
+        "buildIdentity": hil_identity,
+        "deviceId": device_id,
+        "deviceUuid": device_uuid,
+        "connectionIdentity": connection,
+        "scenarios": scenarios,
+    }
+
+
+def release_evidence_payload(
+    event,
+    hil_identity,
+    production_identity,
+    ledger_path=None,
+    evidence_root=None,
+):
     if event == "hil-flash":
         return {
             "status": "PASS", "event": event,
@@ -668,20 +958,8 @@ def release_evidence_payload(event, hil_identity, production_identity, ledger_pa
             },
         }
     if event == "hil-matrix-pass":
-        return {
-            "status": "PASS", "event": event,
-            "buildIdentity": hil_identity,
-            "scenarios": [
-                {"scenario": scenario, "status": "PASS"}
-                for scenario in (
-                    "evict-before-first-unlink-fail", "evict-after-unlinks-fail",
-                    "evict-before-rmdir-fail", "evict-after-unlinks-sd-removal",
-                    "sync-before-download-write-no-space", "sync-after-download-bytes-no-space",
-                    "sync-before-checksum-corrupt-staging", "sync-before-commit-rename-fail",
-                    "sync-before-commit-rename-power-loss",
-                )
-            ],
-        }
+        assert evidence_root is not None
+        return _matrix_evidence_payload(evidence_root, hil_identity)
     if event == "production-reflash":
         return {
             "status": "PASS", "event": event,

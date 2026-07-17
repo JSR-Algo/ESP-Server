@@ -51,6 +51,10 @@ export CAPTURE_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_live_capture.py"
 export VERIFIER_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_log_verify.py"
 export BACKEND_URL='http://192.168.1.25:3100/v1'
 export SERIAL_PORT='<serial-port>'
+export HIL_ESP_BASE_URL='<attended-ESP-base-URL>'
+export HIL_ASSET_URL='<attended-lab-asset-URL>'
+export HIL_ASSET_SHA256='<64-lowercase-hex-asset-SHA-256>'
+export HIL_ASSET_BYTES='<positive-asset-byte-count>'
 export SCENARIO='cold' # set to warm for the second fresh assignment
 mkdir -p "$EVIDENCE_ROOT"
 
@@ -434,6 +438,26 @@ python3 scripts/lesson_e2e_log_verify.py \
   --device-id "$DEVICE_ID" \
   --before-log-file "$EVIDENCE_ROOT/rollback/before-rollback.log" \
   --after-log-file "$EVIDENCE_ROOT/rollback/after-rollback.log"
+```
+
+Run the attended storage fault matrix with the HIL build still flashed. The
+orchestrator writes `hil-matrix-report.json` atomically only after all nine
+scenario directories have passed their validators and checksum binding. Do
+not create or edit this report by hand:
+
+```bash
+cd "$ESP_WORKTREE/main/tbot-server"
+python3 scripts/lesson_studio_task14_hil_storage.py run-matrix \
+  --device-id "$DEVICE_ID" \
+  --device-uuid "$DEVICE_ALIAS" \
+  --serial-port "$SERIAL_PORT" \
+  --esp-base-url "$HIL_ESP_BASE_URL" \
+  --asset-url "$HIL_ASSET_URL" \
+  --asset-sha256 "$HIL_ASSET_SHA256" \
+  --asset-bytes "$HIL_ASSET_BYTES" \
+  --build-manifest "$HIL_BUILD_MANIFEST" \
+  --evidence-dir "$EVIDENCE_ROOT"
+test -f "$HIL_MATRIX_REPORT"
 ```
 
 The attended release order is immutable:

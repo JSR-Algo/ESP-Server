@@ -41,6 +41,27 @@ HIL_STORAGE_SCENARIOS = (
     "sync-before-checksum-corrupt-staging", "sync-before-commit-rename-fail",
     "sync-before-commit-rename-power-loss",
 )
+HIL_ORDINARY_ARTIFACTS = (
+    "command.txt", "serial.log", "server.log", "timeline.log",
+    "build-manifest.json", "build-manifest.sha256", "status-before.json",
+    "inspect-before.json", "stage-response.json", "arm-response.json",
+    "trigger-response.json", "status-after.json", "inspect-after.json",
+    "cleanup-response.json", "result.json", "evidence.json",
+    "validator-exit-code.txt", "SHA256SUMS",
+)
+HIL_POWER_LOSS_ARTIFACTS = (
+    tuple(name for name in HIL_ORDINARY_ARTIFACTS if name != "trigger-response.json")[:-1]
+    + (
+        "checkpoint-reached-utc.txt", "power-removed-utc.txt", "reboot-serial.log",
+        "post-reboot-inspect.json", "SHA256SUMS",
+    )
+)
+HIL_MATRIX_RECORD_FIELDS = frozenset(
+    {
+        "scenario", "status", "evidencePath", "evidenceSha256",
+        "sha256SumsPath", "sha256SumsSha256", "validatorExitCode", "artifacts",
+    }
+)
 ZERO_SHA256 = "0" * 64
 
 
@@ -293,19 +314,176 @@ def _validate_boot_evidence(value, event, identity):
     )
 
 
-def _validate_event_evidence(event, value, pair, prior_ledger):
+def _load_matrix_json(path, label):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BuildIdentityError(f"invalid HIL matrix {label} JSON") from exc
+    require(isinstance(value, dict), f"invalid HIL matrix {label} JSON")
+    return value
+
+
+def _matrix_checksums(directory, expected_names):
+    checksum_path = directory / "SHA256SUMS"
+    rows = checksum_path.read_text(encoding="ascii").splitlines()
+    expected_artifacts = tuple(name for name in expected_names if name != "SHA256SUMS")
+    require(len(rows) == len(expected_artifacts), "HIL matrix checksum file set mismatch")
+    declared = {}
+    for row in rows:
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)", row)
+        require(match is not None, "invalid HIL matrix checksum manifest")
+        digest, name = match.groups()
+        require(name not in declared, "duplicate HIL matrix checksum entry")
+        declared[name] = digest
+    require(set(declared) == set(expected_artifacts), "HIL matrix checksum file set mismatch")
+    for name in expected_artifacts:
+        artifact = directory / name
+        require(
+            not artifact.is_symlink() and artifact.is_file() and artifact.stat().st_size > 0,
+            f"invalid HIL matrix artifact: {name}",
+        )
+        require(
+            declared[name] == sha256_file(artifact),
+            f"HIL matrix artifact checksum mismatch: {name}",
+        )
+    return declared
+
+
+def _validate_hil_matrix(value, pair, evidence_path):
+    require(
+        set(value) == {
+            "status", "event", "buildIdentity", "deviceId", "deviceUuid",
+            "connectionIdentity", "scenarios",
+        },
+        "invalid HIL matrix fields",
+    )
+    require(
+        value.get("status") == "PASS" and value.get("event") == "hil-matrix-pass",
+        "HIL matrix is not PASS",
+    )
+    require(value.get("buildIdentity") == pair["hil"], "HIL matrix build mismatch")
+    device_id = value.get("deviceId")
+    device_uuid = value.get("deviceUuid")
+    connection = value.get("connectionIdentity")
+    require(
+        isinstance(device_id, str)
+        and re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", device_id),
+        "invalid HIL matrix device MAC",
+    )
+    require(
+        isinstance(device_uuid, str)
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            device_uuid,
+            re.IGNORECASE,
+        ),
+        "invalid HIL matrix device UUID",
+    )
+    require(
+        connection == {"deviceId": device_id, "clientId": device_uuid},
+        "HIL matrix connection identity mismatch",
+    )
+    scenarios = value.get("scenarios")
+    require(
+        isinstance(scenarios, list)
+        and len(scenarios) == len(HIL_STORAGE_SCENARIOS)
+        and all(isinstance(item, dict) for item in scenarios)
+        and [item.get("scenario") for item in scenarios] == list(HIL_STORAGE_SCENARIOS),
+        "HIL matrix scenario evidence incomplete",
+    )
+    root = Path(evidence_path).parent
+    for index, scenario in enumerate(HIL_STORAGE_SCENARIOS):
+        record = scenarios[index]
+        require(
+            isinstance(record, dict) and set(record) == HIL_MATRIX_RECORD_FIELDS,
+            "invalid HIL matrix scenario fields",
+        )
+        require(record.get("status") == "PASS", "HIL matrix scenario is not PASS")
+        require(
+            record.get("validatorExitCode") == 0
+            and type(record.get("validatorExitCode")) is int,
+            "HIL matrix scenario validator did not succeed",
+        )
+        evidence_relative = f"{scenario}/evidence.json"
+        sums_relative = f"{scenario}/SHA256SUMS"
+        require(
+            record.get("evidencePath") == evidence_relative
+            and record.get("sha256SumsPath") == sums_relative,
+            "HIL matrix scenario evidence path mismatch",
+        )
+        scenario_evidence = _safe_relative_path(root, evidence_relative, "HIL matrix evidence")
+        checksum_path = _safe_relative_path(root, sums_relative, "HIL matrix checksum")
+        scenario_dir = scenario_evidence.parent
+        require(checksum_path.parent == scenario_dir, "HIL matrix scenario paths diverge")
+        expected = (
+            HIL_POWER_LOSS_ARTIFACTS
+            if scenario == HIL_STORAGE_SCENARIOS[-1]
+            else HIL_ORDINARY_ARTIFACTS
+        )
+        require(
+            {path.name for path in scenario_dir.iterdir()} == set(expected),
+            "HIL matrix scenario file set mismatch",
+        )
+        declared = _matrix_checksums(scenario_dir, expected)
+        require(record.get("artifacts") == declared, "HIL matrix artifact binding mismatch")
+        require(
+            record.get("evidenceSha256") == declared["evidence.json"]
+            == sha256_file(scenario_evidence),
+            "HIL matrix evidence hash mismatch",
+        )
+        require(
+            record.get("sha256SumsSha256") == sha256_file(checksum_path),
+            "HIL matrix checksum manifest hash mismatch",
+        )
+        require(
+            (scenario_dir / "validator-exit-code.txt").read_bytes() == b"0\n",
+            "HIL matrix scenario validator did not succeed",
+        )
+        scenario_value = _load_matrix_json(scenario_evidence, "evidence")
+        require(
+            scenario_value.get("scenario") == scenario
+            and scenario_value.get("status") == "PASS"
+            and scenario_value.get("validationErrors") == [],
+            "HIL matrix validator evidence is not PASS",
+        )
+        result = _load_matrix_json(scenario_dir / "result.json", "result")
+        require(
+            result.get("scenario") == scenario and result.get("status") == "PASS",
+            "HIL matrix scenario result is not PASS",
+        )
+        require(result.get("buildIdentity") == pair["hil"], "HIL matrix scenario build mismatch")
+        require(result.get("deviceId") == device_id, "HIL matrix scenario device mismatch")
+        require(result.get("deviceUuid") == device_uuid, "HIL matrix scenario UUID mismatch")
+        require(
+            result.get("connectionIdentity") == connection,
+            "HIL matrix scenario connection mismatch",
+        )
+        require(
+            _load_matrix_json(scenario_dir / "build-manifest.json", "build manifest")
+            == pair["hil"],
+            "HIL matrix scenario build manifest mismatch",
+        )
+        build_manifest_path = scenario_dir / "build-manifest.json"
+        build_checksum_parts = (
+            scenario_dir / "build-manifest.sha256"
+        ).read_text(encoding="ascii").strip().split()
+        require(
+            len(build_checksum_parts) == 2
+            and build_checksum_parts[0] == sha256_file(build_manifest_path)
+            and build_checksum_parts[1].lstrip("*") == build_manifest_path.name,
+            "HIL matrix scenario build manifest checksum mismatch",
+        )
+        require(
+            _matrix_checksums(scenario_dir, expected) == declared,
+            "HIL matrix scenario artifacts changed during validation",
+        )
+
+
+def _validate_event_evidence(event, value, pair, prior_ledger, evidence_path):
     if event == "hil-flash":
         _validate_boot_evidence(value, event, pair["hil"])
     elif event == "hil-matrix-pass":
-        require(value.get("status") == "PASS" and value.get("event") == event, "HIL matrix is not PASS")
-        require(value.get("buildIdentity") == pair["hil"], "HIL matrix build mismatch")
-        scenarios = value.get("scenarios")
-        require(
-            isinstance(scenarios, list)
-            and [item.get("scenario") for item in scenarios if isinstance(item, dict)] == list(HIL_STORAGE_SCENARIOS)
-            and all(set(item) == {"scenario", "status"} and item["status"] == "PASS" for item in scenarios),
-            "HIL matrix scenario evidence incomplete",
-        )
+        _validate_hil_matrix(value, pair, evidence_path)
     elif event == "production-reflash":
         _validate_boot_evidence(value, event, pair["production"])
     elif event == "production-attest":
@@ -445,7 +623,7 @@ def append_release_receipt(
         require(_strict_utc(receipts[-1]["completedAt"]) < completed, "release receipt UTC is not increasing")
     evidence, digest = _release_evidence(evidence_path, evidence_checksum_path)
     evidence_value = _load_evidence_json(evidence)
-    _validate_event_evidence(event, evidence_value, pair, ledger)
+    _validate_event_evidence(event, evidence_value, pair, ledger, evidence)
     receipt = {
         "event": event,
         "completedAt": completed_at,

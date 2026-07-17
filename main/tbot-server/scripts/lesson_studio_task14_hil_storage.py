@@ -41,6 +41,7 @@ HIL_STORAGE_SCENARIOS = (
     "sync-before-commit-rename-fail",
     "sync-before-commit-rename-power-loss",
 )
+MATRIX_REPORT_NAME = "hil-matrix-report.json"
 POWER_LOSS_SCENARIO = HIL_STORAGE_SCENARIOS[-1]
 HIL_TOOL_NAMES = {
     "arm": "self.lesson_assets.hil.arm_fault",
@@ -483,6 +484,131 @@ def finalize_scenario_directory(directory, payloads, *, power_loss):
         "scenario directory layout mismatch",
     )
     return directory
+
+
+def _scenario_checksums(directory, expected_names):
+    checksum_path = directory / "SHA256SUMS"
+    require(
+        not checksum_path.is_symlink() and checksum_path.is_file(),
+        "HIL scenario checksum manifest missing",
+    )
+    rows = checksum_path.read_text(encoding="ascii").splitlines()
+    expected_artifacts = tuple(name for name in expected_names if name != "SHA256SUMS")
+    require(len(rows) == len(expected_artifacts), "HIL scenario checksum file set mismatch")
+    declared = {}
+    for row in rows:
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)", row)
+        require(match is not None, "invalid HIL scenario checksum manifest")
+        digest, name = match.groups()
+        require(name not in declared, "duplicate HIL scenario checksum entry")
+        declared[name] = digest
+    require(set(declared) == set(expected_artifacts), "HIL scenario checksum file set mismatch")
+    for name in expected_artifacts:
+        artifact = directory / name
+        require(
+            not artifact.is_symlink() and artifact.is_file() and artifact.stat().st_size > 0,
+            f"invalid HIL scenario artifact: {name}",
+        )
+        require(
+            hashlib.sha256(artifact.read_bytes()).hexdigest() == declared[name],
+            f"HIL scenario artifact checksum mismatch: {name}",
+        )
+    return declared
+
+
+def _matrix_scenario_record(evidence_root, scenario, preflight_result):
+    scenario_dir = evidence_root / scenario
+    require(
+        not scenario_dir.is_symlink() and scenario_dir.is_dir(),
+        "HIL scenario evidence directory missing",
+    )
+    expected = scenario_artifact_names(power_loss=scenario == POWER_LOSS_SCENARIO)
+    require(
+        {path.name for path in scenario_dir.iterdir()} == set(expected),
+        "HIL scenario evidence file set mismatch",
+    )
+    artifacts = _scenario_checksums(scenario_dir, expected)
+    try:
+        result = json.loads((scenario_dir / "result.json").read_text(encoding="utf-8"))
+        evidence = json.loads((scenario_dir / "evidence.json").read_text(encoding="utf-8"))
+        build_manifest = json.loads(
+            (scenario_dir / "build-manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HilValidationError("invalid HIL matrix scenario JSON") from exc
+    require(
+        isinstance(result, dict)
+        and result.get("scenario") == scenario
+        and result.get("status") == "PASS",
+        "HIL matrix scenario result is not PASS",
+    )
+    require(
+        isinstance(evidence, dict)
+        and evidence.get("scenario") == scenario
+        and evidence.get("status") == "PASS"
+        and evidence.get("validationErrors") == [],
+        "HIL matrix scenario validator evidence is not PASS",
+    )
+    require(
+        (scenario_dir / "validator-exit-code.txt").read_bytes() == b"0\n",
+        "HIL matrix scenario validator did not succeed",
+    )
+    for field in ("buildIdentity", "deviceId", "deviceUuid", "connectionIdentity"):
+        require(
+            result.get(field) == preflight_result.get(field),
+            f"HIL matrix scenario {field} mismatch",
+        )
+    require(
+        build_manifest == preflight_result.get("buildIdentity"),
+        "HIL matrix scenario build manifest mismatch",
+    )
+    return {
+        "scenario": scenario,
+        "status": "PASS",
+        "evidencePath": f"{scenario}/evidence.json",
+        "evidenceSha256": artifacts["evidence.json"],
+        "sha256SumsPath": f"{scenario}/SHA256SUMS",
+        "sha256SumsSha256": hashlib.sha256(
+            (scenario_dir / "SHA256SUMS").read_bytes()
+        ).hexdigest(),
+        "validatorExitCode": 0,
+        "artifacts": artifacts,
+    }
+
+
+def publish_matrix_report(arguments, preflight_result):
+    evidence_root = Path(arguments.evidence_dir)
+    scenarios = [
+        _matrix_scenario_record(evidence_root, scenario, preflight_result)
+        for scenario in HIL_STORAGE_SCENARIOS
+    ]
+    report = {
+        "status": "PASS",
+        "event": "hil-matrix-pass",
+        "buildIdentity": preflight_result["buildIdentity"],
+        "deviceId": preflight_result["deviceId"],
+        "deviceUuid": preflight_result["deviceUuid"],
+        "connectionIdentity": preflight_result["connectionIdentity"],
+        "scenarios": scenarios,
+    }
+    report_path = evidence_root / MATRIX_REPORT_NAME
+
+    def verify_inputs():
+        observed = [
+            _matrix_scenario_record(evidence_root, scenario, preflight_result)
+            for scenario in HIL_STORAGE_SCENARIOS
+        ]
+        require(observed == scenarios, "HIL matrix inputs changed during publication")
+
+    try:
+        verify_inputs()
+        atomic_write_bytes(report_path, json_bytes(report))
+        verify_inputs()
+    except BaseException:
+        with suppress(FileNotFoundError):
+            report_path.unlink()
+        raise
+    return report
 
 
 def validate_power_loss_result(value):
@@ -1459,9 +1585,13 @@ def main():
             preflight(arguments)
             run_scenario(arguments, arguments.scenario)
         else:
-            preflight(arguments)
+            report_path = Path(arguments.evidence_dir) / MATRIX_REPORT_NAME
+            with suppress(FileNotFoundError):
+                report_path.unlink()
+            preflight_result = preflight(arguments)
             for scenario in HIL_STORAGE_SCENARIOS:
                 run_scenario(arguments, scenario)
+            publish_matrix_report(arguments, preflight_result)
         return 0
     except (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError) as exc:
         print(f"lesson storage HIL: FAIL: {redact_text(exc)}", file=sys.stderr)
