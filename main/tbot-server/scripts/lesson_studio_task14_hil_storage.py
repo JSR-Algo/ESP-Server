@@ -162,15 +162,33 @@ def _exact_bool(value, name):
     return value
 
 
-def validate_arm_response(value, cache_key, operation, checkpoint, action):
+def validate_arm_response(
+    value,
+    cache_key,
+    operation,
+    checkpoint,
+    action,
+    *,
+    threshold=None,
+    declared_asset_bytes=None,
+    pause_seconds=None,
+):
     value = _exact_fields(value, ARM_FIELDS, "arm")
     require(value["cacheKey"] == cache_key, "arm response cache key mismatch")
     require(value["status"] == "armed", "fault was not armed")
     require(value["operation"] == operation, "arm operation mismatch")
     require(value["checkpoint"] == checkpoint, "arm checkpoint mismatch")
     require(value["action"] == action, "arm action mismatch")
-    for name in ("threshold", "declaredAssetBytes", "pauseSeconds"):
-        _exact_int(value[name], name)
+    expected_numbers = {
+        "threshold": threshold,
+        "declaredAssetBytes": declared_asset_bytes,
+        "pauseSeconds": pause_seconds,
+    }
+    for name, expected in expected_numbers.items():
+        actual = _exact_int(value[name], name)
+        if expected is not None:
+            _exact_int(expected, f"expected {name}")
+            require(actual == expected, f"arm {name} mismatch")
     _exact_int(value["armSequence"], "armSequence", minimum=1)
     return value
 
@@ -188,6 +206,13 @@ def validate_status_response(value, *, expected_cache_key=None):
     if value["status"] == "idle":
         require(value["cacheKey"] == "", "idle status retains a cache key")
         require(not value["armed"] and not value["reached"] and not value["consumed"], "idle flags invalid")
+        for name in ("operation", "checkpoint", "action"):
+            require(value[name] == "", f"idle status retains {name}")
+        for name in (
+            "threshold", "declaredAssetBytes", "pauseSeconds", "armSequence",
+            "reachedSequence", "consumedSequence",
+        ):
+            require(value[name] == 0, f"idle status retains {name}")
     elif expected_cache_key is not None:
         require(value["cacheKey"] == expected_cache_key, "status cache key mismatch")
     states = {
@@ -259,6 +284,16 @@ def redact_text(value, secrets=()):
             rendered = rendered.replace(str(secret), "<redacted-secret>")
     rendered = JWT_RE.sub("<redacted-jwt>", rendered)
     rendered = ABSOLUTE_PATH_RE.sub("<redacted-path>", rendered)
+    rendered = re.sub(
+        r"(?im)\b(?:proxy-)?authorization\s*[:=]\s*[^\r\n]*",
+        "Authorization=<redacted>",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+        "<redacted-credential>",
+        rendered,
+    )
     rendered = re.sub(r"(?i)(authorization|x-mint-secret|password|token)\s*[:=]\s*\S+", r"\1=<redacted>", rendered)
     return rendered
 
@@ -423,6 +458,15 @@ def validate_event_order(events):
 
 def validate_sequences(arm, status):
     require(status.get("status") == "consumed", "HIL arm was not consumed")
+    for name in (
+        "cacheKey", "operation", "checkpoint", "action", "threshold",
+        "declaredAssetBytes", "pauseSeconds", "armSequence",
+    ):
+        require(
+            status.get(name) == arm.get(name)
+            and type(status.get(name)) is type(arm.get(name)),
+            f"HIL status does not bind armed field: {name}",
+        )
     arm_sequence = _exact_int(arm.get("armSequence"), "arm sequence", minimum=1)
     reached = _exact_int(status.get("reachedSequence"), "reached sequence", minimum=1)
     consumed = _exact_int(status.get("consumedSequence"), "consumed sequence", minimum=1)
@@ -594,7 +638,49 @@ def assert_artifacts_sanitized(payloads, secrets):
         require(JWT_RE.search(text) is None, f"JWT marker in artifact: {name}")
         require(re.search(r"https?://[^/\s:@]+:[^/\s@]+@", text) is None, f"URL userinfo in artifact: {name}")
         require(re.search(r"[?&](?:token|key|secret|password)=", text, re.I) is None, f"query credential in artifact: {name}")
+        require(
+            re.search(r"(?i)\b(?:proxy-)?authorization\s*[:=]|\b(?:bearer|basic)\s+", text) is None,
+            f"authorization credential in artifact: {name}",
+        )
     return payloads
+
+
+def _normalize_mac(value):
+    rendered = str(value or "").strip().lower()
+    require(
+        re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", rendered) is not None,
+        "invalid device MAC",
+    )
+    return rendered
+
+
+def attest_live_connection(base_url, route_uuid, expected_mac, *, open_url=urllib.request.urlopen):
+    expected_mac = _normalize_mac(expected_mac)
+    request = urllib.request.Request(
+        f"{str(base_url).rstrip('/')}/internal/lesson-runtime/metrics",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        response = open_url(request, timeout=5)
+        if hasattr(response, "__enter__"):
+            with response as opened:
+                payload = json.loads(opened.read().decode("utf-8"))
+        else:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, urllib.error.URLError):
+        raise HilTransportError("HIL_CONNECTION_LOOKUP_FAILED") from None
+    require(isinstance(payload, dict), "invalid live connection metadata")
+    devices = payload.get("devices")
+    require(isinstance(devices, list), "invalid live connection metadata")
+    matches = [
+        item for item in devices
+        if isinstance(item, dict) and item.get("clientId") == route_uuid
+    ]
+    require(len(matches) == 1, "route UUID does not resolve to one live connection")
+    resolved_mac = _normalize_mac(matches[0].get("deviceId"))
+    require(resolved_mac == expected_mac, "live connection MAC does not match attended device")
+    return {"deviceId": resolved_mac, "clientId": route_uuid}
 
 
 class RawMcpTransport:
@@ -754,7 +840,16 @@ class HilToolClient:
             "pauseSeconds": pause_seconds,
         }
         response = self.transport.call(HIL_TOOL_NAMES["arm"], args, 30)
-        return validate_arm_response(response, cache_key, operation, checkpoint, action)
+        return validate_arm_response(
+            response,
+            cache_key,
+            operation,
+            checkpoint,
+            action,
+            threshold=threshold,
+            declared_asset_bytes=declared_asset_bytes,
+            pause_seconds=pause_seconds,
+        )
 
 
 class SerialMonitor:
@@ -962,6 +1057,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
     require(scenario in HIL_STORAGE_SCENARIOS, "unknown HIL storage scenario")
     operation, checkpoint, action, threshold, pause_seconds, power_loss = SCENARIO_SPECS[scenario]
     build_identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
+    connection_identity = attest_live_connection(
+        arguments.esp_base_url, arguments.device_uuid, arguments.device_id
+    )
     secret = os.environ.get(arguments.mint_secret_env, "")
     require(bool(secret), f"missing {arguments.mint_secret_env}")
     cache_key = f"hil-task14/v1-{arguments.asset_sha256}"
@@ -1100,8 +1198,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         result = {
             "scenario": scenario,
             "status": "PASS",
-            "deviceId": arguments.device_id,
+            "deviceId": connection_identity["deviceId"],
             "deviceUuid": arguments.device_uuid,
+            "connectionIdentity": connection_identity,
             "cacheKey": cache_key,
             "utcStart": started,
             "utcEnd": ended,
@@ -1191,16 +1290,25 @@ def preflight(arguments):
     identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
     secret = os.environ.get(arguments.mint_secret_env, "")
     require(bool(secret), f"missing {arguments.mint_secret_env}")
-    require(re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", arguments.device_id) is not None, "invalid device MAC")
+    device_id = _normalize_mac(arguments.device_id)
     require(re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", arguments.device_uuid) is not None, "invalid device UUID")
     require(SHA256_RE.fullmatch(arguments.asset_sha256) is not None, "invalid asset SHA-256")
     require(type(arguments.asset_bytes) is int and arguments.asset_bytes > 0, "invalid asset byte count")
     validate_lab_url(arguments.esp_base_url, require_path=False)
     validate_lab_url(arguments.asset_url, require_path=True)
+    connection_identity = attest_live_connection(
+        arguments.esp_base_url, arguments.device_uuid, device_id
+    )
     client = HilToolClient(RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret))
     status = client.status()
     require(status["status"] == "idle", "HIL controller is not idle")
-    result = {"status": "PASS", "deviceId": arguments.device_id, "deviceUuid": arguments.device_uuid, "buildIdentity": identity}
+    result = {
+        "status": "PASS",
+        "deviceId": device_id,
+        "deviceUuid": arguments.device_uuid,
+        "connectionIdentity": connection_identity,
+        "buildIdentity": identity,
+    }
     print(json.dumps(result, sort_keys=True))
     return result
 

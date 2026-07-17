@@ -19,6 +19,14 @@ from typing import Any
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+HIL_CONNECTION = {
+    "deviceId": "28:84:85:85:1a:80",
+    "deviceUuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "connectionIdentity": {
+        "deviceId": "28:84:85:85:1a:80",
+        "clientId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    },
+}
 
 
 def load_script(name: str):
@@ -44,6 +52,76 @@ def test_fault_driver_hil_storage_extension_remains_validation_only():
         assert forbidden not in source
 
 
+def test_fault_driver_independently_binds_control_artifacts_and_serial_sequences(tmp_path):
+    cache_key = f"hil-task14/v1-{'d' * 64}"
+    arm = {
+        "cacheKey": cache_key,
+        "status": "armed",
+        "operation": "evict",
+        "checkpoint": "after_unlinks",
+        "action": "fail",
+        "threshold": 1,
+        "declaredAssetBytes": 0,
+        "pauseSeconds": 0,
+        "armSequence": 10,
+    }
+    status = {
+        "status": "consumed",
+        "cacheKey": cache_key,
+        "armed": False,
+        "reached": True,
+        "consumed": True,
+        "operation": "evict",
+        "checkpoint": "after_unlinks",
+        "action": "fail",
+        "threshold": 1,
+        "declaredAssetBytes": 0,
+        "pauseSeconds": 0,
+        "armSequence": 10,
+        "reachedSequence": 11,
+        "consumedSequence": 12,
+    }
+    result = {
+        "cacheKey": cache_key,
+        "operation": "evict",
+        "checkpoint": "after_unlinks",
+        "faultAction": "fail",
+        "armSequence": 10,
+        "reachedSequence": 11,
+        "consumedSequence": 12,
+    }
+    (tmp_path / "arm-response.json").write_text(json.dumps(arm))
+    (tmp_path / "status-after.json").write_text(json.dumps(status))
+    (tmp_path / "serial.log").write_text(
+        "HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks "
+        f"cache_key={cache_key} count=1 reached_sequence=11\n"
+        "HIL_STORAGE_FAULT_CONSUMED operation=evict checkpoint=after_unlinks "
+        f"action=fail cache_key={cache_key} consumed_sequence=12\n"
+    )
+
+    assert fault._hil_control_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    ) == []
+
+    tampered = dict(arm, threshold=0)
+    (tmp_path / "arm-response.json").write_text(json.dumps(tampered))
+    assert fault._hil_control_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    )
+
+    (tmp_path / "arm-response.json").write_text(json.dumps(arm))
+    (tmp_path / "status-after.json").write_text(json.dumps({**status, "reachedSequence": 12}))
+    assert fault._hil_control_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    )
+
+    (tmp_path / "status-after.json").write_text(json.dumps(status))
+    (tmp_path / "serial.log").write_text("forged result-only sequence evidence\n")
+    assert fault._hil_control_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    )
+
+
 def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     build = {
         "sourceCommit": "a" * 40,
@@ -60,6 +138,7 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     result = {
         "scenario": fault.HIL_STORAGE_SCENARIOS[-1],
         "status": "PASS",
+        **HIL_CONNECTION,
         "buildIdentity": build,
         "cacheKey": f"hil-task14/v1-{'d' * 64}",
         "armSequence": 1,
@@ -98,6 +177,16 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     assert fault.validate_hil_storage_result(
         result["scenario"], {**result, "triggerResponseAbsent": False}
     )
+    assert fault.validate_hil_storage_result(
+        result["scenario"],
+        {
+            **result,
+            "connectionIdentity": {
+                **result["connectionIdentity"],
+                "deviceId": "28:84:85:85:1a:81",
+            },
+        },
+    )
     assert fault.validate_hil_release_order(list(fault.HIL_RELEASE_ORDER)) == []
     assert fault.validate_hil_release_order(
         ["hil-flash", "production-soak", "production-reflash"]
@@ -122,6 +211,7 @@ def test_fault_driver_rejects_missing_malformed_or_out_of_order_power_timestamps
     result = {
         "scenario": fault.HIL_POWER_LOSS_SCENARIO,
         "status": "PASS",
+        **HIL_CONNECTION,
         "buildIdentity": {
             "sourceCommit": "a" * 40,
             "profile": "hil",
@@ -219,6 +309,7 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
         "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
     }
     monkeypatch.setattr(fault, "validate_hil_storage_result", lambda *_: [])
+    monkeypatch.setattr(fault, "_hil_control_artifact_errors", lambda *_: [])
     for name in fault.HIL_POWER_REQUIRED:
         if name != "SHA256SUMS":
             (tmp_path / name).write_text("x\n")
@@ -278,6 +369,7 @@ def test_fault_driver_rejects_equal_adjacent_power_timestamps(earlier, later):
     result = {
         "scenario": fault.HIL_POWER_LOSS_SCENARIO,
         "status": "PASS",
+        **HIL_CONNECTION,
         "buildIdentity": {
             "sourceCommit": "a" * 40,
             "profile": "hil",
@@ -328,6 +420,7 @@ def test_fault_driver_allows_equal_disconnect_and_confirmation_utc():
     result = {
         "scenario": fault.HIL_POWER_LOSS_SCENARIO,
         "status": "PASS",
+        **HIL_CONNECTION,
         "buildIdentity": {
             "sourceCommit": "a" * 40,
             "profile": "hil",
@@ -389,6 +482,7 @@ def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
     base = {
         "scenario": "evict-before-first-unlink-fail",
         "status": "PASS",
+        **HIL_CONNECTION,
         "buildIdentity": build,
         "cacheKey": f"hil-task14/v1-{'d' * 64}",
         "armSequence": 1,

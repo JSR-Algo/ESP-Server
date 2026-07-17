@@ -57,6 +57,26 @@ HIL_SCENARIO_CONTRACT={
     'sync-before-commit-rename-fail':('sync','before_commit_rename','fail',0),
     'sync-before-commit-rename-power-loss':('sync','before_commit_rename','pause',0),
 }
+HIL_ARM_CONTRACT={
+    'evict-before-first-unlink-fail':('evict','before_first_unlink','fail',0,0),
+    'evict-after-unlinks-fail':('evict','after_unlinks','fail',1,0),
+    'evict-before-rmdir-fail':('evict','before_rmdir','fail',0,0),
+    'evict-after-unlinks-sd-removal':('evict','after_unlinks','pause',1,15),
+    'sync-before-download-write-no-space':('sync','before_download_write','no_space',0,0),
+    'sync-after-download-bytes-no-space':('sync','after_download_bytes','no_space',1,0),
+    'sync-before-checksum-corrupt-staging':('sync','before_checksum_verify','corrupt_staging',0,0),
+    'sync-before-commit-rename-fail':('sync','before_commit_rename','fail',0,0),
+    'sync-before-commit-rename-power-loss':('sync','before_commit_rename','pause',0,30),
+}
+HIL_ARM_FIELDS={
+    'cacheKey','status','operation','checkpoint','action','threshold',
+    'declaredAssetBytes','pauseSeconds','armSequence',
+}
+HIL_STATUS_FIELDS={
+    'status','cacheKey','armed','reached','consumed','operation','checkpoint',
+    'action','threshold','declaredAssetBytes','pauseSeconds','armSequence',
+    'reachedSequence','consumedSequence',
+}
 REQUIRED=('serial.log','server.log','command.txt','result.json')
 COLD_REQUIRED=(
     'eviction-response.json','eviction-response.sha256','utc-start.txt',
@@ -642,6 +662,19 @@ def validate_hil_storage_result(scenario,result):
         return ['HIL result must be an object']
     if result.get('scenario') != scenario:errors.append('HIL result scenario mismatch')
     if result.get('status') != 'PASS':errors.append('HIL result status is not PASS')
+    device_id=result.get('deviceId'); device_uuid=result.get('deviceUuid')
+    connection=result.get('connectionIdentity')
+    if not isinstance(device_id,str) or not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}',device_id):
+        errors.append('invalid attended HIL device MAC')
+    if not isinstance(device_uuid,str) or not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
+        device_uuid,re.I,
+    ):
+        errors.append('invalid attended HIL route UUID')
+    if not isinstance(connection,dict) or set(connection)!={'deviceId','clientId'}:
+        errors.append('invalid attended HIL connection identity')
+    elif connection.get('deviceId')!=device_id or connection.get('clientId')!=device_uuid:
+        errors.append('attended HIL connection identity mismatch')
     errors.extend(_hil_build_identity_errors(result.get('buildIdentity')))
     sequences=[]
     for name in ('armSequence','reachedSequence','consumedSequence'):
@@ -762,6 +795,108 @@ def _power_loss_timestamp_artifact_errors(result,evidence_dir):
             errors.append(f'HIL timestamp artifact mismatch: {name}')
     return errors
 
+def _load_hil_json(path,label,errors):
+    try:
+        value=json.loads(Path(path).read_text())
+    except (OSError,UnicodeError,ValueError,json.JSONDecodeError):
+        errors.append(f'invalid HIL control artifact: {label}')
+        return None
+    if not isinstance(value,dict):
+        errors.append(f'invalid HIL control artifact: {label}')
+        return None
+    return value
+
+def _hil_serial_sequence(lines,marker,expected,sequence_name,errors):
+    matches=[]
+    for line in lines:
+        if marker not in line:continue
+        if not _line_has_fields(line,expected):continue
+        sequence=_positive_int_field(line,sequence_name)
+        if sequence is not None:matches.append(sequence)
+    if len(matches)!=1:
+        errors.append(f'invalid HIL serial marker: {marker}')
+        return None
+    return matches[0]
+
+def _hil_control_artifact_errors(scenario,evidence_dir,result):
+    root=Path(evidence_dir); errors=[]
+    arm=_load_hil_json(root/'arm-response.json','arm-response.json',errors)
+    status=_load_hil_json(root/'status-after.json','status-after.json',errors)
+    if arm is None or status is None:return errors
+    operation,checkpoint,action,threshold,pause_seconds=HIL_ARM_CONTRACT[scenario]
+    cache_key=result.get('cacheKey')
+    expected_arm={
+        'cacheKey':cache_key,'status':'armed','operation':operation,
+        'checkpoint':checkpoint,'action':action,'threshold':threshold,
+        'pauseSeconds':pause_seconds,
+    }
+    if set(arm)!=HIL_ARM_FIELDS:
+        errors.append('invalid HIL arm response fields')
+    for name,value in expected_arm.items():
+        if arm.get(name)!=value or type(arm.get(name)) is not type(value):
+            errors.append(f'HIL arm response mismatch: {name}')
+    declared=arm.get('declaredAssetBytes')
+    if type(declared) is not int or declared < 0 or (
+        checkpoint=='after_download_bytes' and declared <= 0
+    ) or (checkpoint!='after_download_bytes' and declared != 0):
+        errors.append('HIL arm response mismatch: declaredAssetBytes')
+    arm_sequence=arm.get('armSequence')
+    if type(arm_sequence) is not int or arm_sequence <= 0:
+        errors.append('invalid HIL arm sequence')
+    elif arm_sequence!=result.get('armSequence'):
+        errors.append('HIL arm sequence does not match result')
+    if set(status)!=HIL_STATUS_FIELDS:
+        errors.append('invalid HIL status-after fields')
+    if scenario==HIL_POWER_LOSS_SCENARIO:
+        if not (
+            status.get('status')=='idle' and status.get('cacheKey')=='' and
+            status.get('armed') is False and status.get('reached') is False and
+            status.get('consumed') is False and
+            all(status.get(name)=='' for name in ('operation','checkpoint','action')) and
+            all(type(status.get(name)) is int and status.get(name)==0 for name in (
+                'threshold','declaredAssetBytes','pauseSeconds','armSequence',
+                'reachedSequence','consumedSequence',
+            ))
+        ):
+            errors.append('power-loss status-after did not clear volatile arm')
+    else:
+        for name in (
+            'cacheKey','operation','checkpoint','action','threshold',
+            'declaredAssetBytes','pauseSeconds','armSequence',
+        ):
+            if status.get(name)!=arm.get(name) or type(status.get(name)) is not type(arm.get(name)):
+                errors.append(f'HIL status-after does not bind arm: {name}')
+        if not (
+            status.get('status')=='consumed' and status.get('armed') is False and
+            status.get('reached') is True and status.get('consumed') is True
+        ):
+            errors.append('ordinary HIL status-after is not consumed')
+    reached=status.get('reachedSequence') if scenario!=HIL_POWER_LOSS_SCENARIO else result.get('reachedSequence')
+    consumed=status.get('consumedSequence') if scenario!=HIL_POWER_LOSS_SCENARIO else result.get('consumedSequence')
+    if not (
+        type(arm_sequence) is int and type(reached) is int and type(consumed) is int and
+        arm_sequence < reached < consumed and reached==result.get('reachedSequence') and
+        consumed==result.get('consumedSequence')
+    ):
+        errors.append('HIL control artifact sequences are not strictly bound')
+    serial=''
+    for name in ('serial.log','reboot-serial.log'):
+        path=root/name
+        if path.is_file():serial+='\n'+path.read_text(errors='replace')
+    lines=serial.splitlines()
+    marker_fields={'operation':operation,'checkpoint':checkpoint,'cache_key':cache_key}
+    serial_reached=_hil_serial_sequence(
+        lines,'HIL_STORAGE_CHECKPOINT_REACHED',marker_fields,
+        'reached_sequence',errors,
+    )
+    serial_consumed=_hil_serial_sequence(
+        lines,'HIL_STORAGE_FAULT_CONSUMED',marker_fields,
+        'consumed_sequence',errors,
+    )
+    if serial_reached!=reached or serial_consumed!=consumed:
+        errors.append('HIL serial sequences do not match control artifacts')
+    return errors
+
 def _hil_storage_artifact_errors(scenario,evidence_dir,result):
     errors=[]
     root=Path(evidence_dir)
@@ -818,6 +953,7 @@ def _hil_storage_artifact_errors(scenario,evidence_dir,result):
         before_loss=(root/'serial.log').read_text(errors='replace') if (root/'serial.log').is_file() else ''
         if 'HIL_STORAGE_OPERATION_SUCCESS' in before_loss:
             errors.append('power-loss evidence contains success before loss')
+    errors.extend(_hil_control_artifact_errors(scenario,root,result))
     return errors
 
 def build_hil_storage_report(scenario,evidence_dir):
@@ -877,7 +1013,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','deviceId':'28:84:85:85:1a:80','deviceUuid':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','connectionIdentity':{'deviceId':'28:84:85:85:1a:80','clientId':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'},'buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         invalid_timestamps=(
             ('checkpointReachedUtc',None),

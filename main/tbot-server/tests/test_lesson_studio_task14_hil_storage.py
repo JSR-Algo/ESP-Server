@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -131,19 +132,20 @@ def exact_arm():
 
 
 def exact_status(state="consumed"):
+    idle = state == "idle"
     return {
         "status": state,
-        "cacheKey": KEY if state != "idle" else "",
+        "cacheKey": "" if idle else KEY,
         "armed": state == "armed",
         "reached": state in ("reached", "consumed"),
         "consumed": state == "consumed",
-        "operation": "evict",
-        "checkpoint": "after_unlinks",
-        "action": "fail",
-        "threshold": 1,
+        "operation": "" if idle else "evict",
+        "checkpoint": "" if idle else "after_unlinks",
+        "action": "" if idle else "fail",
+        "threshold": 0 if idle else 1,
         "declaredAssetBytes": 0,
         "pauseSeconds": 0,
-        "armSequence": 1 if state != "idle" else 0,
+        "armSequence": 0 if idle else 1,
         "reachedSequence": 2 if state in ("reached", "consumed") else 0,
         "consumedSequence": 3 if state == "consumed" else 0,
     }
@@ -178,6 +180,22 @@ def test_exact_hil_tool_response_schemas_and_foreign_key_rejection():
         hil.validate_arm_response({**arm, "threshold": True}, KEY, "evict", "after_unlinks", "fail")
     with pytest.raises(hil.HilValidationError):
         hil.validate_arm_response({**arm, "cacheKey": SIBLING}, KEY, "evict", "after_unlinks", "fail")
+    for field, value in (
+        ("threshold", 0),
+        ("declaredAssetBytes", 1),
+        ("pauseSeconds", 15),
+    ):
+        with pytest.raises(hil.HilValidationError):
+            hil.validate_arm_response(
+                {**arm, field: value},
+                KEY,
+                "evict",
+                "after_unlinks",
+                "fail",
+                threshold=1,
+                declared_asset_bytes=0,
+                pause_seconds=0,
+            )
     with pytest.raises(hil.HilValidationError):
         hil.validate_fixture_response({**fixture, "changed": 1}, KEY, SIBLING, "preservation_set", "staged")
     with pytest.raises(hil.HilValidationError):
@@ -201,6 +219,21 @@ def test_raw_mcp_wrapper_parses_only_exact_internal_response_and_redacts_credent
     assert secret not in rendered
     assert "aaa.bbb.ccc" not in rendered
     assert "/Users/private/key" not in rendered
+
+
+def test_redaction_removes_complete_authorization_and_bearer_credentials():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    secret = "opaque-secret-without-jwt-shape"
+    rendered = hil.redact_text(
+        f"Authorization: Bearer {secret}\n"
+        f"authorization=Basic {secret}\n"
+        f"proxy-authorization: Bearer {secret}\n"
+        f"standalone Bearer {secret}\n"
+        f"X-Mint-Secret: {secret}\n"
+    )
+    assert secret not in rendered
+    assert "Bearer" not in rendered
+    assert "Basic" not in rendered
 
 
 def test_checkpoint_polling_is_bounded_and_requires_exact_marker():
@@ -299,6 +332,9 @@ def test_power_loss_classification_requires_response_absence_reboot_clear_and_re
     ):
         with pytest.raises(hil.HilValidationError):
             hil.validate_power_loss_result({**result, field: invalid})
+    stale_idle = {**exact_status("idle"), "operation": "sync"}
+    with pytest.raises(hil.HilValidationError):
+        hil.validate_power_loss_result({**result, "postRebootStatus": stale_idle})
 
     for earlier, later in (
         ("utcStart", "checkpointReachedUtc"),
@@ -362,6 +398,77 @@ def test_cleanup_status_inspect_order_and_sequence_validation():
     assert hil.validate_sequences(exact_arm(), exact_status()) == {"arm": 1, "reached": 2, "consumed": 3}
     with pytest.raises(hil.HilValidationError):
         hil.validate_sequences(exact_arm(), {**exact_status(), "reachedSequence": 1})
+    for field, value in (
+        ("cacheKey", SIBLING),
+        ("operation", "sync"),
+        ("checkpoint", "before_commit_rename"),
+        ("action", "pause"),
+        ("threshold", 0),
+        ("declaredAssetBytes", 1),
+        ("pauseSeconds", 15),
+        ("armSequence", 2),
+    ):
+        with pytest.raises(hil.HilValidationError):
+            hil.validate_sequences(exact_arm(), {**exact_status(), field: value})
+
+
+def test_live_connection_attestation_binds_route_uuid_to_resolved_mac():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    expected_mac = "28:84:85:85:1a:80"
+    route_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "connections": 1,
+                    "alarms": 0,
+                    "counters": {
+                        "forwarder.dropped_events_total": 0,
+                        "safety_forwarder.dropped_events_total": 0,
+                    },
+                    "devices": [{
+                        "deviceId": expected_mac,
+                        "clientId": route_uuid,
+                        "forwarderDroppedEventsTotal": 0,
+                        "safetyForwarderDroppedEventsTotal": 0,
+                        "alarm": None,
+                    }],
+                }
+            ).encode()
+
+    identity = hil.attest_live_connection(
+        "http://127.0.0.1:8003", route_uuid, expected_mac,
+        open_url=lambda *_args, **_kwargs: Response(),
+    )
+    assert identity == {"deviceId": expected_mac, "clientId": route_uuid}
+
+    for claimed_mac, devices in (
+        ("28:84:85:85:1a:81", None),
+        (expected_mac, []),
+        (expected_mac, [
+            {"deviceId": expected_mac, "clientId": route_uuid},
+            {"deviceId": "28:84:85:85:1a:81", "clientId": route_uuid},
+        ]),
+    ):
+        with pytest.raises(hil.HilValidationError):
+            hil.attest_live_connection(
+                "http://127.0.0.1:8003", route_uuid, claimed_mac,
+                open_url=lambda *_args, devices=devices, **_kwargs: types.SimpleNamespace(
+                    read=lambda: json.dumps({
+                        "connections": len(devices or [{"deviceId": expected_mac, "clientId": route_uuid}]),
+                        "devices": devices if devices is not None else [
+                            {"deviceId": expected_mac, "clientId": route_uuid}
+                        ],
+                    }).encode()
+                ),
+            )
 
 
 def test_build_identity_recomputes_task6_artifacts_defaults_and_flat_binding(tmp_path):
@@ -440,6 +547,34 @@ def test_release_order_requires_hil_matrix_then_production_reflash_then_soak():
     assert identity.validate_release_order(events) == events
     with pytest.raises(identity.BuildIdentityError):
         identity.validate_release_order(["hil-flash", "production-soak", "production-reflash"])
+
+
+def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(tmp_path / "prod", profile="production", binary=b"prod")
+    script = ROOT / "scripts" / "lesson_studio_task14_build_identity.py"
+    events = ["hil-flash", "hil-matrix-pass", "production-reflash", "production-attest", "production-soak"]
+    command = [
+        sys.executable, str(script), "release",
+        "--hil-manifest", str(hil_path),
+        "--production-manifest", str(prod_path),
+    ]
+    for event in events:
+        command.extend(("--event", event))
+    valid = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert valid.returncode == 0
+    assert json.loads(valid.stdout)["releaseOrder"] == events
+
+    invalid = subprocess.run(
+        command[:-10] + [
+            "--event", "hil-flash", "--event", "production-soak",
+            "--event", "production-reflash",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert invalid.returncode == 1
 
 
 def eviction_result(status, file_count, *, evicted=False):

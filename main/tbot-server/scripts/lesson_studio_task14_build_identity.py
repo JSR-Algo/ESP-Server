@@ -251,12 +251,23 @@ def main():
     pair.add_argument("--hil-manifest", required=True, type=Path)
     pair.add_argument("--production-manifest", required=True, type=Path)
     pair.add_argument("--output", type=Path)
+    release = subparsers.add_parser("release")
+    release.add_argument("--hil-manifest", required=True, type=Path)
+    release.add_argument("--production-manifest", required=True, type=Path)
+    release.add_argument("--event", action="append", required=True, dest="events")
+    release.add_argument("--output", type=Path)
     arguments = parser.parse_args()
     try:
         if arguments.command == "validate":
             result = load_build_identity(arguments.manifest, expected_profile=arguments.profile)
-        else:
+        elif arguments.command == "pair":
             result = validate_build_pair(arguments.hil_manifest, arguments.production_manifest)
+        else:
+            pair_result = validate_build_pair(
+                arguments.hil_manifest, arguments.production_manifest
+            )
+            release_order = validate_release_order(arguments.events)
+            result = {**pair_result, "releaseOrder": release_order}
         if arguments.output:
             atomic_write_json(arguments.output, result)
         print(json.dumps(result, sort_keys=True))
