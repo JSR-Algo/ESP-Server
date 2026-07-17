@@ -325,7 +325,7 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.status, 409)
         self.assertEqual((await _response_json(failed))["error"], "MCP_CALL_FAILED")
 
-    async def test_exact_hil_tool_without_resolved_live_connection_fails_allowlist(self):
+    async def test_hil_paths_without_resolved_live_connection_fail_allowlist_first(self):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
@@ -334,25 +334,42 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             {},
         )
 
-        response = await handler.handle_post(
-            _FakeRequest(
-                device_id="route-device-uuid",
-                body={
-                    "toolName": self.HIL_TOOLS[0],
-                    "allowUnlisted": True,
-                    "args": {},
-                },
-            )
-        )
-
-        self.assertEqual(response.status, 403)
-        self.assertEqual(
-            await _response_json(response),
+        requests = (
             {
-                "error": "HIL_DEVICE_NOT_ALLOWLISTED",
-                "message": "HIL MCP request rejected",
+                "toolName": self.HIL_TOOLS[0],
+                "allowUnlisted": True,
+                "args": {},
+            },
+            {
+                "toolName": self.HIL_TOOLS[0],
+                "allowUnlisted": True,
+                "timeoutSeconds": "75",
+                "args": [],
+            },
+            {
+                "toolName": "self.lesson_assets.evict_cache_key",
+                "timeoutSeconds": 75,
+                "args": {"cacheKey": "hil-bad/../secret"},
             },
         )
+
+        for body in requests:
+            with self.subTest(body=body):
+                response = await handler.handle_post(
+                    _FakeRequest(
+                        device_id="route-device-uuid",
+                        body=body,
+                    )
+                )
+
+                self.assertEqual(response.status, 403)
+                self.assertEqual(
+                    await _response_json(response),
+                    {
+                        "error": "HIL_DEVICE_NOT_ALLOWLISTED",
+                        "message": "HIL MCP request rejected",
+                    },
+                )
 
     async def test_valid_hil_paths_without_mcp_client_return_sanitized_hil_failure(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
@@ -827,28 +844,44 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         listed_call.assert_not_awaited()
 
-    async def test_hil_trigger_timeout_also_requires_allowlisted_resolved_mac(self):
+    async def test_hil_paths_require_allowlisted_resolved_mac_before_shape_validation(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
         handler, _ = self._hil_handler(allowlist=[])
         listed_call = AsyncMock(side_effect=AssertionError("must not dispatch"))
+        requests = (
+            {
+                "toolName": "self.lesson_assets.evict_cache_key",
+                "timeoutSeconds": 75,
+                "args": {"cacheKey": self.HIL_CACHE_KEY},
+            },
+            {
+                "toolName": self.HIL_TOOLS[0],
+                "allowUnlisted": True,
+                "timeoutSeconds": "75",
+                "args": [],
+            },
+            {
+                "toolName": "self.lesson_assets.evict_cache_key",
+                "timeoutSeconds": 75,
+                "args": {"cacheKey": "hil-bad/../secret"},
+            },
+        )
 
         with patch("core.api.device_mcp_admin_handler.call_mcp_tool", listed_call):
-            response = await handler.handle_post(
-                _FakeRequest(
-                    device_id="route-device-uuid",
-                    body={
-                        "toolName": "self.lesson_assets.evict_cache_key",
-                        "timeoutSeconds": 75,
-                        "args": {"cacheKey": self.HIL_CACHE_KEY},
-                    },
-                )
-            )
+            for body in requests:
+                with self.subTest(body=body):
+                    response = await handler.handle_post(
+                        _FakeRequest(
+                            device_id="route-device-uuid",
+                            body=body,
+                        )
+                    )
 
-        self.assertEqual(response.status, 403)
-        self.assertEqual(
-            (await _response_json(response))["error"],
-            "HIL_DEVICE_NOT_ALLOWLISTED",
-        )
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(
+                        (await _response_json(response))["error"],
+                        "HIL_DEVICE_NOT_ALLOWLISTED",
+                    )
         listed_call.assert_not_awaited()
 
     async def test_non_hil_calls_without_override_keep_existing_dispatch_and_timeout(self):

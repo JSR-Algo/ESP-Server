@@ -244,30 +244,13 @@ class DeviceMCPAdminHandler:
             return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
         if is_hil_tool and body.get("allowUnlisted") is not True:
             return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+        has_timeout_override = "timeoutSeconds" in body
+        if has_timeout_override and not is_hil_tool and tool_name not in _HIL_TRIGGER_TOOLS:
+            return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         args = body.get("args", {})
         timeout = _mcp_call_timeout(tool_name)
-        is_hil_timeout_path = False
-        if is_hil_tool:
-            if not isinstance(args, dict):
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            try:
-                override = _hil_timeout(body)
-            except ValueError:
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            if override is not None:
-                timeout = override
-            is_hil_timeout_path = True
-        elif "timeoutSeconds" in body:
-            if tool_name not in _HIL_TRIGGER_TOOLS or not _has_canonical_hil_cache_key(
-                tool_name, args
-            ):
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            try:
-                timeout = _hil_timeout(body)
-            except ValueError:
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            is_hil_timeout_path = True
+        is_hil_timeout_path = is_hil_tool or has_timeout_override
 
         device_id = request.match_info.get("deviceId", "")
         try:
@@ -290,6 +273,23 @@ class DeviceMCPAdminHandler:
 
         if is_hil_timeout_path and not _hil_device_is_allowlisted(self.config, conn):
             return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+
+        if is_hil_tool:
+            if not isinstance(args, dict):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            try:
+                override = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            if override is not None:
+                timeout = override
+        elif has_timeout_override:
+            if not _has_canonical_hil_cache_key(tool_name, args):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            try:
+                timeout = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         mcp_client = getattr(conn, "mcp_client", None)
         if mcp_client is None:
