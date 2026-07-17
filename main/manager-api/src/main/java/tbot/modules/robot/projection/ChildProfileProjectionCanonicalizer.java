@@ -11,11 +11,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 public final class ChildProfileProjectionCanonicalizer {
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Pattern CANONICAL_UUID = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
 
@@ -80,7 +76,23 @@ public final class ChildProfileProjectionCanonicalizer {
     }
 
     private static String normalize(String value) {
-        return Normalizer.normalize(Objects.requireNonNull(value), Normalizer.Form.NFC);
+        String requiredValue = Objects.requireNonNull(value);
+        assertUnicodeScalars(requiredValue);
+        return Normalizer.normalize(requiredValue, Normalizer.Form.NFC);
+    }
+
+    private static void assertUnicodeScalars(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char codeUnit = value.charAt(index);
+            if (Character.isHighSurrogate(codeUnit)) {
+                if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                    throw new IllegalArgumentException("profile strings must contain only Unicode scalar values");
+                }
+                index++;
+            } else if (Character.isLowSurrogate(codeUnit)) {
+                throw new IllegalArgumentException("profile strings must contain only Unicode scalar values");
+            }
+        }
     }
 
     private static int compareByCodePoint(String left, String right) {
@@ -114,11 +126,30 @@ public final class ChildProfileProjectionCanonicalizer {
     }
 
     private static String jsonString(String value) {
-        try {
-            return OBJECT_MAPPER.writeValueAsString(value);
-        } catch (JsonProcessingException exception) {
-            throw new IllegalArgumentException("unable to encode canonical JSON string", exception);
+        assertUnicodeScalars(value);
+        StringBuilder encoded = new StringBuilder(value.length() + 2).append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char codeUnit = value.charAt(index);
+            switch (codeUnit) {
+                case '"' -> encoded.append("\\\"");
+                case '\\' -> encoded.append("\\\\");
+                case '\b' -> encoded.append("\\b");
+                case '\t' -> encoded.append("\\t");
+                case '\n' -> encoded.append("\\n");
+                case '\f' -> encoded.append("\\f");
+                case '\r' -> encoded.append("\\r");
+                default -> {
+                    if (codeUnit <= 0x1f) {
+                        encoded.append("\\u00")
+                                .append(Character.forDigit((codeUnit >>> 4) & 0xf, 16))
+                                .append(Character.forDigit(codeUnit & 0xf, 16));
+                    } else {
+                        encoded.append(codeUnit);
+                    }
+                }
+            }
         }
+        return encoded.append('"').toString();
     }
 
     private static String sha256(String canonicalJson) {

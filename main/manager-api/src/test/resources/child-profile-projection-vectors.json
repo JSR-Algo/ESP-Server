@@ -46,6 +46,24 @@
       },
       "canonicalJson": "{\"mode\":\"clear\",\"profile\":null,\"revision\":9}",
       "sha256": "4b07ae267a3da7330a10452db9833d7caf388e92ba8634e844b825b0d175d28e"
+    },
+    {
+      "name": "replace-uses-ecmascript-control-escapes",
+      "input": {
+        "mode": "replace",
+        "revision": 11,
+        "profile": {
+          "childProfileId": "123e4567-e89b-12d3-a456-426614174001",
+          "displayName": "Line\u000bBreak",
+          "birthYear": 2017,
+          "interests": ["control\u000bcharacter"],
+          "learningStyle": "visual\tlearner",
+          "vocabularyLevel": "level\b1",
+          "parentCareer": "engineer\nresearcher"
+        }
+      },
+      "canonicalJson": "{\"mode\":\"replace\",\"profile\":{\"birthYear\":2017,\"childProfileId\":\"123e4567-e89b-12d3-a456-426614174001\",\"displayName\":\"Line\\u000bBreak\",\"interests\":[\"control\\u000bcharacter\"],\"learningStyle\":\"visual\\tlearner\",\"parentCareer\":\"engineer\\nresearcher\",\"vocabularyLevel\":\"level\\b1\"},\"revision\":11}",
+      "sha256": "d47442a5c1575e045f21ef362d5acd7ddc29b7e656b5bf6a6398b4179ea3a275"
     }
   ]
 }
