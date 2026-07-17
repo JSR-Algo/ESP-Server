@@ -32,8 +32,8 @@ run recovery. The orchestrator must:
    unchanged through the existing bounded inspection validator.
 3. Call the normal `self.lesson_assets.evict_cache_key` tool again with no new
    fault arm.
-4. Require `evicted=true`, `notFound=false`, `fileCount=0`, and the exact cache
-   key.
+4. Require the exact response fields, `status="evicted"`, `reason="evicted"`,
+   `evicted=true`, `notFound=false`, `fileCount=0`, and the exact cache key.
 5. Inspect again and require the primary missing while protected paths and the
    sibling fixture remain byte-identical.
 6. Run preservation cleanup and require the final clean inspection.
@@ -73,10 +73,38 @@ Add a `recovery` field with the same value to `result.json`, and add a
 The initial `trigger-response.json` remains the faulted operation response and
 must never be overwritten by the retry.
 
-Update the artifact constants and validators in both the orchestrator and
-`lesson_studio_task14_build_identity.py`. Existing evidence without the new
-artifact remains historical and must not be rewritten or accepted as a new
-matrix run.
+Update the artifact constants and validators in all three independent owners:
+
+- `lesson_studio_task14_hil_storage.py` creates and validates the live bundle.
+- `lesson_studio_task14_fault_driver.py` must require the artifact, validate the
+  exact recovery object schema and semantics, bind it byte-for-byte to
+  `result.json.recovery`, enforce the conditional timeline events, and reject
+  extra or missing files.
+- `lesson_studio_task14_build_identity.py` must include the artifact in matrix
+  and release-ledger verification.
+
+Existing evidence without the new artifact remains historical and must not be
+rewritten or accepted as a new matrix run.
+
+## Failed Evidence Contract
+
+Add a required `--failure-evidence-dir` argument for live scenario and matrix
+runs. It must be outside the matrix evidence directory. On any failure after
+preflight, the orchestrator atomically writes a new timestamped quarantine
+bundle containing:
+
+- redacted command, serial, server, and timeline logs
+- the build identity and last successfully validated status/inspection/tool
+  responses available before the failure
+- a fixed `failure.json` with `status="FAIL"`, scenario, stable error code,
+  completed events, UTC timestamps, and no raw exception or secret material
+- `SHA256SUMS` covering the exact fixed failure artifact set
+
+The quarantine directory must not exist before the run, is never reused, and is
+not accepted by the matrix publisher, fault driver, build identity validator, or
+release ledger. Failure-bundle creation is best-effort only after redaction; a
+failure to write evidence must not convert the original scenario failure into a
+PASS.
 
 ## Error Handling And Safety
 
@@ -88,7 +116,8 @@ matrix run.
   command is allowed.
 - The controller is reset to idle only through the existing reboot boundary;
   recovery must not re-arm or mutate sequence evidence.
-- Failed scenario directories are preserved and never reused.
+- Failed scenario evidence is preserved only in the separate quarantine root;
+  matrix scenario directories are created only for validated PASS bundles.
 - The main matrix directory remains empty until a full fresh run begins.
 
 ## Verification
@@ -100,9 +129,14 @@ Required RED/GREEN coverage:
 - Recovery is called exactly once for both directory-only eviction scenarios.
 - Recovery is never called for the other seven scenarios.
 - Retry false success, nonzero file count, wrong cache key, sibling drift,
-  protected-path drift, and second partial outcome all fail closed.
+  protected-path drift, wrong or extra status/reason fields, and second partial
+  outcome all fail closed.
 - Artifact layout, checksum, matrix report, release ledger, and secret-redaction
   tests include `recovery-response.json`.
+- Fault-driver tests bind recovery evidence to `result.json`, conditional event
+  order, exact retry semantics, and exact file layout.
+- Failure-quarantine tests prove atomic fixed-layout bundles, redaction,
+  collision refusal, matrix exclusion, and preservation of the original error.
 - Existing firmware fixture tests continue to prove empty unattested directories
   are refused.
 - Full ESP Python tests and lesson-studio Node contracts pass.
