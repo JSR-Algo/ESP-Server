@@ -33,7 +33,10 @@ export HIL_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-hil/lesson-storage-hi
 export PRODUCTION_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-production/lesson-storage-hil-build.json"
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
-export RELEASE_ORDER_ARTIFACT="$EVIDENCE_ROOT/release-order.json"
+export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger.json"
+export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/hil-matrix-report.json"
+export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
+export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
 export DEVICE_ID='28:84:85:85:1a:80' # exact live connection key used by the eviction route
 export DEVICE_ALIAS='fce7bec8-8478-4ab4-817f-7b87c41c1f91'
 export BACKEND_DEVICE_ID='14140000-0000-4000-8000-000000000004'
@@ -440,21 +443,43 @@ from the exact paired source commit, verify that the selected manifest has
 profile `production` and HIL disabled, and only then collect the production
 soak. Never count transitions captured from the HIL image toward production.
 
-After production attestation and before starting the soak, materialize the
-validated paired-build release order. The soak and audit commands reject a
-missing, reordered, foreign-build, or hand-edited contradictory artifact:
+Record each completed gate immediately after its evidence exists. Every call
+appends exactly one timestamped receipt and hashes its prerequisite artifact;
+skips, rewrites, non-increasing timestamps, foreign builds, and changed evidence
+are rejected. Run the first command after flashing HIL, the second after the HIL
+matrix report is PASS, the third after production reflash, and the fourth after
+production attestation:
 
 ```bash
 cd "$ESP_WORKTREE/main/tbot-server"
 python3 scripts/lesson_studio_task14_build_identity.py release \
+  --ledger "$RELEASE_LEDGER" \
   --hil-manifest "$HIL_BUILD_MANIFEST" \
   --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event hil-flash \
+  --evidence "$HIL_BUILD_MANIFEST" \
+  --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 scripts/lesson_studio_task14_build_identity.py release \
+  --ledger "$RELEASE_LEDGER" \
+  --hil-manifest "$HIL_BUILD_MANIFEST" \
+  --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event hil-matrix-pass \
+  --evidence "$HIL_MATRIX_REPORT" \
+  --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 scripts/lesson_studio_task14_build_identity.py release \
+  --ledger "$RELEASE_LEDGER" \
+  --hil-manifest "$HIL_BUILD_MANIFEST" \
+  --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event production-reflash \
+  --evidence "$PRODUCTION_REFLASH_RECEIPT" \
+  --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 scripts/lesson_studio_task14_build_identity.py release \
+  --ledger "$RELEASE_LEDGER" \
+  --hil-manifest "$HIL_BUILD_MANIFEST" \
+  --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event production-attest \
-  --event production-soak \
-  --output "$RELEASE_ORDER_ARTIFACT"
+  --evidence "$PRODUCTION_ATTESTATION" \
+  --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 Capture the raw production soak timeline without applying the single-lesson
@@ -474,7 +499,8 @@ python3 scripts/lesson_e2e_live_capture.py \
   --out-dir "$EVIDENCE_ROOT/soak/capture"
 ```
 
-After at least 104 real step transitions, run both fail-closed audits:
+After at least 104 real step transitions, run the soak gate against the ledger
+ending at `production-attest`:
 
 ```bash
 cd "$ESP_WORKTREE/main/tbot-server"
@@ -489,8 +515,23 @@ python3 scripts/lesson_studio_task14_soak.py \
   --verifier-script "$VERIFIER_SCRIPT" \
   --minimum-transitions 104 \
   --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
-  --release-order-artifact "$RELEASE_ORDER_ARTIFACT" \
+  --release-ledger "$RELEASE_LEDGER" \
   --output "$EVIDENCE_ROOT/soak/report.json"
+```
+
+Only after that report is PASS may the final receipt be appended. The command
+validates the report's transition gate, production build identity, and embedded
+prerequisite ledger before recording `production-soak`. Then run the final log
+audit against the completed ledger:
+
+```bash
+python3 scripts/lesson_studio_task14_build_identity.py release \
+  --ledger "$RELEASE_LEDGER" \
+  --hil-manifest "$HIL_BUILD_MANIFEST" \
+  --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
+  --event production-soak \
+  --evidence "$EVIDENCE_ROOT/soak/report.json" \
+  --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 scripts/lesson_studio_task14_log_audit.py \
   "$EVIDENCE_ROOT/soak/capture/firmware-serial.log" \
   "$EVIDENCE_ROOT/soak/capture/esp-server.log" \
@@ -502,7 +543,7 @@ python3 scripts/lesson_studio_task14_log_audit.py \
   --verifier-script "$VERIFIER_SCRIPT" \
   --minimum-transitions 104 \
   --build-manifest "$PRODUCTION_BUILD_MANIFEST" \
-  --release-order-artifact "$RELEASE_ORDER_ARTIFACT" \
+  --release-ledger "$RELEASE_LEDGER" \
   --output "$EVIDENCE_ROOT/soak/audit.json"
 ```
 
@@ -518,8 +559,9 @@ boundary instead of being correlated by file order alone.
 Both JSON reports must contain `minimumTransitionsRequired=104` and the exact
 flattened `buildIdentity` loaded from `PRODUCTION_BUILD_MANIFEST`; a HIL,
 unverified, stale, or foreign-profile manifest is a hard failure.
-Both reports must also contain `releaseOrderEvidence` loaded from
-`RELEASE_ORDER_ARTIFACT` and bound to that same production build identity.
+The soak report must contain `releaseLedgerEvidence` through
+`production-attest`; the final audit must contain the same ledger with the
+`production-soak` receipt appended and bound to the actual PASS soak report.
 
 ## Evidence schema
 

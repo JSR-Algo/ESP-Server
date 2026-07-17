@@ -101,6 +101,8 @@ INSPECT_FIELDS = frozenset(
     {"cacheKey", "siblingCacheKey", "status", "truncated", "entries"}
 )
 INSPECT_ENTRY_FIELDS = frozenset({"label", "nodeType", "bytes", "sha256"})
+PRIMARY_SENTINEL_SHA256 = "e95ab394bdf8569652429018519989d3e94cae168cf91c269c81a2c9bb00d5ec"
+SIBLING_SENTINEL_SHA256 = "462cc80e16c12bbee14c7eba5e61da286e79580d6dc5b996bfcf7a43f30a4cf8"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}(?![A-Za-z0-9_-])"
@@ -206,8 +208,9 @@ def validate_status_response(value, *, expected_cache_key=None):
     if value["status"] == "idle":
         require(value["cacheKey"] == "", "idle status retains a cache key")
         require(not value["armed"] and not value["reached"] and not value["consumed"], "idle flags invalid")
-        for name in ("operation", "checkpoint", "action"):
-            require(value[name] == "", f"idle status retains {name}")
+        require(value["operation"] == "evict", "idle operation default mismatch")
+        require(value["checkpoint"] == "before_first_unlink", "idle checkpoint default mismatch")
+        require(value["action"] == "fail", "idle action default mismatch")
         for name in (
             "threshold", "declaredAssetBytes", "pauseSeconds", "armSequence",
             "reachedSequence", "consumedSequence",
@@ -261,6 +264,100 @@ def validate_inspect_response(value, cache_key, sibling_cache_key):
         rendered = json.dumps(entry, sort_keys=True)
         require(not ABSOLUTE_PATH_RE.search(rendered), "inspection contains an absolute path")
     return value
+
+
+def _entry(label, node_type, bytes_count=0, sha256=""):
+    return {"label": label, "nodeType": node_type, "bytes": bytes_count, "sha256": sha256}
+
+
+def _preservation_entries(cache_key, sibling_cache_key, primary_state, sibling_state):
+    expected = []
+    for key, state, digest in (
+        (cache_key, primary_state, PRIMARY_SENTINEL_SHA256),
+        (sibling_cache_key, sibling_state, SIBLING_SENTINEL_SHA256),
+    ):
+        label = f"lesson-assets/{key}"
+        if state == "missing":
+            expected.append(_entry(label, "missing"))
+        else:
+            expected.append(_entry(label, "directory"))
+            if state == "full":
+                expected.append(
+                    _entry(f"{label}/.tbot-hil-sentinel", "regular_file", 33, digest)
+                )
+    return sorted(expected, key=lambda item: item["label"])
+
+
+def validate_preservation_inspections(scenario, before, after, *, post_reboot=None):
+    require(scenario in HIL_STORAGE_SCENARIOS, "unknown preservation scenario")
+    cache_key = before.get("cacheKey") if isinstance(before, dict) else None
+    sibling = before.get("siblingCacheKey") if isinstance(before, dict) else None
+    validate_inspect_response(before, cache_key, sibling)
+    validate_inspect_response(after, cache_key, sibling)
+    prefixes = (f"lesson-assets/{cache_key}", f"lesson-assets/{sibling}")
+
+    def split(value):
+        target = sorted(
+            (item for item in value["entries"] if item["label"].startswith(prefixes)),
+            key=lambda item: item["label"],
+        )
+        protected = sorted(
+            (item for item in value["entries"] if not item["label"].startswith(prefixes)),
+            key=lambda item: item["label"],
+        )
+        return target, protected
+
+    before_target, before_protected = split(before)
+    after_target, after_protected = split(after)
+    require(
+        before_target == _preservation_entries(cache_key, sibling, "missing", "missing"),
+        "inspection baseline is not clean",
+    )
+    protected_labels = {item["label"] for item in before_protected}
+    require(
+        {"lesson-assets/current.json", "lesson-assets/pvg", "lesson-assets/shared"}
+        <= protected_labels,
+        "protected inspection baseline missing",
+    )
+    require(before_protected == after_protected, "protected storage fingerprint changed")
+    primary_state = {
+        "evict-before-first-unlink-fail": "full",
+        "evict-after-unlinks-fail": "directory_only",
+        "evict-before-rmdir-fail": "directory_only",
+        "evict-after-unlinks-sd-removal": "missing",
+        "sync-before-download-write-no-space": "full",
+        "sync-after-download-bytes-no-space": "full",
+        "sync-before-checksum-corrupt-staging": "full",
+        "sync-before-commit-rename-fail": "full",
+        "sync-before-commit-rename-power-loss": "full",
+    }[scenario]
+    require(
+        after_target == _preservation_entries(cache_key, sibling, primary_state, "full"),
+        "scenario inspection state mismatch",
+    )
+    if scenario == POWER_LOSS_SCENARIO:
+        require(post_reboot is not None, "power-loss post-reboot inspection missing")
+        validate_inspect_response(post_reboot, cache_key, sibling)
+        require(post_reboot == after, "post-reboot inspection mismatch")
+    else:
+        require(post_reboot is None, "ordinary scenario has post-reboot inspection")
+    return {"cacheKey": cache_key, "siblingCacheKey": sibling}
+
+
+def validate_cleanup_inspection(before, cleaned):
+    cache_key = before.get("cacheKey")
+    sibling = before.get("siblingCacheKey")
+    validate_inspect_response(cleaned, cache_key, sibling)
+    prefixes = (f"lesson-assets/{cache_key}", f"lesson-assets/{sibling}")
+    cleaned_target = sorted(
+        (item for item in cleaned["entries"] if item["label"].startswith(prefixes)),
+        key=lambda item: item["label"],
+    )
+    require(
+        cleaned_target == _preservation_entries(cache_key, sibling, "missing", "missing"),
+        "fixture cleanup inspection is not clean",
+    )
+    return cleaned
 
 
 def parse_internal_mcp_response(value):
@@ -1180,12 +1277,22 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         events.append("status-after")
         inspect_after = post_reboot_inspect if power_loss else client.inspect(cache_key, sibling)
         events.append("inspect-after")
+        validate_preservation_inspections(
+            scenario,
+            inspect_before,
+            inspect_after,
+            post_reboot=post_reboot_inspect if power_loss else None,
+        )
         if power_loss and operation == "sync":
             evicted_retry = _trigger(client, "evict", cache_key, arguments)
             require(evicted_retry.get("evicted") is True, "retry cache cleanup eviction failed")
         cleanup = client.cleanup(cache_key, fixture, sibling)
         cleaned = True
         events.append("cleanup")
+        cleanup_inspect = client.inspect(cache_key, sibling)
+        validate_cleanup_inspection(inspect_before, cleanup_inspect)
+        final_status = client.status()
+        require(final_status["armed"] is False, "HIL controller remained active after cleanup")
         validate_event_order(events)
         sequences = sequences_from_serial(
             arm, sequence_log,
@@ -1213,6 +1320,8 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             "checkpoint": checkpoint,
             "faultAction": action,
             "expectedProgress": SCENARIO_EXPECTED_PROGRESS[scenario],
+            "cleanupVerified": True,
+            "controllerInactive": True,
             **outcome,
         }
         if power_data:

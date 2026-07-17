@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -213,16 +214,6 @@ def validate_build_pair(hil_manifest, production_manifest):
     return {"sourceCommit": hil["sourceCommit"], "hil": hil, "production": production}
 
 
-def validate_release_order(events):
-    require(isinstance(events, list) and all(isinstance(item, str) for item in events), "invalid release events")
-    positions = []
-    for event in RELEASE_ORDER:
-        require(events.count(event) == 1, f"release event missing or duplicated: {event}")
-        positions.append(events.index(event))
-    require(positions == sorted(positions), "HIL-to-production release order invalid")
-    return events
-
-
 def _validate_flat_identity(value, expected_profile):
     require(isinstance(value, dict) and set(value) == FLAT_FIELDS, "invalid flat build identity")
     require(value.get("profile") == expected_profile, "foreign flat build profile")
@@ -235,26 +226,115 @@ def _validate_flat_identity(value, expected_profile):
     return value
 
 
-def load_release_order_artifact(path, *, production_identity):
+def _strict_utc(value):
+    require(
+        isinstance(value, str)
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value),
+        "invalid release receipt UTC",
+    )
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        raise BuildIdentityError("invalid release receipt UTC") from None
+    require(parsed.tzinfo == timezone.utc, "invalid release receipt UTC")
+    return parsed
+
+
+def _release_evidence(path):
     path = Path(path)
-    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release-order artifact missing")
+    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release evidence missing")
+    return path.resolve(), sha256_file(path)
+
+
+def load_release_ledger(path, *, production_identity, required_event=None):
+    path = Path(path)
+    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release ledger missing")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise BuildIdentityError("invalid release-order artifact JSON") from exc
+        raise BuildIdentityError("invalid release ledger JSON") from exc
     require(
         isinstance(value, dict)
-        and set(value) == {"sourceCommit", "hil", "production", "releaseOrder"},
-        "invalid release-order artifact fields",
+        and set(value) == {"sourceCommit", "hil", "production", "receipts"},
+        "invalid release ledger fields",
     )
     hil = _validate_flat_identity(value.get("hil"), "hil")
     production = _validate_flat_identity(value.get("production"), "production")
     _validate_flat_identity(production_identity, "production")
     require(production == production_identity, "release artifact production build mismatch")
-    require(value.get("sourceCommit") == hil["sourceCommit"] == production["sourceCommit"], "release artifact source mismatch")
-    require(hil["binarySha256"] != production["binarySha256"], "release artifact binaries must differ")
-    validate_release_order(value.get("releaseOrder"))
+    require(value.get("sourceCommit") == hil["sourceCommit"] == production["sourceCommit"], "release ledger source mismatch")
+    require(hil["binarySha256"] != production["binarySha256"], "release ledger binaries must differ")
+    receipts = value.get("receipts")
+    require(isinstance(receipts, list) and len(receipts) <= len(RELEASE_ORDER), "invalid release receipts")
+    previous = None
+    for index, receipt in enumerate(receipts):
+        require(
+            isinstance(receipt, dict)
+            and set(receipt) == {"event", "completedAt", "evidencePath", "evidenceSha256"},
+            "invalid release receipt fields",
+        )
+        require(receipt.get("event") == RELEASE_ORDER[index], "release receipt order invalid")
+        completed = _strict_utc(receipt.get("completedAt"))
+        require(previous is None or previous < completed, "release receipt UTC is not increasing")
+        previous = completed
+        evidence_path, digest = _release_evidence(receipt.get("evidencePath"))
+        require(str(evidence_path) == receipt.get("evidencePath"), "release evidence path is not canonical")
+        require(digest == receipt.get("evidenceSha256"), "release evidence hash mismatch")
+    if required_event is not None:
+        require(required_event in RELEASE_ORDER, "unknown required release event")
+        required_count = RELEASE_ORDER.index(required_event) + 1
+        require(len(receipts) == required_count, f"release ledger must end at {required_event}")
     return value
+
+
+def append_release_receipt(
+    ledger_path,
+    hil_manifest,
+    production_manifest,
+    *,
+    event,
+    evidence_path,
+    completed_at,
+):
+    pair = validate_build_pair(hil_manifest, production_manifest)
+    ledger_path = Path(ledger_path)
+    if ledger_path.exists():
+        ledger = load_release_ledger(
+            ledger_path, production_identity=pair["production"]
+        )
+        require(ledger["hil"] == pair["hil"], "release ledger HIL build mismatch")
+    else:
+        ledger = {**pair, "receipts": []}
+    receipts = ledger["receipts"]
+    require(len(receipts) < len(RELEASE_ORDER), "release ledger is complete")
+    require(event == RELEASE_ORDER[len(receipts)], "release event prerequisite missing")
+    completed = _strict_utc(completed_at)
+    if receipts:
+        require(_strict_utc(receipts[-1]["completedAt"]) < completed, "release receipt UTC is not increasing")
+    evidence, digest = _release_evidence(evidence_path)
+    if event == "production-soak":
+        try:
+            report = json.loads(evidence.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BuildIdentityError("invalid production soak report") from exc
+        require(isinstance(report, dict) and report.get("status") == "PASS", "production soak report is not PASS")
+        require(report.get("minimumTransitionsRequired") == 104, "production soak report transition gate missing")
+        require(report.get("buildIdentity") == pair["production"], "production soak build mismatch")
+        prior = report.get("releaseLedgerEvidence")
+        require(
+            prior == ledger,
+            "production soak report lacks prerequisite ledger",
+        )
+    receipts.append(
+        {
+            "event": event,
+            "completedAt": completed_at,
+            "evidencePath": str(evidence),
+            "evidenceSha256": digest,
+        }
+    )
+    atomic_write_json(ledger_path, ledger)
+    return ledger
 
 
 def atomic_write_json(path, value):
@@ -286,10 +366,12 @@ def main():
     pair.add_argument("--production-manifest", required=True, type=Path)
     pair.add_argument("--output", type=Path)
     release = subparsers.add_parser("release")
+    release.add_argument("--ledger", required=True, type=Path)
     release.add_argument("--hil-manifest", required=True, type=Path)
     release.add_argument("--production-manifest", required=True, type=Path)
-    release.add_argument("--event", action="append", required=True, dest="events")
-    release.add_argument("--output", type=Path)
+    release.add_argument("--event", required=True, choices=RELEASE_ORDER)
+    release.add_argument("--evidence", required=True, type=Path)
+    release.add_argument("--completed-at", required=True)
     arguments = parser.parse_args()
     try:
         if arguments.command == "validate":
@@ -297,12 +379,15 @@ def main():
         elif arguments.command == "pair":
             result = validate_build_pair(arguments.hil_manifest, arguments.production_manifest)
         else:
-            pair_result = validate_build_pair(
-                arguments.hil_manifest, arguments.production_manifest
+            result = append_release_receipt(
+                arguments.ledger,
+                arguments.hil_manifest,
+                arguments.production_manifest,
+                event=arguments.event,
+                evidence_path=arguments.evidence,
+                completed_at=arguments.completed_at,
             )
-            release_order = validate_release_order(arguments.events)
-            result = {**pair_result, "releaseOrder": release_order}
-        if arguments.output:
+        if getattr(arguments, "output", None):
             atomic_write_json(arguments.output, result)
         print(json.dumps(result, sort_keys=True))
         return 0

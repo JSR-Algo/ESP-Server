@@ -139,9 +139,9 @@ def exact_status(state="consumed"):
         "armed": state == "armed",
         "reached": state in ("reached", "consumed"),
         "consumed": state == "consumed",
-        "operation": "" if idle else "evict",
-        "checkpoint": "" if idle else "after_unlinks",
-        "action": "" if idle else "fail",
+        "operation": "evict",
+        "checkpoint": "before_first_unlink" if idle else "after_unlinks",
+        "action": "fail",
         "threshold": 0 if idle else 1,
         "declaredAssetBytes": 0,
         "pauseSeconds": 0,
@@ -541,52 +541,84 @@ def test_paired_builds_require_same_source_opposite_profiles_and_different_binar
         identity.validate_build_pair(hil_path, foreign_path)
 
 
-def test_release_order_requires_hil_matrix_then_production_reflash_then_soak():
-    identity = load_script("lesson_studio_task14_build_identity.py")
-    events = ["hil-flash", "hil-matrix-pass", "production-reflash", "production-attest", "production-soak"]
-    assert identity.validate_release_order(events) == events
-    with pytest.raises(identity.BuildIdentityError):
-        identity.validate_release_order(["hil-flash", "production-soak", "production-reflash"])
-
-
 def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
     hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
     prod_path, _prod, _ = task6_manifest(tmp_path / "prod", profile="production", binary=b"prod")
     script = ROOT / "scripts" / "lesson_studio_task14_build_identity.py"
-    events = ["hil-flash", "hil-matrix-pass", "production-reflash", "production-attest", "production-soak"]
-    command = [
-        sys.executable, str(script), "release",
-        "--hil-manifest", str(hil_path),
-        "--production-manifest", str(prod_path),
-    ]
-    for event in events:
-        command.extend(("--event", event))
-    valid = subprocess.run(command, text=True, capture_output=True, check=False)
-    assert valid.returncode == 0
-    release_artifact = json.loads(valid.stdout)
-    assert release_artifact["releaseOrder"] == events
     identity = load_script("lesson_studio_task14_build_identity.py")
-    artifact_path = tmp_path / "release-order.json"
-    artifact_path.write_text(json.dumps(release_artifact))
-    assert identity.load_release_order_artifact(
-        artifact_path, production_identity=release_artifact["production"]
+    events = ["hil-flash", "hil-matrix-pass", "production-reflash", "production-attest", "production-soak"]
+    ledger_path = tmp_path / "release-ledger.json"
+    evidence_paths = []
+    for index, event in enumerate(events):
+        evidence = tmp_path / f"{event}.json"
+        payload = {"status": "PASS", "event": event}
+        if event == "production-soak":
+            payload["buildIdentity"] = identity.load_build_identity(
+                prod_path, expected_profile="production"
+            )
+            payload["minimumTransitionsRequired"] = 104
+            payload["releaseLedgerEvidence"] = json.loads(ledger_path.read_text())
+        evidence.write_text(json.dumps(payload))
+        evidence_paths.append(evidence)
+        completed = subprocess.run(
+            [
+                sys.executable, str(script), "release",
+                "--ledger", str(ledger_path),
+                "--hil-manifest", str(hil_path),
+                "--production-manifest", str(prod_path),
+                "--event", event,
+                "--evidence", str(evidence),
+                "--completed-at", f"2026-07-17T00:00:0{index}Z",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+    release_artifact = json.loads(ledger_path.read_text())
+    assert [receipt["event"] for receipt in release_artifact["receipts"]] == events
+    assert identity.load_release_ledger(
+        ledger_path,
+        production_identity=release_artifact["production"],
+        required_event="production-soak",
     ) == release_artifact
-    artifact_path.write_text(json.dumps({**release_artifact, "releaseOrder": events[::-1]}))
+    release_artifact["receipts"][1]["completedAt"] = "2026-07-16T23:59:59Z"
+    ledger_path.write_text(json.dumps(release_artifact))
     with pytest.raises(identity.BuildIdentityError):
-        identity.load_release_order_artifact(
-            artifact_path, production_identity=release_artifact["production"]
+        identity.load_release_ledger(
+            ledger_path,
+            production_identity=release_artifact["production"],
+            required_event="production-soak",
         )
 
-    invalid = subprocess.run(
-        command[:-10] + [
-            "--event", "hil-flash", "--event", "production-soak",
-            "--event", "production-reflash",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert invalid.returncode == 1
+
+def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(tmp_path / "prod", profile="production", binary=b"prod")
+    ledger = tmp_path / "ledger.json"
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({"status": "PASS"}))
+    with pytest.raises(identity.BuildIdentityError):
+        identity.append_release_receipt(
+            ledger, hil_path, prod_path,
+            event="production-reflash", evidence_path=evidence,
+            completed_at="2026-07-17T00:00:00Z",
+        )
+    for index, event in enumerate(identity.RELEASE_ORDER[:-1]):
+        identity.append_release_receipt(
+            ledger, hil_path, prod_path,
+            event=event, evidence_path=evidence,
+            completed_at=f"2026-07-17T00:00:0{index}Z",
+        )
+    failing_soak = tmp_path / "soak.json"
+    failing_soak.write_text(json.dumps({"status": "NOT_PASS"}))
+    with pytest.raises(identity.BuildIdentityError):
+        identity.append_release_receipt(
+            ledger, hil_path, prod_path,
+            event="production-soak", evidence_path=failing_soak,
+            completed_at="2026-07-17T00:00:05Z",
+        )
 
 
 def eviction_result(status, file_count, *, evicted=False):

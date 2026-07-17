@@ -24,6 +24,7 @@ HilValidationError=HIL_VALIDATOR_MODULE.HilValidationError
 validate_fixture_response=HIL_VALIDATOR_MODULE.validate_fixture_response
 validate_inspect_response=HIL_VALIDATOR_MODULE.validate_inspect_response
 validate_scenario_outcome=HIL_VALIDATOR_MODULE.validate_scenario_outcome
+validate_preservation_inspections=HIL_VALIDATOR_MODULE.validate_preservation_inspections
 del HIL_VALIDATOR_MODULE
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
@@ -55,10 +56,6 @@ HIL_BUILD_FIELDS={
 HIL_EVENT_ORDER=(
     'status-before','inspect-before','stage','arm','trigger',
     'status-after','inspect-after','cleanup',
-)
-HIL_RELEASE_ORDER=(
-    'hil-flash','hil-matrix-pass','production-reflash',
-    'production-attest','production-soak',
 )
 HIL_SCENARIO_CONTRACT={
     'evict-before-first-unlink-fail':('evict','before_first_unlink','fail',0),
@@ -709,6 +706,10 @@ def validate_hil_storage_result(scenario,result):
             errors.append(f'HIL scenario contract mismatch: {name}')
     if result.get('checkpointExercised') is not True:
         errors.append('HIL checkpoint was not exercised')
+    if result.get('cleanupVerified') is not True:
+        errors.append('HIL cleanup was not verified')
+    if result.get('controllerInactive') is not True:
+        errors.append('HIL controller remained active')
     trigger=result.get('triggerOutcome')
     absent=result.get('triggerResponseAbsent')
     cache_key=result.get('cacheKey')
@@ -769,16 +770,6 @@ def validate_hil_storage_result(scenario,result):
             if not (start < checkpoint < boundary < disconnected <= confirmed < end):
                 errors.append('invalid power-loss timestamp order')
         except (TypeError,ValueError):errors.append('invalid power-loss boundary timestamps')
-    return errors
-
-def validate_hil_release_order(events):
-    if not isinstance(events,list) or any(not isinstance(item,str) for item in events):
-        return ['invalid HIL release event list']
-    positions=[]; errors=[]
-    for event in HIL_RELEASE_ORDER:
-        if events.count(event)!=1:errors.append(f'HIL release event missing or duplicated: {event}')
-        else:positions.append(events.index(event))
-    if not errors and positions != sorted(positions):errors.append('HIL-to-production release order is invalid')
     return errors
 
 def _atomic_text(path,data):
@@ -866,7 +857,9 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
             status.get('status')=='idle' and status.get('cacheKey')=='' and
             status.get('armed') is False and status.get('reached') is False and
             status.get('consumed') is False and
-            all(status.get(name)=='' for name in ('operation','checkpoint','action')) and
+            status.get('operation')=='evict' and
+            status.get('checkpoint')=='before_first_unlink' and
+            status.get('action')=='fail' and
             all(type(status.get(name)) is int and status.get(name)==0 for name in (
                 'threshold','declaredAssetBytes','pauseSeconds','armSequence',
                 'reachedSequence','consumedSequence',
@@ -916,8 +909,14 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
 def _hil_artifact_credential_errors(root,names):
     errors=[]; root=Path(root)
     credential=re.compile(
-        r'(?im)\b(?:proxy-)?authorization\s*[:=]|\b(?:bearer|basic)\s+\S+|'
-        r'\b(?:x-mint-secret|token|secret)\s*["\']?\s*[:=]\s*\S+'
+        r'''(?im)
+        \b(?:proxy-)?authorization\s*[:=]
+        |\b(?:bearer|basic)\s+\S+
+        |["']?(?:x-mint-secret|x-api-key|api[-_]key|password|passwd|
+          token|secret|credential|credentials)["']?\s*[:=]\s*\S+
+        |^(?:cookie|set-cookie)\s*:\s*\S+
+        ''',
+        re.X,
     )
     for name in names:
         path=root/name
@@ -947,8 +946,8 @@ def _hil_semantic_artifact_errors(scenario,evidence_dir,result):
             values['stage-response.json'],cache_key,sibling,
             'preservation_set','staged',
         )
-        validate_inspect_response(values['inspect-before.json'],cache_key,sibling)
-        validate_inspect_response(values['inspect-after.json'],cache_key,sibling)
+        before=validate_inspect_response(values['inspect-before.json'],cache_key,sibling)
+        after=validate_inspect_response(values['inspect-after.json'],cache_key,sibling)
         validate_fixture_response(
             values['cleanup-response.json'],cache_key,sibling,
             'preservation_set','cleaned',
@@ -957,11 +956,13 @@ def _hil_semantic_artifact_errors(scenario,evidence_dir,result):
             post=validate_inspect_response(
                 values['post-reboot-inspect.json'],cache_key,sibling
             )
-            if post!=values['inspect-after.json']:
-                errors.append('post-reboot inspection does not match inspect-after')
+            validate_preservation_inspections(
+                scenario,before,after,post_reboot=post
+            )
             if result.get('triggerResponseAbsent') is not True or result.get('triggerOutcome') is not None:
                 errors.append('power-loss result contradicts absent trigger artifact')
         else:
+            validate_preservation_inspections(scenario,before,after)
             trigger=values['trigger-response.json']
             validate_scenario_outcome(scenario,trigger,cache_key=cache_key)
             if trigger!=result.get('triggerOutcome') or result.get('triggerResponseAbsent') is not False:
@@ -1080,7 +1081,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','deviceId':'28:84:85:85:1a:80','deviceUuid':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','connectionIdentity':{'deviceId':'28:84:85:85:1a:80','clientId':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'},'buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','deviceId':'28:84:85:85:1a:80','deviceUuid':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','connectionIdentity':{'deviceId':'28:84:85:85:1a:80','clientId':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'},'cleanupVerified':True,'controllerInactive':True,'buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         invalid_timestamps=(
             ('checkpointReachedUtc',None),
@@ -1124,8 +1125,6 @@ def main():
             checkpoint.write_bytes(b'\xff\xfe\n')
             assert _power_loss_timestamp_artifact_errors(hil_result,root)
         assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
-        assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))
-        assert validate_hil_release_order(['hil-flash','production-soak','production-reflash'])
         print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'hilStorageScenarios':HIL_STORAGE_SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2,'hilPowerTimestampCases':2+len(invalid_timestamps)+len(equal_timestamps),'hilTimestampArtifactCases':1+len(invalid_artifacts)+2})); return 0
     if a.hil_storage_scenario is not None:
         if a.evidence_dir is None:p.error('--evidence-dir is required for HIL storage validation')
