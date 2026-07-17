@@ -248,11 +248,11 @@ class DeviceChildProfileMigrationTest {
 
     private static UpgradeFixture seedAuthoritativeRowsBeforeJsonMigration(DataSource dataSource) throws Exception {
         Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174001", "Upgrade An", 2017,
-                List.of("quote\"mark", "slash\\path", "line\nbreak", "", "snowman ☃"),
+                List.of("", "science, technology"),
                 "visual", "starter", "engineer");
         var canonical = ChildProfileProjectionCanonicalizer.canonicalize(
                 "replace", 7, profile.toCanonicalProfile());
-        String csv = String.join(",", canonical.normalizedProfile().interests());
+        String encoded = ChildInterestsCodec.encode(canonical.normalizedProfile().interests());
         String insert = "INSERT INTO ai_device (id, child_profile_id, child_birth_year, child_profile_revision, "
                 + "child_profile_payload_hash, child_name, child_age, child_interests, learning_style, "
                 + "vocabulary_level, parent_career) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
@@ -265,33 +265,56 @@ class DeviceChildProfileMigrationTest {
             statement.setString(5, canonical.sha256());
             statement.setString(6, canonical.normalizedProfile().displayName());
             statement.setInt(7, 9);
-            statement.setString(8, csv);
+            statement.setString(8, encoded);
             statement.setString(9, canonical.normalizedProfile().learningStyle());
             statement.setString(10, canonical.normalizedProfile().vocabularyLevel());
             statement.setString(11, canonical.normalizedProfile().parentCareer());
             statement.executeUpdate();
 
-            statement.setString(1, "upgrade-blank");
+            statement.setString(1, "upgrade-csv");
             statement.setString(2, "123e4567-e89b-12d3-a456-426614174002");
             statement.setInt(3, 2018);
             statement.setLong(4, 3);
             statement.setString(5, "1".repeat(64));
-            statement.setString(6, "Blank");
+            statement.setString(6, "CSV");
             statement.setInt(7, 8);
-            statement.setString(8, "");
-            statement.setNull(9, java.sql.Types.VARCHAR);
-            statement.setNull(10, java.sql.Types.VARCHAR);
-            statement.setNull(11, java.sql.Types.VARCHAR);
+            statement.setString(8, "science, technology");
+            statement.setString(9, "visual");
+            statement.setString(10, "starter");
+            statement.setString(11, "engineer");
             statement.executeUpdate();
 
-            statement.setString(1, "upgrade-null");
+            statement.setString(1, "upgrade-blank");
             statement.setString(2, "123e4567-e89b-12d3-a456-426614174003");
             statement.setInt(3, 2019);
             statement.setLong(4, 2);
             statement.setString(5, "2".repeat(64));
-            statement.setString(6, "Null");
+            statement.setString(6, "Blank");
             statement.setInt(7, 7);
+            statement.setString(8, "");
+            statement.executeUpdate();
+
+            statement.setString(1, "upgrade-comma");
+            statement.setString(2, "123e4567-e89b-12d3-a456-426614174004");
+            statement.setInt(3, 2020);
+            statement.setLong(4, 4);
+            statement.setString(5, "3".repeat(64));
+            statement.setString(6, "Comma");
+            statement.setInt(7, 6);
+            statement.setString(8, ",");
+            statement.executeUpdate();
+
+            statement.setString(1, "upgrade-clear");
+            statement.setNull(2, java.sql.Types.CHAR);
+            statement.setNull(3, java.sql.Types.INTEGER);
+            statement.setLong(4, 5);
+            statement.setString(5, "4".repeat(64));
+            statement.setNull(6, java.sql.Types.VARCHAR);
+            statement.setNull(7, java.sql.Types.INTEGER);
             statement.setNull(8, java.sql.Types.VARCHAR);
+            statement.setNull(9, java.sql.Types.VARCHAR);
+            statement.setNull(10, java.sql.Types.VARCHAR);
+            statement.setNull(11, java.sql.Types.VARCHAR);
             statement.executeUpdate();
         }
         return new UpgradeFixture(profile, canonical.sha256(), canonical.normalizedProfile().interests());
@@ -314,13 +337,37 @@ class DeviceChildProfileMigrationTest {
         }
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery(
-                        "SELECT id, child_age, child_interests, child_interests_json FROM ai_device "
-                                + "WHERE id IN ('upgrade-blank','upgrade-null') ORDER BY id")) {
+                        "SELECT id, child_profile_id, child_birth_year, child_name, child_age, "
+                                + "child_interests, child_interests_json, learning_style, vocabulary_level, "
+                                + "parent_career, child_profile_revision, child_profile_payload_hash "
+                                + "FROM ai_device WHERE id IN ('upgrade-csv','upgrade-blank','upgrade-comma') "
+                                + "ORDER BY id")) {
             while (result.next()) {
+                assertNull(result.getString("child_profile_id"), result.getString("id"));
+                assertNull(result.getObject("child_birth_year"), result.getString("id"));
+                assertNull(result.getString("child_name"), result.getString("id"));
                 assertNull(result.getObject("child_age"));
                 assertNull(result.getString("child_interests"));
-                assertEquals("[]", result.getString("child_interests_json"), result.getString("id"));
+                assertNull(result.getString("child_interests_json"), result.getString("id"));
+                assertNull(result.getString("learning_style"), result.getString("id"));
+                assertNull(result.getString("vocabulary_level"), result.getString("id"));
+                assertNull(result.getString("parent_career"), result.getString("id"));
+                assertEquals(-1, result.getLong("child_profile_revision"), result.getString("id"));
+                assertNull(result.getString("child_profile_payload_hash"), result.getString("id"));
             }
+        }
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT child_profile_id, child_name, child_interests, child_interests_json, "
+                                + "child_profile_revision, child_profile_payload_hash "
+                                + "FROM ai_device WHERE id='upgrade-clear'")) {
+            result.next();
+            assertNull(result.getString("child_profile_id"));
+            assertNull(result.getString("child_name"));
+            assertNull(result.getString("child_interests"));
+            assertNull(result.getString("child_interests_json"));
+            assertEquals(5, result.getLong("child_profile_revision"));
+            assertEquals("4".repeat(64), result.getString("child_profile_payload_hash"));
         }
     }
 

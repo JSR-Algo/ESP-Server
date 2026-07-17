@@ -3,39 +3,39 @@ ALTER TABLE `ai_device`
         COMMENT 'Canonical child interests JSON managed by profile projection'
         AFTER `child_interests`;
 
-WITH RECURSIVE `legacy_interest_parts` AS (
+WITH `projection_state` AS (
     SELECT `id`,
-           IF(LOCATE(',', `child_interests`) = 0,
-              NULL,
-              SUBSTRING(`child_interests`, LOCATE(',', `child_interests`) + 1)) AS `remainder`,
-           CAST(CONCAT('[', JSON_QUOTE(SUBSTRING_INDEX(`child_interests`, ',', 1))) AS CHAR(4096))
-               AS `encoded`
+           (`child_profile_id` IS NOT NULL
+            AND `child_interests` IS NOT NULL
+            AND JSON_VALID(`child_interests`)
+            AND `child_interests` REGEXP '^[[:space:]]*\\[') AS `preserve_replace`,
+           (`child_profile_id` IS NULL
+            AND `child_birth_year` IS NULL
+            AND `child_name` IS NULL
+            AND `child_age` IS NULL
+            AND `child_interests` IS NULL
+            AND `learning_style` IS NULL
+            AND `vocabulary_level` IS NULL
+            AND `parent_career` IS NULL) AS `preserve_clear`
       FROM `ai_device`
      WHERE `child_profile_revision` >= 0
-       AND `child_profile_id` IS NOT NULL
-       AND `child_interests` IS NOT NULL
-       AND `child_interests` <> ''
-    UNION ALL
-    SELECT `id`,
-           IF(LOCATE(',', `remainder`) = 0,
-              NULL,
-              SUBSTRING(`remainder`, LOCATE(',', `remainder`) + 1)) AS `remainder`,
-           CONCAT(`encoded`, ',', JSON_QUOTE(SUBSTRING_INDEX(`remainder`, ',', 1))) AS `encoded`
-      FROM `legacy_interest_parts`
-     WHERE `remainder` IS NOT NULL
-),
-`legacy_interests_json` AS (
-    SELECT `id`, CONCAT(`encoded`, ']') AS `encoded`
-      FROM `legacy_interest_parts`
-     WHERE `remainder` IS NULL
 )
 UPDATE `ai_device` AS `device`
-LEFT JOIN `legacy_interests_json` AS `legacy` ON `legacy`.`id` = `device`.`id`
-   SET `device`.`child_interests_json` = CASE
-           WHEN `device`.`child_profile_id` IS NULL THEN NULL
-           WHEN `device`.`child_interests` IS NULL OR `device`.`child_interests` = '' THEN JSON_ARRAY()
-           ELSE `legacy`.`encoded`
-       END,
+JOIN `projection_state` AS `state` ON `state`.`id` = `device`.`id`
+   SET `device`.`child_profile_id` = IF(`state`.`preserve_replace`, `device`.`child_profile_id`, NULL),
+       `device`.`child_birth_year` = IF(`state`.`preserve_replace`, `device`.`child_birth_year`, NULL),
+       `device`.`child_name` = IF(`state`.`preserve_replace`, `device`.`child_name`, NULL),
+       `device`.`child_age` = NULL,
+       `device`.`child_interests_json` = IF(`state`.`preserve_replace`, `device`.`child_interests`, NULL),
        `device`.`child_interests` = NULL,
-       `device`.`child_age` = NULL
- WHERE `device`.`child_profile_revision` >= 0;
+       `device`.`learning_style` = IF(`state`.`preserve_replace`, `device`.`learning_style`, NULL),
+       `device`.`vocabulary_level` = IF(`state`.`preserve_replace`, `device`.`vocabulary_level`, NULL),
+       `device`.`parent_career` = IF(`state`.`preserve_replace`, `device`.`parent_career`, NULL),
+       `device`.`child_profile_revision` = IF(
+           `state`.`preserve_replace` OR `state`.`preserve_clear`,
+           `device`.`child_profile_revision`,
+           -1),
+       `device`.`child_profile_payload_hash` = IF(
+           `state`.`preserve_replace` OR `state`.`preserve_clear`,
+           `device`.`child_profile_payload_hash`,
+           NULL);
