@@ -199,7 +199,7 @@ def hil_preservation_entries(cache_key, state, digest):
 
 def run_scenario_with_fakes(
     monkeypatch, tmp_path, scenario, *, recovery_response=None,
-    recovered_inspection=None, state=None,
+    recovered_inspection=None, injected_response=None, state=None,
 ):
     hil = load_script("lesson_studio_task14_hil_storage.py")
     operation, checkpoint, action, threshold, pause_seconds, power_loss = hil.SCENARIO_SPECS[scenario]
@@ -218,7 +218,7 @@ def run_scenario_with_fakes(
     after = preservation_inspection(primary_after)
     recovered = recovered_inspection or preservation_inspection("missing")
     cleanup_inspection = preservation_inspection("missing", "missing")
-    injected = (
+    injected = injected_response if injected_response is not None else (
         eviction_result(
             {
                 "evict-before-first-unlink-fail": "unlink_failed",
@@ -566,6 +566,34 @@ def test_run_scenario_recovery_failure_prevents_cleanup_and_pass_publication(
             state=state,
         )
 
+    assert state["client"].cleanup_count == 0
+    assert state["published"] == []
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("evict-after-unlinks-fail", "evict-before-rmdir-fail"),
+)
+def test_run_scenario_recovery_rejects_wrong_initial_outcome_before_retry_or_cleanup(
+    monkeypatch, tmp_path, scenario,
+):
+    state = {}
+    with pytest.raises(Exception):
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            scenario,
+            injected_response=eviction_result("unlink_failed", 0),
+            state=state,
+        )
+
+    evictions = [
+        call for call in state["transport_calls"]
+        if call[0].endswith("evict_cache_key")
+    ]
+    assert evictions == [
+        ("self.lesson_assets.evict_cache_key", {"cacheKey": KEY}, 75)
+    ]
     assert state["client"].cleanup_count == 0
     assert state["published"] == []
 

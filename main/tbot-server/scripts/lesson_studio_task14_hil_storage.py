@@ -1482,6 +1482,8 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         recovery = recovery_not_attempted()
         if scenario in PARTIAL_EVICTION_SCENARIOS:
             recovery_blocked_cleanup = True
+        outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
+        if scenario in PARTIAL_EVICTION_SCENARIOS:
             retry_raw = client.transport.call(
                 TRIGGER_TOOLS["evict"], {"cacheKey": cache_key}, 75
             )
@@ -1518,7 +1520,6 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             arm, sequence_log,
             operation=operation, checkpoint=checkpoint, cache_key=cache_key,
         ) if power_loss else validate_sequences(arm, status_after)
-        outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         ended = utc_now()
         serial_log = redact_text(monitor.snapshot(), (secret,))
         server_log = _server_logs(arguments.server_container, started, (secret,))
