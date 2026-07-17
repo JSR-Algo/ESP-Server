@@ -50,23 +50,26 @@ public class DeviceChildProfileJwtVerifier {
 
     public void verify(String authorization, String pathDeviceId) {
         try {
+            if (publicKey == null) {
+                reject(JwtRejection.VERIFIER_UNAVAILABLE);
+            }
             if (authorization == null || !authorization.startsWith("Bearer ")) {
-                throw new SecurityException("missing bearer token");
+                reject(JwtRejection.MISSING_AUTHORIZATION);
             }
             String[] parts = authorization.substring(7).split("\\.", -1);
-            if (parts.length != 3 || publicKey == null) {
-                throw new SecurityException("invalid service token");
+            if (parts.length != 3) {
+                reject(JwtRejection.MALFORMED_TOKEN);
             }
             Base64.Decoder decoder = Base64.getUrlDecoder();
             JsonNode header = objectMapper.readTree(decoder.decode(parts[0]));
             if (!"RS256".equals(header.path("alg").asText())) {
-                throw new SecurityException("invalid token algorithm");
+                reject(JwtRejection.INVALID_ALGORITHM);
             }
             Signature signature = Signature.getInstance("SHA256withRSA");
             signature.initVerify(publicKey);
             signature.update((parts[0] + "." + parts[1]).getBytes(UTF_8));
             if (!signature.verify(decoder.decode(parts[2]))) {
-                throw new SecurityException("invalid token signature");
+                reject(JwtRejection.INVALID_SIGNATURE);
             }
 
             JsonNode claims = objectMapper.readTree(decoder.decode(parts[1]));
@@ -75,14 +78,14 @@ public class DeviceChildProfileJwtVerifier {
             long notBefore = requiredLong(claims, "nbf");
             long expiry = requiredLong(claims, "exp");
             if (!issuer.equals(claims.path("iss").asText()) || !audienceMatches(claims.path("aud"))) {
-                throw new SecurityException("invalid token authority");
+                reject(JwtRejection.INVALID_AUTHORITY);
             }
             if (!pathDeviceId.equals(claims.path("deviceId").asText())) {
-                throw new SecurityException("token device binding mismatch");
+                reject(JwtRejection.DEVICE_BINDING_MISMATCH);
             }
             if (!claims.path("scope").isTextual()
                     || !REQUIRED_SCOPE.equals(claims.path("scope").textValue())) {
-                throw new SecurityException("required token scope is missing");
+                reject(JwtRejection.INVALID_SCOPE);
             }
             long nowSeconds = now.getEpochSecond();
             long maximumExpiry;
@@ -93,13 +96,17 @@ public class DeviceChildProfileJwtVerifier {
             }
             if (issuedAt > nowSeconds || notBefore > nowSeconds || expiry <= nowSeconds
                     || expiry <= issuedAt || expiry > maximumExpiry) {
-                throw new SecurityException("token is outside its allowed lifetime");
+                reject(JwtRejection.INVALID_LIFETIME);
             }
-        } catch (SecurityException exception) {
+        } catch (JwtRejectionException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new SecurityException("invalid service token", exception);
+            throw new JwtRejectionException(JwtRejection.MALFORMED_TOKEN);
         }
+    }
+
+    private static void reject(JwtRejection reason) {
+        throw new JwtRejectionException(reason);
     }
 
     private boolean audienceMatches(JsonNode claim) {
@@ -115,7 +122,7 @@ public class DeviceChildProfileJwtVerifier {
     private static long requiredLong(JsonNode claims, String name) {
         JsonNode value = claims.get(name);
         if (value == null || !value.isIntegralNumber() || !value.canConvertToLong()) {
-            throw new SecurityException("missing numeric " + name);
+            reject(JwtRejection.INVALID_LIFETIME);
         }
         return value.longValue();
     }
@@ -132,6 +139,32 @@ public class DeviceChildProfileJwtVerifier {
                     new X509EncodedKeySpec(Base64.getDecoder().decode(encoded)));
         } catch (Exception exception) {
             throw new IllegalArgumentException("invalid child-profile JWT public key", exception);
+        }
+    }
+
+    public enum JwtRejection {
+        PATH_MISMATCH,
+        VERIFIER_UNAVAILABLE,
+        MISSING_AUTHORIZATION,
+        MALFORMED_TOKEN,
+        INVALID_ALGORITHM,
+        INVALID_SIGNATURE,
+        INVALID_AUTHORITY,
+        DEVICE_BINDING_MISMATCH,
+        INVALID_SCOPE,
+        INVALID_LIFETIME
+    }
+
+    public static final class JwtRejectionException extends SecurityException {
+        private final JwtRejection reason;
+
+        public JwtRejectionException(JwtRejection reason) {
+            super(reason.name());
+            this.reason = reason;
+        }
+
+        public JwtRejection reason() {
+            return reason;
         }
     }
 }

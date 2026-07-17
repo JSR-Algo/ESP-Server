@@ -1,6 +1,8 @@
 package tbot.modules.device.service;
 
 import java.time.Year;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 import org.springframework.http.HttpStatus;
@@ -23,7 +25,7 @@ public class DeviceChildProfileProjectionService {
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public Outcome apply(String deviceId, DeviceChildProfileProjectionDTO request) {
+    public ProjectionResult apply(String deviceId, DeviceChildProfileProjectionDTO request) {
         validateRequest(request);
         var canonical = ChildProfileProjectionCanonicalizer.canonicalize(
                 request.getMode(), request.getRevision(),
@@ -46,7 +48,7 @@ public class DeviceChildProfileProjectionService {
         }
         if (incomingRevision == storedRevision) {
             if (Objects.equals(request.getPayloadHash(), stored.getChildProfilePayloadHash())) {
-                return Outcome.NO_OP;
+                return result(Outcome.NO_OP, stored);
             }
             throw new ProjectionConflictException("child profile revision hash conflicts");
         }
@@ -69,7 +71,48 @@ public class DeviceChildProfileProjectionService {
             update.setParentCareer(profile.parentCareer());
             deviceDao.replaceChildProfile(update);
         }
-        return Outcome.APPLIED;
+        DeviceEntity persisted = deviceDao.selectChildProfileForUpdate(deviceId);
+        if (persisted == null) {
+            throw new IllegalStateException("device disappeared after child profile projection");
+        }
+        return result(Outcome.APPLIED, persisted);
+    }
+
+    private static ProjectionResult result(Outcome outcome, DeviceEntity stored) {
+        long revision = stored.getChildProfileRevision() == null ? -1 : stored.getChildProfileRevision();
+        if (stored.getChildProfileId() == null) {
+            if (!isFullyCleared(stored)) {
+                throw new IllegalStateException("stored child profile clear projection is incoherent");
+            }
+            return new ProjectionResult(outcome, stored.getId(), revision,
+                    stored.getChildProfilePayloadHash(), "clear", null);
+        }
+        return new ProjectionResult(outcome, stored.getId(), revision,
+                stored.getChildProfilePayloadHash(), "replace", new StoredProfile(
+                        stored.getChildProfileId(),
+                        stored.getChildName(),
+                        stored.getChildBirthYear(),
+                        storedInterests(stored.getChildInterests()),
+                        stored.getLearningStyle(),
+                        stored.getVocabularyLevel(),
+                        stored.getParentCareer()));
+    }
+
+    private static boolean isFullyCleared(DeviceEntity stored) {
+        return stored.getChildBirthYear() == null
+                && stored.getChildName() == null
+                && stored.getChildAge() == null
+                && stored.getChildInterests() == null
+                && stored.getLearningStyle() == null
+                && stored.getVocabularyLevel() == null
+                && stored.getParentCareer() == null;
+    }
+
+    private static List<String> storedInterests(String interests) {
+        if (interests == null || interests.isEmpty()) {
+            return List.of();
+        }
+        return List.copyOf(Arrays.asList(interests.split(",", -1)));
     }
 
     private static void validateRequest(DeviceChildProfileProjectionDTO request) {
@@ -114,6 +157,23 @@ public class DeviceChildProfileProjectionService {
     }
 
     public enum Outcome { APPLIED, NO_OP }
+
+    public record StoredProfile(
+            String childProfileId,
+            String displayName,
+            Integer birthYear,
+            List<String> interests,
+            String learningStyle,
+            String vocabularyLevel,
+            String parentCareer) {}
+
+    public record ProjectionResult(
+            Outcome outcome,
+            String deviceId,
+            long revision,
+            String payloadHash,
+            String mode,
+            StoredProfile profile) {}
 
     @ResponseStatus(HttpStatus.CONFLICT)
     public static class ProjectionConflictException extends RuntimeException {

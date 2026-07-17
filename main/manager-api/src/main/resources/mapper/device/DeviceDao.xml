@@ -11,7 +11,17 @@
     </select>
 
     <select id="selectChildProfileForUpdate" resultType="tbot.modules.device.entity.DeviceEntity">
-        SELECT id, child_profile_revision, child_profile_payload_hash
+        SELECT id,
+               child_profile_id,
+               child_birth_year,
+               child_name,
+               child_age,
+               child_interests,
+               learning_style,
+               vocabulary_level,
+               parent_career,
+               child_profile_revision,
+               child_profile_payload_hash
         FROM ai_device
         WHERE id = #{deviceId}
         FOR UPDATE

@@ -2,6 +2,7 @@ package tbot.modules.device;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -28,8 +29,12 @@ import com.fasterxml.jackson.core.json.JsonReadFeature;
 import tbot.modules.device.controller.DeviceChildProfileInternalController;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
+import tbot.modules.device.service.DeviceChildProfileProjectionService.Outcome;
+import tbot.modules.device.service.DeviceChildProfileProjectionService.ProjectionResult;
+import tbot.modules.device.service.DeviceChildProfileProjectionService.StoredProfile;
 import tbot.modules.device.service.DeviceChildProfileProjectionService.ProjectionConflictException;
 import tbot.common.exception.RenExceptionHandler;
+import tbot.modules.security.config.WebMvcConfig;
 
 class DeviceChildProfileInternalControllerTest {
     @Test
@@ -131,19 +136,69 @@ class DeviceChildProfileInternalControllerTest {
     }
 
     @Test
-    void successResponseBindsOutcomeDeviceRevisionAndHash() throws Exception {
+    void successResponseIsTheFullStoredProjectionReturnedByTheService() throws Exception {
         DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
-        when(service.apply(eq("device-1"), any())).thenReturn(DeviceChildProfileProjectionService.Outcome.APPLIED);
         String hash = "0".repeat(64);
+        when(service.apply(eq("device-1"), any())).thenReturn(new ProjectionResult(
+                Outcome.NO_OP, "device-1", 7, hash, "replace",
+                new StoredProfile("123e4567-e89b-12d3-a456-426614174000", "Stored An", 2017,
+                        List.of("art", "robots"), "visual", "advanced", "engineer")));
 
         mvc(service).perform(put("/internal/devices/device-1/child-profile")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"mode\":\"clear\",\"revision\":7,\"payloadHash\":\"" + hash + "\",\"profile\":null}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.outcome").value("APPLIED"))
+                .andExpect(jsonPath("$.data.outcome").value("NO_OP"))
                 .andExpect(jsonPath("$.data.deviceId").value("device-1"))
                 .andExpect(jsonPath("$.data.revision").value(7))
-                .andExpect(jsonPath("$.data.payloadHash").value(hash));
+                .andExpect(jsonPath("$.data.payloadHash").value(hash))
+                .andExpect(jsonPath("$.data.mode").value("replace"))
+                .andExpect(jsonPath("$.data.profile.childProfileId").value("123e4567-e89b-12d3-a456-426614174000"))
+                .andExpect(jsonPath("$.data.profile.displayName").value("Stored An"))
+                .andExpect(jsonPath("$.data.profile.birthYear").value(2017))
+                .andExpect(jsonPath("$.data.profile.interests[0]").value("art"))
+                .andExpect(jsonPath("$.data.profile.learningStyle").value("visual"))
+                .andExpect(jsonPath("$.data.profile.vocabularyLevel").value("advanced"))
+                .andExpect(jsonPath("$.data.profile.parentCareer").value("engineer"))
+                .andExpect(jsonPath("$.data.profile.childAge").doesNotExist());
+    }
+
+    @Test
+    void clearResponseContainsStoredNullProfile() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+        String hash = "0".repeat(64);
+        when(service.apply(eq("device-1"), any())).thenReturn(
+                new ProjectionResult(Outcome.APPLIED, "device-1", 8, hash, "clear", null));
+
+        mvc(service).perform(put("/internal/devices/device-1/child-profile")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"mode\":\"clear\",\"revision\":8,\"payloadHash\":\"" + hash + "\",\"profile\":null}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.mode").value("clear"))
+                .andExpect(jsonPath("$.data.profile").isEmpty());
+    }
+
+    @Test
+    void productionJsonConverterKeepsRevisionNumericAndExplicitClearProfileNull() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+        String hash = "0".repeat(64);
+        when(service.apply(eq("device-1"), any())).thenReturn(
+                new ProjectionResult(Outcome.APPLIED, "device-1", 8, hash, "clear", null));
+
+        String body = MockMvcBuilders.standaloneSetup(new DeviceChildProfileInternalController(service))
+                .setControllerAdvice(new RenExceptionHandler())
+                .setMessageConverters(new WebMvcConfig().jackson2HttpMessageConverter())
+                .build()
+                .perform(put("/internal/devices/device-1/child-profile")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"clear\",\"revision\":8,\"payloadHash\":\""
+                                + hash + "\",\"profile\":null}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        var data = new ObjectMapper().readTree(body).path("data");
+        assertTrue(data.path("revision").isIntegralNumber(), body);
+        assertTrue(data.has("profile") && data.get("profile").isNull(), body);
     }
 
     private static MockMvc mvc(DeviceChildProfileProjectionService service) {

@@ -22,6 +22,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import tbot.modules.device.security.DeviceChildProfileJwtVerifier;
+import tbot.modules.device.security.DeviceChildProfileJwtVerifier.JwtRejection;
+import tbot.modules.device.security.DeviceChildProfileJwtVerifier.JwtRejectionException;
 
 class DeviceChildProfileJwtVerifierTest {
     private static final Instant NOW = Instant.parse("2026-07-17T10:00:00Z");
@@ -43,25 +45,34 @@ class DeviceChildProfileJwtVerifierTest {
         assertDoesNotThrow(() -> verifier.verify("Bearer " + token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"));
     }
 
-    @Test void rejectsWrongSignature() throws Exception { assertRejected(token(otherKeyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsWrongIssuer() throws Exception { assertRejected(token(keyPair, "other", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsWrongAudience() throws Exception { assertRejected(token(keyPair, "issuer", "other", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsMissingScope() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "other", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsRequiredScopeAlongsideExtraScope() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync other", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsScopeWithSurroundingWhitespace() throws Exception { assertRejected(token(keyPair, "issuer", "manager", " device:child-profile:sync ", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsWrongDeviceBinding() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-2", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1"); }
-    @Test void rejectsExpiredToken() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.minusSeconds(1), NOW.minusSeconds(30)), "device-1"); }
-    @Test void rejectsNotBeforeInFuture() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.plusSeconds(1)), "device-1"); }
+    @Test void rejectsMissingAuthorizationWithStableReason() { assertRejectedAuthorization(null, "device-1", JwtRejection.MISSING_AUTHORIZATION); }
+    @Test
+    void rejectsUnavailableVerifierConfigurationWithStableReason() {
+        verifier = new DeviceChildProfileJwtVerifier("", "issuer", "manager", 300,
+                Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
+        assertRejection("Bearer sensitive.jwt.material", "device-1", JwtRejection.VERIFIER_UNAVAILABLE);
+    }
+    @Test void rejectsMalformedTokenWithStableReason() { assertRejectedAuthorization("Bearer not.a.jwt", "device-1", JwtRejection.MALFORMED_TOKEN); }
+    @Test void rejectsWrongAlgorithmWithStableReason() throws Exception { assertRejected(tokenWithAlgorithm("RS512"), "device-1", JwtRejection.INVALID_ALGORITHM); }
+    @Test void rejectsWrongSignature() throws Exception { assertRejected(token(otherKeyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_SIGNATURE); }
+    @Test void rejectsWrongIssuer() throws Exception { assertRejected(token(keyPair, "other", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_AUTHORITY); }
+    @Test void rejectsWrongAudience() throws Exception { assertRejected(token(keyPair, "issuer", "other", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_AUTHORITY); }
+    @Test void rejectsMissingScope() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "other", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_SCOPE); }
+    @Test void rejectsRequiredScopeAlongsideExtraScope() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync other", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_SCOPE); }
+    @Test void rejectsScopeWithSurroundingWhitespace() throws Exception { assertRejected(token(keyPair, "issuer", "manager", " device:child-profile:sync ", "device-1", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.INVALID_SCOPE); }
+    @Test void rejectsWrongDeviceBinding() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-2", NOW.plusSeconds(30), NOW.minusSeconds(1)), "device-1", JwtRejection.DEVICE_BINDING_MISMATCH); }
+    @Test void rejectsExpiredToken() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.minusSeconds(1), NOW.minusSeconds(30)), "device-1", JwtRejection.INVALID_LIFETIME); }
+    @Test void rejectsNotBeforeInFuture() throws Exception { assertRejected(token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1", NOW.plusSeconds(30), NOW.plusSeconds(1)), "device-1", JwtRejection.INVALID_LIFETIME); }
     @Test void acceptsExactMaximumTtl() throws Exception { assertDoesNotThrow(() -> verifier().verify("Bearer " + tokenWithTimes(keyPair, NOW.minusSeconds(2).getEpochSecond(), NOW.minusSeconds(1).getEpochSecond(), NOW.plusSeconds(298).getEpochSecond()), "device-1")); }
-    @Test void rejectsMaximumTtlPlusOne() throws Exception { assertRejected(tokenWithTimes(keyPair, NOW.minusSeconds(2).getEpochSecond(), NOW.minusSeconds(1).getEpochSecond(), NOW.plusSeconds(299).getEpochSecond()), "device-1"); }
-    @Test void rejectsExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MIN_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MAX_VALUE), "device-1"); }
-    @Test void rejectsReversedExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MAX_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MIN_VALUE), "device-1"); }
+    @Test void rejectsMaximumTtlPlusOne() throws Exception { assertRejected(tokenWithTimes(keyPair, NOW.minusSeconds(2).getEpochSecond(), NOW.minusSeconds(1).getEpochSecond(), NOW.plusSeconds(299).getEpochSecond()), "device-1", JwtRejection.INVALID_LIFETIME); }
+    @Test void rejectsExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MIN_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MAX_VALUE), "device-1", JwtRejection.INVALID_LIFETIME); }
+    @Test void rejectsReversedExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MAX_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MIN_VALUE), "device-1", JwtRejection.INVALID_LIFETIME); }
 
     @ParameterizedTest(name = "rejects {0} outside signed long range: {1}")
     @MethodSource("oversizedNumericDates")
     void rejectsIntegralNumericDatesOutsideSignedLongRange(String claim, String direction,
             String issuedAt, String notBefore, String expiry) throws Exception {
-        assertRejected(tokenWithRawTimes(keyPair, issuedAt, notBefore, expiry), "device-1");
+        assertRejected(tokenWithRawTimes(keyPair, issuedAt, notBefore, expiry), "device-1", JwtRejection.INVALID_LIFETIME);
     }
 
     private static java.util.stream.Stream<Arguments> oversizedNumericDates() {
@@ -78,9 +89,19 @@ class DeviceChildProfileJwtVerifierTest {
                 Arguments.of("exp", "below", iat, nbf, new BigInteger(exp).subtract(modulus).toString()));
     }
 
-    private void assertRejected(String token, String deviceId) {
+    private void assertRejected(String token, String deviceId, JwtRejection reason) {
+        assertRejectedAuthorization("Bearer " + token, deviceId, reason);
+    }
+
+    private void assertRejectedAuthorization(String authorization, String deviceId, JwtRejection reason) {
         verifier = verifier();
-        assertThrows(SecurityException.class, () -> verifier.verify("Bearer " + token, deviceId));
+        assertRejection(authorization, deviceId, reason);
+    }
+
+    private void assertRejection(String authorization, String deviceId, JwtRejection reason) {
+        JwtRejectionException rejection = assertThrows(JwtRejectionException.class,
+                () -> verifier.verify(authorization, deviceId));
+        org.junit.jupiter.api.Assertions.assertEquals(reason, rejection.reason());
     }
 
     private static DeviceChildProfileJwtVerifier verifier() {
@@ -102,6 +123,19 @@ class DeviceChildProfileJwtVerifierTest {
 
     private static String tokenWithTimes(KeyPair signer, long issuedAt, long notBefore, long expiry) throws Exception {
         return tokenWithRawTimes(signer, Long.toString(issuedAt), Long.toString(notBefore), Long.toString(expiry));
+    }
+
+    private static String tokenWithAlgorithm(String algorithm) throws Exception {
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+        String header = encoder.encodeToString(("{\"alg\":\"" + algorithm + "\",\"typ\":\"JWT\"}").getBytes(UTF_8));
+        String valid = token(keyPair, "issuer", "manager", "device:child-profile:sync", "device-1",
+                NOW.plusSeconds(30), NOW.minusSeconds(1));
+        String payload = valid.split("\\.", -1)[1];
+        String signingInput = header + "." + payload;
+        Signature signature = Signature.getInstance("SHA256withRSA");
+        signature.initSign(keyPair.getPrivate());
+        signature.update(signingInput.getBytes(UTF_8));
+        return signingInput + "." + encoder.encodeToString(signature.sign());
     }
 
     private static String tokenWithRawTimes(KeyPair signer, String issuedAt, String notBefore, String expiry) throws Exception {

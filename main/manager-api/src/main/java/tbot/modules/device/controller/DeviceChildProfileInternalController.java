@@ -13,6 +13,7 @@ import org.springframework.validation.ObjectError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 
 import java.util.Objects;
+import java.math.BigInteger;
 
 import jakarta.validation.Valid;
 import tbot.common.utils.Result;
@@ -35,16 +36,21 @@ public class DeviceChildProfileInternalController {
     public Result<ProjectionResponse> replace(
             @PathVariable String deviceId,
             @Valid @RequestBody DeviceChildProfileProjectionDTO request) {
-        DeviceChildProfileProjectionService.Outcome outcome = service.apply(deviceId, request);
-        return new Result<ProjectionResponse>().ok(new ProjectionResponse(
-                outcome, deviceId, request.getRevision(), request.getPayloadHash()));
+        return new Result<ProjectionResponse>().ok(ProjectionResponse.from(service.apply(deviceId, request)));
     }
 
     public record ProjectionResponse(
             DeviceChildProfileProjectionService.Outcome outcome,
             String deviceId,
-            long revision,
-            String payloadHash) {}
+            BigInteger revision,
+            String payloadHash,
+            String mode,
+            DeviceChildProfileProjectionService.StoredProfile profile) {
+        static ProjectionResponse from(DeviceChildProfileProjectionService.ProjectionResult result) {
+            return new ProjectionResponse(result.outcome(), result.deviceId(), BigInteger.valueOf(result.revision()),
+                    result.payloadHash(), result.mode(), result.profile());
+        }
+    }
 
     @ExceptionHandler(ProjectionConflictException.class)
     ResponseEntity<Result<Void>> conflict(ProjectionConflictException exception) {

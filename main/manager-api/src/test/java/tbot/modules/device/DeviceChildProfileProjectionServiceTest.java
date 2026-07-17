@@ -1,6 +1,7 @@
 package tbot.modules.device;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
@@ -23,6 +24,7 @@ import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO.Profile;
 import tbot.modules.device.entity.DeviceEntity;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
+import tbot.modules.device.service.DeviceChildProfileProjectionService.ProjectionResult;
 import tbot.modules.device.service.DeviceChildProfileProjectionService.ProjectionConflictException;
 import tbot.modules.robot.projection.ChildProfileProjectionCanonicalizer;
 
@@ -50,12 +52,28 @@ class DeviceChildProfileProjectionServiceTest {
     }
 
     @Test
-    void fullyReplacesProfileAndLegacyAge() {
-        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null));
+    void fullyReplacesProfileAndReturnsThePersistedCanonicalProjection() {
+        DeviceEntity persisted = storedProfile(7, "unused", PROFILE_ID, "Persisted An", 2018,
+                "music,robots", "visual", "beginner", "engineer");
         Profile profile = profile(PROFILE_ID);
         DeviceChildProfileProjectionDTO request = replace(7, profile);
+        persisted.setChildProfilePayloadHash(request.getPayloadHash());
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null), persisted);
 
-        assertEquals(DeviceChildProfileProjectionService.Outcome.APPLIED, service.apply(DEVICE_ID, request));
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+
+        assertEquals(DeviceChildProfileProjectionService.Outcome.APPLIED, result.outcome());
+        assertEquals(DEVICE_ID, result.deviceId());
+        assertEquals(7, result.revision());
+        assertEquals(request.getPayloadHash(), result.payloadHash());
+        assertEquals("replace", result.mode());
+        assertEquals(PROFILE_ID, result.profile().childProfileId());
+        assertEquals("Persisted An", result.profile().displayName());
+        assertEquals(2018, result.profile().birthYear());
+        assertEquals(List.of("music", "robots"), result.profile().interests());
+        assertEquals("visual", result.profile().learningStyle());
+        assertEquals("beginner", result.profile().vocabularyLevel());
+        assertEquals("engineer", result.profile().parentCareer());
 
         ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
         verify(deviceDao).replaceChildProfile(captor.capture());
@@ -74,11 +92,18 @@ class DeviceChildProfileProjectionServiceTest {
     }
 
     @Test
-    void fullClearClearsAllProfileFieldsIncludingLegacyAge() {
-        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(4, "0".repeat(64)));
+    void fullClearReturnsPersistedNullProjection() {
         DeviceChildProfileProjectionDTO request = clear(5);
+        DeviceEntity persisted = stored(5, request.getPayloadHash());
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID))
+                .thenReturn(storedProfile(4, "0".repeat(64), PROFILE_ID, "Stale", 2018,
+                        "music", "visual", "beginner", "engineer"), persisted);
 
-        assertEquals(DeviceChildProfileProjectionService.Outcome.APPLIED, service.apply(DEVICE_ID, request));
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+
+        assertEquals(DeviceChildProfileProjectionService.Outcome.APPLIED, result.outcome());
+        assertEquals("clear", result.mode());
+        assertNull(result.profile());
 
         ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
         verify(deviceDao).clearChildProfile(captor.capture());
@@ -99,8 +124,44 @@ class DeviceChildProfileProjectionServiceTest {
     void sameRevisionAndHashIsIdempotent() {
         DeviceChildProfileProjectionDTO request = clear(9);
         when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(9, request.getPayloadHash()));
-        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, service.apply(DEVICE_ID, request));
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, result.outcome());
+        assertEquals("clear", result.mode());
+        assertNull(result.profile());
         verify(deviceDao, never()).clearChildProfile(any());
+    }
+
+    @Test
+    void refusesToAttestAStoredClearProjectionWithResidualProfileMaterial() {
+        DeviceChildProfileProjectionDTO request = clear(9);
+        DeviceEntity partialClear = stored(9, request.getPayloadHash());
+        partialClear.setChildName("Residual child name");
+        partialClear.setChildAge(8);
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(partialClear);
+
+        assertThrows(IllegalStateException.class, () -> service.apply(DEVICE_ID, request));
+        verify(deviceDao, never()).clearChildProfile(any());
+    }
+
+    @Test
+    void sameRevisionReplayReturnsStoredFieldsInsteadOfEchoingTheRequest() {
+        Profile requested = profile(PROFILE_ID);
+        DeviceChildProfileProjectionDTO request = replace(9, requested);
+        DeviceEntity corrupted = storedProfile(9, request.getPayloadHash(), PROFILE_ID,
+                "Database value", 2017, "art", null, "advanced", null);
+        corrupted.setChildAge(99);
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(corrupted);
+
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, result.outcome());
+        assertEquals("Database value", result.profile().displayName());
+        assertEquals(2017, result.profile().birthYear());
+        assertEquals(List.of("art"), result.profile().interests());
+        assertEquals("advanced", result.profile().vocabularyLevel());
+        assertEquals(7, result.profile().getClass().getRecordComponents().length,
+                "stored response must contain only the seven canonical profile fields, never legacy age");
+        verify(deviceDao, never()).replaceChildProfile(any());
     }
 
     @Test
@@ -116,6 +177,10 @@ class DeviceChildProfileProjectionServiceTest {
         Profile profile = new Profile(PROFILE_ID, "A\u0301n", 2018,
                 List.of("é", "z", "e\u0301", "a"), "cafe\u0301", "de\u0301butant", "inge\u0301nieur");
         DeviceChildProfileProjectionDTO request = replace(3, profile);
+
+        DeviceEntity persisted = storedProfile(3, request.getPayloadHash(), PROFILE_ID, "Án", 2018,
+                "a,z,é", "café", "débutant", "ingénieur");
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null), persisted);
 
         service.apply(DEVICE_ID, request);
 
@@ -165,6 +230,20 @@ class DeviceChildProfileProjectionServiceTest {
         device.setId(DEVICE_ID);
         device.setChildProfileRevision(revision);
         device.setChildProfilePayloadHash(hash);
+        return device;
+    }
+
+    private static DeviceEntity storedProfile(long revision, String hash, String profileId,
+            String name, Integer birthYear, String interests, String style, String vocabulary,
+            String career) {
+        DeviceEntity device = stored(revision, hash);
+        device.setChildProfileId(profileId);
+        device.setChildName(name);
+        device.setChildBirthYear(birthYear);
+        device.setChildInterests(interests);
+        device.setLearningStyle(style);
+        device.setVocabularyLevel(vocabulary);
+        device.setParentCareer(career);
         return device;
     }
 }

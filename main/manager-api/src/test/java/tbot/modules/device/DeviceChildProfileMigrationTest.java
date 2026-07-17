@@ -123,9 +123,10 @@ class DeviceChildProfileMigrationTest {
         String replayHash = ChildProfileProjectionCanonicalizer.canonicalize(
                 "replace", 1, equivalentReplay.toCanonicalProfile()).sha256();
         assertEquals(replaceHash, replayHash);
-        DeviceChildProfileProjectionService.Outcome replayOutcome = transaction.execute(status -> service.apply(
+        DeviceChildProfileProjectionService.ProjectionResult replayResult = transaction.execute(status -> service.apply(
                 "mapped-device", new DeviceChildProfileProjectionDTO("replace", 1, replayHash, equivalentReplay)));
-        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, replayOutcome);
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, replayResult.outcome());
+        assertEquals("Án", replayResult.profile().displayName());
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery("SELECT child_name, child_interests, learning_style, vocabulary_level, parent_career FROM ai_device WHERE id='mapped-device'")) {
             result.next();
