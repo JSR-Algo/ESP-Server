@@ -210,16 +210,14 @@ class DeviceMCPAdminHandler:
             conn = self.connections.get(device_id)
             if conn is not None and _normalize_mac(device_id) is not None:
                 return conn
-            matched = None
+            resolved = conn
             for candidate in self.connections.values():
                 if _conn_client_identity(candidate) == device_id:
-                    if matched is not None:
+                    if resolved is not None and resolved is not candidate:
                         raise MCPAmbiguousClientIdentityError()
-                    matched = candidate
-            if conn is not None:
-                return conn
-            if matched is not None:
-                return matched
+                    resolved = candidate
+            if resolved is not None:
+                return resolved
         return await self._shared._find_connection(device_id)
 
     async def handle_post(self, request: web.Request) -> web.Response:
