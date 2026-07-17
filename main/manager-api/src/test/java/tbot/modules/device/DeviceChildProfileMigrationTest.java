@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
@@ -32,6 +33,7 @@ import tbot.modules.device.entity.DeviceEntity;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO.Profile;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
+import tbot.modules.device.service.ChildInterestsCodec;
 import tbot.modules.robot.projection.ChildProfileProjectionCanonicalizer;
 
 class DeviceChildProfileMigrationTest {
@@ -76,15 +78,25 @@ class DeviceChildProfileMigrationTest {
             }
         }
 
+        try (Connection upgradeConnection = dataSource.getConnection();
+                Liquibase upgrade = liquibase.open(upgradeConnection)) {
+            upgrade.update(1, new Contexts(), new LabelExpression());
+        }
+        UpgradeFixture upgradeFixture = seedAuthoritativeRowsBeforeJsonMigration(dataSource);
+
         liquibase.afterPropertiesSet();
         try (Connection connection = dataSource.getConnection()) {
             assertSchemaAndBackfill(connection);
+            assertAuthoritativeRowsBackfilled(connection, upgradeFixture);
 
-            exerciseMapperTransaction(dataSource, connection);
+            exerciseMapperTransaction(dataSource, connection, upgradeFixture);
         }
     }
 
-    private static void exerciseMapperTransaction(DataSource dataSource, Connection connection) throws Exception {
+    private static void exerciseMapperTransaction(
+            DataSource dataSource,
+            Connection connection,
+            UpgradeFixture upgradeFixture) throws Exception {
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("INSERT INTO ai_device (id) VALUES ('mapped-device')");
         }
@@ -98,6 +110,13 @@ class DeviceChildProfileMigrationTest {
         DeviceChildProfileProjectionService service = new DeviceChildProfileProjectionService(session.getMapper(DeviceDao.class));
         DeviceDao deviceDao = session.getMapper(DeviceDao.class);
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+
+        DeviceChildProfileProjectionService.ProjectionResult upgradedReplay = transaction.execute(status -> service.apply(
+                "upgrade-applied", new DeviceChildProfileProjectionDTO(
+                        "replace", 7, upgradeFixture.hash(), upgradeFixture.profile())));
+        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, upgradedReplay.outcome());
+        assertEquals(upgradeFixture.profile().displayName(), upgradedReplay.profile().displayName());
+        assertEquals(upgradeFixture.canonicalInterests(), upgradedReplay.profile().interests());
 
         Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174000", "A\u0301n", 2018,
                 List.of("é", "z", "e\u0301", "a"), "cafe\u0301", "de\u0301butant", "inge\u0301nieur");
@@ -227,6 +246,84 @@ class DeviceChildProfileMigrationTest {
         }
     }
 
+    private static UpgradeFixture seedAuthoritativeRowsBeforeJsonMigration(DataSource dataSource) throws Exception {
+        Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174001", "Upgrade An", 2017,
+                List.of("quote\"mark", "slash\\path", "line\nbreak", "", "snowman ☃"),
+                "visual", "starter", "engineer");
+        var canonical = ChildProfileProjectionCanonicalizer.canonicalize(
+                "replace", 7, profile.toCanonicalProfile());
+        String csv = String.join(",", canonical.normalizedProfile().interests());
+        String insert = "INSERT INTO ai_device (id, child_profile_id, child_birth_year, child_profile_revision, "
+                + "child_profile_payload_hash, child_name, child_age, child_interests, learning_style, "
+                + "vocabulary_level, parent_career) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(insert)) {
+            statement.setString(1, "upgrade-applied");
+            statement.setString(2, canonical.normalizedProfile().childProfileId());
+            statement.setInt(3, canonical.normalizedProfile().birthYear());
+            statement.setLong(4, 7);
+            statement.setString(5, canonical.sha256());
+            statement.setString(6, canonical.normalizedProfile().displayName());
+            statement.setInt(7, 9);
+            statement.setString(8, csv);
+            statement.setString(9, canonical.normalizedProfile().learningStyle());
+            statement.setString(10, canonical.normalizedProfile().vocabularyLevel());
+            statement.setString(11, canonical.normalizedProfile().parentCareer());
+            statement.executeUpdate();
+
+            statement.setString(1, "upgrade-blank");
+            statement.setString(2, "123e4567-e89b-12d3-a456-426614174002");
+            statement.setInt(3, 2018);
+            statement.setLong(4, 3);
+            statement.setString(5, "1".repeat(64));
+            statement.setString(6, "Blank");
+            statement.setInt(7, 8);
+            statement.setString(8, "");
+            statement.setNull(9, java.sql.Types.VARCHAR);
+            statement.setNull(10, java.sql.Types.VARCHAR);
+            statement.setNull(11, java.sql.Types.VARCHAR);
+            statement.executeUpdate();
+
+            statement.setString(1, "upgrade-null");
+            statement.setString(2, "123e4567-e89b-12d3-a456-426614174003");
+            statement.setInt(3, 2019);
+            statement.setLong(4, 2);
+            statement.setString(5, "2".repeat(64));
+            statement.setString(6, "Null");
+            statement.setInt(7, 7);
+            statement.setNull(8, java.sql.Types.VARCHAR);
+            statement.executeUpdate();
+        }
+        return new UpgradeFixture(profile, canonical.sha256(), canonical.normalizedProfile().interests());
+    }
+
+    private static void assertAuthoritativeRowsBackfilled(
+            Connection connection,
+            UpgradeFixture fixture) throws Exception {
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT child_age, child_interests, child_interests_json, child_profile_revision, "
+                                + "child_profile_payload_hash FROM ai_device WHERE id='upgrade-applied'")) {
+            result.next();
+            assertNull(result.getObject("child_age"));
+            assertNull(result.getString("child_interests"));
+            assertEquals(ChildInterestsCodec.encode(fixture.canonicalInterests()),
+                    result.getString("child_interests_json"));
+            assertEquals(7, result.getLong("child_profile_revision"));
+            assertEquals(fixture.hash(), result.getString("child_profile_payload_hash"));
+        }
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        "SELECT id, child_age, child_interests, child_interests_json FROM ai_device "
+                                + "WHERE id IN ('upgrade-blank','upgrade-null') ORDER BY id")) {
+            while (result.next()) {
+                assertNull(result.getObject("child_age"));
+                assertNull(result.getString("child_interests"));
+                assertEquals("[]", result.getString("child_interests_json"), result.getString("id"));
+            }
+        }
+    }
+
     private static void assertColumn(Connection connection, String name, String dataType, Long length,
             String charset, String collation, String defaultValue, String nullable) throws Exception {
         String sql = "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, CHARACTER_SET_NAME, COLLATION_NAME, COLUMN_DEFAULT, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ai_device' AND COLUMN_NAME='" + name + "'";
@@ -253,4 +350,6 @@ class DeviceChildProfileMigrationTest {
             return createLiquibase(connection);
         }
     }
+
+    private record UpgradeFixture(Profile profile, String hash, List<String> canonicalInterests) {}
 }

@@ -22,6 +22,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
+import tbot.modules.device.dto.validation.CodePointSize;
 import tbot.modules.robot.projection.ChildProfileProjectionCanonicalizer.ChildProfileProjection;
 
 @Getter
@@ -65,14 +66,18 @@ public final class DeviceChildProfileProjectionDTO {
     public record Profile(
             @JsonProperty(value = "childProfileId", required = true)
             @NotBlank @Pattern(regexp = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}") String childProfileId,
-            @JsonProperty(value = "displayName", required = true) @NotNull String displayName,
+            @JsonProperty(value = "displayName", required = true)
+            @NotNull @CodePointSize(max = 64) String displayName,
             @JsonProperty(value = "birthYear", required = true)
             @JsonDeserialize(using = StrictBirthYearDeserializer.class) Integer birthYear,
             @JsonProperty(value = "interests", required = true)
-            @NotNull @Size(max = 256) List<@NotNull @Size(max = 4096) String> interests,
-            @JsonProperty(value = "learningStyle", required = true) String learningStyle,
-            @JsonProperty(value = "vocabularyLevel", required = true) String vocabularyLevel,
-            @JsonProperty(value = "parentCareer", required = true) String parentCareer) {
+            @NotNull @Size(max = 256) List<@NotNull @CodePointSize(max = 4096) String> interests,
+            @JsonProperty(value = "learningStyle", required = true)
+            @CodePointSize(max = 32) String learningStyle,
+            @JsonProperty(value = "vocabularyLevel", required = true)
+            @CodePointSize(max = 32) String vocabularyLevel,
+            @JsonProperty(value = "parentCareer", required = true)
+            @CodePointSize(max = 64) String parentCareer) {
         public Profile {
             interests = interests == null ? null : List.copyOf(interests);
         }

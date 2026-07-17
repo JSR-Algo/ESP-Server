@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -94,6 +96,33 @@ class DeviceChildProfileInternalControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(json))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void acceptsExactly4096UnicodeCodePointsInAnInterest() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+        String hash = "0".repeat(64);
+        when(service.apply(eq("device-1"), any())).thenReturn(
+                new ProjectionResult(Outcome.APPLIED, "device-1", 1, hash, "clear", null));
+
+        mvc(service).perform(put("/internal/devices/device-1/child-profile")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(replaceJsonWithInterest("😀".repeat(4096))))
+                .andExpect(status().isOk());
+
+        verify(service).apply(eq("device-1"), any());
+    }
+
+    @Test
+    void rejects4097UnicodeCodePointsBeforeCallingTheService() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+
+        mvc(service).perform(put("/internal/devices/device-1/child-profile")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(replaceJsonWithInterest("😀".repeat(4097))))
+                .andExpect(status().isBadRequest());
+
+        verify(service, never()).apply(eq("device-1"), any());
     }
 
     @Test
@@ -212,5 +241,12 @@ class DeviceChildProfileInternalControllerTest {
                 + "\",\"profile\":{\"childProfileId\":\"123e4567-e89b-12d3-a456-426614174000\","
                 + "\"displayName\":\"An\",\"birthYear\":" + birthYear
                 + ",\"interests\":[],\"learningStyle\":null,\"vocabularyLevel\":null,\"parentCareer\":null}}";
+    }
+
+    private static String replaceJsonWithInterest(String interest) throws Exception {
+        var root = new ObjectMapper().readTree(replaceJson("2018"));
+        ((com.fasterxml.jackson.databind.node.ArrayNode) root.path("profile").path("interests"))
+                .add(interest);
+        return new ObjectMapper().writeValueAsString(root);
     }
 }
