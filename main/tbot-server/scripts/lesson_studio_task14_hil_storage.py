@@ -1290,9 +1290,12 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         cleaned = True
         events.append("cleanup")
         cleanup_inspect = client.inspect(cache_key, sibling)
-        validate_cleanup_inspection(inspect_before, cleanup_inspect)
+        validated_cleanup_inspect = validate_cleanup_inspection(
+            inspect_before, cleanup_inspect
+        )
         final_status = client.status()
-        require(final_status["armed"] is False, "HIL controller remained active after cleanup")
+        controller_inactive = final_status["armed"] is False
+        require(controller_inactive, "HIL controller remained active after cleanup")
         validate_event_order(events)
         sequences = sequences_from_serial(
             arm, sequence_log,
@@ -1320,8 +1323,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             "checkpoint": checkpoint,
             "faultAction": action,
             "expectedProgress": SCENARIO_EXPECTED_PROGRESS[scenario],
-            "cleanupVerified": True,
-            "controllerInactive": True,
+            "cleanupInspection": validated_cleanup_inspect,
+            "finalStatus": final_status,
+            "cleanupVerified": validated_cleanup_inspect == cleanup_inspect,
+            "controllerInactive": controller_inactive,
             **outcome,
         }
         if power_data:

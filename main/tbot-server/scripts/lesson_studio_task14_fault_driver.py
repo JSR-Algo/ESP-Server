@@ -25,6 +25,8 @@ validate_fixture_response=HIL_VALIDATOR_MODULE.validate_fixture_response
 validate_inspect_response=HIL_VALIDATOR_MODULE.validate_inspect_response
 validate_scenario_outcome=HIL_VALIDATOR_MODULE.validate_scenario_outcome
 validate_preservation_inspections=HIL_VALIDATOR_MODULE.validate_preservation_inspections
+validate_cleanup_inspection=HIL_VALIDATOR_MODULE.validate_cleanup_inspection
+validate_status_response=HIL_VALIDATOR_MODULE.validate_status_response
 del HIL_VALIDATOR_MODULE
 
 SCENARIOS=('preview-parity','cold','warm','offline','checksum','interrupted','power-loss','missing-optional','sd-full','slave-unavailable','rollback')
@@ -827,7 +829,8 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
     root=Path(evidence_dir); errors=[]
     arm=_load_hil_json(root/'arm-response.json','arm-response.json',errors)
     status=_load_hil_json(root/'status-after.json','status-after.json',errors)
-    if arm is None or status is None:return errors
+    inspect_before=_load_hil_json(root/'inspect-before.json','inspect-before.json',errors)
+    if arm is None or status is None or inspect_before is None:return errors
     operation,checkpoint,action,threshold,pause_seconds=HIL_ARM_CONTRACT[scenario]
     cache_key=result.get('cacheKey')
     expected_arm={
@@ -904,6 +907,23 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
     )
     if serial_reached!=reached or serial_consumed!=consumed:
         errors.append('HIL serial sequences do not match control artifacts')
+    try:
+        cleanup_inspection=validate_cleanup_inspection(
+            inspect_before,result.get('cleanupInspection')
+        )
+        final_status=validate_status_response(
+            result.get('finalStatus'),expected_cache_key=None
+        )
+        if final_status!=status:
+            errors.append('final HIL status does not match status-after artifact')
+        cleanup_verified=cleanup_inspection==result.get('cleanupInspection')
+        controller_inactive=final_status.get('armed') is False
+        if result.get('cleanupVerified') is not cleanup_verified:
+            errors.append('cleanupVerified is not derived from raw inspection')
+        if result.get('controllerInactive') is not controller_inactive:
+            errors.append('controllerInactive is not derived from raw status')
+    except HilValidationError as exc:
+        errors.append(f'invalid HIL cleanup recovery evidence: {exc}')
     return errors
 
 def _hil_artifact_credential_errors(root,names):
@@ -1034,6 +1054,8 @@ def build_hil_storage_report(scenario,evidence_dir):
         'scenario':scenario,'status':'PASS' if not errors else 'NOT_PASS',
         'capturedAt':datetime.now(timezone.utc).isoformat(),
         'validationErrors':errors,
+        'cleanupInspection':result.get('cleanupInspection'),
+        'finalStatus':result.get('finalStatus'),
     }
 
 def build_evidence_report(

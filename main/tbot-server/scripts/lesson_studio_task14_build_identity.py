@@ -34,6 +34,14 @@ RELEASE_ORDER = (
     "hil-flash", "hil-matrix-pass", "production-reflash",
     "production-attest", "production-soak",
 )
+HIL_STORAGE_SCENARIOS = (
+    "evict-before-first-unlink-fail", "evict-after-unlinks-fail",
+    "evict-before-rmdir-fail", "evict-after-unlinks-sd-removal",
+    "sync-before-download-write-no-space", "sync-after-download-bytes-no-space",
+    "sync-before-checksum-corrupt-staging", "sync-before-commit-rename-fail",
+    "sync-before-commit-rename-power-loss",
+)
+ZERO_SHA256 = "0" * 64
 
 
 class BuildIdentityError(RuntimeError):
@@ -240,51 +248,171 @@ def _strict_utc(value):
     return parsed
 
 
-def _release_evidence(path):
+def _release_evidence(path, checksum_path=None):
     path = Path(path)
     require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release evidence missing")
-    return path.resolve(), sha256_file(path)
+    digest = sha256_file(path)
+    if checksum_path is not None:
+        checksum_path = Path(checksum_path)
+        require(not checksum_path.is_symlink() and checksum_path.is_file(), "release evidence checksum missing")
+        parts = checksum_path.read_text(encoding="ascii").strip().split()
+        require(
+            len(parts) == 2 and parts[0] == digest
+            and parts[1].lstrip("*") == path.name,
+            "release evidence checksum mismatch",
+        )
+    return path.resolve(), digest
+
+
+def _load_evidence_json(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BuildIdentityError("invalid release evidence JSON") from exc
+    require(isinstance(value, dict), "release evidence must be an object")
+    return value
+
+
+def _validate_boot_evidence(value, event, identity):
+    require(value.get("status") == "PASS" and value.get("event") == event, "boot evidence is not PASS")
+    require(value.get("buildIdentity") == identity, "boot evidence build mismatch")
+    boot = value.get("bootIdentity")
+    require(
+        isinstance(boot, dict)
+        and set(boot) == {"sourceCommit", "profile", "configEnabled", "binarySha256"},
+        "invalid boot identity evidence",
+    )
+    require(
+        boot == {
+            "sourceCommit": identity["sourceCommit"],
+            "profile": identity["profile"],
+            "configEnabled": identity["configEnabled"],
+            "binarySha256": identity["binarySha256"],
+        },
+        "boot identity evidence mismatch",
+    )
+
+
+def _validate_event_evidence(event, value, pair, prior_ledger):
+    if event == "hil-flash":
+        _validate_boot_evidence(value, event, pair["hil"])
+    elif event == "hil-matrix-pass":
+        require(value.get("status") == "PASS" and value.get("event") == event, "HIL matrix is not PASS")
+        require(value.get("buildIdentity") == pair["hil"], "HIL matrix build mismatch")
+        scenarios = value.get("scenarios")
+        require(
+            isinstance(scenarios, list)
+            and [item.get("scenario") for item in scenarios if isinstance(item, dict)] == list(HIL_STORAGE_SCENARIOS)
+            and all(set(item) == {"scenario", "status"} and item["status"] == "PASS" for item in scenarios),
+            "HIL matrix scenario evidence incomplete",
+        )
+    elif event == "production-reflash":
+        _validate_boot_evidence(value, event, pair["production"])
+    elif event == "production-attest":
+        require(value.get("status") == "PASS" and value.get("event") == event, "production attestation is not PASS")
+        require(value.get("buildIdentity") == pair["production"], "production attestation build mismatch")
+        require(value.get("hilToolsAbsent") is True, "production attestation did not exclude HIL tools")
+        require(value.get("sourceCommit") == pair["sourceCommit"], "production attestation source mismatch")
+        require(value.get("binarySha256") == pair["production"]["binarySha256"], "production attestation binary mismatch")
+    else:
+        require(value.get("status") == "PASS", "production soak report is not PASS")
+        require(value.get("minimumTransitionsRequired") == 104, "production soak report transition gate missing")
+        metrics = value.get("metrics")
+        require(
+            isinstance(metrics, dict)
+            and type(metrics.get("transitions")) is int and metrics["transitions"] >= 104
+            and type(metrics.get("sessions")) is int and metrics["sessions"] > 0,
+            "production soak metrics incomplete",
+        )
+        checks = value.get("checks")
+        require(isinstance(checks, dict) and checks and all(item is True for item in checks.values()), "production soak checks are not PASS")
+        require(value.get("buildIdentity") == pair["production"], "production soak build mismatch")
+        require(value.get("releaseLedgerEvidence") == prior_ledger, "production soak report lacks prerequisite ledger")
+
+
+def _fsync_directory(path):
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _exclusive_json(path, value):
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(path)
+        raise
+    _fsync_directory(Path(path).parent)
+    return hashlib.sha256(data).hexdigest()
 
 
 def load_release_ledger(path, *, production_identity, required_event=None):
     path = Path(path)
-    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release ledger missing")
+    require(not path.is_symlink() and path.is_dir(), "release ledger missing")
+    index_path = path / "index.json"
+    require(not index_path.is_symlink() and index_path.is_file(), "release ledger index missing")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        index_value = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise BuildIdentityError("invalid release ledger JSON") from exc
     require(
-        isinstance(value, dict)
-        and set(value) == {"sourceCommit", "hil", "production", "receipts"},
-        "invalid release ledger fields",
+        isinstance(index_value, dict)
+        and set(index_value) == {"sourceCommit", "hil", "production", "receiptFiles", "headSha256"},
+        "invalid release ledger index fields",
     )
-    hil = _validate_flat_identity(value.get("hil"), "hil")
-    production = _validate_flat_identity(value.get("production"), "production")
+    hil = _validate_flat_identity(index_value.get("hil"), "hil")
+    production = _validate_flat_identity(index_value.get("production"), "production")
     _validate_flat_identity(production_identity, "production")
     require(production == production_identity, "release artifact production build mismatch")
-    require(value.get("sourceCommit") == hil["sourceCommit"] == production["sourceCommit"], "release ledger source mismatch")
+    require(index_value.get("sourceCommit") == hil["sourceCommit"] == production["sourceCommit"], "release ledger source mismatch")
     require(hil["binarySha256"] != production["binarySha256"], "release ledger binaries must differ")
-    receipts = value.get("receipts")
-    require(isinstance(receipts, list) and len(receipts) <= len(RELEASE_ORDER), "invalid release receipts")
+    receipt_files = index_value.get("receiptFiles")
+    require(isinstance(receipt_files, list) and len(receipt_files) <= len(RELEASE_ORDER), "invalid release receipt index")
+    expected_files = {"index.json", *receipt_files}
+    require({item.name for item in path.iterdir()} == expected_files, "release ledger file set mismatch")
+    receipts = []
     previous = None
-    for index, receipt in enumerate(receipts):
+    previous_hash = ZERO_SHA256
+    for index, filename in enumerate(receipt_files):
+        expected_filename = f"{index + 1:02d}-{RELEASE_ORDER[index]}.json"
+        require(filename == expected_filename, "release receipt filename mismatch")
+        receipt_path = path / filename
+        require(not receipt_path.is_symlink() and receipt_path.is_file(), "release receipt missing")
+        receipt_bytes = receipt_path.read_bytes()
+        receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+        try:
+            receipt = json.loads(receipt_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise BuildIdentityError("invalid release receipt JSON") from exc
         require(
             isinstance(receipt, dict)
-            and set(receipt) == {"event", "completedAt", "evidencePath", "evidenceSha256"},
+            and set(receipt) == {"event", "completedAt", "evidencePath", "evidenceSha256", "previousReceiptSha256"},
             "invalid release receipt fields",
         )
         require(receipt.get("event") == RELEASE_ORDER[index], "release receipt order invalid")
         completed = _strict_utc(receipt.get("completedAt"))
         require(previous is None or previous < completed, "release receipt UTC is not increasing")
         previous = completed
+        require(receipt.get("previousReceiptSha256") == previous_hash, "release receipt hash chain invalid")
         evidence_path, digest = _release_evidence(receipt.get("evidencePath"))
         require(str(evidence_path) == receipt.get("evidencePath"), "release evidence path is not canonical")
         require(digest == receipt.get("evidenceSha256"), "release evidence hash mismatch")
+        receipts.append(receipt)
+        previous_hash = receipt_hash
+    require(index_value.get("headSha256") == previous_hash, "release ledger head hash mismatch")
     if required_event is not None:
         require(required_event in RELEASE_ORDER, "unknown required release event")
         required_count = RELEASE_ORDER.index(required_event) + 1
         require(len(receipts) == required_count, f"release ledger must end at {required_event}")
-    return value
+    return {**index_value, "receipts": receipts}
 
 
 def append_release_receipt(
@@ -295,6 +423,7 @@ def append_release_receipt(
     event,
     evidence_path,
     completed_at,
+    evidence_checksum_path=None,
 ):
     pair = validate_build_pair(hil_manifest, production_manifest)
     ledger_path = Path(ledger_path)
@@ -304,37 +433,40 @@ def append_release_receipt(
         )
         require(ledger["hil"] == pair["hil"], "release ledger HIL build mismatch")
     else:
-        ledger = {**pair, "receipts": []}
+        require(event == RELEASE_ORDER[0], "release event prerequisite missing")
+        ledger_path.mkdir(parents=True)
+        _fsync_directory(ledger_path.parent)
+        ledger = {**pair, "receiptFiles": [], "headSha256": ZERO_SHA256, "receipts": []}
     receipts = ledger["receipts"]
     require(len(receipts) < len(RELEASE_ORDER), "release ledger is complete")
     require(event == RELEASE_ORDER[len(receipts)], "release event prerequisite missing")
     completed = _strict_utc(completed_at)
     if receipts:
         require(_strict_utc(receipts[-1]["completedAt"]) < completed, "release receipt UTC is not increasing")
-    evidence, digest = _release_evidence(evidence_path)
-    if event == "production-soak":
-        try:
-            report = json.loads(evidence.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise BuildIdentityError("invalid production soak report") from exc
-        require(isinstance(report, dict) and report.get("status") == "PASS", "production soak report is not PASS")
-        require(report.get("minimumTransitionsRequired") == 104, "production soak report transition gate missing")
-        require(report.get("buildIdentity") == pair["production"], "production soak build mismatch")
-        prior = report.get("releaseLedgerEvidence")
-        require(
-            prior == ledger,
-            "production soak report lacks prerequisite ledger",
-        )
-    receipts.append(
-        {
-            "event": event,
-            "completedAt": completed_at,
-            "evidencePath": str(evidence),
-            "evidenceSha256": digest,
-        }
+    evidence, digest = _release_evidence(evidence_path, evidence_checksum_path)
+    evidence_value = _load_evidence_json(evidence)
+    _validate_event_evidence(event, evidence_value, pair, ledger)
+    receipt = {
+        "event": event,
+        "completedAt": completed_at,
+        "evidencePath": str(evidence),
+        "evidenceSha256": digest,
+        "previousReceiptSha256": ledger["headSha256"],
+    }
+    filename = f"{len(receipts) + 1:02d}-{event}.json"
+    receipt_hash = _exclusive_json(ledger_path / filename, receipt)
+    index_value = {
+        "sourceCommit": pair["sourceCommit"],
+        "hil": pair["hil"],
+        "production": pair["production"],
+        "receiptFiles": [*ledger["receiptFiles"], filename],
+        "headSha256": receipt_hash,
+    }
+    atomic_write_json(ledger_path / "index.json", index_value)
+    _fsync_directory(ledger_path)
+    return load_release_ledger(
+        ledger_path, production_identity=pair["production"], required_event=event
     )
-    atomic_write_json(ledger_path, ledger)
-    return ledger
 
 
 def atomic_write_json(path, value):
@@ -371,6 +503,7 @@ def main():
     release.add_argument("--production-manifest", required=True, type=Path)
     release.add_argument("--event", required=True, choices=RELEASE_ORDER)
     release.add_argument("--evidence", required=True, type=Path)
+    release.add_argument("--evidence-sha256", type=Path)
     release.add_argument("--completed-at", required=True)
     arguments = parser.parse_args()
     try:
@@ -386,6 +519,7 @@ def main():
                 event=arguments.event,
                 evidence_path=arguments.evidence,
                 completed_at=arguments.completed_at,
+                evidence_checksum_path=arguments.evidence_sha256,
             )
         if getattr(arguments, "output", None):
             atomic_write_json(arguments.output, result)

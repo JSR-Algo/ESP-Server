@@ -547,17 +547,18 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
     script = ROOT / "scripts" / "lesson_studio_task14_build_identity.py"
     identity = load_script("lesson_studio_task14_build_identity.py")
     events = ["hil-flash", "hil-matrix-pass", "production-reflash", "production-attest", "production-soak"]
-    ledger_path = tmp_path / "release-ledger.json"
+    ledger_path = tmp_path / "release-ledger"
+    hil_identity = identity.load_build_identity(hil_path, expected_profile="hil")
+    production_identity = identity.load_build_identity(prod_path, expected_profile="production")
     evidence_paths = []
     for index, event in enumerate(events):
         evidence = tmp_path / f"{event}.json"
-        payload = {"status": "PASS", "event": event}
-        if event == "production-soak":
-            payload["buildIdentity"] = identity.load_build_identity(
-                prod_path, expected_profile="production"
-            )
-            payload["minimumTransitionsRequired"] = 104
-            payload["releaseLedgerEvidence"] = json.loads(ledger_path.read_text())
+        payload = release_evidence_payload(
+            event,
+            hil_identity,
+            production_identity,
+            ledger_path=ledger_path,
+        )
         evidence.write_text(json.dumps(payload))
         evidence_paths.append(evidence)
         completed = subprocess.run(
@@ -575,15 +576,35 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
             check=False,
         )
         assert completed.returncode == 0, completed.stderr
-    release_artifact = json.loads(ledger_path.read_text())
+    release_artifact = identity.load_release_ledger(
+        ledger_path,
+        production_identity=production_identity,
+        required_event="production-soak",
+    )
     assert [receipt["event"] for receipt in release_artifact["receipts"]] == events
+    assert sorted(path.name for path in ledger_path.iterdir()) == [
+        "01-hil-flash.json", "02-hil-matrix-pass.json",
+        "03-production-reflash.json", "04-production-attest.json",
+        "05-production-soak.json", "index.json",
+    ]
+    first_receipt = ledger_path / "01-hil-flash.json"
+    with pytest.raises(identity.BuildIdentityError):
+        identity.append_release_receipt(
+            ledger_path, hil_path, prod_path,
+            event="hil-flash", evidence_path=evidence_paths[0],
+            completed_at="2026-07-17T00:00:06Z",
+        )
+    assert first_receipt.is_file()
     assert identity.load_release_ledger(
         ledger_path,
         production_identity=release_artifact["production"],
         required_event="production-soak",
     ) == release_artifact
-    release_artifact["receipts"][1]["completedAt"] = "2026-07-16T23:59:59Z"
-    ledger_path.write_text(json.dumps(release_artifact))
+    second_receipt = ledger_path / "02-hil-matrix-pass.json"
+    tampered = json.loads(second_receipt.read_text())
+    tampered["previousReceiptSha256"] = "0" * 64
+    second_receipt.chmod(0o644)
+    second_receipt.write_text(json.dumps(tampered))
     with pytest.raises(identity.BuildIdentityError):
         identity.load_release_ledger(
             ledger_path,
@@ -596,9 +617,13 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
     identity = load_script("lesson_studio_task14_build_identity.py")
     hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
     prod_path, _prod, _ = task6_manifest(tmp_path / "prod", profile="production", binary=b"prod")
-    ledger = tmp_path / "ledger.json"
+    ledger = tmp_path / "ledger"
+    hil_identity = identity.load_build_identity(hil_path, expected_profile="hil")
+    production_identity = identity.load_build_identity(prod_path, expected_profile="production")
     evidence = tmp_path / "evidence.json"
-    evidence.write_text(json.dumps({"status": "PASS"}))
+    evidence.write_text(json.dumps(release_evidence_payload(
+        "production-reflash", hil_identity, production_identity
+    )))
     with pytest.raises(identity.BuildIdentityError):
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
@@ -606,19 +631,88 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
             completed_at="2026-07-17T00:00:00Z",
         )
     for index, event in enumerate(identity.RELEASE_ORDER[:-1]):
+        event_evidence = tmp_path / f"{event}.json"
+        event_evidence.write_text(json.dumps(release_evidence_payload(
+            event, hil_identity, production_identity, ledger_path=ledger
+        )))
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
-            event=event, evidence_path=evidence,
+            event=event, evidence_path=event_evidence,
             completed_at=f"2026-07-17T00:00:0{index}Z",
         )
     failing_soak = tmp_path / "soak.json"
-    failing_soak.write_text(json.dumps({"status": "NOT_PASS"}))
+    failing_soak.write_text(json.dumps({
+        **release_evidence_payload(
+            "production-soak", hil_identity, production_identity,
+            ledger_path=ledger,
+        ),
+        "status": "NOT_PASS",
+    }))
     with pytest.raises(identity.BuildIdentityError):
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
             event="production-soak", evidence_path=failing_soak,
             completed_at="2026-07-17T00:00:05Z",
         )
+
+
+def release_evidence_payload(event, hil_identity, production_identity, ledger_path=None):
+    if event == "hil-flash":
+        return {
+            "status": "PASS", "event": event,
+            "buildIdentity": hil_identity,
+            "bootIdentity": {
+                "sourceCommit": hil_identity["sourceCommit"],
+                "profile": "hil", "configEnabled": True,
+                "binarySha256": hil_identity["binarySha256"],
+            },
+        }
+    if event == "hil-matrix-pass":
+        return {
+            "status": "PASS", "event": event,
+            "buildIdentity": hil_identity,
+            "scenarios": [
+                {"scenario": scenario, "status": "PASS"}
+                for scenario in (
+                    "evict-before-first-unlink-fail", "evict-after-unlinks-fail",
+                    "evict-before-rmdir-fail", "evict-after-unlinks-sd-removal",
+                    "sync-before-download-write-no-space", "sync-after-download-bytes-no-space",
+                    "sync-before-checksum-corrupt-staging", "sync-before-commit-rename-fail",
+                    "sync-before-commit-rename-power-loss",
+                )
+            ],
+        }
+    if event == "production-reflash":
+        return {
+            "status": "PASS", "event": event,
+            "buildIdentity": production_identity,
+            "bootIdentity": {
+                "sourceCommit": production_identity["sourceCommit"],
+                "profile": "production", "configEnabled": False,
+                "binarySha256": production_identity["binarySha256"],
+            },
+        }
+    if event == "production-attest":
+        return {
+            "status": "PASS", "event": event,
+            "buildIdentity": production_identity,
+            "hilToolsAbsent": True,
+            "sourceCommit": production_identity["sourceCommit"],
+            "binarySha256": production_identity["binarySha256"],
+        }
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    ledger = identity.load_release_ledger(
+        ledger_path,
+        production_identity=production_identity,
+        required_event="production-attest",
+    )
+    return {
+        "status": "PASS", "minimumTransitionsRequired": 104,
+        "metrics": {"transitions": 104, "sessions": 3},
+        "checks": {"transition_binding_complete": True, "memory_gate": True},
+        "buildIdentity": production_identity,
+        "releaseLedgerEvidence": ledger,
+    }
 
 
 def eviction_result(status, file_count, *, evicted=False):

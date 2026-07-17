@@ -121,9 +121,16 @@ def test_fault_driver_independently_binds_control_artifacts_and_serial_sequences
         "armSequence": 10,
         "reachedSequence": 11,
         "consumedSequence": 12,
+        "cleanupVerified": True,
+        "controllerInactive": True,
+        "cleanupInspection": preservation_inspection(cache_key, f"hil-task14/v2-{'d' * 64}", "missing", "missing"),
+        "finalStatus": status,
     }
     (tmp_path / "arm-response.json").write_text(json.dumps(arm))
     (tmp_path / "status-after.json").write_text(json.dumps(status))
+    (tmp_path / "inspect-before.json").write_text(json.dumps(
+        preservation_inspection(cache_key, f"hil-task14/v2-{'d' * 64}", "missing", "missing")
+    ))
     serial = (
         "HIL_STORAGE_CHECKPOINT_REACHED operation=evict checkpoint=after_unlinks "
         f"cache_key={cache_key} count=1 reached_sequence=11\n"
@@ -278,6 +285,20 @@ def test_fault_driver_power_artifacts_bind_post_reboot_inspection(tmp_path):
     assert fault._hil_semantic_artifact_errors(
         fault.HIL_POWER_LOSS_SCENARIO, tmp_path, result
     )
+
+
+def test_fault_driver_report_persists_raw_cleanup_and_final_status(tmp_path, monkeypatch):
+    cleanup = {"cacheKey": "hil-task14/v1-" + "d" * 64, "entries": ["raw"]}
+    status = {"status": "consumed", "armed": False}
+    result = {"cleanupInspection": cleanup, "finalStatus": status}
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    monkeypatch.setattr(fault, "validate_hil_storage_result", lambda *_: [])
+    monkeypatch.setattr(fault, "_hil_storage_artifact_errors", lambda *_: [])
+    report = fault.build_hil_storage_report(
+        "evict-after-unlinks-fail", tmp_path
+    )
+    assert report["cleanupInspection"] == cleanup
+    assert report["finalStatus"] == status
 
 def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
     build = {

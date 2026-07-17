@@ -33,7 +33,7 @@ export HIL_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-hil/lesson-storage-hi
 export PRODUCTION_BUILD_MANIFEST="$FIRMWARE_WORKTREE/build-task14-production/lesson-storage-hil-build.json"
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
-export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger.json"
+export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger"
 export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/hil-matrix-report.json"
 export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
 export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
@@ -444,11 +444,22 @@ profile `production` and HIL disabled, and only then collect the production
 soak. Never count transitions captured from the HIL image toward production.
 
 Record each completed gate immediately after its evidence exists. Every call
-appends exactly one timestamped receipt and hashes its prerequisite artifact;
-skips, rewrites, non-increasing timestamps, foreign builds, and changed evidence
-are rejected. Run the first command after flashing HIL, the second after the HIL
-matrix report is PASS, the third after production reflash, and the fourth after
-production attestation:
+creates one `O_EXCL` receipt file, fsyncs it, and advances `index.json` with a
+SHA-256 chain to the prior receipt. Existing receipt paths are never replaced.
+The local directory owner can still rewrite local files, so this is an
+append-only CLI workflow with tamper-evident anchored hashes, not protection
+against a malicious local root. Skips, non-increasing timestamps, foreign
+builds, changed evidence, extra files, and broken chains are rejected.
+
+Evidence schemas are event-specific: `hil-flash` and `production-reflash`
+require PASS boot identity objects bound to the selected binary; the HIL matrix
+requires every named storage scenario exactly once with PASS; production
+attestation requires the production build plus `hilToolsAbsent=true`; and the
+soak receipt requires the full PASS report with 104+ transitions, positive
+session count, all recorded checks true, the production identity, and the exact
+ledger ending at `production-attest`. Run the first command after flashing HIL,
+the second after the HIL matrix report is PASS, the third after production
+reflash, and the fourth after production attestation:
 
 ```bash
 cd "$ESP_WORKTREE/main/tbot-server"
@@ -525,12 +536,15 @@ prerequisite ledger before recording `production-soak`. Then run the final log
 audit against the completed ledger:
 
 ```bash
+(cd "$EVIDENCE_ROOT/soak" && \
+  shasum -a 256 report.json > report.sha256)
 python3 scripts/lesson_studio_task14_build_identity.py release \
   --ledger "$RELEASE_LEDGER" \
   --hil-manifest "$HIL_BUILD_MANIFEST" \
   --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event production-soak \
   --evidence "$EVIDENCE_ROOT/soak/report.json" \
+  --evidence-sha256 "$EVIDENCE_ROOT/soak/report.sha256" \
   --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 scripts/lesson_studio_task14_log_audit.py \
   "$EVIDENCE_ROOT/soak/capture/firmware-serial.log" \
