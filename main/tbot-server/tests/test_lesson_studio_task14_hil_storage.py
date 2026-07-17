@@ -2219,7 +2219,7 @@ def test_runbook_uses_fresh_distinct_hil_roots_and_current_serial_port():
         "lesson_studio_task14_hil_storage.py run-matrix"
     ):runbook.index("The attended release order is immutable")]
 
-    assert "export SERIAL_PORT='/dev/cu.usbmodem1101'" in runbook
+    assert "export SERIAL_PORT='/dev/cu.usbmodem101'" in runbook
     assert '--evidence-dir "$EVIDENCE_ROOT/storage-hil"' in matrix
     assert '--failure-evidence-dir "$EVIDENCE_ROOT/storage-hil-failures"' in matrix
     assert '--before default_reset --after hard_reset' in runbook
@@ -2234,8 +2234,7 @@ def _flash_boot_inputs(tmp_path):
     build = identity.load_build_identity(manifest, expected_profile="hil")
     flash_log = tmp_path / "esptool-flash.log"
     flash_log.write_text(
-        "esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 "
-        f"--before default_reset --after hard_reset write_flash 0x20000 {paths['bin']}\n"
+        f"{_safe_real_flash_command(paths['bin'])}\n"
         "MAC: 28:84:85:85:1a:80\n"
         "Wrote 3651968 bytes (100%) at 0x00020000\n"
         "Hash of data verified.\n"
@@ -2259,6 +2258,102 @@ def _flash_boot_inputs(tmp_path):
         "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
     )
     return identity, manifest, build, flash_log, exit_code, preflight, serial
+
+
+def _safe_real_flash_command(app):
+    return (
+        "esptool.py --chip esp32s3 --port /dev/cu.usbmodem101 --baud 460800 "
+        "--before default_reset --after hard_reset write_flash "
+        "--flash_mode dio --flash_freq 80m --flash_size 16MB "
+        f"0x20000 {app}"
+    )
+
+
+def _write_flash_evidence(tmp_path, command, app_size, *, mac="28:84:85:85:1a:80"):
+    flash_log = tmp_path / "safe-esptool-flash.log"
+    flash_log.write_text(
+        f"{command}\n"
+        f"MAC: {mac}\n"
+        f"Wrote {app_size} bytes (100%) at 0x00020000\n"
+        "Hash of data verified.\n"
+    )
+    exit_code = tmp_path / "safe-esptool-exit-code.txt"
+    exit_code.write_text("0\n")
+    return flash_log, exit_code
+
+
+def test_flash_attestation_accepts_safe_real_app_only_command(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    manifest, _value, paths = task6_manifest(
+        tmp_path, profile="hil", binary=b"h" * 3_651_968
+    )
+    app = paths["bin"]
+    flash_log, exit_code = _write_flash_evidence(
+        tmp_path, _safe_real_flash_command(app), app.stat().st_size
+    )
+
+    receipt = identity.build_flash_attestation(
+        manifest, flash_log, exit_code, "28:84:85:85:1a:80",
+        "2026-07-17T00:00:00Z", "2026-07-17T00:00:01Z",
+    )
+
+    assert receipt["status"] == "PASS"
+    assert receipt["application"]["path"] == str(app)
+    assert receipt["application"]["offset"] == "0x00020000"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "extra-segment", "duplicate-mode", "duplicate-freq", "duplicate-size",
+        "altered-mode", "altered-freq", "altered-size", "altered-before",
+        "altered-after", "altered-port", "altered-mac", "relative-binary",
+        "erase-command", "shell-semicolon", "shell-and", "response-file",
+        "altered-offset", "extra-global-flag",
+    ),
+)
+def test_flash_attestation_rejects_noncanonical_or_unsafe_command(tmp_path, mutation):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    manifest, _value, paths = task6_manifest(
+        tmp_path, profile="hil", binary=b"h" * 3_651_968
+    )
+    app = paths["bin"]
+    command = _safe_real_flash_command(app)
+    mac = "28:84:85:85:1a:80"
+    replacements = {
+        "extra-segment": (str(app), f"{app} 0x0 /abs/bootloader.bin"),
+        "duplicate-mode": ("--flash_mode dio", "--flash_mode dio --flash_mode dio"),
+        "duplicate-freq": ("--flash_freq 80m", "--flash_freq 80m --flash_freq 80m"),
+        "duplicate-size": ("--flash_size 16MB", "--flash_size 16MB --flash_size 16MB"),
+        "altered-mode": ("--flash_mode dio", "--flash_mode qio"),
+        "altered-freq": ("--flash_freq 80m", "--flash_freq 40m"),
+        "altered-size": ("--flash_size 16MB", "--flash_size 8MB"),
+        "altered-before": ("--before default_reset", "--before no_reset"),
+        "altered-after": ("--after hard_reset", "--after no_reset"),
+        "altered-port": ("/dev/cu.usbmodem101", "/dev/cu.usbmodem1101"),
+        "altered-mac": (mac, "00:00:00:00:00:00"),
+        "relative-binary": (str(app), "xiaozhi.bin"),
+        "erase-command": ("esptool.py", "esptool.py erase_flash && esptool.py"),
+        "shell-semicolon": (str(app), f"{app}; echo unsafe"),
+        "shell-and": (str(app), f"{app} && echo unsafe"),
+        "response-file": (str(app), "@flash-arguments.txt"),
+        "altered-offset": ("0x20000", "0x10000"),
+        "extra-global-flag": ("--chip esp32s3", "--chip esp32s3 --no-stub"),
+    }
+    old, new = replacements[mutation]
+    if mutation == "altered-mac":
+        mac = new
+    else:
+        command = command.replace(old, new, 1)
+    flash_log, exit_code = _write_flash_evidence(
+        tmp_path, command, app.stat().st_size, mac=mac
+    )
+
+    with pytest.raises(identity.BuildIdentityError):
+        identity.build_flash_attestation(
+            manifest, flash_log, exit_code, "28:84:85:85:1a:80",
+            "2026-07-17T00:00:00Z", "2026-07-17T00:00:01Z",
+        )
 
 
 def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
@@ -2543,7 +2638,10 @@ def test_runbook_generates_dedicated_hil_boot_attestation_before_release():
     runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
     assert 'export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"' in runbook
     assert "lesson_studio_task14_build_identity.py flash-attest" in runbook
-    assert 'write_flash 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin' in runbook
+    assert (
+        "write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB "
+        '0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin'
+    ) in runbook
     assert "lesson_studio_task14_build_identity.py boot-attest" in runbook
     assert '--flash-receipt "$HIL_FLASH_RECEIPT"' in runbook
     assert "lesson_studio_task14_build_identity.py boot-capture" in runbook
@@ -3005,8 +3103,7 @@ def _valid_hil_flash_evidence(tmp_path, identity, manifest):
     app = Path(manifest).parent / "xiaozhi.bin"
     flash_log = tmp_path / "release-esptool.log"
     flash_log.write_text(
-        "esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 "
-        f"--before default_reset --after hard_reset write_flash 0x20000 {app}\n"
+        f"{_safe_real_flash_command(app)}\n"
         "MAC: 28:84:85:85:1a:80\n"
         f"Wrote {app.stat().st_size} bytes (100%) at 0x00020000\n"
         "Hash of data verified.\n"

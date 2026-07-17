@@ -57,7 +57,7 @@ export CACHE_KEY='<exact-cache-key-from-the-published-manifest>'
 export CAPTURE_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_live_capture.py"
 export VERIFIER_SCRIPT="$TBOT_ROOT/robot/scripts/lesson_e2e_log_verify.py"
 export BACKEND_URL='http://192.168.100.209:13100/v1'
-export SERIAL_PORT='/dev/cu.usbmodem1101'
+export SERIAL_PORT='/dev/cu.usbmodem101'
 export HIL_ESP_BASE_URL='http://127.0.0.1:8003'
 export HIL_ASSET_URL='http://192.168.100.209:18102/tvideo-demo/esp-tft/barn-192.png'
 export HIL_ASSET_SHA256='0bc9825de6b18c76990127d0ced5ff8c93dfd0bd931aa5689b3ff46e9d812679'
@@ -474,11 +474,12 @@ export HIL_FLASH_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set +e
 {
   printf '%s\n' \
-    "/Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py --chip esp32s3 --port $SERIAL_PORT --before default_reset --after hard_reset write_flash 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin"
+    "esptool.py --chip esp32s3 --port $SERIAL_PORT --baud 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin"
   /Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
     /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py \
-    --chip esp32s3 --port "$SERIAL_PORT" \
+    --chip esp32s3 --port "$SERIAL_PORT" --baud 460800 \
     --before default_reset --after hard_reset write_flash \
+    --flash_mode dio --flash_freq 80m --flash_size 16MB \
     0x20000 "$(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin"
 } > "$HIL_FLASH_LOG" 2>&1
 HIL_FLASH_STATUS="$?"

@@ -70,6 +70,7 @@ HIL_MATRIX_RECORD_FIELDS = frozenset(
 ZERO_SHA256 = "0" * 64
 _HIL_EVIDENCE_VALIDATOR = None
 ELF_SHA256_PREFIX_LENGTH = 16
+HIL_FLASH_SERIAL_PORT = "/dev/cu.usbmodem101"
 
 
 class BuildIdentityError(RuntimeError):
@@ -323,12 +324,17 @@ def build_flash_attestation(
         "erase_flash" not in log and "erase_region" not in log,
         "flash evidence contains prohibited erase command",
     )
-    command = re.compile(
-        rf"^.*--before default_reset --after hard_reset write_flash "
-        rf"0x20000 {re.escape(str(app))}$",
-        re.MULTILINE,
+    command_lines = [line for line in log.splitlines() if "write_flash" in line]
+    expected_command = [
+        "esptool.py", "--chip", "esp32s3", "--port", HIL_FLASH_SERIAL_PORT,
+        "--baud", "460800", "--before", "default_reset", "--after", "hard_reset",
+        "write_flash", "--flash_mode", "dio", "--flash_freq", "80m",
+        "--flash_size", "16MB", "0x20000", str(app),
+    ]
+    require(
+        len(command_lines) == 1 and command_lines[0].split() == expected_command,
+        "invalid esptool application flash command",
     )
-    require(len(command.findall(log)) == 1, "invalid esptool application flash command")
     require(log.count(f"MAC: {device_mac}") == 1, "flashed device MAC mismatch")
     wrote = re.findall(
         rf"^Wrote {app.stat().st_size} bytes .* at 0x00020000.*$", log, re.MULTILINE
