@@ -1773,7 +1773,10 @@ def test_publish_matrix_report_removes_output_when_inputs_change(tmp_path, monke
         "validator", "matrix-build", "matrix-device", "artifact-hash",
         "checksum-manifest", "recovery-missing", "recovery-hash",
         "recovery-content", "recovery-result", "quarantine-path",
-        "recovery-semantics", "validator-summary",
+        "recovery-semantics", "recovery-empty-entries",
+        "recovery-malformed-entry", "recovery-wrong-sibling",
+        "recovery-protected-change", "recovery-events-missing",
+        "recovery-events-out-of-order", "validator-summary",
     ),
 )
 def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, mutation):
@@ -1844,6 +1847,52 @@ def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, muta
         result["recovery"] = recovery
         result_path.write_text(json.dumps(result))
         for name in ("recovery-response.json", "result.json"):
+            record["artifacts"][name] = sha256(scenario_dir / name)
+        checksum_path = scenario_dir / "SHA256SUMS"
+        checksum_path.write_text("".join(
+            f"{record['artifacts'][name]}  {name}\n"
+            for name in identity.HIL_ORDINARY_ARTIFACTS
+            if name != "SHA256SUMS"
+        ))
+        record["sha256SumsSha256"] = sha256(checksum_path)
+    elif mutation.startswith("recovery-") and mutation not in {
+        "recovery-missing", "recovery-hash", "recovery-content", "recovery-result",
+    }:
+        record = report["scenarios"][1]
+        scenario_dir = (matrix_root / record["evidencePath"]).parent
+        recovery_path = scenario_dir / "recovery-response.json"
+        recovery = json.loads(recovery_path.read_text())
+        result_path = scenario_dir / "result.json"
+        result = json.loads(result_path.read_text())
+        timeline_path = scenario_dir / "timeline.log"
+        if mutation == "recovery-empty-entries":
+            recovery["inspection"]["entries"] = []
+        elif mutation == "recovery-malformed-entry":
+            recovery["inspection"]["entries"][0] = {"label": "broken"}
+        elif mutation == "recovery-wrong-sibling":
+            recovery["inspection"]["siblingCacheKey"] = KEY
+        elif mutation == "recovery-protected-change":
+            protected = next(
+                item for item in recovery["inspection"]["entries"]
+                if item["label"] == "lesson-assets/current.json"
+            )
+            protected["sha256"] = "f" * 64
+        else:
+            events = list(result["events"])
+            if mutation == "recovery-events-missing":
+                events.remove("recovery-inspect")
+            else:
+                left = events.index("recovery-trigger")
+                right = events.index("recovery-inspect")
+                events[left], events[right] = events[right], events[left]
+            result["events"] = events
+            timeline_path.write_text("".join(
+                f"{index + 1} {event}\n" for index, event in enumerate(events)
+            ))
+        result["recovery"] = recovery
+        recovery_path.write_text(json.dumps(recovery))
+        result_path.write_text(json.dumps(result))
+        for name in ("recovery-response.json", "result.json", "timeline.log"):
             record["artifacts"][name] = sha256(scenario_dir / name)
         checksum_path = scenario_dir / "SHA256SUMS"
         checksum_path.write_text("".join(
@@ -1947,6 +1996,7 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
                 "recovery": _matrix_recovery_payload(scenario),
                 "cleanupInspection": {"status": "inspected"},
                 "finalStatus": {"status": "idle"},
+                "events": _matrix_recovery_events(scenario),
             }, sort_keys=True) + "\n"
         ).encode()
         payloads["evidence.json"] = (
@@ -1962,6 +2012,23 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
         payloads["validator-exit-code.txt"] = b"0\n"
         payloads["recovery-response.json"] = (
             json.dumps(_matrix_recovery_payload(scenario), sort_keys=True) + "\n"
+        ).encode()
+        payloads["inspect-before.json"] = (
+            json.dumps(_matrix_preservation_inspection("full"), sort_keys=True) + "\n"
+        ).encode()
+        payloads["inspect-after.json"] = (
+            json.dumps(
+                _matrix_preservation_inspection(
+                    "directory_only" if scenario in {
+                        "evict-after-unlinks-fail", "evict-before-rmdir-fail",
+                    } else "full"
+                ),
+                sort_keys=True,
+            ) + "\n"
+        ).encode()
+        payloads["timeline.log"] = "".join(
+            f"{index + 1} {event}\n"
+            for index, event in enumerate(_matrix_recovery_events(scenario))
         ).encode()
         for name, data in payloads.items():
             (directory / name).write_bytes(data)
@@ -2020,13 +2087,46 @@ def _matrix_recovery_payload(scenario):
             "notFound": False,
             "fileCount": 0,
         },
-        "inspection": {
-            "cacheKey": KEY,
-            "siblingCacheKey": SIBLING,
-            "status": "inspected",
-            "truncated": False,
-            "entries": [],
+        "inspection": _matrix_preservation_inspection("missing"),
+    }
+
+
+def _matrix_recovery_events(scenario):
+    events = [
+        "status-before", "inspect-before", "stage", "arm", "trigger",
+        "status-after", "inspect-after", "cleanup",
+    ]
+    if scenario in {"evict-after-unlinks-fail", "evict-before-rmdir-fail"}:
+        events[-1:-1] = ["recovery-trigger", "recovery-inspect"]
+    return events
+
+
+def _matrix_preservation_inspection(primary_state, sibling_state="full"):
+    sibling = KEY.replace("/v1-", "/v2-", 1)
+    entries = [
+        {
+            "label": "lesson-assets/current.json",
+            "nodeType": "regular_file",
+            "bytes": 7,
+            "sha256": "a" * 64,
         },
+        {"label": "lesson-assets/pvg", "nodeType": "directory", "bytes": 0, "sha256": ""},
+        {"label": "lesson-assets/shared", "nodeType": "directory", "bytes": 0, "sha256": ""},
+    ]
+    entries.extend(hil_preservation_entries(
+        KEY, primary_state,
+        "e95ab394bdf8569652429018519989d3e94cae168cf91c269c81a2c9bb00d5ec",
+    ))
+    entries.extend(hil_preservation_entries(
+        sibling, sibling_state,
+        "462cc80e16c12bbee14c7eba5e61da286e79580d6dc5b996bfcf7a43f30a4cf8",
+    ))
+    return {
+        "cacheKey": KEY,
+        "siblingCacheKey": sibling,
+        "status": "inspected",
+        "truncated": False,
+        "entries": sorted(entries, key=lambda item: item["label"]),
     }
 
 

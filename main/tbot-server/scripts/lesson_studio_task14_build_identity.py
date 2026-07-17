@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -65,6 +66,7 @@ HIL_MATRIX_RECORD_FIELDS = frozenset(
     }
 )
 ZERO_SHA256 = "0" * 64
+_HIL_EVIDENCE_VALIDATOR = None
 
 
 class BuildIdentityError(RuntimeError):
@@ -351,70 +353,25 @@ def _matrix_checksums(directory, expected_names):
     return declared
 
 
-def _validate_matrix_recovery(scenario, scenario_dir, result):
-    recovery = _load_matrix_json(
-        scenario_dir / "recovery-response.json", "recovery response"
-    )
-    require(
-        set(recovery) == {
-            "attempted", "operation", "reason", "response", "inspection",
-        },
-        "invalid HIL matrix recovery fields",
-    )
-    require(
-        result.get("recovery") == recovery,
-        "HIL matrix recovery/result mismatch",
-    )
-    attempted = scenario in {
-        "evict-after-unlinks-fail", "evict-before-rmdir-fail",
-    }
-    require(
-        recovery.get("attempted") is attempted,
-        "HIL matrix recovery attempt mismatch",
-    )
-    if not attempted:
-        require(
-            recovery == {
-                "attempted": False,
-                "operation": None,
-                "reason": None,
-                "response": None,
-                "inspection": None,
-            },
-            "invalid HIL matrix no-recovery evidence",
+def _hil_evidence_validator():
+    global _HIL_EVIDENCE_VALIDATOR
+    if _HIL_EVIDENCE_VALIDATOR is None:
+        path = Path(__file__).with_name("lesson_studio_task14_fault_driver.py")
+        spec = importlib.util.spec_from_file_location(
+            "lesson_studio_task14_release_evidence_validator", path
         )
-        return
-    response = recovery.get("response")
-    inspection = recovery.get("inspection")
-    require(
-        recovery.get("operation") == "evict"
-        and recovery.get("reason") == "expected_partial_eviction",
-        "invalid HIL matrix recovery operation",
+        require(spec is not None and spec.loader is not None, "HIL validator unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _HIL_EVIDENCE_VALIDATOR = module
+    return _HIL_EVIDENCE_VALIDATOR
+
+
+def _validate_matrix_recovery(scenario, scenario_dir, result):
+    errors = _hil_evidence_validator()._hil_recovery_artifact_errors(
+        scenario, scenario_dir, result
     )
-    require(
-        isinstance(response, dict)
-        and set(response) == {
-            "cacheKey", "status", "reason", "evicted", "notFound", "fileCount",
-        }
-        and response.get("cacheKey") == result.get("cacheKey")
-        and response.get("status") == "evicted"
-        and response.get("reason") == "evicted"
-        and response.get("evicted") is True
-        and response.get("notFound") is False
-        and response.get("fileCount") == 0,
-        "invalid HIL matrix recovery response",
-    )
-    require(
-        isinstance(inspection, dict)
-        and set(inspection) == {
-            "cacheKey", "siblingCacheKey", "status", "truncated", "entries",
-        }
-        and inspection.get("cacheKey") == result.get("cacheKey")
-        and inspection.get("status") == "inspected"
-        and inspection.get("truncated") is False
-        and isinstance(inspection.get("entries"), list),
-        "invalid HIL matrix recovery inspection",
-    )
+    require(not errors, f"invalid independent HIL recovery evidence: {'; '.join(errors)}")
 
 
 def _validate_matrix_validator_evidence(scenario, evidence, result):
