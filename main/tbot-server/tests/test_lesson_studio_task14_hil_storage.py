@@ -346,7 +346,13 @@ def run_scenario_with_fakes(
     monkeypatch.setattr(hil, "await_power_loss_disconnect", lambda *_args, **_kwargs: {"triggerPendingAtMarker": True, "triggerPendingAtCutBoundary": True, "powerCutBoundaryUtc": "2026-07-17T00:00:01Z", "disconnectObservedUtc": "2026-07-17T00:00:02Z", "powerRemovalConfirmedUtc": "2026-07-17T00:00:03Z", "disconnectAfterPowerCutBoundary": True})
     monkeypatch.setattr(hil, "utc_now", iter(["2026-07-17T00:00:00Z", "2026-07-17T00:00:00.500000Z", "2026-07-17T00:00:04Z"]).__next__)
     monkeypatch.setattr(hil, "_server_logs", lambda *_args: "")
-    monkeypatch.setattr(hil, "finalize_scenario_directory", lambda *_args, **_kwargs: published.append(True))
+    monkeypatch.setattr(
+        hil,
+        "publish_validated_scenario_directory",
+        lambda _directory, payloads, **_kwargs: published.append(
+            json.loads(payloads["recovery-response.json"])
+        ),
+    )
     monkeypatch.setattr(hil, "scenario_artifact_names", lambda **_kwargs: ("SHA256SUMS",))
     monkeypatch.setattr(hil, "atomic_write_bytes", lambda *_args: None)
     monkeypatch.setattr(hil.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
@@ -508,7 +514,7 @@ def test_run_scenario_recovery_runs_once_after_partial_inspection_and_preserves_
         "inspection": preservation_inspection("missing"),
     }
     assert client.cleanup_count == 1
-    assert published == [True]
+    assert published == [result["recovery"]]
 
 
 @pytest.mark.parametrize(
@@ -541,7 +547,7 @@ def test_run_scenario_recovery_is_never_attempted_for_non_partial_scenarios(
     assert "recovery-inspect" not in result["events"]
     assert result["triggerOutcome"] == (None if scenario.endswith("power-loss") else injected)
     assert client.cleanup_count == 1
-    assert published == [True]
+    assert published == [result["recovery"]]
 
 
 @pytest.mark.parametrize(
@@ -673,9 +679,10 @@ def test_ordinary_and_power_loss_layouts_are_exact_and_checksums_written_last(tm
         "build-manifest.json", "build-manifest.sha256", "status-before.json",
         "inspect-before.json", "stage-response.json", "arm-response.json",
         "trigger-response.json", "status-after.json", "inspect-after.json",
-        "cleanup-response.json", "result.json", "evidence.json",
+        "cleanup-response.json", "recovery-response.json", "result.json", "evidence.json",
         "validator-exit-code.txt", "SHA256SUMS",
     )
+    assert "recovery-response.json" in power
     assert "trigger-response.json" not in power
     for required in (
         "checkpoint-reached-utc.txt", "power-removed-utc.txt",
@@ -696,6 +703,71 @@ def test_ordinary_and_power_loss_layouts_are_exact_and_checksums_written_last(tm
     assert writes[-1] == "SHA256SUMS"
     assert tuple(sorted(path.name for path in directory.iterdir())) == tuple(sorted(ordinary))
     assert "mint-secret" not in (directory / "command.txt").read_text()
+
+
+def test_hil_storage_scenario_publication_uses_hidden_staging_and_requires_validator_pass(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    final = tmp_path / "evict-after-unlinks-fail"
+    expected = hil.scenario_artifact_names(power_loss=False)
+    payloads = {name: b"x\n" for name in expected if name != "SHA256SUMS"}
+    payloads["recovery-response.json"] = hil.json_bytes({"attempted": True})
+    fsynced = []
+
+    def validator(command, **_kwargs):
+        staging = Path(command[command.index("--evidence-dir") + 1])
+        output = Path(command[command.index("--output") + 1])
+        assert staging.parent == final.parent
+        assert staging.name.startswith(f".{final.name}.staging-")
+        assert not final.exists()
+        output.write_text(json.dumps({
+            "scenario": "evict-after-unlinks-fail",
+            "status": "PASS",
+            "validationErrors": [],
+        }) + "\n")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(hil.subprocess, "run", validator)
+    monkeypatch.setattr(hil, "_fsync_directory", lambda path: fsynced.append(Path(path)))
+    published = hil.publish_validated_scenario_directory(
+        final,
+        payloads,
+        scenario="evict-after-unlinks-fail",
+        power_loss=False,
+        validator_script=tmp_path / "validator.py",
+    )
+
+    assert published == final
+    assert {path.name for path in final.iterdir()} == set(expected)
+    assert json.loads((final / "evidence.json").read_text())["status"] == "PASS"
+    assert (final / "validator-exit-code.txt").read_bytes() == b"0\n"
+    assert hil._scenario_checksums(final, expected)
+    assert fsynced[-2:] == [next(path for path in fsynced if path.name.startswith(f".{final.name}.staging-")), final.parent]
+    assert not list(tmp_path.glob(f".{final.name}.staging-*"))
+
+    failed = tmp_path / "evict-before-rmdir-fail"
+
+    def rejecting_validator(command, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps({
+            "scenario": "evict-before-rmdir-fail",
+            "status": "NOT_PASS",
+            "validationErrors": ["rejected"],
+        }) + "\n")
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(hil.subprocess, "run", rejecting_validator)
+    with pytest.raises(hil.HilValidationError, match="validator failed"):
+        hil.publish_validated_scenario_directory(
+            failed,
+            payloads,
+            scenario="evict-before-rmdir-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+    assert not failed.exists()
+    assert not list(tmp_path.glob(f".{failed.name}.staging-*"))
 
 
 def test_power_loss_classification_requires_response_absence_reboot_clear_and_retry():
@@ -1158,7 +1230,9 @@ def test_publish_matrix_report_binds_scenario_artifacts_and_attended_identity(tm
     identity = load_script("lesson_studio_task14_build_identity.py").load_build_identity(
         hil_path, expected_profile="hil"
     )
-    report_fixture = _matrix_evidence_payload(tmp_path / "matrix", identity)
+    report_fixture = _matrix_evidence_payload(
+        tmp_path / "matrix", identity, storage_layout=True
+    )
     preflight_result = {
         key: report_fixture[key]
         for key in ("status", "buildIdentity", "deviceId", "deviceUuid", "connectionIdentity")
@@ -1258,8 +1332,9 @@ def test_runbook_releases_generated_hil_matrix_report():
     assert '--evidence "$HIL_MATRIX_REPORT"' in runbook
 
 
-def _matrix_evidence_payload(root, hil_identity):
+def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
     identity = load_script("lesson_studio_task14_build_identity.py")
+    hil = load_script("lesson_studio_task14_hil_storage.py")
     Path(root).mkdir(parents=True, exist_ok=True)
     device_id = "28:84:85:85:1a:80"
     device_uuid = "fce7bec8-8478-4ab4-817f-7b87c41c1f91"
@@ -1268,11 +1343,17 @@ def _matrix_evidence_payload(root, hil_identity):
     for scenario in identity.HIL_STORAGE_SCENARIOS:
         directory = Path(root) / scenario
         directory.mkdir()
-        expected = (
-            identity.HIL_POWER_LOSS_ARTIFACTS
-            if scenario == identity.HIL_STORAGE_SCENARIOS[-1]
-            else identity.HIL_ORDINARY_ARTIFACTS
-        )
+        if storage_layout:
+            # Build-identity's duplicated release layout remains a Task 5 update.
+            expected = hil.scenario_artifact_names(
+                power_loss=scenario == identity.HIL_STORAGE_SCENARIOS[-1]
+            )
+        else:
+            expected = (
+                identity.HIL_POWER_LOSS_ARTIFACTS
+                if scenario == identity.HIL_STORAGE_SCENARIOS[-1]
+                else identity.HIL_ORDINARY_ARTIFACTS
+            )
         payloads = {
             name: b"artifact\n"
             for name in expected

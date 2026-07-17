@@ -25,6 +25,8 @@ validate_fixture_response=HIL_VALIDATOR_MODULE.validate_fixture_response
 validate_inspect_response=HIL_VALIDATOR_MODULE.validate_inspect_response
 validate_scenario_outcome=HIL_VALIDATOR_MODULE.validate_scenario_outcome
 validate_preservation_inspections=HIL_VALIDATOR_MODULE.validate_preservation_inspections
+validate_partial_eviction_retry=HIL_VALIDATOR_MODULE.validate_partial_eviction_retry
+validate_recovered_preservation_inspection=HIL_VALIDATOR_MODULE.validate_recovered_preservation_inspection
 validate_cleanup_inspection=HIL_VALIDATOR_MODULE.validate_cleanup_inspection
 validate_status_response=HIL_VALIDATOR_MODULE.validate_status_response
 del HIL_VALIDATOR_MODULE
@@ -42,7 +44,7 @@ HIL_ORDINARY_REQUIRED=(
     'command.txt','serial.log','server.log','timeline.log','build-manifest.json',
     'build-manifest.sha256','status-before.json','inspect-before.json',
     'stage-response.json','arm-response.json','trigger-response.json',
-    'status-after.json','inspect-after.json','cleanup-response.json','result.json',
+    'status-after.json','inspect-after.json','cleanup-response.json','recovery-response.json','result.json',
     'evidence.json','validator-exit-code.txt','SHA256SUMS',
 )
 HIL_POWER_REQUIRED=tuple(
@@ -59,6 +61,10 @@ HIL_EVENT_ORDER=(
     'status-before','inspect-before','stage','arm','trigger',
     'status-after','inspect-after','cleanup',
 )
+HIL_PARTIAL_EVICTION_SCENARIOS={
+    'evict-after-unlinks-fail','evict-before-rmdir-fail',
+}
+HIL_RECOVERY_FIELDS={'attempted','operation','reason','response','inspection'}
 HIL_SCENARIO_CONTRACT={
     'evict-before-first-unlink-fail':('evict','before_first_unlink','fail',0),
     'evict-after-unlinks-fail':('evict','after_unlinks','fail',1),
@@ -667,6 +673,43 @@ def _hil_build_identity_errors(value):
             errors.append(f'invalid HIL build integer: {name}')
     return errors
 
+def _expected_hil_events(scenario):
+    events=list(HIL_EVENT_ORDER)
+    if scenario in HIL_PARTIAL_EVICTION_SCENARIOS:
+        events[-1:-1]=['recovery-trigger','recovery-inspect']
+    return events
+
+def _hil_recovery_contract_errors(scenario,recovery,cache_key):
+    errors=[]
+    if not isinstance(recovery,dict) or set(recovery)!=HIL_RECOVERY_FIELDS:
+        return ['invalid HIL recovery response fields']
+    if scenario in HIL_PARTIAL_EVICTION_SCENARIOS:
+        if recovery.get('attempted') is not True:
+            errors.append('partial eviction recovery was not attempted')
+        if recovery.get('operation')!='evict':
+            errors.append('invalid HIL recovery operation')
+        if recovery.get('reason')!='expected_partial_eviction':
+            errors.append('invalid HIL recovery reason')
+        if recovery.get('response') is None:
+            errors.append('attempted HIL recovery response is null')
+        else:
+            try:validate_partial_eviction_retry(recovery['response'],cache_key)
+            except HilValidationError as exc:errors.append(f'invalid HIL recovery retry: {exc}')
+        if recovery.get('inspection') is None:
+            errors.append('attempted HIL recovery inspection is null')
+        else:
+            sibling=cache_key.replace('/v1-','/v2-',1) if isinstance(cache_key,str) else None
+            try:validate_inspect_response(recovery['inspection'],cache_key,sibling)
+            except HilValidationError as exc:errors.append(f'invalid HIL recovery inspection: {exc}')
+    else:
+        expected={
+            'attempted':False,'operation':None,'reason':None,
+            'response':None,'inspection':None,
+        }
+        if recovery != expected:
+            errors.append('HIL recovery must not be attempted for this scenario')
+    return errors
+
 def validate_hil_storage_result(scenario,result):
     errors=[]
     if scenario not in HIL_STORAGE_SCENARIOS:
@@ -697,7 +740,7 @@ def validate_hil_storage_result(scenario,result):
         else:sequences.append(value)
     if len(sequences)==3 and not sequences[0] < sequences[1] < sequences[2]:
         errors.append('HIL sequences must be strictly increasing')
-    if result.get('events') != list(HIL_EVENT_ORDER):
+    if result.get('events') != _expected_hil_events(scenario):
         errors.append('HIL event order is invalid')
     operation,checkpoint,action,progress=HIL_SCENARIO_CONTRACT[scenario]
     for name,expected in (
@@ -717,6 +760,7 @@ def validate_hil_storage_result(scenario,result):
     cache_key=result.get('cacheKey')
     if not isinstance(cache_key,str) or not re.fullmatch(r'hil-[a-z0-9-]*/v[1-9][0-9]*-[0-9a-f]{64}',cache_key):
         errors.append('invalid HIL cacheKey')
+    errors.extend(_hil_recovery_contract_errors(scenario,result.get('recovery'),cache_key))
     if scenario == HIL_POWER_LOSS_SCENARIO:
         if absent is not True or trigger is not None:
             errors.append('power-loss trigger response must be absent')
@@ -926,6 +970,37 @@ def _hil_control_artifact_errors(scenario,evidence_dir,result):
         errors.append(f'invalid HIL cleanup recovery evidence: {exc}')
     return errors
 
+def _hil_recovery_artifact_errors(scenario,evidence_dir,result):
+    root=Path(evidence_dir); errors=[]
+    recovery=_load_hil_json(root/'recovery-response.json','recovery-response.json',errors)
+    before=_load_hil_json(root/'inspect-before.json','inspect-before.json',errors)
+    after=_load_hil_json(root/'inspect-after.json','inspect-after.json',errors)
+    if recovery is None or before is None or after is None:return errors
+    errors.extend(_hil_recovery_contract_errors(scenario,recovery,result.get('cacheKey')))
+    if recovery != result.get('recovery'):
+        errors.append('recovery artifact does not match result')
+    expected_events=_expected_hil_events(scenario)
+    if result.get('events') != expected_events:
+        errors.append('HIL recovery event order is invalid')
+    try:
+        lines=(root/'timeline.log').read_text(encoding='utf-8').splitlines()
+        timeline=[]
+        for index,line in enumerate(lines,1):
+            match=re.fullmatch(r'([1-9][0-9]*) ([a-z][a-z-]*)',line)
+            if match is None or int(match.group(1))!=index:raise ValueError
+            timeline.append(match.group(2))
+        if timeline!=expected_events:errors.append('HIL recovery timeline order is invalid')
+    except (OSError,UnicodeError,ValueError):
+        errors.append('invalid HIL recovery timeline artifact')
+    if scenario in HIL_PARTIAL_EVICTION_SCENARIOS and not errors:
+        try:
+            validate_recovered_preservation_inspection(
+                before,after,recovery.get('inspection')
+            )
+        except HilValidationError as exc:
+            errors.append(f'invalid HIL recovery inspection: {exc}')
+    return errors
+
 def _hil_artifact_credential_errors(root,names):
     errors=[]; root=Path(root)
     credential=re.compile(
@@ -989,6 +1064,7 @@ def _hil_semantic_artifact_errors(scenario,evidence_dir,result):
                 errors.append('trigger artifact does not match result')
     except HilValidationError as exc:
         errors.append(f'invalid HIL semantic artifact: {exc}')
+    errors.extend(_hil_recovery_artifact_errors(scenario,root,result))
     return errors
 
 def _hil_storage_artifact_errors(scenario,evidence_dir,result):
@@ -1103,7 +1179,7 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','deviceId':'28:84:85:85:1a:80','deviceUuid':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','connectionIdentity':{'deviceId':'28:84:85:85:1a:80','clientId':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'},'cleanupVerified':True,'controllerInactive':True,'buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','deviceId':'28:84:85:85:1a:80','deviceUuid':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee','connectionIdentity':{'deviceId':'28:84:85:85:1a:80','clientId':'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'},'cleanupVerified':True,'controllerInactive':True,'buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'recovery':{'attempted':False,'operation':None,'reason':None,'response':None,'inspection':None},'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:01.500000Z','powerRemovalConfirmedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
         invalid_timestamps=(
             ('checkpointReachedUtc',None),

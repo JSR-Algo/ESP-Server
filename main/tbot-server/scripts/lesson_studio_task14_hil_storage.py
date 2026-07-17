@@ -10,6 +10,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,7 +75,7 @@ ORDINARY_ARTIFACTS = (
     "build-manifest.json", "build-manifest.sha256", "status-before.json",
     "inspect-before.json", "stage-response.json", "arm-response.json",
     "trigger-response.json", "status-after.json", "inspect-after.json",
-    "cleanup-response.json", "result.json", "evidence.json",
+    "cleanup-response.json", "recovery-response.json", "result.json", "evidence.json",
     "validator-exit-code.txt", "SHA256SUMS",
 )
 _TRIGGER_INDEX = ORDINARY_ARTIFACTS.index("trigger-response.json")
@@ -556,6 +557,91 @@ def finalize_scenario_directory(directory, payloads, *, power_loss):
         "scenario directory layout mismatch",
     )
     return directory
+
+
+def _fsync_directory(directory):
+    descriptor = os.open(Path(directory), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rewrite_scenario_checksums(directory, *, power_loss):
+    directory = Path(directory)
+    lines = []
+    for name in scenario_artifact_names(power_loss=power_loss):
+        if name != "SHA256SUMS":
+            lines.append(
+                f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}\n"
+            )
+    atomic_write_bytes(directory / "SHA256SUMS", "".join(lines).encode("ascii"))
+
+
+def publish_validated_scenario_directory(
+    final_directory,
+    payloads,
+    *,
+    scenario,
+    power_loss,
+    validator_script,
+    secrets=(),
+):
+    final_directory = Path(final_directory)
+    parent = final_directory.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    require(not final_directory.exists(), "final HIL scenario directory already exists")
+    staging = Path(tempfile.mkdtemp(prefix=f".{final_directory.name}.staging-", dir=parent))
+    expected = scenario_artifact_names(power_loss=power_loss)
+    try:
+        finalize_scenario_directory(staging, payloads, power_loss=power_loss)
+        validator = subprocess.run(
+            [
+                sys.executable, str(validator_script), "--hil-storage-scenario", scenario,
+                "--evidence-dir", str(staging), "--output", str(staging / "evidence.json"),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=30,
+        )
+        try:
+            evidence = json.loads((staging / "evidence.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HilValidationError("HIL scenario validator produced invalid evidence") from exc
+        require(
+            validator.returncode == 0
+            and isinstance(evidence, dict)
+            and evidence.get("scenario") == scenario
+            and evidence.get("status") == "PASS"
+            and evidence.get("validationErrors") == [],
+            "HIL scenario validator failed",
+        )
+        atomic_write_bytes(
+            staging / "validator-exit-code.txt",
+            f"{validator.returncode}\n".encode("ascii"),
+        )
+        _rewrite_scenario_checksums(staging, power_loss=power_loss)
+        final_artifacts = {
+            name: (staging / name).read_bytes()
+            for name in expected
+            if name != "SHA256SUMS"
+        }
+        assert_artifacts_sanitized(final_artifacts, secrets)
+        _scenario_checksums(staging, expected)
+        for name in expected:
+            with (staging / name).open("rb") as artifact:
+                os.fsync(artifact.fileno())
+        _fsync_directory(staging)
+        require(not final_directory.exists(), "final HIL scenario directory already exists")
+        os.rename(staging, final_directory)
+        _fsync_directory(parent)
+        return final_directory
+    except BaseException:
+        with suppress(Exception):
+            shutil.rmtree(staging)
+        raise
 
 
 def _scenario_checksums(directory, expected_names):
@@ -1566,6 +1652,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                 "status-after.json": json_bytes(status_after),
                 "inspect-after.json": json_bytes(inspect_after),
                 "cleanup-response.json": json_bytes(cleanup),
+                "recovery-response.json": json_bytes(recovery),
                 "result.json": json_bytes(result),
                 "evidence.json": json_bytes(evidence),
                 "validator-exit-code.txt": b"0\n",
@@ -1583,32 +1670,14 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         else:
             payloads["trigger-response.json"] = json_bytes(trigger)
         assert_artifacts_sanitized(payloads, (secret,))
-        finalize_scenario_directory(scenario_dir, payloads, power_loss=power_loss)
-        validator = subprocess.run(
-            [
-                sys.executable, str(validator_script), "--hil-storage-scenario", scenario,
-                "--evidence-dir", str(scenario_dir), "--output", str(scenario_dir / "evidence.json"),
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=30,
+        publish_validated_scenario_directory(
+            scenario_dir,
+            payloads,
+            scenario=scenario,
+            power_loss=power_loss,
+            validator_script=validator_script,
+            secrets=(secret,),
         )
-        # The validator rewrites evidence, so refresh exit code and the final checksum last.
-        atomic_write_bytes(scenario_dir / "validator-exit-code.txt", f"{validator.returncode}\n".encode("ascii"))
-        final_artifacts = {
-            name: (scenario_dir / name).read_bytes()
-            for name in scenario_artifact_names(power_loss=power_loss)
-            if name != "SHA256SUMS"
-        }
-        assert_artifacts_sanitized(final_artifacts, (secret,))
-        checksum_lines = []
-        for name in scenario_artifact_names(power_loss=power_loss):
-            if name != "SHA256SUMS":
-                checksum_lines.append(f"{hashlib.sha256((scenario_dir / name).read_bytes()).hexdigest()}  {name}\n")
-        atomic_write_bytes(scenario_dir / "SHA256SUMS", "".join(checksum_lines).encode("ascii"))
-        require(validator.returncode == 0, "HIL scenario validator failed")
         return result
     except BaseException:
         if staged and not cleaned and not recovery_blocked_cleanup:

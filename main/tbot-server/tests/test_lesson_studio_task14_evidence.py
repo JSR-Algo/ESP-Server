@@ -28,6 +28,13 @@ HIL_CONNECTION = {
     },
 }
 HIL_RUNTIME = {"cleanupVerified": True, "controllerInactive": True}
+RECOVERY_NOT_ATTEMPTED = {
+    "attempted": False,
+    "operation": None,
+    "reason": None,
+    "response": None,
+    "inspection": None,
+}
 PRIMARY_SENTINEL_SHA = "e95ab394bdf8569652429018519989d3e94cae168cf91c269c81a2c9bb00d5ec"
 SIBLING_SENTINEL_SHA = "462cc80e16c12bbee14c7eba5e61da286e79580d6dc5b996bfcf7a43f30a4cf8"
 
@@ -184,6 +191,7 @@ def test_fault_driver_semantically_validates_all_hil_artifacts_and_credentials(t
     }
     inspect_before = preservation_inspection(cache_key, sibling, "missing", "missing")
     inspect_after = preservation_inspection(cache_key, sibling, "directory_only")
+    recovered = preservation_inspection(cache_key, sibling, "missing")
     trigger = {
         "cacheKey": cache_key,
         "status": "partial_evict_recovery_required",
@@ -196,16 +204,40 @@ def test_fault_driver_semantically_validates_all_hil_artifacts_and_credentials(t
         "cacheKey": cache_key,
         "triggerOutcome": trigger,
         "triggerResponseAbsent": False,
+        "events": list(fault.HIL_EVENT_ORDER[:-1]) + [
+            "recovery-trigger", "recovery-inspect", "cleanup",
+        ],
+        "recovery": {
+            "attempted": True,
+            "operation": "evict",
+            "reason": "expected_partial_eviction",
+            "response": {
+                "cacheKey": cache_key,
+                "status": "evicted",
+                "reason": "evicted",
+                "evicted": True,
+                "notFound": False,
+                "fileCount": 0,
+            },
+            "inspection": recovered,
+        },
     }
     payloads = {
         "stage-response.json": fixture,
         "inspect-before.json": inspect_before,
         "inspect-after.json": inspect_after,
         "trigger-response.json": trigger,
+        "recovery-response.json": result["recovery"],
         "cleanup-response.json": {**fixture, "status": "cleaned"},
     }
     for name, payload in payloads.items():
         (tmp_path / name).write_text(json.dumps(payload))
+    (tmp_path / "timeline.log").write_text(
+        "".join(
+            f"{index + 1} {event}\n"
+            for index, event in enumerate(result["events"])
+        )
+    )
 
     assert fault._hil_semantic_artifact_errors(
         "evict-after-unlinks-fail", tmp_path, result
@@ -215,6 +247,7 @@ def test_fault_driver_semantically_validates_all_hil_artifacts_and_credentials(t
         ("stage-response.json", {**fixture, "changed": False}),
         ("inspect-after.json", {**inspect_after, "entries": []}),
         ("trigger-response.json", {**trigger, "fileCount": 0}),
+        ("recovery-response.json", {**result["recovery"], "operation": "sync"}),
         ("cleanup-response.json", {**fixture, "status": "staged"}),
     ):
         original = (tmp_path / name).read_text()
@@ -249,6 +282,116 @@ def test_fault_driver_semantically_validates_all_hil_artifacts_and_credentials(t
     assert fault._hil_artifact_credential_errors(tmp_path, ("server.log",)) == []
 
 
+def test_recovery_response_artifact_layout_and_semantics_are_exact(tmp_path):
+    cache_key = f"hil-task14/v1-{'d' * 64}"
+    sibling = f"hil-task14/v2-{'d' * 64}"
+    before = preservation_inspection(cache_key, sibling, "missing", "missing")
+    after = preservation_inspection(cache_key, sibling, "directory_only")
+    recovered = preservation_inspection(cache_key, sibling, "missing")
+    response = {
+        "cacheKey": cache_key,
+        "status": "evicted",
+        "reason": "evicted",
+        "evicted": True,
+        "notFound": False,
+        "fileCount": 0,
+    }
+    recovery = {
+        "attempted": True,
+        "operation": "evict",
+        "reason": "expected_partial_eviction",
+        "response": response,
+        "inspection": recovered,
+    }
+    recovered_events = list(fault.HIL_EVENT_ORDER[:-1]) + [
+        "recovery-trigger", "recovery-inspect", "cleanup",
+    ]
+    result = {"cacheKey": cache_key, "recovery": recovery, "events": recovered_events}
+    assert "recovery-response.json" in fault.HIL_ORDINARY_REQUIRED
+    assert "recovery-response.json" in fault.HIL_POWER_REQUIRED
+    layout = tmp_path / "layout"
+    layout.mkdir()
+    for name in fault.HIL_ORDINARY_REQUIRED:
+        (layout / name).write_text("x\n")
+    assert "HIL evidence directory layout is not exact" not in fault._hil_storage_artifact_errors(
+        "evict-after-unlinks-fail", layout, {}
+    )
+    (layout / "recovery-response.json").unlink()
+    assert "HIL evidence directory layout is not exact" in fault._hil_storage_artifact_errors(
+        "evict-after-unlinks-fail", layout, {}
+    )
+    (layout / "recovery-response.json").write_text("x\n")
+    (layout / "extra.json").write_text("x\n")
+    assert "HIL evidence directory layout is not exact" in fault._hil_storage_artifact_errors(
+        "evict-after-unlinks-fail", layout, {}
+    )
+    for name, value in (
+        ("inspect-before.json", before),
+        ("inspect-after.json", after),
+        ("recovery-response.json", recovery),
+    ):
+        (tmp_path / name).write_text(json.dumps(value))
+    (tmp_path / "timeline.log").write_text(
+        "".join(f"{index + 1} {event}\n" for index, event in enumerate(recovered_events))
+    )
+    assert fault._hil_recovery_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    ) == []
+
+    invalid = (
+        {key: value for key, value in recovery.items() if key != "inspection"},
+        {**recovery, "extra": None},
+        {**recovery, "response": None},
+        {**recovery, "inspection": None},
+        {**recovery, "response": {**response, "fileCount": 1}},
+        {**recovery, "response": {**response, "evicted": False}},
+        {**recovery, "response": {**response, "notFound": True}},
+    )
+    for candidate in invalid:
+        (tmp_path / "recovery-response.json").write_text(json.dumps(candidate))
+        assert fault._hil_recovery_artifact_errors(
+            "evict-after-unlinks-fail", tmp_path, result
+        )
+    (tmp_path / "recovery-response.json").write_text(json.dumps(recovery))
+    assert fault._hil_recovery_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, {**result, "recovery": {**recovery, "reason": "tampered"}}
+    )
+    (tmp_path / "timeline.log").write_text(
+        "".join(f"{index + 1} {event}\n" for index, event in enumerate(fault.HIL_EVENT_ORDER))
+    )
+    assert fault._hil_recovery_artifact_errors(
+        "evict-after-unlinks-fail", tmp_path, result
+    )
+
+    not_attempted = {
+        "attempted": False,
+        "operation": None,
+        "reason": None,
+        "response": None,
+        "inspection": None,
+    }
+    (tmp_path / "recovery-response.json").write_text(json.dumps(not_attempted))
+    ordinary_events = list(fault.HIL_EVENT_ORDER)
+    (tmp_path / "timeline.log").write_text(
+        "".join(f"{index + 1} {event}\n" for index, event in enumerate(ordinary_events))
+    )
+    assert fault._hil_recovery_artifact_errors(
+        "evict-before-first-unlink-fail", tmp_path,
+        {"cacheKey": cache_key, "recovery": not_attempted, "events": ordinary_events},
+    ) == []
+    for candidate in (
+        {**not_attempted, "operation": "evict"},
+        {**not_attempted, "response": response},
+        {**not_attempted, "inspection": recovered},
+        recovery,
+    ):
+        (tmp_path / "recovery-response.json").write_text(json.dumps(candidate))
+        assert fault._hil_recovery_artifact_errors(
+            "evict-before-first-unlink-fail", tmp_path,
+            {"cacheKey": cache_key, "recovery": candidate, "events": ordinary_events},
+        )
+
+
 def test_fault_driver_power_artifacts_bind_post_reboot_inspection(tmp_path):
     cache_key = f"hil-task14/v1-{'d' * 64}"
     sibling = f"hil-task14/v2-{'d' * 64}"
@@ -275,7 +418,18 @@ def test_fault_driver_power_artifacts_bind_post_reboot_inspection(tmp_path):
         "cacheKey": cache_key,
         "triggerOutcome": None,
         "triggerResponseAbsent": True,
+        "recovery": RECOVERY_NOT_ATTEMPTED,
+        "events": list(fault.HIL_EVENT_ORDER),
     }
+    (tmp_path / "recovery-response.json").write_text(
+        json.dumps(RECOVERY_NOT_ATTEMPTED)
+    )
+    (tmp_path / "timeline.log").write_text(
+        "".join(
+            f"{index + 1} {event}\n"
+            for index, event in enumerate(fault.HIL_EVENT_ORDER)
+        )
+    )
     assert fault._hil_semantic_artifact_errors(
         fault.HIL_POWER_LOSS_SCENARIO, tmp_path, result
     ) == []
@@ -331,6 +485,7 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "checkpointExercised": True,
         "triggerResponseAbsent": True,
         "triggerOutcome": None,
+        "recovery": RECOVERY_NOT_ATTEMPTED,
         "powerLoss": True,
         "checkpointReached": True,
         "successMarkerBeforeLoss": False,
@@ -410,6 +565,7 @@ def test_fault_driver_rejects_missing_malformed_or_out_of_order_power_timestamps
         "checkpointExercised": True,
         "triggerResponseAbsent": True,
         "triggerOutcome": None,
+        "recovery": RECOVERY_NOT_ATTEMPTED,
         "powerLoss": True,
         "checkpointReached": True,
         "successMarkerBeforeLoss": False,
@@ -622,6 +778,7 @@ def test_fault_driver_allows_equal_disconnect_and_confirmation_utc():
         "checkpointExercised": True,
         "triggerResponseAbsent": True,
         "triggerOutcome": None,
+        "recovery": RECOVERY_NOT_ATTEMPTED,
         "powerLoss": True,
         "checkpointReached": True,
         "successMarkerBeforeLoss": False,
@@ -681,6 +838,7 @@ def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
             "fileCount": 0,
             "reason": "unlink_failed",
         },
+        "recovery": RECOVERY_NOT_ATTEMPTED,
     }
     assert fault.validate_hil_storage_result(base["scenario"], base) == []
     false_green = {**base, "triggerOutcome": {**base["triggerOutcome"], "status": "evicted", "reason": "evicted", "evicted": True, "fileCount": 1}}
