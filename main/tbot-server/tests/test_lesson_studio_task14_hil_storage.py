@@ -2079,9 +2079,28 @@ def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
 
 def test_real_idf_elf_sha_line_accepts_whitespace_and_literal_ellipsis(tmp_path):
     identity = load_script("lesson_studio_task14_build_identity.py")
-    expected = "4667d1197" + "0" * 55
-    captured = b"I (109) app_init: ELF file SHA256:  4667d1197...\n"
-    assert identity.parse_running_elf_sha256(captured, expected) == "4667d1197"
+    expected = "4667d1197abcdef0" + "0" * 48
+    captured = b"I (109) app_init: ELF file SHA256:  4667d1197abcdef0...\n"
+    assert identity.parse_running_elf_sha256(captured, expected) == "4667d1197abcdef0"
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    (
+        "4667d1197abcdef0",
+        "4667d119...",
+        "4667d1197abcdef...",
+        "4667d1197abcdef00...",
+        "4667D1197ABCDEF0...",
+    ),
+)
+def test_real_idf_elf_sha_line_rejects_noncanonical_prefix(rendered):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    expected = "4667d1197abcdef0" + "0" * 48
+    with pytest.raises(identity.BuildIdentityError):
+        identity.parse_running_elf_sha256(
+            f"app_init: ELF file SHA256:  {rendered}\n".encode(), expected
+        )
 
 
 def test_boot_capture_opens_port_before_safe_reset_and_orders_markers(tmp_path):
@@ -2104,6 +2123,9 @@ def test_boot_capture_opens_port_before_safe_reset_and_orders_markers(tmp_path):
         def setRTS(self, value):
             events.append(("rts", value))
 
+        def reset_input_buffer(self):
+            events.append("flush")
+
         def read(self, _size):
             return next(chunks, b"")
 
@@ -2122,7 +2144,9 @@ def test_boot_capture_opens_port_before_safe_reset_and_orders_markers(tmp_path):
         monotonic=iter([0.0, 0.1, 0.2]).__next__, sleep=lambda _seconds: None,
     )
 
-    assert events[:4] == ["open", ("dtr", False), ("rts", False), ("rts", True)]
+    assert events[:5] == [
+        "open", ("dtr", False), ("rts", False), "flush", ("rts", True),
+    ]
     assert events[-2:] == [("rts", False), "close"]
     assert value["captureStartedUtc"] <= value["resetUtc"] < value["elfMarkerUtc"]
     assert value["resetUtc"] < value["hilMarkerUtc"]
@@ -2136,6 +2160,7 @@ def test_boot_capture_timeout_writes_not_pass_receipt(tmp_path):
         def __init__(self, *_args, **_kwargs): pass
         def setDTR(self, _value): pass
         def setRTS(self, _value): pass
+        def reset_input_buffer(self): pass
         def read(self, _size): return b""
         def close(self): pass
 
@@ -2146,14 +2171,59 @@ def test_boot_capture_timeout_writes_not_pass_receipt(tmp_path):
             "/dev/cu.usbmodem1101", output, receipt, timeout_seconds=1,
             serial_factory=SilentSerial,
             utc_now=iter(["2026-07-17T00:00:01Z", "2026-07-17T00:00:02Z"]).__next__,
-            monotonic=iter([0.0, 2.0]).__next__, sleep=lambda _seconds: None,
+            monotonic=iter([0.0, 0.1, 2.0]).__next__, sleep=lambda _seconds: None,
         )
     assert json.loads(receipt.read_text())["timedOut"] is True
 
 
+def test_boot_capture_discards_stale_pre_reset_markers(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    stale = [
+        b"app_init: ELF file SHA256:  4667d1197abcdef0...\n"
+        b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+    ]
+
+    class StaleSerial:
+        def __init__(self, *_args, **_kwargs): pass
+        def setDTR(self, _value): pass
+        def setRTS(self, _value): pass
+        def reset_input_buffer(self): stale.clear()
+        def read(self, _size): return stale.pop(0) if stale else b""
+        def close(self): pass
+
+    with pytest.raises(identity.BuildIdentityError, match="timed out"):
+        identity.capture_hil_boot_identity(
+            "/dev/cu.usbmodem1101", tmp_path / "boot.log", tmp_path / "receipt.json",
+            timeout_seconds=1, serial_factory=StaleSerial,
+            utc_now=iter(["2026-07-17T00:00:01Z", "2026-07-17T00:00:02Z"]).__next__,
+            monotonic=iter([0.0, 0.1, 2.0]).__next__, sleep=lambda _seconds: None,
+        )
+
+
+def test_boot_capture_flush_failure_aborts_without_attestation(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+
+    class FlushFailureSerial:
+        def __init__(self, *_args, **_kwargs): pass
+        def setDTR(self, _value): pass
+        def setRTS(self, _value): pass
+        def reset_input_buffer(self): raise OSError("flush failed")
+        def close(self): pass
+
+    output = tmp_path / "boot.log"
+    receipt = tmp_path / "receipt.json"
+    with pytest.raises(OSError, match="flush failed"):
+        identity.capture_hil_boot_identity(
+            "/dev/cu.usbmodem1101", output, receipt,
+            serial_factory=FlushFailureSerial,
+        )
+    assert not output.exists()
+    assert not receipt.exists()
+
+
 def _write_boot_capture_receipt(path, serial, **changes):
     prefix = re.search(
-        r"app_init: ELF file SHA256:\s+([0-9a-f]{8,64})(?:\.\.\.)?",
+        r"app_init: ELF file SHA256:\s+([0-9a-f]{16})\.\.\.",
         serial.read_text(),
     ).group(1)
     value = {
@@ -2179,7 +2249,8 @@ def _write_boot_capture_receipt(path, serial, **changes):
     (
         "mac", "offset", "bytes", "verify", "exit", "old-elf",
         "old-manifest", "stale-time", "capture-order", "capture-timeout",
-        "missing-hil", "erase",
+        "missing-hil", "duplicate-elf", "duplicate-hil", "reversed-markers",
+        "erase",
     ),
 )
 def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, mutation):
@@ -2210,6 +2281,7 @@ def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, m
         assert mutation not in {
             "old-elf", "old-manifest", "stale-time", "capture-order",
             "capture-timeout", "missing-hil",
+            "duplicate-elf", "duplicate-hil", "reversed-markers",
         }
         return
     if mutation == "old-elf":
@@ -2222,6 +2294,16 @@ def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, m
         serial.write_text(serial.read_text().replace(
             "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n", ""
         ))
+    elif mutation == "duplicate-elf":
+        serial.write_text(serial.read_text().splitlines()[0] + "\n" + serial.read_text())
+    elif mutation == "duplicate-hil":
+        serial.write_text(
+            serial.read_text()
+            + "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+        )
+    elif mutation == "reversed-markers":
+        lines = serial.read_text().splitlines()
+        serial.write_text(lines[1] + "\n" + lines[0] + "\n")
     observed = "2026-07-16T23:59:59Z" if mutation == "stale-time" else "2026-07-17T00:00:05Z"
     capture_changes = {}
     if mutation == "capture-order":

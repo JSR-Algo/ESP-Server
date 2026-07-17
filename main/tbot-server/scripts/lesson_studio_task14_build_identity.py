@@ -69,7 +69,7 @@ HIL_MATRIX_RECORD_FIELDS = frozenset(
 )
 ZERO_SHA256 = "0" * 64
 _HIL_EVIDENCE_VALIDATOR = None
-MIN_ELF_SHA256_PREFIX = 8
+ELF_SHA256_PREFIX_LENGTH = 16
 
 
 class BuildIdentityError(RuntimeError):
@@ -470,11 +470,17 @@ def _validate_boot_capture_receipt(capture, identity, flash_receipt):
         capture.get("serialPath")
     )
     prefix = parse_running_elf_sha256(serial_bytes, identity["elfSha256"])
+    elf_match = re.search(
+        rb"app_init: ELF file SHA256:\s+[0-9a-f]{16}\.\.\.", serial_bytes
+    )
+    hil_marker = b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image"
     require(
         str(serial_path) == capture.get("serialPath")
         and serial_sha256 == capture.get("serialSha256")
         and prefix == capture.get("elfSha256Prefix")
-        and serial_bytes.count(b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
+        and serial_bytes.count(hil_marker) == 1
+        and elf_match is not None
+        and elf_match.start() < serial_bytes.find(hil_marker),
         "HIL boot capture content mismatch",
     )
     capture_started = _strict_utc(capture.get("captureStartedUtc"))
@@ -482,9 +488,8 @@ def _validate_boot_capture_receipt(capture, identity, flash_receipt):
     elf_marker = _strict_utc(capture.get("elfMarkerUtc"))
     hil_marker = _strict_utc(capture.get("hilMarkerUtc"))
     require(
-        capture_started <= reset < elf_marker
-        and reset < hil_marker
-        and _strict_utc(flash_receipt["completedAt"]) < reset,
+        capture_started <= reset
+        and _strict_utc(flash_receipt["completedAt"]) < reset < elf_marker <= hil_marker,
         "HIL boot capture timestamp order invalid",
     )
     return capture
@@ -525,7 +530,7 @@ def _utc_now():
 def _elf_sha256_prefixes(serial_bytes):
     text = serial_bytes.decode("utf-8", errors="replace")
     return re.findall(
-        rf"app_init: ELF file SHA256:\s+([0-9a-f]{{{MIN_ELF_SHA256_PREFIX},64}})(?:\.\.\.)?",
+        rf"app_init: ELF file SHA256:\s+([0-9a-f]{{{ELF_SHA256_PREFIX_LENGTH}}})\.\.\.",
         text,
     )
 
@@ -566,6 +571,7 @@ def capture_hil_boot_identity(
     try:
         port.setDTR(False)
         port.setRTS(False)
+        port.reset_input_buffer()
         capture_started = utc_now()
         port.setRTS(True)
         sleep(0.1)
@@ -599,7 +605,19 @@ def capture_hil_boot_identity(
         output.flush()
         os.fsync(output.fileno())
     _fsync_directory(output_path.parent)
-    timed_out = elf_marker_utc is None or hil_marker_utc is None
+    serial_bytes = bytes(data)
+    prefixes = _elf_sha256_prefixes(serial_bytes)
+    hil_marker = b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image"
+    elf_match = re.search(
+        rb"app_init: ELF file SHA256:\s+[0-9a-f]{16}\.\.\.", serial_bytes
+    )
+    markers_valid = (
+        len(prefixes) == 1
+        and serial_bytes.count(hil_marker) == 1
+        and elf_match is not None
+        and elf_match.start() < serial_bytes.find(hil_marker)
+    )
+    timed_out = elf_marker_utc is None or hil_marker_utc is None or not markers_valid
     receipt = {
         "status": "NOT_PASS" if timed_out else "PASS",
         "event": "hil-boot-capture",
@@ -611,7 +629,7 @@ def capture_hil_boot_identity(
         "elfMarkerUtc": elf_marker_utc,
         "hilMarkerUtc": hil_marker_utc,
         "elfSha256Prefix": (
-            _elf_sha256_prefixes(bytes(data))[0] if elf_marker_utc is not None else None
+            prefixes[0] if len(prefixes) == 1 else None
         ),
         "timedOut": timed_out,
     }
