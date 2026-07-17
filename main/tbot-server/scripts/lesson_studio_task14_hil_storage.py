@@ -381,6 +381,42 @@ def validate_preservation_inspections(scenario, before, after, *, post_reboot=No
     return {"cacheKey": cache_key, "siblingCacheKey": sibling}
 
 
+def validate_recovered_preservation_inspection(before, after, recovered):
+    cache_key = before.get("cacheKey") if isinstance(before, dict) else None
+    sibling = before.get("siblingCacheKey") if isinstance(before, dict) else None
+    for value in (before, after, recovered):
+        validate_inspect_response(value, cache_key, sibling)
+    prefixes = (f"lesson-assets/{cache_key}", f"lesson-assets/{sibling}")
+
+    def split(value):
+        target = sorted(
+            (item for item in value["entries"] if item["label"].startswith(prefixes)),
+            key=lambda item: item["label"],
+        )
+        protected = sorted(
+            (item for item in value["entries"] if not item["label"].startswith(prefixes)),
+            key=lambda item: item["label"],
+        )
+        return target, protected
+
+    _, before_protected = split(before)
+    after_target, _ = split(after)
+    recovered_target, recovered_protected = split(recovered)
+    require(
+        after_target == _preservation_entries(cache_key, sibling, "directory_only", "full"),
+        "recovery was not preceded by the expected partial eviction state",
+    )
+    require(
+        recovered_target == _preservation_entries(cache_key, sibling, "missing", "full"),
+        "recovered preservation state mismatch",
+    )
+    require(
+        recovered_protected == before_protected,
+        "recovery changed protected storage fingerprints",
+    )
+    return recovered
+
+
 def validate_cleanup_inspection(before, cleaned):
     cache_key = before.get("cacheKey")
     sibling = before.get("siblingCacheKey")
@@ -707,11 +743,12 @@ def finalize_power_loss_result(result, power_data):
 
 
 def validate_event_order(events):
-    expected = [
+    ordinary = [
         "status-before", "inspect-before", "stage", "arm", "trigger",
         "status-after", "inspect-after", "cleanup",
     ]
-    require(events == expected, "HIL cleanup/status/inspect order invalid")
+    recovered = ordinary[:-1] + ["recovery-trigger", "recovery-inspect", "cleanup"]
+    require(events in (ordinary, recovered), "HIL cleanup/status/inspect order invalid")
     return events
 
 
@@ -1329,6 +1366,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
     fixture = "preservation_set"
     staged = False
     cleaned = False
+    recovery_blocked_cleanup = False
     try:
         status_before = client.status()
         require(status_before["status"] == "idle", "HIL controller is not idle before scenario")
@@ -1441,6 +1479,27 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             inspect_after,
             post_reboot=post_reboot_inspect if power_loss else None,
         )
+        recovery = recovery_not_attempted()
+        if scenario in PARTIAL_EVICTION_SCENARIOS:
+            recovery_blocked_cleanup = True
+            retry_raw = client.transport.call(
+                TRIGGER_TOOLS["evict"], {"cacheKey": cache_key}, 75
+            )
+            retry = validate_partial_eviction_retry(retry_raw, cache_key)
+            events.append("recovery-trigger")
+            recovered_inspection = client.inspect(cache_key, sibling)
+            validate_recovered_preservation_inspection(
+                inspect_before, inspect_after, recovered_inspection
+            )
+            events.append("recovery-inspect")
+            recovery = {
+                "attempted": True,
+                "operation": "evict",
+                "reason": "expected_partial_eviction",
+                "response": retry,
+                "inspection": recovered_inspection,
+            }
+            recovery_blocked_cleanup = False
         if power_loss and operation == "sync":
             evicted_retry = _trigger(client, "evict", cache_key, arguments)
             require(evicted_retry.get("evicted") is True, "retry cache cleanup eviction failed")
@@ -1485,6 +1544,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             "finalStatus": final_status,
             "cleanupVerified": validated_cleanup_inspect == cleanup_inspect,
             "controllerInactive": controller_inactive,
+            "recovery": recovery,
             **outcome,
         }
         if power_data:
@@ -1550,7 +1610,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         require(validator.returncode == 0, "HIL scenario validator failed")
         return result
     except BaseException:
-        if staged and not cleaned:
+        if staged and not cleaned and not recovery_blocked_cleanup:
             with suppress(Exception):
                 client.cleanup(cache_key, fixture, sibling)
         raise

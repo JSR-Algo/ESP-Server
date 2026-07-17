@@ -8,6 +8,7 @@ import time
 import types
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -164,6 +165,202 @@ def exact_recovery_response(**changes):
     return response
 
 
+def preservation_inspection(primary_state, sibling_state="full", *, protected_sha="a" * 64):
+    entries = [
+        {"label": "lesson-assets/current.json", "nodeType": "regular_file", "bytes": 7, "sha256": protected_sha},
+        {"label": "lesson-assets/pvg", "nodeType": "directory", "bytes": 0, "sha256": ""},
+        {"label": "lesson-assets/shared", "nodeType": "directory", "bytes": 0, "sha256": ""},
+    ]
+    entries.extend(hil_preservation_entries(KEY, primary_state, "e95ab394bdf8569652429018519989d3e94cae168cf91c269c81a2c9bb00d5ec"))
+    entries.extend(hil_preservation_entries(SIBLING, sibling_state, "462cc80e16c12bbee14c7eba5e61da286e79580d6dc5b996bfcf7a43f30a4cf8"))
+    return {
+        "cacheKey": KEY,
+        "siblingCacheKey": SIBLING,
+        "status": "inspected",
+        "truncated": False,
+        "entries": sorted(entries, key=lambda item: item["label"]),
+    }
+
+
+def hil_preservation_entries(cache_key, state, digest):
+    label = f"lesson-assets/{cache_key}"
+    if state == "missing":
+        return [{"label": label, "nodeType": "missing", "bytes": 0, "sha256": ""}]
+    entries = [{"label": label, "nodeType": "directory", "bytes": 0, "sha256": ""}]
+    if state == "full":
+        entries.append({
+            "label": f"{label}/.tbot-hil-sentinel",
+            "nodeType": "regular_file",
+            "bytes": 33,
+            "sha256": digest,
+        })
+    return entries
+
+
+def run_scenario_with_fakes(
+    monkeypatch, tmp_path, scenario, *, recovery_response=None,
+    recovered_inspection=None, state=None,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    operation, checkpoint, action, threshold, pause_seconds, power_loss = hil.SCENARIO_SPECS[scenario]
+    primary_after = {
+        "evict-before-first-unlink-fail": "full",
+        "evict-after-unlinks-fail": "directory_only",
+        "evict-before-rmdir-fail": "directory_only",
+        "evict-after-unlinks-sd-removal": "missing",
+        "sync-before-download-write-no-space": "full",
+        "sync-after-download-bytes-no-space": "full",
+        "sync-before-checksum-corrupt-staging": "full",
+        "sync-before-commit-rename-fail": "full",
+        "sync-before-commit-rename-power-loss": "full",
+    }[scenario]
+    before = preservation_inspection("missing", "missing")
+    after = preservation_inspection(primary_after)
+    recovered = recovered_inspection or preservation_inspection("missing")
+    cleanup_inspection = preservation_inspection("missing", "missing")
+    injected = (
+        eviction_result(
+            {
+                "evict-before-first-unlink-fail": "unlink_failed",
+                "evict-after-unlinks-fail": "partial_evict_recovery_required",
+                "evict-before-rmdir-fail": "partial_evict_recovery_required",
+                "evict-after-unlinks-sd-removal": "evicted",
+            }[scenario],
+            0 if scenario == "evict-before-first-unlink-fail" else 1,
+            evicted=scenario == "evict-after-unlinks-sd-removal",
+        )
+        if operation == "evict"
+        else failed_sync_result()
+    )
+    calls = []
+    transport_calls = []
+    scenario_inspections = iter([before, after, recovered])
+
+    def status_for_arm(state):
+        idle = state == "idle"
+        return {
+            "status": state,
+            "cacheKey": "" if idle else KEY,
+            "armed": state == "armed",
+            "reached": state in ("reached", "consumed"),
+            "consumed": state == "consumed",
+            "operation": "evict" if idle else operation,
+            "checkpoint": "before_first_unlink" if idle else checkpoint,
+            "action": "fail" if idle else action,
+            "threshold": 0 if idle else threshold,
+            "declaredAssetBytes": 0,
+            "pauseSeconds": 0 if idle else pause_seconds,
+            "armSequence": 0 if idle else 1,
+            "reachedSequence": 2 if state in ("reached", "consumed") else 0,
+            "consumedSequence": 3 if state == "consumed" else 0,
+        }
+
+    class FakeTransport:
+        def call(self, tool, args, timeout):
+            transport_calls.append((tool, args, timeout))
+            if tool == hil.TRIGGER_TOOLS["evict"]:
+                evict_count = sum(item[0] == tool for item in transport_calls)
+                calls.append("trigger" if operation == "evict" and evict_count == 1 else "recovery-trigger")
+                if operation == "evict" and evict_count == 1:
+                    return injected
+                return recovery_response or exact_recovery_response()
+            if tool == hil.TRIGGER_TOOLS["sync"]:
+                sync_count = sum(item[0] == tool for item in transport_calls)
+                calls.append("trigger" if sync_count == 1 else "retry-trigger")
+                if power_loss and sync_count > 1:
+                    return {**failed_sync_result(ready=True, state="DOWNLOADED"), "downloadedCount": 1, "failedCount": 0, "totalBytes": 1, "files": [{"key": "hil-asset.png", "path": "hil-asset.png", "localPath": f"/sdcard/tbot/lesson-assets/{KEY}/hil-asset.png", "state": "DOWNLOADED", "bytes": 1}]}
+                return injected
+            raise AssertionError(tool)
+
+    class FakeClient:
+        def __init__(self):
+            self.transport = FakeTransport()
+            self.status_count = 0
+            self.cleanup_count = 0
+            self.inspect_count = 0
+
+        def status(self, _expected_cache_key=None):
+            self.status_count += 1
+            state = "idle" if self.status_count == 1 or (power_loss and self.status_count == 2) or self.status_count >= (3 if power_loss else 3) else "consumed"
+            calls.append("status-before" if self.status_count == 1 else "status-after" if state == "consumed" or power_loss and self.status_count == 2 else "final-status")
+            return status_for_arm(state)
+
+        def inspect(self, _cache_key, _sibling):
+            self.inspect_count += 1
+            value = cleanup_inspection if self.cleanup_count else next(scenario_inspections)
+            labels = (
+                ("inspect-before", "inspect-after", "recovery-inspect", "cleanup-inspect")
+                if scenario in hil.PARTIAL_EVICTION_SCENARIOS
+                else ("inspect-before", "inspect-after", "cleanup-inspect")
+            )
+            calls.append(labels[self.inspect_count - 1])
+            return value
+
+        def stage(self, *_args):
+            calls.append("stage")
+            return {"cacheKey": KEY, "siblingCacheKey": SIBLING, "fixture": "preservation_set", "status": "staged", "changed": True}
+
+        def arm(self, *_args, **_kwargs):
+            calls.append("arm")
+            return {
+                "cacheKey": KEY, "status": "armed", "operation": operation,
+                "checkpoint": checkpoint, "action": action, "threshold": threshold,
+                "declaredAssetBytes": 0, "pauseSeconds": pause_seconds, "armSequence": 1,
+            }
+
+        def cleanup(self, *_args):
+            self.cleanup_count += 1
+            calls.append("cleanup")
+            return {"cacheKey": KEY, "siblingCacheKey": SIBLING, "fixture": "preservation_set", "status": "cleaned", "changed": True}
+
+    class FakeMonitor:
+        def __init__(self):
+            self.snapshot_count = 0
+
+        def start(self):
+            return self
+
+        def read_new(self):
+            return ""
+
+        def snapshot(self):
+            self.snapshot_count += 1
+            if power_loss and self.snapshot_count == 1:
+                return ""
+            return "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+
+        def stop(self):
+            return None
+
+    client = FakeClient()
+    published = []
+    if state is not None:
+        state.update(client=client, transport_calls=transport_calls, calls=calls, published=published)
+    monkeypatch.setenv("TBOT_TEST_SECRET", "test-secret")
+    monkeypatch.setattr(hil, "load_build_identity", lambda *_args, **_kwargs: {"status": "PASS"})
+    monkeypatch.setattr(hil, "attest_live_connection", lambda *_args: {"deviceId": "28:84:85:85:1a:80"})
+    monkeypatch.setattr(hil, "RawMcpTransport", lambda *_args: object())
+    monkeypatch.setattr(hil, "HilToolClient", lambda _transport: client)
+    monkeypatch.setattr(hil, "SerialMonitor", lambda _port: FakeMonitor())
+    monkeypatch.setattr(hil, "poll_checkpoint", lambda *_args, **_kwargs: f"HIL_STORAGE_CHECKPOINT_REACHED operation={operation} checkpoint={checkpoint} cache_key={KEY} count=0 reached_sequence=2\nHIL_STORAGE_FAULT_CONSUMED operation={operation} checkpoint={checkpoint} cache_key={KEY} count=0 consumed_sequence=3\n")
+    monkeypatch.setattr(hil, "await_power_loss_disconnect", lambda *_args, **_kwargs: {"triggerPendingAtMarker": True, "triggerPendingAtCutBoundary": True, "powerCutBoundaryUtc": "2026-07-17T00:00:01Z", "disconnectObservedUtc": "2026-07-17T00:00:02Z", "powerRemovalConfirmedUtc": "2026-07-17T00:00:03Z", "disconnectAfterPowerCutBoundary": True})
+    monkeypatch.setattr(hil, "utc_now", iter(["2026-07-17T00:00:00Z", "2026-07-17T00:00:00.500000Z", "2026-07-17T00:00:04Z"]).__next__)
+    monkeypatch.setattr(hil, "_server_logs", lambda *_args: "")
+    monkeypatch.setattr(hil, "finalize_scenario_directory", lambda *_args, **_kwargs: published.append(True))
+    monkeypatch.setattr(hil, "scenario_artifact_names", lambda **_kwargs: ("SHA256SUMS",))
+    monkeypatch.setattr(hil, "atomic_write_bytes", lambda *_args: None)
+    monkeypatch.setattr(hil.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    arguments = SimpleNamespace(
+        build_manifest=tmp_path / "manifest.json", esp_base_url="http://127.0.0.1",
+        device_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", device_id="28:84:85:85:1a:80",
+        mint_secret_env="TBOT_TEST_SECRET", asset_sha256="d" * 64, asset_bytes=1,
+        asset_url="http://127.0.0.1/asset", serial_port="fake", evidence_dir=tmp_path,
+        server_container="server",
+    )
+    result = hil.run_scenario(arguments, scenario, operator_input=lambda _prompt: "")
+    return hil, result, client, transport_calls, calls, published, injected
+
+
 def test_exact_hil_tool_response_schemas_and_foreign_key_rejection():
     hil = load_script("lesson_studio_task14_hil_storage.py")
     arm = exact_arm()
@@ -279,6 +476,98 @@ def test_recovery_contract_rejects_non_exact_or_false_success_response(candidate
     hil = load_script("lesson_studio_task14_hil_storage.py")
     with pytest.raises(hil.HilValidationError):
         hil.validate_partial_eviction_retry(candidate, KEY)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("evict-after-unlinks-fail", "evict-before-rmdir-fail"),
+)
+def test_run_scenario_recovery_runs_once_after_partial_inspection_and_preserves_trigger(
+    monkeypatch, tmp_path, scenario,
+):
+    hil, result, client, transport_calls, _calls, published, injected = run_scenario_with_fakes(
+        monkeypatch, tmp_path, scenario
+    )
+
+    evictions = [call for call in transport_calls if call[0] == hil.TRIGGER_TOOLS["evict"]]
+    assert evictions == [
+        (hil.TRIGGER_TOOLS["evict"], {"cacheKey": KEY}, 75),
+        (hil.TRIGGER_TOOLS["evict"], {"cacheKey": KEY}, 75),
+    ]
+    assert result["events"] == [
+        "status-before", "inspect-before", "stage", "arm", "trigger",
+        "status-after", "inspect-after", "recovery-trigger",
+        "recovery-inspect", "cleanup",
+    ]
+    assert result["triggerOutcome"] == injected
+    assert result["recovery"] == {
+        "attempted": True,
+        "operation": "evict",
+        "reason": "expected_partial_eviction",
+        "response": exact_recovery_response(),
+        "inspection": preservation_inspection("missing"),
+    }
+    assert client.cleanup_count == 1
+    assert published == [True]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "evict-before-first-unlink-fail",
+        "evict-after-unlinks-sd-removal",
+        "sync-before-download-write-no-space",
+        "sync-after-download-bytes-no-space",
+        "sync-before-checksum-corrupt-staging",
+        "sync-before-commit-rename-fail",
+        "sync-before-commit-rename-power-loss",
+    ),
+)
+def test_run_scenario_recovery_is_never_attempted_for_non_partial_scenarios(
+    monkeypatch, tmp_path, scenario,
+):
+    _hil, result, client, _transport_calls, _calls, published, injected = run_scenario_with_fakes(
+        monkeypatch, tmp_path, scenario
+    )
+
+    assert result["recovery"] == {
+        "attempted": False,
+        "operation": None,
+        "reason": None,
+        "response": None,
+        "inspection": None,
+    }
+    assert "recovery-trigger" not in result["events"]
+    assert "recovery-inspect" not in result["events"]
+    assert result["triggerOutcome"] == (None if scenario.endswith("power-loss") else injected)
+    assert client.cleanup_count == 1
+    assert published == [True]
+
+
+@pytest.mark.parametrize(
+    "recovery_response,recovered_inspection",
+    (
+        (exact_recovery_response(fileCount=1), None),
+        (None, preservation_inspection("missing", protected_sha="b" * 64)),
+        (None, preservation_inspection("missing", "missing")),
+    ),
+)
+def test_run_scenario_recovery_failure_prevents_cleanup_and_pass_publication(
+    monkeypatch, tmp_path, recovery_response, recovered_inspection,
+):
+    state = {}
+    with pytest.raises(Exception):
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            "evict-after-unlinks-fail",
+            recovery_response=recovery_response,
+            recovered_inspection=recovered_inspection,
+            state=state,
+        )
+
+    assert state["client"].cleanup_count == 0
+    assert state["published"] == []
 
 
 def test_raw_mcp_wrapper_parses_only_exact_internal_response_and_redacts_credentials():
