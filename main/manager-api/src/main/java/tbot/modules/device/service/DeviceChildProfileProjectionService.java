@@ -1,6 +1,6 @@
 package tbot.modules.device.service;
 
-import java.time.Year;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 
@@ -50,6 +50,7 @@ public class DeviceChildProfileProjectionService {
         }
         if (incomingRevision == storedRevision) {
             if (Objects.equals(request.getPayloadHash(), stored.getChildProfilePayloadHash())) {
+                assertStoredMatchesCanonical(stored, canonical.normalizedProfile(), encodedInterests);
                 return result(Outcome.NO_OP, stored);
             }
             throw new ProjectionConflictException("child profile revision hash conflicts");
@@ -66,8 +67,9 @@ public class DeviceChildProfileProjectionService {
             update.setChildProfileId(profile.childProfileId());
             update.setChildBirthYear(profile.birthYear());
             update.setChildName(profile.displayName());
-            update.setChildAge(legacyAge(profile.birthYear()));
-            update.setChildInterests(encodedInterests);
+            update.setChildAge(null);
+            update.setChildInterests(null);
+            update.setChildInterestsJson(encodedInterests);
             update.setLearningStyle(profile.learningStyle());
             update.setVocabularyLevel(profile.vocabularyLevel());
             update.setParentCareer(profile.parentCareer());
@@ -77,6 +79,7 @@ public class DeviceChildProfileProjectionService {
         if (persisted == null) {
             throw new IllegalStateException("device disappeared after child profile projection");
         }
+        assertStoredMatchesCanonical(persisted, canonical.normalizedProfile(), encodedInterests);
         return result(Outcome.APPLIED, persisted);
     }
 
@@ -94,7 +97,7 @@ public class DeviceChildProfileProjectionService {
                         stored.getChildProfileId(),
                         stored.getChildName(),
                         stored.getChildBirthYear(),
-                        storedInterests(stored.getChildInterests()),
+                        storedInterests(stored),
                         stored.getLearningStyle(),
                         stored.getVocabularyLevel(),
                         stored.getParentCareer()));
@@ -105,12 +108,16 @@ public class DeviceChildProfileProjectionService {
                 && stored.getChildName() == null
                 && stored.getChildAge() == null
                 && stored.getChildInterests() == null
+                && stored.getChildInterestsJson() == null
                 && stored.getLearningStyle() == null
                 && stored.getVocabularyLevel() == null
                 && stored.getParentCareer() == null;
     }
 
-    private static List<String> storedInterests(String interests) {
+    private static List<String> storedInterests(DeviceEntity stored) {
+        String interests = stored.getChildInterestsJson() != null
+                ? stored.getChildInterestsJson()
+                : stored.getChildInterests();
         if (interests == null || interests.isEmpty()) {
             return List.of();
         }
@@ -140,7 +147,11 @@ public class DeviceChildProfileProjectionService {
             throw new IllegalArgumentException("interests cannot contain null values");
         }
         requireMaxLength("displayName", profile.displayName(), 64);
-        requireMaxLength("interests", encodedInterests, 255);
+        if (profile.interests().size() > 256) {
+            throw new IllegalArgumentException("interests exceeds item capacity");
+        }
+        profile.interests().forEach(interest -> requireMaxLength("interest", interest, 4_096));
+        requireMaxUtf8Bytes("interests", encodedInterests, 65_535);
         requireMaxLength("learningStyle", profile.learningStyle(), 32);
         requireMaxLength("vocabularyLevel", profile.vocabularyLevel(), 32);
         requireMaxLength("parentCareer", profile.parentCareer(), 64);
@@ -152,12 +163,33 @@ public class DeviceChildProfileProjectionService {
         }
     }
 
-    private static Integer legacyAge(Integer birthYear) {
-        if (birthYear == null) {
-            return null;
+    private static void requireMaxUtf8Bytes(String field, String value, int maximum) {
+        if (value != null && value.getBytes(StandardCharsets.UTF_8).length > maximum) {
+            throw new IllegalArgumentException(field + " exceeds storage capacity");
         }
-        long age = (long) Year.now().getValue() - birthYear;
-        return age >= 0 && age <= 255 ? (int) age : null;
+    }
+
+    private static void assertStoredMatchesCanonical(
+            DeviceEntity stored,
+            ChildProfileProjection expected,
+            String encodedInterests) {
+        if (expected == null) {
+            if (!isFullyCleared(stored)) {
+                throw new IllegalStateException("stored child profile clear projection is incoherent");
+            }
+            return;
+        }
+        if (!Objects.equals(stored.getChildProfileId(), expected.childProfileId())
+                || !Objects.equals(stored.getChildBirthYear(), expected.birthYear())
+                || !Objects.equals(stored.getChildName(), expected.displayName())
+                || stored.getChildAge() != null
+                || stored.getChildInterests() != null
+                || !Objects.equals(stored.getChildInterestsJson(), encodedInterests)
+                || !Objects.equals(stored.getLearningStyle(), expected.learningStyle())
+                || !Objects.equals(stored.getVocabularyLevel(), expected.vocabularyLevel())
+                || !Objects.equals(stored.getParentCareer(), expected.parentCareer())) {
+            throw new IllegalStateException("stored child profile replace projection is incoherent");
+        }
     }
 
     public enum Outcome { APPLIED, NO_OP }

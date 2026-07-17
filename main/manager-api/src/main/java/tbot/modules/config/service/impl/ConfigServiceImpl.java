@@ -259,7 +259,10 @@ public class ConfigServiceImpl implements ConfigService {
         childProfile.put("device_alias", device.getAlias());
         childProfile.put("child_name", device.getChildName());
         childProfile.put("child_age", device.getChildAge());
-        childProfile.put("interests", splitProfileTags(device.getChildInterests()));
+        String interests = device.getChildInterestsJson() != null
+                ? device.getChildInterestsJson()
+                : device.getChildInterests();
+        childProfile.put("interests", splitProfileTags(interests));
         childProfile.put("learning_style", device.getLearningStyle());
         childProfile.put("vocabulary_level", device.getVocabularyLevel());
         childProfile.put("parent_career", device.getParentCareer());

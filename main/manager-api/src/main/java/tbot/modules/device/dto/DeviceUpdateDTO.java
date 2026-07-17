@@ -62,5 +62,16 @@ public class DeviceUpdateDTO implements Serializable {
     @Size(max = 64)
     private String parentCareer;
 
+    private String childProfileId;
+
+    private Integer childBirthYear;
+
+    private Long childProfileRevision;
+
+    @Size(max = 64)
+    private String childProfilePayloadHash;
+
+    private String childInterestsJson;
+
     private static final long serialVersionUID = 1L;
 }

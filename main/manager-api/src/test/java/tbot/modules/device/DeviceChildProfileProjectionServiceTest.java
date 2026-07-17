@@ -9,7 +9,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
-import java.time.Year;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,8 +52,8 @@ class DeviceChildProfileProjectionServiceTest {
 
     @Test
     void fullyReplacesProfileAndReturnsThePersistedCanonicalProjection() {
-        DeviceEntity persisted = storedProfile(7, "unused", PROFILE_ID, "Persisted An", 2018,
-                "music,robots", "visual", "beginner", "engineer");
+        DeviceEntity persisted = storedProfile(7, "unused", PROFILE_ID, "An", 2018,
+                "[\"music\",\"robots\"]", "visual", "beginner", "engineer");
         Profile profile = profile(PROFILE_ID);
         DeviceChildProfileProjectionDTO request = replace(7, profile);
         persisted.setChildProfilePayloadHash(request.getPayloadHash());
@@ -68,7 +67,7 @@ class DeviceChildProfileProjectionServiceTest {
         assertEquals(request.getPayloadHash(), result.payloadHash());
         assertEquals("replace", result.mode());
         assertEquals(PROFILE_ID, result.profile().childProfileId());
-        assertEquals("Persisted An", result.profile().displayName());
+        assertEquals("An", result.profile().displayName());
         assertEquals(2018, result.profile().birthYear());
         assertEquals(List.of("music", "robots"), result.profile().interests());
         assertEquals("visual", result.profile().learningStyle());
@@ -82,8 +81,9 @@ class DeviceChildProfileProjectionServiceTest {
         assertEquals(PROFILE_ID, updated.getChildProfileId());
         assertEquals(2018, updated.getChildBirthYear());
         assertEquals("An", updated.getChildName());
-        assertEquals(Year.now().getValue() - 2018, updated.getChildAge());
-        assertEquals("[\"music\",\"robots\"]", updated.getChildInterests());
+        assertNull(updated.getChildAge());
+        assertNull(updated.getChildInterests());
+        assertEquals("[\"music\",\"robots\"]", updated.getChildInterestsJson());
         assertEquals("visual", updated.getLearningStyle());
         assertEquals("beginner", updated.getVocabularyLevel());
         assertEquals("engineer", updated.getParentCareer());
@@ -144,7 +144,7 @@ class DeviceChildProfileProjectionServiceTest {
     }
 
     @Test
-    void sameRevisionReplayReturnsStoredFieldsInsteadOfEchoingTheRequest() {
+    void sameRevisionReplayRejectsStoredFieldsThatDoNotMatchTheCanonicalEnvelope() {
         Profile requested = profile(PROFILE_ID);
         DeviceChildProfileProjectionDTO request = replace(9, requested);
         DeviceEntity corrupted = storedProfile(9, request.getPayloadHash(), PROFILE_ID,
@@ -152,15 +152,20 @@ class DeviceChildProfileProjectionServiceTest {
         corrupted.setChildAge(99);
         when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(corrupted);
 
-        ProjectionResult result = service.apply(DEVICE_ID, request);
+        assertThrows(IllegalStateException.class, () -> service.apply(DEVICE_ID, request));
+        verify(deviceDao, never()).replaceChildProfile(any());
+    }
 
-        assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, result.outcome());
-        assertEquals("Database value", result.profile().displayName());
-        assertEquals(2017, result.profile().birthYear());
-        assertEquals(List.of("art"), result.profile().interests());
-        assertEquals("advanced", result.profile().vocabularyLevel());
-        assertEquals(7, result.profile().getClass().getRecordComponents().length,
-                "stored response must contain only the seven canonical profile fields, never legacy age");
+    @Test
+    void sameRevisionReplayRejectsResidualLegacyAgeAndMissingAuthoritativeJson() {
+        DeviceChildProfileProjectionDTO request = replace(9, profile(PROFILE_ID));
+        DeviceEntity incoherent = storedProfile(9, request.getPayloadHash(), PROFILE_ID,
+                "An", 2018, "music,robots", "visual", "beginner", "engineer");
+        incoherent.setChildAge(8);
+        incoherent.setChildInterestsJson(null);
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(incoherent);
+
+        assertThrows(IllegalStateException.class, () -> service.apply(DEVICE_ID, request));
         verify(deviceDao, never()).replaceChildProfile(any());
     }
 
@@ -179,7 +184,7 @@ class DeviceChildProfileProjectionServiceTest {
         DeviceChildProfileProjectionDTO request = replace(3, profile);
 
         DeviceEntity persisted = storedProfile(3, request.getPayloadHash(), PROFILE_ID, "Án", 2018,
-                "a,z,é", "café", "débutant", "ingénieur");
+                "[\"a\",\"z\",\"é\"]", "café", "débutant", "ingénieur");
         when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null), persisted);
 
         service.apply(DEVICE_ID, request);
@@ -188,7 +193,8 @@ class DeviceChildProfileProjectionServiceTest {
         verify(deviceDao).replaceChildProfile(captor.capture());
         DeviceEntity stored = captor.getValue();
         assertEquals("Án", stored.getChildName());
-        assertEquals("[\"a\",\"z\",\"é\"]", stored.getChildInterests());
+        assertNull(stored.getChildInterests());
+        assertEquals("[\"a\",\"z\",\"é\"]", stored.getChildInterestsJson());
         assertEquals("café", stored.getLearningStyle());
         assertEquals("débutant", stored.getVocabularyLevel());
         assertEquals("ingénieur", stored.getParentCareer());
@@ -207,8 +213,29 @@ class DeviceChildProfileProjectionServiceTest {
 
         ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
         verify(deviceDao).replaceChildProfile(captor.capture());
-        assertEquals("[\"\",\"science, technology\"]", captor.getValue().getChildInterests());
+        assertNull(captor.getValue().getChildInterests());
+        assertEquals("[\"\",\"science, technology\"]", captor.getValue().getChildInterestsJson());
         assertEquals(List.of("", "science, technology"), result.profile().interests());
+    }
+
+    @Test
+    void acceptsLosslessInterestJsonBeyondTheLegacyVarcharLimit() {
+        String longInterest = "robotics," + "x".repeat(400);
+        Profile profile = new Profile(PROFILE_ID, "An", 2018,
+                List.of("", longInterest), null, null, null);
+        DeviceChildProfileProjectionDTO request = replace(4, profile);
+        DeviceEntity persisted = storedProfile(4, request.getPayloadHash(), PROFILE_ID, "An", 2018,
+                null, null, null, null);
+        persisted.setChildInterestsJson("[\"\",\"" + longInterest + "\"]");
+        when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(-1, null), persisted);
+
+        ProjectionResult result = service.apply(DEVICE_ID, request);
+
+        ArgumentCaptor<DeviceEntity> captor = ArgumentCaptor.forClass(DeviceEntity.class);
+        verify(deviceDao).replaceChildProfile(captor.capture());
+        assertNull(captor.getValue().getChildInterests());
+        assertEquals("[\"\",\"" + longInterest + "\"]", captor.getValue().getChildInterestsJson());
+        assertEquals(List.of("", longInterest), result.profile().interests());
     }
 
     @ParameterizedTest(name = "rejects profile storage overflow: {0}")
@@ -222,8 +249,10 @@ class DeviceChildProfileProjectionServiceTest {
     private static List<org.junit.jupiter.params.provider.Arguments> oversizedProfiles() {
         return List.of(
                 org.junit.jupiter.params.provider.Arguments.of("displayName", new Profile(PROFILE_ID, "x".repeat(65), 2018, List.of(), null, null, null)),
-                org.junit.jupiter.params.provider.Arguments.of("interests encoded", new Profile(PROFILE_ID, "An", 2018, List.of("x".repeat(252)), null, null, null)),
-                org.junit.jupiter.params.provider.Arguments.of("interests", new Profile(PROFILE_ID, "An", 2018, List.of("x".repeat(256)), null, null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("interest count", new Profile(PROFILE_ID, "An", 2018,
+                        java.util.stream.IntStream.range(0, 257).mapToObj(index -> "interest-" + index).toList(), null, null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("interest length", new Profile(PROFILE_ID, "An", 2018,
+                        List.of("x".repeat(4097)), null, null, null)),
                 org.junit.jupiter.params.provider.Arguments.of("learningStyle", new Profile(PROFILE_ID, "An", 2018, List.of(), "x".repeat(33), null, null)),
                 org.junit.jupiter.params.provider.Arguments.of("vocabularyLevel", new Profile(PROFILE_ID, "An", 2018, List.of(), null, "x".repeat(33), null)),
                 org.junit.jupiter.params.provider.Arguments.of("parentCareer", new Profile(PROFILE_ID, "An", 2018, List.of(), null, null, "x".repeat(65))));
@@ -258,7 +287,8 @@ class DeviceChildProfileProjectionServiceTest {
         device.setChildProfileId(profileId);
         device.setChildName(name);
         device.setChildBirthYear(birthYear);
-        device.setChildInterests(interests);
+        device.setChildInterestsJson(interests != null && interests.stripLeading().startsWith("[") ? interests : null);
+        device.setChildInterests(interests != null && interests.stripLeading().startsWith("[") ? null : interests);
         device.setLearningStyle(style);
         device.setVocabularyLevel(vocabulary);
         device.setParentCareer(career);

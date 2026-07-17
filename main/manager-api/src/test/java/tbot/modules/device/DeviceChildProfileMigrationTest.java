@@ -7,7 +7,6 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
-import java.time.Year;
 
 import javax.sql.DataSource;
 
@@ -29,6 +28,7 @@ import liquibase.Liquibase;
 import liquibase.exception.LiquibaseException;
 import liquibase.integration.spring.SpringLiquibase;
 import tbot.modules.device.dao.DeviceDao;
+import tbot.modules.device.entity.DeviceEntity;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO.Profile;
 import tbot.modules.device.service.DeviceChildProfileProjectionService;
@@ -62,7 +62,7 @@ class DeviceChildProfileMigrationTest {
 
         try (Connection rollbackConnection = dataSource.getConnection();
                 Liquibase rollback = liquibase.open(rollbackConnection)) {
-            rollback.rollback(1, new Contexts(), new LabelExpression());
+            rollback.rollback(2, new Contexts(), new LabelExpression());
         }
 
         try (Connection legacyConnection = dataSource.getConnection()) {
@@ -70,6 +70,7 @@ class DeviceChildProfileMigrationTest {
             assertEquals(0, columnCount(legacyConnection, "child_birth_year"));
             assertEquals(0, columnCount(legacyConnection, "child_profile_revision"));
             assertEquals(0, columnCount(legacyConnection, "child_profile_payload_hash"));
+            assertEquals(0, columnCount(legacyConnection, "child_interests_json"));
             try (Statement statement = legacyConnection.createStatement()) {
                 statement.executeUpdate("INSERT INTO ai_device (id, child_name, child_age, child_interests, learning_style, vocabulary_level, parent_career) VALUES ('legacy', 'Old', 9, 'music', 'visual', 'basic', 'teacher')");
             }
@@ -95,6 +96,7 @@ class DeviceChildProfileMigrationTest {
         factoryBean.setMapperLocations(new ClassPathResource("mapper/device/DeviceDao.xml"));
         SqlSessionTemplate session = new SqlSessionTemplate(factoryBean.getObject());
         DeviceChildProfileProjectionService service = new DeviceChildProfileProjectionService(session.getMapper(DeviceDao.class));
+        DeviceDao deviceDao = session.getMapper(DeviceDao.class);
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
 
         Profile profile = new Profile("123e4567-e89b-12d3-a456-426614174000", "A\u0301n", 2018,
@@ -109,8 +111,9 @@ class DeviceChildProfileMigrationTest {
             assertEquals(profile.childProfileId(), result.getString("child_profile_id"));
             assertEquals(2018, result.getInt("child_birth_year"));
             assertEquals("Án", result.getString("child_name"));
-            assertEquals(Year.now().getValue() - 2018, result.getInt("child_age"));
-            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests"));
+            assertNull(result.getObject("child_age"));
+            assertNull(result.getString("child_interests"));
+            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests_json"));
             assertEquals("café", result.getString("learning_style"));
             assertEquals("débutant", result.getString("vocabulary_level"));
             assertEquals("ingénieur", result.getString("parent_career"));
@@ -128,10 +131,12 @@ class DeviceChildProfileMigrationTest {
         assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, replayResult.outcome());
         assertEquals("Án", replayResult.profile().displayName());
         try (Statement statement = connection.createStatement();
-                ResultSet result = statement.executeQuery("SELECT child_name, child_interests, learning_style, vocabulary_level, parent_career FROM ai_device WHERE id='mapped-device'")) {
+                ResultSet result = statement.executeQuery("SELECT child_name, child_age, child_interests, child_interests_json, learning_style, vocabulary_level, parent_career FROM ai_device WHERE id='mapped-device'")) {
             result.next();
             assertEquals("Án", result.getString("child_name"));
-            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests"));
+            assertNull(result.getObject("child_age"));
+            assertNull(result.getString("child_interests"));
+            assertEquals("[\"a\",\"z\",\"é\"]", result.getString("child_interests_json"));
             assertEquals("café", result.getString("learning_style"));
             assertEquals("débutant", result.getString("vocabulary_level"));
             assertEquals("ingénieur", result.getString("parent_career"));
@@ -140,23 +145,43 @@ class DeviceChildProfileMigrationTest {
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("INSERT INTO ai_device (id) VALUES ('mapped-lossless')");
         }
+        String longInterest = "science, technology " + "x".repeat(400);
         Profile lossless = new Profile(profile.childProfileId(), "An", 2018,
-                List.of("science, technology", ""), null, null, null);
+                List.of(longInterest, ""), null, null, null);
         String losslessHash = ChildProfileProjectionCanonicalizer.canonicalize(
                 "replace", 1, lossless.toCanonicalProfile()).sha256();
         DeviceChildProfileProjectionService.ProjectionResult losslessResult = transaction.execute(status -> service.apply(
                 "mapped-lossless", new DeviceChildProfileProjectionDTO("replace", 1, losslessHash, lossless)));
-        assertEquals(List.of("", "science, technology"), losslessResult.profile().interests());
+        assertEquals(List.of("", longInterest), losslessResult.profile().interests());
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery(
-                        "SELECT child_interests FROM ai_device WHERE id='mapped-lossless'")) {
+                        "SELECT child_interests, child_interests_json FROM ai_device WHERE id='mapped-lossless'")) {
             result.next();
-            assertEquals("[\"\",\"science, technology\"]", result.getString("child_interests"));
+            assertNull(result.getString("child_interests"));
+            assertEquals("[\"\",\"" + longInterest + "\"]", result.getString("child_interests_json"));
         }
         DeviceChildProfileProjectionService.ProjectionResult losslessReplay = transaction.execute(status -> service.apply(
                 "mapped-lossless", new DeviceChildProfileProjectionDTO("replace", 1, losslessHash, lossless)));
         assertEquals(DeviceChildProfileProjectionService.Outcome.NO_OP, losslessReplay.outcome());
-        assertEquals(List.of("", "science, technology"), losslessReplay.profile().interests());
+        assertEquals(List.of("", longInterest), losslessReplay.profile().interests());
+
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO ai_device (id, child_profile_revision, child_name) VALUES ('legacy-route', -1, 'Old')");
+        }
+        DeviceEntity legacyUpdate = new DeviceEntity();
+        legacyUpdate.setId("legacy-route");
+        legacyUpdate.setChildName("Legacy allowed");
+        assertEquals(1, deviceDao.updateDeviceInfo(legacyUpdate));
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("UPDATE ai_device SET child_profile_revision=0 WHERE id='legacy-route'");
+        }
+        legacyUpdate.setChildName("Forbidden overwrite");
+        assertEquals(0, deviceDao.updateDeviceInfo(legacyUpdate));
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("SELECT child_name FROM ai_device WHERE id='legacy-route'")) {
+            result.next();
+            assertEquals("Legacy allowed", result.getString("child_name"));
+        }
 
         String clearHash = ChildProfileProjectionCanonicalizer.canonicalize("clear", 2, null).sha256();
         transaction.executeWithoutResult(status -> service.apply("mapped-device",
@@ -169,6 +194,7 @@ class DeviceChildProfileMigrationTest {
             assertNull(result.getString("child_name"));
             assertNull(result.getObject("child_age"));
             assertNull(result.getString("child_interests"));
+            assertNull(result.getString("child_interests_json"));
             assertNull(result.getString("learning_style"));
             assertNull(result.getString("vocabulary_level"));
             assertNull(result.getString("parent_career"));
@@ -190,6 +216,7 @@ class DeviceChildProfileMigrationTest {
         assertColumn(connection, "child_birth_year", "int", null, null, null, null, "YES");
         assertColumn(connection, "child_profile_revision", "bigint", null, null, null, "-1", "NO");
         assertColumn(connection, "child_profile_payload_hash", "varchar", 64L, "ascii", "ascii_bin", null, "YES");
+        assertColumn(connection, "child_interests_json", "text", 65535L, "utf8mb4", "utf8mb4_unicode_ci", null, "YES");
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery("SELECT child_profile_revision, child_profile_id, child_birth_year, child_profile_payload_hash FROM ai_device WHERE id='legacy'")) {
             result.next();

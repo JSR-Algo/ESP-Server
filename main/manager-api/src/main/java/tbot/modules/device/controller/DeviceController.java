@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ResponseStatus;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -115,32 +117,81 @@ public class DeviceController {
         if (!entity.getUserId().equals(user.getId())) {
             return new Result<Void>().error("Device does not exist");
         }
-        if (deviceUpdateDTO.getAutoUpdate() != null) {
-            entity.setAutoUpdate(deviceUpdateDTO.getAutoUpdate());
+        if (hasCanonicalChildProfileMutation(deviceUpdateDTO)
+                || (isProjectionManaged(entity) && hasLegacyChildProfileMutation(deviceUpdateDTO))) {
+            throw new ProjectedChildProfileMutationException();
         }
-        if (deviceUpdateDTO.getAlias() != null) {
-            entity.setAlias(StringUtils.trimToNull(deviceUpdateDTO.getAlias()));
-        }
+        DeviceEntity update = new DeviceEntity();
+        update.setId(id);
+        if (deviceUpdateDTO.getAutoUpdate() != null) update.setAutoUpdate(deviceUpdateDTO.getAutoUpdate());
+        if (deviceUpdateDTO.getAlias() != null) update.setAlias(StringUtils.trimToNull(deviceUpdateDTO.getAlias()));
         if (deviceUpdateDTO.getChildName() != null) {
-            entity.setChildName(StringUtils.trimToNull(deviceUpdateDTO.getChildName()));
+            update.setChildName(StringUtils.trimToNull(deviceUpdateDTO.getChildName()));
         }
         if (deviceUpdateDTO.getChildAge() != null) {
-            entity.setChildAge(deviceUpdateDTO.getChildAge());
+            update.setChildAge(deviceUpdateDTO.getChildAge());
         }
         if (deviceUpdateDTO.getChildInterests() != null) {
-            entity.setChildInterests(StringUtils.trimToNull(deviceUpdateDTO.getChildInterests()));
+            update.setChildInterests(StringUtils.trimToNull(deviceUpdateDTO.getChildInterests()));
         }
         if (deviceUpdateDTO.getLearningStyle() != null) {
-            entity.setLearningStyle(StringUtils.trimToNull(deviceUpdateDTO.getLearningStyle()));
+            update.setLearningStyle(StringUtils.trimToNull(deviceUpdateDTO.getLearningStyle()));
         }
         if (deviceUpdateDTO.getVocabularyLevel() != null) {
-            entity.setVocabularyLevel(StringUtils.trimToNull(deviceUpdateDTO.getVocabularyLevel()));
+            update.setVocabularyLevel(StringUtils.trimToNull(deviceUpdateDTO.getVocabularyLevel()));
         }
         if (deviceUpdateDTO.getParentCareer() != null) {
-            entity.setParentCareer(StringUtils.trimToNull(deviceUpdateDTO.getParentCareer()));
+            update.setParentCareer(StringUtils.trimToNull(deviceUpdateDTO.getParentCareer()));
         }
-        deviceService.updateById(entity);
+        if (hasAnyUpdateValues(update)) {
+            int updated = deviceService.updateDeviceInfo(update);
+            if (updated == 0 && hasLegacyChildProfileMutation(deviceUpdateDTO)) {
+                DeviceEntity current = deviceService.selectById(id);
+                if (current != null && isProjectionManaged(current)) {
+                    throw new ProjectedChildProfileMutationException();
+                }
+            }
+        }
         return new Result<Void>();
+    }
+
+    private static boolean isProjectionManaged(DeviceEntity entity) {
+        return entity.getChildProfileRevision() != null && entity.getChildProfileRevision() >= 0;
+    }
+
+    private static boolean hasLegacyChildProfileMutation(DeviceUpdateDTO dto) {
+        return dto.getChildName() != null
+                || dto.getChildAge() != null
+                || dto.getChildInterests() != null
+                || dto.getLearningStyle() != null
+                || dto.getVocabularyLevel() != null
+                || dto.getParentCareer() != null;
+    }
+
+    private static boolean hasCanonicalChildProfileMutation(DeviceUpdateDTO dto) {
+        return dto.getChildProfileId() != null
+                || dto.getChildBirthYear() != null
+                || dto.getChildProfileRevision() != null
+                || dto.getChildProfilePayloadHash() != null
+                || dto.getChildInterestsJson() != null;
+    }
+
+    private static boolean hasAnyUpdateValues(DeviceEntity update) {
+        return update.getAutoUpdate() != null
+                || update.getAlias() != null
+                || update.getChildName() != null
+                || update.getChildAge() != null
+                || update.getChildInterests() != null
+                || update.getLearningStyle() != null
+                || update.getVocabularyLevel() != null
+                || update.getParentCareer() != null;
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public static final class ProjectedChildProfileMutationException extends RuntimeException {
+        public ProjectedChildProfileMutationException() {
+            super("projected_child_profile_managed");
+        }
     }
 
     @PostMapping("/manual-add")

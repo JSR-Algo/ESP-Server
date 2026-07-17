@@ -104,6 +104,9 @@ public interface DeviceService extends BaseService<DeviceEntity> {
      */
     void updateDeviceConnectionInfo(String agentId, String deviceId, String appVersion);
 
+    /** Update only caller-editable fields, guarding legacy profile writes atomically. */
+    int updateDeviceInfo(DeviceEntity device);
+
     /**
      * GenerateWebSocketAuthtoken
      *

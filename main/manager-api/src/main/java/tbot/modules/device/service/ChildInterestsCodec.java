@@ -32,7 +32,12 @@ public final class ChildInterestsCodec {
             return List.of();
         }
         if (encoded.stripLeading().startsWith("[")) {
-            return decodeJson(encoded);
+            try {
+                return decodeJson(encoded);
+            } catch (IllegalArgumentException ignored) {
+                // Pre-projection rows may legitimately begin with '[' while still
+                // using the legacy comma-separated representation.
+            }
         }
         return Arrays.stream(encoded.split(","))
                 .map(StringUtils::trimToNull)

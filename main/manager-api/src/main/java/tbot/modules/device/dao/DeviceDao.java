@@ -25,4 +25,6 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
 
     int clearChildProfile(DeviceEntity device);
 
+    int updateDeviceInfo(DeviceEntity device);
+
 }

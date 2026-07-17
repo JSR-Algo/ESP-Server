@@ -98,10 +98,18 @@ class ConfigServiceChildProfileTest {
         assertEquals("beginner", childProfile.get("vocabulary_level"));
         assertEquals("teacher", childProfile.get("parent_career"));
 
-        device.setChildInterests("[\"\",\"science, technology\"]");
+        device.setChildInterestsJson("[\"\",\"science, technology\"]");
         Map<String, Object> jsonResult = service.getAgentModels(
                 "AA:BB:CC:DD:EE:FF", new HashMap<>());
         Map<?, ?> jsonProfile = assertInstanceOf(Map.class, jsonResult.get("child_profile"));
         assertEquals(java.util.List.of("", "science, technology"), jsonProfile.get("interests"));
+
+        device.setChildInterestsJson(null);
+        device.setChildInterests("[robotics],music");
+        Map<String, Object> malformedLegacyResult = service.getAgentModels(
+                "AA:BB:CC:DD:EE:FF", new HashMap<>());
+        Map<?, ?> malformedLegacyProfile = assertInstanceOf(
+                Map.class, malformedLegacyResult.get("child_profile"));
+        assertEquals(java.util.List.of("[robotics]", "music"), malformedLegacyProfile.get("interests"));
     }
 }

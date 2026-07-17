@@ -49,6 +49,9 @@ public class DeviceEntity {
     @Schema(description = "Comma-separated child interests for lesson personalization")
     private String childInterests;
 
+    @Schema(description = "Canonical child interests JSON managed by profile projection")
+    private String childInterestsJson;
+
     @Schema(description = "Preferred learning style for lesson personalization")
     private String learningStyle;
 
