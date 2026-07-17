@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 
@@ -8,12 +7,25 @@ COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 def test_lesson_studio_compose_is_test_owned_and_complete():
     compose = COMPOSE.read_text()
 
-    assert "name: tbot-ls-e2e" in compose
+    project_name = "${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}"
+    resource_prefix = (
+        "${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-"
+        "${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-"
+        "${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}"
+    )
+    assert f"name: {project_name}" in compose
+    for suffix in (
+        "pg", "redis", "mysql", "backend", "seed-pg", "web", "seed-mysql"
+    ):
+        assert f"container_name: {resource_prefix}-{suffix}" in compose
+    assert f"name: {resource_prefix}\n" in compose
+    for suffix in ("pg-data", "redis-data", "mysql-data"):
+        assert f"name: {resource_prefix}-{suffix}" in compose
     for service in ("postgres:", "redis:", "mysql:", "backend:", "web:", "seed-postgres:", "seed-mysql:"):
         assert service in compose
 
-    assert '"3100:3000"' in compose
-    assert '"8102:8002"' in compose
+    assert '"${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"' in compose
+    assert '"${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"' in compose
     assert "local/tbot-backend:lesson-studio-e2e" in compose
     assert "local/tbot-server-web:lesson-studio-e2e" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets:/usr/share/nginx/html/tvideo-demo:ro" not in compose

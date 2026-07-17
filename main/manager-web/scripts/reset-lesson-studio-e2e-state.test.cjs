@@ -31,12 +31,19 @@ test('resets auth throttling through compose service names', () => {
   ]);
 });
 
-test('allows the reset commands to follow an isolated Compose project', () => {
+test('reset project precedence is custom, standard Compose, then default', () => {
+  assert.deepEqual(resetOptionsFromEnvironment({
+    COMPOSE_PROJECT_NAME: 'standard-isolated',
+  }), {
+    projectName: 'standard-isolated',
+  });
   assert.deepEqual(resetOptionsFromEnvironment({
     LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
+    COMPOSE_PROJECT_NAME: 'standard-isolated',
   }), {
     projectName: 'task14-isolated',
   });
+  assert.deepEqual(resetOptionsFromEnvironment({}), {});
 });
 
 test('reset and global setup supply parse-only fallbacks without overriding live settings', () => {
