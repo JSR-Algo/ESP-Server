@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -68,6 +69,7 @@ HIL_MATRIX_RECORD_FIELDS = frozenset(
 )
 ZERO_SHA256 = "0" * 64
 _HIL_EVIDENCE_VALIDATOR = None
+MIN_ELF_SHA256_PREFIX = 8
 
 
 class BuildIdentityError(RuntimeError):
@@ -383,7 +385,7 @@ def _validate_flash_receipt(receipt, identity):
 
 
 def build_boot_attestation(
-    manifest_path, flash_receipt_path, boot_serial_path,
+    manifest_path, flash_receipt_path, boot_capture_receipt_path,
     connection_attestation_path, observed_at, event,
 ):
     expected_profile = "hil"
@@ -392,6 +394,11 @@ def build_boot_attestation(
     _receipt_path, _receipt_digest, receipt_bytes, _receipt_identity = _release_evidence(flash_receipt_path)
     receipt = _load_evidence_json_bytes(receipt_bytes)
     _validate_flash_receipt(receipt, identity)
+    _capture_path, _capture_digest, capture_bytes, _capture_identity = _release_evidence(
+        boot_capture_receipt_path
+    )
+    capture = _load_evidence_json_bytes(capture_bytes)
+    _validate_boot_capture_receipt(capture, identity, receipt)
     _path, _digest, attestation_bytes, _attestation_identity = _release_evidence(connection_attestation_path)
     attestation = _load_evidence_json_bytes(attestation_bytes)
     require(
@@ -417,24 +424,11 @@ def build_boot_attestation(
         == {"deviceId": device_id, "clientId": device_uuid},
         "invalid live boot connection identity",
     )
-    serial_path, serial_sha256, serial_bytes, _serial_identity = _release_evidence(boot_serial_path)
-    try:
-        serial = serial_bytes.decode("utf-8")
-    except UnicodeError as exc:
-        raise BuildIdentityError("invalid HIL boot serial evidence") from exc
-    prefix = identity["elfSha256"][:16]
-    require(
-        serial.count(f"app_init: ELF file SHA256: {prefix}") == 1,
-        "running ELF identity mismatch",
-    )
-    require(
-        serial.count("TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
-        "running HIL profile marker missing",
-    )
+    prefix = capture["elfSha256Prefix"]
     observed = _strict_utc(observed_at)
     require(
-        _strict_utc(receipt["completedAt"]) < observed,
-        "boot evidence does not follow the flash receipt",
+        _strict_utc(capture["hilMarkerUtc"]) < observed,
+        "live preflight does not follow captured boot evidence",
     )
     require(receipt["deviceId"] == device_id, "flash and boot device identity mismatch")
     return {
@@ -448,16 +442,52 @@ def build_boot_attestation(
             "binarySha256": identity["binarySha256"],
         },
         "flashReceipt": receipt,
+        "bootCaptureReceipt": capture,
         "bootEvidence": {
             "observedAt": observed_at,
-            "serialPath": str(serial_path),
-            "serialSha256": serial_sha256,
             "elfSha256Prefix": prefix,
             "deviceId": device_id,
             "deviceUuid": device_uuid,
             "connectionIdentity": attestation["connectionIdentity"],
         },
     }
+
+
+def _validate_boot_capture_receipt(capture, identity, flash_receipt):
+    require(
+        isinstance(capture, dict)
+        and set(capture) == {
+            "status", "event", "serialPort", "serialPath", "serialSha256",
+            "captureStartedUtc", "resetUtc", "elfMarkerUtc", "hilMarkerUtc",
+            "elfSha256Prefix", "timedOut",
+        }
+        and capture.get("status") == "PASS"
+        and capture.get("event") == "hil-boot-capture"
+        and capture.get("timedOut") is False,
+        "invalid HIL boot capture receipt",
+    )
+    serial_path, serial_sha256, serial_bytes, _serial_identity = _release_evidence(
+        capture.get("serialPath")
+    )
+    prefix = parse_running_elf_sha256(serial_bytes, identity["elfSha256"])
+    require(
+        str(serial_path) == capture.get("serialPath")
+        and serial_sha256 == capture.get("serialSha256")
+        and prefix == capture.get("elfSha256Prefix")
+        and serial_bytes.count(b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
+        "HIL boot capture content mismatch",
+    )
+    capture_started = _strict_utc(capture.get("captureStartedUtc"))
+    reset = _strict_utc(capture.get("resetUtc"))
+    elf_marker = _strict_utc(capture.get("elfMarkerUtc"))
+    hil_marker = _strict_utc(capture.get("hilMarkerUtc"))
+    require(
+        capture_started <= reset < elf_marker
+        and reset < hil_marker
+        and _strict_utc(flash_receipt["completedAt"]) < reset,
+        "HIL boot capture timestamp order invalid",
+    )
+    return capture
 
 
 def _validate_flat_identity(value, expected_profile):
@@ -484,6 +514,111 @@ def _strict_utc(value):
         raise BuildIdentityError("invalid release receipt UTC") from None
     require(parsed.tzinfo == timezone.utc, "invalid release receipt UTC")
     return parsed
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _elf_sha256_prefixes(serial_bytes):
+    text = serial_bytes.decode("utf-8", errors="replace")
+    return re.findall(
+        rf"app_init: ELF file SHA256:\s+([0-9a-f]{{{MIN_ELF_SHA256_PREFIX},64}})(?:\.\.\.)?",
+        text,
+    )
+
+
+def parse_running_elf_sha256(serial_bytes, expected_sha256):
+    require(
+        isinstance(expected_sha256, str) and SHA256_RE.fullmatch(expected_sha256),
+        "invalid expected ELF SHA-256",
+    )
+    prefixes = _elf_sha256_prefixes(serial_bytes)
+    require(len(prefixes) == 1, "running ELF identity marker missing or ambiguous")
+    prefix = prefixes[0]
+    require(expected_sha256.startswith(prefix), "running ELF identity mismatch")
+    return prefix
+
+
+def capture_hil_boot_identity(
+    serial_port, output_path, receipt_path, *, timeout_seconds=60,
+    serial_factory=None, utc_now=_utc_now, monotonic=time.monotonic, sleep=time.sleep,
+):
+    require(type(timeout_seconds) in (int, float) and timeout_seconds > 0, "invalid boot capture timeout")
+    if serial_factory is None:
+        try:
+            import serial  # type: ignore
+        except ImportError as exc:
+            raise BuildIdentityError("pyserial is required for HIL boot capture") from exc
+        serial_factory = serial.Serial
+    output_path = Path(output_path)
+    receipt_path = Path(receipt_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    require(not output_path.exists() and not receipt_path.exists(), "boot capture output already exists")
+    port = serial_factory(serial_port, 115200, timeout=0.25)
+    data = bytearray()
+    capture_started = None
+    elf_marker_utc = None
+    hil_marker_utc = None
+    reset_utc = None
+    try:
+        port.setDTR(False)
+        port.setRTS(False)
+        capture_started = utc_now()
+        port.setRTS(True)
+        sleep(0.1)
+        port.setRTS(False)
+        reset_utc = utc_now()
+        sleep(0.2)
+        deadline = monotonic() + timeout_seconds
+        while monotonic() < deadline:
+            chunk = port.read(4096)
+            if chunk:
+                data.extend(chunk)
+                current = bytes(data)
+                if elf_marker_utc is None and _elf_sha256_prefixes(current):
+                    elf_marker_utc = utc_now()
+                if (
+                    hil_marker_utc is None
+                    and b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image" in current
+                ):
+                    hil_marker_utc = utc_now()
+                if elf_marker_utc is not None and hil_marker_utc is not None:
+                    break
+    finally:
+        with suppress(Exception):
+            port.setDTR(False)
+        with suppress(Exception):
+            port.setRTS(False)
+        port.close()
+    descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
+    _fsync_directory(output_path.parent)
+    timed_out = elf_marker_utc is None or hil_marker_utc is None
+    receipt = {
+        "status": "NOT_PASS" if timed_out else "PASS",
+        "event": "hil-boot-capture",
+        "serialPort": serial_port,
+        "serialPath": str(output_path.resolve()),
+        "serialSha256": sha256_file(output_path),
+        "captureStartedUtc": capture_started,
+        "resetUtc": reset_utc,
+        "elfMarkerUtc": elf_marker_utc,
+        "hilMarkerUtc": hil_marker_utc,
+        "elfSha256Prefix": (
+            _elf_sha256_prefixes(bytes(data))[0] if elf_marker_utc is not None else None
+        ),
+        "timedOut": timed_out,
+    }
+    atomic_write_json(receipt_path, receipt)
+    _fsync_directory(receipt_path.parent)
+    require(not timed_out, "timed out waiting for HIL boot identity markers")
+    return receipt
 
 
 def _release_evidence(path, checksum_path=None):
@@ -539,34 +674,27 @@ def _validate_boot_evidence(value, event, identity):
     )
     if event == "hil-flash":
         receipt = _validate_flash_receipt(value.get("flashReceipt"), identity)
+        capture = _validate_boot_capture_receipt(
+            value.get("bootCaptureReceipt"), identity, receipt
+        )
         evidence = value.get("bootEvidence")
         require(
             isinstance(evidence, dict)
             and set(evidence) == {
-                "observedAt", "serialPath", "serialSha256", "elfSha256Prefix",
+                "observedAt", "elfSha256Prefix",
                 "deviceId", "deviceUuid", "connectionIdentity",
             },
             "invalid running HIL boot evidence",
         )
-        serial_path, serial_sha256, serial_bytes, _serial_identity = _release_evidence(
-            evidence.get("serialPath")
-        )
-        require(
-            str(serial_path) == evidence.get("serialPath")
-            and serial_sha256 == evidence.get("serialSha256"),
-            "running HIL serial evidence changed",
-        )
-        serial = serial_bytes.decode("utf-8")
-        prefix = identity["elfSha256"][:16]
+        prefix = capture["elfSha256Prefix"]
         require(
             evidence.get("elfSha256Prefix") == prefix
-            and serial.count(f"app_init: ELF file SHA256: {prefix}") == 1
-            and serial.count("TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
+            and identity["elfSha256"].startswith(prefix),
             "running HIL identity mismatch",
         )
         require(
-            _strict_utc(receipt["completedAt"]) < _strict_utc(evidence.get("observedAt")),
-            "running HIL evidence predates flash completion",
+            _strict_utc(capture["hilMarkerUtc"]) < _strict_utc(evidence.get("observedAt")),
+            "running HIL preflight predates captured boot markers",
         )
         require(
             evidence.get("deviceId") == receipt["deviceId"]
@@ -1126,13 +1254,18 @@ def main():
     flash.add_argument("--started-at", required=True)
     flash.add_argument("--completed-at", required=True)
     flash.add_argument("--output", required=True, type=Path)
+    capture = subparsers.add_parser("boot-capture")
+    capture.add_argument("--serial-port", required=True)
+    capture.add_argument("--serial-log", required=True, type=Path)
+    capture.add_argument("--receipt", required=True, type=Path)
+    capture.add_argument("--timeout-seconds", type=float, default=60)
     boot = subparsers.add_parser("boot-attest")
     boot.add_argument("--manifest", required=True, type=Path)
     boot.add_argument(
         "--event", required=True, choices=("hil-flash",)
     )
     boot.add_argument("--flash-receipt", required=True, type=Path)
-    boot.add_argument("--boot-serial", required=True, type=Path)
+    boot.add_argument("--boot-capture-receipt", required=True, type=Path)
     boot.add_argument("--connection-attestation", required=True, type=Path)
     boot.add_argument("--observed-at", required=True)
     boot.add_argument("--output", required=True, type=Path)
@@ -1155,9 +1288,15 @@ def main():
                 arguments.manifest, arguments.esptool_log, arguments.exit_code_file,
                 arguments.device_mac, arguments.started_at, arguments.completed_at,
             )
+        elif arguments.command == "boot-capture":
+            result = capture_hil_boot_identity(
+                arguments.serial_port, arguments.serial_log, arguments.receipt,
+                timeout_seconds=arguments.timeout_seconds,
+            )
         elif arguments.command == "boot-attest":
             result = build_boot_attestation(
-                arguments.manifest, arguments.flash_receipt, arguments.boot_serial,
+                arguments.manifest, arguments.flash_receipt,
+                arguments.boot_capture_receipt,
                 arguments.connection_attestation, arguments.observed_at, arguments.event,
             )
         else:

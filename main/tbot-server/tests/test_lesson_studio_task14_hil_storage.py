@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -2032,7 +2033,7 @@ def _flash_boot_inputs(tmp_path):
     }))
     serial = tmp_path / "hil-boot-serial.log"
     serial.write_text(
-        f"app_init: ELF file SHA256: {build['elfSha256'][:16]}\n"
+        f"app_init: ELF file SHA256:  {build['elfSha256'][:16]}...\n"
         "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
     )
     return identity, manifest, build, flash_log, exit_code, preflight, serial
@@ -2043,6 +2044,7 @@ def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
         _flash_boot_inputs(tmp_path)
     )
     receipt = tmp_path / "hil-flash-receipt.json"
+    capture_receipt = tmp_path / "hil-boot-capture.json"
     output = tmp_path / "hil-boot-attestation.json"
 
     flashed = subprocess.run([
@@ -2054,13 +2056,15 @@ def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
         "--completed-at", "2026-07-17T00:00:01Z", "--output", str(receipt),
     ], text=True, capture_output=True, check=False)
     assert flashed.returncode == 0, flashed.stderr
+    _write_boot_capture_receipt(capture_receipt, serial)
 
     completed = subprocess.run([
         sys.executable, str(identity.__file__), "boot-attest",
         "--manifest", str(manifest), "--event", "hil-flash",
-        "--flash-receipt", str(receipt), "--boot-serial", str(serial),
+        "--flash-receipt", str(receipt),
+        "--boot-capture-receipt", str(capture_receipt),
         "--connection-attestation", str(preflight),
-        "--observed-at", "2026-07-17T00:00:02Z", "--output", str(output),
+        "--observed-at", "2026-07-17T00:00:05Z", "--output", str(output),
     ], text=True, capture_output=True, check=False)
 
     assert completed.returncode == 0, completed.stderr
@@ -2073,11 +2077,109 @@ def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
     assert value["bootEvidence"]["elfSha256Prefix"] == build["elfSha256"][:16]
 
 
+def test_real_idf_elf_sha_line_accepts_whitespace_and_literal_ellipsis(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    expected = "4667d1197" + "0" * 55
+    captured = b"I (109) app_init: ELF file SHA256:  4667d1197...\n"
+    assert identity.parse_running_elf_sha256(captured, expected) == "4667d1197"
+
+
+def test_boot_capture_opens_port_before_safe_reset_and_orders_markers(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    events = []
+    chunks = iter([
+        b"app_init: ELF file SHA256:  4667d1197abcdef0...\n",
+        b"TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n",
+    ])
+
+    class FakeSerial:
+        def __init__(self, *_args, **_kwargs):
+            events.append("open")
+            self.dtr = None
+            self.rts = None
+
+        def setDTR(self, value):
+            events.append(("dtr", value))
+
+        def setRTS(self, value):
+            events.append(("rts", value))
+
+        def read(self, _size):
+            return next(chunks, b"")
+
+        def close(self):
+            events.append("close")
+
+    times = iter([
+        "2026-07-17T00:00:01Z", "2026-07-17T00:00:02Z",
+        "2026-07-17T00:00:03Z", "2026-07-17T00:00:04Z",
+    ])
+    output = tmp_path / "boot.log"
+    receipt = tmp_path / "capture.json"
+    value = identity.capture_hil_boot_identity(
+        "/dev/cu.usbmodem1101", output, receipt, timeout_seconds=1,
+        serial_factory=FakeSerial, utc_now=lambda: next(times),
+        monotonic=iter([0.0, 0.1, 0.2]).__next__, sleep=lambda _seconds: None,
+    )
+
+    assert events[:4] == ["open", ("dtr", False), ("rts", False), ("rts", True)]
+    assert events[-2:] == [("rts", False), "close"]
+    assert value["captureStartedUtc"] <= value["resetUtc"] < value["elfMarkerUtc"]
+    assert value["resetUtc"] < value["hilMarkerUtc"]
+    assert value["timedOut"] is False
+
+
+def test_boot_capture_timeout_writes_not_pass_receipt(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+
+    class SilentSerial:
+        def __init__(self, *_args, **_kwargs): pass
+        def setDTR(self, _value): pass
+        def setRTS(self, _value): pass
+        def read(self, _size): return b""
+        def close(self): pass
+
+    output = tmp_path / "timeout.log"
+    receipt = tmp_path / "timeout.json"
+    with pytest.raises(identity.BuildIdentityError, match="timed out"):
+        identity.capture_hil_boot_identity(
+            "/dev/cu.usbmodem1101", output, receipt, timeout_seconds=1,
+            serial_factory=SilentSerial,
+            utc_now=iter(["2026-07-17T00:00:01Z", "2026-07-17T00:00:02Z"]).__next__,
+            monotonic=iter([0.0, 2.0]).__next__, sleep=lambda _seconds: None,
+        )
+    assert json.loads(receipt.read_text())["timedOut"] is True
+
+
+def _write_boot_capture_receipt(path, serial, **changes):
+    prefix = re.search(
+        r"app_init: ELF file SHA256:\s+([0-9a-f]{8,64})(?:\.\.\.)?",
+        serial.read_text(),
+    ).group(1)
+    value = {
+        "status": "PASS",
+        "event": "hil-boot-capture",
+        "serialPort": "/dev/cu.usbmodem1101",
+        "serialPath": str(serial.resolve()),
+        "serialSha256": sha256(serial),
+        "captureStartedUtc": "2026-07-17T00:00:01Z",
+        "resetUtc": "2026-07-17T00:00:02Z",
+        "elfMarkerUtc": "2026-07-17T00:00:03Z",
+        "hilMarkerUtc": "2026-07-17T00:00:04Z",
+        "elfSha256Prefix": prefix,
+        "timedOut": False,
+    }
+    value.update(changes)
+    path.write_text(json.dumps(value))
+    return value
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
         "mac", "offset", "bytes", "verify", "exit", "old-elf",
-        "old-manifest", "stale-time", "erase",
+        "old-manifest", "stale-time", "capture-order", "capture-timeout",
+        "missing-hil", "erase",
     ),
 )
 def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, mutation):
@@ -2097,6 +2199,7 @@ def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, m
     elif mutation == "erase":
         flash_log.write_text("erase_flash\n" + flash_log.read_text())
     receipt = tmp_path / "receipt.json"
+    capture_receipt = tmp_path / "capture.json"
     try:
         value = identity.build_flash_attestation(
             manifest, flash_log, exit_code, "28:84:85:85:1a:80",
@@ -2104,7 +2207,10 @@ def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, m
         )
         identity.atomic_write_json(receipt, value)
     except identity.BuildIdentityError:
-        assert mutation not in {"old-elf", "old-manifest", "stale-time"}
+        assert mutation not in {
+            "old-elf", "old-manifest", "stale-time", "capture-order",
+            "capture-timeout", "missing-hil",
+        }
         return
     if mutation == "old-elf":
         serial.write_text(serial.read_text().replace(build["elfSha256"][:16], "0" * 16))
@@ -2112,10 +2218,20 @@ def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, m
         manifest, _value, _paths = task6_manifest(
             tmp_path / "old", profile="hil", binary=b"old-running-image"
         )
-    observed = "2026-07-16T23:59:59Z" if mutation == "stale-time" else "2026-07-17T00:00:02Z"
+    if mutation == "missing-hil":
+        serial.write_text(serial.read_text().replace(
+            "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n", ""
+        ))
+    observed = "2026-07-16T23:59:59Z" if mutation == "stale-time" else "2026-07-17T00:00:05Z"
+    capture_changes = {}
+    if mutation == "capture-order":
+        capture_changes["resetUtc"] = "2026-07-17T00:00:04Z"
+    elif mutation == "capture-timeout":
+        capture_changes.update(status="NOT_PASS", timedOut=True, hilMarkerUtc=None)
+    _write_boot_capture_receipt(capture_receipt, serial, **capture_changes)
     with pytest.raises(identity.BuildIdentityError):
         identity.build_boot_attestation(
-            manifest, receipt, serial, preflight, observed, "hil-flash"
+            manifest, receipt, capture_receipt, preflight, observed, "hil-flash"
         )
 
 
@@ -2126,7 +2242,12 @@ def test_runbook_generates_dedicated_hil_boot_attestation_before_release():
     assert 'write_flash 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin' in runbook
     assert "lesson_studio_task14_build_identity.py boot-attest" in runbook
     assert '--flash-receipt "$HIL_FLASH_RECEIPT"' in runbook
-    assert '--boot-serial "$HIL_BOOT_SERIAL"' in runbook
+    assert "lesson_studio_task14_build_identity.py boot-capture" in runbook
+    assert '--boot-capture-receipt "$HIL_BOOT_CAPTURE_RECEIPT"' in runbook
+    capture = runbook.index("lesson_studio_task14_build_identity.py boot-capture")
+    preflight = runbook.index("lesson_studio_task14_hil_storage.py preflight", capture)
+    attest = runbook.index("lesson_studio_task14_build_identity.py boot-attest", preflight)
+    assert capture < preflight < attest
     assert '--connection-attestation "$HIL_PREFLIGHT_ATTESTATION"' in runbook
     hil_release = runbook[runbook.index("--event hil-flash"):
                           runbook.index("--event hil-matrix-pass")]
@@ -2596,9 +2717,11 @@ def _valid_hil_flash_evidence(tmp_path, identity, manifest):
     identity.atomic_write_json(receipt_path, receipt)
     serial = tmp_path / "release-boot-serial.log"
     serial.write_text(
-        f"app_init: ELF file SHA256: {build['elfSha256'][:16]}\n"
+        f"app_init: ELF file SHA256:  {build['elfSha256'][:16]}...\n"
         "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
     )
+    capture_receipt = tmp_path / "release-boot-capture.json"
+    _write_boot_capture_receipt(capture_receipt, serial)
     connection = tmp_path / "release-preflight.json"
     connection.write_text(json.dumps({
         "status": "PASS",
@@ -2611,7 +2734,8 @@ def _valid_hil_flash_evidence(tmp_path, identity, manifest):
         "buildIdentity": build,
     }))
     return identity.build_boot_attestation(
-        manifest, receipt_path, serial, connection, "2026-07-17T00:00:00Z", "hil-flash"
+        manifest, receipt_path, capture_receipt, connection,
+        "2026-07-17T00:00:05Z", "hil-flash"
     )
 
 

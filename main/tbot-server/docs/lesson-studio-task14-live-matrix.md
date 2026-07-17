@@ -40,6 +40,7 @@ export HIL_FLASH_LOG="$EVIDENCE_ROOT/hil-esptool-flash.log"
 export HIL_FLASH_EXIT_CODE="$EVIDENCE_ROOT/hil-esptool-exit-code.txt"
 export HIL_FLASH_RECEIPT="$EVIDENCE_ROOT/hil-flash-receipt.json"
 export HIL_BOOT_SERIAL="$EVIDENCE_ROOT/hil-boot-serial.log"
+export HIL_BOOT_CAPTURE_RECEIPT="$EVIDENCE_ROOT/hil-boot-capture-receipt.json"
 export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"
 export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
 export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
@@ -492,20 +493,12 @@ python3 scripts/lesson_studio_task14_build_identity.py flash-attest \
   --started-at "$HIL_FLASH_STARTED_AT" \
   --completed-at "$HIL_FLASH_COMPLETED_AT" \
   --output "$HIL_FLASH_RECEIPT"
-python3 - "$SERIAL_PORT" "$HIL_BOOT_SERIAL" <<'PY'
-from pathlib import Path
-import serial
-import sys
-import time
-
-deadline = time.monotonic() + 60
-with serial.Serial(sys.argv[1], 115200, timeout=0.25) as source, \
-        Path(sys.argv[2]).open("wb") as output:
-    while time.monotonic() < deadline:
-        data = source.read(4096)
-        if data:
-            output.write(data)
-PY
+/Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
+  scripts/lesson_studio_task14_build_identity.py boot-capture \
+  --serial-port "$SERIAL_PORT" \
+  --serial-log "$HIL_BOOT_SERIAL" \
+  --receipt "$HIL_BOOT_CAPTURE_RECEIPT" \
+  --timeout-seconds 60
 python3 scripts/lesson_studio_task14_hil_storage.py preflight \
   --device-id "$DEVICE_ID" \
   --device-uuid "$DEVICE_ALIAS" \
@@ -521,7 +514,7 @@ python3 scripts/lesson_studio_task14_build_identity.py boot-attest \
   --manifest "$HIL_BUILD_MANIFEST" \
   --event hil-flash \
   --flash-receipt "$HIL_FLASH_RECEIPT" \
-  --boot-serial "$HIL_BOOT_SERIAL" \
+  --boot-capture-receipt "$HIL_BOOT_CAPTURE_RECEIPT" \
   --connection-attestation "$HIL_PREFLIGHT_ATTESTATION" \
   --observed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --output "$HIL_BOOT_ATTESTATION"
