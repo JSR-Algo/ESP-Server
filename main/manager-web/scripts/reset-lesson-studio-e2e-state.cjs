@@ -27,10 +27,10 @@ function buildResetCommands({ composeFile = DEFAULT_COMPOSE_FILE, projectName = 
 }
 
 function resetOptionsFromEnvironment(env = process.env) {
-  // Keep reset targeting aligned with Compose: the suite-specific namespace
-  // overrides the standard Compose project, then buildResetCommands defaults.
-  const projectName = env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
-    || env.COMPOSE_PROJECT_NAME;
+  // Match Compose precedence: its standard project name wins over the
+  // suite-specific fallback, then buildResetCommands supplies the default.
+  const projectName = env.COMPOSE_PROJECT_NAME
+    || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME;
   return projectName ? { projectName } : {};
 }
 

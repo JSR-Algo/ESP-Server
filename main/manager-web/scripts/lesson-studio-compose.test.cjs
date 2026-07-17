@@ -74,7 +74,7 @@ test('lesson studio compose isolates every named Docker resource through one pre
     compose,
     /\$\{LESSON_STUDIO_E2E_RESOURCE_PREFIX:-tbot-ls-e2e\}/,
   );
-  const resourcePrefix = '${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}';
+  const resourcePrefix = '${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}';
   for (const suffix of (
     'pg redis mysql backend seed-pg web seed-mysql'.split(' ')
   )) {

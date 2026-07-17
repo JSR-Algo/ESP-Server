@@ -2,6 +2,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+IMPLEMENTATION_PLAN = (
+    ROOT
+    / "docs/superpowers/plans/2026-07-15-task14-exact-cache-eviction-implementation.md"
+)
 
 
 def test_lesson_studio_compose_is_test_owned_and_complete():
@@ -10,8 +14,8 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     project_name = "${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}"
     resource_prefix = (
         "${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-"
-        "${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-"
-        "${COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}"
+        "${COMPOSE_PROJECT_NAME:-"
+        "${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}"
     )
     assert f"name: {project_name}" in compose
     for suffix in (
@@ -44,6 +48,14 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "condition: service_healthy" in compose
     assert "/tbot/user/captcha" not in compose
     assert "http://127.0.0.1:8002/login" in compose
+
+
+def test_documented_launch_uses_one_unambiguous_compose_project_namespace():
+    plan = IMPLEMENTATION_PLAN.read_text()
+
+    assert "COMPOSE_PROJECT_NAME=tbot-ls-e2e-task14" in plan
+    assert "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME=tbot-ls-e2e-task14" not in plan
+    assert "docker compose -p" not in plan
 
 
 def test_lesson_studio_seed_includes_real_response_visual_sources():

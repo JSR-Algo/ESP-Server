@@ -948,6 +948,11 @@ Expected: intentional commits exist, diffs are whitespace-clean, and `main/manag
 
 ```bash
 cd /Users/manhhodinh/.config/superpowers/worktrees/esp32-server/production-lesson-studio
+export COMPOSE_PROJECT_NAME=tbot-ls-e2e-task14
+export LESSON_STUDIO_E2E_BACKEND_HOST_PORT=13100
+export LESSON_STUDIO_E2E_WEB_HOST_PORT=18102
+export LESSON_STUDIO_E2E_BASE_URL=http://127.0.0.1:18102
+export LESSON_ASSET_ORIGIN_BASE=http://127.0.0.1:18102/tvideo-demo
 docker compose -f docs/docker/docker-compose.lesson-studio-e2e.yml up -d --build
 docker compose -f docs/docker/docker-compose.lesson-studio-e2e.yml ps
 curl --silent --output /dev/null --write-out '%{http_code}\n' \

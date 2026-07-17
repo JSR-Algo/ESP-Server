@@ -31,7 +31,7 @@ test('resets auth throttling through compose service names', () => {
   ]);
 });
 
-test('reset project precedence is custom, standard Compose, then default', () => {
+test('reset project precedence is standard Compose, custom fallback, then default', () => {
   assert.deepEqual(resetOptionsFromEnvironment({
     COMPOSE_PROJECT_NAME: 'standard-isolated',
   }), {
@@ -40,6 +40,11 @@ test('reset project precedence is custom, standard Compose, then default', () =>
   assert.deepEqual(resetOptionsFromEnvironment({
     LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
     COMPOSE_PROJECT_NAME: 'standard-isolated',
+  }), {
+    projectName: 'standard-isolated',
+  });
+  assert.deepEqual(resetOptionsFromEnvironment({
+    LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME: 'task14-isolated',
   }), {
     projectName: 'task14-isolated',
   });
