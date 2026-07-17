@@ -130,6 +130,22 @@ class DeviceChildProfileInternalControllerTest {
                 .andExpect(status().isConflict());
     }
 
+    @Test
+    void successResponseBindsOutcomeDeviceRevisionAndHash() throws Exception {
+        DeviceChildProfileProjectionService service = mock(DeviceChildProfileProjectionService.class);
+        when(service.apply(eq("device-1"), any())).thenReturn(DeviceChildProfileProjectionService.Outcome.APPLIED);
+        String hash = "0".repeat(64);
+
+        mvc(service).perform(put("/internal/devices/device-1/child-profile")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"mode\":\"clear\",\"revision\":7,\"payloadHash\":\"" + hash + "\",\"profile\":null}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.outcome").value("APPLIED"))
+                .andExpect(jsonPath("$.data.deviceId").value("device-1"))
+                .andExpect(jsonPath("$.data.revision").value(7))
+                .andExpect(jsonPath("$.data.payloadHash").value(hash));
+    }
+
     private static MockMvc mvc(DeviceChildProfileProjectionService service) {
         return MockMvcBuilders.standaloneSetup(new DeviceChildProfileInternalController(service))
                 .setControllerAdvice(new RenExceptionHandler())

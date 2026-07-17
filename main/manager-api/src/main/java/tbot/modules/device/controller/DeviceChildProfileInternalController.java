@@ -32,11 +32,19 @@ public class DeviceChildProfileInternalController {
     }
 
     @PutMapping("/{deviceId}/child-profile")
-    public Result<DeviceChildProfileProjectionService.Outcome> replace(
+    public Result<ProjectionResponse> replace(
             @PathVariable String deviceId,
             @Valid @RequestBody DeviceChildProfileProjectionDTO request) {
-        return new Result<DeviceChildProfileProjectionService.Outcome>().ok(service.apply(deviceId, request));
+        DeviceChildProfileProjectionService.Outcome outcome = service.apply(deviceId, request);
+        return new Result<ProjectionResponse>().ok(new ProjectionResponse(
+                outcome, deviceId, request.getRevision(), request.getPayloadHash()));
     }
+
+    public record ProjectionResponse(
+            DeviceChildProfileProjectionService.Outcome outcome,
+            String deviceId,
+            long revision,
+            String payloadHash) {}
 
     @ExceptionHandler(ProjectionConflictException.class)
     ResponseEntity<Result<Void>> conflict(ProjectionConflictException exception) {
