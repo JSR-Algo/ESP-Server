@@ -755,6 +755,82 @@ def quarantine_scenario_failure(primary, *, secondary_log=None, **evidence):
     raise primary
 
 
+def _safe_failure_text(capture, *, fallback="<capture unavailable>\n"):
+    try:
+        value = capture()
+        return value if isinstance(value, str) else str(value)
+    except BaseException:
+        return fallback
+
+
+def _safe_failure_utc(fallback):
+    try:
+        return utc_now()
+    except BaseException:
+        return fallback
+
+
+def _attempt_failure_quarantine(
+    arguments,
+    *,
+    scenario,
+    primary,
+    phase,
+    utc_start,
+    completed_events,
+    build_identity,
+    last_responses,
+    secret="",
+    monitor=None,
+    server_logs_allowed=False,
+    secondary_events=(),
+):
+    failure_phase = phase if isinstance(
+        primary,
+        (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError),
+    ) else "internal"
+    serial_log = _safe_failure_text(
+        lambda: monitor.snapshot() if monitor is not None else ""
+    )
+    server_log = _safe_failure_text(
+        lambda: _server_logs(arguments.server_container, utc_start, (secret,))
+        if server_logs_allowed else ""
+    )
+    command = _safe_failure_text(
+        lambda: sanitized_command_text(sys.argv, (secret,))
+    )
+    timeline_log = _safe_failure_text(
+        lambda: "\n".join(
+            [
+                *(f"{index + 1} {name}" for index, name in enumerate(completed_events)),
+                *secondary_events,
+            ]
+        )
+    )
+    try:
+        write_failure_evidence(
+            arguments.failure_evidence_dir,
+            scenario=scenario,
+            phase=failure_phase,
+            utc_start=utc_start,
+            utc_failure=_safe_failure_utc(utc_start),
+            completed_events=completed_events,
+            build_identity=build_identity,
+            last_responses=last_responses,
+            command=command,
+            serial_log=serial_log,
+            server_log=server_log,
+            timeline_log=timeline_log,
+            secrets=(secret,),
+        )
+    except BaseException:
+        with suppress(BaseException):
+            print(
+                "lesson storage HIL: failure evidence publication also failed",
+                file=sys.stderr,
+            )
+
+
 def finalize_scenario_directory(directory, payloads, *, power_loss):
     directory = Path(directory)
     expected = scenario_artifact_names(power_loss=power_loss)
@@ -850,6 +926,7 @@ def publish_validated_scenario_directory(
 ):
     final_directory = Path(final_directory)
     parent = final_directory.parent
+    parent_existed = os.path.lexists(parent)
     parent.mkdir(parents=True, exist_ok=True)
     require(
         not os.path.lexists(final_directory),
@@ -914,6 +991,9 @@ def publish_validated_scenario_directory(
             shutil.rmtree(cleanup)
         with suppress(Exception):
             _fsync_directory(parent)
+        if not parent_existed:
+            with suppress(OSError):
+                parent.rmdir()
         raise
 
 
@@ -1722,9 +1802,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
     sibling = None
     client = None
     monitor = None
-    staged = False
+    stage_attempted = False
     cleaned = False
     recovery_blocked_cleanup = False
+    failure_in_progress = False
     try:
         build_identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
         phase = "attestation"
@@ -1750,9 +1831,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         responses["inspectBefore"] = inspect_before
         events.append("inspect-before")
         phase = "stage"
+        stage_attempted = True
         stage = client.stage(cache_key, fixture, sibling)
         responses["stage"] = stage
-        staged = True
         events.append("stage")
         declared = arguments.asset_bytes if checkpoint == "after_download_bytes" else 0
         phase = "arm"
@@ -1999,58 +2080,49 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         )
         return result
     except BaseException as primary:
+        failure_in_progress = True
         secondary_events = []
-        if client is not None and staged and not cleaned and not recovery_blocked_cleanup:
+        if client is not None and stage_attempted and not cleaned and not recovery_blocked_cleanup:
             try:
                 responses["cleanup"] = client.cleanup(cache_key, fixture, sibling)
                 events.append("cleanup")
-            except Exception:
+            except BaseException:
                 secondary_events.append("secondary fixture cleanup also failed")
-        failure_phase = phase if isinstance(
-            primary,
-            (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError),
-        ) else "internal"
-        serial_log = monitor.snapshot() if monitor is not None else ""
-        server_log = ""
-        if build_identity is not None:
-            with suppress(Exception):
-                server_log = _server_logs(arguments.server_container, started, (secret,))
-        timeline_log = "\n".join(
-            f"{index + 1} {name}" for index, name in enumerate(events)
-        )
-        if secondary_events:
-            timeline_log += "\n" + "\n".join(secondary_events)
-        try:
-            write_failure_evidence(
-                arguments.failure_evidence_dir,
+        with suppress(BaseException):
+            _attempt_failure_quarantine(
+                arguments,
                 scenario=scenario,
-                phase=failure_phase,
+                primary=primary,
+                phase=phase,
                 utc_start=started,
-                utc_failure=utc_now(),
                 completed_events=events,
                 build_identity=build_identity,
                 last_responses=responses,
-                command=sanitized_command_text(sys.argv, (secret,)),
-                serial_log=serial_log,
-                server_log=server_log,
-                timeline_log=timeline_log,
-                secrets=(secret,),
-            )
-        except BaseException:
-            print(
-                "lesson storage HIL: failure evidence publication also failed",
-                file=sys.stderr,
+                secret=secret,
+                monitor=monitor,
+                server_logs_allowed=build_identity is not None,
+                secondary_events=secondary_events,
             )
         raise
     finally:
         if monitor is not None:
-            with suppress(Exception):
-                monitor.stop()
+            if failure_in_progress:
+                with suppress(BaseException):
+                    monitor.stop()
+            else:
+                with suppress(Exception):
+                    monitor.stop()
 
 
-def preflight(arguments):
+def preflight(arguments, *, phase_changed=None, context=None):
+    if phase_changed is not None:
+        phase_changed("setup")
     identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
+    if context is not None:
+        context["buildIdentity"] = identity
     secret = os.environ.get(arguments.mint_secret_env, "")
+    if context is not None:
+        context["secret"] = secret
     require(bool(secret), f"missing {arguments.mint_secret_env}")
     device_id = _normalize_mac(arguments.device_id)
     require(re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", arguments.device_uuid) is not None, "invalid device UUID")
@@ -2058,11 +2130,19 @@ def preflight(arguments):
     require(type(arguments.asset_bytes) is int and arguments.asset_bytes > 0, "invalid asset byte count")
     validate_lab_url(arguments.esp_base_url, require_path=False)
     validate_lab_url(arguments.asset_url, require_path=True)
+    if phase_changed is not None:
+        phase_changed("attestation")
     connection_identity = attest_live_connection(
         arguments.esp_base_url, arguments.device_uuid, device_id
     )
+    if phase_changed is not None:
+        phase_changed("setup")
     client = HilToolClient(RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret))
+    if phase_changed is not None:
+        phase_changed("status")
     status = client.status()
+    if context is not None:
+        context["statusBefore"] = status
     require(status["status"] == "idle", "HIL controller is not idle")
     result = {
         "status": "PASS",
@@ -2073,6 +2153,57 @@ def preflight(arguments):
     }
     print(json.dumps(result, sort_keys=True))
     return result
+
+
+def _remove_matrix_report(report_path):
+    with suppress(FileNotFoundError):
+        Path(report_path).unlink()
+
+
+def run_matrix(arguments):
+    validate_run_roots(arguments)
+    scenario = HIL_STORAGE_SCENARIOS[0]
+    started = utc_now()
+    phase = "publication"
+    context = {"buildIdentity": None, "statusBefore": None, "secret": ""}
+    responses = {key: None for key in FAILURE_RESPONSE_KEYS}
+    scenario_active = False
+
+    def set_failure_phase(value):
+        nonlocal phase
+        phase = value
+
+    try:
+        _remove_matrix_report(Path(arguments.evidence_dir) / MATRIX_REPORT_NAME)
+        phase = "setup"
+        preflight_result = preflight(
+            arguments,
+            phase_changed=set_failure_phase,
+            context=context,
+        )
+        responses["statusBefore"] = context["statusBefore"]
+        for current_scenario in HIL_STORAGE_SCENARIOS:
+            scenario_active = True
+            run_scenario(arguments, current_scenario)
+            scenario_active = False
+        phase = "publication"
+        return publish_matrix_report(arguments, preflight_result)
+    except BaseException as primary:
+        if not scenario_active:
+            with suppress(BaseException):
+                _attempt_failure_quarantine(
+                    arguments,
+                    scenario=scenario,
+                    primary=primary,
+                    phase=phase,
+                    utc_start=started,
+                    completed_events=[],
+                    build_identity=context["buildIdentity"],
+                    last_responses=responses,
+                    secret=context["secret"],
+                    server_logs_allowed=context["buildIdentity"] is not None,
+                )
+        raise
 
 
 def _add_live_arguments(parser):
@@ -2113,22 +2244,7 @@ def main():
             validate_run_roots(arguments)
             run_scenario(arguments, arguments.scenario)
         else:
-            validate_run_roots(arguments)
-            report_path = Path(arguments.evidence_dir) / MATRIX_REPORT_NAME
-            with suppress(FileNotFoundError):
-                report_path.unlink()
-            preflight_result = None
-            for scenario in HIL_STORAGE_SCENARIOS:
-                result = run_scenario(arguments, scenario)
-                if preflight_result is None:
-                    preflight_result = {
-                        key: result[key]
-                        for key in (
-                            "status", "deviceId", "deviceUuid",
-                            "connectionIdentity", "buildIdentity",
-                        )
-                    }
-            publish_matrix_report(arguments, preflight_result)
+            run_matrix(arguments)
         return 0
     except Exception as exc:
         print(f"lesson storage HIL: FAIL: {redact_text(exc)}", file=sys.stderr)

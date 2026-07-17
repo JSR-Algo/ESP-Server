@@ -2826,3 +2826,65 @@ def test_quarantine_failure_wraps_earliest_setup_and_classifies_unexpected_error
     combined = "".join(path.read_text(errors="replace") for path in bundles[0].iterdir())
     assert "secret setup detail" not in combined
     assert "secret internal detail" not in combined
+
+
+def test_quarantine_failure_preserves_primary_when_capture_context_also_fails(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    primary = hil.HilValidationError("primary status failure")
+
+    class FailingClient:
+        def status(self, *_args):
+            raise primary
+
+    class FailingMonitor:
+        def start(self):
+            return self
+
+        def snapshot(self):
+            raise OSError("secondary serial capture failure")
+
+        def stop(self):
+            raise OSError("secondary stop failure")
+
+    arguments = argparse.Namespace(
+        build_manifest=tmp_path / "build.json",
+        esp_base_url="http://127.0.0.1:8000",
+        device_uuid="fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        device_id="28:84:85:85:1a:80",
+        mint_secret_env="TBOT_DEVICE_MINT_SECRET",
+        asset_sha256="d" * 64,
+        asset_bytes=1,
+        asset_url="http://127.0.0.1:8000/asset",
+        serial_port="/dev/null",
+        server_container="unused",
+        evidence_dir=tmp_path / "pass",
+        failure_evidence_dir=tmp_path / "failures",
+    )
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "test-secret")
+    monkeypatch.setattr(hil, "load_build_identity", lambda *_a, **_k: {"profile": "hil"})
+    monkeypatch.setattr(
+        hil,
+        "attest_live_connection",
+        lambda *_a, **_k: {"deviceId": arguments.device_id},
+    )
+    monkeypatch.setattr(hil, "RawMcpTransport", lambda *_args: object())
+    monkeypatch.setattr(hil, "HilToolClient", lambda _transport: FailingClient())
+    monkeypatch.setattr(hil, "SerialMonitor", lambda _port: FailingMonitor())
+    monkeypatch.setattr(
+        hil,
+        "_server_logs",
+        lambda *_args: (_ for _ in ()).throw(OSError("secondary server capture failure")),
+    )
+
+    with pytest.raises(hil.HilValidationError) as caught:
+        hil.run_scenario(arguments, hil.HIL_STORAGE_SCENARIOS[0])
+
+    assert caught.value is primary
+    bundles = list(Path(arguments.failure_evidence_dir).iterdir())
+    assert len(bundles) == 1
+    failure = json.loads((bundles[0] / "failure.json").read_text())
+    assert failure["phase"] == "status"
+    assert (bundles[0] / "serial.log").read_text() == "<capture unavailable>\n"
+    assert (bundles[0] / "server.log").read_text() == "<capture unavailable>\n"

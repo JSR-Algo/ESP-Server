@@ -199,7 +199,7 @@ def hil_preservation_entries(cache_key, state, digest):
 
 def run_scenario_with_fakes(
     monkeypatch, tmp_path, scenario, *, recovery_response=None,
-    recovered_inspection=None, injected_response=None, state=None,
+    recovered_inspection=None, injected_response=None, state=None, stage_error=None,
 ):
     hil = load_script("lesson_studio_task14_hil_storage.py")
     operation, checkpoint, action, threshold, pause_seconds, power_loss = hil.SCENARIO_SPECS[scenario]
@@ -298,6 +298,8 @@ def run_scenario_with_fakes(
 
         def stage(self, *_args):
             calls.append("stage")
+            if stage_error is not None:
+                raise stage_error
             return {"cacheKey": KEY, "siblingCacheKey": SIBLING, "fixture": "preservation_set", "status": "staged", "changed": True}
 
         def arm(self, *_args, **_kwargs):
@@ -577,6 +579,27 @@ def test_run_scenario_recovery_failure_prevents_cleanup_and_pass_publication(
     assert state["published"] == []
 
 
+def test_failure_evidence_stage_attempt_cleanup_runs_after_remote_mutation_throws(
+    monkeypatch, tmp_path,
+):
+    state = {}
+    primary = RuntimeError("remote stage response lost")
+
+    with pytest.raises(RuntimeError) as caught:
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            "evict-before-first-unlink-fail",
+            state=state,
+            stage_error=primary,
+        )
+
+    assert caught.value is primary
+    assert state["calls"][:4] == ["status-before", "inspect-before", "stage", "cleanup"]
+    assert state["client"].cleanup_count == 1
+    assert state["published"] == []
+
+
 @pytest.mark.parametrize(
     "scenario",
     ("evict-after-unlinks-fail", "evict-before-rmdir-fail"),
@@ -846,6 +869,37 @@ def test_hil_storage_publication_failure_rolls_back_staging_and_final(
     assert captured.value is marker
     assert not os.path.lexists(final)
     assert not list(tmp_path.glob(f".{final.name}.staging-*"))
+
+
+@pytest.mark.parametrize("preexisting_root", (False, True))
+def test_failure_evidence_publication_failure_removes_only_new_empty_pass_root(
+    tmp_path, monkeypatch, preexisting_root,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass-root"
+    if preexisting_root:
+        pass_root.mkdir()
+    final = pass_root / "evict-after-unlinks-fail"
+    marker = RuntimeError("publication failed before final publish")
+    monkeypatch.setattr(
+        hil,
+        "finalize_scenario_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(marker),
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        hil.publish_validated_scenario_directory(
+            final,
+            _publication_payloads(hil, power_loss=False),
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+
+    assert caught.value is marker
+    assert pass_root.exists() is preexisting_root
+    if preexisting_root:
+        assert not any(pass_root.iterdir())
 
 
 @pytest.mark.parametrize("power_loss", (False, True))
@@ -1348,7 +1402,9 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
     }
 
     monkeypatch.setattr(
-        hil, "preflight", lambda _arguments: pytest.fail("preflight escaped guarded scenario")
+        hil,
+        "preflight",
+        lambda _arguments, **_kwargs: (calls.append("preflight"), preflight_result)[1],
     )
     monkeypatch.setattr(
         hil,
@@ -1382,8 +1438,99 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
     )
 
     assert hil.main() == 0
-    assert calls == list(hil.HIL_STORAGE_SCENARIOS)
+    assert calls == ["preflight", *hil.HIL_STORAGE_SCENARIOS]
     assert (evidence_root / "hil-matrix-report.json").is_file()
+
+
+def _failure_evidence_matrix_arguments(tmp_path):
+    return SimpleNamespace(
+        device_id="28:84:85:85:1a:80",
+        device_uuid="fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        serial_port="/dev/null",
+        esp_base_url="http://127.0.0.1:8000",
+        asset_url="http://127.0.0.1:8000/asset",
+        asset_sha256="d" * 64,
+        asset_bytes=1,
+        build_manifest=tmp_path / "build.json",
+        evidence_dir=tmp_path / "pass",
+        failure_evidence_dir=tmp_path / "failures",
+        mint_secret_env="TBOT_DEVICE_MINT_SECRET",
+        server_container="unused",
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_phase"),
+    (("preflight", "setup"), ("report-unlink", "publication"), ("publish", "publication")),
+)
+def test_failure_evidence_run_matrix_quarantines_preflight_and_report_failures(
+    tmp_path, monkeypatch, failure_point, expected_phase,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    identity = {
+        "status": "PASS",
+        "deviceId": arguments.device_id,
+        "deviceUuid": arguments.device_uuid,
+        "connectionIdentity": {
+            "deviceId": arguments.device_id,
+            "clientId": arguments.device_uuid,
+        },
+        "buildIdentity": {"profile": "hil"},
+    }
+    primary = (
+        hil.HilValidationError("matrix preflight failed")
+        if failure_point == "preflight"
+        else OSError(f"matrix {failure_point} failed")
+    )
+    monkeypatch.setattr(
+        hil,
+        "preflight",
+        lambda _arguments, **_kwargs: (
+            (_ for _ in ()).throw(primary) if failure_point == "preflight" else identity
+        ),
+    )
+    monkeypatch.setattr(hil, "run_scenario", lambda *_args: identity)
+    monkeypatch.setattr(
+        hil,
+        "_remove_matrix_report",
+        lambda *_args: (
+            (_ for _ in ()).throw(primary) if failure_point == "report-unlink" else None
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        hil,
+        "publish_matrix_report",
+        lambda *_args: (
+            (_ for _ in ()).throw(primary) if failure_point == "publish" else None
+        ),
+    )
+
+    with pytest.raises(type(primary)) as caught:
+        hil.run_matrix(arguments)
+
+    assert caught.value is primary
+    bundles = list(Path(arguments.failure_evidence_dir).iterdir())
+    assert len(bundles) == 1
+    failure = json.loads((bundles[0] / "failure.json").read_text())
+    assert failure["scenario"] == hil.HIL_STORAGE_SCENARIOS[0]
+    assert failure["phase"] == expected_phase
+    assert failure["errorCode"] == hil.failure_error_code(expected_phase)
+    assert not (Path(arguments.evidence_dir) / hil.MATRIX_REPORT_NAME).exists()
+
+
+def test_failure_evidence_run_matrix_checks_roots_before_hardware(tmp_path, monkeypatch):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    arguments.failure_evidence_dir = arguments.evidence_dir / "nested"
+    calls = []
+    monkeypatch.setattr(hil, "preflight", lambda *_args: calls.append("hardware"))
+
+    with pytest.raises(hil.HilValidationError, match="overlap"):
+        hil.run_matrix(arguments)
+
+    assert calls == []
 
 
 def test_publish_matrix_report_binds_scenario_artifacts_and_attended_identity(tmp_path):
