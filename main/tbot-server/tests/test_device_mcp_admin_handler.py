@@ -412,6 +412,62 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(raw_call.await_args.args[0], conn)
                 backend_lookup.assert_not_awaited()
 
+    async def test_hil_duplicate_firmware_client_identity_fails_closed(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        firmware_uuid = "fce7bec8-8478-4ab4-817f-7b87c41c1f91"
+        connections = {
+            self.HIL_MAC: SimpleNamespace(
+                device_id=self.HIL_MAC,
+                client_id=firmware_uuid,
+                mcp_client=object(),
+            ),
+            "28:84:85:85:1a:81": SimpleNamespace(
+                device_id="28:84:85:85:1a:81",
+                headers={"client-id": firmware_uuid},
+                mcp_client=object(),
+            ),
+        }
+        handler = DeviceMCPAdminHandler(
+            {"lesson": {"storage_hil_device_allowlist": [self.HIL_MAC]}},
+            connections,
+        )
+        raw_call = AsyncMock(return_value="ok")
+        backend_lookup = AsyncMock(
+            side_effect=AssertionError("backend identity fallback must not run")
+        )
+
+        with patch(
+            "core.api.device_mcp_admin_handler._call_raw_mcp_tool",
+            raw_call,
+        ), patch.object(
+            handler._shared,
+            "_find_connection",
+            backend_lookup,
+        ):
+            response = await handler.handle_post(
+                _FakeRequest(
+                    device_id=firmware_uuid,
+                    body={
+                        "toolName": "self.lesson_assets.hil.status",
+                        "allowUnlisted": True,
+                        "args": {},
+                    },
+                )
+            )
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            await _response_json(response),
+            {
+                "error": "MCP_CLIENT_IDENTITY_AMBIGUOUS",
+                "message": "Device MCP connection identity is ambiguous",
+            },
+        )
+        raw_call.assert_not_awaited()
+        backend_lookup.assert_not_awaited()
+
     async def test_hil_prefix_unknown_tool_and_non_exact_allow_unlisted_are_forbidden(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
         raw_call = AsyncMock(side_effect=AssertionError("must not dispatch"))

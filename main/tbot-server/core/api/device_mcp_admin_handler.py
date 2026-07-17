@@ -47,6 +47,13 @@ class MCPUnknownToolError(RuntimeError):
         super().__init__("mcp-unknown-tool")
 
 
+class MCPAmbiguousClientIdentityError(RuntimeError):
+    """An internal route matched more than one active firmware client identity."""
+
+    def __init__(self):
+        super().__init__("mcp-client-identity-ambiguous")
+
+
 def _is_correlated_unknown_tool_result(raw_result, tool_name: str) -> bool:
     if not isinstance(raw_result, dict) or raw_result.get("isError") is not True:
         return False
@@ -203,9 +210,14 @@ class DeviceMCPAdminHandler:
             conn = self.connections.get(device_id)
             if conn is not None:
                 return conn
+            matched = None
             for candidate in self.connections.values():
                 if _conn_client_identity(candidate) == device_id:
-                    return candidate
+                    if matched is not None:
+                        raise MCPAmbiguousClientIdentityError()
+                    matched = candidate
+            if matched is not None:
+                return matched
         return await self._shared._find_connection(device_id)
 
     async def handle_post(self, request: web.Request) -> web.Response:
@@ -234,7 +246,16 @@ class DeviceMCPAdminHandler:
             return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         device_id = request.match_info.get("deviceId", "")
-        conn = await self._find_connection(device_id)
+        try:
+            conn = await self._find_connection(device_id)
+        except MCPAmbiguousClientIdentityError:
+            return web.json_response(
+                {
+                    "error": "MCP_CLIENT_IDENTITY_AMBIGUOUS",
+                    "message": "Device MCP connection identity is ambiguous",
+                },
+                status=409,
+            )
         if conn is None:
             return web.json_response(
                 {"data": {"called": False, "reason": "device-offline"}},
