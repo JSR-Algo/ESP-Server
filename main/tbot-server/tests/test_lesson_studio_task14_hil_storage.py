@@ -383,12 +383,16 @@ def run_scenario_with_fakes(
             "write_failure_evidence",
             lambda _root, **evidence: state["failure_evidence"].append(evidence),
         )
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    pass_root.mkdir(exist_ok=True)
+    failure_root.mkdir(exist_ok=True)
     arguments = SimpleNamespace(
         build_manifest=tmp_path / "manifest.json", esp_base_url="http://127.0.0.1",
         device_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", device_id="28:84:85:85:1a:80",
         mint_secret_env="TBOT_TEST_SECRET", asset_sha256="d" * 64, asset_bytes=1,
         asset_url="http://127.0.0.1/asset", serial_port="fake",
-        evidence_dir=tmp_path / "pass", failure_evidence_dir=tmp_path / "failures",
+        evidence_dir=pass_root, failure_evidence_dir=failure_root,
         server_container="server",
     )
     result = hil.run_scenario(arguments, scenario, operator_input=lambda _prompt: "")
@@ -1586,6 +1590,9 @@ def test_release_ledger_rejects_self_authored_hil_matrix_summary(tmp_path):
 def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatch):
     hil = load_script("lesson_studio_task14_hil_storage.py")
     evidence_root = tmp_path / "matrix"
+    failure_root = tmp_path / "failures"
+    evidence_root.mkdir()
+    failure_root.mkdir()
     manifest = tmp_path / "build.json"
     manifest.write_text("{}")
     calls = []
@@ -1632,7 +1639,7 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
             "--asset-bytes", "1",
             "--build-manifest", str(manifest),
             "--evidence-dir", str(evidence_root),
-            "--failure-evidence-dir", str(tmp_path / "failures"),
+            "--failure-evidence-dir", str(failure_root),
         ],
     )
 
@@ -1642,6 +1649,12 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
 
 
 def _failure_evidence_matrix_arguments(tmp_path):
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    if not os.path.lexists(pass_root):
+        pass_root.mkdir()
+    if not os.path.lexists(failure_root):
+        failure_root.mkdir()
     return SimpleNamespace(
         device_id="28:84:85:85:1a:80",
         device_uuid="fce7bec8-8478-4ab4-817f-7b87c41c1f91",
@@ -1651,8 +1664,8 @@ def _failure_evidence_matrix_arguments(tmp_path):
         asset_sha256="d" * 64,
         asset_bytes=1,
         build_manifest=tmp_path / "build.json",
-        evidence_dir=tmp_path / "pass",
-        failure_evidence_dir=tmp_path / "failures",
+        evidence_dir=pass_root,
+        failure_evidence_dir=failure_root,
         mint_secret_env="TBOT_DEVICE_MINT_SECRET",
         server_container="unused",
     )
@@ -1723,6 +1736,7 @@ def test_failure_evidence_run_matrix_checks_roots_before_hardware(tmp_path, monk
     hil = load_script("lesson_studio_task14_hil_storage.py")
     arguments = _failure_evidence_matrix_arguments(tmp_path)
     arguments.failure_evidence_dir = arguments.evidence_dir / "nested"
+    arguments.failure_evidence_dir.mkdir()
     calls = []
     monkeypatch.setattr(hil, "preflight", lambda *_args: calls.append("hardware"))
 
@@ -3227,6 +3241,7 @@ def test_failure_evidence_roots_reject_overlap_symlinks_and_aliases_before_acces
     assert hil.validate_evidence_roots(pass_root, failure_root) == (
         pass_root.resolve(), failure_root.resolve()
     )
+    (pass_root / "child").mkdir()
     for candidate in (pass_root, pass_root / "child", tmp_path):
         with pytest.raises(hil.HilValidationError, match="overlap"):
             hil.validate_evidence_roots(pass_root, candidate)
@@ -3271,6 +3286,70 @@ def test_failure_evidence_root_preflight_rejects_existing_non_directories_before
             hil.run_scenario(arguments, hil.HIL_STORAGE_SCENARIOS[0])
         else:
             hil.run_matrix(arguments)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("alias_kind", ("missing", "case-variant", "unicode-normalized"))
+def test_failure_evidence_root_preflight_requires_existing_distinct_roots_before_access(
+    tmp_path, monkeypatch, alias_kind,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    if alias_kind == "missing":
+        pass_root = tmp_path / "missing-pass"
+        failure_root = tmp_path / "missing-failure"
+    elif alias_kind == "case-variant":
+        pass_root = tmp_path / "storage-hil"
+        failure_root = tmp_path / "STORAGE-HIL"
+        pass_root.mkdir()
+    else:
+        pass_root = tmp_path / "évidence-hil"
+        failure_root = tmp_path / "e\u0301vidence-hil"
+        pass_root.mkdir()
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    arguments.evidence_dir = pass_root
+    arguments.failure_evidence_dir = failure_root
+    calls = []
+    monkeypatch.setattr(hil, "load_build_identity", lambda *_a, **_k: calls.append("build"))
+    monkeypatch.setattr(hil, "attest_live_connection", lambda *_a, **_k: calls.append("attest"))
+    monkeypatch.setattr(hil, "preflight", lambda *_a, **_k: calls.append("preflight"))
+
+    with pytest.raises(hil.HilValidationError, match="existing|alias|overlap"):
+        hil.run_matrix(arguments)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", ("disappear", "replace"))
+def test_failure_evidence_root_preflight_rejects_identity_change_during_validation(
+    tmp_path, monkeypatch, mutation,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failure"
+    pass_root.mkdir()
+    failure_root.mkdir()
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    arguments.evidence_dir = pass_root
+    arguments.failure_evidence_dir = failure_root
+    calls = []
+    original_resolve = Path.resolve
+    mutated = False
+
+    def mutate_during_resolve(path, strict=False):
+        nonlocal mutated
+        if Path(path) == pass_root and not mutated:
+            mutated = True
+            pass_root.rmdir()
+            if mutation == "replace":
+                pass_root.mkdir()
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", mutate_during_resolve)
+    monkeypatch.setattr(hil, "preflight", lambda *_a, **_k: calls.append("preflight"))
+
+    with pytest.raises((hil.HilValidationError, FileNotFoundError), match="existing|changed|No such"):
+        hil.run_matrix(arguments)
 
     assert calls == []
 

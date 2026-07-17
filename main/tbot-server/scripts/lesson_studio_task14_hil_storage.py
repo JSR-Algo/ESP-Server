@@ -580,19 +580,48 @@ def _reject_existing_symlink_components(path):
             require(not current.is_symlink(), "evidence root contains a symlink")
 
 
+def _snapshot_evidence_root(path):
+    path = Path(path).absolute()
+    current = Path(path.anchor)
+    try:
+        anchor = os.lstat(current)
+    except OSError:
+        raise HilValidationError("existing evidence root is required") from None
+    snapshot = [(str(current), anchor.st_dev, anchor.st_ino, anchor.st_mode)]
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            observed = os.lstat(current)
+        except OSError:
+            raise HilValidationError("existing evidence root is required") from None
+        require(not stat.S_ISLNK(observed.st_mode), "evidence root contains a symlink")
+        snapshot.append(
+            (str(current), observed.st_dev, observed.st_ino, observed.st_mode)
+        )
+    require(
+        stat.S_ISDIR(snapshot[-1][3]),
+        "existing evidence root must be a real directory",
+    )
+    return tuple(snapshot)
+
+
 def validate_evidence_roots(pass_root, failure_root):
     pass_path = Path(pass_root).absolute()
     failure_path = Path(failure_root).absolute()
-    _reject_existing_symlink_components(pass_path)
-    _reject_existing_symlink_components(failure_path)
-    for path in (pass_path, failure_path):
-        if os.path.lexists(path):
-            require(
-                stat.S_ISDIR(os.lstat(path).st_mode),
-                "existing evidence root must be a real directory",
-            )
-    pass_resolved = pass_path.resolve(strict=False)
-    failure_resolved = failure_path.resolve(strict=False)
+    before = {
+        pass_path: _snapshot_evidence_root(pass_path),
+        failure_path: _snapshot_evidence_root(failure_path),
+    }
+    try:
+        pass_resolved = pass_path.resolve(strict=True)
+        failure_resolved = failure_path.resolve(strict=True)
+    except OSError:
+        raise HilValidationError("existing evidence root is required") from None
+    after = {
+        pass_path: _snapshot_evidence_root(pass_path),
+        failure_path: _snapshot_evidence_root(failure_path),
+    }
+    require(before == after, "evidence root changed during validation")
     try:
         common = Path(os.path.commonpath((pass_resolved, failure_resolved)))
     except ValueError:

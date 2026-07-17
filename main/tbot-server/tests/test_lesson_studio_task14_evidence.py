@@ -2791,6 +2791,8 @@ def test_quarantine_failure_wraps_earliest_setup_and_classifies_unexpected_error
     hil = load_script("lesson_studio_task14_hil_storage.py")
     pass_root = tmp_path / "pass"
     failure_root = tmp_path / "failures"
+    pass_root.mkdir()
+    failure_root.mkdir()
     arguments = argparse.Namespace(
         build_manifest=tmp_path / "missing-build.json",
         esp_base_url="http://127.0.0.1:8000",
@@ -2823,7 +2825,7 @@ def test_quarantine_failure_wraps_earliest_setup_and_classifies_unexpected_error
     assert failure["phase"] == expected_phase
     assert failure["errorCode"] == expected_code
     assert failure["completedEvents"] == []
-    assert not pass_root.exists()
+    assert pass_root.is_dir() and not any(pass_root.iterdir())
     combined = "".join(path.read_text(errors="replace") for path in bundles[0].iterdir())
     assert "secret setup detail" not in combined
     assert "secret internal detail" not in combined
@@ -2834,6 +2836,8 @@ def test_quarantine_failure_preserves_primary_when_capture_context_also_fails(
 ):
     hil = load_script("lesson_studio_task14_hil_storage.py")
     primary = hil.HilValidationError("primary status failure")
+    (tmp_path / "pass").mkdir()
+    (tmp_path / "failures").mkdir()
 
     class FailingClient:
         def status(self, *_args):
@@ -2986,6 +2990,8 @@ hil._server_logs = lambda *_a, **_k: ""
 os.environ["TBOT_DEVICE_MINT_SECRET"] = "test-secret"
 original_int = signal.getsignal(signal.SIGINT)
 original_term = signal.getsignal(signal.SIGTERM)
+Path({str(pass_root)!r}).mkdir()
+Path({str(failure_root)!r}).mkdir()
 sys.argv = [
     str(hil.__file__), "run-scenario",
     "--device-id", "28:84:85:85:1a:80",
@@ -3029,7 +3035,7 @@ raise SystemExit(code)
     assert failure["phase"] == "arm"
     assert failure["completedEvents"][-1] == "cleanup"
     assert not list(failure_root.glob(".*.staging-*"))
-    assert not pass_root.exists()
+    assert pass_root.is_dir() and not any(pass_root.iterdir())
     assert "Traceback" not in stderr
 
 
