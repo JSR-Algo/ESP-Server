@@ -105,12 +105,22 @@ services:
       # by editing these env vars and restarting -- no image rebuild.
       NESTJS_UPSTREAM_HOST: ${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}
       NESTJS_TOKEN: ${NESTJS_TOKEN:-}
+      # Backend-signed child-profile projection requests. The private key remains
+      # backend-only; Spring receives the matching verification material.
+      TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
+      TBOT_PROFILE_SYNC_JWT_ISSUER: ${TBOT_PROFILE_SYNC_JWT_ISSUER:-tbot-backend}
+      TBOT_PROFILE_SYNC_JWT_AUDIENCE: ${TBOT_PROFILE_SYNC_JWT_AUDIENCE:-tbot-manager-api}
+      CHILD_PROFILE_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
+      CHILD_PROFILE_JWT_ISSUER: ${TBOT_PROFILE_SYNC_JWT_ISSUER:-tbot-backend}
+      CHILD_PROFILE_JWT_AUDIENCE: ${TBOT_PROFILE_SYNC_JWT_AUDIENCE:-tbot-manager-api}
     ports:
       - "${TBOT_ADMIN_PORT:-8002}:8002"
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
     networks:
-      - tbot
+      tbot:
+        aliases:
+          - manager-api
 
   tbot-esp32-server-db:
     image: ${MYSQL_IMAGE:-mysql:8.4}
