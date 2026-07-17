@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
+import java.math.BigInteger;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -14,6 +15,9 @@ import java.util.Base64;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -53,6 +57,27 @@ class DeviceChildProfileJwtVerifierTest {
     @Test void rejectsExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MIN_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MAX_VALUE), "device-1"); }
     @Test void rejectsReversedExtremeLifetimeWithoutOverflow() throws Exception { assertRejected(tokenWithTimes(keyPair, Long.MAX_VALUE, NOW.minusSeconds(1).getEpochSecond(), Long.MIN_VALUE), "device-1"); }
 
+    @ParameterizedTest(name = "rejects {0} outside signed long range: {1}")
+    @MethodSource("oversizedNumericDates")
+    void rejectsIntegralNumericDatesOutsideSignedLongRange(String claim, String direction,
+            String issuedAt, String notBefore, String expiry) throws Exception {
+        assertRejected(tokenWithRawTimes(keyPair, issuedAt, notBefore, expiry), "device-1");
+    }
+
+    private static java.util.stream.Stream<Arguments> oversizedNumericDates() {
+        BigInteger modulus = BigInteger.ONE.shiftLeft(64);
+        String iat = Long.toString(NOW.minusSeconds(2).getEpochSecond());
+        String nbf = Long.toString(NOW.minusSeconds(1).getEpochSecond());
+        String exp = Long.toString(NOW.plusSeconds(30).getEpochSecond());
+        return java.util.stream.Stream.of(
+                Arguments.of("iat", "above", modulus.add(new BigInteger(iat)).toString(), nbf, exp),
+                Arguments.of("iat", "below", new BigInteger(iat).subtract(modulus).toString(), nbf, exp),
+                Arguments.of("nbf", "above", iat, modulus.add(new BigInteger(nbf)).toString(), exp),
+                Arguments.of("nbf", "below", iat, new BigInteger(nbf).subtract(modulus).toString(), exp),
+                Arguments.of("exp", "above", iat, nbf, modulus.add(new BigInteger(exp)).toString()),
+                Arguments.of("exp", "below", iat, nbf, new BigInteger(exp).subtract(modulus).toString()));
+    }
+
     private void assertRejected(String token, String deviceId) {
         verifier = verifier();
         assertThrows(SecurityException.class, () -> verifier.verify("Bearer " + token, deviceId));
@@ -76,6 +101,10 @@ class DeviceChildProfileJwtVerifierTest {
     }
 
     private static String tokenWithTimes(KeyPair signer, long issuedAt, long notBefore, long expiry) throws Exception {
+        return tokenWithRawTimes(signer, Long.toString(issuedAt), Long.toString(notBefore), Long.toString(expiry));
+    }
+
+    private static String tokenWithRawTimes(KeyPair signer, String issuedAt, String notBefore, String expiry) throws Exception {
         Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
         String header = encoder.encodeToString("{\"alg\":\"RS256\",\"typ\":\"JWT\"}".getBytes(UTF_8));
         String payloadJson = "{\"iss\":\"issuer\",\"aud\":\"manager\",\"scope\":\"device:child-profile:sync\",\"deviceId\":\"device-1\",\"iat\":" + issuedAt + ",\"nbf\":" + notBefore + ",\"exp\":" + expiry + "}";

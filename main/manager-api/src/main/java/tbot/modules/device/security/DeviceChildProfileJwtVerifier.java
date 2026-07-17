@@ -114,7 +114,7 @@ public class DeviceChildProfileJwtVerifier {
 
     private static long requiredLong(JsonNode claims, String name) {
         JsonNode value = claims.get(name);
-        if (value == null || !value.isIntegralNumber()) {
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToLong()) {
             throw new SecurityException("missing numeric " + name);
         }
         return value.longValue();
