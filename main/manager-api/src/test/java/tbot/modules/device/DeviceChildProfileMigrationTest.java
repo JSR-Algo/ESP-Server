@@ -23,6 +23,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.mysql.cj.jdbc.MysqlDataSource;
 
+import liquibase.Contexts;
+import liquibase.LabelExpression;
+import liquibase.Liquibase;
+import liquibase.exception.LiquibaseException;
 import liquibase.integration.spring.SpringLiquibase;
 import tbot.modules.device.dao.DeviceDao;
 import tbot.modules.device.dto.DeviceChildProfileProjectionDTO;
@@ -50,21 +54,30 @@ class DeviceChildProfileMigrationTest {
     @Test
     void migrationBackfillsLegacyRowsAndSupportsRollbackReapply() throws Exception {
         DataSource dataSource = dataSource();
-        SpringLiquibase liquibase = new SpringLiquibase();
+        RollbackCapableSpringLiquibase liquibase = new RollbackCapableSpringLiquibase();
         liquibase.setDataSource(dataSource);
         liquibase.setChangeLog("classpath:" + CHANGELOG);
-        liquibase.setTestRollbackOnUpdate(true);
+        liquibase.setTestRollbackOnUpdate(false);
         liquibase.afterPropertiesSet();
 
-        try (Connection connection = dataSource.getConnection()) {
-            try (Statement statement = connection.createStatement()) {
+        try (Connection rollbackConnection = dataSource.getConnection();
+                Liquibase rollback = liquibase.open(rollbackConnection)) {
+            rollback.rollback(1, new Contexts(), new LabelExpression());
+        }
+
+        try (Connection legacyConnection = dataSource.getConnection()) {
+            assertEquals(0, columnCount(legacyConnection, "child_profile_id"));
+            assertEquals(0, columnCount(legacyConnection, "child_birth_year"));
+            assertEquals(0, columnCount(legacyConnection, "child_profile_revision"));
+            assertEquals(0, columnCount(legacyConnection, "child_profile_payload_hash"));
+            try (Statement statement = legacyConnection.createStatement()) {
                 statement.executeUpdate("INSERT INTO ai_device (id, child_name, child_age, child_interests, learning_style, vocabulary_level, parent_career) VALUES ('legacy', 'Old', 9, 'music', 'visual', 'basic', 'teacher')");
             }
-            assertSchemaAndBackfill(connection);
+        }
 
-            liquibase.setTestRollbackOnUpdate(false);
-            liquibase.afterPropertiesSet();
-            assertEquals(1, columnCount(connection, "child_profile_revision"));
+        liquibase.afterPropertiesSet();
+        try (Connection connection = dataSource.getConnection()) {
+            assertSchemaAndBackfill(connection);
 
             exerciseMapperTransaction(dataSource, connection);
         }
@@ -159,6 +172,12 @@ class DeviceChildProfileMigrationTest {
         try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ai_device' AND COLUMN_NAME='" + name + "'")) {
             result.next();
             return result.getInt(1);
+        }
+    }
+
+    private static final class RollbackCapableSpringLiquibase extends SpringLiquibase {
+        Liquibase open(Connection connection) throws LiquibaseException {
+            return createLiquibase(connection);
         }
     }
 }

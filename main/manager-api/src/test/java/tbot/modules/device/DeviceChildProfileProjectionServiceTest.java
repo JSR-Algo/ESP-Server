@@ -12,6 +12,8 @@ import java.time.Year;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
@@ -106,6 +108,23 @@ class DeviceChildProfileProjectionServiceTest {
         when(deviceDao.selectChildProfileForUpdate(DEVICE_ID)).thenReturn(stored(9, "0".repeat(64)));
         assertThrows(ProjectionConflictException.class, () -> service.apply(DEVICE_ID, clear(9)));
         verify(deviceDao, never()).clearChildProfile(any());
+    }
+
+    @ParameterizedTest(name = "rejects profile storage overflow: {0}")
+    @MethodSource("oversizedProfiles")
+    void rejectsProfileFieldsThatExceedStorageBeforeLocking(String field, Profile profile) {
+        DeviceChildProfileProjectionDTO request = replace(1, profile);
+        assertThrows(IllegalArgumentException.class, () -> service.apply(DEVICE_ID, request));
+        verify(deviceDao, never()).selectChildProfileForUpdate(any());
+    }
+
+    private static List<org.junit.jupiter.params.provider.Arguments> oversizedProfiles() {
+        return List.of(
+                org.junit.jupiter.params.provider.Arguments.of("displayName", new Profile(PROFILE_ID, "x".repeat(65), 2018, List.of(), null, null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("interests", new Profile(PROFILE_ID, "An", 2018, List.of("x".repeat(256)), null, null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("learningStyle", new Profile(PROFILE_ID, "An", 2018, List.of(), "x".repeat(33), null, null)),
+                org.junit.jupiter.params.provider.Arguments.of("vocabularyLevel", new Profile(PROFILE_ID, "An", 2018, List.of(), null, "x".repeat(33), null)),
+                org.junit.jupiter.params.provider.Arguments.of("parentCareer", new Profile(PROFILE_ID, "An", 2018, List.of(), null, null, "x".repeat(65))));
     }
 
     private static DeviceChildProfileProjectionDTO replace(long revision, Profile profile) {

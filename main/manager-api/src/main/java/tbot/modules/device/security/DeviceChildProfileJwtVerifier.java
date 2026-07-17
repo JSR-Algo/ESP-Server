@@ -8,7 +8,6 @@ import java.security.Signature;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.Base64;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -81,12 +80,19 @@ public class DeviceChildProfileJwtVerifier {
             if (!pathDeviceId.equals(claims.path("deviceId").asText())) {
                 throw new SecurityException("token device binding mismatch");
             }
-            if (Arrays.stream(claims.path("scope").asText().split(" ")).noneMatch(REQUIRED_SCOPE::equals)) {
+            if (!claims.path("scope").isTextual()
+                    || !REQUIRED_SCOPE.equals(claims.path("scope").textValue())) {
                 throw new SecurityException("required token scope is missing");
             }
             long nowSeconds = now.getEpochSecond();
+            long maximumExpiry;
+            try {
+                maximumExpiry = Math.addExact(issuedAt, maxTtlSeconds);
+            } catch (ArithmeticException exception) {
+                maximumExpiry = Long.MAX_VALUE;
+            }
             if (issuedAt > nowSeconds || notBefore > nowSeconds || expiry <= nowSeconds
-                    || expiry <= issuedAt || expiry - issuedAt > maxTtlSeconds) {
+                    || expiry <= issuedAt || expiry > maximumExpiry) {
                 throw new SecurityException("token is outside its allowed lifetime");
             }
         } catch (SecurityException exception) {

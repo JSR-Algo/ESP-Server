@@ -80,6 +80,29 @@ public class DeviceChildProfileProjectionService {
         if (("replace".equals(request.getMode())) != (request.getProfile() != null)) {
             throw new IllegalArgumentException("mode/profile coherence violation");
         }
+        if (request.getProfile() != null) {
+            validateProfileStorage(request.getProfile());
+        }
+    }
+
+    private static void validateProfileStorage(Profile profile) {
+        if (profile.displayName() == null || profile.interests() == null) {
+            throw new IllegalArgumentException("required profile fields are missing");
+        }
+        if (profile.interests().stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("interests cannot contain null values");
+        }
+        requireMaxLength("displayName", profile.displayName(), 64);
+        requireMaxLength("interests", String.join(",", profile.interests()), 255);
+        requireMaxLength("learningStyle", profile.learningStyle(), 32);
+        requireMaxLength("vocabularyLevel", profile.vocabularyLevel(), 32);
+        requireMaxLength("parentCareer", profile.parentCareer(), 64);
+    }
+
+    private static void requireMaxLength(String field, String value, int maximum) {
+        if (value != null && value.codePointCount(0, value.length()) > maximum) {
+            throw new IllegalArgumentException(field + " exceeds storage capacity");
+        }
     }
 
     private static Integer legacyAge(Integer birthYear) {
