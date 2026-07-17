@@ -151,6 +151,19 @@ def exact_status(state="consumed"):
     }
 
 
+def exact_recovery_response(**changes):
+    response = {
+        "cacheKey": KEY,
+        "status": "evicted",
+        "reason": "evicted",
+        "evicted": True,
+        "notFound": False,
+        "fileCount": 0,
+    }
+    response.update(changes)
+    return response
+
+
 def test_exact_hil_tool_response_schemas_and_foreign_key_rejection():
     hil = load_script("lesson_studio_task14_hil_storage.py")
     arm = exact_arm()
@@ -200,6 +213,72 @@ def test_exact_hil_tool_response_schemas_and_foreign_key_rejection():
         hil.validate_fixture_response({**fixture, "changed": 1}, KEY, SIBLING, "preservation_set", "staged")
     with pytest.raises(hil.HilValidationError):
         hil.validate_inspect_response({**inspect, "entries": [{**inspect["entries"][0], "bytes": False}]}, KEY, SIBLING)
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    ((scenario, scenario in {
+        "evict-after-unlinks-fail",
+        "evict-before-rmdir-fail",
+    }) for scenario in (
+        "evict-before-first-unlink-fail",
+        "evict-after-unlinks-fail",
+        "evict-before-rmdir-fail",
+        "evict-after-unlinks-sd-removal",
+        "sync-before-download-write-no-space",
+        "sync-after-download-bytes-no-space",
+        "sync-before-checksum-corrupt-staging",
+        "sync-before-commit-rename-fail",
+        "sync-before-commit-rename-power-loss",
+    )),
+)
+def test_recovery_scenario_is_allowed_only_for_partial_eviction(scenario, expected):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    assert hil.PARTIAL_EVICTION_SCENARIOS == frozenset({
+        "evict-after-unlinks-fail",
+        "evict-before-rmdir-fail",
+    })
+    assert (scenario in hil.PARTIAL_EVICTION_SCENARIOS) is expected
+
+
+def test_recovery_contract_accepts_only_exact_converged_eviction_response():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    response = exact_recovery_response()
+
+    assert hil.validate_partial_eviction_retry(response, KEY) == response
+    assert hil.recovery_not_attempted() == {
+        "attempted": False,
+        "operation": None,
+        "reason": None,
+        "response": None,
+        "inspection": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        {key: value for key, value in exact_recovery_response().items() if key != "fileCount"},
+        exact_recovery_response(extra=None),
+        exact_recovery_response(cacheKey=SIBLING),
+        exact_recovery_response(fileCount=1),
+        exact_recovery_response(notFound=True),
+        exact_recovery_response(evicted=False),
+        exact_recovery_response(evicted=1),
+        exact_recovery_response(notFound=0),
+        exact_recovery_response(fileCount=False),
+        exact_recovery_response(
+            status="partial_evict_recovery_required",
+            reason="partial_evict_recovery_required",
+        ),
+        exact_recovery_response(status="unlink_failed"),
+        exact_recovery_response(reason="unlink_failed"),
+    ),
+)
+def test_recovery_contract_rejects_non_exact_or_false_success_response(candidate):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    with pytest.raises(hil.HilValidationError):
+        hil.validate_partial_eviction_retry(candidate, KEY)
 
 
 def test_raw_mcp_wrapper_parses_only_exact_internal_response_and_redacts_credentials():

@@ -41,6 +41,10 @@ HIL_STORAGE_SCENARIOS = (
     "sync-before-commit-rename-fail",
     "sync-before-commit-rename-power-loss",
 )
+PARTIAL_EVICTION_SCENARIOS = frozenset({
+    "evict-after-unlinks-fail",
+    "evict-before-rmdir-fail",
+})
 MATRIX_REPORT_NAME = "hil-matrix-report.json"
 POWER_LOSS_SCENARIO = HIL_STORAGE_SCENARIOS[-1]
 HIL_TOOL_NAMES = {
@@ -102,6 +106,9 @@ INSPECT_FIELDS = frozenset(
     {"cacheKey", "siblingCacheKey", "status", "truncated", "entries"}
 )
 INSPECT_ENTRY_FIELDS = frozenset({"label", "nodeType", "bytes", "sha256"})
+EVICT_RESPONSE_FIELDS = frozenset(
+    {"cacheKey", "status", "reason", "evicted", "notFound", "fileCount"}
+)
 PRIMARY_SENTINEL_SHA256 = "e95ab394bdf8569652429018519989d3e94cae168cf91c269c81a2c9bb00d5ec"
 SIBLING_SENTINEL_SHA256 = "462cc80e16c12bbee14c7eba5e61da286e79580d6dc5b996bfcf7a43f30a4cf8"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -162,6 +169,35 @@ def _exact_int(value, name, *, minimum=0):
 
 def _exact_bool(value, name):
     require(type(value) is bool, f"invalid {name}")
+    return value
+
+
+def recovery_not_attempted():
+    return {
+        "attempted": False,
+        "operation": None,
+        "reason": None,
+        "response": None,
+        "inspection": None,
+    }
+
+
+def validate_partial_eviction_retry(value, cache_key):
+    value = _exact_fields(value, EVICT_RESPONSE_FIELDS, "recovery eviction")
+    _exact_bool(value["evicted"], "recovery evicted")
+    _exact_bool(value["notFound"], "recovery notFound")
+    _exact_int(value["fileCount"], "recovery fileCount")
+    require(
+        value == {
+            "cacheKey": cache_key,
+            "status": "evicted",
+            "reason": "evicted",
+            "evicted": True,
+            "notFound": False,
+            "fileCount": 0,
+        },
+        "partial eviction recovery did not converge",
+    )
     return value
 
 
@@ -729,11 +765,7 @@ def validate_trigger_response(operation, value, cache_key, *, require_ready=None
     require(isinstance(value, dict), "trigger response must be an object")
     require(value.get("cacheKey") == cache_key, "trigger response cache key mismatch")
     if operation == "evict":
-        _exact_fields(
-            value,
-            frozenset({"cacheKey", "status", "evicted", "notFound", "fileCount", "reason"}),
-            "eviction trigger",
-        )
+        _exact_fields(value, EVICT_RESPONSE_FIELDS, "eviction trigger")
         _exact_bool(value["evicted"], "evicted")
         _exact_bool(value["notFound"], "notFound")
         _exact_int(value["fileCount"], "fileCount")
