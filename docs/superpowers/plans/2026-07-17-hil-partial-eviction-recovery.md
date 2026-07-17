@@ -298,7 +298,30 @@ SHA256SUMS
 `last-responses.json` has fixed keys `statusBefore`, `inspectBefore`, `stage`,
 `arm`, `trigger`, `statusAfter`, `inspectAfter`, `recovery`, and `cleanup`; every
 value is the last validated bounded object or JSON null. Define a closed
-phase-to-stable-error-code mapping; never serialize raw exception text. Require
+phase-to-stable-error-code mapping exactly as follows; never serialize raw
+exception text:
+
+```python
+FAILURE_ERROR_CODES = {
+    "setup": "HIL_SETUP_FAILED",
+    "attestation": "LIVE_CONNECTION_ATTESTATION_FAILED",
+    "serial": "SERIAL_MONITOR_FAILED",
+    "status": "CONTROLLER_STATUS_INVALID",
+    "inspect": "STORAGE_INSPECTION_INVALID",
+    "stage": "FIXTURE_STAGE_FAILED",
+    "arm": "FAULT_ARM_FAILED",
+    "trigger": "SCENARIO_TRIGGER_FAILED",
+    "recovery": "PARTIAL_EVICTION_RECOVERY_FAILED",
+    "cleanup": "FIXTURE_CLEANUP_REFUSED",
+    "validator": "INDEPENDENT_VALIDATION_FAILED",
+    "publication": "ATOMIC_PUBLICATION_FAILED",
+    "internal": "INTERNAL_ORCHESTRATOR_FAILURE",
+}
+```
+
+Add one table-driven test for every exact pair, an explicit internal-fallback
+test for an unclassified exception inside the guarded boundary, and rejection
+tests for unknown phase names or caller-supplied error codes. Require
 `utcStart <= utcFailure`, bounded log/JSON sizes, and capture each response only
 after its validator succeeds.
 
@@ -451,6 +474,8 @@ export TBOT_SERVER_IMAGE_TAG="hil-$(git rev-parse --short=12 HEAD)"
 export LESSON_RUNTIME_ENABLED=true
 export LESSON_MOTION_PRESETS_ENABLED=true
 export LESSON_PLAYFUL_INTERACTIONS_ENABLED=true
+export LESSON_SAMPLE_ENABLED=true
+export LESSON_SAMPLE_MODE=interactive
 export LESSON_ROLLOUT_DEVICE_ALLOWLIST=28:84:85:85:1a:80
 export LESSON_STORAGE_HIL_DEVICE_ALLOWLIST=28:84:85:85:1a:80
 export COURSE_BACKEND_URL=http://192.168.100.209:13100/v1
@@ -460,11 +485,15 @@ export LESSON_ASSET_DELIVERY_MODE=sd_pack
 export TBOT_PUBLIC_WEBSOCKET_URL=ws://192.168.100.209:8000/tbot/v1/
 docker compose -f main/tbot-server/docker-compose.yml up -d --force-recreate
 docker inspect tbot-esp32-server --format '{{.Config.Image}} {{.State.Status}}'
+docker inspect tbot-esp32-server --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | rg '^(LESSON_|COURSE_|TBOT_PUBLIC_|TBOT_DEVICE_)' \
+  | sed 's/^TBOT_DEVICE_MINT_SECRET=.*/TBOT_DEVICE_MINT_SECRET=<redacted>/'
 ```
 
 Require the exact new image, every exported LAN endpoint/feature flag, exact MAC
-allowlists, nonempty secret without printing it, and one exact MAC/UUID
-connection. Fail on stale `192.168.1.25` or `192.168.100.230` values.
+allowlists, `LESSON_SAMPLE_ENABLED=true`, `LESSON_SAMPLE_MODE=interactive`, a
+nonempty secret without printing it, and one exact MAC/UUID connection. Fail on
+stale `192.168.1.25` or `192.168.100.230` values.
 
 - [ ] **Step 2: Run fresh automated partial-eviction smoke**
 
@@ -501,15 +530,71 @@ Reset without NVS erase using the exact safe command and record it:
 ```bash
 /Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
   /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py \
-  --chip esp32s3 --port /dev/cu.usbmodem1101 read_mac \
+  --chip esp32s3 --port /dev/cu.usbmodem1101 \
+  --before default_reset --after hard_reset read_mac \
   > "$PASS_ROOT/post-scenario-reset-read-mac.log" 2>&1
 ```
 
-Wait for one exact connection, run orchestrator `preflight`, require controller
-idle and inspection residue missing, then repeat for
-`evict-before-rmdir-fail`. Require recovery attempted, initial partial outcome
-preserved, retry exact-evicted, cleanup clean, numeric sequences, validator 0,
-and no quarantine bundle.
+This is the only reset command permitted between smoke scenarios. Do not run
+`erase_flash`, `erase_region`, or any command that erases NVS. Wait for one exact
+MAC/UUID connection, then run the exact preflight command:
+
+```bash
+python3 scripts/lesson_studio_task14_hil_storage.py preflight \
+  --device-id 28:84:85:85:1a:80 \
+  --device-uuid fce7bec8-8478-4ab4-817f-7b87c41c1f91 \
+  --serial-port /dev/cu.usbmodem1101 \
+  --esp-base-url http://127.0.0.1:8003 \
+  --asset-url http://192.168.100.209:18102/tvideo-demo/esp-tft/barn-192.png \
+  --asset-sha256 0bc9825de6b18c76990127d0ced5ff8c93dfd0bd931aa5689b3ff46e9d812679 \
+  --asset-bytes 42986 \
+  --build-manifest /Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued/build-task14-hil-ba472a3-v2/lesson-storage-hil-build.json \
+  --evidence-dir "$PASS_ROOT" \
+  > "$PASS_ROOT/post-scenario-preflight.json"
+```
+
+Require that JSON to be `PASS` and the controller status checked by preflight to
+be idle. Locate the single first-scenario result and run an independent exact
+residue inspection through the same validated HIL transport:
+
+```bash
+export FIRST_RESULT="$(find "$PASS_ROOT/evict-after-unlinks-fail" \
+  -name result.json -type f -print -quit)"
+test -n "$FIRST_RESULT" && test -f "$FIRST_RESULT"
+python3 - "$FIRST_RESULT" "$PASS_ROOT/post-scenario-residue.json" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+from scripts.lesson_studio_task14_hil_storage import (
+    HilToolClient,
+    RawMcpTransport,
+    validate_cleanup_inspection,
+)
+
+result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+secret = os.environ["TBOT_DEVICE_MINT_SECRET"]
+client = HilToolClient(RawMcpTransport(
+    "http://127.0.0.1:8003",
+    "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+    secret,
+))
+cache_key = result["cacheKey"]
+sibling = f"hil-task14/v2-{cache_key.rsplit('-', 1)[1]}"
+inspection = client.inspect(cache_key, sibling)
+validate_cleanup_inspection(result["cleanupInspection"], inspection)
+Path(sys.argv[2]).write_text(
+    json.dumps(inspection, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+```
+
+Only after both commands pass may the second scenario
+`evict-before-rmdir-fail` run with the same exact arguments and distinct output
+files. Require recovery attempted, initial partial outcome preserved, retry
+exact-evicted, cleanup clean, numeric sequences, validator 0, and no quarantine
+bundle.
 
 - [ ] **Step 3: Run the complete fresh nine-scenario matrix**
 
