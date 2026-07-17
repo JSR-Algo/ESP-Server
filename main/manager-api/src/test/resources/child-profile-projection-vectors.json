@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "replace-normalizes-and-sorts",
+      "input": {
+        "mode": "replace",
+        "revision": 7,
+        "profile": {
+          "childProfileId": "123e4567-e89b-12d3-a456-426614174000",
+          "displayName": "Bé",
+          "birthYear": 2018,
+          "interests": ["space", "Zoë", "🚀", "animals", "Zoë", "", "space"],
+          "learningStyle": "kínetic",
+          "vocabularyLevel": null,
+          "parentCareer": "Kỹ sư"
+        }
+      },
+      "canonicalJson": "{\"mode\":\"replace\",\"profile\":{\"birthYear\":2018,\"childProfileId\":\"123e4567-e89b-12d3-a456-426614174000\",\"displayName\":\"Bé\",\"interests\":[\"Zoë\",\"animals\",\"space\",\"\",\"🚀\"],\"learningStyle\":\"kínetic\",\"parentCareer\":\"Kỹ sư\",\"vocabularyLevel\":null},\"revision\":7}",
+      "sha256": "c9950d758e40d0ca2503995e2deba3443553029efc48e77ca90ef258de41ae14"
+    },
+    {
+      "name": "replace-preserves-explicit-nulls",
+      "input": {
+        "mode": "replace",
+        "revision": 8,
+        "profile": {
+          "childProfileId": "00000000-0000-0000-0000-000000000001",
+          "displayName": "An",
+          "birthYear": null,
+          "interests": [],
+          "learningStyle": null,
+          "vocabularyLevel": null,
+          "parentCareer": null
+        }
+      },
+      "canonicalJson": "{\"mode\":\"replace\",\"profile\":{\"birthYear\":null,\"childProfileId\":\"00000000-0000-0000-0000-000000000001\",\"displayName\":\"An\",\"interests\":[],\"learningStyle\":null,\"parentCareer\":null,\"vocabularyLevel\":null},\"revision\":8}",
+      "sha256": "b8b25716da4b72bc8a0232b843485464fef772772bcada8921aa61a0ec88c464"
+    },
+    {
+      "name": "clear",
+      "input": {
+        "mode": "clear",
+        "revision": 9,
+        "profile": null
+      },
+      "canonicalJson": "{\"mode\":\"clear\",\"profile\":null,\"revision\":9}",
+      "sha256": "4b07ae267a3da7330a10452db9833d7caf388e92ba8634e844b825b0d175d28e"
+    }
+  ]
+}
