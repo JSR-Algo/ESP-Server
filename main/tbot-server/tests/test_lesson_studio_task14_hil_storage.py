@@ -1089,6 +1089,77 @@ def test_failure_evidence_staging_allocation_failure_cleans_only_new_pass_root(
         assert not any(pass_root.iterdir())
 
 
+def test_failure_evidence_scenario_publication_rejects_post_validation_root_swap(
+    tmp_path,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    original_root = tmp_path / "pass-original"
+    pass_root.mkdir()
+    failure_root.mkdir()
+    arguments = SimpleNamespace(
+        evidence_dir=pass_root,
+        failure_evidence_dir=failure_root,
+    )
+    hil.validate_run_roots(arguments)
+    pass_root.rename(original_root)
+    pass_root.symlink_to(failure_root, target_is_directory=True)
+
+    with pytest.raises(hil.HilValidationError, match="changed during publication"):
+        hil.publish_validated_scenario_directory(
+            pass_root / "evict-after-unlinks-fail",
+            _publication_payloads(hil, power_loss=False),
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+            root_identity=arguments._pass_evidence_root_identity,
+        )
+
+    assert not any(failure_root.iterdir())
+    assert not any(original_root.iterdir())
+
+
+def test_failure_evidence_bundle_publication_rejects_post_validation_root_swap(
+    tmp_path,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    replacement = tmp_path / "replacement"
+    original_failure = tmp_path / "failures-original"
+    pass_root.mkdir()
+    failure_root.mkdir()
+    replacement.mkdir()
+    arguments = SimpleNamespace(
+        evidence_dir=pass_root,
+        failure_evidence_dir=failure_root,
+    )
+    hil.validate_run_roots(arguments)
+    failure_root.rename(original_failure)
+    failure_root.symlink_to(replacement, target_is_directory=True)
+
+    with pytest.raises(hil.HilValidationError, match="changed during publication"):
+        hil.write_failure_evidence(
+            failure_root,
+            scenario=hil.HIL_STORAGE_SCENARIOS[0],
+            phase="setup",
+            utc_start="2026-07-17T01:02:03.000000Z",
+            utc_failure="2026-07-17T01:02:04.000000Z",
+            completed_events=[],
+            build_identity=None,
+            last_responses={key: None for key in hil.FAILURE_RESPONSE_KEYS},
+            command="command\n",
+            serial_log="",
+            server_log="",
+            timeline_log="",
+            root_identity=arguments._failure_evidence_root_identity,
+        )
+
+    assert not any(replacement.iterdir())
+    assert not any(original_failure.iterdir())
+
+
 @pytest.mark.parametrize("power_loss", (False, True))
 @pytest.mark.parametrize("extra_kind", ("file", "directory", "symlink"))
 def test_hil_storage_post_validator_layout_rejects_extra_entry(
@@ -1795,6 +1866,38 @@ def test_publish_matrix_report_removes_output_when_inputs_change(tmp_path, monke
         hil.publish_matrix_report(arguments, preflight_result)
 
     assert not (tmp_path / hil.MATRIX_REPORT_NAME).exists()
+
+
+def test_failure_evidence_matrix_publication_rejects_post_validation_root_swap(
+    tmp_path,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    hil_path, _manifest, _paths = task6_manifest(tmp_path / "hil", profile="hil")
+    identity = load_script("lesson_studio_task14_build_identity.py").load_build_identity(
+        hil_path, expected_profile="hil"
+    )
+    matrix_root = tmp_path / "matrix"
+    failure_root = tmp_path / "failures"
+    original_root = tmp_path / "matrix-original"
+    report_fixture = _matrix_evidence_payload(matrix_root, identity, storage_layout=True)
+    failure_root.mkdir()
+    arguments = SimpleNamespace(
+        evidence_dir=matrix_root,
+        failure_evidence_dir=failure_root,
+    )
+    hil.validate_run_roots(arguments)
+    matrix_root.rename(original_root)
+    matrix_root.symlink_to(failure_root, target_is_directory=True)
+    preflight_result = {
+        key: report_fixture[key]
+        for key in ("status", "buildIdentity", "deviceId", "deviceUuid", "connectionIdentity")
+    }
+
+    with pytest.raises(hil.HilValidationError, match="changed during publication"):
+        hil.publish_matrix_report(arguments, preflight_result)
+
+    assert not (failure_root / hil.MATRIX_REPORT_NAME).exists()
+    assert not (original_root / hil.MATRIX_REPORT_NAME).exists()
 
 
 @pytest.mark.parametrize(

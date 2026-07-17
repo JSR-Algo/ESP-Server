@@ -605,7 +605,7 @@ def _snapshot_evidence_root(path):
     return tuple(snapshot)
 
 
-def validate_evidence_roots(pass_root, failure_root):
+def validate_evidence_roots(pass_root, failure_root, *, identity_sink=None):
     pass_path = Path(pass_root).absolute()
     failure_path = Path(failure_root).absolute()
     before = {
@@ -637,16 +637,56 @@ def validate_evidence_roots(pass_root, failure_root):
             (pass_stat.st_dev, pass_stat.st_ino) != (failure_stat.st_dev, failure_stat.st_ino),
             "PASS and failure evidence roots alias the same location",
         )
+    if identity_sink is not None:
+        identity_sink.update(
+            pass_root={
+                "requested": pass_path,
+                "resolved": pass_resolved,
+                "components": after[pass_path],
+                "rootDev": after[pass_path][-1][1],
+                "rootIno": after[pass_path][-1][2],
+            },
+            failure_root={
+                "requested": failure_path,
+                "resolved": failure_resolved,
+                "components": after[failure_path],
+                "rootDev": after[failure_path][-1][1],
+                "rootIno": after[failure_path][-1][2],
+            },
+        )
     return pass_resolved, failure_resolved
 
 
 def validate_run_roots(arguments):
+    identities = {}
     pass_root, failure_root = validate_evidence_roots(
-        arguments.evidence_dir, arguments.failure_evidence_dir
+        arguments.evidence_dir,
+        arguments.failure_evidence_dir,
+        identity_sink=identities,
     )
     arguments.evidence_dir = pass_root
     arguments.failure_evidence_dir = failure_root
+    arguments._pass_evidence_root_identity = identities["pass_root"]
+    arguments._failure_evidence_root_identity = identities["failure_root"]
     return pass_root, failure_root
+
+
+def revalidate_publication_root(identity):
+    require(isinstance(identity, dict), "missing validated evidence root identity")
+    try:
+        requested = Path(identity["requested"])
+        observed = _snapshot_evidence_root(requested)
+        resolved = requested.resolve(strict=True)
+    except (KeyError, OSError, HilValidationError):
+        raise HilValidationError("evidence root changed during publication") from None
+    require(
+        resolved == identity.get("resolved")
+        and observed == identity.get("components")
+        and observed[-1][1] == identity.get("rootDev")
+        and observed[-1][2] == identity.get("rootIno"),
+        "evidence root changed during publication",
+    )
+    return resolved
 
 
 def _bounded_redacted_text(value, secrets, max_bytes):
@@ -747,6 +787,7 @@ def write_failure_evidence(
     timeline_log,
     secrets=(),
     now=None,
+    root_identity=None,
 ):
     require(scenario in HIL_STORAGE_SCENARIOS, "unknown HIL storage scenario")
     error_code = failure_error_code(phase)
@@ -768,15 +809,25 @@ def write_failure_evidence(
         "last response must be a bounded object or null",
     )
     root = Path(failure_root).absolute()
+    if root_identity is not None:
+        require(
+            revalidate_publication_root(root_identity) == root,
+            "evidence root changed during publication",
+        )
     _reject_existing_symlink_components(root)
     root.mkdir(parents=True, exist_ok=True)
     _reject_existing_symlink_components(root)
     effective_now = now or utc_now
     final = root / _failure_directory_name(scenario, effective_now())
     require(not os.path.lexists(final), "failure evidence directory already exists")
-    staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=root))
+    staging = None
+    staging_stat = None
     published = False
     try:
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
+        staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=root))
+        staging_stat = staging.stat()
         failure = {
             "artifactVersion": 1,
             "completedEvents": completed_events,
@@ -812,14 +863,23 @@ def write_failure_evidence(
             with (staging / name).open("rb") as artifact:
                 os.fsync(artifact.fileno())
         _fsync_directory(staging)
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         _rename_directory_noreplace(staging, final)
         published = True
         _fsync_directory(root)
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         return final
     except BaseException:
         cleanup = final if published else staging
-        with suppress(Exception):
-            shutil.rmtree(cleanup)
+        if cleanup is not None and staging_stat is not None:
+            with suppress(Exception):
+                observed = os.lstat(cleanup)
+                if (observed.st_dev, observed.st_ino) == (
+                    staging_stat.st_dev, staging_stat.st_ino,
+                ):
+                    shutil.rmtree(cleanup)
         with suppress(Exception):
             _fsync_directory(root)
         raise
@@ -904,6 +964,9 @@ def _attempt_failure_quarantine(
             server_log=server_log,
             timeline_log=timeline_log,
             secrets=(secret,),
+            root_identity=getattr(
+                arguments, "_failure_evidence_root_identity", None
+            ),
         )
     except BaseException:
         with suppress(BaseException):
@@ -1005,9 +1068,15 @@ def publish_validated_scenario_directory(
     validator_script,
     secrets=(),
     phase_changed=None,
+    root_identity=None,
 ):
     final_directory = Path(final_directory)
     parent = final_directory.parent
+    if root_identity is not None:
+        require(
+            revalidate_publication_root(root_identity) == parent,
+            "evidence root changed during publication",
+        )
     parent_existed = os.path.lexists(parent)
     parent.mkdir(parents=True, exist_ok=True)
     require(
@@ -1016,11 +1085,15 @@ def publish_validated_scenario_directory(
     )
     expected = scenario_artifact_names(power_loss=power_loss)
     staging = None
+    staging_stat = None
     published = False
     try:
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         staging = Path(
             tempfile.mkdtemp(prefix=f".{final_directory.name}.staging-", dir=parent)
         )
+        staging_stat = staging.stat()
         finalize_scenario_directory(staging, payloads, power_loss=power_loss)
         if phase_changed is not None:
             phase_changed("validator")
@@ -1066,15 +1139,23 @@ def publish_validated_scenario_directory(
                 os.fsync(artifact.fileno())
         _fsync_directory(staging)
         _validate_staging_layout(staging, expected)
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         _rename_directory_noreplace(staging, final_directory)
         published = True
         _fsync_directory(parent)
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         return final_directory
     except BaseException:
         cleanup = final_directory if published else staging
-        if cleanup is not None:
+        if cleanup is not None and staging_stat is not None:
             with suppress(Exception):
-                shutil.rmtree(cleanup)
+                observed = os.lstat(cleanup)
+                if (observed.st_dev, observed.st_ino) == (
+                    staging_stat.st_dev, staging_stat.st_ino,
+                ):
+                    shutil.rmtree(cleanup)
         with suppress(Exception):
             _fsync_directory(parent)
         if not parent_existed:
@@ -1175,6 +1256,12 @@ def _matrix_scenario_record(evidence_root, scenario, preflight_result):
 
 def publish_matrix_report(arguments, preflight_result):
     evidence_root = Path(arguments.evidence_dir)
+    root_identity = getattr(arguments, "_pass_evidence_root_identity", None)
+    if root_identity is not None:
+        require(
+            revalidate_publication_root(root_identity) == evidence_root,
+            "evidence root changed during publication",
+        )
     scenarios = [
         _matrix_scenario_record(evidence_root, scenario, preflight_result)
         for scenario in HIL_STORAGE_SCENARIOS
@@ -1189,8 +1276,11 @@ def publish_matrix_report(arguments, preflight_result):
         "scenarios": scenarios,
     }
     report_path = evidence_root / MATRIX_REPORT_NAME
+    report_stat = None
 
     def verify_inputs():
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         observed = [
             _matrix_scenario_record(evidence_root, scenario, preflight_result)
             for scenario in HIL_STORAGE_SCENARIOS
@@ -1199,11 +1289,21 @@ def publish_matrix_report(arguments, preflight_result):
 
     try:
         verify_inputs()
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
         atomic_write_bytes(report_path, json_bytes(report))
+        report_stat = report_path.stat()
         verify_inputs()
+        if root_identity is not None:
+            revalidate_publication_root(root_identity)
     except BaseException:
-        with suppress(FileNotFoundError):
-            report_path.unlink()
+        if report_stat is not None:
+            with suppress(Exception):
+                observed = os.lstat(report_path)
+                if (observed.st_dev, observed.st_ino) == (
+                    report_stat.st_dev, report_stat.st_ino,
+                ):
+                    report_path.unlink()
         raise
     return report
 
@@ -2177,6 +2277,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             validator_script=validator_script,
             secrets=(secret,),
             phase_changed=set_failure_phase,
+            root_identity=getattr(
+                arguments, "_pass_evidence_root_identity", None
+            ),
         )
         return result
     except BaseException as primary:
@@ -2300,7 +2403,9 @@ def run_matrix(arguments):
         phase = value
 
     try:
+        revalidate_publication_root(arguments._pass_evidence_root_identity)
         _remove_matrix_report(Path(arguments.evidence_dir) / MATRIX_REPORT_NAME)
+        revalidate_publication_root(arguments._pass_evidence_root_identity)
         phase = "setup"
         preflight_result = preflight(
             arguments,
