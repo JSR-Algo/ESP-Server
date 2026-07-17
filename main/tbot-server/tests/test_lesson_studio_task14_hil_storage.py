@@ -902,6 +902,37 @@ def test_failure_evidence_publication_failure_removes_only_new_empty_pass_root(
         assert not any(pass_root.iterdir())
 
 
+@pytest.mark.parametrize("preexisting_root", (False, True))
+def test_failure_evidence_staging_allocation_failure_cleans_only_new_pass_root(
+    tmp_path, monkeypatch, preexisting_root,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass-root"
+    if preexisting_root:
+        pass_root.mkdir()
+    final = pass_root / "evict-after-unlinks-fail"
+    marker = OSError("staging allocation failed")
+    monkeypatch.setattr(
+        hil.tempfile,
+        "mkdtemp",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(marker),
+    )
+
+    with pytest.raises(OSError) as caught:
+        hil.publish_validated_scenario_directory(
+            final,
+            _publication_payloads(hil, power_loss=False),
+            scenario="evict-after-unlinks-fail",
+            power_loss=False,
+            validator_script=tmp_path / "validator.py",
+        )
+
+    assert caught.value is marker
+    assert pass_root.exists() is preexisting_root
+    if preexisting_root:
+        assert not any(pass_root.iterdir())
+
+
 @pytest.mark.parametrize("power_loss", (False, True))
 @pytest.mark.parametrize("extra_kind", ("file", "directory", "symlink"))
 def test_hil_storage_post_validator_layout_rejects_extra_entry(

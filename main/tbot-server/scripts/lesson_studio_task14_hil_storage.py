@@ -932,10 +932,13 @@ def publish_validated_scenario_directory(
         not os.path.lexists(final_directory),
         "final HIL scenario directory already exists",
     )
-    staging = Path(tempfile.mkdtemp(prefix=f".{final_directory.name}.staging-", dir=parent))
     expected = scenario_artifact_names(power_loss=power_loss)
+    staging = None
     published = False
     try:
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{final_directory.name}.staging-", dir=parent)
+        )
         finalize_scenario_directory(staging, payloads, power_loss=power_loss)
         if phase_changed is not None:
             phase_changed("validator")
@@ -987,8 +990,9 @@ def publish_validated_scenario_directory(
         return final_directory
     except BaseException:
         cleanup = final_directory if published else staging
-        with suppress(Exception):
-            shutil.rmtree(cleanup)
+        if cleanup is not None:
+            with suppress(Exception):
+                shutil.rmtree(cleanup)
         with suppress(Exception):
             _fsync_directory(parent)
         if not parent_existed:
