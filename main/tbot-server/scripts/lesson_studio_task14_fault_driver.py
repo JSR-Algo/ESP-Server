@@ -716,9 +716,10 @@ def validate_hil_storage_result(scenario,result):
         try:
             ordered=[_strict_utc(result.get(name)) for name in (
                 'utcStart','checkpointReachedUtc','powerCutBoundaryUtc',
-                'disconnectObservedUtc','utcEnd',
+                'powerRemovedUtc','disconnectObservedUtc','utcEnd',
             )]
-            if ordered != sorted(ordered):errors.append('invalid power-loss timestamp order')
+            if not all(earlier < later for earlier,later in zip(ordered,ordered[1:])):
+                errors.append('invalid power-loss timestamp order')
         except (TypeError,ValueError):errors.append('invalid power-loss boundary timestamps')
     return errors
 
@@ -748,13 +749,13 @@ def _power_loss_timestamp_artifact_errors(result,evidence_dir):
     root=Path(evidence_dir); errors=[]
     expected={
         'checkpoint-reached-utc.txt':result.get('checkpointReachedUtc'),
-        'power-removed-utc.txt':result.get('disconnectObservedUtc'),
+        'power-removed-utc.txt':result.get('powerRemovedUtc'),
     }
     for name,value in expected.items():
         path=root/name
         try:actual=path.read_text()
-        except OSError:
-            errors.append(f'HIL timestamp artifact missing: {name}')
+        except (OSError,UnicodeError):
+            errors.append(f'HIL timestamp artifact missing or invalid: {name}')
             continue
         if not isinstance(value,str) or actual != value+'\n':
             errors.append(f'HIL timestamp artifact mismatch: {name}')
@@ -875,12 +876,53 @@ def main():
             assert not _script_hash_errors(hashes,capture,verifier)
             assert _script_hash_errors({**hashes,'captureScriptSha256':'0'*64},capture,verifier)
         hil_build={'sourceCommit':'a'*40,'profile':'hil','configEnabled':True,'sdkconfigSha256':'b'*64,'binarySha256':'c'*64,'elfSha256':'d'*64,'mapSha256':'e'*64,'archiveSha256':'f'*64,'binaryBytes':1,'appPartitionFreeBytes':1}
-        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','disconnectObservedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
+        hil_result={'scenario':HIL_POWER_LOSS_SCENARIO,'status':'PASS','buildIdentity':hil_build,'cacheKey':'hil-task14/v1-'+'d'*64,'armSequence':1,'reachedSequence':2,'consumedSequence':3,'events':list(HIL_EVENT_ORDER),'operation':'sync','checkpoint':'before_commit_rename','faultAction':'pause','expectedProgress':0,'checkpointExercised':True,'triggerResponseAbsent':True,'triggerOutcome':None,'powerLoss':True,'checkpointReached':True,'successMarkerBeforeLoss':False,'rebootCaptured':True,'armClearedAfterReboot':True,'postRebootInspected':True,'retryStatus':'ready','triggerPendingAtMarker':True,'triggerPendingAtCutBoundary':True,'utcStart':'2026-07-17T00:00:00Z','checkpointReachedUtc':'2026-07-17T00:00:00.500000Z','powerCutBoundaryUtc':'2026-07-17T00:00:01Z','powerRemovedUtc':'2026-07-17T00:00:01.500000Z','disconnectObservedUtc':'2026-07-17T00:00:02Z','utcEnd':'2026-07-17T00:00:03Z','disconnectAfterPowerCutBoundary':True}
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,hil_result)
+        invalid_timestamps=(
+            ('checkpointReachedUtc',None),
+            ('checkpointReachedUtc','not-a-timestamp'),
+            ('checkpointReachedUtc','2026-07-17T00:00:00.500000+00:00'),
+            ('checkpointReachedUtc','2026-07-16T23:59:59Z'),
+            ('powerCutBoundaryUtc','2026-07-17T00:00:00.250000Z'),
+            ('powerRemovedUtc','2026-07-17T00:00:00.750000Z'),
+            ('disconnectObservedUtc','2026-07-17T00:00:01.250000Z'),
+            ('utcEnd','2026-07-17T00:00:01.500000Z'),
+        )
+        for field,value in invalid_timestamps:
+            assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,field:value})
+        equal_timestamps=(
+            ('utcStart','checkpointReachedUtc'),
+            ('checkpointReachedUtc','powerCutBoundaryUtc'),
+            ('powerCutBoundaryUtc','powerRemovedUtc'),
+            ('powerRemovedUtc','disconnectObservedUtc'),
+            ('disconnectObservedUtc','utcEnd'),
+        )
+        for earlier,later in equal_timestamps:
+            assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,later:hil_result[earlier]})
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); checkpoint=root/'checkpoint-reached-utc.txt'; removed=root/'power-removed-utc.txt'
+            checkpoint.write_text(hil_result['checkpointReachedUtc']+'\n')
+            removed.write_text(hil_result['powerRemovedUtc']+'\n')
+            assert not _power_loss_timestamp_artifact_errors(hil_result,root)
+            invalid_artifacts=(
+                (checkpoint,'2026-07-17T00:00:01Z\n'),
+                (removed,'2026-07-17T00:00:03Z\n'),
+                (checkpoint,hil_result['checkpointReachedUtc']+' \n'),
+                (removed,hil_result['powerRemovedUtc']+'\n\n'),
+            )
+            for path,value in invalid_artifacts:
+                checkpoint.write_text(hil_result['checkpointReachedUtc']+'\n')
+                removed.write_text(hil_result['powerRemovedUtc']+'\n')
+                path.write_text(value)
+                assert _power_loss_timestamp_artifact_errors(hil_result,root)
+            checkpoint.unlink()
+            assert _power_loss_timestamp_artifact_errors(hil_result,root)
+            checkpoint.write_bytes(b'\xff\xfe\n')
+            assert _power_loss_timestamp_artifact_errors(hil_result,root)
         assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'reachedSequence':1})
         assert not validate_hil_release_order(list(HIL_RELEASE_ORDER))
         assert validate_hil_release_order(['hil-flash','production-soak','production-reflash'])
-        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'hilStorageScenarios':HIL_STORAGE_SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2})); return 0
+        print(json.dumps({'status':'PASS','scenarios':SCENARIOS,'hilStorageScenarios':HIL_STORAGE_SCENARIOS,'validAndInvalidCases':len(SCENARIOS)*2,'fixtureBindingCases':4,'scriptHashCases':2,'hilPowerTimestampCases':1+len(invalid_timestamps)+len(equal_timestamps),'hilTimestampArtifactCases':1+len(invalid_artifacts)+2})); return 0
     if a.hil_storage_scenario is not None:
         if a.evidence_dir is None:p.error('--evidence-dir is required for HIL storage validation')
         report=build_hil_storage_report(a.hil_storage_scenario,a.evidence_dir)

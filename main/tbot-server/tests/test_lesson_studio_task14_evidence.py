@@ -85,6 +85,7 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         "utcStart": "2026-07-17T00:00:00Z",
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
         "utcEnd": "2026-07-17T00:00:03Z",
         "disconnectAfterPowerCutBoundary": True,
@@ -110,7 +111,8 @@ def test_fault_driver_validates_hil_sequences_build_identity_and_power_loss():
         ("checkpointReachedUtc", "not-a-timestamp"),
         ("checkpointReachedUtc", "2026-07-16T23:59:59Z"),
         ("powerCutBoundaryUtc", "2026-07-17T00:00:00.250000Z"),
-        ("disconnectObservedUtc", "2026-07-17T00:00:00.750000Z"),
+        ("powerRemovedUtc", "2026-07-17T00:00:00.750000Z"),
+        ("disconnectObservedUtc", "2026-07-17T00:00:01.250000Z"),
         ("utcEnd", "2026-07-17T00:00:01.500000Z"),
     ),
 )
@@ -156,6 +158,7 @@ def test_fault_driver_rejects_missing_malformed_or_out_of_order_power_timestamps
         "utcStart": "2026-07-17T00:00:00Z",
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
         "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
         "utcEnd": "2026-07-17T00:00:03Z",
         "disconnectAfterPowerCutBoundary": True,
@@ -169,12 +172,13 @@ def test_fault_driver_rejects_missing_malformed_or_out_of_order_power_timestamps
 def test_power_loss_timestamp_artifacts_bind_exactly_to_result(tmp_path):
     result = {
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
     }
     checkpoint = tmp_path / "checkpoint-reached-utc.txt"
     removed = tmp_path / "power-removed-utc.txt"
     checkpoint.write_text(result["checkpointReachedUtc"] + "\n")
-    removed.write_text(result["disconnectObservedUtc"] + "\n")
+    removed.write_text(result["powerRemovedUtc"] + "\n")
 
     assert fault._power_loss_timestamp_artifact_errors(result, tmp_path) == []
 
@@ -182,10 +186,10 @@ def test_power_loss_timestamp_artifacts_bind_exactly_to_result(tmp_path):
         (checkpoint, "2026-07-17T00:00:01Z\n"),
         (removed, "2026-07-17T00:00:03Z\n"),
         (checkpoint, result["checkpointReachedUtc"] + " \n"),
-        (removed, result["disconnectObservedUtc"] + "\n\n"),
+        (removed, result["powerRemovedUtc"] + "\n\n"),
     ):
         checkpoint.write_text(result["checkpointReachedUtc"] + "\n")
-        removed.write_text(result["disconnectObservedUtc"] + "\n")
+        removed.write_text(result["powerRemovedUtc"] + "\n")
         path.write_text(value)
         assert fault._power_loss_timestamp_artifact_errors(result, tmp_path)
 
@@ -211,6 +215,7 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
     result = {
         "buildIdentity": build,
         "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
         "disconnectObservedUtc": "2026-07-17T00:00:02Z",
     }
     monkeypatch.setattr(fault, "validate_hil_storage_result", lambda *_: [])
@@ -229,7 +234,7 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
         result["checkpointReachedUtc"] + "\n"
     )
     (tmp_path / "power-removed-utc.txt").write_text(
-        result["disconnectObservedUtc"] + "\n"
+        result["powerRemovedUtc"] + "\n"
     )
 
     def rewrite_checksums():
@@ -252,6 +257,72 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
     report = fault.build_hil_storage_report(fault.HIL_POWER_LOSS_SCENARIO, tmp_path)
     assert report["status"] == "NOT_PASS"
     assert any("timestamp artifact mismatch" in error for error in report["validationErrors"])
+
+    (tmp_path / "checkpoint-reached-utc.txt").write_bytes(b"\xff\xfe\n")
+    rewrite_checksums()
+    report = fault.build_hil_storage_report(fault.HIL_POWER_LOSS_SCENARIO, tmp_path)
+    assert report["status"] == "NOT_PASS"
+    assert any("timestamp artifact" in error for error in report["validationErrors"])
+
+
+@pytest.mark.parametrize(
+    ("earlier", "later"),
+    (
+        ("utcStart", "checkpointReachedUtc"),
+        ("checkpointReachedUtc", "powerCutBoundaryUtc"),
+        ("powerCutBoundaryUtc", "powerRemovedUtc"),
+        ("powerRemovedUtc", "disconnectObservedUtc"),
+        ("disconnectObservedUtc", "utcEnd"),
+    ),
+)
+def test_fault_driver_rejects_equal_adjacent_power_timestamps(earlier, later):
+    result = {
+        "scenario": fault.HIL_POWER_LOSS_SCENARIO,
+        "status": "PASS",
+        "buildIdentity": {
+            "sourceCommit": "a" * 40,
+            "profile": "hil",
+            "configEnabled": True,
+            "sdkconfigSha256": "b" * 64,
+            "binarySha256": "c" * 64,
+            "elfSha256": "d" * 64,
+            "mapSha256": "e" * 64,
+            "archiveSha256": "f" * 64,
+            "binaryBytes": 1,
+            "appPartitionFreeBytes": 1,
+        },
+        "cacheKey": f"hil-task14/v1-{'d' * 64}",
+        "armSequence": 1,
+        "reachedSequence": 2,
+        "consumedSequence": 3,
+        "events": list(fault.HIL_EVENT_ORDER),
+        "operation": "sync",
+        "checkpoint": "before_commit_rename",
+        "faultAction": "pause",
+        "expectedProgress": 0,
+        "checkpointExercised": True,
+        "triggerResponseAbsent": True,
+        "triggerOutcome": None,
+        "powerLoss": True,
+        "checkpointReached": True,
+        "successMarkerBeforeLoss": False,
+        "rebootCaptured": True,
+        "armClearedAfterReboot": True,
+        "postRebootInspected": True,
+        "retryStatus": "ready",
+        "triggerPendingAtMarker": True,
+        "triggerPendingAtCutBoundary": True,
+        "utcStart": "2026-07-17T00:00:00Z",
+        "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+        "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+        "powerRemovedUtc": "2026-07-17T00:00:01.500000Z",
+        "disconnectObservedUtc": "2026-07-17T00:00:02Z",
+        "utcEnd": "2026-07-17T00:00:03Z",
+        "disconnectAfterPowerCutBoundary": True,
+    }
+    candidate = {**result, later: result[earlier]}
+
+    assert fault.validate_hil_storage_result(result["scenario"], candidate)
 
 
 def test_fault_driver_rejects_false_green_hil_trigger_outcomes():
@@ -300,7 +371,10 @@ def test_fault_driver_self_test_needs_no_live_arguments(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["lesson_studio_task14_fault_driver.py", "--self-test"])
 
     assert fault.main() == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "PASS"
+    assert report["hilPowerTimestampCases"] == 14
+    assert report["hilTimestampArtifactCases"] == 7
 
 
 def test_cold_eviction_validator_has_stable_typed_contract():

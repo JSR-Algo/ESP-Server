@@ -371,21 +371,39 @@ def validate_power_loss_result(value):
         require(value.get(name) == expected and type(value.get(name)) is type(expected), f"invalid power-loss field: {name}")
     try:
         ordered = [
-            datetime.fromisoformat(value[name].replace("Z", "+00:00"))
+            _strict_utc(value[name])
             for name in (
                 "utcStart",
                 "checkpointReachedUtc",
                 "powerCutBoundaryUtc",
+                "powerRemovedUtc",
                 "disconnectObservedUtc",
                 "utcEnd",
             )
         ]
     except (AttributeError, KeyError, TypeError, ValueError):
         raise HilValidationError("invalid power-loss boundary timestamps") from None
-    require(ordered == sorted(ordered), "invalid power-loss timestamp order")
+    require(
+        all(earlier < later for earlier, later in zip(ordered, ordered[1:])),
+        "invalid power-loss timestamp order",
+    )
     status = validate_status_response(value.get("postRebootStatus"), expected_cache_key=None)
     require(status["status"] == "idle", "volatile HIL arm survived reboot")
     return value
+
+
+def _strict_utc(value):
+    require(
+        isinstance(value, str)
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value),
+        "invalid UTC timestamp",
+    )
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        raise HilValidationError("invalid UTC timestamp") from None
+    require(parsed.tzinfo == timezone.utc, "invalid UTC timestamp")
+    return parsed
 
 
 def finalize_power_loss_result(result, power_data):
@@ -646,6 +664,7 @@ def await_power_loss_disconnect(
     require(not future.done(), "trigger completed during READY prompt")
     boundary_utc = clock()
     remove_power_prompt()
+    power_removed_utc = clock()
     try:
         result = future.result(timeout=timeout_seconds)
     except HilDisconnectError:
@@ -653,6 +672,7 @@ def await_power_loss_disconnect(
             "triggerPendingAtMarker": True,
             "triggerPendingAtCutBoundary": True,
             "powerCutBoundaryUtc": boundary_utc,
+            "powerRemovedUtc": power_removed_utc,
             "disconnectObservedUtc": clock(),
             "disconnectAfterPowerCutBoundary": True,
         }
@@ -982,7 +1002,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                         timeout_seconds=10,
                     )
                     trigger = None
-                    power_removed_utc = disconnect_evidence["disconnectObservedUtc"]
+                    power_removed_utc = disconnect_evidence["powerRemovedUtc"]
                     operator_input(
                         "Disconnect observed after the READY boundary. Confirm power is removed, then press Enter."
                     )
