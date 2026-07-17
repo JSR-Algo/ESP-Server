@@ -17,7 +17,7 @@
 - Modify `main/tbot-server/scripts/lesson_studio_task14_build_identity.py`: matrix and release artifact schema binding.
 - Modify `main/tbot-server/tests/test_lesson_studio_task14_hil_storage.py`: orchestrator RED/GREEN tests.
 - Modify `main/tbot-server/tests/test_lesson_studio_task14_evidence.py`: fault-driver, failure-bundle, build-identity, and release tests.
-- Modify `docs/lesson-studio-task14-live-matrix.md`: required failure evidence root and attended commands.
+- Modify `main/tbot-server/docs/lesson-studio-task14-live-matrix.md`: required failure evidence root and attended commands.
 - Preserve `main/tbot-server/data/manager-web/output/` and all existing failed hardware evidence.
 
 ### Task 1: Add Pure Recovery Decision And Response Validation
@@ -233,6 +233,14 @@ Power-loss sets inherit it. In the fault driver, parse the file as an exact
 object, compare it to `result["recovery"]`, validate scenario-specific semantics,
 and enforce conditional event order. Do not relax existing extra-file rejection.
 
+Replace direct PASS-directory publication with a hidden sibling staging
+directory. Write the complete bundle there, run the independent fault driver
+against staging, write final validator exit/evidence/checksums, fsync files and
+the staging directory, and atomically rename to the never-existing final
+scenario directory only when validator exit is `0`. Remove staging on failure;
+never leave a scenario directory under the matrix root unless it is a fully
+validated PASS bundle.
+
 - [ ] **Step 4: Run GREEN tests and commit**
 
 ```bash
@@ -256,7 +264,10 @@ git commit -m "test(e2e): bind HIL recovery evidence"
 
 - [ ] **Step 1: Write RED failure-bundle tests**
 
-Add tests for a required `--failure-evidence-dir` argument and a fixed bundle:
+Add `--failure-evidence-dir` only to `run-scenario` and `run-matrix`, not
+`preflight`. Before hardware access, resolve both roots strictly and reject
+symlinks, equality, ancestor/descendant overlap, and aliases that resolve to the
+same location. Add tests for a required argument and a fixed bundle:
 
 ```text
 command.txt
@@ -268,6 +279,28 @@ failure.json
 last-responses.json
 SHA256SUMS
 ```
+
+`failure.json` has exactly:
+
+```json
+{
+  "status": "FAIL",
+  "artifactVersion": 1,
+  "scenario": "evict-after-unlinks-fail",
+  "phase": "cleanup",
+  "errorCode": "FIXTURE_CLEANUP_REFUSED",
+  "utcStart": "2026-07-17T09:00:00Z",
+  "utcFailure": "2026-07-17T09:00:01Z",
+  "completedEvents": ["status-before", "inspect-before"]
+}
+```
+
+`last-responses.json` has fixed keys `statusBefore`, `inspectBefore`, `stage`,
+`arm`, `trigger`, `statusAfter`, `inspectAfter`, `recovery`, and `cleanup`; every
+value is the last validated bounded object or JSON null. Define a closed
+phase-to-stable-error-code mapping; never serialize raw exception text. Require
+`utcStart <= utcFailure`, bounded log/JSON sizes, and capture each response only
+after its validator succeeds.
 
 Require atomic rename, new timestamped directory, collision refusal, redaction,
 stable error codes, exact checksums, no matrix report eligibility, and retention
@@ -288,16 +321,22 @@ Create a fixed payload builder that accepts only already-redacted bounded data:
 
 ```python
 def write_failure_bundle(root, scenario, context):
-    directory = reserve_timestamped_failure_directory(root, scenario)
+    final = choose_never_existing_timestamped_path(root, scenario)
+    staging = create_hidden_sibling_directory(root, scenario)
     payloads = build_failure_payloads(context)
     assert_artifacts_sanitized(payloads, context.secrets)
-    publish_atomic_fixed_bundle(directory, payloads)
-    return directory
+    write_fsync_and_checksum(staging, payloads)
+    atomic_rename_and_fsync_parent(staging, final)
+    return final
 ```
 
-Call it in `run_scenario`'s exception path after best-effort fixture cleanup.
-Preserve the original exception and never create files under the PASS matrix
-root.
+Move all post-preflight setup, including build-identity load, live connection
+attestation, secret lookup, transport/client creation, and optional serial
+monitor start, inside one guarded boundary with nullable context fields. Call the
+quarantine writer for any failure in that boundary after best-effort fixture
+cleanup. Preserve the original exception if cleanup or evidence writing also
+fails, clean hidden staging best-effort, and never create files under the PASS
+matrix root.
 
 - [ ] **Step 4: Run GREEN tests and commit**
 
@@ -317,7 +356,7 @@ git commit -m "feat(e2e): quarantine failed HIL evidence"
 - Modify: `main/tbot-server/scripts/lesson_studio_task14_build_identity.py`
 - Modify: `main/tbot-server/tests/test_lesson_studio_task14_hil_storage.py`
 - Modify: `main/tbot-server/tests/test_lesson_studio_task14_evidence.py`
-- Modify: `docs/lesson-studio-task14-live-matrix.md`
+- Modify: `main/tbot-server/docs/lesson-studio-task14-live-matrix.md`
 
 - [ ] **Step 1: Write RED matrix/release tests**
 
@@ -353,7 +392,7 @@ git diff --check
 git add main/tbot-server/scripts/lesson_studio_task14_build_identity.py \
   main/tbot-server/tests/test_lesson_studio_task14_hil_storage.py \
   main/tbot-server/tests/test_lesson_studio_task14_evidence.py \
-  docs/lesson-studio-task14-live-matrix.md
+  main/tbot-server/docs/lesson-studio-task14-live-matrix.md
 git commit -m "docs(e2e): require recoverable HIL matrix evidence"
 ```
 
@@ -403,18 +442,44 @@ finding returns to the owning task with a RED/GREEN regression and re-review.
 
 ```bash
 cd /Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-hil-task7-auth-order
+export TBOT_DEVICE_MINT_SECRET="$(docker inspect tbot-esp32-server \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's/^TBOT_DEVICE_MINT_SECRET=//p')"
+test -n "$TBOT_DEVICE_MINT_SECRET"
 export TBOT_SERVER_IMAGE_TAG="hil-$(git rev-parse --short=12 HEAD)"
 ./deploy/build-local.sh --tag "$TBOT_SERVER_IMAGE_TAG" --only server --no-latest
+export LESSON_RUNTIME_ENABLED=true
+export LESSON_MOTION_PRESETS_ENABLED=true
+export LESSON_PLAYFUL_INTERACTIONS_ENABLED=true
+export LESSON_ROLLOUT_DEVICE_ALLOWLIST=28:84:85:85:1a:80
+export LESSON_STORAGE_HIL_DEVICE_ALLOWLIST=28:84:85:85:1a:80
+export COURSE_BACKEND_URL=http://192.168.100.209:13100/v1
+export LESSON_ASSET_ORIGIN_BASE=http://192.168.100.209:18102/tvideo-demo
+export LESSON_ASSET_PUBLIC_BASE_URL=http://192.168.100.209:18102/tvideo-demo
+export LESSON_ASSET_DELIVERY_MODE=sd_pack
+export TBOT_PUBLIC_WEBSOCKET_URL=ws://192.168.100.209:8000/tbot/v1/
 docker compose -f main/tbot-server/docker-compose.yml up -d --force-recreate
 docker inspect tbot-esp32-server --format '{{.Config.Image}} {{.State.Status}}'
 ```
 
-Require the exact new image, current LAN endpoints, exact MAC allowlists, and one
-connected device.
+Require the exact new image, every exported LAN endpoint/feature flag, exact MAC
+allowlists, nonempty secret without printing it, and one exact MAC/UUID
+connection. Fail on stale `192.168.1.25` or `192.168.100.230` values.
 
 - [ ] **Step 2: Run fresh automated partial-eviction smoke**
 
-Use a new PASS root and failure root. Run:
+Define and create non-overlapping new roots, then enter the script directory:
+
+```bash
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export PASS_ROOT="/Users/manhhodinh/Documents/TBOT/.codex_tmp/task14-live-$RUN_ID/storage-hil-smoke"
+export FAIL_ROOT="/Users/manhhodinh/Documents/TBOT/.codex_tmp/task14-live-$RUN_ID/storage-hil-smoke-failures"
+test ! -e "$PASS_ROOT" && test ! -e "$FAIL_ROOT"
+mkdir -p "$PASS_ROOT" "$FAIL_ROOT"
+cd /Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-hil-task7-auth-order/main/tbot-server
+```
+
+Run:
 
 ```bash
 python3 scripts/lesson_studio_task14_hil_storage.py run-scenario \
@@ -431,9 +496,20 @@ python3 scripts/lesson_studio_task14_hil_storage.py run-scenario \
   --failure-evidence-dir "$FAIL_ROOT"
 ```
 
-Reset without NVS erase, then repeat for `evict-before-rmdir-fail`. Require
-recovery attempted, initial partial outcome preserved, retry exact-evicted,
-cleanup clean, numeric sequences, validator 0, and no quarantine bundle.
+Reset without NVS erase using the exact safe command and record it:
+
+```bash
+/Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
+  /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py \
+  --chip esp32s3 --port /dev/cu.usbmodem1101 read_mac \
+  > "$PASS_ROOT/post-scenario-reset-read-mac.log" 2>&1
+```
+
+Wait for one exact connection, run orchestrator `preflight`, require controller
+idle and inspection residue missing, then repeat for
+`evict-before-rmdir-fail`. Require recovery attempted, initial partial outcome
+preserved, retry exact-evicted, cleanup clean, numeric sequences, validator 0,
+and no quarantine bundle.
 
 - [ ] **Step 3: Run the complete fresh nine-scenario matrix**
 
