@@ -360,7 +360,8 @@ def run_scenario_with_fakes(
         build_manifest=tmp_path / "manifest.json", esp_base_url="http://127.0.0.1",
         device_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", device_id="28:84:85:85:1a:80",
         mint_secret_env="TBOT_TEST_SECRET", asset_sha256="d" * 64, asset_bytes=1,
-        asset_url="http://127.0.0.1/asset", serial_port="fake", evidence_dir=tmp_path,
+        asset_url="http://127.0.0.1/asset", serial_port="fake",
+        evidence_dir=tmp_path / "pass", failure_evidence_dir=tmp_path / "failures",
         server_container="server",
     )
     result = hil.run_scenario(arguments, scenario, operator_input=lambda _prompt: "")
@@ -1346,9 +1347,13 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
         "buildIdentity": {"profile": "hil"},
     }
 
-    monkeypatch.setattr(hil, "preflight", lambda _arguments: preflight_result)
     monkeypatch.setattr(
-        hil, "run_scenario", lambda _arguments, scenario: calls.append(scenario)
+        hil, "preflight", lambda _arguments: pytest.fail("preflight escaped guarded scenario")
+    )
+    monkeypatch.setattr(
+        hil,
+        "run_scenario",
+        lambda _arguments, scenario: (calls.append(scenario), preflight_result)[1],
     )
     def publish(arguments, observed_preflight):
         assert observed_preflight == preflight_result
@@ -1372,6 +1377,7 @@ def test_run_matrix_publishes_aggregate_after_all_scenarios(tmp_path, monkeypatc
             "--asset-bytes", "1",
             "--build-manifest", str(manifest),
             "--evidence-dir", str(evidence_root),
+            "--failure-evidence-dir", str(tmp_path / "failures"),
         ],
     )
 
@@ -1990,6 +1996,91 @@ def test_bounded_process_output_kills_running_producer_immediately_at_byte_cap()
 
     assert time.monotonic() - started < 2
     assert process.poll() is not None
+
+
+def test_failure_evidence_phase_mapping_is_exact_and_closed():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    expected = {
+        "setup": "HIL_SETUP_FAILED",
+        "attestation": "LIVE_CONNECTION_ATTESTATION_FAILED",
+        "serial": "SERIAL_MONITOR_FAILED",
+        "status": "CONTROLLER_STATUS_INVALID",
+        "inspect": "STORAGE_INSPECTION_INVALID",
+        "stage": "FIXTURE_STAGE_FAILED",
+        "arm": "FAULT_ARM_FAILED",
+        "trigger": "SCENARIO_TRIGGER_FAILED",
+        "recovery": "PARTIAL_EVICTION_RECOVERY_FAILED",
+        "cleanup": "FIXTURE_CLEANUP_REFUSED",
+        "validator": "INDEPENDENT_VALIDATION_FAILED",
+        "publication": "ATOMIC_PUBLICATION_FAILED",
+        "internal": "INTERNAL_ORCHESTRATOR_FAILURE",
+    }
+
+    assert hil.FAILURE_PHASE_CODES == expected
+    for phase, error_code in expected.items():
+        assert hil.failure_error_code(phase) == error_code
+    for phase in ("", "network", None):
+        with pytest.raises(hil.HilValidationError, match="unknown failure phase"):
+            hil.failure_error_code(phase)
+    with pytest.raises(TypeError):
+        hil.write_failure_evidence(error_code="CALLER_SUPPLIED")
+
+
+def test_failure_evidence_roots_reject_overlap_symlinks_and_aliases_before_access(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failure"
+    pass_root.mkdir()
+    failure_root.mkdir()
+
+    assert hil.validate_evidence_roots(pass_root, failure_root) == (
+        pass_root.resolve(), failure_root.resolve()
+    )
+    for candidate in (pass_root, pass_root / "child", tmp_path):
+        with pytest.raises(hil.HilValidationError, match="overlap"):
+            hil.validate_evidence_roots(pass_root, candidate)
+
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(hil.HilValidationError, match="symlink"):
+        hil.validate_evidence_roots(pass_root, linked_parent / "quarantine")
+
+    calls = []
+    monkeypatch.setattr(hil, "load_build_identity", lambda *_args, **_kwargs: calls.append("build"))
+    arguments = SimpleNamespace(evidence_dir=pass_root, failure_evidence_dir=pass_root)
+    with pytest.raises(hil.HilValidationError, match="overlap"):
+        hil.validate_run_roots(arguments)
+    assert calls == []
+
+
+def test_failure_evidence_argument_is_required_only_for_live_run_commands(monkeypatch):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+
+    parser = hil.build_argument_parser()
+    preflight = parser.parse_args([
+        "preflight", "--device-id", "28:84:85:85:1a:80",
+        "--device-uuid", "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "--serial-port", "/dev/null", "--esp-base-url", "http://127.0.0.1:8000",
+        "--asset-url", "http://127.0.0.1:8000/asset", "--asset-sha256", "d" * 64,
+        "--asset-bytes", "1", "--build-manifest", "/tmp/build.json",
+        "--evidence-dir", "/tmp/pass",
+    ])
+    assert not hasattr(preflight, "failure_evidence_dir")
+
+    common = [
+        "--device-id", "28:84:85:85:1a:80",
+        "--device-uuid", "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "--serial-port", "/dev/null", "--esp-base-url", "http://127.0.0.1:8000",
+        "--asset-url", "http://127.0.0.1:8000/asset", "--asset-sha256", "d" * 64,
+        "--asset-bytes", "1", "--build-manifest", "/tmp/build.json",
+        "--evidence-dir", "/tmp/pass",
+    ]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run-scenario", *common, "--scenario", hil.HIL_STORAGE_SCENARIOS[0]])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run-matrix", *common])
 
 
 def test_bounded_process_output_enforces_deadline_on_stalled_process():

@@ -2645,3 +2645,184 @@ def test_task14_docs_include_preview_and_keep_every_live_gate_not_pass():
     assert "hil-matrix-pass -> production-reflash -> production-attest -> production-soak" in live
     assert "/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-production-lesson-studio-continued" in live
     assert "/Users/manhhodinh/Documents/TBOT/.worktrees/tbot-firmware-production-lesson-studio-continued" in live
+
+
+def test_quarantine_failure_evidence_writer_publishes_exact_bounded_bundle(tmp_path):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    failure_root = tmp_path / "quarantine"
+    secret = "mint-secret-value"
+    responses = {
+        key: None
+        for key in hil.FAILURE_RESPONSE_KEYS
+    }
+    responses["statusBefore"] = {"status": "idle", "token": secret}
+
+    published = hil.write_failure_evidence(
+        failure_root,
+        scenario="evict-before-first-unlink-fail",
+        phase="trigger",
+        utc_start="2026-07-17T01:02:03.000000Z",
+        utc_failure="2026-07-17T01:02:04.000000Z",
+        completed_events=["status-before", "inspect-before", "stage", "arm"],
+        build_identity={"profile": "hil", "secret": secret},
+        last_responses=responses,
+        command="run --token mint-secret-value\n",
+        serial_log="serial mint-secret-value\n" + "x" * (hil.MAX_FAILURE_LOG_BYTES * 2),
+        server_log="server mint-secret-value\n",
+        timeline_log="1 status-before\n",
+        secrets=(secret,),
+        now=lambda: "2026-07-17T01:02:04.000000Z",
+    )
+
+    expected = {
+        "command.txt", "serial.log", "server.log", "timeline.log",
+        "build-manifest.json", "failure.json", "last-responses.json", "SHA256SUMS",
+    }
+    assert published.parent == failure_root
+    assert not published.name.startswith(".")
+    assert {path.name for path in published.iterdir()} == expected
+    failure = json.loads((published / "failure.json").read_text())
+    assert failure == {
+        "artifactVersion": 1,
+        "completedEvents": ["status-before", "inspect-before", "stage", "arm"],
+        "errorCode": "SCENARIO_TRIGGER_FAILED",
+        "phase": "trigger",
+        "scenario": "evict-before-first-unlink-fail",
+        "status": "FAIL",
+        "utcFailure": "2026-07-17T01:02:04.000000Z",
+        "utcStart": "2026-07-17T01:02:03.000000Z",
+    }
+    captured = json.loads((published / "last-responses.json").read_text())
+    assert list(captured) == list(hil.FAILURE_RESPONSE_KEYS)
+    assert captured["statusBefore"]["token"] == "<redacted-secret>"
+    assert (published / "serial.log").stat().st_size <= hil.MAX_FAILURE_LOG_BYTES
+    assert secret not in "".join(
+        path.read_text(errors="replace") for path in published.iterdir()
+    )
+    checksum_rows = (published / "SHA256SUMS").read_text().splitlines()
+    assert len(checksum_rows) == len(expected) - 1
+    for row in checksum_rows:
+        digest, name = row.split("  ", 1)
+        assert digest == hashlib.sha256((published / name).read_bytes()).hexdigest()
+    assert not list(failure_root.glob(".*.staging-*"))
+
+
+def test_quarantine_failure_evidence_rejects_invalid_payloads_and_collision(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    root = tmp_path / "quarantine"
+    responses = {key: None for key in hil.FAILURE_RESPONSE_KEYS}
+    base = dict(
+        failure_root=root,
+        scenario=hil.HIL_STORAGE_SCENARIOS[0],
+        phase="setup",
+        utc_start="2026-07-17T01:02:03.000000Z",
+        utc_failure="2026-07-17T01:02:04.000000Z",
+        completed_events=[],
+        build_identity=None,
+        last_responses=responses,
+        command="command\n", serial_log="serial\n", server_log="server\n",
+        timeline_log="timeline\n",
+        now=lambda: "2026-07-17T01:02:04.000000Z",
+    )
+    with pytest.raises(hil.HilValidationError, match="unknown failure phase"):
+        hil.write_failure_evidence(**{**base, "phase": "unknown"})
+    with pytest.raises(hil.HilValidationError, match="failure timestamps"):
+        hil.write_failure_evidence(**{
+            **base,
+            "utc_start": "2026-07-17T01:02:05.000000Z",
+        })
+    with pytest.raises(hil.HilValidationError, match="last response keys"):
+        hil.write_failure_evidence(**{**base, "last_responses": {}})
+    with pytest.raises(hil.HilValidationError, match="bounded object"):
+        hil.write_failure_evidence(**{
+            **base,
+            "last_responses": {**responses, "stage": "not-an-object"},
+        })
+
+    monkeypatch.setattr(hil, "_failure_directory_name", lambda *_args: "fixed-failure")
+    (root / "fixed-failure").mkdir(parents=True)
+    with pytest.raises(hil.HilValidationError, match="already exists"):
+        hil.write_failure_evidence(**base)
+    assert {path.name for path in root.iterdir()} == {"fixed-failure"}
+
+
+def test_quarantine_failure_preserves_primary_exception_when_secondary_steps_fail(
+    tmp_path, monkeypatch,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    primary = hil.HilValidationError("sensitive-primary")
+    secondaries = []
+    monkeypatch.setattr(
+        hil,
+        "write_failure_evidence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sensitive-secondary")),
+    )
+
+    with pytest.raises(hil.HilValidationError) as caught:
+        hil.quarantine_scenario_failure(
+            primary,
+            failure_root=tmp_path / "quarantine",
+            scenario=hil.HIL_STORAGE_SCENARIOS[0],
+            phase="internal",
+            utc_start="2026-07-17T01:02:03.000000Z",
+            completed_events=[],
+            build_identity=None,
+            last_responses={key: None for key in hil.FAILURE_RESPONSE_KEYS},
+            command="command\n", serial_log="", server_log="", timeline_log="",
+            secondary_log=secondaries.append,
+        )
+    assert caught.value is primary
+    assert secondaries == ["failure evidence publication also failed"]
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "expected_phase", "expected_code"),
+    (
+        (lambda hil: hil.HilValidationError("secret setup detail"), "setup", "HIL_SETUP_FAILED"),
+        (lambda _hil: RuntimeError("secret internal detail"), "internal", "INTERNAL_ORCHESTRATOR_FAILURE"),
+    ),
+)
+def test_quarantine_failure_wraps_earliest_setup_and_classifies_unexpected_errors(
+    tmp_path, monkeypatch, exception_factory, expected_phase, expected_code,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    arguments = argparse.Namespace(
+        build_manifest=tmp_path / "missing-build.json",
+        esp_base_url="http://127.0.0.1:8000",
+        device_uuid="fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        device_id="28:84:85:85:1a:80",
+        mint_secret_env="TBOT_DEVICE_MINT_SECRET",
+        asset_sha256="d" * 64,
+        asset_bytes=1,
+        asset_url="http://127.0.0.1:8000/asset",
+        serial_port="/dev/null",
+        server_container="unused",
+        evidence_dir=pass_root,
+        failure_evidence_dir=failure_root,
+    )
+    primary = exception_factory(hil)
+    monkeypatch.setattr(
+        hil, "load_build_identity", lambda *_args, **_kwargs: (_ for _ in ()).throw(primary)
+    )
+    monkeypatch.setattr(
+        hil, "attest_live_connection", lambda *_args, **_kwargs: pytest.fail("attestation accessed")
+    )
+
+    with pytest.raises(type(primary)) as caught:
+        hil.run_scenario(arguments, hil.HIL_STORAGE_SCENARIOS[0])
+
+    assert caught.value is primary
+    bundles = list(failure_root.iterdir())
+    assert len(bundles) == 1
+    failure = json.loads((bundles[0] / "failure.json").read_text())
+    assert failure["phase"] == expected_phase
+    assert failure["errorCode"] == expected_code
+    assert failure["completedEvents"] == []
+    assert not pass_root.exists()
+    combined = "".join(path.read_text(errors="replace") for path in bundles[0].iterdir())
+    assert "secret setup detail" not in combined
+    assert "secret internal detail" not in combined

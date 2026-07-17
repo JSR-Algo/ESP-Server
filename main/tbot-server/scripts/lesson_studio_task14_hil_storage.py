@@ -123,6 +123,32 @@ ABSOLUTE_PATH_RE = re.compile(r"/(?:Users|home|private|opt|tmp)/[^\s,;]+")
 MAX_SERIAL_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_SERVER_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_CAPTURE_LINES = 50_000
+MAX_FAILURE_LOG_BYTES = 256 * 1024
+MAX_FAILURE_JSON_BYTES = 256 * 1024
+MAX_FAILURE_COMMAND_BYTES = 16 * 1024
+FAILURE_ARTIFACTS = (
+    "command.txt", "serial.log", "server.log", "timeline.log",
+    "build-manifest.json", "failure.json", "last-responses.json", "SHA256SUMS",
+)
+FAILURE_RESPONSE_KEYS = (
+    "statusBefore", "inspectBefore", "stage", "arm", "trigger",
+    "statusAfter", "inspectAfter", "recovery", "cleanup",
+)
+FAILURE_PHASE_CODES = {
+    "setup": "HIL_SETUP_FAILED",
+    "attestation": "LIVE_CONNECTION_ATTESTATION_FAILED",
+    "serial": "SERIAL_MONITOR_FAILED",
+    "status": "CONTROLLER_STATUS_INVALID",
+    "inspect": "STORAGE_INSPECTION_INVALID",
+    "stage": "FIXTURE_STAGE_FAILED",
+    "arm": "FAULT_ARM_FAILED",
+    "trigger": "SCENARIO_TRIGGER_FAILED",
+    "recovery": "PARTIAL_EVICTION_RECOVERY_FAILED",
+    "cleanup": "FIXTURE_CLEANUP_REFUSED",
+    "validator": "INDEPENDENT_VALIDATION_FAILED",
+    "publication": "ATOMIC_PUBLICATION_FAILED",
+    "internal": "INTERNAL_ORCHESTRATOR_FAILURE",
+}
 SCENARIO_EXPECTED_PROGRESS = {
     "evict-before-first-unlink-fail": 0,
     "evict-after-unlinks-fail": 1,
@@ -532,6 +558,203 @@ def json_bytes(value):
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def failure_error_code(phase):
+    require(phase in FAILURE_PHASE_CODES, "unknown failure phase")
+    return FAILURE_PHASE_CODES[phase]
+
+
+def _reject_existing_symlink_components(path):
+    path = Path(path).absolute()
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        if os.path.lexists(current):
+            require(not current.is_symlink(), "evidence root contains a symlink")
+
+
+def validate_evidence_roots(pass_root, failure_root):
+    pass_path = Path(pass_root).absolute()
+    failure_path = Path(failure_root).absolute()
+    _reject_existing_symlink_components(pass_path)
+    _reject_existing_symlink_components(failure_path)
+    pass_resolved = pass_path.resolve(strict=False)
+    failure_resolved = failure_path.resolve(strict=False)
+    try:
+        common = Path(os.path.commonpath((pass_resolved, failure_resolved)))
+    except ValueError:
+        common = None
+    require(
+        common not in {pass_resolved, failure_resolved},
+        "PASS and failure evidence roots overlap",
+    )
+    if pass_resolved.exists() and failure_resolved.exists():
+        pass_stat = pass_resolved.stat()
+        failure_stat = failure_resolved.stat()
+        require(
+            (pass_stat.st_dev, pass_stat.st_ino) != (failure_stat.st_dev, failure_stat.st_ino),
+            "PASS and failure evidence roots alias the same location",
+        )
+    return pass_resolved, failure_resolved
+
+
+def validate_run_roots(arguments):
+    pass_root, failure_root = validate_evidence_roots(
+        arguments.evidence_dir, arguments.failure_evidence_dir
+    )
+    arguments.evidence_dir = pass_root
+    arguments.failure_evidence_dir = failure_root
+    return pass_root, failure_root
+
+
+def _bounded_redacted_text(value, secrets, max_bytes):
+    rendered = redact_text(value or "", secrets)
+    lines = rendered.splitlines(keepends=True)[:MAX_CAPTURE_LINES]
+    encoded = "".join(lines).encode("utf-8", errors="replace")
+    if len(encoded) > max_bytes:
+        encoded = encoded[:max_bytes]
+        while True:
+            try:
+                rendered = encoded.decode("utf-8")
+                break
+            except UnicodeDecodeError as exc:
+                encoded = encoded[:exc.start]
+    else:
+        rendered = encoded.decode("utf-8")
+    return (rendered or "<no captured output>\n").encode("utf-8")
+
+
+def _sanitize_json(value, secrets):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return redact_text(value, secrets)
+    if isinstance(value, list):
+        return [_sanitize_json(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {
+            redact_text(key, secrets): _sanitize_json(item, secrets)
+            for key, item in value.items()
+            if isinstance(key, str)
+        }
+    return redact_text(type(value).__name__, secrets)
+
+
+def _bounded_json_bytes(value, secrets, *, sort_keys=True):
+    data = (
+        json.dumps(_sanitize_json(value, secrets), indent=2, sort_keys=sort_keys) + "\n"
+    ).encode("utf-8")
+    require(len(data) <= MAX_FAILURE_JSON_BYTES, "failure JSON exceeds bounded size")
+    return data
+
+
+def _failure_directory_name(scenario, utc_failure):
+    stamp = re.sub(r"[^0-9]", "", utc_failure)[:20]
+    return f"{stamp}-{scenario}"
+
+
+def write_failure_evidence(
+    failure_root,
+    *,
+    scenario,
+    phase,
+    utc_start,
+    utc_failure,
+    completed_events,
+    build_identity,
+    last_responses,
+    command,
+    serial_log,
+    server_log,
+    timeline_log,
+    secrets=(),
+    now=None,
+):
+    require(scenario in HIL_STORAGE_SCENARIOS, "unknown HIL storage scenario")
+    error_code = failure_error_code(phase)
+    start_value = _strict_utc(utc_start)
+    failure_value = _strict_utc(utc_failure)
+    require(start_value <= failure_value, "invalid failure timestamps")
+    require(
+        isinstance(completed_events, list)
+        and all(isinstance(event, str) for event in completed_events),
+        "invalid completed events",
+    )
+    require(
+        isinstance(last_responses, dict)
+        and tuple(last_responses) == FAILURE_RESPONSE_KEYS,
+        "invalid last response keys",
+    )
+    require(
+        all(value is None or isinstance(value, dict) for value in last_responses.values()),
+        "last response must be a bounded object or null",
+    )
+    root = Path(failure_root).absolute()
+    _reject_existing_symlink_components(root)
+    root.mkdir(parents=True, exist_ok=True)
+    _reject_existing_symlink_components(root)
+    effective_now = now or utc_now
+    final = root / _failure_directory_name(scenario, effective_now())
+    require(not os.path.lexists(final), "failure evidence directory already exists")
+    staging = Path(tempfile.mkdtemp(prefix=f".{final.name}.staging-", dir=root))
+    published = False
+    try:
+        failure = {
+            "artifactVersion": 1,
+            "completedEvents": completed_events,
+            "errorCode": error_code,
+            "phase": phase,
+            "scenario": scenario,
+            "status": "FAIL",
+            "utcFailure": utc_failure,
+            "utcStart": utc_start,
+        }
+        payloads = {
+            "command.txt": _bounded_redacted_text(command, secrets, MAX_FAILURE_COMMAND_BYTES),
+            "serial.log": _bounded_redacted_text(serial_log, secrets, MAX_FAILURE_LOG_BYTES),
+            "server.log": _bounded_redacted_text(server_log, secrets, MAX_FAILURE_LOG_BYTES),
+            "timeline.log": _bounded_redacted_text(timeline_log, secrets, MAX_FAILURE_LOG_BYTES),
+            "build-manifest.json": _bounded_json_bytes(build_identity, secrets),
+            "failure.json": _bounded_json_bytes(failure, secrets),
+            "last-responses.json": _bounded_json_bytes(
+                last_responses, secrets, sort_keys=False
+            ),
+        }
+        assert_artifacts_sanitized(payloads, secrets)
+        for name, data in payloads.items():
+            atomic_write_bytes(staging / name, data)
+        checksums = "".join(
+            f"{hashlib.sha256(payloads[name]).hexdigest()}  {name}\n"
+            for name in FAILURE_ARTIFACTS if name != "SHA256SUMS"
+        ).encode("ascii")
+        atomic_write_bytes(staging / "SHA256SUMS", checksums)
+        _validate_staging_layout(staging, FAILURE_ARTIFACTS)
+        _scenario_checksums(staging, FAILURE_ARTIFACTS)
+        for name in FAILURE_ARTIFACTS:
+            with (staging / name).open("rb") as artifact:
+                os.fsync(artifact.fileno())
+        _fsync_directory(staging)
+        _rename_directory_noreplace(staging, final)
+        published = True
+        _fsync_directory(root)
+        return final
+    except BaseException:
+        cleanup = final if published else staging
+        with suppress(Exception):
+            shutil.rmtree(cleanup)
+        with suppress(Exception):
+            _fsync_directory(root)
+        raise
+
+
+def quarantine_scenario_failure(primary, *, secondary_log=None, **evidence):
+    try:
+        write_failure_evidence(**evidence, utc_failure=utc_now())
+    except BaseException:
+        if secondary_log is not None:
+            secondary_log("failure evidence publication also failed")
+    raise primary
+
+
 def finalize_scenario_directory(directory, payloads, *, power_loss):
     directory = Path(directory)
     expected = scenario_artifact_names(power_loss=power_loss)
@@ -623,6 +846,7 @@ def publish_validated_scenario_directory(
     power_loss,
     validator_script,
     secrets=(),
+    phase_changed=None,
 ):
     final_directory = Path(final_directory)
     parent = final_directory.parent
@@ -636,6 +860,8 @@ def publish_validated_scenario_directory(
     published = False
     try:
         finalize_scenario_directory(staging, payloads, power_loss=power_loss)
+        if phase_changed is not None:
+            phase_changed("validator")
         validator = subprocess.run(
             [
                 sys.executable, str(validator_script), "--hil-storage-scenario", scenario,
@@ -659,6 +885,8 @@ def publish_validated_scenario_directory(
             and evidence.get("validationErrors") == [],
             "HIL scenario validator failed",
         )
+        if phase_changed is not None:
+            phase_changed("publication")
         atomic_write_bytes(
             staging / "validator-exit-code.txt",
             f"{validator.returncode}\n".encode("ascii"),
@@ -1478,36 +1706,56 @@ def _validator_report(scenario, result):
 
 def run_scenario(arguments, scenario, *, operator_input=input):
     require(scenario in HIL_STORAGE_SCENARIOS, "unknown HIL storage scenario")
+    validate_run_roots(arguments)
     operation, checkpoint, action, threshold, pause_seconds, power_loss = SCENARIO_SPECS[scenario]
-    build_identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
-    connection_identity = attest_live_connection(
-        arguments.esp_base_url, arguments.device_uuid, arguments.device_id
-    )
-    secret = os.environ.get(arguments.mint_secret_env, "")
-    require(bool(secret), f"missing {arguments.mint_secret_env}")
-    cache_key = f"hil-task14/v1-{arguments.asset_sha256}"
-    sibling = f"hil-task14/v2-{arguments.asset_sha256}"
-    transport = RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret)
-    client = HilToolClient(transport)
-    monitor = SerialMonitor(arguments.serial_port).start()
     started = utc_now()
     events = []
+    responses = {key: None for key in FAILURE_RESPONSE_KEYS}
     payloads = {}
     scenario_dir = Path(arguments.evidence_dir) / scenario
     fixture = "preservation_set"
+    phase = "setup"
+    build_identity = None
+    connection_identity = None
+    secret = ""
+    cache_key = None
+    sibling = None
+    client = None
+    monitor = None
     staged = False
     cleaned = False
     recovery_blocked_cleanup = False
     try:
+        build_identity = load_build_identity(arguments.build_manifest, expected_profile="hil")
+        phase = "attestation"
+        connection_identity = attest_live_connection(
+            arguments.esp_base_url, arguments.device_uuid, arguments.device_id
+        )
+        phase = "setup"
+        secret = os.environ.get(arguments.mint_secret_env, "")
+        require(bool(secret), f"missing {arguments.mint_secret_env}")
+        cache_key = f"hil-task14/v1-{arguments.asset_sha256}"
+        sibling = f"hil-task14/v2-{arguments.asset_sha256}"
+        transport = RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret)
+        client = HilToolClient(transport)
+        phase = "serial"
+        monitor = SerialMonitor(arguments.serial_port).start()
+        phase = "status"
         status_before = client.status()
+        responses["statusBefore"] = status_before
         require(status_before["status"] == "idle", "HIL controller is not idle before scenario")
         events.append("status-before")
+        phase = "inspect"
         inspect_before = client.inspect(cache_key, sibling)
+        responses["inspectBefore"] = inspect_before
         events.append("inspect-before")
+        phase = "stage"
         stage = client.stage(cache_key, fixture, sibling)
+        responses["stage"] = stage
         staged = True
         events.append("stage")
         declared = arguments.asset_bytes if checkpoint == "after_download_bytes" else 0
+        phase = "arm"
         arm = client.arm(
             cache_key,
             operation,
@@ -1517,6 +1765,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             declared_asset_bytes=declared,
             pause_seconds=pause_seconds,
         )
+        responses["arm"] = arm
         events.append("arm")
         trigger = None
         reboot_serial = ""
@@ -1524,8 +1773,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         power_data = None
         post_status = post_reboot_inspect = None
         if action == "pause":
+            phase = "trigger"
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_trigger, client, operation, cache_key, arguments)
+                phase = "serial"
                 serial_until_marker = poll_checkpoint(
                     monitor.read_new,
                     operation=operation,
@@ -1567,6 +1818,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                     operator_input("Restore robot power, wait for boot, then press Enter.")
                     deadline = time.monotonic() + 45
                     post_status = None
+                    phase = "status"
                     while time.monotonic() < deadline:
                         try:
                             post_status = client.status()
@@ -1577,7 +1829,9 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                         time.sleep(0.5)
                     require(post_status is not None and post_status["status"] == "idle", "volatile HIL arm did not clear after reboot")
                     reboot_serial = monitor.snapshot()[reboot_start:]
+                    phase = "inspect"
                     post_reboot_inspect = client.inspect(cache_key, sibling)
+                    phase = "trigger"
                     retry = _trigger(client, operation, cache_key, arguments)
                     validate_trigger_response(operation, retry, cache_key, require_ready=True)
                     power_data = {
@@ -1595,14 +1849,22 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                     }
                 else:
                     operator_input("Remove and reinsert the SD card within the pause window, then press Enter.")
+                    phase = "trigger"
                     trigger = future.result(timeout=pause_seconds + 10)
         else:
             serial_until_marker = ""
+            phase = "trigger"
             trigger = _trigger(client, operation, cache_key, arguments)
+        if trigger is not None:
+            responses["trigger"] = trigger
         events.append("trigger")
+        phase = "status"
         status_after = post_status if power_loss else client.status(cache_key)
+        responses["statusAfter"] = status_after
         events.append("status-after")
+        phase = "inspect"
         inspect_after = post_reboot_inspect if power_loss else client.inspect(cache_key, sibling)
+        responses["inspectAfter"] = inspect_after
         events.append("inspect-after")
         validate_preservation_inspections(
             scenario,
@@ -1613,8 +1875,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         recovery = recovery_not_attempted()
         if scenario in PARTIAL_EVICTION_SCENARIOS:
             recovery_blocked_cleanup = True
+        phase = "trigger"
         outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         if scenario in PARTIAL_EVICTION_SCENARIOS:
+            phase = "recovery"
             retry_raw = client.transport.call(
                 TRIGGER_TOOLS["evict"], {"cacheKey": cache_key}, 75
             )
@@ -1632,11 +1896,14 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                 "response": retry,
                 "inspection": recovered_inspection,
             }
+            responses["recovery"] = recovery
             recovery_blocked_cleanup = False
         if power_loss and operation == "sync":
             evicted_retry = _trigger(client, "evict", cache_key, arguments)
             require(evicted_retry.get("evicted") is True, "retry cache cleanup eviction failed")
+        phase = "cleanup"
         cleanup = client.cleanup(cache_key, fixture, sibling)
+        responses["cleanup"] = cleanup
         cleaned = True
         events.append("cleanup")
         cleanup_inspect = client.inspect(cache_key, sibling)
@@ -1681,6 +1948,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         }
         if power_data:
             finalize_power_loss_result(result, power_data)
+        phase = "validator"
         evidence, validator_script = _validator_report(scenario, result)
         payloads.update(
             {
@@ -1715,6 +1983,11 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         else:
             payloads["trigger-response.json"] = json_bytes(trigger)
         assert_artifacts_sanitized(payloads, (secret,))
+        def set_failure_phase(value):
+            nonlocal phase
+            phase = value
+
+        phase = "publication"
         publish_validated_scenario_directory(
             scenario_dir,
             payloads,
@@ -1722,15 +1995,57 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             power_loss=power_loss,
             validator_script=validator_script,
             secrets=(secret,),
+            phase_changed=set_failure_phase,
         )
         return result
-    except BaseException:
-        if staged and not cleaned and not recovery_blocked_cleanup:
+    except BaseException as primary:
+        secondary_events = []
+        if client is not None and staged and not cleaned and not recovery_blocked_cleanup:
+            try:
+                responses["cleanup"] = client.cleanup(cache_key, fixture, sibling)
+                events.append("cleanup")
+            except Exception:
+                secondary_events.append("secondary fixture cleanup also failed")
+        failure_phase = phase if isinstance(
+            primary,
+            (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError),
+        ) else "internal"
+        serial_log = monitor.snapshot() if monitor is not None else ""
+        server_log = ""
+        if build_identity is not None:
             with suppress(Exception):
-                client.cleanup(cache_key, fixture, sibling)
+                server_log = _server_logs(arguments.server_container, started, (secret,))
+        timeline_log = "\n".join(
+            f"{index + 1} {name}" for index, name in enumerate(events)
+        )
+        if secondary_events:
+            timeline_log += "\n" + "\n".join(secondary_events)
+        try:
+            write_failure_evidence(
+                arguments.failure_evidence_dir,
+                scenario=scenario,
+                phase=failure_phase,
+                utc_start=started,
+                utc_failure=utc_now(),
+                completed_events=events,
+                build_identity=build_identity,
+                last_responses=responses,
+                command=sanitized_command_text(sys.argv, (secret,)),
+                serial_log=serial_log,
+                server_log=server_log,
+                timeline_log=timeline_log,
+                secrets=(secret,),
+            )
+        except BaseException:
+            print(
+                "lesson storage HIL: failure evidence publication also failed",
+                file=sys.stderr,
+            )
         raise
     finally:
-        monitor.stop()
+        if monitor is not None:
+            with suppress(Exception):
+                monitor.stop()
 
 
 def preflight(arguments):
@@ -1774,33 +2089,48 @@ def _add_live_arguments(parser):
     parser.add_argument("--server-container", default="tbot-esp32-server")
 
 
-def main():
+def build_argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     preflight_parser = subparsers.add_parser("preflight")
     _add_live_arguments(preflight_parser)
     scenario_parser = subparsers.add_parser("run-scenario")
     _add_live_arguments(scenario_parser)
+    scenario_parser.add_argument("--failure-evidence-dir", required=True, type=Path)
     scenario_parser.add_argument("--scenario", required=True, choices=HIL_STORAGE_SCENARIOS)
     matrix_parser = subparsers.add_parser("run-matrix")
     _add_live_arguments(matrix_parser)
-    arguments = parser.parse_args()
+    matrix_parser.add_argument("--failure-evidence-dir", required=True, type=Path)
+    return parser
+
+
+def main():
+    arguments = build_argument_parser().parse_args()
     try:
         if arguments.command == "preflight":
             preflight(arguments)
         elif arguments.command == "run-scenario":
-            preflight(arguments)
+            validate_run_roots(arguments)
             run_scenario(arguments, arguments.scenario)
         else:
+            validate_run_roots(arguments)
             report_path = Path(arguments.evidence_dir) / MATRIX_REPORT_NAME
             with suppress(FileNotFoundError):
                 report_path.unlink()
-            preflight_result = preflight(arguments)
+            preflight_result = None
             for scenario in HIL_STORAGE_SCENARIOS:
-                run_scenario(arguments, scenario)
+                result = run_scenario(arguments, scenario)
+                if preflight_result is None:
+                    preflight_result = {
+                        key: result[key]
+                        for key in (
+                            "status", "deviceId", "deviceUuid",
+                            "connectionIdentity", "buildIdentity",
+                        )
+                    }
             publish_matrix_report(arguments, preflight_result)
         return 0
-    except (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError) as exc:
+    except Exception as exc:
         print(f"lesson storage HIL: FAIL: {redact_text(exc)}", file=sys.stderr)
         return 1
 
