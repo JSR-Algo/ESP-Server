@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import tempfile
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -84,6 +85,41 @@ def sha256_file(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _read_file_snapshot(path, label):
+    path = Path(path)
+    require(not path.is_symlink(), f"{label} must not be a symlink")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode) and before.st_size > 0, f"invalid {label}")
+        chunks = []
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = path.lstat()
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    require(
+        identity == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        == (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+        f"{label} changed during validation",
+    )
+    data = b"".join(chunks)
+    return data, hashlib.sha256(data).hexdigest(), identity
+
+
+def _snapshot_directory(directory, expected_names):
+    return {
+        name: _read_file_snapshot(directory / name, f"HIL matrix artifact: {name}")[1:]
+        for name in expected_names
+    }
 
 
 def _exact_int(value, name, *, minimum=0):
@@ -247,6 +283,48 @@ def validate_build_pair(hil_manifest, production_manifest):
     return {"sourceCommit": hil["sourceCommit"], "hil": hil, "production": production}
 
 
+def build_boot_attestation(manifest_path, connection_attestation_path, event):
+    expected_profile = "hil" if event == "hil-flash" else "production"
+    require(event in {"hil-flash", "production-reflash"}, "invalid boot event")
+    identity = load_build_identity(manifest_path, expected_profile=expected_profile)
+    _path, _digest, attestation_bytes = _release_evidence(connection_attestation_path)
+    attestation = _load_evidence_json_bytes(attestation_bytes)
+    require(
+        set(attestation) == {
+            "status", "deviceId", "deviceUuid", "connectionIdentity", "buildIdentity",
+        }
+        and attestation.get("status") == "PASS"
+        and attestation.get("buildIdentity") == identity,
+        "live boot/connection attestation mismatch",
+    )
+    device_id = attestation.get("deviceId")
+    device_uuid = attestation.get("deviceUuid")
+    require(
+        isinstance(device_id, str)
+        and re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", device_id)
+        and isinstance(device_uuid, str)
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            device_uuid,
+            re.IGNORECASE,
+        )
+        and attestation.get("connectionIdentity")
+        == {"deviceId": device_id, "clientId": device_uuid},
+        "invalid live boot connection identity",
+    )
+    return {
+        "status": "PASS",
+        "event": event,
+        "buildIdentity": identity,
+        "bootIdentity": {
+            "sourceCommit": identity["sourceCommit"],
+            "profile": identity["profile"],
+            "configEnabled": identity["configEnabled"],
+            "binarySha256": identity["binarySha256"],
+        },
+    }
+
+
 def _validate_flat_identity(value, expected_profile):
     require(isinstance(value, dict) and set(value) == FLAT_FIELDS, "invalid flat build identity")
     require(value.get("profile") == expected_profile, "foreign flat build profile")
@@ -275,8 +353,7 @@ def _strict_utc(value):
 
 def _release_evidence(path, checksum_path=None):
     path = Path(path)
-    require(not path.is_symlink() and path.is_file() and path.stat().st_size > 0, "release evidence missing")
-    digest = sha256_file(path)
+    data, digest, _identity = _read_file_snapshot(path, "release evidence")
     if checksum_path is not None:
         checksum_path = Path(checksum_path)
         require(not checksum_path.is_symlink() and checksum_path.is_file(), "release evidence checksum missing")
@@ -286,13 +363,22 @@ def _release_evidence(path, checksum_path=None):
             and parts[1].lstrip("*") == path.name,
             "release evidence checksum mismatch",
         )
-    return path.resolve(), digest
+    return path.resolve(), digest, data
 
 
 def _load_evidence_json(path):
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BuildIdentityError("invalid release evidence JSON") from exc
+    require(isinstance(value, dict), "release evidence must be an object")
+    return value
+
+
+def _load_evidence_json_bytes(data):
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise BuildIdentityError("invalid release evidence JSON") from exc
     require(isinstance(value, dict), "release evidence must be an object")
     return value
@@ -400,6 +486,21 @@ def _validate_matrix_validator_evidence(scenario, evidence, result):
 
 
 def _validate_hil_matrix(value, pair, evidence_path):
+    evidence_path = Path(evidence_path)
+    require(
+        evidence_path.name == "hil-matrix-report.json"
+        and evidence_path.parent.name == "storage-hil"
+        and not evidence_path.parent.is_symlink()
+        and evidence_path.parent.resolve(strict=True) == evidence_path.parent.absolute(),
+        "HIL matrix report is not under the canonical PASS root",
+    )
+    require(
+        not any(
+            "failure" in part.lower() or "quarantine" in part.lower()
+            for part in evidence_path.parts
+        ),
+        "HIL matrix failure/quarantine path is not release evidence",
+    )
     require(
         set(value) == {
             "status", "event", "buildIdentity", "deviceId", "deviceUuid",
@@ -464,7 +565,12 @@ def _validate_hil_matrix(value, pair, evidence_path):
         scenario_evidence = _safe_relative_path(root, evidence_relative, "HIL matrix evidence")
         checksum_path = _safe_relative_path(root, sums_relative, "HIL matrix checksum")
         scenario_dir = scenario_evidence.parent
-        require(checksum_path.parent == scenario_dir, "HIL matrix scenario paths diverge")
+        require(
+            checksum_path.parent == scenario_dir
+            and scenario_dir.parent == root
+            and not scenario_dir.is_symlink(),
+            "HIL matrix scenario paths diverge",
+        )
         expected = (
             HIL_POWER_LOSS_ARTIFACTS
             if scenario == HIL_STORAGE_SCENARIOS[-1]
@@ -474,6 +580,7 @@ def _validate_hil_matrix(value, pair, evidence_path):
             {path.name for path in scenario_dir.iterdir()} == set(expected),
             "HIL matrix scenario file set mismatch",
         )
+        initial_snapshot = _snapshot_directory(scenario_dir, expected)
         declared = _matrix_checksums(scenario_dir, expected)
         require(record.get("artifacts") == declared, "HIL matrix artifact binding mismatch")
         require(
@@ -504,6 +611,33 @@ def _validate_hil_matrix(value, pair, evidence_path):
         )
         _validate_matrix_validator_evidence(scenario, scenario_value, result)
         _validate_matrix_recovery(scenario, scenario_dir, result)
+        validator = _hil_evidence_validator()
+        independent_errors = [
+            *validator.validate_hil_storage_result(scenario, result),
+            *validator._hil_storage_artifact_errors(scenario, scenario_dir, result),
+        ]
+        require(
+            not independent_errors,
+            f"invalid independent HIL scenario evidence: {'; '.join(independent_errors)}",
+        )
+        regenerated = validator.build_hil_storage_report(scenario, scenario_dir)
+        require(
+            {
+                key: scenario_value.get(key)
+                for key in (
+                    "scenario", "status", "validationErrors",
+                    "cleanupInspection", "finalStatus",
+                )
+            }
+            == {
+                key: regenerated.get(key)
+                for key in (
+                    "scenario", "status", "validationErrors",
+                    "cleanupInspection", "finalStatus",
+                )
+            },
+            "stored HIL validator evidence differs from independent regeneration",
+        )
         require(
             _load_matrix_json(scenario_dir / "build-manifest.json", "build manifest")
             == pair["hil"],
@@ -521,6 +655,10 @@ def _validate_hil_matrix(value, pair, evidence_path):
         )
         require(
             _matrix_checksums(scenario_dir, expected) == declared,
+            "HIL matrix scenario artifacts changed during validation",
+        )
+        require(
+            _snapshot_directory(scenario_dir, expected) == initial_snapshot,
             "HIL matrix scenario artifacts changed during validation",
         )
 
@@ -626,7 +764,7 @@ def load_release_ledger(path, *, production_identity, required_event=None):
         require(previous is None or previous < completed, "release receipt UTC is not increasing")
         previous = completed
         require(receipt.get("previousReceiptSha256") == previous_hash, "release receipt hash chain invalid")
-        evidence_path, digest = _release_evidence(receipt.get("evidencePath"))
+        evidence_path, digest, _evidence_bytes = _release_evidence(receipt.get("evidencePath"))
         require(str(evidence_path) == receipt.get("evidencePath"), "release evidence path is not canonical")
         require(digest == receipt.get("evidenceSha256"), "release evidence hash mismatch")
         receipts.append(receipt)
@@ -651,6 +789,7 @@ def append_release_receipt(
 ):
     pair = validate_build_pair(hil_manifest, production_manifest)
     ledger_path = Path(ledger_path)
+    new_ledger = not ledger_path.exists()
     if ledger_path.exists():
         ledger = load_release_ledger(
             ledger_path, production_identity=pair["production"]
@@ -658,8 +797,6 @@ def append_release_receipt(
         require(ledger["hil"] == pair["hil"], "release ledger HIL build mismatch")
     else:
         require(event == RELEASE_ORDER[0], "release event prerequisite missing")
-        ledger_path.mkdir(parents=True)
-        _fsync_directory(ledger_path.parent)
         ledger = {**pair, "receiptFiles": [], "headSha256": ZERO_SHA256, "receipts": []}
     receipts = ledger["receipts"]
     require(len(receipts) < len(RELEASE_ORDER), "release ledger is complete")
@@ -667,9 +804,14 @@ def append_release_receipt(
     completed = _strict_utc(completed_at)
     if receipts:
         require(_strict_utc(receipts[-1]["completedAt"]) < completed, "release receipt UTC is not increasing")
-    evidence, digest = _release_evidence(evidence_path, evidence_checksum_path)
-    evidence_value = _load_evidence_json(evidence)
+    evidence, digest, evidence_bytes = _release_evidence(
+        evidence_path, evidence_checksum_path
+    )
+    evidence_value = _load_evidence_json_bytes(evidence_bytes)
     _validate_event_evidence(event, evidence_value, pair, ledger, evidence)
+    if new_ledger:
+        ledger_path.mkdir(parents=True)
+        _fsync_directory(ledger_path.parent)
     receipt = {
         "event": event,
         "completedAt": completed_at,
@@ -721,6 +863,13 @@ def main():
     pair.add_argument("--hil-manifest", required=True, type=Path)
     pair.add_argument("--production-manifest", required=True, type=Path)
     pair.add_argument("--output", type=Path)
+    boot = subparsers.add_parser("boot-attest")
+    boot.add_argument("--manifest", required=True, type=Path)
+    boot.add_argument(
+        "--event", required=True, choices=("hil-flash", "production-reflash")
+    )
+    boot.add_argument("--connection-attestation", required=True, type=Path)
+    boot.add_argument("--output", required=True, type=Path)
     release = subparsers.add_parser("release")
     release.add_argument("--ledger", required=True, type=Path)
     release.add_argument("--hil-manifest", required=True, type=Path)
@@ -735,6 +884,10 @@ def main():
             result = load_build_identity(arguments.manifest, expected_profile=arguments.profile)
         elif arguments.command == "pair":
             result = validate_build_pair(arguments.hil_manifest, arguments.production_manifest)
+        elif arguments.command == "boot-attest":
+            result = build_boot_attestation(
+                arguments.manifest, arguments.connection_attestation, arguments.event
+            )
         else:
             result = append_release_receipt(
                 arguments.ledger,

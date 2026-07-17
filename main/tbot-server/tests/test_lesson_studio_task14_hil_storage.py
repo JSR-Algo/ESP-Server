@@ -1413,13 +1413,18 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
     production_identity = identity.load_build_identity(prod_path, expected_profile="production")
     evidence_paths = []
     for index, event in enumerate(events):
-        evidence = tmp_path / f"{event}.json"
+        evidence = (
+            tmp_path / "storage-hil" / "hil-matrix-report.json"
+            if event == "hil-matrix-pass"
+            else tmp_path / f"{event}.json"
+        )
+        evidence.parent.mkdir(exist_ok=True)
         payload = release_evidence_payload(
             event,
             hil_identity,
             production_identity,
             ledger_path=ledger_path,
-            evidence_root=tmp_path,
+            evidence_root=evidence.parent,
         )
         evidence.write_text(json.dumps(payload))
         evidence_paths.append(evidence)
@@ -1493,10 +1498,15 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
             completed_at="2026-07-17T00:00:00Z",
         )
     for index, event in enumerate(identity.RELEASE_ORDER[:-1]):
-        event_evidence = tmp_path / f"{event}.json"
+        event_evidence = (
+            tmp_path / "storage-hil" / "hil-matrix-report.json"
+            if event == "hil-matrix-pass"
+            else tmp_path / f"{event}.json"
+        )
+        event_evidence.parent.mkdir(exist_ok=True)
         event_evidence.write_text(json.dumps(release_evidence_payload(
             event, hil_identity, production_identity, ledger_path=ledger,
-            evidence_root=tmp_path,
+            evidence_root=event_evidence.parent,
         )))
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
@@ -1776,7 +1786,9 @@ def test_publish_matrix_report_removes_output_when_inputs_change(tmp_path, monke
         "recovery-semantics", "recovery-empty-entries",
         "recovery-malformed-entry", "recovery-wrong-sibling",
         "recovery-protected-change", "recovery-events-missing",
-        "recovery-events-out-of-order", "validator-summary",
+        "recovery-events-out-of-order", "cleanup-inspection-forgery",
+        "final-status-forgery", "control-artifact-forgery",
+        "sequence-forgery", "validator-summary",
     ),
 )
 def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, mutation):
@@ -1786,7 +1798,7 @@ def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, muta
         tmp_path / "prod", profile="production", binary=b"prod"
     )
     pair = identity.validate_build_pair(hil_path, prod_path)
-    matrix_root = tmp_path / "matrix"
+    matrix_root = tmp_path / "storage-hil"
     report = _matrix_evidence_payload(matrix_root, pair["hil"])
     first = report["scenarios"][0]
     if mutation == "scenario-set":
@@ -1901,6 +1913,40 @@ def test_release_validation_rejects_unbound_hil_matrix_components(tmp_path, muta
             if name != "SHA256SUMS"
         ))
         record["sha256SumsSha256"] = sha256(checksum_path)
+    elif mutation in {
+        "cleanup-inspection-forgery", "final-status-forgery",
+        "control-artifact-forgery", "sequence-forgery",
+    }:
+        scenario_dir = (matrix_root / first["evidencePath"]).parent
+        result_path = scenario_dir / "result.json"
+        result = json.loads(result_path.read_text())
+        evidence_path = scenario_dir / "evidence.json"
+        evidence = json.loads(evidence_path.read_text())
+        changed = {"result.json", "evidence.json"}
+        if mutation == "cleanup-inspection-forgery":
+            result["cleanupInspection"] = {"status": "forged"}
+            evidence["cleanupInspection"] = result["cleanupInspection"]
+        elif mutation == "final-status-forgery":
+            result["finalStatus"] = {"status": "idle", "armed": True}
+            evidence["finalStatus"] = result["finalStatus"]
+        elif mutation == "sequence-forgery":
+            result["reachedSequence"] = result["armSequence"]
+        else:
+            arm_path = scenario_dir / "arm-response.json"
+            arm_path.write_text(json.dumps({"status": "armed"}))
+            changed.add("arm-response.json")
+        result_path.write_text(json.dumps(result))
+        evidence_path.write_text(json.dumps(evidence))
+        for name in changed:
+            first["artifacts"][name] = sha256(scenario_dir / name)
+        first["evidenceSha256"] = first["artifacts"]["evidence.json"]
+        checksum_path = scenario_dir / "SHA256SUMS"
+        checksum_path.write_text("".join(
+            f"{first['artifacts'][name]}  {name}\n"
+            for name in identity.HIL_ORDINARY_ARTIFACTS
+            if name != "SHA256SUMS"
+        ))
+        first["sha256SumsSha256"] = sha256(checksum_path)
     elif mutation == "validator-summary":
         scenario_dir = (matrix_root / first["evidencePath"]).parent
         evidence_path = scenario_dir / "evidence.json"
@@ -1951,6 +1997,131 @@ def test_runbook_uses_fresh_distinct_hil_roots_and_current_serial_port():
     assert "Do not erase NVS" in runbook
 
 
+def test_boot_attestation_cli_derives_release_evidence_from_live_preflight(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    manifest, _value, _paths = task6_manifest(tmp_path, profile="hil")
+    build = identity.load_build_identity(manifest, expected_profile="hil")
+    preflight = tmp_path / "hil-preflight.json"
+    preflight.write_text(json.dumps({
+        "status": "PASS",
+        "deviceId": "28:84:85:85:1a:80",
+        "deviceUuid": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "connectionIdentity": {
+            "deviceId": "28:84:85:85:1a:80",
+            "clientId": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        },
+        "buildIdentity": build,
+    }))
+    output = tmp_path / "hil-boot-attestation.json"
+
+    completed = subprocess.run([
+        sys.executable, str(identity.__file__), "boot-attest",
+        "--manifest", str(manifest), "--event", "hil-flash",
+        "--connection-attestation", str(preflight), "--output", str(output),
+    ], text=True, capture_output=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
+    value = json.loads(output.read_text())
+    assert value == {
+        "status": "PASS",
+        "event": "hil-flash",
+        "buildIdentity": build,
+        "bootIdentity": {
+            "sourceCommit": build["sourceCommit"],
+            "profile": "hil",
+            "configEnabled": True,
+            "binarySha256": build["binarySha256"],
+        },
+    }
+
+
+def test_runbook_generates_dedicated_hil_boot_attestation_before_release():
+    runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
+    assert 'export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"' in runbook
+    assert "lesson_studio_task14_build_identity.py boot-attest" in runbook
+    assert '--connection-attestation "$HIL_PREFLIGHT_ATTESTATION"' in runbook
+    hil_release = runbook[runbook.index("--event hil-flash"):
+                          runbook.index("--event hil-matrix-pass")]
+    assert '--evidence "$HIL_BOOT_ATTESTATION"' in hil_release
+    assert '--evidence "$HIL_BUILD_MANIFEST"' not in hil_release
+
+
+def test_hil_matrix_release_requires_canonical_pass_root(tmp_path):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    pair = identity.validate_build_pair(hil_path, prod_path)
+    failure_root = tmp_path / "storage-hil-failures"
+    report = _matrix_evidence_payload(failure_root, pair["hil"])
+    report_path = failure_root / "hil-matrix-report.json"
+    report_path.write_text(json.dumps(report))
+    with pytest.raises(identity.BuildIdentityError):
+        identity._validate_hil_matrix(report, pair, report_path)
+
+    alias = tmp_path / "storage-hil"
+    alias.symlink_to(failure_root, target_is_directory=True)
+    with pytest.raises(identity.BuildIdentityError):
+        identity._validate_hil_matrix(report, pair, alias / "hil-matrix-report.json")
+
+
+def test_release_hashes_the_same_evidence_bytes_it_validates(tmp_path, monkeypatch):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    pair = identity.validate_build_pair(hil_path, prod_path)
+    evidence = tmp_path / "hil-flash.json"
+    invalid_bytes = b'{"status":"NOT_PASS"}\n'
+    evidence.write_bytes(invalid_bytes)
+    valid = release_evidence_payload("hil-flash", pair["hil"], pair["production"])
+    original_sha = identity.sha256_file
+
+    def replace_after_hash(path):
+        digest = original_sha(path)
+        if Path(path) == evidence:
+            evidence.write_text(json.dumps(valid))
+        return digest
+
+    monkeypatch.setattr(identity, "sha256_file", replace_after_hash)
+    ledger = tmp_path / "ledger"
+    with pytest.raises(identity.BuildIdentityError):
+        identity.append_release_receipt(
+            ledger, hil_path, prod_path,
+            event="hil-flash", evidence_path=evidence,
+            completed_at="2026-07-17T00:00:00Z",
+        )
+    assert not ledger.exists()
+
+
+def test_hil_matrix_rejects_scenario_replacement_during_validation(tmp_path, monkeypatch):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    pair = identity.validate_build_pair(hil_path, prod_path)
+    root = tmp_path / "storage-hil"
+    report = _matrix_evidence_payload(root, pair["hil"])
+    report_path = root / "hil-matrix-report.json"
+    report_path.write_text(json.dumps(report))
+    original_snapshot = identity._snapshot_directory
+    calls = 0
+
+    def replace_before_resnapshot(directory, expected):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (Path(directory) / "server.log").write_text("replaced during validation\n")
+        return original_snapshot(directory, expected)
+
+    monkeypatch.setattr(identity, "_snapshot_directory", replace_before_resnapshot)
+    with pytest.raises(identity.BuildIdentityError):
+        identity._validate_hil_matrix(report, pair, report_path)
+
+
 def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
     identity = load_script("lesson_studio_task14_build_identity.py")
     hil = load_script("lesson_studio_task14_hil_storage.py")
@@ -1962,6 +2133,35 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
     for scenario in identity.HIL_STORAGE_SCENARIOS:
         directory = Path(root) / scenario
         directory.mkdir()
+        operation, checkpoint, action, threshold, pause_seconds, power_loss = (
+            hil.SCENARIO_SPECS[scenario]
+        )
+        expected_progress = hil.SCENARIO_EXPECTED_PROGRESS[scenario]
+        arm = {
+            "cacheKey": KEY,
+            "status": "armed",
+            "operation": operation,
+            "checkpoint": checkpoint,
+            "action": action,
+            "threshold": threshold,
+            "declaredAssetBytes": 1 if checkpoint == "after_download_bytes" else 0,
+            "pauseSeconds": pause_seconds,
+            "armSequence": 1,
+        }
+        status_after = {
+            **arm,
+            "status": "consumed",
+            "armed": False,
+            "reached": True,
+            "consumed": True,
+            "reachedSequence": 2,
+            "consumedSequence": 3,
+        }
+        if power_loss:
+            status_after = exact_status("idle")
+        status_before = exact_status("idle")
+        trigger = _matrix_trigger_outcome(scenario)
+        cleanup_inspection = _matrix_preservation_inspection("missing", "missing")
         if storage_layout:
             expected = hil.scenario_artifact_names(
                 power_loss=scenario == identity.HIL_STORAGE_SCENARIOS[-1]
@@ -1994,9 +2194,39 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
                 "deviceUuid": device_uuid,
                 "connectionIdentity": connection,
                 "recovery": _matrix_recovery_payload(scenario),
-                "cleanupInspection": {"status": "inspected"},
-                "finalStatus": {"status": "idle"},
                 "events": _matrix_recovery_events(scenario),
+                "armSequence": 1,
+                "reachedSequence": 2,
+                "consumedSequence": 3,
+                "operation": operation,
+                "checkpoint": checkpoint,
+                "faultAction": action,
+                "expectedProgress": expected_progress,
+                "checkpointExercised": True,
+                "cleanupVerified": True,
+                "controllerInactive": True,
+                "triggerOutcome": None if power_loss else trigger,
+                "triggerResponseAbsent": power_loss,
+                "cleanupInspection": cleanup_inspection,
+                "finalStatus": status_after,
+                **({
+                    "powerLoss": True,
+                    "checkpointReached": True,
+                    "successMarkerBeforeLoss": False,
+                    "rebootCaptured": True,
+                    "armClearedAfterReboot": True,
+                    "postRebootInspected": True,
+                    "retryStatus": "ready",
+                    "triggerPendingAtMarker": True,
+                    "triggerPendingAtCutBoundary": True,
+                    "disconnectAfterPowerCutBoundary": True,
+                    "utcStart": "2026-07-17T00:00:00Z",
+                    "checkpointReachedUtc": "2026-07-17T00:00:00.500000Z",
+                    "powerCutBoundaryUtc": "2026-07-17T00:00:01Z",
+                    "disconnectObservedUtc": "2026-07-17T00:00:01.500000Z",
+                    "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
+                    "utcEnd": "2026-07-17T00:00:03Z",
+                } if power_loss else {}),
             }, sort_keys=True) + "\n"
         ).encode()
         payloads["evidence.json"] = (
@@ -2005,8 +2235,8 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
                 "status": "PASS",
                 "capturedAt": "2026-07-17T00:00:00+00:00",
                 "validationErrors": [],
-                "cleanupInspection": {"status": "inspected"},
-                "finalStatus": {"status": "idle"},
+                "cleanupInspection": cleanup_inspection,
+                "finalStatus": status_after,
             }, sort_keys=True) + "\n"
         ).encode()
         payloads["validator-exit-code.txt"] = b"0\n"
@@ -2014,14 +2244,19 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
             json.dumps(_matrix_recovery_payload(scenario), sort_keys=True) + "\n"
         ).encode()
         payloads["inspect-before.json"] = (
-            json.dumps(_matrix_preservation_inspection("full"), sort_keys=True) + "\n"
+            json.dumps(
+                _matrix_preservation_inspection("missing", "missing"), sort_keys=True
+            ) + "\n"
         ).encode()
         payloads["inspect-after.json"] = (
             json.dumps(
                 _matrix_preservation_inspection(
-                    "directory_only" if scenario in {
-                        "evict-after-unlinks-fail", "evict-before-rmdir-fail",
-                    } else "full"
+                    {
+                        "evict-before-first-unlink-fail": "full",
+                        "evict-after-unlinks-fail": "directory_only",
+                        "evict-before-rmdir-fail": "directory_only",
+                        "evict-after-unlinks-sd-removal": "missing",
+                    }.get(scenario, "full")
                 ),
                 sort_keys=True,
             ) + "\n"
@@ -2029,6 +2264,38 @@ def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
         payloads["timeline.log"] = "".join(
             f"{index + 1} {event}\n"
             for index, event in enumerate(_matrix_recovery_events(scenario))
+        ).encode()
+        payloads["status-before.json"] = (json.dumps(status_before) + "\n").encode()
+        payloads["stage-response.json"] = (json.dumps({
+            "cacheKey": KEY,
+            "siblingCacheKey": KEY.replace("/v1-", "/v2-", 1),
+            "fixture": "preservation_set",
+            "status": "staged",
+            "changed": True,
+        }) + "\n").encode()
+        payloads["arm-response.json"] = (json.dumps(arm) + "\n").encode()
+        payloads["status-after.json"] = (json.dumps(status_after) + "\n").encode()
+        payloads["cleanup-response.json"] = (json.dumps({
+            "cacheKey": KEY,
+            "siblingCacheKey": KEY.replace("/v1-", "/v2-", 1),
+            "fixture": "preservation_set",
+            "status": "cleaned",
+            "changed": True,
+        }) + "\n").encode()
+        if not power_loss:
+            payloads["trigger-response.json"] = (json.dumps(trigger) + "\n").encode()
+        else:
+            payloads["checkpoint-reached-utc.txt"] = b"2026-07-17T00:00:00.500000Z\n"
+            payloads["power-removed-utc.txt"] = b"2026-07-17T00:00:02Z\n"
+            payloads["post-reboot-inspect.json"] = payloads["inspect-after.json"]
+            payloads["reboot-serial.log"] = payloads["serial.log"]
+        payloads["serial.log"] = (
+            "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+            f"HIL_STORAGE_CHECKPOINT_REACHED operation={operation} "
+            f"checkpoint={checkpoint} cache_key={KEY} count={expected_progress} "
+            "reached_sequence=2\n"
+            f"HIL_STORAGE_FAULT_CONSUMED operation={operation} checkpoint={checkpoint} "
+            f"cache_key={KEY} action={action} consumed_sequence=3\n"
         ).encode()
         for name, data in payloads.items():
             (directory / name).write_bytes(data)
@@ -2089,6 +2356,16 @@ def _matrix_recovery_payload(scenario):
         },
         "inspection": _matrix_preservation_inspection("missing"),
     }
+
+
+def _matrix_trigger_outcome(scenario):
+    if scenario == "evict-before-first-unlink-fail":
+        return eviction_result("unlink_failed", 0)
+    if scenario in {"evict-after-unlinks-fail", "evict-before-rmdir-fail"}:
+        return eviction_result("partial_evict_recovery_required", 1)
+    if scenario == "evict-after-unlinks-sd-removal":
+        return eviction_result("evicted", 1, evicted=True)
+    return failed_sync_result()
 
 
 def _matrix_recovery_events(scenario):

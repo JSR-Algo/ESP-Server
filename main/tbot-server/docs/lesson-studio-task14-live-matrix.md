@@ -35,6 +35,8 @@ export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
 export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger"
 export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/storage-hil/hil-matrix-report.json"
+export HIL_PREFLIGHT_ATTESTATION="$EVIDENCE_ROOT/hil-preflight-attestation.json"
+export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"
 export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
 export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
 export DEVICE_ID='28:84:85:85:1a:80' # exact live connection key used by the eviction route
@@ -463,6 +465,22 @@ cd "$ESP_WORKTREE/main/tbot-server"
 test ! -e "$EVIDENCE_ROOT/storage-hil"
 test ! -e "$EVIDENCE_ROOT/storage-hil-failures"
 mkdir -p "$EVIDENCE_ROOT/storage-hil" "$EVIDENCE_ROOT/storage-hil-failures"
+python3 scripts/lesson_studio_task14_hil_storage.py preflight \
+  --device-id "$DEVICE_ID" \
+  --device-uuid "$DEVICE_ALIAS" \
+  --serial-port "$SERIAL_PORT" \
+  --esp-base-url "$HIL_ESP_BASE_URL" \
+  --asset-url "$HIL_ASSET_URL" \
+  --asset-sha256 "$HIL_ASSET_SHA256" \
+  --asset-bytes "$HIL_ASSET_BYTES" \
+  --build-manifest "$HIL_BUILD_MANIFEST" \
+  --evidence-dir "$EVIDENCE_ROOT/storage-hil" \
+  > "$HIL_PREFLIGHT_ATTESTATION"
+python3 scripts/lesson_studio_task14_build_identity.py boot-attest \
+  --manifest "$HIL_BUILD_MANIFEST" \
+  --event hil-flash \
+  --connection-attestation "$HIL_PREFLIGHT_ATTESTATION" \
+  --output "$HIL_BOOT_ATTESTATION"
 python3 scripts/lesson_studio_task14_hil_storage.py run-matrix \
   --device-id "$DEVICE_ID" \
   --device-uuid "$DEVICE_ALIAS" \
@@ -523,7 +541,7 @@ python3 scripts/lesson_studio_task14_build_identity.py release \
   --hil-manifest "$HIL_BUILD_MANIFEST" \
   --production-manifest "$PRODUCTION_BUILD_MANIFEST" \
   --event hil-flash \
-  --evidence "$HIL_BUILD_MANIFEST" \
+  --evidence "$HIL_BOOT_ATTESTATION" \
   --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 scripts/lesson_studio_task14_build_identity.py release \
   --ledger "$RELEASE_LEDGER" \
