@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -2888,3 +2889,164 @@ def test_quarantine_failure_preserves_primary_when_capture_context_also_fails(
     assert failure["phase"] == "status"
     assert (bundles[0] / "serial.log").read_text() == "<capture unavailable>\n"
     assert (bundles[0] / "server.log").read_text() == "<capture unavailable>\n"
+
+
+@pytest.mark.parametrize(
+    ("signal_number", "expected_exit"),
+    ((signal.SIGINT, 130), (signal.SIGTERM, 143)),
+)
+def test_quarantine_interrupted_run_cleans_fixture_restores_handlers_and_exits_conventionally(
+    tmp_path, signal_number, expected_exit,
+):
+    script_path = ROOT / "scripts" / "lesson_studio_task14_hil_storage.py"
+    runner = tmp_path / "signal_runner.py"
+    ready = tmp_path / "ready"
+    cleaned = tmp_path / "cleaned"
+    stopped = tmp_path / "stopped"
+    restored = tmp_path / "restored"
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failures"
+    runner.write_text(
+        f"""
+import importlib.util
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("hil_signal_runner", {str(script_path)!r})
+hil = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hil)
+ready = Path({str(ready)!r})
+cleaned = Path({str(cleaned)!r})
+stopped = Path({str(stopped)!r})
+restored = Path({str(restored)!r})
+cache_key = "hil-task14/v1-" + "d" * 64
+sibling = "hil-task14/v2-" + "d" * 64
+
+def idle_status():
+    return {{
+        "status": "idle", "cacheKey": "", "armed": False, "reached": False,
+        "consumed": False, "operation": "evict", "checkpoint": "before_first_unlink",
+        "action": "fail", "threshold": 0, "declaredAssetBytes": 0,
+        "pauseSeconds": 0, "armSequence": 0, "reachedSequence": 0,
+        "consumedSequence": 0,
+    }}
+
+def inspection():
+    labels = ["lesson-assets/current.json", "lesson-assets/pvg", "lesson-assets/shared", cache_key, sibling]
+    return {{
+        "cacheKey": cache_key,
+        "siblingCacheKey": sibling,
+        "status": "inspected",
+        "truncated": False,
+        "entries": sorted(
+            [{{"label": label, "nodeType": "missing", "bytes": 0, "sha256": ""}} for label in labels],
+            key=lambda item: item["label"],
+        ),
+    }}
+
+class Client:
+    def status(self, *_args):
+        return idle_status()
+    def inspect(self, *_args):
+        return inspection()
+    def stage(self, *_args):
+        return {{
+            "cacheKey": cache_key, "siblingCacheKey": sibling,
+            "fixture": "preservation_set", "status": "staged", "changed": True,
+        }}
+    def arm(self, *_args, **_kwargs):
+        ready.write_text("ready")
+        while True:
+            time.sleep(0.1)
+    def cleanup(self, *_args):
+        cleaned.write_text("cleaned")
+        return {{
+            "cacheKey": cache_key, "siblingCacheKey": sibling,
+            "fixture": "preservation_set", "status": "cleaned", "changed": True,
+        }}
+
+class Monitor:
+    def start(self):
+        return self
+    def snapshot(self):
+        return ""
+    def stop(self):
+        stopped.write_text("stopped")
+
+hil.load_build_identity = lambda *_a, **_k: {{"profile": "hil"}}
+hil.attest_live_connection = lambda *_a, **_k: {{"deviceId": "28:84:85:85:1a:80"}}
+hil.RawMcpTransport = lambda *_a, **_k: object()
+hil.HilToolClient = lambda _transport: Client()
+hil.SerialMonitor = lambda _port: Monitor()
+hil._server_logs = lambda *_a, **_k: ""
+os.environ["TBOT_DEVICE_MINT_SECRET"] = "test-secret"
+original_int = signal.getsignal(signal.SIGINT)
+original_term = signal.getsignal(signal.SIGTERM)
+sys.argv = [
+    str(hil.__file__), "run-scenario",
+    "--device-id", "28:84:85:85:1a:80",
+    "--device-uuid", "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+    "--serial-port", "/dev/null",
+    "--esp-base-url", "http://127.0.0.1:8000",
+    "--asset-url", "http://127.0.0.1:8000/asset",
+    "--asset-sha256", "d" * 64,
+    "--asset-bytes", "1",
+    "--build-manifest", {str(tmp_path / 'build.json')!r},
+    "--evidence-dir", {str(pass_root)!r},
+    "--failure-evidence-dir", {str(failure_root)!r},
+    "--scenario", "evict-before-first-unlink-fail",
+]
+code = hil.main()
+if signal.getsignal(signal.SIGINT) == original_int and signal.getsignal(signal.SIGTERM) == original_term:
+    restored.write_text("restored")
+raise SystemExit(code)
+"""
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(runner)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ready.exists(), process.communicate(timeout=1)
+    process.send_signal(signal_number)
+    stdout, stderr = process.communicate(timeout=8)
+
+    assert process.returncode == expected_exit, (stdout, stderr)
+    assert cleaned.is_file()
+    assert stopped.is_file()
+    assert restored.is_file()
+    bundles = list(failure_root.iterdir())
+    assert len(bundles) == 1
+    failure = json.loads((bundles[0] / "failure.json").read_text())
+    assert failure["phase"] == "arm"
+    assert failure["completedEvents"][-1] == "cleanup"
+    assert not list(failure_root.glob(".*.staging-*"))
+    assert not pass_root.exists()
+    assert "Traceback" not in stderr
+
+
+def test_failure_evidence_signal_scope_fails_safely_off_main_thread():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+
+    def enter_scope():
+        with hil.scoped_execution_signal_handlers():
+            pytest.fail("non-main thread installed signal handlers")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with pytest.raises(hil.HilValidationError, match="main thread"):
+            executor.submit(enter_scope).result(timeout=2)
+
+    assert signal.getsignal(signal.SIGINT) == previous[signal.SIGINT]
+    assert signal.getsignal(signal.SIGTERM) == previous[signal.SIGTERM]

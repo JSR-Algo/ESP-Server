@@ -13,6 +13,7 @@ import os
 import re
 import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,6 +127,7 @@ MAX_CAPTURE_LINES = 50_000
 MAX_FAILURE_LOG_BYTES = 256 * 1024
 MAX_FAILURE_JSON_BYTES = 256 * 1024
 MAX_FAILURE_COMMAND_BYTES = 16 * 1024
+MAX_FAILURE_RESPONSE_LIST_ITEMS = 128
 FAILURE_ARTIFACTS = (
     "command.txt", "serial.log", "server.log", "timeline.log",
     "build-manifest.json", "failure.json", "last-responses.json", "SHA256SUMS",
@@ -180,6 +182,12 @@ class HilDisconnectError(HilTransportError):
 
 class HilCaptureLimitError(HilValidationError):
     pass
+
+
+class HilTerminationError(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__(f"HIL execution interrupted by signal {signum}")
 
 
 def require(condition, message):
@@ -577,6 +585,12 @@ def validate_evidence_roots(pass_root, failure_root):
     failure_path = Path(failure_root).absolute()
     _reject_existing_symlink_components(pass_path)
     _reject_existing_symlink_components(failure_path)
+    for path in (pass_path, failure_path):
+        if os.path.lexists(path):
+            require(
+                stat.S_ISDIR(os.lstat(path).st_mode),
+                "existing evidence root must be a real directory",
+            )
     pass_resolved = pass_path.resolve(strict=False)
     failure_resolved = failure_path.resolve(strict=False)
     try:
@@ -645,6 +659,27 @@ def _bounded_json_bytes(value, secrets, *, sort_keys=True):
     ).encode("utf-8")
     require(len(data) <= MAX_FAILURE_JSON_BYTES, "failure JSON exceeds bounded size")
     return data
+
+
+def _validate_response_list_limits(value):
+    if isinstance(value, list):
+        require(
+            len(value) <= MAX_FAILURE_RESPONSE_LIST_ITEMS,
+            "failure response list exceeds bounded size",
+        )
+        for item in value:
+            _validate_response_list_limits(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _validate_response_list_limits(item)
+    return value
+
+
+def validate_bounded_failure_response(value, secrets=()):
+    require(isinstance(value, dict), "failure response must be an object")
+    _validate_response_list_limits(value)
+    _bounded_json_bytes(value, secrets)
+    return value
 
 
 def _failure_directory_name(scenario, utc_failure):
@@ -787,7 +822,10 @@ def _attempt_failure_quarantine(
 ):
     failure_phase = phase if isinstance(
         primary,
-        (HilValidationError, HilTransportError, BuildIdentityError, OSError, ValueError),
+        (
+            HilValidationError, HilTransportError, BuildIdentityError,
+            HilTerminationError, OSError, ValueError,
+        ),
     ) else "internal"
     serial_log = _safe_failure_text(
         lambda: monitor.snapshot() if monitor is not None else ""
@@ -1940,7 +1978,12 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             serial_until_marker = ""
             phase = "trigger"
             trigger = _trigger(client, operation, cache_key, arguments)
+        if scenario in PARTIAL_EVICTION_SCENARIOS:
+            recovery_blocked_cleanup = True
+        phase = "trigger"
+        outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         if trigger is not None:
+            validate_bounded_failure_response(trigger, (secret,))
             responses["trigger"] = trigger
         events.append("trigger")
         phase = "status"
@@ -1958,10 +2001,6 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             post_reboot=post_reboot_inspect if power_loss else None,
         )
         recovery = recovery_not_attempted()
-        if scenario in PARTIAL_EVICTION_SCENARIOS:
-            recovery_blocked_cleanup = True
-        phase = "trigger"
-        outcome = validate_scenario_outcome(scenario, trigger, cache_key=cache_key)
         if scenario in PARTIAL_EVICTION_SCENARIOS:
             phase = "recovery"
             retry_raw = client.transport.call(
@@ -2164,6 +2203,29 @@ def _remove_matrix_report(report_path):
         Path(report_path).unlink()
 
 
+@contextmanager
+def scoped_execution_signal_handlers():
+    require(
+        threading.current_thread() is threading.main_thread(),
+        "HIL signal handlers require the main thread",
+    )
+    watched = (signal.SIGINT, signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in watched}
+
+    def terminate(signum, _frame):
+        raise HilTerminationError(signum)
+
+    installed = []
+    try:
+        for signum in watched:
+            signal.signal(signum, terminate)
+            installed.append(signum)
+        yield
+    finally:
+        for signum in reversed(installed):
+            signal.signal(signum, previous[signum])
+
+
 def run_matrix(arguments):
     validate_run_roots(arguments)
     scenario = HIL_STORAGE_SCENARIOS[0]
@@ -2245,11 +2307,14 @@ def main():
         if arguments.command == "preflight":
             preflight(arguments)
         elif arguments.command == "run-scenario":
-            validate_run_roots(arguments)
-            run_scenario(arguments, arguments.scenario)
+            with scoped_execution_signal_handlers():
+                run_scenario(arguments, arguments.scenario)
         else:
-            run_matrix(arguments)
+            with scoped_execution_signal_handlers():
+                run_matrix(arguments)
         return 0
+    except HilTerminationError as exc:
+        return 128 + exc.signum
     except Exception as exc:
         print(f"lesson storage HIL: FAIL: {redact_text(exc)}", file=sys.stderr)
         return 1

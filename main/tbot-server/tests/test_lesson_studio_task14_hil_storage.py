@@ -337,7 +337,13 @@ def run_scenario_with_fakes(
     client = FakeClient()
     published = []
     if state is not None:
-        state.update(client=client, transport_calls=transport_calls, calls=calls, published=published)
+        state.update(
+            client=client,
+            transport_calls=transport_calls,
+            calls=calls,
+            published=published,
+            failure_evidence=[],
+        )
     monkeypatch.setenv("TBOT_TEST_SECRET", "test-secret")
     monkeypatch.setattr(hil, "load_build_identity", lambda *_args, **_kwargs: {"status": "PASS"})
     monkeypatch.setattr(hil, "attest_live_connection", lambda *_args: {"deviceId": "28:84:85:85:1a:80"})
@@ -358,6 +364,12 @@ def run_scenario_with_fakes(
     monkeypatch.setattr(hil, "scenario_artifact_names", lambda **_kwargs: ("SHA256SUMS",))
     monkeypatch.setattr(hil, "atomic_write_bytes", lambda *_args: None)
     monkeypatch.setattr(hil.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    if state is not None:
+        monkeypatch.setattr(
+            hil,
+            "write_failure_evidence",
+            lambda _root, **evidence: state["failure_evidence"].append(evidence),
+        )
     arguments = SimpleNamespace(
         build_manifest=tmp_path / "manifest.json", esp_base_url="http://127.0.0.1",
         device_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", device_id="28:84:85:85:1a:80",
@@ -597,6 +609,43 @@ def test_failure_evidence_stage_attempt_cleanup_runs_after_remote_mutation_throw
     assert caught.value is primary
     assert state["calls"][:4] == ["status-before", "inspect-before", "stage", "cleanup"]
     assert state["client"].cleanup_count == 1
+    assert state["published"] == []
+
+
+@pytest.mark.parametrize(
+    ("scenario", "mutation"),
+    (
+        ("evict-before-first-unlink-fail", "schema"),
+        ("evict-before-first-unlink-fail", "cache-key"),
+        ("evict-before-first-unlink-fail", "outcome"),
+        ("sync-before-download-write-no-space", "oversized"),
+    ),
+)
+def test_failure_evidence_trigger_capture_requires_valid_bounded_outcome(
+    monkeypatch, tmp_path, scenario, mutation,
+):
+    state = {}
+    if mutation == "schema":
+        response = {"cacheKey": KEY}
+    elif mutation == "cache-key":
+        response = {**eviction_result("unlink_failed", 0), "cacheKey": "foreign-cache"}
+    elif mutation == "outcome":
+        response = eviction_result("evicted", 1, evicted=True)
+    else:
+        response = failed_sync_result()
+        response["files"][0]["path"] = "x" * (300 * 1024)
+
+    with pytest.raises(Exception):
+        run_scenario_with_fakes(
+            monkeypatch,
+            tmp_path,
+            scenario,
+            injected_response=response,
+            state=state,
+        )
+
+    assert len(state["failure_evidence"]) == 1
+    assert state["failure_evidence"][0]["last_responses"]["trigger"] is None
     assert state["published"] == []
 
 
@@ -2230,6 +2279,37 @@ def test_failure_evidence_roots_reject_overlap_symlinks_and_aliases_before_acces
     arguments = SimpleNamespace(evidence_dir=pass_root, failure_evidence_dir=pass_root)
     with pytest.raises(hil.HilValidationError, match="overlap"):
         hil.validate_run_roots(arguments)
+    assert calls == []
+
+
+@pytest.mark.parametrize("file_root", ("pass", "failure"))
+@pytest.mark.parametrize("runner", ("scenario", "matrix"))
+def test_failure_evidence_root_preflight_rejects_existing_non_directories_before_access(
+    tmp_path, monkeypatch, file_root, runner,
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    pass_root = tmp_path / "pass"
+    failure_root = tmp_path / "failure"
+    if file_root == "pass":
+        pass_root.write_text("not a directory")
+        failure_root.mkdir()
+    else:
+        pass_root.mkdir()
+        failure_root.write_text("not a directory")
+    arguments = _failure_evidence_matrix_arguments(tmp_path)
+    arguments.evidence_dir = pass_root
+    arguments.failure_evidence_dir = failure_root
+    calls = []
+    monkeypatch.setattr(hil, "load_build_identity", lambda *_a, **_k: calls.append("build"))
+    monkeypatch.setattr(hil, "attest_live_connection", lambda *_a, **_k: calls.append("attest"))
+    monkeypatch.setattr(hil, "preflight", lambda *_a, **_k: calls.append("preflight"))
+
+    with pytest.raises(hil.HilValidationError, match="real directory"):
+        if runner == "scenario":
+            hil.run_scenario(arguments, hil.HIL_STORAGE_SCENARIOS[0])
+        else:
+            hil.run_matrix(arguments)
+
     assert calls == []
 
 
