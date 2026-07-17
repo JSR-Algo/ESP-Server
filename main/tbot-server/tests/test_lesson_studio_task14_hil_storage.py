@@ -249,7 +249,7 @@ def test_ordinary_and_power_loss_layouts_are_exact_and_checksums_written_last(tm
     )
     assert "trigger-response.json" not in power
     for required in (
-        "checkpoint-reached-utc.txt", "power-removed-utc.txt",
+        "checkpoint-reached-utc.txt", "power-removal-confirmed-utc.txt",
         "reboot-serial.log", "post-reboot-inspect.json",
     ):
         assert required in power
@@ -585,6 +585,7 @@ def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disco
     future = Future()
     moments = iter([
         "2026-07-17T00:00:01Z",
+        "2026-07-17T00:00:01.250000Z",
         "2026-07-17T00:00:01.500000Z",
         "2026-07-17T00:00:02Z",
     ])
@@ -595,8 +596,10 @@ def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disco
         events.append(("clock", value))
         return value
 
-    def remove_power():
-        events.append(("remove", "started"))
+    def remove_power(mark_prompt_started):
+        events.append(("remove", "instruction"))
+        mark_prompt_started()
+        events.append(("remove", "marked"))
         future.set_exception(hil.HilDisconnectError("connection reset"))
         events.append(("remove", "returned"))
 
@@ -617,7 +620,9 @@ def test_power_loss_response_absence_requires_pending_trigger_and_post_cut_disco
     }
     assert events == [
         ("clock", "2026-07-17T00:00:01Z"),
-        ("remove", "started"),
+        ("remove", "instruction"),
+        ("clock", "2026-07-17T00:00:01.250000Z"),
+        ("remove", "marked"),
         ("clock", "2026-07-17T00:00:01.500000Z"),
         ("remove", "returned"),
         ("clock", "2026-07-17T00:00:02Z"),
@@ -629,6 +634,7 @@ def test_power_loss_rejects_disconnect_at_or_before_cut_boundary():
     future = Future()
     clock = iter([
         "2026-07-17T00:00:01Z",
+        "2026-07-17T00:00:01.250000Z",
         "2026-07-17T00:00:01Z",
         "2026-07-17T00:00:02Z",
     ]).__next__
@@ -637,7 +643,7 @@ def test_power_loss_rejects_disconnect_at_or_before_cut_boundary():
         hil.await_power_loss_disconnect(
             future,
             lambda: None,
-            lambda: future.set_exception(hil.HilDisconnectError("early reset")),
+            lambda mark: (mark(), future.set_exception(hil.HilDisconnectError("early reset"))),
             timeout_seconds=0.1,
             utc_clock=clock,
         )
@@ -663,12 +669,40 @@ def test_power_loss_rejects_completion_during_boundary_clock_before_remove_promp
         hil.await_power_loss_disconnect(
             future,
             lambda: None,
-            lambda: events.append("remove-prompt"),
+            lambda _mark: events.append("remove-prompt"),
             timeout_seconds=0.1,
             utc_clock=racing_clock,
         )
 
     assert events == []
+
+
+def test_power_loss_rejects_disconnect_before_explicit_prompt_marker():
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    future = Future()
+    events = []
+    clock = iter([
+        "2026-07-17T00:00:01Z",
+        "2026-07-17T00:00:01.500000Z",
+        "2026-07-17T00:00:02Z",
+    ]).__next__
+
+    def remove_before_marker(mark_prompt_started):
+        events.append("instruction-printed")
+        future.set_exception(hil.HilDisconnectError("before explicit marker"))
+        mark_prompt_started()
+        events.append("waiting-for-enter")
+
+    with pytest.raises(hil.HilValidationError, match="before removal prompt marker"):
+        hil.await_power_loss_disconnect(
+            future,
+            lambda: None,
+            remove_before_marker,
+            timeout_seconds=0.1,
+            utc_clock=clock,
+        )
+
+    assert events == ["instruction-printed"]
 
 
 def test_power_loss_allows_disconnect_and_confirmation_at_same_captured_utc():
@@ -703,14 +737,14 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
     completed.set_result({"ready": False})
     with pytest.raises(hil.HilValidationError, match="completed before READY boundary"):
         hil.await_power_loss_disconnect(
-            completed, lambda: None, lambda: None, timeout_seconds=0.1
+            completed, lambda: None, lambda _mark: None, timeout_seconds=0.1
         )
 
     failed = Future()
     failed.set_exception(hil.HilTransportError("HIL_HTTP_ERROR"))
     with pytest.raises(hil.HilValidationError, match="completed before READY boundary"):
         hil.await_power_loss_disconnect(
-            failed, lambda: None, lambda: None, timeout_seconds=0.1
+            failed, lambda: None, lambda _mark: None, timeout_seconds=0.1
         )
 
     disconnected_during_ready = Future()
@@ -727,7 +761,7 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
         hil.await_power_loss_disconnect(
             disconnected_during_ready,
             ready_too_late,
-            lambda: early_events.append("remove-prompt"),
+            lambda _mark: early_events.append("remove-prompt"),
             timeout_seconds=0.1,
             utc_clock=early_clock,
         )
@@ -735,7 +769,8 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
 
     semantic_after_cut = Future()
 
-    def remove_then_semantic_failure():
+    def remove_then_semantic_failure(mark_prompt_started):
+        mark_prompt_started()
         semantic_after_cut.set_exception(hil.HilValidationError("bad response schema"))
 
     with pytest.raises(hil.HilValidationError, match="non-disconnect failure after cut boundary"):
@@ -751,7 +786,7 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
         hil.await_power_loss_disconnect(
             response_after_cut,
             lambda: None,
-            lambda: response_after_cut.set_result({"ready": False}),
+            lambda mark: (mark(), response_after_cut.set_result({"ready": False})),
             timeout_seconds=0.1,
         )
 
@@ -760,7 +795,7 @@ def test_power_loss_rejects_precut_completion_and_semantic_failures():
         hil.await_power_loss_disconnect(
             still_pending,
             lambda: None,
-            lambda: None,
+            lambda mark: mark(),
             timeout_seconds=0.01,
         )
 

@@ -176,7 +176,7 @@ def test_power_loss_timestamp_artifacts_bind_exactly_to_result(tmp_path):
         "powerRemovalConfirmedUtc": "2026-07-17T00:00:02Z",
     }
     checkpoint = tmp_path / "checkpoint-reached-utc.txt"
-    removed = tmp_path / "power-removed-utc.txt"
+    removed = tmp_path / "power-removal-confirmed-utc.txt"
     checkpoint.write_text(result["checkpointReachedUtc"] + "\n")
     removed.write_text(result["powerRemovalConfirmedUtc"] + "\n")
 
@@ -233,7 +233,7 @@ def test_power_loss_report_rejects_timestamp_tamper_with_recomputed_checksums(
     (tmp_path / "checkpoint-reached-utc.txt").write_text(
         result["checkpointReachedUtc"] + "\n"
     )
-    (tmp_path / "power-removed-utc.txt").write_text(
+    (tmp_path / "power-removal-confirmed-utc.txt").write_text(
         result["powerRemovalConfirmedUtc"] + "\n"
     )
 
