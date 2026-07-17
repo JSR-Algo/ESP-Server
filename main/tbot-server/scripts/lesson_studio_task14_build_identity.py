@@ -122,6 +122,22 @@ def _snapshot_directory(directory, expected_names):
     }
 
 
+def _capture_directory(directory, expected_names):
+    return {
+        name: _read_file_snapshot(directory / name, f"HIL matrix artifact: {name}")
+        for name in expected_names
+    }
+
+
+def _require_unchanged_snapshot(path, identity, label):
+    current = Path(path).lstat()
+    require(
+        not Path(path).is_symlink()
+        and identity == (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+        f"{label} changed during validation",
+    )
+
+
 def _exact_int(value, name, *, minimum=0):
     require(type(value) is int and value >= minimum, f"invalid {name}")
     return value
@@ -283,11 +299,100 @@ def validate_build_pair(hil_manifest, production_manifest):
     return {"sourceCommit": hil["sourceCommit"], "hil": hil, "production": production}
 
 
-def build_boot_attestation(manifest_path, connection_attestation_path, event):
-    expected_profile = "hil" if event == "hil-flash" else "production"
-    require(event in {"hil-flash", "production-reflash"}, "invalid boot event")
+def build_flash_attestation(
+    manifest_path, esptool_log_path, exit_code_path, device_mac, started_at, completed_at
+):
+    identity = load_build_identity(manifest_path, expected_profile="hil")
+    manifest_path, manifest = _read_manifest(manifest_path)
+    artifacts = _validate_artifacts(manifest_path.parent, manifest)
+    app = artifacts["bin"]
+    log_path, log_sha256, log_bytes, _log_identity = _release_evidence(esptool_log_path)
+    exit_path, exit_sha256, exit_bytes, _exit_identity = _release_evidence(exit_code_path)
+    require(exit_bytes == b"0\n", "esptool flash exit code is not zero")
+    try:
+        log = log_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise BuildIdentityError("invalid esptool flash log") from exc
+    require(
+        re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", device_mac) is not None,
+        "invalid flashed device MAC",
+    )
+    require(
+        "erase_flash" not in log and "erase_region" not in log,
+        "flash evidence contains prohibited erase command",
+    )
+    command = re.compile(
+        rf"^.*--before default_reset --after hard_reset write_flash "
+        rf"0x20000 {re.escape(str(app))}$",
+        re.MULTILINE,
+    )
+    require(len(command.findall(log)) == 1, "invalid esptool application flash command")
+    require(log.count(f"MAC: {device_mac}") == 1, "flashed device MAC mismatch")
+    wrote = re.findall(
+        rf"^Wrote {app.stat().st_size} bytes .* at 0x00020000.*$", log, re.MULTILINE
+    )
+    require(len(wrote) == 1, "flashed application byte count or offset mismatch")
+    require(log.count("Hash of data verified.") == 1, "esptool hash verification missing")
+    started = _strict_utc(started_at)
+    completed = _strict_utc(completed_at)
+    require(started < completed, "flash receipt timestamps are not increasing")
+    return {
+        "status": "PASS",
+        "event": "hil-flash-write",
+        "deviceId": device_mac,
+        "startedAt": started_at,
+        "completedAt": completed_at,
+        "manifestPath": str(manifest_path),
+        "buildIdentity": identity,
+        "application": {
+            "path": str(app),
+            "offset": "0x00020000",
+            "bytes": app.stat().st_size,
+            "sha256": sha256_file(app),
+        },
+        "esptoolLog": {"path": str(log_path), "sha256": log_sha256},
+        "exitCode": {"path": str(exit_path), "sha256": exit_sha256, "value": 0},
+    }
+
+
+def _validate_flash_receipt(receipt, identity):
+    require(
+        isinstance(receipt, dict)
+        and set(receipt) == {
+            "status", "event", "deviceId", "startedAt", "completedAt",
+            "manifestPath", "buildIdentity", "application", "esptoolLog", "exitCode",
+        }
+        and isinstance(receipt.get("esptoolLog"), dict)
+        and set(receipt["esptoolLog"]) == {"path", "sha256"}
+        and isinstance(receipt.get("exitCode"), dict)
+        and set(receipt["exitCode"]) == {"path", "sha256", "value"}
+        and isinstance(receipt.get("application"), dict)
+        and set(receipt["application"]) == {"path", "offset", "bytes", "sha256"},
+        "invalid HIL flash receipt",
+    )
+    rebuilt = build_flash_attestation(
+        receipt.get("manifestPath"),
+        receipt.get("esptoolLog", {}).get("path"),
+        receipt.get("exitCode", {}).get("path"),
+        receipt.get("deviceId"),
+        receipt.get("startedAt"),
+        receipt.get("completedAt"),
+    )
+    require(rebuilt == receipt and receipt.get("buildIdentity") == identity, "HIL flash receipt mismatch")
+    return receipt
+
+
+def build_boot_attestation(
+    manifest_path, flash_receipt_path, boot_serial_path,
+    connection_attestation_path, observed_at, event,
+):
+    expected_profile = "hil"
+    require(event == "hil-flash", "invalid boot event")
     identity = load_build_identity(manifest_path, expected_profile=expected_profile)
-    _path, _digest, attestation_bytes = _release_evidence(connection_attestation_path)
+    _receipt_path, _receipt_digest, receipt_bytes, _receipt_identity = _release_evidence(flash_receipt_path)
+    receipt = _load_evidence_json_bytes(receipt_bytes)
+    _validate_flash_receipt(receipt, identity)
+    _path, _digest, attestation_bytes, _attestation_identity = _release_evidence(connection_attestation_path)
     attestation = _load_evidence_json_bytes(attestation_bytes)
     require(
         set(attestation) == {
@@ -312,6 +417,26 @@ def build_boot_attestation(manifest_path, connection_attestation_path, event):
         == {"deviceId": device_id, "clientId": device_uuid},
         "invalid live boot connection identity",
     )
+    serial_path, serial_sha256, serial_bytes, _serial_identity = _release_evidence(boot_serial_path)
+    try:
+        serial = serial_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise BuildIdentityError("invalid HIL boot serial evidence") from exc
+    prefix = identity["elfSha256"][:16]
+    require(
+        serial.count(f"app_init: ELF file SHA256: {prefix}") == 1,
+        "running ELF identity mismatch",
+    )
+    require(
+        serial.count("TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
+        "running HIL profile marker missing",
+    )
+    observed = _strict_utc(observed_at)
+    require(
+        _strict_utc(receipt["completedAt"]) < observed,
+        "boot evidence does not follow the flash receipt",
+    )
+    require(receipt["deviceId"] == device_id, "flash and boot device identity mismatch")
     return {
         "status": "PASS",
         "event": event,
@@ -321,6 +446,16 @@ def build_boot_attestation(manifest_path, connection_attestation_path, event):
             "profile": identity["profile"],
             "configEnabled": identity["configEnabled"],
             "binarySha256": identity["binarySha256"],
+        },
+        "flashReceipt": receipt,
+        "bootEvidence": {
+            "observedAt": observed_at,
+            "serialPath": str(serial_path),
+            "serialSha256": serial_sha256,
+            "elfSha256Prefix": prefix,
+            "deviceId": device_id,
+            "deviceUuid": device_uuid,
+            "connectionIdentity": attestation["connectionIdentity"],
         },
     }
 
@@ -353,7 +488,7 @@ def _strict_utc(value):
 
 def _release_evidence(path, checksum_path=None):
     path = Path(path)
-    data, digest, _identity = _read_file_snapshot(path, "release evidence")
+    data, digest, identity = _read_file_snapshot(path, "release evidence")
     if checksum_path is not None:
         checksum_path = Path(checksum_path)
         require(not checksum_path.is_symlink() and checksum_path.is_file(), "release evidence checksum missing")
@@ -363,7 +498,7 @@ def _release_evidence(path, checksum_path=None):
             and parts[1].lstrip("*") == path.name,
             "release evidence checksum mismatch",
         )
-    return path.resolve(), digest, data
+    return path.resolve(), digest, data, identity
 
 
 def _load_evidence_json(path):
@@ -402,6 +537,45 @@ def _validate_boot_evidence(value, event, identity):
         },
         "boot identity evidence mismatch",
     )
+    if event == "hil-flash":
+        receipt = _validate_flash_receipt(value.get("flashReceipt"), identity)
+        evidence = value.get("bootEvidence")
+        require(
+            isinstance(evidence, dict)
+            and set(evidence) == {
+                "observedAt", "serialPath", "serialSha256", "elfSha256Prefix",
+                "deviceId", "deviceUuid", "connectionIdentity",
+            },
+            "invalid running HIL boot evidence",
+        )
+        serial_path, serial_sha256, serial_bytes, _serial_identity = _release_evidence(
+            evidence.get("serialPath")
+        )
+        require(
+            str(serial_path) == evidence.get("serialPath")
+            and serial_sha256 == evidence.get("serialSha256"),
+            "running HIL serial evidence changed",
+        )
+        serial = serial_bytes.decode("utf-8")
+        prefix = identity["elfSha256"][:16]
+        require(
+            evidence.get("elfSha256Prefix") == prefix
+            and serial.count(f"app_init: ELF file SHA256: {prefix}") == 1
+            and serial.count("TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") == 1,
+            "running HIL identity mismatch",
+        )
+        require(
+            _strict_utc(receipt["completedAt"]) < _strict_utc(evidence.get("observedAt")),
+            "running HIL evidence predates flash completion",
+        )
+        require(
+            evidence.get("deviceId") == receipt["deviceId"]
+            and evidence.get("connectionIdentity") == {
+                "deviceId": evidence.get("deviceId"),
+                "clientId": evidence.get("deviceUuid"),
+            },
+            "running HIL connection identity mismatch",
+        )
 
 
 def _load_matrix_json(path, label):
@@ -485,7 +659,7 @@ def _validate_matrix_validator_evidence(scenario, evidence, result):
     )
 
 
-def _validate_hil_matrix(value, pair, evidence_path):
+def _require_canonical_matrix_path(evidence_path):
     evidence_path = Path(evidence_path)
     require(
         evidence_path.name == "hil-matrix-report.json"
@@ -501,6 +675,78 @@ def _validate_hil_matrix(value, pair, evidence_path):
         ),
         "HIL matrix failure/quarantine path is not release evidence",
     )
+
+
+def _validate_hil_matrix(
+    value, pair, evidence_path, report_bytes=None, report_identity=None
+):
+    evidence_path = Path(evidence_path)
+    _require_canonical_matrix_path(evidence_path)
+    if report_bytes is None:
+        report_bytes, _report_digest, report_identity = _read_file_snapshot(
+            evidence_path, "HIL matrix report"
+        )
+    else:
+        require(report_identity is not None, "HIL matrix report snapshot identity missing")
+    require(
+        _load_evidence_json_bytes(report_bytes) == value,
+        "HIL matrix report bytes do not match parsed evidence",
+    )
+    root = evidence_path.parent
+    captured = {}
+    captured_directories = {}
+    for scenario in HIL_STORAGE_SCENARIOS:
+        scenario_dir = root / scenario
+        require(
+            not scenario_dir.is_symlink()
+            and scenario_dir.is_dir()
+            and scenario_dir.parent == root,
+            "HIL matrix scenario directory is not canonical",
+        )
+        directory_stat = scenario_dir.lstat()
+        captured_directories[scenario] = (
+            directory_stat.st_dev, directory_stat.st_ino,
+            directory_stat.st_size, directory_stat.st_mtime_ns,
+        )
+        expected = (
+            HIL_POWER_LOSS_ARTIFACTS
+            if scenario == HIL_STORAGE_SCENARIOS[-1]
+            else HIL_ORDINARY_ARTIFACTS
+        )
+        require(
+            {path.name for path in scenario_dir.iterdir()} == set(expected),
+            "HIL matrix scenario file set mismatch",
+        )
+        captured[scenario] = _capture_directory(scenario_dir, expected)
+    with tempfile.TemporaryDirectory(prefix="task14-hil-release-") as temporary:
+        snapshot_root = Path(temporary) / "storage-hil"
+        snapshot_root.mkdir()
+        snapshot_report = snapshot_root / "hil-matrix-report.json"
+        snapshot_report.write_bytes(report_bytes)
+        for scenario, artifacts in captured.items():
+            snapshot_dir = snapshot_root / scenario
+            snapshot_dir.mkdir()
+            for name, (data, _digest, _identity) in artifacts.items():
+                (snapshot_dir / name).write_bytes(data)
+        _validate_hil_matrix_snapshot(value, pair, snapshot_report)
+    _require_unchanged_snapshot(evidence_path, report_identity, "HIL matrix report")
+    for scenario, artifacts in captured.items():
+        scenario_dir = root / scenario
+        _require_unchanged_snapshot(
+            scenario_dir, captured_directories[scenario],
+            f"HIL matrix scenario directory: {scenario}",
+        )
+        require(
+            {path.name for path in scenario_dir.iterdir()} == set(artifacts),
+            "HIL matrix scenario file set changed during validation",
+        )
+        for name, (_data, _digest, identity) in artifacts.items():
+            _require_unchanged_snapshot(
+                root / scenario / name, identity, f"HIL matrix artifact: {name}"
+            )
+
+
+def _validate_hil_matrix_snapshot(value, pair, evidence_path):
     require(
         set(value) == {
             "status", "event", "buildIdentity", "deviceId", "deviceUuid",
@@ -542,7 +788,7 @@ def _validate_hil_matrix(value, pair, evidence_path):
         and [item.get("scenario") for item in scenarios] == list(HIL_STORAGE_SCENARIOS),
         "HIL matrix scenario evidence incomplete",
     )
-    root = Path(evidence_path).parent
+    root = Path(evidence_path).parent.resolve(strict=True)
     for index, scenario in enumerate(HIL_STORAGE_SCENARIOS):
         record = scenarios[index]
         require(
@@ -663,11 +909,17 @@ def _validate_hil_matrix(value, pair, evidence_path):
         )
 
 
-def _validate_event_evidence(event, value, pair, prior_ledger, evidence_path):
+def _validate_event_evidence(
+    event, value, pair, prior_ledger, evidence_path,
+    evidence_bytes=None, evidence_identity=None,
+):
     if event == "hil-flash":
         _validate_boot_evidence(value, event, pair["hil"])
     elif event == "hil-matrix-pass":
-        _validate_hil_matrix(value, pair, evidence_path)
+        _validate_hil_matrix(
+            value, pair, evidence_path,
+            report_bytes=evidence_bytes, report_identity=evidence_identity,
+        )
     elif event == "production-reflash":
         _validate_boot_evidence(value, event, pair["production"])
     elif event == "production-attest":
@@ -764,7 +1016,7 @@ def load_release_ledger(path, *, production_identity, required_event=None):
         require(previous is None or previous < completed, "release receipt UTC is not increasing")
         previous = completed
         require(receipt.get("previousReceiptSha256") == previous_hash, "release receipt hash chain invalid")
-        evidence_path, digest, _evidence_bytes = _release_evidence(receipt.get("evidencePath"))
+        evidence_path, digest, _evidence_bytes, _evidence_identity = _release_evidence(receipt.get("evidencePath"))
         require(str(evidence_path) == receipt.get("evidencePath"), "release evidence path is not canonical")
         require(digest == receipt.get("evidenceSha256"), "release evidence hash mismatch")
         receipts.append(receipt)
@@ -804,11 +1056,14 @@ def append_release_receipt(
     completed = _strict_utc(completed_at)
     if receipts:
         require(_strict_utc(receipts[-1]["completedAt"]) < completed, "release receipt UTC is not increasing")
-    evidence, digest, evidence_bytes = _release_evidence(
+    evidence, digest, evidence_bytes, evidence_identity = _release_evidence(
         evidence_path, evidence_checksum_path
     )
     evidence_value = _load_evidence_json_bytes(evidence_bytes)
-    _validate_event_evidence(event, evidence_value, pair, ledger, evidence)
+    _validate_event_evidence(
+        event, evidence_value, pair, ledger, evidence,
+        evidence_bytes=evidence_bytes, evidence_identity=evidence_identity,
+    )
     if new_ledger:
         ledger_path.mkdir(parents=True)
         _fsync_directory(ledger_path.parent)
@@ -863,12 +1118,23 @@ def main():
     pair.add_argument("--hil-manifest", required=True, type=Path)
     pair.add_argument("--production-manifest", required=True, type=Path)
     pair.add_argument("--output", type=Path)
+    flash = subparsers.add_parser("flash-attest")
+    flash.add_argument("--manifest", required=True, type=Path)
+    flash.add_argument("--esptool-log", required=True, type=Path)
+    flash.add_argument("--exit-code-file", required=True, type=Path)
+    flash.add_argument("--device-mac", required=True)
+    flash.add_argument("--started-at", required=True)
+    flash.add_argument("--completed-at", required=True)
+    flash.add_argument("--output", required=True, type=Path)
     boot = subparsers.add_parser("boot-attest")
     boot.add_argument("--manifest", required=True, type=Path)
     boot.add_argument(
-        "--event", required=True, choices=("hil-flash", "production-reflash")
+        "--event", required=True, choices=("hil-flash",)
     )
+    boot.add_argument("--flash-receipt", required=True, type=Path)
+    boot.add_argument("--boot-serial", required=True, type=Path)
     boot.add_argument("--connection-attestation", required=True, type=Path)
+    boot.add_argument("--observed-at", required=True)
     boot.add_argument("--output", required=True, type=Path)
     release = subparsers.add_parser("release")
     release.add_argument("--ledger", required=True, type=Path)
@@ -884,9 +1150,15 @@ def main():
             result = load_build_identity(arguments.manifest, expected_profile=arguments.profile)
         elif arguments.command == "pair":
             result = validate_build_pair(arguments.hil_manifest, arguments.production_manifest)
+        elif arguments.command == "flash-attest":
+            result = build_flash_attestation(
+                arguments.manifest, arguments.esptool_log, arguments.exit_code_file,
+                arguments.device_mac, arguments.started_at, arguments.completed_at,
+            )
         elif arguments.command == "boot-attest":
             result = build_boot_attestation(
-                arguments.manifest, arguments.connection_attestation, arguments.event
+                arguments.manifest, arguments.flash_receipt, arguments.boot_serial,
+                arguments.connection_attestation, arguments.observed_at, arguments.event,
             )
         else:
             result = append_release_receipt(

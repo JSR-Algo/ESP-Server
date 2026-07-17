@@ -36,6 +36,10 @@ export EVIDENCE_ROOT="$TBOT_ROOT/.codex_tmp/task14-live-$RUN_ID"
 export RELEASE_LEDGER="$EVIDENCE_ROOT/release-ledger"
 export HIL_MATRIX_REPORT="$EVIDENCE_ROOT/storage-hil/hil-matrix-report.json"
 export HIL_PREFLIGHT_ATTESTATION="$EVIDENCE_ROOT/hil-preflight-attestation.json"
+export HIL_FLASH_LOG="$EVIDENCE_ROOT/hil-esptool-flash.log"
+export HIL_FLASH_EXIT_CODE="$EVIDENCE_ROOT/hil-esptool-exit-code.txt"
+export HIL_FLASH_RECEIPT="$EVIDENCE_ROOT/hil-flash-receipt.json"
+export HIL_BOOT_SERIAL="$EVIDENCE_ROOT/hil-boot-serial.log"
 export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"
 export PRODUCTION_REFLASH_RECEIPT="$EVIDENCE_ROOT/production-reflash.json"
 export PRODUCTION_ATTESTATION="$EVIDENCE_ROOT/production-attestation.json"
@@ -465,6 +469,43 @@ cd "$ESP_WORKTREE/main/tbot-server"
 test ! -e "$EVIDENCE_ROOT/storage-hil"
 test ! -e "$EVIDENCE_ROOT/storage-hil-failures"
 mkdir -p "$EVIDENCE_ROOT/storage-hil" "$EVIDENCE_ROOT/storage-hil-failures"
+export HIL_FLASH_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+set +e
+{
+  printf '%s\n' \
+    "/Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py --chip esp32s3 --port $SERIAL_PORT --before default_reset --after hard_reset write_flash 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin"
+  /Users/manhhodinh/.espressif/python_env/idf5.5_py3.9_env/bin/python \
+    /Users/manhhodinh/esp/esp-idf-v5.5.2/components/esptool_py/esptool/esptool.py \
+    --chip esp32s3 --port "$SERIAL_PORT" \
+    --before default_reset --after hard_reset write_flash \
+    0x20000 "$(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin"
+} > "$HIL_FLASH_LOG" 2>&1
+HIL_FLASH_STATUS="$?"
+printf '%s\n' "$HIL_FLASH_STATUS" > "$HIL_FLASH_EXIT_CODE"
+set -e
+export HIL_FLASH_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 scripts/lesson_studio_task14_build_identity.py flash-attest \
+  --manifest "$HIL_BUILD_MANIFEST" \
+  --esptool-log "$HIL_FLASH_LOG" \
+  --exit-code-file "$HIL_FLASH_EXIT_CODE" \
+  --device-mac "$DEVICE_ID" \
+  --started-at "$HIL_FLASH_STARTED_AT" \
+  --completed-at "$HIL_FLASH_COMPLETED_AT" \
+  --output "$HIL_FLASH_RECEIPT"
+python3 - "$SERIAL_PORT" "$HIL_BOOT_SERIAL" <<'PY'
+from pathlib import Path
+import serial
+import sys
+import time
+
+deadline = time.monotonic() + 60
+with serial.Serial(sys.argv[1], 115200, timeout=0.25) as source, \
+        Path(sys.argv[2]).open("wb") as output:
+    while time.monotonic() < deadline:
+        data = source.read(4096)
+        if data:
+            output.write(data)
+PY
 python3 scripts/lesson_studio_task14_hil_storage.py preflight \
   --device-id "$DEVICE_ID" \
   --device-uuid "$DEVICE_ALIAS" \
@@ -479,7 +520,10 @@ python3 scripts/lesson_studio_task14_hil_storage.py preflight \
 python3 scripts/lesson_studio_task14_build_identity.py boot-attest \
   --manifest "$HIL_BUILD_MANIFEST" \
   --event hil-flash \
+  --flash-receipt "$HIL_FLASH_RECEIPT" \
+  --boot-serial "$HIL_BOOT_SERIAL" \
   --connection-attestation "$HIL_PREFLIGHT_ATTESTATION" \
+  --observed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --output "$HIL_BOOT_ATTESTATION"
 python3 scripts/lesson_studio_task14_hil_storage.py run-matrix \
   --device-id "$DEVICE_ID" \

@@ -1411,6 +1411,7 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
     ledger_path = tmp_path / "release-ledger"
     hil_identity = identity.load_build_identity(hil_path, expected_profile="hil")
     production_identity = identity.load_build_identity(prod_path, expected_profile="production")
+    hil_flash_evidence = _valid_hil_flash_evidence(tmp_path, identity, hil_path)
     evidence_paths = []
     for index, event in enumerate(events):
         evidence = (
@@ -1425,6 +1426,7 @@ def test_release_cli_operationally_binds_build_pair_and_order(tmp_path):
             production_identity,
             ledger_path=ledger_path,
             evidence_root=evidence.parent,
+            hil_flash_evidence=hil_flash_evidence,
         )
         evidence.write_text(json.dumps(payload))
         evidence_paths.append(evidence)
@@ -1487,6 +1489,7 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
     ledger = tmp_path / "ledger"
     hil_identity = identity.load_build_identity(hil_path, expected_profile="hil")
     production_identity = identity.load_build_identity(prod_path, expected_profile="production")
+    hil_flash_evidence = _valid_hil_flash_evidence(tmp_path, identity, hil_path)
     evidence = tmp_path / "evidence.json"
     evidence.write_text(json.dumps(release_evidence_payload(
         "production-reflash", hil_identity, production_identity
@@ -1507,6 +1510,7 @@ def test_release_ledger_rejects_skips_and_soak_without_passing_report(tmp_path):
         event_evidence.write_text(json.dumps(release_evidence_payload(
             event, hil_identity, production_identity, ledger_path=ledger,
             evidence_root=event_evidence.parent,
+            hil_flash_evidence=hil_flash_evidence,
         )))
         identity.append_release_receipt(
             ledger, hil_path, prod_path,
@@ -1539,11 +1543,13 @@ def test_release_ledger_rejects_self_authored_hil_matrix_summary(tmp_path):
     production_identity = identity.load_build_identity(
         prod_path, expected_profile="production"
     )
+    hil_flash_evidence = _valid_hil_flash_evidence(tmp_path, identity, hil_path)
     ledger = tmp_path / "ledger"
     flash = tmp_path / "hil-flash.json"
     flash.write_text(
         json.dumps(release_evidence_payload(
-            "hil-flash", hil_identity, production_identity
+            "hil-flash", hil_identity, production_identity,
+            hil_flash_evidence=hil_flash_evidence,
         ))
     )
     identity.append_release_receipt(
@@ -1997,10 +2003,22 @@ def test_runbook_uses_fresh_distinct_hil_roots_and_current_serial_port():
     assert "Do not erase NVS" in runbook
 
 
-def test_boot_attestation_cli_derives_release_evidence_from_live_preflight(tmp_path):
+def _flash_boot_inputs(tmp_path):
     identity = load_script("lesson_studio_task14_build_identity.py")
-    manifest, _value, _paths = task6_manifest(tmp_path, profile="hil")
+    manifest, _value, paths = task6_manifest(
+        tmp_path, profile="hil", binary=b"h" * 3_651_968
+    )
     build = identity.load_build_identity(manifest, expected_profile="hil")
+    flash_log = tmp_path / "esptool-flash.log"
+    flash_log.write_text(
+        "esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 "
+        f"--before default_reset --after hard_reset write_flash 0x20000 {paths['bin']}\n"
+        "MAC: 28:84:85:85:1a:80\n"
+        "Wrote 3651968 bytes (100%) at 0x00020000\n"
+        "Hash of data verified.\n"
+    )
+    exit_code = tmp_path / "esptool-exit-code.txt"
+    exit_code.write_text("0\n")
     preflight = tmp_path / "hil-preflight.json"
     preflight.write_text(json.dumps({
         "status": "PASS",
@@ -2012,33 +2030,103 @@ def test_boot_attestation_cli_derives_release_evidence_from_live_preflight(tmp_p
         },
         "buildIdentity": build,
     }))
+    serial = tmp_path / "hil-boot-serial.log"
+    serial.write_text(
+        f"app_init: ELF file SHA256: {build['elfSha256'][:16]}\n"
+        "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+    )
+    return identity, manifest, build, flash_log, exit_code, preflight, serial
+
+
+def test_flash_and_boot_attestation_cli_bind_running_hil_identity(tmp_path):
+    identity, manifest, build, flash_log, exit_code, preflight, serial = (
+        _flash_boot_inputs(tmp_path)
+    )
+    receipt = tmp_path / "hil-flash-receipt.json"
     output = tmp_path / "hil-boot-attestation.json"
+
+    flashed = subprocess.run([
+        sys.executable, str(identity.__file__), "flash-attest",
+        "--manifest", str(manifest), "--esptool-log", str(flash_log),
+        "--exit-code-file", str(exit_code),
+        "--device-mac", "28:84:85:85:1a:80",
+        "--started-at", "2026-07-17T00:00:00Z",
+        "--completed-at", "2026-07-17T00:00:01Z", "--output", str(receipt),
+    ], text=True, capture_output=True, check=False)
+    assert flashed.returncode == 0, flashed.stderr
 
     completed = subprocess.run([
         sys.executable, str(identity.__file__), "boot-attest",
         "--manifest", str(manifest), "--event", "hil-flash",
-        "--connection-attestation", str(preflight), "--output", str(output),
+        "--flash-receipt", str(receipt), "--boot-serial", str(serial),
+        "--connection-attestation", str(preflight),
+        "--observed-at", "2026-07-17T00:00:02Z", "--output", str(output),
     ], text=True, capture_output=True, check=False)
 
     assert completed.returncode == 0, completed.stderr
     value = json.loads(output.read_text())
-    assert value == {
-        "status": "PASS",
-        "event": "hil-flash",
-        "buildIdentity": build,
-        "bootIdentity": {
-            "sourceCommit": build["sourceCommit"],
-            "profile": "hil",
-            "configEnabled": True,
-            "binarySha256": build["binarySha256"],
-        },
-    }
+    assert value["status"] == "PASS"
+    assert value["event"] == "hil-flash"
+    assert value["buildIdentity"] == build
+    assert value["bootIdentity"]["binarySha256"] == build["binarySha256"]
+    assert value["flashReceipt"]["deviceId"] == "28:84:85:85:1a:80"
+    assert value["bootEvidence"]["elfSha256Prefix"] == build["elfSha256"][:16]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "mac", "offset", "bytes", "verify", "exit", "old-elf",
+        "old-manifest", "stale-time", "erase",
+    ),
+)
+def test_flash_and_boot_attestation_reject_invalid_or_stale_evidence(tmp_path, mutation):
+    identity, manifest, build, flash_log, exit_code, preflight, serial = (
+        _flash_boot_inputs(tmp_path)
+    )
+    if mutation == "mac":
+        flash_log.write_text(flash_log.read_text().replace("28:84:85:85:1a:80", "00:00:00:00:00:00"))
+    elif mutation == "offset":
+        flash_log.write_text(flash_log.read_text().replace("0x20000", "0x10000"))
+    elif mutation == "bytes":
+        flash_log.write_text(flash_log.read_text().replace("3651968 bytes", "1 bytes"))
+    elif mutation == "verify":
+        flash_log.write_text(flash_log.read_text().replace("Hash of data verified.\n", ""))
+    elif mutation == "exit":
+        exit_code.write_text("1\n")
+    elif mutation == "erase":
+        flash_log.write_text("erase_flash\n" + flash_log.read_text())
+    receipt = tmp_path / "receipt.json"
+    try:
+        value = identity.build_flash_attestation(
+            manifest, flash_log, exit_code, "28:84:85:85:1a:80",
+            "2026-07-17T00:00:00Z", "2026-07-17T00:00:01Z",
+        )
+        identity.atomic_write_json(receipt, value)
+    except identity.BuildIdentityError:
+        assert mutation not in {"old-elf", "old-manifest", "stale-time"}
+        return
+    if mutation == "old-elf":
+        serial.write_text(serial.read_text().replace(build["elfSha256"][:16], "0" * 16))
+    if mutation == "old-manifest":
+        manifest, _value, _paths = task6_manifest(
+            tmp_path / "old", profile="hil", binary=b"old-running-image"
+        )
+    observed = "2026-07-16T23:59:59Z" if mutation == "stale-time" else "2026-07-17T00:00:02Z"
+    with pytest.raises(identity.BuildIdentityError):
+        identity.build_boot_attestation(
+            manifest, receipt, serial, preflight, observed, "hil-flash"
+        )
 
 
 def test_runbook_generates_dedicated_hil_boot_attestation_before_release():
     runbook = (ROOT / "docs" / "lesson-studio-task14-live-matrix.md").read_text()
     assert 'export HIL_BOOT_ATTESTATION="$EVIDENCE_ROOT/hil-boot-attestation.json"' in runbook
+    assert "lesson_studio_task14_build_identity.py flash-attest" in runbook
+    assert 'write_flash 0x20000 $(dirname "$HIL_BUILD_MANIFEST")/xiaozhi.bin' in runbook
     assert "lesson_studio_task14_build_identity.py boot-attest" in runbook
+    assert '--flash-receipt "$HIL_FLASH_RECEIPT"' in runbook
+    assert '--boot-serial "$HIL_BOOT_SERIAL"' in runbook
     assert '--connection-attestation "$HIL_PREFLIGHT_ATTESTATION"' in runbook
     hil_release = runbook[runbook.index("--event hil-flash"):
                           runbook.index("--event hil-matrix-pass")]
@@ -2120,6 +2208,30 @@ def test_hil_matrix_rejects_scenario_replacement_during_validation(tmp_path, mon
     monkeypatch.setattr(identity, "_snapshot_directory", replace_before_resnapshot)
     with pytest.raises(identity.BuildIdentityError):
         identity._validate_hil_matrix(report, pair, report_path)
+
+
+def test_hil_matrix_semantics_never_reopen_original_paths_after_snapshot(
+    tmp_path, monkeypatch
+):
+    identity = load_script("lesson_studio_task14_build_identity.py")
+    hil_path, _hil, _ = task6_manifest(tmp_path / "hil", profile="hil", binary=b"hil")
+    prod_path, _prod, _ = task6_manifest(
+        tmp_path / "prod", profile="production", binary=b"prod"
+    )
+    pair = identity.validate_build_pair(hil_path, prod_path)
+    root = tmp_path / "storage-hil"
+    report = _matrix_evidence_payload(root, pair["hil"])
+    report_path = root / "hil-matrix-report.json"
+    report_path.write_text(json.dumps(report))
+    original_load = identity._load_matrix_json
+
+    def reject_original_reopen(path, label):
+        if root in Path(path).parents:
+            pytest.fail(f"original matrix path reopened after snapshot: {path}")
+        return original_load(path, label)
+
+    monkeypatch.setattr(identity, "_load_matrix_json", reject_original_reopen)
+    identity._validate_hil_matrix(report, pair, report_path)
 
 
 def _matrix_evidence_payload(root, hil_identity, *, storage_layout=False):
@@ -2413,8 +2525,11 @@ def release_evidence_payload(
     production_identity,
     ledger_path=None,
     evidence_root=None,
+    hil_flash_evidence=None,
 ):
     if event == "hil-flash":
+        if hil_flash_evidence is not None:
+            return hil_flash_evidence
         return {
             "status": "PASS", "event": event,
             "buildIdentity": hil_identity,
@@ -2458,6 +2573,46 @@ def release_evidence_payload(
         "buildIdentity": production_identity,
         "releaseLedgerEvidence": ledger,
     }
+
+
+def _valid_hil_flash_evidence(tmp_path, identity, manifest):
+    build = identity.load_build_identity(manifest, expected_profile="hil")
+    app = Path(manifest).parent / "xiaozhi.bin"
+    flash_log = tmp_path / "release-esptool.log"
+    flash_log.write_text(
+        "esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 "
+        f"--before default_reset --after hard_reset write_flash 0x20000 {app}\n"
+        "MAC: 28:84:85:85:1a:80\n"
+        f"Wrote {app.stat().st_size} bytes (100%) at 0x00020000\n"
+        "Hash of data verified.\n"
+    )
+    exit_code = tmp_path / "release-esptool-exit.txt"
+    exit_code.write_text("0\n")
+    receipt = identity.build_flash_attestation(
+        manifest, flash_log, exit_code, "28:84:85:85:1a:80",
+        "2026-07-16T23:59:58Z", "2026-07-16T23:59:59Z",
+    )
+    receipt_path = tmp_path / "release-flash-receipt.json"
+    identity.atomic_write_json(receipt_path, receipt)
+    serial = tmp_path / "release-boot-serial.log"
+    serial.write_text(
+        f"app_init: ELF file SHA256: {build['elfSha256'][:16]}\n"
+        "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image\n"
+    )
+    connection = tmp_path / "release-preflight.json"
+    connection.write_text(json.dumps({
+        "status": "PASS",
+        "deviceId": "28:84:85:85:1a:80",
+        "deviceUuid": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        "connectionIdentity": {
+            "deviceId": "28:84:85:85:1a:80",
+            "clientId": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+        },
+        "buildIdentity": build,
+    }))
+    return identity.build_boot_attestation(
+        manifest, receipt_path, serial, connection, "2026-07-17T00:00:00Z", "hil-flash"
+    )
 
 
 def eviction_result(status, file_count, *, evicted=False):
