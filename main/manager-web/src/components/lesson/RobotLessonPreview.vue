@@ -7,35 +7,34 @@
     :prompt="caption"
     :word="primaryWord"
   />
-  <section v-else class="robot-preview">
+  <section v-show="!tvideoProjection" class="robot-preview">
     <div class="preview-head">
       <div>
-        <span class="eyebrow">ESP TFT preview</span>
+        <span class="eyebrow">Authoritative robot preview</span>
         <strong>{{ currentTitle }}</strong>
       </div>
-      <el-radio-group v-model="activePath" size="mini" @change="emitPath">
-        <el-radio-button label="correct">Correct</el-radio-button>
-        <el-radio-button label="nearMiss">Near miss</el-radio-button>
-        <el-radio-button label="incorrect">Incorrect</el-radio-button>
-      </el-radio-group>
+      <div class="server-size">
+        {{ manifestPreview.preview.profile }}
+        {{ manifestPreview.preview.width }}x{{ manifestPreview.preview.height }}
+      </div>
     </div>
 
-    <div class="screen" :style="backgroundStyle">
-      <img v-if="teachingObjectSrc" class="teaching-object" :src="teachingObjectSrc" alt="" />
-      <img v-if="robotOverlaySrc" class="robot-overlay" :src="robotOverlaySrc" alt="" />
-      <div v-if="!backgroundSrc && !teachingObjectSrc" class="empty-scene">
-        <span>{{ primaryWord || 'Robot scene' }}</span>
-      </div>
-      <div class="caption">
-        {{ caption }}
+    <div ref="scaler" class="stage-scaler">
+      <div class="stage" :style="stageStyle">
+        <img v-if="teachingObjectSrc" class="teaching-object" :src="teachingObjectSrc" alt="" />
+        <img v-if="robotOverlaySrc" class="robot-overlay" :src="robotOverlaySrc" alt="" />
+        <div v-if="!backgroundSrc && !teachingObjectSrc" class="empty-scene">
+          <span>{{ currentStep.subject || 'Robot scene' }}</span>
+        </div>
+        <div class="caption">{{ caption }}</div>
       </div>
     </div>
 
     <div class="meta-grid">
       <div><span>Step</span><strong>{{ currentIndex + 1 }} / {{ steps.length || 1 }}</strong></div>
-      <div><span>Type</span><strong>{{ currentStep.stepType || currentStep.type || '-' }}</strong></div>
-      <div><span>Motion</span><strong>{{ motionForPath }}</strong></div>
-      <div><span>Assets</span><strong>{{ assetCount }}</strong></div>
+      <div><span>Type</span><strong>{{ currentStep.type || '-' }}</strong></div>
+      <div><span>Checksum</span><strong class="mono">{{ manifestPreview.checksum }}</strong></div>
+      <div><span>ETag</span><strong class="mono">{{ manifestPreview.etag }}</strong></div>
     </div>
   </section>
   </div>
@@ -47,27 +46,16 @@ export default {
   name: 'RobotLessonPreview',
   components: { TvideoJourneyPreview },
   props: {
-    manifest: { type: Object, required: true },
+    manifestPreview: { type: Object, required: true },
     stepIndex: { type: Number, default: 0 },
-    initialPath: { type: String, default: 'correct' },
   },
   data() {
-    return {
-      activePath: this.initialPath || 'correct',
-    };
+    return { previewScale: 1, resizeObserver: null };
   },
   computed: {
     steps() {
-      const raw = this.manifest || {};
-      if (Array.isArray(raw.steps)) return raw.steps;
-      if (Array.isArray(raw.lessonSteps)) return raw.lessonSteps;
-      if (raw.lesson && Array.isArray(raw.lesson.steps)) return raw.lesson.steps;
-      if (raw.frames && Array.isArray(raw.frames)) {
-        return raw.frames
-          .filter((frame) => frame && (frame.type === 'lesson_step' || frame.body))
-          .map((frame) => ({ ...(frame.body || {}), frameType: frame.type, stepId: frame.stepId }));
-      }
-      return [];
+      const manifest = this.manifestPreview.manifest || {};
+      return Array.isArray(manifest.steps) ? manifest.steps : [];
     },
     currentIndex() {
       if (!this.steps.length) return 0;
@@ -85,10 +73,11 @@ export default {
         : null;
     },
     scene() {
-      return this.body.scene || this.body;
+      return this.currentStep.scene || this.body.scene || {};
     },
     backgroundSrc() {
-      return this.assetSrc(this.scene.backgroundScene) || this.assetSrc(this.scene.background);
+      const background = this.scene.backgroundScene || {};
+      return this.assetSrc(background.poster || background) || this.assetSrc(this.scene.background);
     },
     teachingObjectSrc() {
       return this.assetSrc(this.scene.teachingObject) || this.assetSrc(this.body.teachingObject);
@@ -97,9 +86,7 @@ export default {
       return this.assetSrc(this.scene.robotOverlay) || this.assetSrc(this.body.robotOverlay);
     },
     backgroundStyle() {
-      return this.backgroundSrc
-        ? { backgroundImage: `linear-gradient(rgba(15, 24, 36, 0.08), rgba(15, 24, 36, 0.08)), url("${this.backgroundSrc}")` }
-        : {};
+      return this.backgroundSrc ? { backgroundImage: `url("${this.backgroundSrc}")` } : {};
     },
     primaryWord() {
       return (this.body.teachingWord && (this.body.teachingWord.displayText || this.body.teachingWord.text))
@@ -109,50 +96,54 @@ export default {
         || this.currentStep.subject
         || '';
     },
+    stageStyle() {
+      return { ...this.backgroundStyle, transform: `scale(${this.previewScale})` };
+    },
     caption() {
-      return this.scene.altCaption
+      const background = this.scene.backgroundScene || {};
+      return background.altCaption
+        || this.scene.altCaption
         || this.body.caption
         || this.currentStep.prompt
-        || this.currentStep.title
-        || this.primaryWord
-        || 'Generate a preview to inspect this lesson step.';
+        || this.currentStep.subject
+        || 'Robot scene';
     },
     currentTitle() {
-      return this.currentStep.stepId || this.currentStep.stepKey || this.currentStep.subject || `Step ${this.currentIndex + 1}`;
-    },
-    motionForPath() {
-      const motion = this.body.motion || {};
-      return motion[this.activePath] || motion.present || this.currentStep.pose || 'teach';
-    },
-    assetCount() {
-      return [this.backgroundSrc, this.teachingObjectSrc, this.robotOverlaySrc].filter(Boolean).length;
-    },
-  },
-  watch: {
-    initialPath(value) {
-      if (value && value !== this.activePath) this.activePath = value;
-    },
-    stepIndex() {
-      this.emitPath();
+      return this.currentStep.id || `Step ${this.currentIndex + 1}`;
     },
   },
   mounted() {
-    this.emitPath();
+    this.updatePreviewScale();
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries && entries[0];
+        this.updatePreviewScale(entry && entry.contentRect && entry.contentRect.width);
+      });
+      this.resizeObserver.observe(this.$refs.scaler);
+    }
+    if (typeof window !== 'undefined') window.addEventListener('resize', this.updatePreviewScale);
+  },
+  beforeDestroy() {
+    if (this.resizeObserver) this.resizeObserver.disconnect();
+    this.resizeObserver = null;
+    if (typeof window !== 'undefined') window.removeEventListener('resize', this.updatePreviewScale);
   },
   methods: {
-    assetSrc(value) {
-      if (!value) return '';
-      if (typeof value === 'string') return value;
-      const asset = value.asset || value.poster || value.image || value;
-      return asset.src || asset.url || asset.path || '';
+    previewScaleForWidth(width) {
+      const available = Number(width);
+      if (!Number.isFinite(available) || available <= 0) return 1;
+      return Math.min(1, available / 480);
     },
-    emitPath() {
-      this.$emit('path-change', {
-        path: this.activePath,
-        stepIndex: this.currentIndex,
-        stepId: this.currentStep.stepId || this.currentStep.stepKey || null,
-        motion: this.motionForPath,
-      });
+    updatePreviewScale(width) {
+      const scaler = this.$refs && this.$refs.scaler;
+      const available = Number(width) || (scaler && scaler.getBoundingClientRect().width) || 480;
+      this.previewScale = this.previewScaleForWidth(available);
+    },
+    assetSrc(value) {
+      if (typeof value === 'string') return value;
+      if (!value || typeof value !== 'object') return '';
+      const asset = value.asset || value;
+      return asset.src || asset.url || asset.path || '';
     },
   },
 };
@@ -164,6 +155,7 @@ export default {
   border: 1px solid #d9e3df;
   border-radius: 18px;
   box-shadow: 0 8px 22px rgba(20, 42, 38, 0.08);
+  min-width: 0;
   padding: 16px;
 }
 
@@ -180,22 +172,39 @@ export default {
   display: block;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0;
   text-transform: uppercase;
 }
 
-.screen {
+.server-size {
+  background: #edf5f2;
+  border-radius: 999px;
+  color: #285348;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 5px 9px;
+}
+
+.stage-scaler {
   aspect-ratio: 3 / 2;
+  margin: 0 auto;
+  max-width: 480px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.stage {
   background: #13211f;
   background-position: center;
   background-repeat: no-repeat;
   background-size: cover;
-  border: 10px solid #0f1817;
-  border-radius: 16px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-  min-height: 220px;
+  height: 320px;
+  left: 0;
   overflow: hidden;
-  position: relative;
+  position: absolute;
+  top: 0;
+  transform-origin: top left;
+  width: 480px;
 }
 
 .teaching-object {
@@ -247,7 +256,7 @@ export default {
 .meta-grid {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 12px;
 }
 
@@ -256,28 +265,11 @@ export default {
   border-radius: 10px;
   display: grid;
   gap: 4px;
+  min-width: 0;
   padding: 8px;
 }
 
-.meta-grid span {
-  color: #788b86;
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.meta-grid strong {
-  color: #122a26;
-  font-size: 12px;
-}
-
-@media (max-width: 900px) {
-  .preview-head {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .meta-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
+.meta-grid span { color: #788b86; font-size: 10px; text-transform: uppercase; }
+.meta-grid strong { color: #122a26; font-size: 12px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 </style>

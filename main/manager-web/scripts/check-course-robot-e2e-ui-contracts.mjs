@@ -101,6 +101,21 @@ function loadBuildScene() {
 }
 
 {
+  const { settle, context } = loadSettle();
+  let failures = 0;
+  let structured;
+  settle(
+    { status: 401, data: { message: 'session expired' } },
+    () => { throw new Error('401 must never call success'); },
+    (message, error) => { failures += 1; structured = { message, error }; },
+  );
+  assert.equal(context.clearNestSessionCalled, true);
+  assert.equal(failures, 1, '401 must settle exactly once through the failure callback');
+  assert.equal(structured.message, 'session expired');
+  assert.equal(structured.error.status, 401);
+}
+
+{
   const buildScene = loadBuildScene();
   const assets = {
     'backgroundScene.poster': {
@@ -200,6 +215,21 @@ function loadBuildScene() {
   assert.equal(scene.robotOverlay.pose, 'thinking');
   assert.equal(scene.robotOverlay.expression, 'thinking');
   assert.equal(scene.robotOverlay.asset.src, 'assets/robot/poses/bright-thinking.png');
+}
+
+{
+  const preview = read('src/components/lesson/RobotLessonPreview.vue');
+  assert.match(preview, /width:\s*480px/, 'robot preview must retain the exact espTft width');
+  assert.match(preview, /height:\s*320px/, 'robot preview must retain the exact espTft height');
+  assert.match(preview, /manifestPreview\.manifest/, 'robot preview must render the authoritative server manifest');
+  assert.doesNotMatch(preview, /props:\s*\{[\s\S]*?draft/i, 'robot preview must not accept local draft truth');
+
+  const simulation = read('src/components/lesson/LessonSimulationPanel.vue');
+  for (const preset of [
+    'correct', 'near-miss', 'brave-try', 'incorrect-to-fallback',
+    'retry-then-correct', 'timeout', 'completion',
+  ]) assert.match(simulation, new RegExp(`['"]${preset}['"]`), `simulation must expose ${preset}`);
+  assert.match(simulation, /traceIndex/, 'backend trace order must be visible');
 }
 
 console.log('course robot E2E UI contracts OK');

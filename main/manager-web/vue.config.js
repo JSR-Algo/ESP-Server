@@ -11,6 +11,8 @@ const { InjectManifest } = require('workbox-webpack-plugin');
 // 引入 path 模块
 
 const path = require('path')
+const browserE2E = process.env.REWARDS_ADMIN_BROWSER_E2E === '1';
+const browserE2ETarget = browserE2E ? process.env.NESTJS_TARGET : '';
  
 function resolve(dir) {
   return path.join(__dirname, dir)
@@ -19,7 +21,9 @@ function resolve(dir) {
 // 确保加载 .env 文件
 dotenv.config();
 // Load local dev overrides (NestJS proxy target + admin token; gitignored).
-dotenv.config({ path: '.env.development.local', override: true });
+if (!browserE2E) dotenv.config({ path: '.env.development.local', override: true });
+const nestjsTarget = browserE2ETarget || process.env.NESTJS_TARGET || 'http://localhost:3000';
+const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
 
 // 定义CDN资源列表，确保Service Worker也能访问
 const cdnResources = {
@@ -43,7 +47,8 @@ const useCDN = process.env.VUE_APP_USE_CDN === 'true';
 module.exports = defineConfig({
   productionSourceMap: process.env.NODE_ENV !=='production', // 生产环境不生成 source map
   devServer: {
-    port: 8001, // 指定端口为 8001
+    host: '127.0.0.1',
+    port: Number(process.env.MANAGER_WEB_PORT || 8001),
     proxy: {
       '/tbot': {
         target: 'http://127.0.0.1:8002',
@@ -57,7 +62,7 @@ module.exports = defineConfig({
       // NESTJS_ADMIN_TOKEN in .env.development.local. Per-user NestJS login (and a
       // prod reverse-proxy route for /nestjs) is a later slice.
       '/nestjs': {
-        target: process.env.NESTJS_TARGET || 'http://localhost:3000',
+        target: nestjsTarget,
         changeOrigin: true,
         pathRewrite: { '^/nestjs': '' },
         onProxyReq(proxyReq) {
@@ -69,8 +74,8 @@ module.exports = defineConfig({
           if (perUser) {
             proxyReq.setHeader('Authorization', perUser);
             proxyReq.removeHeader('x-nest-authorization');
-          } else if (process.env.NESTJS_ADMIN_TOKEN) {
-            proxyReq.setHeader('Authorization', 'Bearer ' + process.env.NESTJS_ADMIN_TOKEN);
+          } else if (sharedNestAdminToken) {
+            proxyReq.setHeader('Authorization', 'Bearer ' + sharedNestAdminToken);
           }
         }
       }

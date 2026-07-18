@@ -64,7 +64,7 @@
     <div class="asset-list">
       <div class="list-toolbar">
         <span class="list-title muted small">{{ $t('lesson.assetList') }}</span>
-        <el-button type="text" size="mini" icon="el-icon-refresh" :loading="loadingList" @click="reload">{{ $t('lesson.refresh') }}</el-button>
+        <el-button type="text" size="mini" icon="el-icon-refresh" :loading="loadingList" @click="refreshAssets">{{ $t('lesson.refresh') }}</el-button>
       </div>
       <div v-if="!loadingList && !serverAssets.length" class="muted small">{{ $t('lesson.assetListEmpty') }}</div>
       <div v-for="layerName in layerOrder" :key="layerName">
@@ -105,10 +105,18 @@
 
 <script>
 import Api from '@/apis/api';
+import { isUncertainNestError } from '@/apis/nestHttp';
+import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 
 // Default role per layer (server also defaults these, but the UI prefills so the
 // author can see/override). robotOverlay→pose, teachingObject→primarySubject.
 const ROLE_BY_LAYER = { backgroundScene: 'poster', teachingObject: 'primarySubject', robotOverlay: 'pose' };
+let assetMutationEpoch = 0;
+
+function nextAssetMutationId() {
+  assetMutationEpoch += 1;
+  return `asset-mutation-${assetMutationEpoch}`;
+}
 
 export default {
   name: 'LessonAssetManager',
@@ -117,6 +125,8 @@ export default {
     disabled: { type: Boolean, default: false },
     // Optional vocab/subject to prefill teachingObject.<subject> assetKey
     subjectHint: { type: String, default: '' },
+    mutationSettler: { type: Function, required: true },
+    refreshHandler: { type: Function, default: null },
   },
   data() {
     return {
@@ -127,9 +137,12 @@ export default {
       critical: true,
       pickedFile: null,
       uploading: false,
+      mutationPending: false,
+      activeMutationId: null,
       // Server-backed source of truth (replaces the old session-local uploaded[]).
       serverAssets: [],
       loadingList: false,
+      assetListRequestId: 0,
       replaceMode: false,
       previewVisible: false,
       previewAsset: null,
@@ -149,6 +162,10 @@ export default {
   mounted() {
     this.reload();
   },
+  beforeDestroy() {
+    this.invalidateAssetReads();
+    this.detachActiveMutation();
+  },
   methods: {
     // Backend returns the relative public_id when LESSON_ASSET_ORIGIN_BASE is unset;
     // only render a thumbnail for an absolute http(s) URL.
@@ -167,19 +184,49 @@ export default {
       };
       return map[layer] ? this.$t(map[layer]) : layer;
     },
-    reload() {
+    trackAssetRead(readEpoch) {
+      const epoch = Number(readEpoch);
+      if (!Number.isFinite(epoch) || epoch < this.assetListRequestId) return false;
+      this.assetListRequestId = epoch;
+      this.loadingList = false;
+      return true;
+    },
+    invalidateAssetReads() {
+      const readEpoch = reserveAssetReadEpoch();
+      this.trackAssetRead(readEpoch);
+      return readEpoch;
+    },
+    applyServerAssets(assets, readEpoch) {
+      if (!this.trackAssetRead(readEpoch)) return false;
+      this.serverAssets = Array.isArray(assets) ? assets : [];
+      this.$emit('assets-loaded', this.serverAssets, { readEpoch });
+      return this.serverAssets;
+    },
+    reload(onSuccess, onError) {
+      const requestId = reserveAssetReadEpoch();
+      this.assetListRequestId = requestId;
       this.loadingList = true;
+      this.$emit('asset-read-started', { readEpoch: requestId });
       Api.lesson.listAssets(
         this.lessonId,
         'espTft',
         (res) => {
-          this.loadingList = false;
-          this.serverAssets = Array.isArray(res.assets) ? res.assets : [];
-          // Lift the loaded list up so the Scene editor can reference real assetKeys.
-          this.$emit('assets-loaded', this.serverAssets);
+          if (requestId !== this.assetListRequestId) return;
+          const assets = this.applyServerAssets(res && res.assets, requestId);
+          if (assets === false) return;
+          if (typeof onSuccess === 'function') onSuccess(assets);
         },
-        (msg) => { this.loadingList = false; this.$message.error(msg); },
+        (msg) => {
+          if (requestId !== this.assetListRequestId) return;
+          this.loadingList = false;
+          this.$message.error(msg);
+          if (typeof onError === 'function') onError(msg);
+        },
       );
+    },
+    refreshAssets() {
+      if (this.refreshHandler && this.refreshHandler() === true) return;
+      this.reload();
     },
     openPreview(a) {
       this.previewAsset = a;
@@ -188,6 +235,15 @@ export default {
     // Prefill the upload form from a row, keeping layer/role stable so the key's
     // placement does not change on replace (upsert-by-assetKey).
     startReplace(a) {
+      if (this.disabled || this.mutationPending) return;
+      if (a && a.assetId) {
+        this.$emit('impact-review-request', { intent: 'replace', asset: a });
+        return;
+      }
+      this.confirmReplace(a);
+    },
+    confirmReplace(a) {
+      if (!a || this.disabled || this.mutationPending) return;
       this.replaceMode = true;
       this.layer = a.layer;
       this.role = a.role;
@@ -206,12 +262,27 @@ export default {
       if (this.$refs.uploader) this.$refs.uploader.clearFiles();
     },
     onDelete(a) {
+      const mutationId = this.beginMutation();
+      if (!mutationId) return;
+      const settleMutation = this.createMutationSettlement(mutationId);
       Api.lesson.deleteAsset(
         this.lessonId,
         a.assetKey,
         a.profile,
-        () => { this.$message.success(this.$t('lesson.assetDeleted')); this.reload(); },
-        (msg) => this.$message.error(msg),
+        () => {
+          const locallyActive = this.finishMutation(mutationId);
+          if (!settleMutation('success', { assetKey: a.assetKey, profile: a.profile || 'espTft' })) return;
+          if (!locallyActive) return;
+          this.$emit('asset-mutated', { type: 'delete', assetKey: a.assetKey, profile: a.profile || 'espTft' });
+          this.$message.success(this.$t('lesson.assetDeleted'));
+        },
+        (msg, error) => {
+          const locallyActive = this.finishMutation(mutationId);
+          const outcome = isUncertainNestError(error) ? 'uncertain' : 'rejected';
+          if (!settleMutation(outcome, { message: msg, error })) return;
+          if (!locallyActive) return;
+          this.handleMutationError(msg, error);
+        },
       );
     },
     // Seed-convention default assetKey for the current layer/pose/subject.
@@ -232,13 +303,55 @@ export default {
     onFilePick(file) {
       this.pickedFile = file.raw || file;
     },
+    beginMutation() {
+      if (this.disabled || this.mutationPending) return null;
+      const id = nextAssetMutationId();
+      this.mutationPending = true;
+      this.activeMutationId = id;
+      this.$emit('mutation-state', { id, active: true });
+      return id;
+    },
+    finishMutation(id) {
+      if (!id || id !== this.activeMutationId) return false;
+      this.mutationPending = false;
+      this.activeMutationId = null;
+      return true;
+    },
+    createMutationSettlement(id) {
+      const settleWithParent = this.mutationSettler;
+      let settled = false;
+      return (outcome, details = {}) => {
+        if (settled) return false;
+        settled = true;
+        settleWithParent({ id, outcome, ...details });
+        return true;
+      };
+    },
+    detachActiveMutation() {
+      const id = this.activeMutationId;
+      if (!id || !this.mutationPending) return false;
+      this.mutationPending = false;
+      this.activeMutationId = null;
+      this.uploading = false;
+      this.$emit('asset-mutation-detached', { id });
+      return true;
+    },
+    handleMutationError(message, error) {
+      if (isUncertainNestError(error)) {
+        this.$emit('asset-mutation-uncertain', { message, error });
+      }
+      this.$message.error(message);
+    },
     uploadAsset() {
-      if (!this.pickedFile) return;
+      if (!this.pickedFile || this.disabled || this.mutationPending) return;
       const key = (this.assetKey || '').trim();
       if (!key) {
         this.$message.warning(this.$t('lesson.assetKeyRequired'));
         return;
       }
+      const mutationId = this.beginMutation();
+      if (!mutationId) return;
+      const settleMutation = this.createMutationSettlement(mutationId);
       this.uploading = true;
       const layer = this.layer;
       const fields = {
@@ -248,31 +361,44 @@ export default {
         assetKey: key,
         critical: this.critical ? 'true' : 'false',
       };
+      const mutationType = this.replaceMode ? 'replace' : 'upload';
       Api.lesson.uploadAsset(
         this.lessonId,
         this.pickedFile,
         fields,
         (asset) => {
-          this.uploading = false;
+          const locallyActive = this.finishMutation(mutationId);
           const a = (asset && asset.asset) ? asset.asset : (asset || {});
+          if (!settleMutation('success', {
+            assetKey: a.asset_key || a.assetKey || key,
+            profile: a.profile || fields.profile,
+          })) return;
+          if (!locallyActive) return;
+          this.uploading = false;
           this.pickedFile = null;
           this.replaceMode = false;
           if (this.$refs.uploader) this.$refs.uploader.clearFiles();
+          this.$emit('asset-mutated', {
+            type: mutationType,
+            assetKey: a.asset_key || a.assetKey || key,
+            profile: a.profile || fields.profile,
+            layer: a.layer || layer,
+          });
           this.$message.success(this.$t('lesson.uploadOk'));
-          // Refetch so the server list (incl. upsert/replace) is authoritative;
-          // reload() emits 'assets-loaded' to refresh the Scene editor dropdowns.
-          this.reload();
-          // Keep 'uploaded' so LessonEditor can refresh validate/preview state.
+          // Preserve the existing notification for any non-editor consumers.
           this.$emit('uploaded', {
             assetKey: a.asset_key || a.assetKey || key,
             layer: a.layer || layer,
           });
         },
-        (msg) => {
+        (msg, error) => {
+          const locallyActive = this.finishMutation(mutationId);
+          const outcome = isUncertainNestError(error) ? 'uncertain' : 'rejected';
+          if (!settleMutation(outcome, { message: msg, error })) return;
+          if (!locallyActive) return;
           this.uploading = false;
           // espTft sniff-rejects webp/gif and corrupt headers (415)
-          if (/415/.test(String(msg))) this.$message.error(this.$t('lesson.uploadReject415'));
-          else this.$message.error(msg);
+          this.handleMutationError(/415/.test(String(msg)) ? this.$t('lesson.uploadReject415') : msg, error);
         },
       );
     },

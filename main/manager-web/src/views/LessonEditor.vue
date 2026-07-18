@@ -19,9 +19,9 @@
       </div>
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
-        <el-button size="small" @click="doValidate" :loading="validating">{{ $t('lesson.validate') }}</el-button>
-        <el-button size="small" @click="doPreview" :loading="previewing">{{ $t('lesson.previewManifest') }}</el-button>
-        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing">
+        <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
+        <el-button size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
+        <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
           {{ $t('lesson.publish') }}
         </el-button>
       </div>
@@ -48,9 +48,9 @@
           <div class="lesson-studio__toolbar">
             <div>
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
-              <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
+              <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="!selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
               Save step
             </el-button>
           </div>
@@ -72,29 +72,50 @@
                 @generate="generateTvideoVariants"
                 @readiness="runTvideoBatchReadiness"
               />
-              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
+              <lesson-step-prompt-editor
+                v-model="promptDraft"
+                :disabled="!isDraft || savingStep || rebindingSharedVisual"
+                @input="onPromptInput"
+              />
+              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || rebindingSharedVisual" />
               <SharedAssetPicker
                 :assets="bundleAssets"
                 :selected-key="selectedObjectKey"
                 category="teachingObject"
-                @select="selectSharedAsset"
+                :disabled="savingStep || rebindingSharedVisual"
+                @select-intent="reviewSharedAssetSelection"
               />
             </div>
             <RobotLessonPreview
               v-if="previewManifest"
-              :manifest="previewManifest"
+              :manifest-preview="previewManifest"
               :step-index="selectedStepIndex"
-              initial-path="correct"
-              @path-change="onPreviewPathChange"
             />
             <div v-else class="preview-empty">
               <strong>Robot preview</strong>
               <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
-              <el-button size="small" @click="doPreview">Generate preview</el-button>
+              <el-button size="small" :disabled="proofActionsDisabled" @click="doPreview">Generate preview</el-button>
             </div>
           </div>
+          <LessonSimulationPanel
+            v-if="previewManifest"
+            :value="simulationEvidence"
+            :lesson-id="lessonId"
+            :manifest-preview="previewManifest"
+            :steps="steps"
+            :proof-version="proofVersion"
+            :disabled="proofActionsDisabled"
+            @evidence="acceptSimulationEvidence"
+          />
           <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
-          <LessonPublishReadiness :steps="studioSteps" :assets="bundleAssets" :manifest="previewManifest || {}" />
+          <LessonPublishReadiness
+            :steps="studioSteps"
+            :assets="bundleAssets"
+            :manifest="previewManifest ? previewManifest.manifest : {}"
+            :validation-result="validationResult"
+            :validation-current="validationProofVersion === proofVersion"
+            @ready-change="readinessReady = $event"
+          />
         </main>
       </section>
 
@@ -150,7 +171,22 @@
 
       <!-- Asset authoring (draft only): layer + role + stable assetKey + critical
            + robot pose picker + per-session preview list. -->
-      <LessonAssetManager v-if="isDraft" :lesson-id="lessonId" :subject-hint="lastSubject" @assets-loaded="onAssetsLoaded" />
+      <LessonAssetManager
+        v-if="isDraft"
+        ref="assetManager"
+        :lesson-id="lessonId"
+        :subject-hint="lastSubject"
+        :disabled="savingStep || rebindingSharedVisual || assetMutating"
+        :mutation-settler="settleAssetMutation"
+        :refresh-handler="retryFailedAssetReconciliation"
+        @assets-loaded="onAssetsLoaded"
+        @asset-read-started="onAssetReadStarted"
+        @asset-mutated="onAssetMutated"
+        @asset-mutation-uncertain="onAssetMutationUncertain"
+        @asset-mutation-detached="onAssetMutationDetached"
+        @mutation-state="onAssetMutationState"
+        @impact-review-request="reviewAssetReplacement"
+      />
     </div>
 
     <!-- Step editor dialog (draft only) -->
@@ -316,6 +352,40 @@
         <el-button type="primary" size="small" :loading="renaming" @click="doRename">{{ $t('course.save') }}</el-button>
       </span>
     </el-dialog>
+
+    <SharedVisualImpactDialog
+      v-if="sharedImpactIntent"
+      :visible="sharedImpactVisible"
+      :lesson-id="lessonId"
+      :asset="sharedImpactIntent.asset"
+      :assets="bundleAssets"
+      :steps="steps"
+      :current-step="selectedStep"
+      :cloned-asset="sharedImpactClonedAsset"
+      :rebind-pending="rebindingSharedVisual"
+      :rebind-error="sharedImpactRebindError"
+      :intent-type="sharedImpactIntent.intent"
+      :layer="sharedImpactIntent.layer"
+      :uncertain-clone-key="sharedImpactUncertainCloneKey"
+      :reconciling="sharedImpactReconciling"
+      @keep-shared="keepSharedVisual"
+      @cloned="applyClonedVisual"
+      @retry-rebind="retryClonedVisual"
+      @clone-uncertain="onCloneUncertain"
+      @retry-discovery="discoverUncertainClone"
+      @error="onSharedImpactError"
+      @close="closeSharedImpact"
+    />
+    <LessonPublishReviewDialog
+      :visible.sync="publishReviewVisible"
+      :snapshot="publishReviewSnapshot"
+      :publishing="publishing"
+      :locked="!!publishUncertainState || publishReconciling"
+      :reconciling="publishReconciling"
+      :result="publishResult"
+      @publish="publishReviewedVersion"
+      @reconcile="reconcileUncertainPublish"
+    />
   </div>
 </template>
 
@@ -325,12 +395,23 @@ import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
+import LessonPublishReviewDialog from '@/components/lesson/LessonPublishReviewDialog.vue';
+import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue';
+import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
+import SharedVisualImpactDialog from '@/components/lesson/SharedVisualImpactDialog.vue';
 import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
-import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
+import {
+  bindClonedAssetToStep,
+  collectAssetReferences,
+  mergeAuthoringFields,
+  replaceStepAssetReference,
+  validSimulationEvidence as validateSimulationEvidence,
+} from '@/components/lesson/lesson-builder-logic';
 import {
   normalizeBatchReadiness,
   sharedBackgroundOption,
@@ -338,6 +419,7 @@ import {
   mergeStepBodyForSave,
 } from '@/components/lesson/tvideo-template-logic';
 import Api from '@/apis/api';
+import { isUncertainNestError } from '@/apis/nestHttp';
 
 export default {
   name: 'LessonEditor',
@@ -347,9 +429,13 @@ export default {
     LessonEngagementTrack,
     LessonInteractionPanel,
     LessonPublishReadiness,
+    LessonPublishReviewDialog,
+    LessonSimulationPanel,
+    LessonStepPromptEditor,
     LessonStepNavigator,
     RobotLessonPreview,
     SharedAssetPicker,
+    SharedVisualImpactDialog,
     TvideoTemplatePanel,
     TvideoVariantBatchPanel,
   },
@@ -362,8 +448,22 @@ export default {
       reordering: false,
       addingStep: false,
       validating: false,
+      validationResult: null,
+      validationProofVersion: -1,
+      validationRequestId: 0,
       previewing: false,
+      previewProofVersion: -1,
       publishing: false,
+      publishPreparing: false,
+      publishReviewVisible: false,
+      publishReviewSnapshot: null,
+      publishReviewRequestId: 0,
+      publishRequestId: 0,
+      publishResult: null,
+      publishUncertainState: null,
+      publishReconciling: false,
+      publishReconcileRequestId: 0,
+      readinessReady: false,
       renaming: false,
       stepDialogVisible: false,
       stepForm: this.blankStepForm(),
@@ -384,18 +484,42 @@ export default {
       preview: null,
       publishMessage: '',
       selectedStepIndex: 0,
+      promptDraft: '',
+      promptDirty: false,
+      promptStepKey: '',
+      promptEditRevision: 0,
+      promptSaveRequestId: 0,
       selectedStepDrafts: {},
       selectedAssetDrafts: {},
       dirtyStepKeys: {},
+      stepEditRevisions: {},
       savingStep: false,
       previewManifest: null,
-      previewPath: null,
+      simulationEvidence: null,
+      simulationProofVersion: -1,
+      proofVersion: 0,
+      previewRequestId: 0,
+      assetProofFingerprint: null,
+      assetRefreshIsProofRecovery: false,
+      assetMutationTokens: {},
+      assetReconciliationEpoch: 0,
+      assetReconciliationRequests: {},
+      assetAppliedReadEpoch: 0,
+      assetLatestReadEpoch: 0,
+      editorDestroying: false,
       renameVisible: false,
       titleDraft: '',
       generatingVariants: false,
       checkingVariantReadiness: false,
       variantGenerationResult: null,
       variantBatchReadiness: null,
+      sharedImpactVisible: false,
+      sharedImpactIntent: null,
+      rebindingSharedVisual: false,
+      sharedImpactClonedAsset: null,
+      sharedImpactRebindError: '',
+      sharedImpactUncertainCloneKey: '',
+      sharedImpactReconciling: false,
     };
   },
   computed: {
@@ -430,8 +554,23 @@ export default {
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
     },
+    selectedStepKey() {
+      return this.selectedStep ? this.selectedStep.stepKey : '';
+    },
     selectedStepDirty() {
-      return Boolean(this.selectedStep && this.dirtyStepKeys[this.selectedStep.stepKey]);
+      return Boolean(
+        this.selectedStep
+        && (
+          this.dirtyStepKeys[this.selectedStep.stepKey]
+          || (this.promptStepKey === this.selectedStep.stepKey && this.promptDirty)
+        ),
+      );
+    },
+    proofActionsDisabled() {
+      return this.hasUnsafeProofState();
+    },
+    assetMutating() {
+      return Object.keys(this.assetMutationTokens).length > 0;
     },
     selectedAuthoring: {
       get() {
@@ -440,9 +579,11 @@ export default {
           || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
       },
       set(value) {
-        if (!this.selectedStep) return;
+        if (!this.selectedStep || this.savingStep || this.rebindingSharedVisual) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+        this.bumpStepEditRevision(this.selectedStep.stepKey);
+        this.invalidatePreview();
       },
     },
     selectedTemplateAuthoring: {
@@ -474,6 +615,9 @@ export default {
     },
   },
   watch: {
+    selectedStepKey() {
+      this.resetPromptDraft(this.selectedStep);
+    },
     // Mirror subject into vocab.word + scene.primaryWord while they track it
     // (don't clobber an author-edited value).
     'stepForm.subject'(val, old) {
@@ -489,6 +633,17 @@ export default {
       return;
     }
     this.fetchAll();
+  },
+  beforeDestroy() {
+    this.editorDestroying = true;
+    this.publishReviewVisible = false;
+    this.proofVersion += 1;
+    this.previewRequestId += 1;
+    this.validationRequestId += 1;
+    this.publishReviewRequestId += 1;
+    this.publishRequestId += 1;
+    this.publishReconcileRequestId += 1;
+    this.promptSaveRequestId += 1;
   },
   methods: {
     statusType(status) {
@@ -529,8 +684,233 @@ export default {
         },
       };
     },
-    onAssetsLoaded(assets) {
-      this.bundleAssets = Array.isArray(assets) ? assets : [];
+    onAssetsLoaded(assets, metadata = {}) {
+      if (this.editorDestroying) return;
+      const readEpoch = Number(metadata && metadata.readEpoch);
+      if (Number.isFinite(readEpoch)
+        && (readEpoch < this.assetAppliedReadEpoch || readEpoch < this.assetLatestReadEpoch)) return false;
+      if (Number.isFinite(readEpoch)) {
+        this.assetLatestReadEpoch = Math.max(this.assetLatestReadEpoch, readEpoch);
+        this.assetAppliedReadEpoch = readEpoch;
+      }
+      const nextAssets = Array.isArray(assets) ? assets : [];
+      const fingerprint = this.buildAssetProofFingerprint(nextAssets);
+      if (this.assetProofFingerprint !== null
+        && fingerprint !== this.assetProofFingerprint
+        && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
+      this.assetProofFingerprint = fingerprint;
+      this.bundleAssets = nextAssets;
+      return true;
+    },
+    onAssetReadStarted(metadata) {
+      if (this.editorDestroying) return false;
+      const readEpoch = Number(metadata && metadata.readEpoch);
+      if (!Number.isFinite(readEpoch)) return false;
+      this.assetLatestReadEpoch = Math.max(this.assetLatestReadEpoch, readEpoch);
+      return true;
+    },
+    buildAssetProofFingerprint(assets) {
+      return (Array.isArray(assets) ? assets : [])
+        .map((asset) => JSON.stringify({
+          assetId: asset.assetId || '',
+          profile: asset.profile || '',
+          assetKey: asset.assetKey || '',
+          sha256: asset.sha256 || '',
+          layer: asset.layer || '',
+          role: asset.role || '',
+          critical: asset.critical === true,
+          mediaType: asset.mediaType || '',
+          bytes: asset.bytes == null ? null : Number(asset.bytes),
+          width: asset.width == null ? null : Number(asset.width),
+          height: asset.height == null ? null : Number(asset.height),
+          path: asset.path || asset.url || '',
+          version: asset.version || asset.versionId || '',
+        }))
+        .sort()
+        .join('|');
+    },
+    onAssetMutated() {
+      if (this.editorDestroying) return;
+      this.invalidatePreview();
+    },
+    onAssetMutationUncertain() {
+      if (this.editorDestroying) return;
+      this.invalidatePreview();
+    },
+    onAssetMutationState(payload) {
+      if (this.editorDestroying) return;
+      if (!payload || typeof payload.id !== 'string' || !payload.id) return;
+      if (payload.active === true) this.$set(this.assetMutationTokens, payload.id, true);
+      else this.$delete(this.assetMutationTokens, payload.id);
+    },
+    onAssetMutationDetached(payload) {
+      if (this.editorDestroying) return;
+      const id = payload && payload.id;
+      if (typeof id !== 'string' || !id) return;
+      this.$set(this.assetMutationTokens, id, true);
+    },
+    settleAssetMutation(payload) {
+      if (this.editorDestroying) return false;
+      const id = payload && payload.id;
+      const outcome = payload && payload.outcome;
+      if (typeof id !== 'string' || !this.assetMutationTokens[id]) return false;
+      if (this.assetMutationTokens[id] === 'settling') return false;
+      if (outcome !== 'rejected' && outcome !== 'success' && outcome !== 'uncertain') return false;
+      this.$set(this.assetMutationTokens, id, 'settling');
+      if (outcome === 'rejected') {
+        this.$delete(this.assetMutationTokens, id);
+        return true;
+      }
+      this.invalidatePreview();
+      return this.reconcileAssetMutation(id);
+    },
+    reconcileAssetMutation(id) {
+      if (this.editorDestroying || typeof id !== 'string') return false;
+      if (this.assetMutationTokens[id] !== 'settling' && this.assetMutationTokens[id] !== 'reconcile-failed') return false;
+      const requestId = this.assetReconciliationEpoch + 1;
+      const readEpoch = reserveAssetReadEpoch();
+      this.assetReconciliationEpoch = requestId;
+      this.$set(this.assetReconciliationRequests, id, { requestId, readEpoch });
+      this.$set(this.assetMutationTokens, id, 'settling');
+      this.onAssetReadStarted({ readEpoch });
+      const currentManager = this.$refs && this.$refs.assetManager;
+      if (currentManager && typeof currentManager.trackAssetRead === 'function') currentManager.trackAssetRead(readEpoch);
+      Api.lesson.listAssets(
+        this.lessonId,
+        'espTft',
+        (result) => {
+          if (this.editorDestroying) return;
+          const activeRequest = this.assetReconciliationRequests[id];
+          if (!activeRequest || activeRequest.requestId !== requestId || activeRequest.readEpoch !== readEpoch) return;
+          if (requestId !== this.assetReconciliationEpoch || readEpoch !== this.assetLatestReadEpoch) {
+            this.$delete(this.assetReconciliationRequests, id);
+            if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
+          const assets = result && result.assets;
+          const manager = this.$refs && this.$refs.assetManager;
+          const applied = manager && typeof manager.applyServerAssets === 'function'
+            ? manager.applyServerAssets(assets, readEpoch)
+            : this.onAssetsLoaded(assets, { readEpoch });
+          if (applied === false) {
+            this.$delete(this.assetReconciliationRequests, id);
+            this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
+          this.$delete(this.assetReconciliationRequests, id);
+          this.$delete(this.assetMutationTokens, id);
+        },
+        (message) => {
+          if (this.editorDestroying) return;
+          const activeRequest = this.assetReconciliationRequests[id];
+          if (!activeRequest || activeRequest.requestId !== requestId || activeRequest.readEpoch !== readEpoch) return;
+          if (requestId !== this.assetReconciliationEpoch || readEpoch !== this.assetLatestReadEpoch) {
+            this.$delete(this.assetReconciliationRequests, id);
+            if (this.assetMutationTokens[id] === 'settling') this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+            return;
+          }
+          this.$delete(this.assetReconciliationRequests, id);
+          this.$set(this.assetMutationTokens, id, 'reconcile-failed');
+          this.$message.error(message);
+        },
+      );
+      return true;
+    },
+    retryAssetReconciliation(id) {
+      if (this.editorDestroying || this.assetMutationTokens[id] !== 'reconcile-failed') return false;
+      return this.reconcileAssetMutation(id);
+    },
+    retryFailedAssetReconciliation() {
+      if (Object.keys(this.assetMutationTokens).some((key) => this.assetMutationTokens[key] === 'settling')) return true;
+      const id = Object.keys(this.assetMutationTokens).find((key) => this.assetMutationTokens[key] === 'reconcile-failed');
+      if (id) {
+        this.retryAssetReconciliation(id);
+        return true;
+      }
+      return false;
+    },
+    hasUnsafeProofState() {
+      return Boolean(
+        this.editorDestroying
+        || this.promptDirty
+        || Object.keys(this.dirtyStepKeys || {}).some((key) => this.dirtyStepKeys[key])
+        || Object.keys(this.selectedStepDrafts || {}).length > 0
+        || Object.keys(this.selectedAssetDrafts || {}).length > 0
+        || this.stepDialogVisible
+        || this.renameVisible
+        || this.sharedImpactVisible
+        || this.sharedImpactReconciling
+        || this.savingStep
+        || this.validating
+        || this.previewing
+        || this.rebindingSharedVisual
+        || this.reordering
+        || this.addingStep
+        || this.renaming
+        || this.publishing
+        || this.publishPreparing
+        || this.assetMutating
+      );
+    },
+    isUncertainMutationError(error) {
+      return isUncertainNestError(error);
+    },
+    handleUncertainMutationError(error, reconcile) {
+      if (this.editorDestroying) return false;
+      if (!this.isUncertainMutationError(error)) return false;
+      this.invalidatePreview();
+      if (typeof reconcile === 'function') reconcile.call(this);
+      return true;
+    },
+    invalidatePreview() {
+      if (this.editorDestroying) return;
+      if (this.publishUncertainState || this.publishReconciling) return false;
+      this.proofVersion += 1;
+      this.previewRequestId += 1;
+      this.validationRequestId += 1;
+      this.publishReviewRequestId += 1;
+      this.previewing = false;
+      this.validating = false;
+      this.preview = null;
+      this.previewManifest = null;
+      this.previewProofVersion = -1;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
+      this.publishPreparing = false;
+    },
+    acceptSimulationEvidence(result, proofVersion) {
+      if (this.editorDestroying) return;
+      if (proofVersion !== this.proofVersion) return;
+      if (result === null) {
+        this.simulationEvidence = null;
+        this.simulationProofVersion = -1;
+        this.publishReviewRequestId += 1;
+        this.publishReviewVisible = false;
+        this.publishReviewSnapshot = null;
+        this.publishResult = null;
+        return;
+      }
+      if (!this.previewIdentityMatches(result, this.previewManifest)) return;
+      if (!this.validSimulationEvidence(result, this.previewManifest)) return;
+      this.simulationEvidence = result;
+      this.simulationProofVersion = proofVersion;
+    },
+    validSimulationEvidence(result, expectedPreview) {
+      return validateSimulationEvidence(result, expectedPreview, this.steps);
+    },
+    previewIdentityMatches(result, preview) {
+      return Boolean(
+        result && preview && result.checksum === preview.checksum && result.etag === preview.etag
+        && result.preview && preview.preview
+        && result.preview.profile === preview.preview.profile
+        && result.preview.width === preview.preview.width
+        && result.preview.height === preview.preview.height
+      );
     },
     generateTvideoVariants(payload) {
       this.generatingVariants = true;
@@ -727,23 +1107,285 @@ export default {
         () => { this.sharedBackgrounds = []; },
       );
     },
-    fetchSteps() {
+    fetchSteps(options = {}) {
       Api.lesson.listSteps(this.lessonId, (rows) => {
+        const selectedKey = this.selectedStepKey;
         this.steps = rows;
-        if (this.selectedStepIndex >= rows.length) this.selectedStepIndex = Math.max(0, rows.length - 1);
-      }, (msg) => this.$message.error(msg));
+        const matchingIndex = rows.findIndex((step) => step.stepKey === selectedKey);
+        this.selectedStepIndex = matchingIndex >= 0
+          ? matchingIndex
+          : Math.min(this.selectedStepIndex, Math.max(0, rows.length - 1));
+        let promptStateApplied = true;
+        if (options.promptGuard) {
+          promptStateApplied = this.syncPromptDraftAfterFetch(rows[this.selectedStepIndex] || null, options.promptGuard);
+        } else if (options.preservePrompt && this.promptStepKey === selectedKey) {
+          const selected = rows[this.selectedStepIndex] || null;
+          this.promptDirty = this.promptDraft !== (selected && selected.prompt ? selected.prompt : '');
+        } else {
+          this.resetPromptDraft(rows[this.selectedStepIndex] || null);
+        }
+        if (options.onSuccess) options.onSuccess(rows, promptStateApplied);
+      }, (msg) => {
+        this.$message.error(msg);
+        if (options.onError) options.onError(msg);
+      });
+    },
+    resetPromptDraft(step) {
+      this.promptStepKey = step ? step.stepKey : '';
+      this.promptDraft = step && typeof step.prompt === 'string' ? step.prompt : '';
+      this.promptDirty = false;
+      this.promptEditRevision += 1;
+    },
+    shouldApplySavedStepState(guard) {
+      return Boolean(
+        guard
+        && guard.requestId === this.promptSaveRequestId
+        && guard.stepKey === this.promptStepKey
+        && guard.promptRevision === this.promptEditRevision
+        && guard.stepRevision === (this.stepEditRevisions[guard.stepKey] || 0),
+      );
+    },
+    clearSavedStepDraft(guard) {
+      if (!guard || guard.requestId !== this.promptSaveRequestId
+        || guard.stepRevision !== (this.stepEditRevisions[guard.stepKey] || 0)) return false;
+      this.$delete(this.selectedStepDrafts, guard.stepKey);
+      this.$delete(this.selectedAssetDrafts, guard.stepKey);
+      this.$delete(this.dirtyStepKeys, guard.stepKey);
+      this.$delete(this.stepEditRevisions, guard.stepKey);
+      return true;
+    },
+    syncPromptDraftAfterFetch(step, guard) {
+      if (this.shouldApplySavedStepState(guard)) {
+        this.resetPromptDraft(step);
+        return true;
+      }
+      if (step && step.stepKey === this.promptStepKey) {
+        this.promptDirty = this.promptDraft !== (step.prompt || '');
+      }
+      return false;
+    },
+    bumpStepEditRevision(stepKey) {
+      this.$set(this.stepEditRevisions, stepKey, (this.stepEditRevisions[stepKey] || 0) + 1);
+    },
+    onPromptInput(value) {
+      const step = this.selectedStep;
+      if (!step || this.savingStep || this.rebindingSharedVisual || this.promptStepKey !== step.stepKey) return;
+      this.promptEditRevision += 1;
+      this.bumpStepEditRevision(step.stepKey);
+      this.promptDirty = value !== (step.prompt || '');
+      this.invalidatePreview();
     },
     selectSharedAsset(asset) {
-      if (!this.selectedStep || !this.isDraft) return;
+      if (!this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+      this.bumpStepEditRevision(this.selectedStep.stepKey);
+      this.invalidatePreview();
     },
-    onPreviewPathChange(payload) {
-      this.previewPath = payload;
+    openSharedImpact(intent, asset) {
+      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
+      this.sharedImpactIntent = {
+        intent,
+        asset,
+        stepKey: this.selectedStep.stepKey,
+        boundAssetKey: intent === 'select' ? this.selectedObjectKey : asset.assetKey,
+        layer: asset.layer || 'teachingObject',
+      };
+      this.sharedImpactClonedAsset = null;
+      this.sharedImpactRebindError = '';
+      this.sharedImpactUncertainCloneKey = '';
+      this.sharedImpactReconciling = false;
+      this.sharedImpactVisible = true;
+    },
+    reviewSharedAssetSelection(asset) {
+      this.openSharedImpact('select', asset);
+    },
+    reviewAssetReplacement(payload) {
+      if (!payload || payload.intent !== 'replace') return;
+      this.openSharedImpact('replace', payload.asset);
+    },
+    keepSharedVisual() {
+      const intent = this.sharedImpactIntent;
+      if (!this.savingStep && !this.rebindingSharedVisual && intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
+        this.selectSharedAsset(intent.asset);
+      }
+      this.closeSharedImpact();
+    },
+    closeSharedImpact(force = false) {
+      if (!force && (this.rebindingSharedVisual || this.sharedImpactClonedAsset || this.sharedImpactUncertainCloneKey || this.sharedImpactReconciling)) return;
+      this.sharedImpactVisible = false;
+      this.sharedImpactIntent = null;
+      this.sharedImpactClonedAsset = null;
+      this.sharedImpactRebindError = '';
+      this.sharedImpactUncertainCloneKey = '';
+      this.sharedImpactReconciling = false;
+    },
+    onSharedImpactError(msg) {
+      if (this.editorDestroying) return;
+      this.$message.error(msg || this.$t('lesson.sharedImpactCloneError'));
+    },
+    onCloneUncertain(payload) {
+      if (this.editorDestroying) return;
+      const key = payload && payload.assetKey;
+      if (!key) {
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
+        return;
+      }
+      this.sharedImpactUncertainCloneKey = key;
+      this.discoverUncertainClone();
+    },
+    discoverUncertainClone() {
+      if (this.editorDestroying) return;
+      const key = this.sharedImpactUncertainCloneKey;
+      if (!key || this.sharedImpactReconciling) return;
+      this.sharedImpactReconciling = true;
+      this.sharedImpactRebindError = '';
+      this.reloadAssets((assets) => {
+        if (this.editorDestroying) return;
+        const clone = (Array.isArray(assets) ? assets : []).find((asset) => asset.assetKey === key);
+        this.sharedImpactReconciling = false;
+        if (!this.validClonedAsset(clone)) {
+          this.sharedImpactRebindError = this.$t('lesson.sharedImpactCloneNotFound', { key });
+          return;
+        }
+        this.sharedImpactUncertainCloneKey = '';
+        this.applyClonedVisual(clone);
+      }, (msg) => {
+        if (this.editorDestroying) return;
+        this.sharedImpactReconciling = false;
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactDiscoveryFailed', { reason: msg || key });
+      });
+    },
+    reloadAssets(onSuccess, onError) {
+      if (this.editorDestroying) return false;
+      if (this.$refs.assetManager) this.$refs.assetManager.reload(onSuccess, onError);
+      else if (onError) onError(this.$t('lesson.sharedImpactRefreshError'));
+      return true;
+    },
+    applyClonedVisual(clonedAsset) {
+      if (this.editorDestroying) return;
+      if (!this.validClonedAsset(clonedAsset)) {
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactInvalidCloneResponse');
+        this.$message.error(this.sharedImpactRebindError);
+        return;
+      }
+      this.sharedImpactClonedAsset = clonedAsset;
+      this.sharedImpactRebindError = '';
+      if (this.savingStep || this.rebindingSharedVisual) {
+        this.sharedImpactRebindError = this.$t('lesson.sharedImpactBusyRetry');
+        this.reloadAssets();
+        return;
+      }
+      this.rebindClonedVisual(clonedAsset);
+    },
+    retryClonedVisual(clonedAsset) {
+      if (!clonedAsset || clonedAsset !== this.sharedImpactClonedAsset || this.savingStep || this.rebindingSharedVisual) return;
+      this.sharedImpactRebindError = '';
+      this.rebindClonedVisual(clonedAsset);
+    },
+    validClonedAsset(asset) {
+      return Boolean(asset && !Array.isArray(asset) && ['assetId', 'assetKey', 'path', 'sha256']
+        .every((key) => typeof asset[key] === 'string' && asset[key].trim()));
+    },
+    failSharedVisualRebind(msg) {
+      if (this.editorDestroying) return;
+      this.rebindingSharedVisual = false;
+      this.sharedImpactRebindError = this.$t('lesson.sharedImpactRebindFailed', { reason: msg || this.$t('lesson.sharedImpactRefreshError') });
+      this.reloadAssets();
+      this.$message.error(this.sharedImpactRebindError);
+    },
+    refreshSharedVisualTruth(onSuccess, onError) {
+      if (this.editorDestroying) return false;
+      let remaining = 3;
+      let failed = false;
+      const done = () => {
+        if (this.editorDestroying || failed) return;
+        remaining -= 1;
+        if (remaining === 0) {
+          this.assetRefreshIsProofRecovery = false;
+          onSuccess();
+        }
+      };
+      const fail = (msg) => {
+        if (this.editorDestroying || failed) return;
+        failed = true;
+        this.assetRefreshIsProofRecovery = false;
+        onError(msg);
+      };
+      this.assetRefreshIsProofRecovery = true;
+      this.reloadAssets(done, fail);
+      this.doValidate(done, fail, { allowUnsafe: true, requireValid: true });
+      this.doPreview(done, fail, { allowUnsafe: true, reuseProofVersion: true, storeProof: !this.promptDirty && !Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]) });
+      return true;
+    },
+    rebindClonedVisual(clonedAsset) {
+      if (this.editorDestroying) return;
+      if (this.savingStep || this.rebindingSharedVisual) return;
+      const intent = this.sharedImpactIntent;
+      const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
+      if (!intent || !step || !clonedAsset) return;
+      let stepBody;
+      try {
+        const sourceBody = JSON.parse(JSON.stringify(step.stepBody || {}));
+        stepBody = intent.intent === 'select'
+          ? bindClonedAssetToStep(sourceBody, {
+            intent: 'select', layer: intent.layer, boundAssetKey: intent.boundAssetKey,
+          }, clonedAsset)
+          : replaceStepAssetReference(sourceBody, intent.asset.assetKey, clonedAsset);
+      } catch (error) {
+        this.failSharedVisualRebind(error && error.message);
+        return;
+      }
+      if (!collectAssetReferences([{ stepKey: step.stepKey, stepBody }], clonedAsset.assetKey).length) {
+        this.failSharedVisualRebind(this.$t('lesson.sharedImpactNoRebindTarget'));
+        return;
+      }
+      this.invalidatePreview();
+      this.rebindingSharedVisual = true;
+      Api.lesson.updateStep(
+        this.lessonId,
+        step.stepKey,
+        { ...step, stepBody },
+        () => {
+          if (this.editorDestroying) return;
+          this.fetchSteps({
+            preservePrompt: true,
+            onSuccess: () => {
+              if (this.editorDestroying) return;
+              this.refreshSharedVisualTruth(() => {
+                if (this.editorDestroying) return;
+                this.assetRefreshIsProofRecovery = false;
+                this.rebindingSharedVisual = false;
+                this.$delete(this.selectedAssetDrafts, step.stepKey);
+                if (!this.selectedStepDrafts[step.stepKey] && !this.promptDirty) {
+                  this.$delete(this.dirtyStepKeys, step.stepKey);
+                }
+                const replaceAfterClone = intent.intent === 'replace';
+                this.closeSharedImpact(true);
+                if (replaceAfterClone) this.$nextTick(() => {
+                  if (this.$refs.assetManager) this.$refs.assetManager.confirmReplace({ ...intent.asset, ...clonedAsset });
+                });
+                this.$message.success(this.$t('lesson.sharedImpactCloned'));
+              }, (msg) => {
+                if (this.editorDestroying) return;
+                this.failSharedVisualRebind(msg);
+              });
+            },
+            onError: (msg) => {
+              if (this.editorDestroying) return;
+              this.failSharedVisualRebind(msg);
+            },
+          });
+        },
+        (msg) => {
+          if (this.editorDestroying) return;
+          this.failSharedVisualRebind(msg);
+        },
+      );
     },
     saveSelectedStep() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft) return;
+      if (!step || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
       const authored = this.selectedAuthoring;
       const stepBody = mergeStepBodyForSave(step.stepBody || {}, authored);
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
@@ -760,25 +1402,42 @@ export default {
           },
         };
       }
+      const saveGuard = {
+        requestId: this.promptSaveRequestId + 1,
+        stepKey: step.stepKey,
+        promptRevision: this.promptEditRevision,
+        stepRevision: this.stepEditRevisions[step.stepKey] || 0,
+      };
+      this.promptSaveRequestId = saveGuard.requestId;
+      this.invalidatePreview();
       this.savingStep = true;
       const visualRefTransition = templateVisualRefTransition(step.stepBody || {}, stepBody);
       const visualRefChanged = this.selectedStepIndex === 0 && visualRefTransition.shouldSync;
       const persistStep = () => Api.lesson.updateStep(
-        this.lessonId, step.stepKey, { ...step, stepBody }, (updated) => {
-          this.savingStep = false;
-          this.$set(this.steps, this.selectedStepIndex, updated);
-          this.$delete(this.selectedStepDrafts, step.stepKey);
-          this.$delete(this.selectedAssetDrafts, step.stepKey);
-          this.$delete(this.dirtyStepKeys, step.stepKey);
-          this.previewManifest = null;
-          this.$message.success('Step saved to the lesson draft.');
+        this.lessonId,
+        step.stepKey,
+        { ...step, prompt: this.promptDraft, stepBody },
+        () => {
+          if (saveGuard.requestId !== this.promptSaveRequestId) return;
+          this.fetchSteps({
+            promptGuard: saveGuard,
+            onSuccess: () => {
+              if (saveGuard.requestId !== this.promptSaveRequestId) return;
+              this.savingStep = false;
+              this.clearSavedStepDraft(saveGuard);
+              this.$message.success(this.$t('lesson.stepSaved'));
+            },
+            onError: () => {
+              if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+            },
+          });
         },
         (msg) => {
           if (visualRefChanged) {
             this.restoreTemplateVisualRef(step.stepKey, visualRefTransition.previousAssetVersionId, msg);
             return;
           }
-          this.savingStep = false;
+          if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
           this.$message.error(msg);
         },
       );
@@ -829,14 +1488,26 @@ export default {
       Api.lesson.reorderSteps(
         this.lessonId,
         order,
-        (rows) => { this.reordering = false; this.steps = rows; },
-        (msg) => { this.reordering = false; this.$message.error(msg); },
+        (rows) => { this.invalidatePreview(); this.reordering = false; this.steps = rows; },
+        (msg, error) => {
+          this.reordering = false;
+          this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+          this.$message.error(msg);
+        },
       );
     },
     deleteStep(row) {
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
-          Api.lesson.deleteStep(this.lessonId, row.stepKey, (rows) => { this.steps = rows; }, (msg) => this.$message.error(msg));
+          Api.lesson.deleteStep(
+            this.lessonId,
+            row.stepKey,
+            (rows) => { this.invalidatePreview(); this.steps = rows; },
+            (msg, error) => {
+              this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+              this.$message.error(msg);
+            },
+          );
         })
         .catch(() => {});
     },
@@ -908,12 +1579,17 @@ export default {
         this.lessonId,
         payload,
         () => {
+          this.invalidatePreview();
           this.addingStep = false;
           this.stepDialogVisible = false;
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
           this.fetchSteps();
         },
-        (msg) => { this.addingStep = false; this.$message.error(msg); },
+        (msg, error) => {
+          this.addingStep = false;
+          this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
+          this.$message.error(msg);
+        },
       );
     },
     openRename() {
@@ -926,50 +1602,523 @@ export default {
       Api.lesson.updateLesson(
         this.lessonId,
         { title: this.titleDraft },
-        (l) => { this.renaming = false; this.renameVisible = false; this.lesson = l; this.$message.success(this.$t('lesson.renamed')); },
-        (msg) => { this.renaming = false; this.$message.error(msg); },
+        (l) => {
+          this.invalidatePreview();
+          this.renaming = false;
+          this.renameVisible = false;
+          this.lesson = l;
+          this.$message.success(this.$t('lesson.renamed'));
+        },
+        (msg, error) => {
+          this.renaming = false;
+          this.handleUncertainMutationError(error, this.fetchAll);
+          this.$message.error(msg);
+        },
       );
     },
-    doValidate() {
+    doValidate(onSuccess, onError, options = {}) {
+      if (this.editorDestroying || (!options.allowUnsafe && this.hasUnsafeProofState())) return false;
+      const requestId = this.validationRequestId + 1;
+      const proofVersion = this.proofVersion;
+      let settled = false;
+      const succeed = (result) => {
+        if (settled) return;
+        settled = true;
+        if (typeof onSuccess === 'function') onSuccess(result);
+      };
+      const fail = (message) => {
+        if (settled) return;
+        settled = true;
+        if (typeof onError === 'function') onError(message);
+      };
+      this.validationRequestId = requestId;
+      this.publishReviewRequestId += 1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
       this.validating = true;
       Api.lesson.validate(
         this.lessonId,
         (res) => {
+          if (this.editorDestroying) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
           this.validating = false;
-          if (res && res.valid) this.$message.success(this.$t('lesson.validOk', { profiles: (res.profiles || []).join(', ') }));
+          const parsed = this.parseValidationResult(res, 'espTft');
+          this.validationResult = parsed || { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [], findings: [] };
+          this.validationProofVersion = proofVersion;
+          if (parsed && parsed.valid) this.$message.success(this.$t('lesson.validOk', { profiles: parsed.profiles.join(', ') }));
           else this.$message.warning(this.$t('lesson.validFail'));
+          if (!parsed) fail(this.$t('lesson.validationResponseMalformed'));
+          else if (!parsed.valid) fail(this.$t('lesson.validFail'));
+          else succeed(parsed);
         },
-        (msg) => { this.validating = false; this.$message.error(msg); },
+        (msg) => {
+          if (this.editorDestroying) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
+          this.validating = false;
+          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
+          this.validationProofVersion = proofVersion;
+          this.$message.error(msg);
+          fail(msg);
+        },
+      );
+      return true;
+    },
+    validManifestPreviewResponse(result) {
+      const preview = result && (result.preview || (
+        result.manifest && result.manifest.profile === 'espTft'
+          ? { profile: 'espTft', width: 480, height: 320 }
+          : null
+      ));
+      return Boolean(
+        result && typeof result.checksum === 'string' && result.checksum
+        && typeof result.etag === 'string' && result.etag
+        && result.manifest && Array.isArray(result.manifest.steps)
+        && preview && preview.profile === 'espTft'
+        && Number(preview.width) === 480 && Number(preview.height) === 320
       );
     },
-    doPreview() {
+    doPreview(onSuccess, onError, options = {}) {
+      if (this.editorDestroying) return false;
+      if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
+      const requestId = this.previewRequestId + 1;
+      const previousProofVersion = this.proofVersion;
+      if (!options.reuseProofVersion) this.proofVersion += 1;
+      const proofVersion = this.proofVersion;
+      if (this.validationProofVersion === previousProofVersion) this.validationProofVersion = proofVersion;
+      this.publishReviewRequestId += 1;
+      this.publishReviewVisible = false;
+      this.publishReviewSnapshot = null;
+      this.publishResult = null;
+      this.previewRequestId = requestId;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
       this.previewing = true;
       Api.lesson.manifestPreview(
         this.lessonId,
         'espTft',
         (res) => {
+          if (this.editorDestroying) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
-          this.preview = { checksum: res.checksum, etag: res.etag };
-          this.previewManifest = res.manifest || null;
+          const normalized = res && !res.preview && res.manifest && res.manifest.profile === 'espTft'
+            ? { ...res, preview: { profile: 'espTft', width: 480, height: 320 } }
+            : res;
+          if (!this.validManifestPreviewResponse(normalized)) {
+            const message = 'Manifest preview returned an invalid response.';
+            this.$message.error(message);
+            if (typeof onError === 'function') onError(message);
+            return;
+          }
+          if (options.storeProof !== false) {
+            this.preview = { checksum: normalized.checksum, etag: normalized.etag };
+            this.previewManifest = normalized;
+            this.previewProofVersion = proofVersion;
+          }
+          if (typeof onSuccess === 'function') onSuccess(normalized);
         },
-        (msg) => { this.previewing = false; this.$message.error(msg); },
+        (msg) => {
+          if (this.editorDestroying) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          this.previewing = false;
+          this.$message.error(msg);
+          if (typeof onError === 'function') onError(msg);
+        },
+      );
+      return true;
+    },
+    canPublishCurrentProof() {
+      return Boolean(
+        !this.editorDestroying
+        && this.isDraft
+        && !this.publishing
+        && !this.publishPreparing
+        && !this.publishUncertainState
+        && !this.publishReconciling
+        && !this.hasUnsafeProofState()
+        && this.readinessReady
+        && this.validationResult
+        && this.validationResult.valid === true
+        && this.validationProofVersion === this.proofVersion
+        && this.previewManifest
+        && this.previewManifest.checksum
+        && this.previewProofVersion === this.proofVersion
+        && this.simulationEvidence
+        && this.simulationProofVersion === this.proofVersion
+        && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
       );
     },
+    publishReviewIsCurrent(snapshot = this.publishReviewSnapshot) {
+      return Boolean(
+        snapshot
+        && snapshot === this.publishReviewSnapshot
+        && snapshot.requestId === this.publishReviewRequestId
+        && snapshot.proofVersion === this.proofVersion
+        && snapshot.previewChecksum === (this.previewManifest && this.previewManifest.checksum)
+        && this.canPublishCurrentProof()
+      );
+    },
+    parseAssetEvidenceResponse(result) {
+      if (!result || Array.isArray(result) || !Array.isArray(result.profiles) || !Array.isArray(result.assets)) return null;
+      const profiles = result.profiles.slice();
+      if (!profiles.length && !result.assets.length) return { profiles: [], assets: [] };
+      if (!profiles.length || !result.assets.length
+        || profiles.some((profile) => typeof profile !== 'string' || !profile.trim())
+        || new Set(profiles).size !== profiles.length) return null;
+      const seen = new Set();
+      const assets = [];
+      for (const raw of result.assets) {
+        if (!raw || Array.isArray(raw) || typeof raw !== 'object') return null;
+        const profile = raw.profile;
+        const assetKey = raw.assetKey;
+        const mediaType = raw.mediaType;
+        const location = raw.path || raw.url;
+        const bytes = Number(raw.bytes);
+        const width = raw.width == null ? null : Number(raw.width);
+        const height = raw.height == null ? null : Number(raw.height);
+        if (![profile, assetKey, raw.layer, raw.role, mediaType, raw.sha256, location].every((value) => typeof value === 'string' && value.trim())) return null;
+        if (!profiles.includes(profile) || !/^[a-f0-9]{64}$/i.test(raw.sha256)) return null;
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || (width !== null && (!Number.isFinite(width) || width < 0)) || (height !== null && (!Number.isFinite(height) || height < 0))) return null;
+        if (typeof raw.critical !== 'boolean') return null;
+        const identity = `${profile}\u0000${assetKey}`;
+        if (seen.has(identity)) return null;
+        seen.add(identity);
+        assets.push({ profile, assetKey, layer: raw.layer, role: raw.role, mediaType, bytes, width, height, sha256: raw.sha256, critical: raw.critical, path: location });
+      }
+      const assetProfiles = [...new Set(assets.map((asset) => asset.profile))].sort();
+      if (assetProfiles.join('|') !== profiles.slice().sort().join('|')) return null;
+      return { profiles: profiles.slice().sort(), assets: assets.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) };
+    },
+    parseValidationResult(result, expectedProfile = 'espTft') {
+      if (!result || Array.isArray(result) || typeof result.valid !== 'boolean' || !Array.isArray(result.profiles)) return null;
+      const profiles = result.profiles.slice();
+      if (!profiles.length || profiles.some((profile) => typeof profile !== 'string' || !profile.trim()) || new Set(profiles).size !== profiles.length || !profiles.includes(expectedProfile)) return null;
+      const validFinding = (finding) => typeof finding === 'string'
+        ? Boolean(finding.trim())
+        : Boolean(finding && !Array.isArray(finding) && typeof finding === 'object'
+          && ['message', 'reason', 'code'].some((key) => typeof finding[key] === 'string' && finding[key].trim()));
+      for (const key of ['errors', 'warnings', 'findings']) {
+        if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].some((finding) => !validFinding(finding)))) return null;
+      }
+      if (result.valid && Array.isArray(result.errors) && result.errors.length) return null;
+      return { ...result, valid: result.valid, profiles, errors: result.errors || [], warnings: result.warnings || [], findings: result.findings || [] };
+    },
+    derivePublishSource(rows, currentLesson) {
+      if (!currentLesson || !Array.isArray(rows)) return null;
+      const authoritativeDraft = rows.find((row) => row.lessonId === currentLesson.lessonId
+        && row.lessonKey === currentLesson.lessonKey
+        && Number(row.lessonVersion) === Number(currentLesson.lessonVersion)
+        && row.status === 'draft');
+      if (!authoritativeDraft) return null;
+      const priorPublished = rows.filter((row) => row.lessonKey === authoritativeDraft.lessonKey
+        && row.status === 'published'
+        && Number(row.lessonVersion) < Number(authoritativeDraft.lessonVersion))
+        .sort((a, b) => Number(b.lessonVersion) - Number(a.lessonVersion))[0];
+      return { mode: priorPublished ? 'prior-published' : 'first-publish', authoritativeDraft, evidenceLesson: priorPublished || authoritativeDraft };
+    },
+    collectLessonEvidence(lesson, onSuccess, onError) {
+      if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishEvidenceIdentityMissing')); return false; }
+      let manifestResult = null;
+      let assetResult = null;
+      let settled = false;
+      const fail = (message) => { if (!settled) { settled = true; onError(message); } };
+      const finish = () => {
+        if (settled || !manifestResult || !assetResult) return;
+        settled = true;
+        if (!this.validManifestPreviewResponse(manifestResult)) { onError(this.$t('lesson.publishManifestEvidenceMalformed')); return; }
+        const parsedAssets = this.parseAssetEvidenceResponse(assetResult);
+        if (!parsedAssets) { onError(this.$t('lesson.publishAssetEvidenceMalformed')); return; }
+        const assets = parsedAssets.assets;
+        onSuccess({
+          lessonId: lesson.lessonId,
+          lessonKey: lesson.lessonKey,
+          lessonVersion: Number(lesson.lessonVersion),
+          status: lesson.status || '',
+          rowManifestChecksum: lesson.manifestChecksum || '',
+          checksum: manifestResult.checksum,
+          etag: manifestResult.etag,
+          manifest: manifestResult.manifest,
+          assets,
+          profiles: parsedAssets.profiles,
+          totalBytes: assets.reduce((sum, asset) => sum + (Number(asset.bytes) || 0), 0),
+        });
+      };
+      Api.lesson.manifestPreview(lesson.lessonId, 'espTft', (result) => { manifestResult = result; finish(); }, fail);
+      Api.lesson.listAssets(lesson.lessonId, undefined, (result) => { assetResult = result; finish(); }, fail);
+      return true;
+    },
+    compareOriginalEvidence(before, after, options = {}) {
+      const stable = (value) => {
+        if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+        if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+        return JSON.stringify(value);
+      };
+      const differences = [];
+      if (!before || !after) return { pass: false, differences: [{ key: 'lesson.publishDiffEvidenceIncomplete' }] };
+      if (before.lessonId !== after.lessonId || Number(before.lessonVersion) !== Number(after.lessonVersion)) differences.push({ key: 'lesson.publishDiffOriginalIdentity' });
+      if (before.checksum !== after.checksum) differences.push({ key: 'lesson.publishDiffOriginalChecksum', params: { before: before.checksum || '—', after: after.checksum || '—' } });
+      if (!options.allowPublishChecksumTransition && (before.rowManifestChecksum || after.rowManifestChecksum)
+        && (before.rowManifestChecksum !== after.rowManifestChecksum
+          || (!options.allowPendingRowChecksum && after.rowManifestChecksum !== after.checksum))) differences.push({ key: 'lesson.publishDiffOriginalRowChecksum' });
+      if (stable(before.manifest) !== stable(after.manifest)) differences.push({ key: 'lesson.publishDiffOriginalManifest' });
+      if (stable(before.assets) !== stable(after.assets)) differences.push({ key: 'lesson.publishDiffOriginalAssets' });
+      if (Number(before.totalBytes || 0) !== Number(after.totalBytes || 0)) differences.push({ key: 'lesson.publishDiffOriginalBytes', params: { before: before.totalBytes || 0, after: after.totalBytes || 0 } });
+      return { pass: differences.length === 0, differences };
+    },
+    compareTargetEvidence(snapshot, publishResponse, fetchedTarget) {
+      const differences = [];
+      if (!snapshot || !publishResponse || !fetchedTarget) return { pass: false, differences: [{ key: 'lesson.publishDiffTargetMissing' }] };
+      if (fetchedTarget.lessonId !== snapshot.targetLessonId) differences.push({ key: 'lesson.publishDiffTargetIdentity' });
+      if (fetchedTarget.status !== 'published') differences.push({ key: 'lesson.publishDiffTargetStatus' });
+      if (Number(fetchedTarget.lessonVersion) !== Number(snapshot.targetVersion)
+        || Number(fetchedTarget.lessonVersion) !== Number(publishResponse.lessonVersion)) differences.push({ key: 'lesson.publishDiffTargetVersion' });
+      if (!fetchedTarget.rowManifestChecksum) differences.push({ key: 'lesson.publishDiffTargetRowChecksumMissing' });
+      if (fetchedTarget.checksum !== publishResponse.checksum
+        || fetchedTarget.checksum !== snapshot.previewChecksum
+        || fetchedTarget.rowManifestChecksum !== fetchedTarget.checksum) differences.push({ key: 'lesson.publishDiffTargetChecksum' });
+      return { pass: differences.length === 0, differences };
+    },
+    parsePublishResponse(result, snapshot) {
+      if (!result || Array.isArray(result) || !snapshot) return null;
+      if (result.lessonId !== snapshot.targetLessonId || result.status !== 'published'
+        || Number(result.lessonVersion) !== Number(snapshot.targetVersion)
+        || typeof result.lessonKey !== 'string' || !result.lessonKey
+        || typeof result.checksum !== 'string' || !/^[a-f0-9]{64}$/i.test(result.checksum)
+        || !result.profileChecksums || Array.isArray(result.profileChecksums) || typeof result.profileChecksums !== 'object'
+        || result.profileChecksums.espTft !== result.checksum) return null;
+      return result;
+    },
+    collectPublishedTargetEvidence(snapshot, publishResponse, onSuccess, onError) {
+      Api.lesson.getLesson(snapshot.targetLessonId, (lesson) => {
+        if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishTargetIdentityMalformed')); return; }
+        this.collectLessonEvidence(lesson, onSuccess, onError);
+      }, onError);
+    },
+    collectRefetchedLessonEvidence(lessonId, onSuccess, onError) {
+      Api.lesson.getLesson(lessonId, (lesson) => {
+        if (!lesson || !lesson.lessonId) { onError(this.$t('lesson.publishEvidenceIdentityMissing')); return; }
+        this.collectLessonEvidence(lesson, onSuccess, onError);
+      }, onError);
+    },
+    verifyPublishedEvidence(snapshot, result, requestId) {
+      let originalAfter = null;
+      let targetAfter = null;
+      let originalError = '';
+      let targetError = '';
+      let completed = 0;
+      const finish = () => {
+        completed += 1;
+        if (completed < 2 || this.editorDestroying || requestId !== this.publishRequestId) return;
+        this.publishing = false;
+        this.publishReconciling = false;
+        this.publishUncertainState = null;
+        const originalComparison = originalError
+          ? { pass: false, differences: [{ key: 'lesson.publishDiffOriginalUnavailable', params: { reason: originalError } }] }
+          : this.compareOriginalEvidence(snapshot.originalEvidence, originalAfter, { allowPublishChecksumTransition: snapshot.sourceMode === 'first-publish' });
+        const targetComparison = targetError
+          ? { pass: false, differences: [{ key: 'lesson.publishDiffTargetUnavailable', params: { reason: targetError } }] }
+          : this.compareTargetEvidence(snapshot, result, targetAfter);
+        const targetEvidence = targetAfter ? {
+          lessonVersion: targetAfter.lessonVersion,
+          checksum: targetAfter.checksum,
+          etag: targetAfter.etag,
+          assetCount: targetAfter.assets.length,
+          bytes: targetAfter.totalBytes,
+          publishChecksum: result.checksum,
+        } : null;
+        const verified = originalComparison.pass && targetComparison.pass;
+        this.publishResult = {
+          type: verified ? 'success' : 'error',
+          title: verified
+            ? this.$t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstVerified' : 'lesson.publishVerified')
+            : this.$t(snapshot.sourceMode === 'first-publish' ? 'lesson.publishFirstVerificationFailed' : 'lesson.publishVerificationFailed'),
+          originalComparison,
+          targetComparison,
+          targetEvidence,
+        };
+        this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
+        this.fetchAll();
+      };
+      this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
+      this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });
+      return true;
+    },
+    latchUncertainPublish(snapshot, requestId, reason) {
+      this.publishing = false;
+      this.publishUncertainState = {
+        requestId,
+        lessonId: snapshot.targetLessonId,
+        lessonVersion: snapshot.targetVersion,
+        checksum: snapshot.previewChecksum,
+        proofVersion: snapshot.proofVersion,
+        reason,
+      };
+      this.publishResult = { type: 'warning', title: this.$t('lesson.publishUncertain'), uncertain: true };
+      this.reconcileUncertainPublish();
+      return true;
+    },
+    reconcileUncertainPublish() {
+      const uncertain = this.publishUncertainState;
+      const snapshot = this.publishReviewSnapshot;
+      if (this.editorDestroying || this.publishReconciling || !uncertain || !snapshot
+        || uncertain.requestId !== this.publishRequestId
+        || uncertain.lessonId !== snapshot.targetLessonId
+        || uncertain.lessonVersion !== snapshot.targetVersion
+        || uncertain.checksum !== snapshot.previewChecksum
+        || uncertain.proofVersion !== snapshot.proofVersion
+        || uncertain.proofVersion !== this.proofVersion) return false;
+      const reconcileRequestId = this.publishReconcileRequestId + 1;
+      this.publishReconcileRequestId = reconcileRequestId;
+      this.publishReconciling = true;
+      this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconciling'), uncertain: true };
+      Api.lesson.getLesson(snapshot.targetLessonId, (lesson) => {
+        if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId || uncertain !== this.publishUncertainState) return;
+        if (!lesson || lesson.lessonId !== snapshot.targetLessonId || Number(lesson.lessonVersion) !== Number(snapshot.targetVersion)) {
+          this.publishReconciling = false;
+          this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
+          return;
+        }
+        if (lesson.status === 'published' && typeof lesson.manifestChecksum === 'string' && lesson.manifestChecksum) {
+          const recovered = this.parsePublishResponse({
+            lessonId: lesson.lessonId,
+            lessonKey: lesson.lessonKey,
+            lessonVersion: lesson.lessonVersion,
+            checksum: lesson.manifestChecksum,
+            status: lesson.status,
+            profileChecksums: { espTft: lesson.manifestChecksum },
+          }, snapshot);
+          if (!recovered) {
+            this.publishReconciling = false;
+            this.publishResult = { type: 'error', title: this.$t('lesson.publishVerificationFailed'), uncertain: true };
+            return;
+          }
+          this.verifyPublishedEvidence(snapshot, recovered, uncertain.requestId);
+          return;
+        }
+        if (lesson.status === 'draft') {
+          this.collectLessonEvidence(lesson, (evidence) => {
+            if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId || uncertain !== this.publishUncertainState) return;
+            this.publishReconciling = false;
+            const comparison = this.compareOriginalEvidence(snapshot.targetDraftEvidence, evidence, { allowPendingRowChecksum: true });
+            this.publishResult = {
+              type: 'warning',
+              title: this.$t(comparison.pass ? 'lesson.publishNotYetObserved' : 'lesson.publishReconcileStillUncertain'),
+              uncertain: true,
+            };
+          }, () => {
+            if (reconcileRequestId !== this.publishReconcileRequestId) return;
+            this.publishReconciling = false;
+            this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileFailed'), uncertain: true };
+          });
+          return;
+        }
+        this.publishReconciling = false;
+        this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileStillUncertain'), uncertain: true };
+      }, () => {
+        if (this.editorDestroying || reconcileRequestId !== this.publishReconcileRequestId) return;
+        this.publishReconciling = false;
+        this.publishResult = { type: 'warning', title: this.$t('lesson.publishReconcileFailed'), uncertain: true };
+      });
+      return true;
+    },
     doPublish() {
-      this.$confirm(this.$t('lesson.publishConfirm'), this.$t('lesson.publish'), { type: 'warning' })
-        .then(() => {
-          this.publishing = true;
-          Api.lesson.publish(
-            this.lessonId,
-            (res) => {
-              this.publishing = false;
-              this.publishMessage = this.$t('lesson.publishedMsg', { v: res.lessonVersion, checksum: res.checksum });
-              this.fetchAll(); // flip the badge to published + lock controls
-            },
-            (msg) => { this.publishing = false; this.$message.error(msg); },
-          );
-        })
-        .catch(() => {});
+      if (this.assetMutating || !this.canPublishCurrentProof()) return false;
+      const requestId = this.publishReviewRequestId + 1;
+      const proofVersion = this.proofVersion;
+      this.publishReviewRequestId = requestId;
+      this.publishPreparing = true;
+      this.publishResult = null;
+      Api.lesson.listLessons(
+        this.lesson.courseId,
+        (lessons) => {
+          if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+          const source = this.derivePublishSource(lessons, this.lesson);
+          if (!source) {
+            this.publishPreparing = false;
+            this.$message.error(this.$t('lesson.publishOriginalMissing'));
+            return;
+          }
+          this.collectLessonEvidence(source.evidenceLesson, (originalEvidence) => {
+            if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+            const openReview = (targetDraftEvidence) => {
+              if (this.editorDestroying || requestId !== this.publishReviewRequestId || proofVersion !== this.proofVersion) return;
+              this.publishPreparing = false;
+              this.publishReviewSnapshot = {
+                requestId,
+                proofVersion,
+                sourceMode: source.mode,
+                originalLesson: source.evidenceLesson,
+                originalEvidence,
+                targetDraftEvidence,
+                originalLessonId: source.evidenceLesson.lessonId,
+                originalVersion: source.evidenceLesson.lessonVersion,
+                originalChecksum: originalEvidence.checksum,
+                originalAssets: originalEvidence.assets,
+                originalBytes: originalEvidence.totalBytes,
+                targetLessonId: source.authoritativeDraft.lessonId,
+                targetVersion: source.authoritativeDraft.lessonVersion,
+                stepCount: this.steps.length,
+                assetCount: targetDraftEvidence.assets.length,
+                previewProfile: this.previewManifest.preview.profile,
+                previewWidth: this.previewManifest.preview.width,
+                previewHeight: this.previewManifest.preview.height,
+                previewChecksum: this.previewManifest.checksum,
+                previewEtag: this.previewManifest.etag,
+                simulationChecksum: this.simulationEvidence.checksum,
+                simulationEtag: this.simulationEvidence.etag,
+                simulationTerminationReason: this.simulationEvidence.simulation.terminationReason,
+                simulationCompletionEvent: this.simulationEvidence.simulation.trace[this.simulationEvidence.simulation.trace.length - 1] || null,
+                validationResult: JSON.parse(JSON.stringify(this.validationResult)),
+                validationProfiles: this.validationResult.profiles.slice(),
+              };
+              this.publishReviewVisible = true;
+            };
+            if (source.evidenceLesson.lessonId === source.authoritativeDraft.lessonId) openReview(originalEvidence);
+            else this.collectLessonEvidence(source.authoritativeDraft, openReview, (message) => {
+              if (requestId !== this.publishReviewRequestId) return;
+              this.publishPreparing = false;
+              this.$message.error(message);
+            });
+          }, (message) => {
+            if (this.editorDestroying || requestId !== this.publishReviewRequestId) return;
+            this.publishPreparing = false;
+            this.$message.error(message);
+          });
+        },
+        (message) => {
+          if (this.editorDestroying || requestId !== this.publishReviewRequestId) return;
+          this.publishPreparing = false;
+          this.$message.error(message);
+        },
+      );
+      return true;
+    },
+    publishReviewedVersion(snapshot) {
+      if (this.publishing || this.publishUncertainState || this.publishReconciling || !this.publishReviewIsCurrent(snapshot)) return false;
+      const requestId = this.publishRequestId + 1;
+      this.publishRequestId = requestId;
+      this.publishing = true;
+      this.publishResult = null;
+      Api.lesson.publish(
+        snapshot.targetLessonId,
+        (result) => {
+          if (this.editorDestroying || requestId !== this.publishRequestId) return;
+          const parsed = this.parsePublishResponse(result, snapshot);
+          if (!parsed) { this.latchUncertainPublish(snapshot, requestId, this.$t('lesson.publishResponseMalformed')); return; }
+          this.verifyPublishedEvidence(snapshot, parsed, requestId);
+        },
+        (message, error) => {
+          if (this.editorDestroying || requestId !== this.publishRequestId) return;
+          this.publishing = false;
+          const uncertain = this.isUncertainMutationError(error);
+          if (uncertain) this.latchUncertainPublish(snapshot, requestId, message);
+          else this.publishResult = { type: 'error', title: this.$t('lesson.publishFailed', { reason: message }) };
+          this.$message.error(message);
+        },
+      );
+      return true;
     },
   },
 };
