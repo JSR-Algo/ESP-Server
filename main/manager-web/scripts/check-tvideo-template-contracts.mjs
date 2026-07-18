@@ -117,8 +117,16 @@ assert.equal(layouts.validateProjection({
 assert.deepEqual(layouts.phaseRobotRect(layouts.LAYOUT_PRESETS.centerRoad, 'walkToward', 900, 1800), {
   left: 234, top: 150, width: 112, height: 56,
 });
+assert.equal(layouts.isTeachingContentVisible('arriveNear', 'revealTeachingContent', true), true);
+assert.equal(layouts.isTeachingContentVisible('arriveNear', 'revealTeachingContent', false), false);
+assert.equal(layouts.isTeachingContentVisible('revealTeachingContent', 'revealTeachingContent', false), true);
+for (const requestedPhase of ['hidden', 'flyIn', 'greetIdle', 'revealTeachingContent']) {
+  assert.equal(layouts.effectivePreviewPhaseName(requestedPhase, true), 'arriveNear');
+}
+assert.equal(layouts.effectivePreviewPhaseName('greetIdle', false), 'greetIdle');
 
 const previewSource = fs.readFileSync(new URL('../src/components/lesson/TvideoJourneyPreview.vue', import.meta.url), 'utf8');
+assert.ok(previewSource.includes('this.paused = this.fallback;'), 'static fallback must remain on the arrived frame');
 for (const marker of [
   '480', '320', 'Replay', 'Pause', 'Arrived frame', 'selectPhase', 'phase-selector',
   'safe-zone', 'walk-corridor', 'teachingObjectSrc', 'missingAtlas', 'missingOverlay', 'phaseTimeout', 'reducedMotion',

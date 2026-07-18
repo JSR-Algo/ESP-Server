@@ -26,7 +26,7 @@
   </section>
 </template>
 <script>
-import { LAYOUT_PRESETS, PHASES, phaseRobotRect, validateProjection } from './tvideo-layout-presets';
+import { effectivePreviewPhaseName, LAYOUT_PRESETS, PHASES, isTeachingContentVisible, phaseRobotRect, validateProjection } from './tvideo-layout-presets';
 export default {
   name: 'TvideoJourneyPreview',
   props: { projection: { type: Object, required: true }, scene: { type: Object, default: () => ({}) }, prompt: { type: String, default: '' }, word: { type: String, default: '' } },
@@ -35,9 +35,13 @@ export default {
     contractValid() { return validateProjection(this.projection); },
     layout() { return LAYOUT_PRESETS[this.projection.layoutPreset]; },
     phaseDefs() { return this.contractValid ? this.projection.phases : PHASES; },
-    phase() { return this.phaseDefs[this.phaseIndex] || this.phaseDefs[this.phaseDefs.length - 1]; },
+    phase() {
+      const selected = this.phaseDefs[this.phaseIndex] || this.phaseDefs[this.phaseDefs.length - 1];
+      const effectiveName = effectivePreviewPhaseName(selected.name, this.fallback);
+      return this.phaseDefs.find((phase) => phase.name === effectiveName) || selected;
+    },
     fallback() { return this.simulation !== 'none'; },
-    contentVisible() { return this.phase.name === this.projection.revealPhase; },
+    contentVisible() { return isTeachingContentVisible(this.phase.name, this.projection.revealPhase, this.fallback); },
     degradedReason() { return this.fallback ? this.simulation : ''; },
     backgroundSrc() { const bg = this.scene.backgroundScene || {}; return (bg.poster || bg).src || ''; },
     teachingObjectSrc() { const object = this.scene.teachingObject || {}; return (object.asset || object).src || ''; },
@@ -48,7 +52,7 @@ export default {
   mounted() { this.start(); }, beforeDestroy() { clearInterval(this.timer); },
   methods: {
     rect(value) { return { left:`${value.left}px`,top:`${value.top}px`,width:`${value.width || 1}px`,height:`${value.height || 1}px` }; },
-    replay() { const arriveIndex = this.phaseDefs.findIndex((phase) => phase.name === 'arriveNear'); this.phaseIndex = this.fallback ? arriveIndex : 0; this.elapsedMs = 0; this.paused = false; },
+    replay() { const arriveIndex = this.phaseDefs.findIndex((phase) => phase.name === 'arriveNear'); this.phaseIndex = this.fallback ? arriveIndex : 0; this.elapsedMs = 0; this.paused = this.fallback; },
     selectPhase(index) { this.phaseIndex = index; this.elapsedMs = 0; this.paused = true; },
     showArrivedFrame() { const index = this.phaseDefs.findIndex((phase) => phase.name === 'arriveNear'); this.selectPhase(index < 0 ? 0 : index); },
     start() { this.timer = setInterval(() => { if (this.paused || !this.contractValid) return; this.elapsedMs += 100; if (this.elapsedMs >= this.phase.durationMs && this.phaseIndex < this.phaseDefs.length - 1) { this.elapsedMs = 0; this.phaseIndex += 1; } }, 100); },

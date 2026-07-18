@@ -50,4 +50,21 @@ function phaseRobotRect(layout, phaseName, elapsedMs, durationMs) {
   return layout.arrive;
 }
 
-module.exports = { SCREEN, PHASES, LAYOUT_PRESETS, rectOverlaps, validateProjection, phaseRobotRect };
+function isTeachingContentVisible(phaseName, revealPhase, staticFallback) {
+  return phaseName === revealPhase || (staticFallback && phaseName === 'arriveNear');
+}
+
+function effectivePreviewPhaseName(phaseName, staticFallback) {
+  return staticFallback ? 'arriveNear' : phaseName;
+}
+
+module.exports = {
+  SCREEN,
+  PHASES,
+  LAYOUT_PRESETS,
+  rectOverlaps,
+  validateProjection,
+  phaseRobotRect,
+  isTeachingContentVisible,
+  effectivePreviewPhaseName,
+};
