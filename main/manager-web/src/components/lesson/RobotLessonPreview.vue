@@ -102,7 +102,12 @@ export default {
         : {};
     },
     primaryWord() {
-      return this.scene.primaryWord || this.body.primaryWord || this.currentStep.subject || '';
+      return (this.body.teachingWord && (this.body.teachingWord.displayText || this.body.teachingWord.text))
+        || (this.currentStep.teachingWord && (this.currentStep.teachingWord.displayText || this.currentStep.teachingWord.text))
+        || this.scene.primaryWord
+        || this.body.primaryWord
+        || this.currentStep.subject
+        || '';
     },
     caption() {
       return this.scene.altCaption

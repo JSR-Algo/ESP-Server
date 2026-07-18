@@ -169,4 +169,30 @@ for (const marker of ['templateVisualRefTransition', 'restoreTemplateVisualRef',
   assert.ok(editorSource.includes(marker), `lesson editor visual-ref compensation missing ${marker}`);
 }
 
+const robotPreviewSource = fs.readFileSync(new URL('../src/components/lesson/RobotLessonPreview.vue', import.meta.url), 'utf8');
+const primaryWordMatch = /primaryWord\(\)\s*\{\s*return\s+([\s\S]*?);\s*\},/.exec(robotPreviewSource);
+assert.ok(primaryWordMatch, 'RobotLessonPreview primaryWord computed expression is missing');
+const resolvePrimaryWord = Function(`return function primaryWord() { return (${primaryWordMatch[1]}); }`)();
+const primaryWordCases = [
+  {
+    body: { teachingWord: { displayText: 'BaRn', text: 'BARN' }, primaryWord: 'body-barn' },
+    scene: { primaryWord: 'scene-barn' }, currentStep: { subject: 'barn' }, expected: 'BaRn',
+  },
+  {
+    body: { teachingWord: { text: 'COW' } }, scene: {}, currentStep: { subject: 'cow' }, expected: 'COW',
+  },
+  {
+    body: {}, scene: { primaryWord: 'Hen' }, currentStep: { subject: 'hen' }, expected: 'Hen',
+  },
+  {
+    body: { primaryWord: 'Corn' }, scene: {}, currentStep: { subject: 'corn' }, expected: 'Corn',
+  },
+  {
+    body: {}, scene: {}, currentStep: { subject: 'barn' }, expected: 'barn',
+  },
+];
+for (const testCase of primaryWordCases) {
+  assert.equal(resolvePrimaryWord.call(testCase), testCase.expected);
+}
+
 console.log('tvideo template contracts OK');
