@@ -331,7 +331,12 @@ import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
 import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
 import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
-import { normalizeBatchReadiness, sharedBackgroundOption } from '@/components/lesson/tvideo-template-logic';
+import {
+  normalizeBatchReadiness,
+  sharedBackgroundOption,
+  templateVisualRefTransition,
+  mergeStepBodyForSave,
+} from '@/components/lesson/tvideo-template-logic';
 import Api from '@/apis/api';
 
 export default {
@@ -740,7 +745,7 @@ export default {
       const step = this.selectedStep;
       if (!step || !this.isDraft) return;
       const authored = this.selectedAuthoring;
-      const stepBody = { ...(step.stepBody || {}), ...authored };
+      const stepBody = mergeStepBodyForSave(step.stepBody || {}, authored);
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       if (selectedAsset) {
         stepBody.teachingObject = {
@@ -756,6 +761,8 @@ export default {
         };
       }
       this.savingStep = true;
+      const visualRefTransition = templateVisualRefTransition(step.stepBody || {}, stepBody);
+      const visualRefChanged = this.selectedStepIndex === 0 && visualRefTransition.shouldSync;
       const persistStep = () => Api.lesson.updateStep(
         this.lessonId, step.stepKey, { ...step, stepBody }, (updated) => {
           this.savingStep = false;
@@ -766,18 +773,50 @@ export default {
           this.previewManifest = null;
           this.$message.success('Step saved to the lesson draft.');
         },
-        (msg) => { this.savingStep = false; this.$message.error(msg); },
+        (msg) => {
+          if (visualRefChanged) {
+            this.restoreTemplateVisualRef(step.stepKey, visualRefTransition.previousAssetVersionId, msg);
+            return;
+          }
+          this.savingStep = false;
+          this.$message.error(msg);
+        },
       );
-      const template = stepBody.templateAuthoring;
-      if (this.selectedStepIndex === 0 && template && template.backgroundAssetVersionId) {
+      if (visualRefChanged) {
         Api.lesson.setVisualRef(
-          this.lessonId, step.stepKey, 'backgroundScene', template.backgroundAssetVersionId,
+          this.lessonId, step.stepKey, 'backgroundScene', visualRefTransition.nextAssetVersionId,
           persistStep,
           (msg) => { this.savingStep = false; this.$message.error(msg); },
         );
       } else {
         persistStep();
       }
+    },
+    restoreTemplateVisualRef(stepKey, assetVersionId, saveError) {
+      Api.lesson.setVisualRef(
+        this.lessonId,
+        stepKey,
+        'backgroundScene',
+        assetVersionId,
+        () => {
+          this.savingStep = false;
+          this.resetStepDraftAfterFailedSave(stepKey);
+          this.fetchSteps();
+          this.$message.error(`Step metadata save failed; the background pin was restored. ${saveError}`);
+        },
+        (rollbackError) => {
+          this.savingStep = false;
+          this.resetStepDraftAfterFailedSave(stepKey);
+          this.fetchSteps();
+          this.$message.error(`Partial save: step metadata failed and the background pin could not be restored. ${saveError}; ${rollbackError}`);
+        },
+      );
+    },
+    resetStepDraftAfterFailedSave(stepKey) {
+      this.$delete(this.selectedStepDrafts, stepKey);
+      this.$delete(this.selectedAssetDrafts, stepKey);
+      this.$delete(this.dirtyStepKeys, stepKey);
+      this.previewManifest = null;
     },
     moveStep(index, delta) {
       const target = index + delta;

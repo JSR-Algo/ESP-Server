@@ -7,6 +7,20 @@ const logic = require('../src/components/lesson/tvideo-template-logic.js');
 const layouts = require('../src/components/lesson/tvideo-layout-presets.js');
 
 assert.deepEqual(logic.TEMPLATE_OPTIONS, ['none', 'tvideoFlyWalk']);
+assert.deepEqual(logic.templateVisualRefTransition(
+  { templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
+  {},
+), { shouldSync: true, previousAssetVersionId: 'old-background-uuid', nextAssetVersionId: null });
+assert.deepEqual(logic.templateVisualRefTransition(
+  { templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
+  { templateAuthoring: { backgroundAssetVersionId: 'new-background-uuid' } },
+), { shouldSync: true, previousAssetVersionId: 'old-background-uuid', nextAssetVersionId: 'new-background-uuid' });
+assert.deepEqual(logic.mergeStepBodyForSave(
+  { interaction: { type: 'repeat' }, templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
+  { interaction: { type: 'repeat' } },
+), { interaction: { type: 'repeat' } });
+assert.equal(logic.readinessVocabularySummary({ vocabularySetId: 'animals-a1', repeatedWords: ['CAT', 'DOG'] }), 'animals-a1 · 2 repeated');
+assert.equal(logic.readinessVocabularySummary({ vocabulary: { unique: ['CAT', 'DOG', 'OWL'], repeated: ['CAT'] } }), '3 unique · 1 repeated');
 assert.deepEqual(logic.sharedBackgroundOption({
   asset_key: 'forest-road', version: 3, version_id: 'visual-version-uuid', title: 'Forest Road',
   compatibility_metadata: { supportedLayoutPresets: ['centerRoad'], geometryVersion: 1 },
@@ -142,6 +156,9 @@ for (const marker of [
   'Api.lesson.generateVariants(', 'Api.lesson.assessBatchReadiness(', 'normalizeBatchReadiness',
 ]) {
   assert.ok(editorSource.includes(marker), `lesson editor batch wiring missing ${marker}`);
+}
+for (const marker of ['templateVisualRefTransition', 'restoreTemplateVisualRef', 'resetStepDraftAfterFailedSave', 'Partial save:', 'assetVersionId,']) {
+  assert.ok(editorSource.includes(marker), `lesson editor visual-ref compensation missing ${marker}`);
 }
 
 console.log('tvideo template contracts OK');

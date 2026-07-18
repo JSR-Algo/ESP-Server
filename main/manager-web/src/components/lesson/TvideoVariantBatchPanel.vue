@@ -60,7 +60,7 @@
 </template>
 
 <script>
-import { buildVariantGenerationRequest, compatibleLayouts } from './tvideo-template-logic';
+import { buildVariantGenerationRequest, compatibleLayouts, readinessVocabularySummary } from './tvideo-template-logic';
 
 let nextRowId = 1;
 
@@ -133,10 +133,7 @@ export default {
       return '—';
     },
     vocabularySummary(entry) {
-      const vocabulary = entry.vocabulary || entry.vocabularySummary || {};
-      const unique = Array.isArray(vocabulary.unique) ? vocabulary.unique.length : Number(vocabulary.uniqueCount || 0);
-      const repeated = Array.isArray(vocabulary.repeated) ? vocabulary.repeated.length : Number(vocabulary.repeatedCount || 0);
-      return `${unique} unique · ${repeated} repeated`;
+      return readinessVocabularySummary(entry);
     },
   },
 };

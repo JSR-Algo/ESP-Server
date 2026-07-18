@@ -14,6 +14,38 @@ function sharedBackgroundOption(row) {
   };
 }
 
+function templateVisualRefTransition(previousBody, nextBody) {
+  const previous = previousBody && previousBody.templateAuthoring;
+  const next = nextBody && nextBody.templateAuthoring;
+  const previousAssetVersionId = String((previous && previous.backgroundAssetVersionId) || '').trim() || null;
+  const nextAssetVersionId = String((next && next.backgroundAssetVersionId) || '').trim() || null;
+  return {
+    shouldSync: previousAssetVersionId !== nextAssetVersionId,
+    previousAssetVersionId,
+    nextAssetVersionId,
+  };
+}
+
+function mergeStepBodyForSave(previousBody, authoredBody) {
+  const result = { ...(previousBody || {}), ...(authoredBody || {}) };
+  if (!authoredBody || !authoredBody.templateAuthoring) delete result.templateAuthoring;
+  return result;
+}
+
+function readinessVocabularySummary(entry) {
+  const vocabulary = entry.vocabulary || entry.vocabularySummary;
+  if (vocabulary) {
+    const unique = Array.isArray(vocabulary.unique) ? vocabulary.unique.length : Number(vocabulary.uniqueCount || 0);
+    const repeated = Array.isArray(vocabulary.repeated) ? vocabulary.repeated.length : Number(vocabulary.repeatedCount || 0);
+    return `${unique} unique · ${repeated} repeated`;
+  }
+  const vocabularySetId = String(entry.vocabularySetId || entry.vocabulary_set_id || '').trim();
+  const repeatedWords = Array.isArray(entry.repeatedWords)
+    ? entry.repeatedWords
+    : (Array.isArray(entry.repeated_words) ? entry.repeated_words : []);
+  return `${vocabularySetId || 'Vocabulary set unavailable'} · ${repeatedWords.length} repeated`;
+}
+
 function compatibleLayouts(background) {
   if (!background || Number(background.geometryVersion) !== 1) return [];
   const supported = Array.isArray(background.supportedLayoutPresets) ? background.supportedLayoutPresets : [];
@@ -119,6 +151,9 @@ module.exports = {
   TEMPLATE_OPTIONS,
   LAYOUT_PRESETS,
   sharedBackgroundOption,
+  templateVisualRefTransition,
+  mergeStepBodyForSave,
+  readinessVocabularySummary,
   compatibleLayouts,
   buildTemplateAuthoring,
   assessVariantReadiness,
