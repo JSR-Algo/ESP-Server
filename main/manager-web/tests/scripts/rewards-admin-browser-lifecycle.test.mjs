@@ -200,6 +200,21 @@ test('backend environment uses development key fallback when a private fixture f
   assert.equal(environment.NESTJS_ADMIN_TOKEN, undefined);
 });
 
+test('backend environment binds the runner-reserved loopback port', () => {
+  const environment = buildBackendEnvironment({
+    baseEnv: {},
+    databaseUrl: 'postgresql://test.invalid/tbot',
+    backendPort: 40123,
+    rolloutAdminId: 'admin-e2e-id',
+  });
+
+  assert.equal(environment.PORT, '40123');
+  assert.equal(environment.LESSON_SHARED_VISUAL_AUTHORING_ENABLED, 'true');
+  assert.equal(environment.LESSON_EXACT_ESPTFT_PREVIEW_ENABLED, 'true');
+  assert.equal(environment.LESSON_ROLLOUT_ADMIN_ID_ALLOWLIST, 'admin-e2e-id');
+  assert.equal(environment.LESSON_ROLLOUT_DEVICE_ALLOWLIST, 'rewards-admin-browser-e2e-device');
+});
+
 test('backend readiness accepts only the real nonzero listening-port handshake', () => {
   assert.equal(extractListeningPort('tbot-backend listening on port 40123'), 40123);
   assert.equal(extractListeningPort('tbot-backend listening on port 0'), null);
@@ -265,6 +280,9 @@ test('browser HTTP failure classification allows only pre-auth admin 401s and kn
   }), false);
   assert.equal(isExpectedBrowserHttpFailure({
     url: 'http://127.0.0.1:4000/assets/objects/barn.png', status: 404, traceStarted: true,
+  }), true);
+  assert.equal(isExpectedBrowserHttpFailure({
+    url: 'https://res.cloudinary.com/doztb4fwf/image/upload/assets/robot/poses/bright-celebrate.png', status: 404, traceStarted: true,
   }), true);
   assert.equal(isExpectedBrowserHttpFailure({
     url: 'http://127.0.0.1:4000/assets/objects/unexpected.png', status: 404, traceStarted: true,

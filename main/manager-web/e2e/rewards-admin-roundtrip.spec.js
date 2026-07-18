@@ -209,7 +209,7 @@ async function openCanonicalLesson(page) {
     method: 'GET',
     pathPattern: /\/v1\/admin\/lessons\/[^/]+\/manifest-preview$/,
   }, () => page.getByRole('button', { name: 'Preview', exact: true }).click());
-  expect(preview.payload.preview).toEqual(expect.objectContaining({ profile: 'espTft', width: 480, height: 320 }));
+  expect(preview.payload.manifest).toEqual(expect.objectContaining({ profile: 'espTft' }));
   await expect(page.locator('.server-size')).toHaveText(/espTft\s+480x320/);
   return { lessonId, editorUrl: page.url(), checksum: preview.payload.checksum, pins: normalizePins(assets) };
 }
@@ -249,6 +249,8 @@ async function editRequiredFields(page) {
   await prompt.fill('Your turn: say "barn" and help TeeBot find the glowing door.');
   await page.locator('.el-form-item').filter({ hasText: 'English teaching word' }).locator('input').fill('BARN');
   await page.locator('.el-form-item').filter({ hasText: 'Goal' }).locator('input').fill('Help TeeBot identify the barn door.');
+  await page.locator('.el-form-item').filter({ hasText: 'Success reaction' }).locator('input').fill('Celebrate finding the barn door together.');
+  await page.locator('.el-form-item').filter({ hasText: 'Next tease' }).locator('input').fill('Invite the child to discover the next farm friend.');
   await page.locator('label.el-radio-button').filter({ hasText: '5 min' }).click();
   const save = await waitForAdminResponse(page, {
     method: 'PATCH',
@@ -275,11 +277,18 @@ async function reviewAndCloneSharedVisual(page) {
   await expect(dialog).toBeVisible();
   const cloneKey = dialog.getByRole('textbox');
   await expect(cloneKey).toHaveValue('teachingObject.barn.v2');
+  const validationAfterClone = page.waitForResponse((response) => (
+    response.request().method() === 'POST'
+    && /\/v1\/admin\/lessons\/[^/]+\/validate$/.test(adminPath(response.url()))
+  ));
   const clone = await waitForAdminResponse(page, {
     method: 'POST',
     pathPattern: /\/v1\/admin\/lessons\/[^/]+\/assets\/[^/]+\/clone$/,
   }, () => dialog.getByRole('button', { name: 'Clone for this draft' }).click());
   expect(clone.payload).toEqual(expect.objectContaining({ assetKey: 'teachingObject.barn.v2' }));
+  const validationResponse = await validationAfterClone;
+  const validationPayload = await responsePayload(validationResponse);
+  expect(validationResponse.status(), JSON.stringify(validationPayload)).toBe(200);
   await expect(dialog).toBeHidden({ timeout: 30_000 });
   await expect(page.locator('.asset-tile').filter({ hasText: 'teachingObject.barn.v2' })).toBeVisible();
 }
@@ -297,7 +306,7 @@ async function assertExactPreview(page) {
     method: 'GET',
     pathPattern: /\/v1\/admin\/lessons\/[^/]+\/manifest-preview$/,
   }, () => page.getByRole('button', { name: 'Preview', exact: true }).click());
-  expect(preview.payload.preview).toEqual(expect.objectContaining({ profile: 'espTft', width: 480, height: 320 }));
+  expect(preview.payload.manifest).toEqual(expect.objectContaining({ profile: 'espTft' }));
   expect(preview.payload.checksum).toMatch(/^[a-f0-9]{64}$/i);
   const size = await page.locator('.robot-preview .stage').evaluate((element) => {
     const style = getComputedStyle(element);

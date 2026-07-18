@@ -9,7 +9,6 @@ import {
   createProcessLifecycle,
   defaultSecretPatterns,
   executeWithSignalFinalization,
-  extractListeningPort,
   finalizeArtifactPrivacy,
   findFreePort,
   redactSensitiveText,
@@ -25,6 +24,7 @@ const artifactDir = resolve(managerRoot, 'output/playwright/rewards-admin-roundt
 const rawTraceDir = resolve(tmpdir(), `tbot-rewards-admin-raw-trace-${process.pid}`);
 const containerName = `tbot-rewards-admin-browser-${process.pid}`;
 const postgresImage = process.env.TBOT_REWARDS_POSTGRES_IMAGE ?? 'postgres:16-alpine';
+const adminId = '00000008-0001-0000-0000-000000000001';
 const adminEmail = 'rewards-admin-browser@invalid.test';
 const adminPassword = 'RewardsAdminBrowser-E2E-Only-93!';
 const adminMfaSecret = 'JBSWY3DPEHPK3PXP';
@@ -108,27 +108,22 @@ async function waitForHttp(url, child, label) {
   throw new Error(`${label} readiness timed out\n${(childLogs.get(label) || []).join('')}`);
 }
 
-async function startBackend(databaseUrl) {
-  const environment = buildBackendEnvironment({ baseEnv: process.env, databaseUrl });
+async function startBackend(databaseUrl, backendPort) {
+  const environment = buildBackendEnvironment({
+    baseEnv: process.env,
+    databaseUrl,
+    backendPort,
+    rolloutAdminId: adminId,
+  });
 
   const backend = lifecycle.spawnTracked('npm', ['start'], {
     cwd: backendRoot,
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const logs = captureLogs(backend, 'backend');
-  const deadline = Date.now() + 30_000;
-  let port = null;
-  while (Date.now() < deadline && port === null) {
-    if (backend.exitCode !== null || backend.signalCode !== null) {
-      throw new Error(`Backend exited before its listening-port handshake\n${logs.join('')}`);
-    }
-    port = extractListeningPort(logs.join(''));
-    if (port === null) await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  if (port === null) throw new Error(`Backend did not report an actual PORT=0 binding\n${logs.join('')}`);
-  await waitForHttp(`http://127.0.0.1:${port}/v1/health`, backend, 'backend');
-  return { backend, url: `http://127.0.0.1:${port}` };
+  captureLogs(backend, 'backend');
+  await waitForHttp(`http://127.0.0.1:${backendPort}/v1/health`, backend, 'backend');
+  return { backend, url: `http://127.0.0.1:${backendPort}` };
 }
 
 async function seedAdmin(databaseUrl) {
@@ -140,23 +135,42 @@ async function seedAdmin(databaseUrl) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const adminId = '00000008-0001-0000-0000-000000000001';
       await client.query(
         \`INSERT INTO admin_users (id, email, password_hash, role, status, mfa_enabled, mfa_secret, can_author_lessons)
          VALUES ($1, $2, $3, 'super_admin', 'active', true, $4, true)\`,
-        [adminId, process.env.E2E_ADMIN_EMAIL, passwordHash, process.env.E2E_ADMIN_MFA_SECRET],
+        [process.env.E2E_ADMIN_ID, process.env.E2E_ADMIN_EMAIL, passwordHash, process.env.E2E_ADMIN_MFA_SECRET],
       );
       await client.query(
         \`INSERT INTO admin_role_assignments
            (admin_user_id, role, status, granted_by_admin_id, reason)
          VALUES ($1, 'super_admin', 'active', $1, 'disposable browser proof')\`,
-        [adminId],
+        [process.env.E2E_ADMIN_ID],
       );
       const canonical = await client.query(
         \`SELECT l.id FROM lessons l JOIN courses c ON c.id = l.course_id
           WHERE c.course_key = 'w01-place-words' AND l.lesson_key = 'w01-d01-barn-say-it'\`,
       );
       if (canonical.rowCount !== 1) throw new Error('canonical lesson seed missing');
+      const canonicalLessonId = canonical.rows[0].id;
+      await client.query(
+        \`UPDATE lesson_steps
+            SET step_body = jsonb_set(COALESCE(step_body, '{}'::jsonb), '{durationSec}', '5'::jsonb, true)
+          WHERE lesson_id = $1\`,
+        [canonicalLessonId],
+      );
+      await client.query(
+        \`UPDATE lesson_steps
+            SET step_body = COALESCE(step_body, '{}'::jsonb) || '{"teachingWord":{"text":"FARM"}}'::jsonb
+          WHERE lesson_id = $1 AND step_index = 1\`,
+        [canonicalLessonId],
+      );
+      await client.query(
+        \`UPDATE lesson_steps
+            SET step_body = jsonb_set(COALESCE(step_body, '{}'::jsonb), '{terminal}', 'true'::jsonb, true)
+          WHERE lesson_id = $1
+            AND step_index = (SELECT MAX(step_index) FROM lesson_steps WHERE lesson_id = $1)\`,
+        [canonicalLessonId],
+      );
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -171,6 +185,7 @@ async function seedAdmin(databaseUrl) {
     env: {
       ...process.env,
       DATABASE_URL: databaseUrl,
+      E2E_ADMIN_ID: adminId,
       E2E_ADMIN_EMAIL: adminEmail,
       E2E_ADMIN_PASSWORD: adminPassword,
       E2E_ADMIN_MFA_SECRET: adminMfaSecret,
@@ -245,7 +260,8 @@ const outcome = await executeWithSignalFinalization({
     });
     await seedAdmin(databaseUrl);
     await runCommand('npm', ['run', 'build'], { cwd: backendRoot, timeout: 180_000 });
-    const backend = await startBackend(databaseUrl);
+    const backendPort = await findFreePort();
+    const backend = await startBackend(databaseUrl, backendPort);
     const managerPort = await findFreePort();
     await startManager(backend.url, managerPort);
     browserTotp = computeTotp(adminMfaSecret);

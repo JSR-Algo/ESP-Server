@@ -154,7 +154,6 @@ export default {
   // PATCH /v1/admin/lessons/:lessonId/steps/:stepKey — draft step authoring fields.
   updateStep(lessonId, stepKey, input, onSuccess, onError) {
     const data = {
-      stepType: input.stepType,
       prompt: input.prompt,
       subject: input.subject,
       helperText: input.helperText || undefined,

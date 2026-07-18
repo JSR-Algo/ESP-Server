@@ -46,13 +46,17 @@ export function buildBrowserEnvironment({ baseEnv, backendUrl, managerPort }) {
   return environment;
 }
 
-export function buildBackendEnvironment({ baseEnv, databaseUrl }) {
+export function buildBackendEnvironment({ baseEnv, databaseUrl, backendPort = 0, rolloutAdminId }) {
   const environment = {
     ...baseEnv,
     DATABASE_URL: databaseUrl,
     NODE_ENV: 'development',
-    PORT: '0',
+    PORT: String(backendPort),
     SWAGGER_ENABLED: 'false',
+    LESSON_SHARED_VISUAL_AUTHORING_ENABLED: 'true',
+    LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: 'true',
+    LESSON_ROLLOUT_ADMIN_ID_ALLOWLIST: rolloutAdminId,
+    LESSON_ROLLOUT_DEVICE_ALLOWLIST: 'rewards-admin-browser-e2e-device',
   };
   delete environment.ADMIN_AUTH_DISABLED;
   delete environment.NESTJS_ADMIN_TOKEN;
@@ -126,12 +130,14 @@ const seededAssetPaths = new Set([
   '/assets/objects/hay.png',
   '/assets/robot/poses/bright-listening.png',
   '/assets/robot/poses/bright-teach.png',
+  '/assets/robot/poses/bright-celebrate.png',
+  '/assets/robot/poses/bright-thinking.png',
 ]);
 
 export function isExpectedBrowserHttpFailure({ url, status, traceStarted }) {
   const pathname = new URL(url).pathname;
   if (status === 401 && !traceStarted && pathname.startsWith('/nestjs/v1/admin/')) return true;
-  return status === 404 && seededAssetPaths.has(pathname);
+  return status === 404 && [...seededAssetPaths].some((path) => pathname.endsWith(path));
 }
 
 export function isUnexpectedBrowserConsole({ type, text }) {

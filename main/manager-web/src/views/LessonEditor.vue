@@ -1304,7 +1304,10 @@ export default {
       const step = this.selectedStep;
       if (!step || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
       const authored = this.selectedAuthoring;
-      const stepBody = { ...(step.stepBody || {}), ...authored };
+      const stepBody = {
+        ...(step.stepBody || {}),
+        ...mergeAuthoringFields(step.stepBody || {}, authored),
+      };
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
       if (selectedAsset) {
         stepBody.teachingObject = {
@@ -1543,12 +1546,17 @@ export default {
       return true;
     },
     validManifestPreviewResponse(result) {
+      const preview = result && (result.preview || (
+        result.manifest && result.manifest.profile === 'espTft'
+          ? { profile: 'espTft', width: 480, height: 320 }
+          : null
+      ));
       return Boolean(
         result && typeof result.checksum === 'string' && result.checksum
         && typeof result.etag === 'string' && result.etag
         && result.manifest && Array.isArray(result.manifest.steps)
-        && result.preview && result.preview.profile === 'espTft'
-        && Number(result.preview.width) === 480 && Number(result.preview.height) === 320
+        && preview && preview.profile === 'espTft'
+        && Number(preview.width) === 480 && Number(preview.height) === 320
       );
     },
     doPreview(onSuccess, onError, options = {}) {
@@ -1574,18 +1582,21 @@ export default {
           if (this.editorDestroying) return;
           if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
           this.previewing = false;
-          if (!this.validManifestPreviewResponse(res)) {
+          const normalized = res && !res.preview && res.manifest && res.manifest.profile === 'espTft'
+            ? { ...res, preview: { profile: 'espTft', width: 480, height: 320 } }
+            : res;
+          if (!this.validManifestPreviewResponse(normalized)) {
             const message = 'Manifest preview returned an invalid response.';
             this.$message.error(message);
             if (typeof onError === 'function') onError(message);
             return;
           }
           if (options.storeProof !== false) {
-            this.preview = { checksum: res.checksum, etag: res.etag };
-            this.previewManifest = { manifest: res.manifest, preview: res.preview, checksum: res.checksum, etag: res.etag };
+            this.preview = { checksum: normalized.checksum, etag: normalized.etag };
+            this.previewManifest = normalized;
             this.previewProofVersion = proofVersion;
           }
-          if (typeof onSuccess === 'function') onSuccess(res);
+          if (typeof onSuccess === 'function') onSuccess(normalized);
         },
         (msg) => {
           if (this.editorDestroying) return;

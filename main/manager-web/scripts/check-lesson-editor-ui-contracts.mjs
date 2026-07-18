@@ -496,6 +496,9 @@ const guardedPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 
 guardedPreview.call({ hasUnsafeProofState: () => true, proofActionsDisabled: true });
 if (guardedPreviewCalls !== 0) throw new Error('programmatic preview calls must reject unsafe dirty state');
 const validManifestPreviewResponse = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'validManifestPreviewResponse')})`);
+if (!validManifestPreviewResponse.call({}, {
+  checksum: 'c', etag: 'e', manifest: { profile: 'espTft', steps: [] },
+})) throw new Error('preview proof must accept the current server espTft manifest shape without a redundant preview field');
 if (validManifestPreviewResponse.call({}, {
   checksum: 'c', etag: 'e', manifest: { steps: [] }, preview: { profile: 'espTft', width: 320, height: 240 },
 })) throw new Error('preview proof must reject non-authoritative espTft dimensions');
