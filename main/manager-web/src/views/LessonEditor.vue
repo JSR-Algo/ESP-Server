@@ -331,7 +331,7 @@ import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
 import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
 import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
-import { normalizeBatchReadiness } from '@/components/lesson/tvideo-template-logic';
+import { normalizeBatchReadiness, sharedBackgroundOption } from '@/components/lesson/tvideo-template-logic';
 import Api from '@/apis/api';
 
 export default {
@@ -717,13 +717,7 @@ export default {
         (rows) => {
           this.sharedBackgrounds = rows
             .filter((row) => row.publication_state === 'published' && row.compatibility_metadata)
-            .map((row) => ({
-              assetKey: `${row.asset_key}@${row.version}`,
-              assetVersionId: row.version_id,
-              name: `${row.title} · v${row.version}`,
-              layer: 'backgroundScene',
-              compatibility: row.compatibility_metadata,
-            }));
+            .map(sharedBackgroundOption);
         },
         () => { this.sharedBackgrounds = []; },
       );

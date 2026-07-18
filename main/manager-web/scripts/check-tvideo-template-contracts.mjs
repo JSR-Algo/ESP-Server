@@ -7,6 +7,16 @@ const logic = require('../src/components/lesson/tvideo-template-logic.js');
 const layouts = require('../src/components/lesson/tvideo-layout-presets.js');
 
 assert.deepEqual(logic.TEMPLATE_OPTIONS, ['none', 'tvideoFlyWalk']);
+assert.deepEqual(logic.sharedBackgroundOption({
+  asset_key: 'forest-road', version: 3, version_id: 'visual-version-uuid', title: 'Forest Road',
+  compatibility_metadata: { supportedLayoutPresets: ['centerRoad'], geometryVersion: 1 },
+}), {
+  assetKey: 'forest-road@v3',
+  assetVersionId: 'visual-version-uuid',
+  name: 'Forest Road · v3',
+  layer: 'backgroundScene',
+  compatibility: { supportedLayoutPresets: ['centerRoad'], geometryVersion: 1 },
+});
 assert.deepEqual(logic.compatibleLayouts({ supportedLayoutPresets: ['centerRoad', 'rightApproach'], geometryVersion: 1 }), ['centerRoad', 'rightApproach']);
 assert.deepEqual(logic.compatibleLayouts({ supportedLayoutPresets: ['centerRoad'], geometryVersion: 2 }), []);
 

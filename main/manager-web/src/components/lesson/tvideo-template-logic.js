@@ -1,6 +1,19 @@
 const TEMPLATE_OPTIONS = Object.freeze(['none', 'tvideoFlyWalk']);
 const LAYOUT_PRESETS = Object.freeze(['centerRoad', 'leftApproach', 'rightApproach']);
 
+function sharedBackgroundOption(row) {
+  const assetKey = String(row.asset_key || row.assetKey || '').trim();
+  const version = Number(row.version);
+  if (!assetKey || !Number.isInteger(version) || version < 1) throw new Error('invalid shared background version');
+  return {
+    assetKey: `${assetKey}@v${version}`,
+    assetVersionId: row.version_id || row.versionId || '',
+    name: `${row.title || assetKey} · v${version}`,
+    layer: 'backgroundScene',
+    compatibility: row.compatibility_metadata || row.compatibilityMetadata || null,
+  };
+}
+
 function compatibleLayouts(background) {
   if (!background || Number(background.geometryVersion) !== 1) return [];
   const supported = Array.isArray(background.supportedLayoutPresets) ? background.supportedLayoutPresets : [];
@@ -105,6 +118,7 @@ function normalizeBatchReadiness(entries) {
 module.exports = {
   TEMPLATE_OPTIONS,
   LAYOUT_PRESETS,
+  sharedBackgroundOption,
   compatibleLayouts,
   buildTemplateAuthoring,
   assessVariantReadiness,
