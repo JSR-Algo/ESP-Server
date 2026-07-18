@@ -201,6 +201,45 @@ export default {
     });
   },
 
+  listSharedBackgrounds(onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lesson-visual-assets?category=scene&profile=espTft`,
+      method: 'GET',
+      onSuccess: (rows) => onSuccess(Array.isArray(rows) ? rows : []),
+      onError,
+    });
+  },
+
+  setVisualRef(lessonId, stepKey, slot, assetVersionId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/steps/${encodeURIComponent(stepKey)}/visual-refs/${encodeURIComponent(slot)}`,
+      method: 'PUT',
+      data: { assetVersionId },
+      onSuccess,
+      onError,
+    });
+  },
+
+  generateVariants(lessonId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/variants`,
+      method: 'POST',
+      data,
+      onSuccess,
+      onError,
+    });
+  },
+
+  assessBatchReadiness(lessonIds, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/batch-readiness`,
+      method: 'POST',
+      data: { lessonIds },
+      onSuccess,
+      onError,
+    });
+  },
+
   // DELETE /v1/admin/lessons/:lessonId/assets/:assetKey?profile= (draft only)
   // Removes the assets row (NOT the content-addressed blob); returns nothing useful.
   deleteAsset(lessonId, assetKey, profile, onSuccess, onError) {

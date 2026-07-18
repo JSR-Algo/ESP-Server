@@ -44,6 +44,9 @@ function mergeAuthoringFields(body, patch) {
     interaction: { ...defaults.interaction, ...(source.interaction || {}), ...(next.interaction || {}) },
     motion: mergedMotion,
     storyBeat: { ...defaults.storyBeat, ...(source.storyBeat || {}), ...(next.storyBeat || {}) },
+    ...((next.templateAuthoring || source.templateAuthoring)
+      ? { templateAuthoring: { ...(source.templateAuthoring || {}), ...(next.templateAuthoring || {}) } }
+      : {}),
   };
 }
 

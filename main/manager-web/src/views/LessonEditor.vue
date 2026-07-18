@@ -56,6 +56,22 @@
           </div>
           <div v-if="selectedStep" class="lesson-studio__workbench">
             <div>
+              <TvideoTemplatePanel
+                v-if="selectedStepIndex === 0"
+                v-model="selectedTemplateAuthoring"
+                :assets="templateAssets"
+              />
+              <TvideoVariantBatchPanel
+                v-if="isDraft && selectedStepIndex === 0 && selectedTemplateAuthoring"
+                :backgrounds="templateAssets.filter((asset) => asset.layer === 'backgroundScene')"
+                :template-authoring="selectedTemplateAuthoring"
+                :generation-result="variantGenerationResult"
+                :readiness="variantBatchReadiness"
+                :generating="generatingVariants"
+                :checking="checkingVariantReadiness"
+                @generate="generateTvideoVariants"
+                @readiness="runTvideoBatchReadiness"
+              />
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
               <SharedAssetPicker
                 :assets="bundleAssets"
@@ -312,7 +328,10 @@ import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.v
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
+import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
+import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
 import { mergeAuthoringFields } from '@/components/lesson/lesson-builder-logic';
+import { normalizeBatchReadiness } from '@/components/lesson/tvideo-template-logic';
 import Api from '@/apis/api';
 
 export default {
@@ -326,6 +345,8 @@ export default {
     LessonStepNavigator,
     RobotLessonPreview,
     SharedAssetPicker,
+    TvideoTemplatePanel,
+    TvideoVariantBatchPanel,
   },
   data() {
     return {
@@ -345,6 +366,7 @@ export default {
       lastSubject: '',
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
+      sharedBackgrounds: [],
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
       partsOfSpeech: ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'determiner'],
@@ -365,6 +387,10 @@ export default {
       previewPath: null,
       renameVisible: false,
       titleDraft: '',
+      generatingVariants: false,
+      checkingVariantReadiness: false,
+      variantGenerationResult: null,
+      variantBatchReadiness: null,
     };
   },
   computed: {
@@ -393,6 +419,9 @@ export default {
     hasBundleAssets() {
       return this.backgroundAssets.length > 0 || this.teachingObjectAssets.length > 0;
     },
+    templateAssets() {
+      return [...this.bundleAssets, ...this.sharedBackgrounds];
+    },
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
     },
@@ -409,6 +438,18 @@ export default {
         if (!this.selectedStep) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+      },
+    },
+    selectedTemplateAuthoring: {
+      get() {
+        return this.selectedAuthoring.templateAuthoring || null;
+      },
+      set(value) {
+        if (!this.selectedStep) return;
+        const next = { ...this.selectedAuthoring };
+        if (value) next.templateAuthoring = value;
+        else delete next.templateAuthoring;
+        this.selectedAuthoring = next;
       },
     },
     selectedObjectKey() {
@@ -485,6 +526,35 @@ export default {
     },
     onAssetsLoaded(assets) {
       this.bundleAssets = Array.isArray(assets) ? assets : [];
+    },
+    generateTvideoVariants(payload) {
+      this.generatingVariants = true;
+      this.variantGenerationResult = null;
+      this.variantBatchReadiness = null;
+      Api.lesson.generateVariants(
+        this.lessonId,
+        payload,
+        (result) => {
+          this.generatingVariants = false;
+          this.variantGenerationResult = result || { created: [], failed: [] };
+          const created = Array.isArray(this.variantGenerationResult.created) ? this.variantGenerationResult.created.length : 0;
+          const failed = Array.isArray(this.variantGenerationResult.failed) ? this.variantGenerationResult.failed.length : 0;
+          this.$message[created ? 'success' : 'warning'](`${created} variants created${failed ? `; ${failed} failed` : ''}.`);
+        },
+        (msg) => { this.generatingVariants = false; this.$message.error(msg); },
+      );
+    },
+    runTvideoBatchReadiness(lessonIds) {
+      if (!Array.isArray(lessonIds) || !lessonIds.length) return;
+      this.checkingVariantReadiness = true;
+      Api.lesson.assessBatchReadiness(
+        lessonIds,
+        (result) => {
+          this.checkingVariantReadiness = false;
+          this.variantBatchReadiness = normalizeBatchReadiness(result);
+        },
+        (msg) => { this.checkingVariantReadiness = false; this.$message.error(msg); },
+      );
     },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
@@ -643,6 +713,20 @@ export default {
         },
         () => {},
       );
+      Api.lesson.listSharedBackgrounds(
+        (rows) => {
+          this.sharedBackgrounds = rows
+            .filter((row) => row.publication_state === 'published' && row.compatibility_metadata)
+            .map((row) => ({
+              assetKey: `${row.asset_key}@${row.version}`,
+              assetVersionId: row.version_id,
+              name: `${row.title} · v${row.version}`,
+              layer: 'backgroundScene',
+              compatibility: row.compatibility_metadata,
+            }));
+        },
+        () => { this.sharedBackgrounds = []; },
+      );
     },
     fetchSteps() {
       Api.lesson.listSteps(this.lessonId, (rows) => {
@@ -678,11 +762,8 @@ export default {
         };
       }
       this.savingStep = true;
-      Api.lesson.updateStep(
-        this.lessonId,
-        step.stepKey,
-        { ...step, stepBody },
-        (updated) => {
+      const persistStep = () => Api.lesson.updateStep(
+        this.lessonId, step.stepKey, { ...step, stepBody }, (updated) => {
           this.savingStep = false;
           this.$set(this.steps, this.selectedStepIndex, updated);
           this.$delete(this.selectedStepDrafts, step.stepKey);
@@ -693,6 +774,16 @@ export default {
         },
         (msg) => { this.savingStep = false; this.$message.error(msg); },
       );
+      const template = stepBody.templateAuthoring;
+      if (this.selectedStepIndex === 0 && template && template.backgroundAssetVersionId) {
+        Api.lesson.setVisualRef(
+          this.lessonId, step.stepKey, 'backgroundScene', template.backgroundAssetVersionId,
+          persistStep,
+          (msg) => { this.savingStep = false; this.$message.error(msg); },
+        );
+      } else {
+        persistStep();
+      }
     },
     moveStep(index, delta) {
       const target = index + delta;

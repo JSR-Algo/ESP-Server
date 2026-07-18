@@ -1245,6 +1245,57 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["storyBeat"], {"ask": "What animal do you see?", "waitForChild": True})
         self.assertEqual(body["vocab"], {"word": "barn", "partOfSpeech": "noun"})
 
+    def test_step_body_forwards_named_tvideo_projection_without_editor_geometry(self):
+        rt = self._runtime()
+        step = copy.deepcopy(_build_manifest()["steps"][0])
+        step["templateProjection"] = {
+            "templateId": "tvideoFlyWalk",
+            "templateVersion": 1,
+            "layoutPreset": "centerRoad",
+            "geometryVersion": 1,
+            "phases": [
+                {"name": "hidden", "durationMs": 100}, {"name": "flyIn", "durationMs": 1200},
+                {"name": "landFar", "durationMs": 700}, {"name": "settle", "durationMs": 350},
+                {"name": "walkToward", "durationMs": 1800}, {"name": "arriveNear", "durationMs": 250},
+                {"name": "greetIdle", "durationMs": 650}, {"name": "revealTeachingContent", "durationMs": 100},
+            ],
+            "revealPhase": "revealTeachingContent",
+            "fallbackPolicy": "snapToArriveNearAndReveal",
+            "background": {"versionId": "backgroundScene.poster", "sha256": "b" * 64, "bytes": 1200, "mediaType": "image/jpeg"},
+            "arrivedPose": {"versionId": "robotOverlay.arrived", "sha256": "a" * 64, "bytes": 800, "mediaType": "image/png"},
+        }
+
+        body = rt._step_body(step)
+
+        self.assertEqual(body["templateProjection"]["templateId"], "tvideoFlyWalk")
+        self.assertNotIn("x", body["templateProjection"])
+        self.assertNotIn("servoCommand", body["templateProjection"])
+
+    def test_step_body_rejects_forged_or_unbounded_tvideo_projection(self):
+        rt = self._runtime()
+        base = {
+            "templateId": "tvideoFlyWalk", "templateVersion": 1, "layoutPreset": "centerRoad", "geometryVersion": 1,
+            "phases": [
+                {"name": "hidden", "durationMs": 100}, {"name": "flyIn", "durationMs": 1200},
+                {"name": "landFar", "durationMs": 700}, {"name": "settle", "durationMs": 350},
+                {"name": "walkToward", "durationMs": 1800}, {"name": "arriveNear", "durationMs": 250},
+                {"name": "greetIdle", "durationMs": 650}, {"name": "revealTeachingContent", "durationMs": 100},
+            ],
+            "revealPhase": "revealTeachingContent", "fallbackPolicy": "snapToArriveNearAndReveal",
+            "background": {"versionId": "bg", "sha256": "b" * 64, "bytes": 1200, "mediaType": "image/jpeg"},
+            "arrivedPose": {"versionId": "pose", "sha256": "a" * 64, "bytes": 800, "mediaType": "image/png"},
+        }
+        forged = [
+            {**base, "servoCommands": [1]},
+            {**base, "phases": [{"name": "flyIn", "durationMs": 999999999}]},
+            {**base, "atlas": {"versionId": "movie.mov", "sha256": "c" * 64, "bytes": 10, "mediaType": "video/quicktime"}},
+            {**base, "left": 10, "top": 20, "width": 30, "height": 40},
+        ]
+        for projection in forged:
+            step = copy.deepcopy(_build_manifest()["steps"][0])
+            step["templateProjection"] = projection
+            self.assertNotIn("templateProjection", rt._step_body(step))
+
     async def test_runtime_close_and_replay_helpers_are_defensive(self):
         class _ReplayForwarder(_FakeForwarder):
             async def replay_pending_terminal_event(self):

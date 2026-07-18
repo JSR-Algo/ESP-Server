@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import math
 import time
 import unicodedata
@@ -66,6 +67,53 @@ def _compact_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception:
         return "{}"
+
+def _safe_tvideo_projection(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    allowed_keys = {"templateId", "templateVersion", "layoutPreset", "geometryVersion", "phases", "revealPhase", "fallbackPolicy", "background", "arrivedPose", "atlas"}
+    if set(value) - allowed_keys:
+        return None
+    if value.get("templateId") != "tvideoFlyWalk" or type(value.get("templateVersion")) is not int or value.get("templateVersion") != 1:
+        return None
+    if value.get("layoutPreset") not in {"centerRoad", "leftApproach", "rightApproach"} or type(value.get("geometryVersion")) is not int or value.get("geometryVersion") != 1:
+        return None
+    expected_phases = [
+        {"name": "hidden", "durationMs": 100}, {"name": "flyIn", "durationMs": 1200},
+        {"name": "landFar", "durationMs": 700}, {"name": "settle", "durationMs": 350},
+        {"name": "walkToward", "durationMs": 1800}, {"name": "arriveNear", "durationMs": 250},
+        {"name": "greetIdle", "durationMs": 650}, {"name": "revealTeachingContent", "durationMs": 100},
+    ]
+    if value.get("phases") != expected_phases or value.get("revealPhase") != "revealTeachingContent" or value.get("fallbackPolicy") != "snapToArriveNearAndReveal":
+        return None
+
+    def pinned_asset(asset: Any, *, atlas: bool = False) -> Optional[Dict[str, Any]]:
+        if not isinstance(asset, dict) or set(asset) != {"versionId", "sha256", "bytes", "mediaType"}:
+            return None
+        media_type = asset.get("mediaType")
+        if not isinstance(asset.get("versionId"), str) or not asset["versionId"].strip():
+            return None
+        if not isinstance(asset.get("sha256"), str) or re.fullmatch(r"[0-9a-fA-F]{64}", asset["sha256"]) is None:
+            return None
+        if type(asset.get("bytes")) is not int or asset["bytes"] <= 0 or asset["bytes"] > 4 * 1024 * 1024:
+            return None
+        if media_type not in ({"image/png"} if atlas else {"image/png", "image/jpeg"}):
+            return None
+        return {"versionId": asset["versionId"].strip(), "sha256": asset["sha256"].lower(), "bytes": asset["bytes"], "mediaType": media_type}
+
+    background = pinned_asset(value.get("background"))
+    arrived_pose = pinned_asset(value.get("arrivedPose"))
+    atlas = pinned_asset(value.get("atlas"), atlas=True) if value.get("atlas") is not None else None
+    if background is None or arrived_pose is None or (value.get("atlas") is not None and atlas is None):
+        return None
+    return {
+        "templateId": "tvideoFlyWalk", "templateVersion": 1,
+        "layoutPreset": value["layoutPreset"], "geometryVersion": 1,
+        "phases": expected_phases, "revealPhase": "revealTeachingContent",
+        "fallbackPolicy": "snapToArriveNearAndReveal",
+        "background": background, "arrivedPose": arrived_pose,
+        **({"atlas": atlas} if atlas is not None else {}),
+    }
 
 def _lesson_trace_context_from_headers(headers: Any) -> Dict[str, str]:
     if not isinstance(headers, dict):
@@ -2164,6 +2212,9 @@ class LessonRuntime:
             value = step.get(key)
             if value is not None:
                 body[key] = value
+        template_projection = _safe_tvideo_projection(step.get("templateProjection"))
+        if template_projection is not None:
+            body["templateProjection"] = template_projection
         body["timeoutSec"] = step.get("timeoutSec")
         body["audio"] = step.get("audio")
         body["scene"] = scene

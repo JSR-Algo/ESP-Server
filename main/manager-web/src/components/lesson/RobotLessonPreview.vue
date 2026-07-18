@@ -1,5 +1,13 @@
 <template>
-  <section class="robot-preview">
+  <div>
+  <TvideoJourneyPreview
+    v-if="tvideoProjection"
+    :projection="tvideoProjection"
+    :scene="scene"
+    :prompt="caption"
+    :word="primaryWord"
+  />
+  <section v-else class="robot-preview">
     <div class="preview-head">
       <div>
         <span class="eyebrow">ESP TFT preview</span>
@@ -30,11 +38,14 @@
       <div><span>Assets</span><strong>{{ assetCount }}</strong></div>
     </div>
   </section>
+  </div>
 </template>
 
 <script>
+import TvideoJourneyPreview from './TvideoJourneyPreview.vue';
 export default {
   name: 'RobotLessonPreview',
+  components: { TvideoJourneyPreview },
   props: {
     manifest: { type: Object, required: true },
     stepIndex: { type: Number, default: 0 },
@@ -67,6 +78,11 @@ export default {
     },
     body() {
       return this.currentStep.body || this.currentStep.stepBody || this.currentStep;
+    },
+    tvideoProjection() {
+      return this.body.templateProjection && this.body.templateProjection.templateId === 'tvideoFlyWalk'
+        ? this.body.templateProjection
+        : null;
     },
     scene() {
       return this.body.scene || this.body;
