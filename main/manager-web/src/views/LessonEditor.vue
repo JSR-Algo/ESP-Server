@@ -1868,18 +1868,6 @@ export default {
         && this.simulationEvidence
         && this.simulationProofVersion === this.proofVersion
         && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
-=======
-          this.previewing = false;
-          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
-          this.preview = { checksum: res.checksum, etag: res.etag };
-          this.previewManifest = res.manifest || null;
-        },
-        (msg) => {
-          this.previewing = false;
-          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
-          this.$message.error(msg);
-        },
->>>>>>> fix/hil-task7-auth-order
       );
     },
     publishReviewIsCurrent(snapshot = this.publishReviewSnapshot) {
