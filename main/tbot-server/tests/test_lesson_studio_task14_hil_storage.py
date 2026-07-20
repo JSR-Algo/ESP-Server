@@ -382,6 +382,85 @@ def test_build_identity_recomputes_task6_artifacts_defaults_and_flat_binding(tmp
     }
 
 
+def test_preflight_binds_initial_status_to_exact_local_manifest(
+    tmp_path, monkeypatch
+):
+    hil = load_script("lesson_studio_task14_hil_storage.py")
+    manifest_path, _manifest, paths = task6_manifest(tmp_path)
+    binding = hil.load_build_identity(manifest_path, expected_profile="hil")
+    remote_build = {
+        "schemaVersion": 1,
+        "hilProfile": "task14-hil-v1",
+        "projectName": "xiaozhi",
+        "projectVersion": "2.2.75",
+        "idfVersion": "v5.4.1",
+        "secureVersion": 0,
+        "elfSha256": sha256(paths["elf"]),
+        "appSha256": sha256(paths["bin"]),
+        "buildId": "tbot-esp-v1:" + sha256(paths["elf"]),
+    }
+    status = {
+        **exact_status("idle"),
+        "schemaVersion": 2,
+        "storageIdentity": {
+            "status": "available",
+            "kind": "sdmmc-fat",
+            "cidFingerprint": "1b-534d-3030303030-10-4a5f7d3d-17b",
+            "cid": {
+                "manufacturerId": 0x1B,
+                "oemId": 0x534D,
+                "productName": "00000",
+                "revision": 0x10,
+                "serial": 0x4A5F7D3D,
+                "manufacturingDate": 0x17B,
+            },
+            "capacitySectors": 62333952,
+            "sectorSizeBytes": 512,
+            "capacityBytes": 31914983424,
+            "mountGeneration": 1,
+            "volumeSerial": "7a31f09c",
+            "volumeLabel": "TBOT_HIL",
+        },
+        "identitySchemaVersion": 1,
+        "buildIdentity": remote_build,
+        "buildIdentityId": hil.approved_build_identity_id(remote_build),
+        "connectionBindingId": "connection-one",
+    }
+
+    class Transport:
+        def __init__(self, *_args):
+            pass
+
+        def call(self, tool, args, timeout):
+            assert (tool, args, timeout) == (
+                hil.HIL_TOOL_NAMES["status"],
+                {"schemaVersion": 2},
+                30,
+            )
+            return status
+
+    monkeypatch.setattr(hil, "RawMcpTransport", Transport)
+    monkeypatch.setenv("TBOT_TEST_MINT_SECRET", "secret")
+    arguments = type(
+        "Arguments",
+        (),
+        {
+            "build_manifest": manifest_path,
+            "mint_secret_env": "TBOT_TEST_MINT_SECRET",
+            "device_id": "28:84:85:85:1a:80",
+            "device_uuid": "fce7bec8-8478-4ab4-817f-7b87c41c1f91",
+            "asset_sha256": "d" * 64,
+            "asset_bytes": 1,
+            "esp_base_url": "http://127.0.0.1:8003",
+            "asset_url": "http://127.0.0.1:8003/tbot/assets/test",
+        },
+    )()
+
+    result = hil.preflight(arguments)
+
+    assert result["buildIdentity"] == binding
+
+
 def test_build_identity_rejects_tamper_bool_traversal_symlink_and_foreign_profile(tmp_path):
     identity = load_script("lesson_studio_task14_build_identity.py")
     manifest_path, manifest, paths = task6_manifest(tmp_path)

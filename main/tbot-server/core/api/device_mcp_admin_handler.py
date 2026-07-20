@@ -1,9 +1,15 @@
 import asyncio
+import json
+from contextlib import suppress
 from typing import Callable, Optional
 
 from aiohttp import web
 
 from core.api.lesson_nudge_handler import LessonNudgeHandler, _conn_mac
+from core.lesson.esp_build_identity import (
+    approved_identities_from_config,
+    evaluate_esp_build_identity,
+)
 from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool, send_mcp_message
 
@@ -38,6 +44,7 @@ _HIL_TRIGGER_TOOLS = frozenset(
 )
 _HIL_MIN_TIMEOUT_SEC = 5
 _HIL_MAX_TIMEOUT_SEC = 75
+_HIL_TRANSPORT_ABORT_TIMEOUT_SEC = 1.0
 
 
 class MCPUnknownToolError(RuntimeError):
@@ -83,12 +90,108 @@ async def _cleanup_registered_call(mcp_client, tool_call_id: int) -> None:
             continue
     await asyncio.gather(cleanup_task, return_exceptions=True)
 
+
+async def _abort_connection_transport(conn) -> None:
+    websocket = getattr(conn, "websocket", None)
+    if websocket is None:
+        return
+    transport = getattr(websocket, "transport", None)
+    abort = getattr(transport, "abort", None)
+    if callable(abort):
+        abort()
+
+    async def close_and_wait() -> None:
+        close = getattr(websocket, "close", None)
+        if callable(close):
+            try:
+                await close(code=1011, reason="MCP dispatch cancelled")
+            except TypeError:
+                await close()
+        wait_closed = getattr(websocket, "wait_closed", None)
+        if callable(wait_closed):
+            await wait_closed()
+
+    async def bounded_close() -> None:
+        with suppress(Exception):
+            await asyncio.wait_for(
+                close_and_wait(), timeout=_HIL_TRANSPORT_ABORT_TIMEOUT_SEC
+            )
+
+    abort_task = asyncio.create_task(bounded_close())
+    while not abort_task.done():
+        try:
+            await asyncio.shield(abort_task)
+        except asyncio.CancelledError:
+            continue
+    await asyncio.gather(abort_task, return_exceptions=True)
+
 def _mcp_call_timeout(tool_name: str) -> float:
     return MOTION_TOOL_ACK_TIMEOUT_SEC if tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES) else 30
 
 
 def _is_robot_motion_tool(tool_name: str) -> bool:
     return tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES)
+
+
+_IDENTITY_ATTESTED_HIL_TOOLS = frozenset(
+    {"self.lesson_assets.hil.status", "self.lesson_assets.hil.inspect"}
+)
+_IDENTITY_BOUND_MUTATING_HIL_TOOLS = frozenset(
+    {"self.lesson_assets.hil.stage_fixture", "self.lesson_assets.hil.cleanup_fixture"}
+)
+
+
+def _attest_hil_result(
+    tool_name: str, result, headers, approved_identities, connection_binding_id: str
+):
+    if tool_name not in _IDENTITY_ATTESTED_HIL_TOOLS:
+        return result
+    evaluated = evaluate_esp_build_identity(headers, approved_identities)
+    if evaluated.status != "approved":
+        raise ValueError(f"ESP build identity {evaluated.status}")
+    if not isinstance(connection_binding_id, str) or not connection_binding_id:
+        raise ValueError("ESP connection binding unavailable")
+    encoded = isinstance(result, str)
+    try:
+        value = json.loads(result) if encoded else result
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HIL result is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("HIL result must be an object")
+    if any(
+        name in value
+        for name in (
+            "identitySchemaVersion",
+            "buildIdentity",
+            "buildIdentityId",
+            "connectionBindingId",
+        )
+    ):
+        raise ValueError("HIL result identity fields already exist")
+    attested = dict(value)
+    attested["identitySchemaVersion"] = 1
+    attested["buildIdentity"] = evaluated.identity
+    attested["buildIdentityId"] = evaluated.identity_id
+    attested["connectionBindingId"] = connection_binding_id
+    return json.dumps(attested, sort_keys=True, separators=(",", ":")) if encoded else attested
+
+
+def _prepare_hil_mutation_args(
+    tool_name: str, args: dict, headers, approved_identities, connection_binding_id: str
+) -> dict:
+    if tool_name not in _IDENTITY_BOUND_MUTATING_HIL_TOOLS:
+        return args
+    evaluated = evaluate_esp_build_identity(headers, approved_identities)
+    if evaluated.status != "approved":
+        raise ValueError(f"ESP build identity {evaluated.status}")
+    forwarded = dict(args)
+    expected_identity = forwarded.pop("expectedBuildIdentityId", None)
+    expected_connection = forwarded.pop("expectedConnectionBindingId", None)
+    if expected_identity != evaluated.identity_id:
+        raise ValueError("ESP build identity changed before mutation")
+    if expected_connection != connection_binding_id:
+        raise ValueError("ESP connection changed before mutation")
+    return forwarded
 
 
 def _normalize_mac(value) -> Optional[str]:
@@ -164,6 +267,7 @@ async def _call_raw_mcp_tool(
     args: dict,
     *,
     timeout: int = 30,
+    send_reservation=None,
     on_dispatched: Optional[Callable[[], None]] = None,
 ):
     if not isinstance(args, dict):
@@ -179,11 +283,25 @@ async def _call_raw_mcp_tool(
         "params": {"name": tool_name, "arguments": args},
     }
 
-    try:
+    async def dispatch():
         if on_dispatched is not None:
             on_dispatched()
-        await send_mcp_message(conn, payload)
-        raw_result = await asyncio.wait_for(result_future, timeout=timeout)
+        if send_reservation is None:
+            await send_mcp_message(conn, payload)
+            return await result_future
+        else:
+            async with send_reservation as current:
+                if not current:
+                    raise ValueError("ESP connection changed before dispatch")
+                try:
+                    await send_mcp_message(conn, payload)
+                    return await result_future
+                except asyncio.CancelledError:
+                    await _abort_connection_transport(conn)
+                    raise
+
+    try:
+        raw_result = await asyncio.wait_for(dispatch(), timeout=timeout)
     except BaseException:
         await _cleanup_registered_call(mcp_client, tool_call_id)
         raise
@@ -219,6 +337,16 @@ class DeviceMCPAdminHandler:
             if resolved is not None:
                 return resolved
         return await self._shared._find_connection(device_id)
+
+    def _connection_registry_key(self, device_id, selected):
+        if self.connections is None:
+            return None
+        if self.connections.get(device_id) is selected:
+            return device_id
+        for key, candidate in self.connections.items():
+            if candidate is selected and _conn_client_identity(candidate) == device_id:
+                return key
+        return None
 
     async def handle_post(self, request: web.Request) -> web.Response:
         auth_error = self._shared._authorize(request)
@@ -300,10 +428,44 @@ class DeviceMCPAdminHandler:
                 status=409,
             )
         try:
+            approved_identities = approved_identities_from_config(self.config)
+            connection_binding_id = str(getattr(conn, "session_id", "") or "")
+            args = _prepare_hil_mutation_args(
+                tool_name,
+                args,
+                getattr(conn, "headers", None),
+                approved_identities,
+                connection_binding_id,
+            )
             if is_hil_tool or bool(body.get("allowUnlisted")):
-                result = await _call_raw_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
+                send_reservation = None
+                if tool_name in _IDENTITY_BOUND_MUTATING_HIL_TOOLS:
+                    registry_key = self._connection_registry_key(device_id, conn)
+                    reserve_current = getattr(
+                        self.connections, "reserve_current", None
+                    )
+                    if registry_key is None or not callable(reserve_current):
+                        raise ValueError("ESP connection reservation unavailable")
+                    send_reservation = reserve_current(
+                        registry_key, conn, connection_binding_id
+                    )
+                result = await _call_raw_mcp_tool(
+                    conn,
+                    mcp_client,
+                    tool_name,
+                    args,
+                    timeout=timeout,
+                    send_reservation=send_reservation,
+                )
             else:
                 result = await call_mcp_tool(conn, mcp_client, tool_name, args, timeout=timeout)
+            result = _attest_hil_result(
+                tool_name,
+                result,
+                getattr(conn, "headers", None),
+                approved_identities,
+                connection_binding_id,
+            )
         except (TimeoutError, asyncio.TimeoutError) as exc:
             if is_hil_timeout_path:
                 return _hil_error("HIL_MCP_TIMEOUT", status=409)

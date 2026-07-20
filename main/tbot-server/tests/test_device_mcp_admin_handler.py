@@ -23,6 +23,8 @@ async def _response_json(response):
 class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
     HIL_MAC = "28:84:85:85:1a:80"
     HIL_CACHE_KEY = f"hil-task14/v1-{'d' * 64}"
+    ESP_ELF_SHA256 = "a" * 64
+    ESP_APP_SHA256 = "b" * 64
     HIL_TOOLS = (
         "self.lesson_assets.hil.arm_fault",
         "self.lesson_assets.hil.status",
@@ -31,21 +33,54 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
         "self.lesson_assets.hil.inspect",
     )
 
+    def _esp_identity(self):
+        return {
+            "schemaVersion": 1,
+            "hilProfile": "task14-hil-v1",
+            "projectName": "xiaozhi",
+            "projectVersion": "2.2.75",
+            "idfVersion": "v5.4.1",
+            "secureVersion": 0,
+            "elfSha256": self.ESP_ELF_SHA256,
+            "appSha256": self.ESP_APP_SHA256,
+            "buildId": f"tbot-esp-v1:{self.ESP_ELF_SHA256}",
+        }
+
+    def _esp_headers(self):
+        identity = self._esp_identity()
+        return {
+            "x-tbot-build-schema": "1",
+            "x-tbot-hil-profile": identity["hilProfile"],
+            "x-tbot-project-name": identity["projectName"],
+            "x-tbot-project-version": identity["projectVersion"],
+            "x-tbot-idf-version": identity["idfVersion"],
+            "x-tbot-secure-version": str(identity["secureVersion"]),
+            "x-tbot-elf-sha256": identity["elfSha256"],
+            "x-tbot-app-sha256": identity["appSha256"],
+            "x-tbot-build-id": identity["buildId"],
+        }
+
     def _hil_handler(self, *, allowlist=None, conn_mac=None):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+        from core.connection_registry import ConnectionRegistry
 
         conn = SimpleNamespace(
             device_id=conn_mac or self.HIL_MAC,
             mcp_client=object(),
+            headers=self._esp_headers(),
+            session_id="connection-one",
         )
         config = {
             "lesson": {
                 "storage_hil_device_allowlist": (
                     [self.HIL_MAC] if allowlist is None else allowlist
-                )
+                ),
+                "esp_build_identity_approved": [self._esp_identity()],
             }
         }
-        return DeviceMCPAdminHandler(config, {"route-device-uuid": conn}), conn
+        connections = ConnectionRegistry()
+        connections["route-device-uuid"] = conn
+        return DeviceMCPAdminHandler(config, connections), conn
 
     async def test_raw_call_raises_privacy_safe_typed_unknown_tool(self):
         from core.api.device_mcp_admin_handler import (
@@ -122,6 +157,243 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
 
+        self.assertEqual(cleaned, [42])
+
+    async def test_raw_call_timeout_covers_stalled_reserved_send_and_releases_lock(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+        from core.connection_registry import ConnectionRegistry
+
+        cleaned = []
+        registry = ConnectionRegistry()
+        conn = SimpleNamespace(session_id="connection-one")
+        registry["device"] = conn
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                pass
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        async def stalled_send(_conn, _payload):
+            await asyncio.Future()
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message", stalled_send
+        ), self.assertRaises(asyncio.TimeoutError):
+            await _call_raw_mcp_tool(
+                conn,
+                Client(),
+                "self.lesson_assets.hil.stage_fixture",
+                {},
+                timeout=0.01,
+                send_reservation=registry.reserve_current(
+                    "device", conn, "connection-one"
+                ),
+            )
+
+        replacement = SimpleNamespace(session_id="connection-two")
+        await asyncio.wait_for(registry.replace("device", replacement), timeout=1)
+        self.assertIs(registry["device"], replacement)
+        self.assertEqual(cleaned, [42])
+
+    async def test_raw_call_timeout_covers_blocked_reservation_and_remove_proceeds(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+        from core.connection_registry import ConnectionRegistry
+
+        cleaned = []
+        registry = ConnectionRegistry()
+        conn = SimpleNamespace(session_id="connection-one")
+        registry["device"] = conn
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                pass
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        async with registry.reserve_current(
+            "device", conn, "connection-one"
+        ) as current:
+            self.assertTrue(current)
+            with self.assertRaises(asyncio.TimeoutError):
+                await _call_raw_mcp_tool(
+                    conn,
+                    Client(),
+                    "self.lesson_assets.hil.cleanup_fixture",
+                    {},
+                    timeout=0.01,
+                    send_reservation=registry.reserve_current(
+                        "device", conn, "connection-one"
+                    ),
+                )
+
+        removed = await asyncio.wait_for(
+            registry.remove_if_current("device", conn), timeout=1
+        )
+        self.assertTrue(removed)
+        self.assertNotIn("device", registry)
+        self.assertEqual(cleaned, [42])
+
+    async def test_timeout_aborts_queued_transport_before_replacement_is_visible(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+        from core.connection_registry import ConnectionRegistry
+
+        class Transport:
+            def __init__(self):
+                self.aborted = False
+
+            def abort(self):
+                self.aborted = True
+
+        class WebSocket:
+            def __init__(self):
+                self.transport = Transport()
+                self.queued = []
+                self.delivered = []
+                self.queued_event = asyncio.Event()
+
+            async def send(self, payload):
+                self.queued.append(payload)
+                self.queued_event.set()
+                await asyncio.Future()
+
+            async def close(self, **_kwargs):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+            def flush(self):
+                if not self.transport.aborted:
+                    self.delivered.extend(self.queued)
+                self.queued.clear()
+
+        cleaned = []
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                pass
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        registry = ConnectionRegistry()
+        websocket = WebSocket()
+        conn = SimpleNamespace(
+            session_id="connection-one",
+            features={"mcp": True},
+            websocket=websocket,
+        )
+        registry["device"] = conn
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await _call_raw_mcp_tool(
+                conn,
+                Client(),
+                "self.lesson_assets.hil.stage_fixture",
+                {},
+                timeout=0.01,
+                send_reservation=registry.reserve_current(
+                    "device", conn, "connection-one"
+                ),
+            )
+
+        replacement = SimpleNamespace(session_id="connection-two")
+        await asyncio.wait_for(registry.replace("device", replacement), timeout=1)
+        websocket.flush()
+        self.assertTrue(websocket.transport.aborted)
+        self.assertEqual(websocket.delivered, [])
+        self.assertIs(registry["device"], replacement)
+        self.assertEqual(cleaned, [42])
+
+    async def test_external_cancellation_aborts_queued_transport_and_propagates(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+        from core.connection_registry import ConnectionRegistry
+
+        class Transport:
+            def __init__(self):
+                self.aborted = False
+
+            def abort(self):
+                self.aborted = True
+
+        class WebSocket:
+            def __init__(self):
+                self.transport = Transport()
+                self.queued = []
+                self.delivered = []
+                self.queued_event = asyncio.Event()
+
+            async def send(self, payload):
+                self.queued.append(payload)
+                self.queued_event.set()
+                await asyncio.Future()
+
+            async def close(self, **_kwargs):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+            def flush(self):
+                if not self.transport.aborted:
+                    self.delivered.extend(self.queued)
+                self.queued.clear()
+
+        cleaned = []
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                pass
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        registry = ConnectionRegistry()
+        websocket = WebSocket()
+        conn = SimpleNamespace(
+            session_id="connection-one",
+            features={"mcp": True},
+            websocket=websocket,
+        )
+        registry["device"] = conn
+        task = asyncio.create_task(
+            _call_raw_mcp_tool(
+                conn,
+                Client(),
+                "self.lesson_assets.hil.cleanup_fixture",
+                {},
+                timeout=30,
+                send_reservation=registry.reserve_current(
+                    "device", conn, "connection-one"
+                ),
+            )
+        )
+        await asyncio.wait_for(websocket.queued_event.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        replacement = SimpleNamespace(session_id="connection-two")
+        await asyncio.wait_for(registry.replace("device", replacement), timeout=1)
+        websocket.flush()
+        self.assertTrue(websocket.transport.aborted)
+        self.assertEqual(websocket.delivered, [])
+        self.assertIs(registry["device"], replacement)
         self.assertEqual(cleaned, [42])
 
     async def test_raw_call_marks_dispatch_immediately_before_send(self):
@@ -388,36 +660,176 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_hil_tools_use_raw_dispatch_for_resolved_live_mac(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
-        raw_call = AsyncMock(return_value="ok")
+        from core.lesson.esp_build_identity import approved_build_identity_id
+
+        raw_call = AsyncMock(return_value="{}")
         listed_call = AsyncMock(side_effect=AssertionError("listed dispatch forbidden"))
         handler, conn = self._hil_handler(conn_mac=self.HIL_MAC.upper())
+        binding = {
+            "expectedBuildIdentityId": approved_build_identity_id(self._esp_identity()),
+            "expectedConnectionBindingId": "connection-one",
+        }
 
         with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", raw_call), patch(
             "core.api.device_mcp_admin_handler.call_mcp_tool", listed_call
         ):
             for tool_name in self.HIL_TOOLS:
                 with self.subTest(tool_name=tool_name):
+                    args = (
+                        binding
+                        if tool_name in {
+                            "self.lesson_assets.hil.stage_fixture",
+                            "self.lesson_assets.hil.cleanup_fixture",
+                        }
+                        else {}
+                    )
                     response = await handler.handle_post(
                         _FakeRequest(
                             device_id="route-device-uuid",
                             body={
                                 "toolName": tool_name,
                                 "allowUnlisted": True,
-                                "args": {},
+                                "args": args,
                             },
                         )
                     )
                     self.assertEqual(response.status, 202)
-                    self.assertEqual(
-                        await _response_json(response),
-                        {"data": {"called": True, "result": "ok"}},
-                    )
+                    self.assertTrue((await _response_json(response))["data"]["called"])
 
         self.assertEqual(raw_call.await_count, len(self.HIL_TOOLS))
         for call in raw_call.await_args_list:
             self.assertIs(call.args[0], conn)
             self.assertEqual(call.kwargs["timeout"], 30)
         listed_call.assert_not_awaited()
+
+    async def test_hil_mutation_rejects_connection_swap_immediately_before_send(self):
+        from core.lesson.esp_build_identity import approved_build_identity_id
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        handler, selected = self._hil_handler(conn_mac=self.HIL_MAC)
+        replacement = SimpleNamespace(
+            device_id=self.HIL_MAC,
+            mcp_client=object(),
+            headers=self._esp_headers(),
+            session_id="connection-two",
+        )
+        sent = []
+        cleaned = []
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, _future):
+                await handler.connections.replace(
+                    "route-device-uuid", replacement
+                )
+
+            async def cleanup_call_result(self, call_id):
+                cleaned.append(call_id)
+
+        selected.mcp_client = Client()
+        binding = {
+            "expectedBuildIdentityId": approved_build_identity_id(
+                self._esp_identity()
+            ),
+            "expectedConnectionBindingId": "connection-one",
+        }
+
+        async def record_send(_conn, payload):
+            sent.append(payload)
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message", record_send
+        ):
+            response = await handler.handle_post(
+                _FakeRequest(
+                    device_id="route-device-uuid",
+                    body={
+                        "toolName": "self.lesson_assets.hil.stage_fixture",
+                        "allowUnlisted": True,
+                        "timeoutSeconds": 5,
+                        "args": binding,
+                    },
+                )
+            )
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual((await _response_json(response))["error"], "HIL_MCP_FAILED")
+        self.assertEqual(sent, [])
+        self.assertEqual(cleaned, [42])
+
+    async def test_hil_mutation_send_holds_registry_reservation_until_send_completes(self):
+        from core.lesson.esp_build_identity import approved_build_identity_id
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        handler, selected = self._hil_handler(conn_mac=self.HIL_MAC)
+        replacement = SimpleNamespace(
+            device_id=self.HIL_MAC,
+            mcp_client=object(),
+            headers=self._esp_headers(),
+            session_id="connection-two",
+        )
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+        sent_connections = []
+
+        class Client:
+            async def get_next_id(self):
+                return 42
+
+            async def register_call_result_future(self, _call_id, future):
+                self.future = future
+
+            async def cleanup_call_result(self, _call_id):
+                pass
+
+        selected.mcp_client = Client()
+        binding = {
+            "expectedBuildIdentityId": approved_build_identity_id(
+                self._esp_identity()
+            ),
+            "expectedConnectionBindingId": "connection-one",
+        }
+
+        async def blocked_send(conn, _payload):
+            sent_connections.append(conn)
+            send_started.set()
+            await finish_send.wait()
+            selected.mcp_client.future.set_result({"content": [{"text": "{}"}]})
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message", blocked_send
+        ):
+            request_task = asyncio.create_task(
+                handler.handle_post(
+                    _FakeRequest(
+                        device_id="route-device-uuid",
+                        body={
+                            "toolName": "self.lesson_assets.hil.stage_fixture",
+                            "allowUnlisted": True,
+                            "timeoutSeconds": 5,
+                            "args": binding,
+                        },
+                    )
+                )
+            )
+            await asyncio.wait_for(send_started.wait(), timeout=1)
+            replace_task = asyncio.create_task(
+                handler.connections.replace("route-device-uuid", replacement)
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(replace_task.done())
+            self.assertIs(
+                handler.connections["route-device-uuid"], selected
+            )
+            finish_send.set()
+            response = await request_task
+            await replace_task
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(sent_connections, [selected])
+        self.assertIs(handler.connections["route-device-uuid"], replacement)
 
     async def test_hil_firmware_client_identity_resolves_live_mac_connection(self):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
@@ -426,21 +838,27 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
         firmware_uuid = "fce7bec8-8478-4ab4-817f-7b87c41c1f91"
 
         for identity_attributes in (
-            {"client_id": firmware_uuid, "headers": {}},
-            {"headers": {"client-id": firmware_uuid}},
-            {"headers": {"Client-Id": firmware_uuid}},
+            {"client_id": firmware_uuid, "headers": self._esp_headers()},
+            {"headers": {"client-id": firmware_uuid, **self._esp_headers()}},
+            {"headers": {"Client-Id": firmware_uuid, **self._esp_headers()}},
         ):
             with self.subTest(identity_attributes=identity_attributes):
                 conn = SimpleNamespace(
                     device_id=self.HIL_MAC,
                     mcp_client=object(),
+                    session_id="connection-one",
                     **identity_attributes,
                 )
                 handler = DeviceMCPAdminHandler(
-                    {"lesson": {"storage_hil_device_allowlist": [self.HIL_MAC]}},
+                    {
+                        "lesson": {
+                            "storage_hil_device_allowlist": [self.HIL_MAC],
+                            "esp_build_identity_approved": [self._esp_identity()],
+                        }
+                    },
                     {self.HIL_MAC: conn},
                 )
-                raw_call = AsyncMock(return_value="ok")
+                raw_call = AsyncMock(return_value="{}")
                 backend_lookup = AsyncMock(
                     side_effect=AssertionError("backend identity fallback must not run")
                 )
@@ -465,10 +883,7 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
                     )
 
                 self.assertEqual(response.status, 202)
-                self.assertEqual(
-                    await _response_json(response),
-                    {"data": {"called": True, "result": "ok"}},
-                )
+                self.assertTrue((await _response_json(response))["data"]["called"])
                 raw_call.assert_awaited_once()
                 self.assertIs(raw_call.await_args.args[0], conn)
                 backend_lookup.assert_not_awaited()
@@ -705,7 +1120,7 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_hil_timeout_override_accepts_only_exact_int_between_five_and_seventy_five(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
-        raw_call = AsyncMock(return_value="ok")
+        raw_call = AsyncMock(return_value="{}")
         handler, _ = self._hil_handler()
 
         with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", raw_call):

@@ -25,10 +25,19 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+SERVER_ROOT = SCRIPT_DIR.parent
+if str(SERVER_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVER_ROOT))
+from hil_storage_identity_contract import (  # noqa: E402
+    require_same_storage_identity,
+    validate_storage_identity,
+)
 from lesson_studio_task14_build_identity import (  # noqa: E402
     BuildIdentityError,
     load_build_identity,
 )
+
+from core.lesson.esp_build_identity import approved_build_identity_id  # noqa: E402
 
 HIL_STORAGE_SCENARIOS = (
     "evict-before-first-unlink-fail",
@@ -100,6 +109,14 @@ FIXTURE_FIELDS = frozenset(
 INSPECT_FIELDS = frozenset(
     {"cacheKey", "siblingCacheKey", "status", "truncated", "entries"}
 )
+ESP_ATTESTATION_FIELDS = frozenset(
+    {
+        "identitySchemaVersion",
+        "buildIdentity",
+        "buildIdentityId",
+        "connectionBindingId",
+    }
+)
 INSPECT_ENTRY_FIELDS = frozenset({"label", "nodeType", "bytes", "sha256"})
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 JWT_RE = re.compile(
@@ -123,6 +140,10 @@ SCENARIO_EXPECTED_PROGRESS = {
 
 
 class HilValidationError(RuntimeError):
+    pass
+
+
+class HilIdentityTerminalError(HilValidationError):
     pass
 
 
@@ -175,8 +196,82 @@ def validate_arm_response(value, cache_key, operation, checkpoint, action):
     return value
 
 
-def validate_status_response(value, *, expected_cache_key=None):
-    value = _exact_fields(value, STATUS_FIELDS, "status")
+def _validate_storage_identity(value):
+    try:
+        validated = validate_storage_identity(value)
+    except ValueError as exc:
+        raise HilIdentityTerminalError(str(exc)) from exc
+    if validated.get("status") != "available":
+        raise HilIdentityTerminalError("physical SD identity unavailable")
+    return validated
+
+
+def _validate_build_attestation(value):
+    require(
+        type(value.get("identitySchemaVersion")) is int
+        and value["identitySchemaVersion"] == 1,
+        "build identity schema mismatch",
+    )
+    try:
+        identity_id = approved_build_identity_id(value.get("buildIdentity"))
+    except (TypeError, ValueError) as exc:
+        raise HilIdentityTerminalError("build identity malformed") from exc
+    require(value.get("buildIdentityId") == identity_id, "build identity ID mismatch")
+    connection_id = value.get("connectionBindingId")
+    require(
+        isinstance(connection_id, str)
+        and 1 <= len(connection_id) <= 128
+        and all(0x21 <= ord(character) <= 0x7E for character in connection_id),
+        "connection binding invalid",
+    )
+    return {
+        "buildIdentity": value["buildIdentity"],
+        "buildIdentityId": identity_id,
+        "connectionBindingId": connection_id,
+    }
+
+
+def _require_local_build_identity(remote_identity, local_build_identity):
+    matches = (
+        isinstance(local_build_identity, dict)
+        and local_build_identity.get("profile") == "hil"
+        and local_build_identity.get("configEnabled") is True
+        and remote_identity.get("hilProfile") == "task14-hil-v1"
+        and remote_identity.get("projectName") == "xiaozhi"
+        and remote_identity.get("elfSha256") == local_build_identity.get("elfSha256")
+        and remote_identity.get("appSha256")
+        == local_build_identity.get("binarySha256")
+    )
+    if not matches:
+        raise HilIdentityTerminalError(
+            "remote build identity does not match local build manifest"
+        )
+
+
+def _validate_identity_envelope(value, legacy_fields, name):
+    try:
+        value = _exact_fields(
+            value,
+            legacy_fields
+            | {"schemaVersion", "storageIdentity"}
+            | ESP_ATTESTATION_FIELDS,
+            name,
+        )
+        require(value["schemaVersion"] == 2, f"{name} schema mismatch")
+        _validate_storage_identity(value["storageIdentity"])
+        _validate_build_attestation(value)
+        return value
+    except HilIdentityTerminalError:
+        raise
+    except HilValidationError as exc:
+        raise HilIdentityTerminalError(str(exc)) from exc
+
+
+def validate_status_response(value, *, expected_cache_key=None, schema_version=1):
+    if schema_version == 2:
+        value = _validate_identity_envelope(value, STATUS_FIELDS, "status")
+    else:
+        value = _exact_fields(value, STATUS_FIELDS, "status")
     require(value["status"] in {"idle", "armed", "reached", "consumed"}, "invalid HIL status")
     for name in ("armed", "reached", "consumed"):
         _exact_bool(value[name], name)
@@ -214,8 +309,13 @@ def validate_fixture_response(value, cache_key, sibling_cache_key, fixture, expe
     return value
 
 
-def validate_inspect_response(value, cache_key, sibling_cache_key):
-    value = _exact_fields(value, INSPECT_FIELDS, "inspect")
+def validate_inspect_response(
+    value, cache_key, sibling_cache_key, *, schema_version=1
+):
+    if schema_version == 2:
+        value = _validate_identity_envelope(value, INSPECT_FIELDS, "inspect")
+    else:
+        value = _exact_fields(value, INSPECT_FIELDS, "inspect")
     require(value["cacheKey"] == cache_key, "inspect cache key mismatch")
     require(value["siblingCacheKey"] == sibling_cache_key, "inspect sibling mismatch")
     require(value["status"] == "inspected", "inspection failed")
@@ -753,25 +853,80 @@ def await_power_loss_disconnect(
 
 
 class HilToolClient:
-    def __init__(self, transport):
+    def __init__(self, transport, local_build_identity):
         self.transport = transport
+        self.local_build_identity = dict(local_build_identity)
+        self.build_identity = None
+        self.build_identity_id = None
+        self.connection_binding_id = None
+
+    def _update_attestation_binding(self, response, *, replace):
+        attestation = _validate_build_attestation(response)
+        _require_local_build_identity(
+            attestation["buildIdentity"], self.local_build_identity
+        )
+        if not replace and self.build_identity_id is not None:
+            require(
+                attestation["buildIdentityId"] == self.build_identity_id,
+                "build identity changed between read-only inspections",
+            )
+            require(
+                attestation["connectionBindingId"] == self.connection_binding_id,
+                "connection changed between read-only inspections",
+            )
+        self.build_identity = attestation["buildIdentity"]
+        self.build_identity_id = attestation["buildIdentityId"]
+        self.connection_binding_id = attestation["connectionBindingId"]
+
+    def _mutation_binding(self):
+        require(self.build_identity_id is not None, "build identity was not inspected")
+        require(self.connection_binding_id is not None, "connection was not inspected")
+        _require_local_build_identity(self.build_identity, self.local_build_identity)
+        return {
+            "expectedBuildIdentityId": self.build_identity_id,
+            "expectedConnectionBindingId": self.connection_binding_id,
+        }
 
     def status(self, expected_cache_key=None):
-        response = self.transport.call(HIL_TOOL_NAMES["status"], {}, 30)
-        return validate_status_response(response, expected_cache_key=expected_cache_key)
+        response = self.transport.call(
+            HIL_TOOL_NAMES["status"], {"schemaVersion": 2}, 30
+        )
+        validated = validate_status_response(
+            response, expected_cache_key=expected_cache_key, schema_version=2
+        )
+        self._update_attestation_binding(validated, replace=True)
+        return validated
 
     def inspect(self, cache_key, sibling_cache_key=""):
-        args = {"cacheKey": cache_key, "siblingCacheKey": sibling_cache_key}
+        args = {
+            "cacheKey": cache_key,
+            "siblingCacheKey": sibling_cache_key,
+            "schemaVersion": 2,
+        }
         response = self.transport.call(HIL_TOOL_NAMES["inspect"], args, 30)
-        return validate_inspect_response(response, cache_key, sibling_cache_key)
+        validated = validate_inspect_response(
+            response, cache_key, sibling_cache_key, schema_version=2
+        )
+        self._update_attestation_binding(validated, replace=False)
+        return validated
 
     def stage(self, cache_key, fixture, sibling_cache_key=""):
-        args = {"cacheKey": cache_key, "fixture": fixture, "siblingCacheKey": sibling_cache_key}
+        args = {
+            "cacheKey": cache_key,
+            "fixture": fixture,
+            "siblingCacheKey": sibling_cache_key,
+            **self._mutation_binding(),
+        }
         response = self.transport.call(HIL_TOOL_NAMES["stage"], args, 30)
         return validate_fixture_response(response, cache_key, sibling_cache_key, fixture, "staged")
 
     def cleanup(self, cache_key, fixture, sibling_cache_key=""):
-        args = {"cacheKey": cache_key, "fixture": fixture, "siblingCacheKey": sibling_cache_key}
+        args = {
+            "cacheKey": cache_key,
+            "fixture": fixture,
+            "siblingCacheKey": sibling_cache_key,
+            **self._mutation_binding(),
+        }
         response = self.transport.call(HIL_TOOL_NAMES["cleanup"], args, 30)
         return validate_fixture_response(response, cache_key, sibling_cache_key, fixture, "cleaned")
 
@@ -999,7 +1154,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
     cache_key = f"hil-task14/v1-{arguments.asset_sha256}"
     sibling = f"hil-task14/v2-{arguments.asset_sha256}"
     transport = RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret)
-    client = HilToolClient(transport)
+    client = HilToolClient(transport, build_identity)
     monitor = SerialMonitor(arguments.serial_port).start()
     started = utc_now()
     events = []
@@ -1082,6 +1237,8 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                             post_status = client.status()
                             if post_status["status"] == "idle":
                                 break
+                        except HilIdentityTerminalError:
+                            raise
                         except HilValidationError:
                             pass
                         time.sleep(0.5)
@@ -1114,6 +1271,12 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         events.append("status-after")
         inspect_after = post_reboot_inspect if power_loss else client.inspect(cache_key, sibling)
         events.append("inspect-after")
+        try:
+            require_same_storage_identity(
+                inspect_before["storageIdentity"], inspect_after["storageIdentity"]
+            )
+        except ValueError as exc:
+            raise HilIdentityTerminalError(str(exc)) from exc
         if power_loss and operation == "sync":
             evicted_retry = _trigger(client, "evict", cache_key, arguments)
             require(evicted_retry.get("evicted") is True, "retry cache cleanup eviction failed")
@@ -1210,6 +1373,8 @@ def run_scenario(arguments, scenario, *, operator_input=input):
         atomic_write_bytes(scenario_dir / "SHA256SUMS", "".join(checksum_lines).encode("ascii"))
         require(validator.returncode == 0, "HIL scenario validator failed")
         return result
+    except HilIdentityTerminalError:
+        raise
     except BaseException:
         if staged and not cleaned:
             with suppress(Exception):
@@ -1229,7 +1394,10 @@ def preflight(arguments):
     require(type(arguments.asset_bytes) is int and arguments.asset_bytes > 0, "invalid asset byte count")
     validate_lab_url(arguments.esp_base_url, require_path=False)
     validate_lab_url(arguments.asset_url, require_path=True)
-    client = HilToolClient(RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret))
+    client = HilToolClient(
+        RawMcpTransport(arguments.esp_base_url, arguments.device_uuid, secret),
+        identity,
+    )
     status = client.status()
     require(status["status"] == "idle", "HIL controller is not idle")
     result = {"status": "PASS", "deviceId": arguments.device_id, "deviceUuid": arguments.device_uuid, "buildIdentity": identity}
