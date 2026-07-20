@@ -16,8 +16,8 @@ does not make:
     ``recognizedText`` to the forwarder, and the boundary drops it + renames
     ``result``->``outcome`` before the body leaves the ESP. The sibling only checks
     that the forwarder BATCH still carries ``recognizedText`` (pre-boundary);
-  * the assignment pull and forwarder stay bound to the WebSocket device id; the
-    voice path does not call the dynamic device-token mint endpoint.
+  * the voice path resolves the WebSocket device id to a backend UUID/JWT, then
+    binds the assignment pull, manifest pull, and forwarder to that minted identity.
 
 Harness is reused from the sibling module (frozen S2 wire fixture, fake backend via
 monkeypatched ``config.manage_api_client``, fake voice/ws/device, fake AssetCache).
@@ -30,12 +30,15 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as L  # noqa: E402  (sibling test harness)
 
 FIX = L.FIX
+MINTED_DEVICE_UUID = "14140000-0000-4000-8000-000000000042"
+MINTED_DEVICE_JWT = "minted-device-jwt"
 
 
 # ── interleaved ordering oracle ─────────────────────────────────────────────────
@@ -156,14 +159,15 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         conn = _OrderingConn(log, session_id=prep["sessionId"])
         manifest = L._build_full_seed_story_manifest()
         forwarder = L._FakeForwarder()
-        rt = LessonRuntime(
-            conn,
-            assignment=L._build_assignment(),
-            manifest=manifest,
-            asset_cache=L._FakeAssetCache(ready=True),
-            forwarder=forwarder,
-            manifest_checksum=L._manifest_checksum(),
-        )
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            rt = LessonRuntime(
+                conn,
+                assignment=L._build_assignment(),
+                manifest=manifest,
+                asset_cache=L._FakeAssetCache(ready=True),
+                forwarder=forwarder,
+                manifest_checksum=L._manifest_checksum(),
+            )
 
         await rt.start()
         await rt.on_lesson_ack(self._ack(1, 1))   # prepare-ack -> preload
@@ -209,8 +213,11 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         # independently per kind so a swapped emit order fails as a clean assertion,
         # not a lookup error.
         prompt_rows = [i for i, r in enumerate(log) if r[0] == "prompt"]
-        # one prompt per step (every seed step authors a prompt).
-        self.assertEqual(len(prompt_rows), len(expected_steps))
+        # Every step has one authored prompt; current adaptive coaching also adds a
+        # safe success cheer after each interactive response.
+        self.assertEqual(len(prompt_rows), len(expected_steps) + len(interactive))
+        success_rows = [i for i in prompt_rows if log[i][1] == "Đúng rồi! barn!"]
+        self.assertEqual(len(success_rows), len(interactive))
         for sid in expected_steps:
             frame_idxs = [i for i, r in enumerate(log) if r == ("frame", "lesson_step", sid)]
             ack_idxs = [i for i, r in enumerate(log) if r == ("ack", "lesson_step", sid)]
@@ -251,14 +258,16 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             [("s4", "repeat", "interactive"), ("s8", "feedback", "passive")]
         )
         forwarder = _RealBoundaryForwarder()
-        rt = LessonRuntime(
-            conn,
-            assignment=L._build_assignment(),
-            manifest=manifest,
-            asset_cache=L._FakeAssetCache(ready=True),
-            forwarder=forwarder,
-            manifest_checksum=L._manifest_checksum(),
-        )
+        prep = FIX["frames"]["lesson_prepare"]
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            rt = LessonRuntime(
+                conn,
+                assignment=L._build_assignment(),
+                manifest=manifest,
+                asset_cache=L._FakeAssetCache(ready=True),
+                forwarder=forwarder,
+                manifest_checksum=L._manifest_checksum(),
+            )
 
         await rt.start()
         await rt.on_lesson_ack(self._ack(1, 1))
@@ -309,7 +318,7 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
 
     # ── 3) device-identity mint threaded through the full pull-on-connect ────────
 
-    async def test_voice_start_uses_websocket_device_identity_for_pull_and_forwarder(self):
+    async def test_voice_start_uses_minted_device_identity_for_pull_and_forwarder(self):
         from core.voice.session_provider.google_live import GoogleLiveProvider
 
         prep = FIX["frames"]["lesson_prepare"]
@@ -327,7 +336,16 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         # Capture the device id + token the runtime threads into the assignment pull.
         seen = {}
 
+        import config.device_token_client as dtc
         import config.manage_api_client as mac
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            seen["mint_device_id"] = device_id
+            return MINTED_DEVICE_UUID, MINTED_DEVICE_JWT
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            seen["child_name_identity"] = (device_id, token)
+            return None
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
             seen["assignment_device_id"] = device_id
@@ -340,9 +358,13 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             return manifest, f'"lesson-3-espTft-{L._manifest_checksum()}"'
 
         saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
             mac.get_current_assignment,
             mac.get_lesson_manifest,
         )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
 
@@ -362,6 +384,8 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             rt = await conn.lesson_pull_task
         finally:
             (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
                 mac.get_current_assignment,
                 mac.get_lesson_manifest,
             ) = saved
@@ -371,11 +395,16 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(rt)
         # the voice phrase admitted start_lesson exactly once.
         self.assertEqual(conn.func_handler.calls, [{"name": "start_lesson", "arguments": {}}])
-        self.assertEqual(seen["assignment_device_id"], conn.device_id)
-        self.assertIsNone(seen["assignment_token"])
-        self.assertIsNone(seen["manifest_token"])
-        self.assertEqual(rt.forwarder.device_id, conn.device_id)
-        self.assertIsNone(rt.forwarder.token)
+        self.assertEqual(seen["mint_device_id"], conn.device_id)
+        self.assertEqual(
+            seen["child_name_identity"],
+            (MINTED_DEVICE_UUID, MINTED_DEVICE_JWT),
+        )
+        self.assertEqual(seen["assignment_device_id"], MINTED_DEVICE_UUID)
+        self.assertEqual(seen["assignment_token"], MINTED_DEVICE_JWT)
+        self.assertEqual(seen["manifest_token"], MINTED_DEVICE_JWT)
+        self.assertEqual(rt.forwarder.device_id, MINTED_DEVICE_UUID)
+        self.assertEqual(rt.forwarder.token, MINTED_DEVICE_JWT)
         # only the prepare frame is on the wire until the firmware acks.
         self.assertEqual(
             [json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"]
@@ -397,8 +426,17 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         manifest = L._build_full_seed_story_manifest()
         seen = {}
 
+        import config.device_token_client as dtc
         import config.manage_api_client as mac
         import core.lesson.asset_cache as asset_cache_mod
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            seen["mint_device_id"] = device_id
+            return MINTED_DEVICE_UUID, MINTED_DEVICE_JWT
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            seen["child_name_identity"] = (device_id, token)
+            return None
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
             seen["assignment"] = (base_url, device_id, token)
@@ -410,10 +448,14 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             return manifest, f'"lesson-3-espTft-{L._manifest_checksum()}"'
 
         saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
             mac.get_current_assignment,
             mac.get_lesson_manifest,
             asset_cache_mod.AssetCache,
         )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
         asset_cache_mod.AssetCache = lambda **_kw: L._FakeAssetCache(ready=True)
@@ -426,10 +468,13 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
 
         try:
-            handled = await provider._on_user_transcript("vào khóa học của con")
-            rt = await conn.lesson_pull_task
+            with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("vào khóa học của con")
+                rt = await conn.lesson_pull_task
         finally:
             (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
                 mac.get_current_assignment,
                 mac.get_lesson_manifest,
                 asset_cache_mod.AssetCache,
@@ -438,9 +483,22 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertIs(conn.lesson_runtime, rt)
         self.assertEqual(conn.func_handler.calls, [{"name": "start_lesson", "arguments": {}}])
-        self.assertEqual(seen["assignment"], ("http://backend.test/v1", "dev-republish", None))
-        self.assertEqual(seen["manifest"][0:3], (prep["lessonId"], "espTft", None))
+        self.assertEqual(seen["mint_device_id"], conn.device_id)
+        self.assertEqual(
+            seen["child_name_identity"],
+            (MINTED_DEVICE_UUID, MINTED_DEVICE_JWT),
+        )
+        self.assertEqual(
+            seen["assignment"],
+            ("http://backend.test/v1", MINTED_DEVICE_UUID, MINTED_DEVICE_JWT),
+        )
+        self.assertEqual(
+            seen["manifest"][0:3],
+            (prep["lessonId"], "espTft", MINTED_DEVICE_JWT),
+        )
         self.assertEqual(seen["manifest"][4], prep["lessonVersion"])
+        self.assertEqual(rt.forwarder.device_id, MINTED_DEVICE_UUID)
+        self.assertEqual(rt.forwarder.token, MINTED_DEVICE_JWT)
 
         sent = [json.loads(p) for p in conn.websocket.sent]
         self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])

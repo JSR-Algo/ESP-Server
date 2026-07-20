@@ -29,6 +29,20 @@ function createAuthoringFields() {
   return clone(DEFAULT_AUTHORING_FIELDS);
 }
 
+function createInitialAuthoringFields({ teachingWord, prompt, subject } = {}) {
+  const word = String(teachingWord || subject || '').trim();
+  const topic = String(subject || word).trim();
+  const goal = String(prompt || '').trim();
+  return mergeAuthoringFields({}, {
+    teachingWord: { text: word.toUpperCase() },
+    storyBeat: {
+      goal,
+      successReaction: `Celebrate learning ${topic}.`,
+      nextTease: `What will we discover about ${topic} next?`,
+    },
+  });
+}
+
 function mergeAuthoringFields(body, patch) {
   const source = body && typeof body === 'object' ? body : {};
   const next = patch && typeof patch === 'object' ? patch : {};
@@ -251,7 +265,7 @@ function bindClonedAssetToStep(value, intent, clonedAsset) {
   throw new TypeError(`unsupported asset binding layer: ${layer || 'unknown'}`);
 }
 
-function calculateReadiness({ steps, assets, manifest } = {}) {
+function calculateReadiness({ steps, assets, manifest, validation } = {}) {
   const rows = Array.isArray(assets) ? assets : [];
   const unique = new Map();
   rows.forEach((asset) => {
@@ -262,30 +276,39 @@ function calculateReadiness({ steps, assets, manifest } = {}) {
   const decodedByLayer = {};
   uniqueAssets.forEach((asset) => {
     const layer = asset.layer || 'unassigned';
-    decodedByLayer[layer] = Math.max(decodedByLayer[layer] || 0, Number(asset.decodedBytes || asset.psramBytes || 0));
+    const dimensionEstimate = Number(asset.width || 0) * Number(asset.height || 0) * (asset.hasAlpha ? 4 : 2);
+    decodedByLayer[layer] = Math.max(decodedByLayer[layer] || 0, Number(asset.decodedBytes || asset.psramBytes || dimensionEstimate || 0));
   });
   const decodedValues = Object.values(decodedByLayer);
   const explicitPeak = uniqueAssets.reduce((peak, asset) => Math.max(peak, Number(asset.estimatedPeakPsram || 0)), 0);
-  const decodedTotal = uniqueAssets.reduce((sum, asset) => sum + Number(asset.decodedBytes || asset.psramBytes || 0), 0);
+  const decodedTotal = uniqueAssets.reduce((sum, asset) => {
+    const dimensionEstimate = Number(asset.width || 0) * Number(asset.height || 0) * (asset.hasAlpha ? 4 : 2);
+    return sum + Number(asset.decodedBytes || asset.psramBytes || dimensionEstimate || 0);
+  }, 0);
   const estimatedPeakPsram = explicitPeak || (decodedByLayer.unassigned ? decodedTotal : decodedValues.reduce((sum, bytes) => sum + bytes, 0));
-  const offlineReady = uniqueAssets.every((asset) => {
-    const src = asset.path || asset.src || '';
-    return !/^https?:\/\//i.test(src) && asset.offlineReady !== false;
-  });
-  const stepRows = Array.isArray(steps) ? steps : [];
-  const inferredTermination = stepRows.length > 0 && stepRows.every((step) => {
-    const interaction = step.stepBody && step.stepBody.interaction;
-    return !interaction || Number(interaction.maxAttempts || 3) <= 3;
-  });
+  const budget = validation && validation.budgets && validation.budgets.espTft;
+  const metrics = budget && budget.metrics;
+  const errors = budget && Array.isArray(budget.errors) ? budget.errors : [];
+  const warnings = budget && Array.isArray(budget.warnings) ? budget.warnings : [];
+  const validationKnown = Boolean(metrics);
+  const issueCodes = new Set([...errors, ...warnings].map((issue) => issue && issue.code).filter(Boolean));
+  const authoritativePeak = metrics && Number(metrics.estimatedVisualPeakBytes);
+  const authoritativePackBytes = metrics && Number(metrics.packBytes);
+  const authoritativeAssetCount = metrics && Number(metrics.assetCount);
+  const authoritativeUniqueCount = metrics && Number(metrics.uniqueAssetCount);
+  const authoritativeSharedCount = metrics && Number(metrics.sharedAssetCount);
+  const explicitOffline = metrics && typeof metrics.offlineReady === 'boolean' ? metrics.offlineReady : null;
+  const explicitTermination = metrics && typeof metrics.allPathsTerminate === 'boolean' ? metrics.allPathsTerminate : null;
   return {
-    downloadBytes: uniqueAssets.reduce((sum, asset) => sum + Number(asset.bytes || 0), 0),
-    uniqueAssetCount: uniqueAssets.length,
-    sharedReferenceCount: Math.max(0, rows.length - uniqueAssets.length),
-    estimatedPeakPsram,
-    offlineReady,
-    allPathsTerminate: manifest && typeof manifest.pathsTerminate === 'boolean'
-      ? manifest.pathsTerminate
-      : inferredTermination,
+    downloadBytes: Number.isFinite(authoritativePackBytes) ? authoritativePackBytes : uniqueAssets.reduce((sum, asset) => sum + Number(asset.bytes || 0), 0),
+    uniqueAssetCount: Number.isFinite(authoritativeUniqueCount) ? authoritativeUniqueCount : (Number.isFinite(authoritativeAssetCount) ? authoritativeAssetCount : uniqueAssets.length),
+    sharedReferenceCount: Number.isFinite(authoritativeSharedCount) ? authoritativeSharedCount : Math.max(0, rows.length - uniqueAssets.length),
+    estimatedPeakPsram: Number.isFinite(authoritativePeak) ? authoritativePeak : estimatedPeakPsram,
+    estimateOnly: !validationKnown,
+    offlineReady: explicitOffline == null ? false : explicitOffline,
+    allPathsTerminate: explicitTermination == null ? (validationKnown && !issueCodes.has('branch-termination')) : explicitTermination,
+    errors,
+    warnings,
   };
 }
 
@@ -398,6 +421,7 @@ module.exports = {
   calculateReadiness,
   collectAssetReferences,
   createAuthoringFields,
+  createInitialAuthoringFields,
   mergeAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,

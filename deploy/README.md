@@ -267,6 +267,10 @@ Knobs that MUST be passed by any manual run so it matches compose:
 - `SPRING_DATA_REDIS_HOST` / `SPRING_DATA_REDIS_PORT` / **`SPRING_DATA_REDIS_PASSWORD`**
   (must equal `REDIS_PASSWORD`; Redis must run `--requirepass "$REDIS_PASSWORD"`)
 - `NESTJS_UPSTREAM_HOST` / `NESTJS_TOKEN` (the `/nestjs` course-CMS proxy upstream)
+- `LESSON_RUNTIME_ENABLED`, `LESSON_SAMPLE_ENABLED`, `LESSON_ASSET_DELIVERY_MODE`,
+  `LESSON_MOTION_PRESETS_ENABLED`, `LESSON_PLAYFUL_INTERACTIONS_ENABLED`, and
+  `LESSON_ROLLOUT_DEVICE_ALLOWLIST`. Production defaults are dark; the initial
+  enabled rollout requires `sd_pack` and exactly one device.
 
 > Prefer compose. Reach for the manual fallback only when Compose v1 cannot
 > recreate containers cleanly. For a **web-only** image bump, prefer
@@ -314,8 +318,23 @@ REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 NESTJS_UPSTREAM_HOST="${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}"
 NESTJS_TOKEN="${NESTJS_TOKEN:-}"
+REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
+LESSON_RUNTIME_ENABLED="${LESSON_RUNTIME_ENABLED:-false}"
+LESSON_SAMPLE_ENABLED="${LESSON_SAMPLE_ENABLED:-false}"
+LESSON_ASSET_DELIVERY_MODE="${LESSON_ASSET_DELIVERY_MODE:-}"
+LESSON_MOTION_PRESETS_ENABLED="${LESSON_MOTION_PRESETS_ENABLED:-false}"
+LESSON_PLAYFUL_INTERACTIONS_ENABLED="${LESSON_PLAYFUL_INTERACTIONS_ENABLED:-false}"
+LESSON_ROLLOUT_DEVICE_ALLOWLIST="${LESSON_ROLLOUT_DEVICE_ALLOWLIST:-}"
+LESSON_ASSET_PACK_LOCAL_ROOT="${LESSON_ASSET_PACK_LOCAL_ROOT:-sd://tbot/lesson-assets}"
+LESSON_ASSET_PACK_MOUNT_ROOT="${LESSON_ASSET_PACK_MOUNT_ROOT:-/opt/tbot-esp32-server/data/lesson-packs}"
 
-mkdir -p "$TBOT_REMOTE_ROOT"/{data,models,uploadfile,mysql/data,redis/data}
+[ "$LESSON_SAMPLE_ENABLED" = false ] || { echo "LESSON_SAMPLE_ENABLED must be false in production" >&2; exit 1; }
+if [ "$LESSON_RUNTIME_ENABLED" = true ]; then
+  [ "$LESSON_ASSET_DELIVERY_MODE" = sd_pack ] || { echo "enabled lessons require sd_pack" >&2; exit 1; }
+  [ "$(printf '%s' "$LESSON_ROLLOUT_DEVICE_ALLOWLIST" | awk -F, '{c=0; for(i=1;i<=NF;i++) if($i~/[^[:space:]]/) c++; print c}')" -eq 1 ] || { echo "enabled lessons require exactly one rollout device" >&2; exit 1; }
+fi
+
+mkdir -p "$TBOT_REMOTE_ROOT"/{data,models,uploadfile,mysql/data,redis/data} "$TBOT_REMOTE_ROOT/data/lesson-packs"
 # MySQL data remains at "$TBOT_REMOTE_ROOT/mysql/data" when the DB container is reused.
 docker network inspect tbot >/dev/null 2>&1 || docker network create tbot
 
@@ -337,8 +356,20 @@ docker run -d --name tbot-esp32-server --restart unless-stopped \
   -e "TBOT_DEVICE_MINT_SECRET=$TBOT_DEVICE_MINT_SECRET" \
   -e "TBOT_SERVER_AUTH_KEY=$TBOT_SERVER_AUTH_KEY" \
   -e "LESSON_ASSET_ORIGIN_BASE=$LESSON_ASSET_ORIGIN_BASE" \
+  -e "LESSON_RUNTIME_ENABLED=$LESSON_RUNTIME_ENABLED" \
+  -e "LESSON_SAMPLE_ENABLED=$LESSON_SAMPLE_ENABLED" \
+  -e "LESSON_ASSET_DELIVERY_MODE=$LESSON_ASSET_DELIVERY_MODE" \
+  -e "LESSON_MOTION_PRESETS_ENABLED=$LESSON_MOTION_PRESETS_ENABLED" \
+  -e "LESSON_PLAYFUL_INTERACTIONS_ENABLED=$LESSON_PLAYFUL_INTERACTIONS_ENABLED" \
+  -e "LESSON_ROLLOUT_DEVICE_ALLOWLIST=$LESSON_ROLLOUT_DEVICE_ALLOWLIST" \
+  -e "LESSON_ASSET_PACK_LOCAL_ROOT=$LESSON_ASSET_PACK_LOCAL_ROOT" \
+  -e "LESSON_ASSET_PACK_MOUNT_ROOT=$LESSON_ASSET_PACK_MOUNT_ROOT" \
+  -e "REDIS_URL=$REDIS_URL" \
+  --health-cmd "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/tbot/ota/', timeout=3).read(1)\"" \
+  --health-interval 15s --health-timeout 5s --health-retries 6 --health-start-period 30s \
   -p "${TBOT_WS_PORT:-8000}:8000" -p "${TBOT_HTTP_PORT:-8003}:8003" \
   -v "$TBOT_REMOTE_ROOT/data":/opt/tbot-esp32-server/data \
+  -v "$TBOT_REMOTE_ROOT/data/lesson-packs:$LESSON_ASSET_PACK_MOUNT_ROOT" \
   -v "$TBOT_REMOTE_ROOT/models":/opt/tbot-esp32-server/models \
   "$TBOT_SERVER_IMAGE"
 

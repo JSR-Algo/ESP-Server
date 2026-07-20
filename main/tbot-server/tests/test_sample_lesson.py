@@ -1,7 +1,11 @@
 import asyncio
 import json
 import unittest
+import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation, ExclusiveDisposition
 from core.lesson.sample import (
     DEFAULT_SAMPLE_STEP_DWELL_SEC,
     DEFAULT_SAMPLE_STEP_TIMEOUT_SEC,
@@ -54,7 +58,14 @@ class _FakeConn:
         self.session_id = "sess-sample-1"
         self.device_id = "device-sample-1"
         self.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
-        self.config = config if config is not None else {}
+        if config is None:
+            config = {}
+        self.config = config
+        if isinstance(self.config, dict):
+            lesson_cfg = self.config.setdefault("lesson", {})
+            if isinstance(lesson_cfg, dict):
+                lesson_cfg.setdefault("sample_lesson", True)
+                lesson_cfg.setdefault("rollout_device_allowlist", [self.device_id])
         self.lesson_runtime = None
         self.lesson_start_status = None
         self.finished = []
@@ -79,11 +90,13 @@ class _FakeConn:
 
 
 def _ack(conn, acks, env_seq, *, step_id=None):
+    runtime = getattr(conn, "lesson_runtime", None)
+    session_id = getattr(runtime, "session_id", None) or conn.session_id
     return {
         "type": "lesson_ack",
         "protocolVersion": "teebot-lesson-renderer.v1",
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
-        "sessionId": conn.session_id,
+        "sessionId": session_id,
         "lessonId": SAMPLE_LESSON_ID,
         "lessonVersion": 1,
         "stepId": step_id,
@@ -194,6 +207,108 @@ class SampleManifestTest(unittest.TestCase):
         self.assertEqual(SampleAssetCache(preload_timeout_sec="bad").preload_timeout_sec, 30.0)
         self.assertEqual(SampleAssetCache(preload_timeout_sec=0).preload_timeout_sec, 30.0)
         self.assertEqual(SampleAssetCache(preload_timeout_sec=float("inf")).preload_timeout_sec, 30.0)
+
+    def test_sd_sample_cache_exposes_fixed_firmware_sync_capability(self):
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+
+        self.assertEqual(
+            cache.firmware_sample_sync_request(),
+            {"base_url": "https://cdn.example/sample"},
+        )
+        files = cache.firmware_sample_sync_files()
+        records = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        self.assertEqual(len(files), 6)
+        self.assertTrue(cache.validate_firmware_sample_sync_result({
+            "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+            "downloadedCount": 6,
+            "files": [
+                {"file": name, "bytes": 1, "sha256": records[name]}
+                for name in files
+            ],
+        }))
+
+    def test_sd_sample_cache_rejects_non_exact_firmware_attestations(self):
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        manifest_assets = cache.asset_pack_manifest(
+            assignment_version=1,
+            lesson_id="sample-barn-say-it",
+            lesson_version=1,
+            manifest_checksum="a" * 64,
+        )["assets"]
+        files = [
+            {
+                "file": asset["path"],
+                "bytes": asset["size"],
+                "sha256": asset["sha256"],
+            }
+            for asset in manifest_assets
+        ]
+
+        invalid_files = {
+            "missing digest": [{key: value for key, value in files[0].items() if key != "sha256"}, *files[1:]],
+            "wrong digest": [{**files[0], "sha256": "0" * 64}, *files[1:]],
+            "uppercase digest": [{**files[0], "sha256": files[0]["sha256"].upper()}, *files[1:]],
+            "duplicate digest": [{**files[0], "sha256": files[1]["sha256"]}, *files[1:]],
+            "duplicate filename": [{**files[0]}, {**files[0]}, *files[2:]],
+            "missing asset": files[:-1],
+            "extra asset": [*files, {"file": "extra.png", "bytes": 1, "sha256": "0" * 64}],
+            "zero bytes": [{**files[0], "bytes": 0}, *files[1:]],
+            "boolean bytes": [{**files[0], "bytes": True}, *files[1:]],
+        }
+        for label, candidate_files in invalid_files.items():
+            with self.subTest(label=label):
+                self.assertFalse(cache.validate_firmware_sample_sync_result({
+                    "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                    "downloadedCount": len(candidate_files),
+                    "files": candidate_files,
+                }))
+
+    def test_sample_firmware_sync_request_requires_safe_http_base(self):
+        valid_bases = (
+            "http://cdn.example/sample",
+            "https://cdn.example:8443/sample/",
+        )
+        for base in valid_bases:
+            with self.subTest(base=base):
+                self.assertEqual(
+                    SampleAssetCache(sd_pack=True, asset_base=base).firmware_sample_sync_request(),
+                    {"base_url": base.rstrip("/")},
+                )
+
+        invalid_bases = (
+            "file:///tmp/sample",
+            "ftp://cdn.example/sample",
+            "//cdn.example/sample",
+            "https:///sample",
+            "https://user:secret@cdn.example/sample",
+            "https://cdn.example\\attacker.example/sample",
+            "https://cdn.example/sample\x00suffix",
+            "https://cdn.example/sample\nheader: value",
+            " https://cdn.example/sample",
+            "https://cdn.example/sample ",
+            "https://cdn.example/sample path",
+            "https://cdn.example/sample?version=1",
+            "https://cdn.example/sample#section",
+        )
+        for base in invalid_bases:
+            with self.subTest(base=base):
+                self.assertIsNone(
+                    SampleAssetCache(sd_pack=True, asset_base=base).firmware_sample_sync_request()
+                )
+
+    def test_sample_cache_without_sd_or_base_has_no_firmware_sync_request(self):
+        self.assertIsNone(
+            SampleAssetCache(sd_pack=False, asset_base="https://cdn.example").firmware_sample_sync_request()
+        )
+        self.assertIsNone(SampleAssetCache(sd_pack=True, asset_base="").firmware_sample_sync_request())
 
     def test_interactive_sample_finishes_with_lesson_completion_announcement(self):
         manifest = build_interactive_sample_manifest()
@@ -369,7 +484,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(runtime)
         self.assertEqual(conn.events[:2], ["prepare_voice", "enter:sample_lesson_start"])
 
-    async def test_sample_lesson_plays_all_steps_to_completed_then_finishes(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_sample_lesson_plays_all_steps_to_completed_then_finishes(self, _uuid4):
         conn = _FakeConn()
         # dwell_sec=0 -> passive steps advance immediately on ack (no per-step pacing);
         # this exercises the completion path. Pacing is covered separately below.
@@ -425,7 +541,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timeouts)
         self.assertGreaterEqual(min(timeouts), 75.0)
 
-    async def test_passive_dwell_delays_auto_advance_then_completes(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_dwell_delays_auto_advance_then_completes(self, _uuid4):
         import asyncio
 
         conn = _FakeConn()
@@ -468,7 +585,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         # Every sample step carried a dwellSec so the scene paces on the device.
         self.assertTrue(all(s.get("dwellSec") == 0.02 for s in manifest["steps"]))
 
-    async def test_passive_step_waits_for_prompt_audio_idle_before_auto_advance(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_step_waits_for_prompt_audio_idle_before_auto_advance(self, _uuid4):
         class _BlockingPromptIdleProvider:
             def __init__(self):
                 self.prompts = []
@@ -534,7 +652,8 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             if not ack_task.done():
                 await asyncio.wait_for(ack_task, timeout=1.0)
 
-    async def test_passive_dwell_starts_after_prompt_audio_idle(self):
+    @patch("core.lesson.runtime.uuid.uuid4", return_value="sess-sample-1")
+    async def test_passive_dwell_starts_after_prompt_audio_idle(self, _uuid4):
         class _BlockingPromptIdleProvider:
             def __init__(self):
                 self.wait_started = asyncio.Event()
@@ -611,34 +730,31 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pack["ready"])
         self.assertEqual(pack["cacheKey"], "sample")
         self.assertEqual(pack["localRoot"], "sd://tbot/lesson-assets/sample-barn")
-        pack_assets = {asset["path"]: asset for asset in pack["assets"]}
+        pack_assets = {asset["key"]: asset for asset in pack["assets"]}
         self.assertEqual(
             set(pack_assets),
             {
-                "barn-round-field-poster.jpg",
-                "barn.png",
-                "bright-teach.png",
-                "bright-listening.png",
-                "bright-thinking.png",
-                "bright-celebrate.png",
+                "backgroundScene.poster",
+                "teachingObject.sample",
+                "robotOverlay.teaching",
+                "robotOverlay.listening",
+                "robotOverlay.thinking",
+                "robotOverlay.celebrating",
             },
         )
         self.assertEqual(
-            pack_assets["barn-round-field-poster.jpg"]["localPath"],
+            pack_assets["backgroundScene.poster"]["localPath"],
             "sd://tbot/lesson-assets/sample-barn/barn-round-field-poster.jpg",
         )
-        self.assertEqual(
-            pack_assets["barn-round-field-poster.jpg"]["url"],
-            "https://esp.example/sample/assets/background/barn-round-field-poster.jpg",
-        )
-        self.assertTrue(all(asset.get("url") for asset in pack_assets.values()))
+        self.assertTrue(all(asset.get("localPath") for asset in pack_assets.values()))
+        self.assertTrue(all("url" not in asset for asset in pack_assets.values()))
 
         await runtime.on_lesson_ack(
             {
                 "type": "lesson_ack",
                 "protocolVersion": "teebot-lesson-renderer.v1",
                 "assignmentId": SAMPLE_ASSIGNMENT_ID,
-                "sessionId": conn.session_id,
+                "sessionId": runtime.session_id,
                 "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
                 "lessonVersion": 1,
                 "stepId": None,
@@ -689,7 +805,7 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
                 "type": "lesson_ack",
                 "protocolVersion": "teebot-lesson-renderer.v1",
                 "assignmentId": SAMPLE_ASSIGNMENT_ID,
-                "sessionId": conn.session_id,
+                "sessionId": runtime.session_id,
                 "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
                 "lessonVersion": 1,
                 "stepId": None,
@@ -743,6 +859,9 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(runtime)
         self.assertIs(conn.lesson_runtime, runtime)
+        self.assertEqual(uuid.UUID(runtime.session_id).version, 4)
+        self.assertNotEqual(runtime.session_id, conn.session_id)
+        self.assertEqual(json.loads(conn.websocket.sent[0])["sessionId"], runtime.session_id)
         self.assertEqual(conn.entered, ["sample_lesson_start"])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
@@ -786,13 +905,13 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(interactive_steps)
 
-    async def test_start_sample_lesson_defaults_malformed_lesson_config(self):
+    async def test_start_sample_lesson_blocks_malformed_lesson_config(self):
         conn = _FakeConn(config={"lesson": "bad"})
 
         runtime = await start_sample_lesson(conn)
 
-        self.assertIsNotNone(runtime)
-        self.assertEqual(runtime.lesson_id, INTERACTIVE_SAMPLE_LESSON_ID)
+        self.assertIsNone(runtime)
+        self.assertEqual(conn.lesson_start_status["code"], "ROLLOUT_BLOCKED")
 
     async def test_start_sample_lesson_falls_back_from_infinite_sample_dwell_config(self):
         conn = _FakeConn(
@@ -822,6 +941,7 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
         second = await start_sample_lesson(conn)
 
         self.assertIsNot(second, first)
+        self.assertNotEqual(second.session_id, first.session_id)
         self.assertIs(conn.lesson_runtime, second)
         self.assertTrue(first._closed)
         self.assertIsNone(first._step_timeout_task)
@@ -1005,11 +1125,13 @@ def _make_real_google_live_provider(conn):
 
 def _iack(conn, acks, env_seq, *, step_id=None):
     """lesson_ack carrying the INTERACTIVE sample's lessonId."""
+    runtime = getattr(conn, "lesson_runtime", None)
+    session_id = getattr(runtime, "session_id", None) or conn.session_id
     return {
         "type": "lesson_ack",
         "protocolVersion": "teebot-lesson-renderer.v1",
         "assignmentId": SAMPLE_ASSIGNMENT_ID,
-        "sessionId": conn.session_id,
+        "sessionId": session_id,
         "lessonId": INTERACTIVE_SAMPLE_LESSON_ID,
         "lessonVersion": 1,
         "stepId": step_id,
@@ -1434,6 +1556,46 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         sent_types = [json.loads(p)["type"] for p in conn.websocket.sent]
         self.assertNotIn("lesson_abandoned", sent_types)
         self.assertEqual(sent_types[-1], "lesson_stop")
+
+
+class ActivityLeaseSampleMutationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_start_refuses_exclusive_lease_inside_shared_lock(self):
+        from core.lesson import sample as sample_module
+
+        lock = asyncio.Lock()
+        await lock.acquire()
+        conn = SimpleNamespace(
+            _lesson_pull_lock=lock,
+            activity_leases=ActivityLeaseCoordinator(asyncio.get_running_loop()),
+        )
+        async def forbidden(_conn):
+            self.fail("sample mutation must not run during exclusive eviction")
+
+        with patch(
+            "core.providers.tools.product_toolset.sample_lesson_config_enabled",
+            return_value=True,
+        ), patch.object(sample_module, "_start_sample_lesson_impl", forbidden):
+            task = asyncio.create_task(sample_module.start_sample_lesson(conn))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                lease = conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+                lock.release()
+                result = await task
+            finally:
+                if lock.locked():
+                    lock.release()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "CACHE_EVICTION_RESERVED")
 
 
 if __name__ == "__main__":

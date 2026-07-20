@@ -188,7 +188,54 @@ validate_production_boot_env() {
     failed=1
   fi
 
+  local lesson_runtime lesson_sample lesson_motion lesson_playful rollout_allowlist rollout_count
+  lesson_runtime="$(env_value LESSON_RUNTIME_ENABLED "false")"
+  lesson_sample="$(env_value LESSON_SAMPLE_ENABLED "false")"
+  lesson_motion="$(env_value LESSON_MOTION_PRESETS_ENABLED "false")"
+  lesson_playful="$(env_value LESSON_PLAYFUL_INTERACTIONS_ENABLED "false")"
+  rollout_allowlist="$(env_value LESSON_ROLLOUT_DEVICE_ALLOWLIST "")"
+
+  for key in LESSON_RUNTIME_ENABLED LESSON_SAMPLE_ENABLED LESSON_MOTION_PRESETS_ENABLED LESSON_PLAYFUL_INTERACTIONS_ENABLED; do
+    value="$(env_value "${key}" "false")"
+    if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+      printf 'error: %s must be exactly true or false\n' "${key}" >&2
+      failed=1
+    fi
+  done
+  if [[ "${lesson_sample}" != "false" ]]; then
+    printf 'error: LESSON_SAMPLE_ENABLED must be false for a production deploy\n' >&2
+    failed=1
+  fi
+  if [[ "${lesson_runtime}" == "false" && ( "${lesson_motion}" == "true" || "${lesson_playful}" == "true" ) ]]; then
+    printf 'error: lesson motion/playful controls cannot be true while LESSON_RUNTIME_ENABLED is false\n' >&2
+    failed=1
+  fi
+  if [[ "${lesson_runtime}" == "true" ]]; then
+    rollout_count="$(printf '%s' "${rollout_allowlist}" | awk -F, '{ count=0; for (i=1; i<=NF; i++) if ($i ~ /[^[:space:]]/) count++; print count }')"
+    if [[ "${rollout_count}" -ne 1 ]]; then
+      printf 'error: LESSON_ROLLOUT_DEVICE_ALLOWLIST must contain exactly one device for the initial production rollout\n' >&2
+      failed=1
+    fi
+    if [[ "$(env_value LESSON_ASSET_DELIVERY_MODE "")" != "sd_pack" ]]; then
+      printf 'error: LESSON_ASSET_DELIVERY_MODE must be sd_pack when LESSON_RUNTIME_ENABLED is true\n' >&2
+      failed=1
+    fi
+    for key in LESSON_ASSET_PACK_LOCAL_ROOT LESSON_ASSET_PACK_MOUNT_ROOT; do
+      value="$(env_value "${key}" "")"
+      if is_placeholder_value "${value}"; then
+        printf 'error: %s is required when LESSON_RUNTIME_ENABLED is true\n' "${key}" >&2
+        failed=1
+      fi
+    done
+  fi
+
   [[ "${failed}" -eq 0 ]] || exit 1
+}
+
+wait_for_remote_stack() {
+  local expected_replicas
+  expected_replicas="$(env_value TBOT_SERVER_REPLICAS 2)"
+  run_ssh "cd ${REMOTE_RELEASE_Q} && expected=${expected_replicas}; attempt=0; while [ \$attempt -lt 90 ]; do if docker compose version >/dev/null 2>&1; then ids=\$(docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps -q tbot-esp32-server); else ids=\$(docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps -q tbot-esp32-server); fi; count=0; healthy=0; for id in \$ids; do count=\$((count + 1)); status=\$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \$id); [ \"\$status\" = healthy ] && healthy=\$((healthy + 1)); done; if [ \$count -eq \$expected ] && [ \$healthy -eq \$expected ]; then echo \"healthy server replicas: \$healthy/\$expected\"; exit 0; fi; attempt=\$((attempt + 1)); sleep 2; done; echo \"error: healthy server replicas: \$healthy/\$expected (containers=\$count)\" >&2; exit 1"
 }
 
 validate_public_endpoint_env() {
@@ -369,6 +416,7 @@ else
 fi
 
 run_ssh "cd ${REMOTE_RELEASE_Q} && sha256sum -c checksums.sha256 && for f in *.tar.gz; do gunzip -c \"\$f\" | docker load; done && ln -sfn ${REMOTE_RELEASE_Q} ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; fi"
+wait_for_remote_stack
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
   if [[ -n "${SMOKE_OTA_URL}" && -n "${SMOKE_EXPECTED_WS_HOST}" ]]; then

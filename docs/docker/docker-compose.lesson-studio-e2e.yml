@@ -1,0 +1,184 @@
+name: ${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-pg
+    environment:
+      POSTGRES_DB: tbot
+      POSTGRES_USER: tbot
+      POSTGRES_PASSWORD: tbot
+    volumes:
+      - lesson-studio-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tbot -d tbot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [lesson-studio-e2e]
+
+  redis:
+    image: redis:8-alpine
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - lesson-studio-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [lesson-studio-e2e]
+
+  mysql:
+    image: mysql:8.4
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: tbot_esp32_server
+      TZ: Asia/Ho_Chi_Minh
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - lesson-studio-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p\"$${MYSQL_ROOT_PASSWORD}\""]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 15s
+    networks: [lesson-studio-e2e]
+
+  backend:
+    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:-local/tbot-backend:lesson-studio-e2e}
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+      DATABASE_URL: postgresql://tbot:tbot@postgres:5432/tbot
+      REDIS_URL: redis://redis:6379
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?export JWT_PUBLIC_KEY with the local backend public PEM}
+      TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
+      LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin}
+      ROBOT_ESP_BASE_URL: ${ROBOT_ESP_BASE_URL:?export the live robot ESP fan-out URL}
+      TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}
+      LESSON_SHARED_VISUAL_AUTHORING_ENABLED: "true"
+      LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: "true"
+      LESSON_ROLLOUT_ADMIN_ID_ALLOWLIST: 11111111-1111-4111-8111-111111111111
+      LESSON_ROLLOUT_DEVICE_ALLOWLIST: e2e-robot-1
+      LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "false"
+      LESSON_STUDIO_ROLLBACK_ASSIGNMENTS_ENABLED: "false"
+      SKIP_MIGRATIONS: "false"
+    ports:
+      - "${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - /nodejs/bin/node
+        - -e
+        - fetch('http://127.0.0.1:3000/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    networks: [lesson-studio-e2e]
+
+  seed-postgres:
+    image: postgres:16-alpine
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-seed-pg
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: tbot
+    command:
+      - sh
+      - -c
+      - psql -v ON_ERROR_STOP=1 -h postgres -U tbot -d tbot -f /seed/seed-postgres.sql && touch /tmp/seed-complete && exec sleep infinity
+    volumes:
+      - ./lesson-studio-e2e/seed-postgres.sql:/seed/seed-postgres.sql:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/seed-complete"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks: [lesson-studio-e2e]
+
+  web:
+    image: ${TBOT_LESSON_STUDIO_WEB_IMAGE:-local/tbot-server-web:lesson-studio-e2e}
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-web
+    depends_on:
+      backend:
+        condition: service_healthy
+      seed-postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://mysql:3306/tbot_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Ho_Chi_Minh&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
+      SPRING_DATASOURCE_DRUID_USERNAME: root
+      SPRING_DATASOURCE_DRUID_PASSWORD: "123456"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_PASSWORD: ""
+      NESTJS_UPSTREAM_HOST: backend:3000
+      NESTJS_UPSTREAM_SCHEME: http
+      NESTJS_TOKEN: ""
+      TBOT_E2E_CAPTCHA_ENABLED: "true"
+      TBOT_E2E_CAPTCHA_CODE: E2E42
+    ports:
+      - "${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
+    volumes:
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
+      - ${TBOT_FIRMWARE_WORKTREE:-../../../../TBOT-Firmware/production-lesson-studio}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [lesson-studio-e2e]
+
+  seed-mysql:
+    image: mysql:8.4
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-seed-mysql
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      MYSQL_PWD: "123456"
+    command:
+      - sh
+      - -c
+      - mysql -h mysql -u root tbot_esp32_server -e 'source /seed/seed-mysql.sql' && touch /tmp/seed-complete && exec sleep infinity
+    volumes:
+      - ./lesson-studio-e2e/seed-mysql.sql:/seed/seed-mysql.sql:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/seed-complete"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks: [lesson-studio-e2e]
+
+networks:
+  lesson-studio-e2e:
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}
+
+volumes:
+  lesson-studio-pg-data:
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-pg-data
+  lesson-studio-redis-data:
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-redis-data
+  lesson-studio-mysql-data:
+    name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-mysql-data

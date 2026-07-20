@@ -128,11 +128,14 @@ def start_lesson(conn: "ConnectionHandler"):
         # original gate only refused when the method was PRESENT and returned False);
         # preserve that so callers without the method keep working. The sample demo
         # flag adds an INDEPENDENT admission path.
+        from core.providers.tools.product_toolset import runtime_rollout_allows_device, sample_lesson_enabled
+
         runtime_check = getattr(conn, "_lesson_runtime_enabled", None)
-        sample_check = getattr(conn, "_sample_lesson_enabled", None)
-        runtime_disabled = callable(runtime_check) and not runtime_check()
+        runtime_disabled = callable(runtime_check) and (
+            not bool(runtime_check()) or not runtime_rollout_allows_device(conn)
+        )
         runtime_admitted = not runtime_disabled
-        sample_on = callable(sample_check) and bool(sample_check())
+        sample_on = sample_lesson_enabled(conn)
         if runtime_disabled and not sample_on:
             conn.logger.bind(tag=TAG).info(
                 "start_lesson requested but lesson runtime is disabled (flag OFF)"

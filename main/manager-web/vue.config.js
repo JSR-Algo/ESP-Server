@@ -156,7 +156,9 @@ module.exports = defineConfig({
         new InjectManifest({
           swSrc: path.resolve(__dirname, 'src/service-worker.js'),
           swDest: 'service-worker.js',
-          exclude: [/\.map$/, /asset-manifest\.json$/],
+          // The generator ships tens of megabytes of optional firmware assets.
+          // Keep those on-demand while precaching the admin shell and lazy routes.
+          exclude: [/\.map$/, /asset-manifest\.json$/, /^generator\//],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5MB
           // 自定义Service Worker注入点
           injectionPoint: 'self.__WB_MANIFEST',

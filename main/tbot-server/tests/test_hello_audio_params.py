@@ -40,6 +40,8 @@ class _Conn:
         self.sample_rate = 24000
         self.features = None
         self.mcp_client = None
+        self.mcp_scheduled = []
+        self.mcp_sent_counts_at_schedule = []
         self.config = {
             "voice_mode": {"type": "classic_pipeline"},
             "google_live": {"output_sample_rate": 24000},
@@ -56,6 +58,12 @@ class _Conn:
                 "frame_duration": 60,
             },
         }
+
+    def schedule_mcp_background_task(self, coro):
+        self.mcp_scheduled.append(coro)
+        self.mcp_sent_counts_at_schedule.append(len(self.websocket.sent))
+        coro.close()
+        return SimpleNamespace(done=lambda: True)
 
 
 class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
@@ -105,24 +113,16 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_features_with_mcp_initializes_client_and_schedules_initialize_message(self):
         conn = _Conn()
-        created = []
-        sent_counts_at_schedule = []
-
-        def create_task(coro):
-            created.append(coro)
-            sent_counts_at_schedule.append(len(conn.websocket.sent))
-            coro.close()
-            return SimpleNamespace(done=lambda: True)
 
         with patch.object(helloHandle, "MCPClient", return_value="mcp-client"), patch.object(
             helloHandle, "send_mcp_initialize_message", new=AsyncMock()
-        ), patch.object(helloHandle.asyncio, "create_task", side_effect=create_task):
+        ):
             await handleHelloMessage(conn, {"features": {"mcp": True, "vision": True}})
 
         self.assertEqual(conn.features, {"mcp": True, "vision": True})
         self.assertEqual(conn.mcp_client, "mcp-client")
-        self.assertEqual(len(created), 1)
-        self.assertEqual(sent_counts_at_schedule, [1])
+        self.assertEqual(len(conn.mcp_scheduled), 1)
+        self.assertEqual(conn.mcp_sent_counts_at_schedule, [1])
         self.assertEqual(json.loads(conn.websocket.sent[0])["type"], "hello")
 
     async def test_empty_hello_still_sends_server_welcome_without_overwriting_state(self):

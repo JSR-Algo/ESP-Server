@@ -844,6 +844,11 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
     def _make_provider(self):
         handler = _FakeFuncHandler(ActionResponse(action=Action.NONE, response="ok"))
         conn = _ProviderConn(func_handler=handler)
+        conn.device_id = "robot-01"
+        conn.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": [conn.device_id],
+        }
         conn._lesson_runtime_enabled = lambda: True
         provider = GoogleLiveProvider(conn)
 
@@ -864,6 +869,12 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 self.sent_texts.append(text)
 
         provider._client = _Client()
+        provider._hard_reconnect_reasons = []
+
+        async def _record_hard_reconnect(reason, **kwargs):
+            provider._hard_reconnect_reasons.append((reason, kwargs))
+
+        provider._hard_reconnect_after_interrupt = _record_hard_reconnect
         return provider, handler
 
     async def test_start_lesson_command_dispatches_local_tool(self):
@@ -885,6 +896,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(handled)
         self.assertEqual(handler.calls, [])
         self.assertEqual(provider._client.sent_texts, [])
+        self.assertEqual(provider._hard_reconnect_reasons, [])
 
     async def test_start_lesson_command_accepts_common_stt_variants(self):
         variants = [
@@ -1541,7 +1553,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 return b"pcm:" + audio
 
             def input_rms(self, _pcm):
-                return 1000
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1585,7 +1597,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 return b"pcm:" + audio
 
             def input_rms(self, _pcm):
-                return 1000
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1614,6 +1626,9 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 "input_min_capture_ms": 0,
                 "input_max_capture_ms": 0,
                 "input_speech_tail_ms": 0,
+                "lesson_child_input_min_capture_ms": 0,
+                "lesson_child_input_max_capture_ms": 0,
+                "lesson_child_input_speech_tail_ms": 0,
             }
         )
 
@@ -1641,7 +1656,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 return b"pcm:" + audio
 
             def input_rms(self, _pcm):
-                return 1000
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1680,7 +1695,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 return b"pcm:" + audio
 
             def input_rms(self, _pcm):
-                return 1000
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1695,7 +1710,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             for level, args, _kwargs in provider.conn.logger.messages
             if level == "info" and args and args[0] == "Google Live lesson_child_audio_forwarded bytes={} rms={}"
         ]
-        self.assertEqual(messages, [("Google Live lesson_child_audio_forwarded bytes={} rms={}", 8, 1000)])
+        self.assertEqual(messages, [("Google Live lesson_child_audio_forwarded bytes={} rms={}", 8, 2500)])
         self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
         self.assertEqual(handler.calls, [])
 
@@ -1722,7 +1737,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 return b"pcm:" + audio
 
             def input_rms(self, _pcm):
-                return 1000
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1732,15 +1747,15 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await provider.handle_audio_bytes(b"barn"))
 
-        aec_logs = [
+        deferred_logs = [
             args
             for level, args, _kwargs in provider.conn.logger.messages
             if level == "info"
             and args
-            and args[0].startswith("Google Live aec_live_vad_forward")
+            and args[0] == "Google Live lesson_child_audio_deferred reason=output_blocked"
         ]
-        self.assertEqual(len(aec_logs), 1)
-        self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
+        self.assertEqual(len(deferred_logs), 1)
+        self.assertEqual(provider._bridge.forwarded, [])
         self.assertEqual(handler.calls, [])
 
     async def test_lesson_child_response_window_forces_lesson_mode_before_audio_forwarding(self):
@@ -1760,6 +1775,9 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
 
             async def decode_input_audio_async(self, audio):
                 return b"pcm:" + audio
+
+            def input_rms(self, _pcm):
+                return 2500
 
             async def forward_decoded_input_audio(self, pcm):
                 self.forwarded.append(pcm)
@@ -1835,7 +1853,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         await provider._on_user_transcript_barge_in("barn")
 
         self.assertEqual(provider.conn.lesson_runtime.responses, [("barn", "voice_transcript")])
-        self.assertEqual(interrupts, [])
+        self.assertEqual(interrupts, ["lesson_child_response"])
         self.assertEqual(handler.calls, [])
 
     async def test_lesson_mode_ignores_transcript_barge_in_when_child_window_closed(self):
@@ -1957,6 +1975,13 @@ class StartLessonNoAssignmentFeedbackTest(unittest.IsolatedAsyncioTestCase):
                 self.voice_provider = _VoiceProvider()
                 self.lesson_pull_task = None
                 self.lesson_start_status = None
+                self.device_id = "robot-01"
+                self.config = {
+                    "lesson": {
+                        "runtime_enabled": True,
+                        "rollout_device_allowlist": [self.device_id],
+                    }
+                }
 
             def _lesson_runtime_enabled(self):
                 return True

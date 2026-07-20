@@ -9,4 +9,72 @@
         order by
             last_connected_at desc limit 0,1
     </select>
-</mapper> 
+
+    <select id="selectChildProfileForUpdate" resultType="tbot.modules.device.entity.DeviceEntity">
+        SELECT id,
+               child_profile_id,
+               child_birth_year,
+               child_name,
+               child_age,
+               child_interests,
+               child_interests_json,
+               learning_style,
+               vocabulary_level,
+               parent_career,
+               child_profile_revision,
+               child_profile_payload_hash
+        FROM ai_device
+        WHERE id = #{deviceId}
+        FOR UPDATE
+    </select>
+
+    <update id="replaceChildProfile" parameterType="tbot.modules.device.entity.DeviceEntity">
+        UPDATE ai_device
+        SET child_profile_id = #{childProfileId},
+            child_birth_year = #{childBirthYear},
+            child_name = #{childName},
+            child_age = #{childAge},
+            child_interests = #{childInterests},
+            child_interests_json = #{childInterestsJson},
+            learning_style = #{learningStyle},
+            vocabulary_level = #{vocabularyLevel},
+            parent_career = #{parentCareer},
+            child_profile_revision = #{childProfileRevision},
+            child_profile_payload_hash = #{childProfilePayloadHash}
+        WHERE id = #{id}
+    </update>
+
+    <update id="clearChildProfile" parameterType="tbot.modules.device.entity.DeviceEntity">
+        UPDATE ai_device
+        SET child_profile_id = NULL,
+            child_birth_year = NULL,
+            child_name = NULL,
+            child_age = NULL,
+            child_interests = NULL,
+            child_interests_json = NULL,
+            learning_style = NULL,
+            vocabulary_level = NULL,
+            parent_career = NULL,
+            child_profile_revision = #{childProfileRevision},
+            child_profile_payload_hash = #{childProfilePayloadHash}
+        WHERE id = #{id}
+    </update>
+
+    <update id="updateDeviceInfo" parameterType="tbot.modules.device.entity.DeviceEntity">
+        UPDATE ai_device
+        <set>
+            <if test="autoUpdate != null">auto_update = #{autoUpdate},</if>
+            <if test="alias != null">alias = #{alias},</if>
+            <if test="childName != null">child_name = #{childName},</if>
+            <if test="childAge != null">child_age = #{childAge},</if>
+            <if test="childInterests != null">child_interests = #{childInterests},</if>
+            <if test="learningStyle != null">learning_style = #{learningStyle},</if>
+            <if test="vocabularyLevel != null">vocabulary_level = #{vocabularyLevel},</if>
+            <if test="parentCareer != null">parent_career = #{parentCareer},</if>
+        </set>
+        WHERE id = #{id}
+        <if test="childName != null or childAge != null or childInterests != null or learningStyle != null or vocabularyLevel != null or parentCareer != null">
+            AND child_profile_revision &lt; 0
+        </if>
+    </update>
+</mapper>

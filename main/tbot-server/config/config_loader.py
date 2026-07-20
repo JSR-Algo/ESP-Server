@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from collections.abc import Mapping
 
 import yaml
@@ -141,6 +142,8 @@ GOOGLE_LIVE_DEFAULTS = {
     },
 }
 DEFAULT_EDGE_TTS_VOICE = "vi-VN-HoaiMyNeural"
+DEFAULT_ENABLE_WEBSOCKET_PING = True
+_COLON_MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
 
 def get_project_dir():
@@ -152,6 +155,49 @@ def read_config(config_path):
     with open(config_path, encoding="utf-8") as file:
         config = yaml.safe_load(file)
     return config
+
+
+def _manager_api_source_config(default_config, custom_config):
+    """Carry only local operational flags needed beside manager-owned config."""
+    source = dict(custom_config) if isinstance(custom_config, Mapping) else {}
+    if "enable_websocket_ping" not in source and isinstance(default_config, Mapping):
+        default_value = default_config.get("enable_websocket_ping")
+        if isinstance(default_value, bool):
+            source["enable_websocket_ping"] = default_value
+    default_lesson = default_config.get("lesson") if isinstance(default_config, Mapping) else None
+    source_lesson = source.get("lesson") if isinstance(source.get("lesson"), Mapping) else None
+    if isinstance(default_lesson, Mapping) or isinstance(source_lesson, Mapping):
+        source_lesson = dict(source_lesson or {})
+        if (
+            "storage_hil_device_allowlist" not in source_lesson
+            and isinstance(default_lesson, Mapping)
+        ):
+            source_lesson["storage_hil_device_allowlist"] = default_lesson.get(
+                "storage_hil_device_allowlist", []
+            )
+        source["lesson"] = source_lesson
+    return source
+
+
+def _apply_websocket_ping_policy(config_data, local_config):
+    """Normalize heartbeat without merging unrelated local manager-domain keys."""
+    local_value = (
+        local_config.get("enable_websocket_ping")
+        if isinstance(local_config, Mapping)
+        else None
+    )
+    remote_value = (
+        config_data.get("enable_websocket_ping")
+        if isinstance(config_data, Mapping)
+        else None
+    )
+    if isinstance(local_value, bool):
+        config_data["enable_websocket_ping"] = local_value
+    elif isinstance(remote_value, bool):
+        config_data["enable_websocket_ping"] = remote_value
+    else:
+        config_data["enable_websocket_ping"] = DEFAULT_ENABLE_WEBSOCKET_PING
+    return config_data
 
 
 def normalize_voice_config(config):
@@ -423,6 +469,17 @@ def _parse_bool_env(name):
         return None
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+def _parse_strict_bool_env(name):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    normalized = raw.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
 def _parse_positive_int_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -432,6 +489,34 @@ def _parse_positive_int_env(name):
     except ValueError:
         return None
     return value if value > 0 else None
+
+def _parse_percent_env(name):
+    raw = _clean_env(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if 0 <= value <= 100 else None
+
+def _validate_lesson_rollout_file_config(lesson_cfg):
+    for key in ("motion_presets_enabled", "playful_interactions_enabled"):
+        if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
+            raise ValueError(f"lesson.{key} must be a boolean")
+
+
+def _normalize_storage_hil_device_allowlist(value):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 1:
+        raise ValueError("lesson storage HIL device allowlist must contain at most one MAC")
+    if not value:
+        return []
+    mac = value[0]
+    if not isinstance(mac, str) or _COLON_MAC_RE.fullmatch(mac.strip()) is None:
+        raise ValueError("lesson storage HIL device allowlist must contain one colon MAC")
+    return [mac.strip().lower()]
 
 def _apply_lesson_env_overrides(config):
     """LESSON_RUNTIME_ENABLED dark-rollout flag + lesson endpoints, so an operator
@@ -454,11 +539,18 @@ def _apply_lesson_env_overrides(config):
     LESSON_STEP_TIMEOUT_FLOOR_SEC -> lesson.step_timeout_floor_sec.
     LESSON_VOICE_RT_P95_DISABLE_MS -> lesson.voice_rt_p95_disable_ms.
     LESSON_MAX_ASSET_BYTES -> lesson.max_asset_bytes.
-    LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes."""
+    LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes.
+    LESSON_SD_CACHE_QUOTA_BYTES -> lesson.sd_cache_quota_bytes.
+    LESSON_SD_GC_FREE_PERCENT -> lesson.sd_gc_free_percent.
+    LESSON_SD_PRELOAD_MIN_FREE_PERCENT -> lesson.sd_preload_min_free_percent."""
     if not isinstance(config, Mapping):
         return config
 
     flag = _parse_bool_env("LESSON_RUNTIME_ENABLED")
+    motion_presets_flag = _parse_strict_bool_env("LESSON_MOTION_PRESETS_ENABLED")
+    playful_interactions_flag = _parse_strict_bool_env("LESSON_PLAYFUL_INTERACTIONS_ENABLED")
+    rollout_allowlist_raw = _clean_env("LESSON_ROLLOUT_DEVICE_ALLOWLIST")
+    storage_hil_allowlist_raw = _clean_env("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST")
     course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
     asset_origin = _clean_env("LESSON_ASSET_ORIGIN_BASE")
     asset_public_base = _clean_env("LESSON_ASSET_PUBLIC_BASE_URL")
@@ -469,6 +561,33 @@ def _apply_lesson_env_overrides(config):
     voice_rt_p95_disable_ms = _clean_env("LESSON_VOICE_RT_P95_DISABLE_MS")
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
     max_total_asset_bytes = _parse_positive_int_env("LESSON_MAX_TOTAL_ASSET_BYTES")
+    sd_cache_quota_bytes = _parse_positive_int_env("LESSON_SD_CACHE_QUOTA_BYTES")
+    sd_gc_free_percent = _parse_percent_env("LESSON_SD_GC_FREE_PERCENT")
+    sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
+    existing_lesson = config.get("lesson")
+    existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
+    _validate_lesson_rollout_file_config(existing_lesson)
+    if storage_hil_allowlist_raw is not None:
+        storage_hil_allowlist = _normalize_storage_hil_device_allowlist(
+            [part.strip() for part in storage_hil_allowlist_raw.split(",") if part.strip()]
+        )
+    else:
+        storage_hil_allowlist = _normalize_storage_hil_device_allowlist(
+            existing_lesson.get("storage_hil_device_allowlist")
+        )
+    effective_gc = sd_gc_free_percent if sd_gc_free_percent is not None else existing_lesson.get("sd_gc_free_percent", 20)
+    effective_preload = (
+        sd_preload_min_free_percent
+        if sd_preload_min_free_percent is not None
+        else existing_lesson.get("sd_preload_min_free_percent", 5)
+    )
+    try:
+        effective_gc = float(effective_gc)
+        effective_preload = float(effective_preload)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("lesson SD free-space percentages must be numeric")
+    if not 0 < effective_preload <= effective_gc <= 100:
+        raise ValueError("lesson SD percentages require 0 < preload_min <= gc_trigger <= 100")
     # Built-in sample-lesson DEMO flag (independent of runtime_enabled; NEVER coupled to
     # the production auto-enable below). LESSON_SAMPLE_ENABLED -> lesson.sample_lesson;
     # LESSON_SAMPLE_ASSET_BASE -> lesson.sample_asset_base_url (optional image host).
@@ -489,19 +608,75 @@ def _apply_lesson_env_overrides(config):
         and not voice_rt_p95_disable_ms
         and max_asset_bytes is None
         and max_total_asset_bytes is None
+        and sd_cache_quota_bytes is None
+        and sd_gc_free_percent is None
+        and sd_preload_min_free_percent is None
         and sample_flag is None
         and not sample_asset_base
         and not sample_step_dwell
         and not sample_mode
+        and motion_presets_flag is None
+        and playful_interactions_flag is None
+        and rollout_allowlist_raw is None
     ):
+        lesson_cfg = config.get("lesson")
+        if not isinstance(lesson_cfg, dict):
+            lesson_cfg = dict(lesson_cfg) if isinstance(lesson_cfg, Mapping) else {}
+            config["lesson"] = lesson_cfg
+        _validate_lesson_rollout_file_config(lesson_cfg)
+        lesson_cfg.setdefault("motion_presets_enabled", False)
+        lesson_cfg.setdefault("playful_interactions_enabled", False)
+        lesson_cfg.setdefault("rollout_device_allowlist", [])
+        lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
+        configured_allowlist = lesson_cfg["rollout_device_allowlist"]
+        if not isinstance(configured_allowlist, list) or not all(
+            isinstance(item, str) for item in configured_allowlist
+        ):
+            raise ValueError("lesson.rollout_device_allowlist must be a list of device identifiers")
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in configured_allowlist if item.strip()}
+        )
+        if (
+            lesson_cfg.get("motion_presets_enabled") is True
+            or lesson_cfg.get("playful_interactions_enabled") is True
+            or lesson_cfg.get("sample_lesson") is True
+        ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
+            raise ValueError("enabled lesson rollout controls require exactly one device")
         return config
 
     lesson_cfg = config.get("lesson")
-    if not isinstance(lesson_cfg, Mapping):
-        lesson_cfg = {}
+    if not isinstance(lesson_cfg, dict):
+        lesson_cfg = dict(lesson_cfg) if isinstance(lesson_cfg, Mapping) else {}
         config["lesson"] = lesson_cfg
+    _validate_lesson_rollout_file_config(lesson_cfg)
+    lesson_cfg.setdefault("motion_presets_enabled", False)
+    lesson_cfg.setdefault("playful_interactions_enabled", False)
+    lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
+    lesson_cfg["motion_presets_enabled"] = (
+        motion_presets_flag
+        if motion_presets_flag is not None
+        else lesson_cfg["motion_presets_enabled"]
+    )
+    lesson_cfg["playful_interactions_enabled"] = (
+        playful_interactions_flag
+        if playful_interactions_flag is not None
+        else lesson_cfg["playful_interactions_enabled"]
+    )
+    if rollout_allowlist_raw is not None:
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in rollout_allowlist_raw.split(",") if item.strip()}
+        )
+    else:
+        configured_allowlist = lesson_cfg.get("rollout_device_allowlist", [])
+        if not isinstance(configured_allowlist, list) or not all(
+            isinstance(item, str) for item in configured_allowlist
+        ):
+            raise ValueError("lesson.rollout_device_allowlist must be a list of device identifiers")
+        lesson_cfg["rollout_device_allowlist"] = sorted(
+            {item.strip().lower() for item in configured_allowlist if item.strip()}
+        )
     if asset_origin:
         lesson_cfg["asset_origin_base"] = asset_origin.rstrip("/")
     if asset_public_base:
@@ -526,6 +701,12 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["max_asset_bytes"] = max_asset_bytes
     if max_total_asset_bytes is not None:
         lesson_cfg["max_total_asset_bytes"] = max_total_asset_bytes
+    if sd_cache_quota_bytes is not None:
+        lesson_cfg["sd_cache_quota_bytes"] = sd_cache_quota_bytes
+    if sd_gc_free_percent is not None:
+        lesson_cfg["sd_gc_free_percent"] = sd_gc_free_percent
+    if sd_preload_min_free_percent is not None:
+        lesson_cfg["sd_preload_min_free_percent"] = sd_preload_min_free_percent
     if sample_flag is not None:
         lesson_cfg["sample_lesson"] = sample_flag
     if sample_asset_base:
@@ -549,6 +730,12 @@ def _apply_lesson_env_overrides(config):
         # production backend and MUST win over any shipped/stale committed
         # lesson.api_base default, so the runtime never pulls from a stale endpoint.
         lesson_cfg["api_base"] = normalized
+    if (
+        lesson_cfg.get("motion_presets_enabled") is True
+        or lesson_cfg.get("playful_interactions_enabled") is True
+        or lesson_cfg.get("sample_lesson") is True
+    ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
+        raise ValueError("enabled lesson rollout controls require exactly one device")
     # Auto-enable ONLY when an EXPLICIT backend URL env (course_url) is present — the
     # shipped lesson.api_base / server.api_url default is deliberately never enough to
     # arm production lessons (dark-by-default; see docstring + boot-guard).
@@ -771,6 +958,13 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "asset_pack_mount_root",
     "asset_cache_root",
     "asset_origin_base",
+    "sd_cache_quota_bytes",
+    "sd_gc_free_percent",
+    "sd_preload_min_free_percent",
+    "motion_presets_enabled",
+    "playful_interactions_enabled",
+    "rollout_device_allowlist",
+    "storage_hil_device_allowlist",
 )
 
 
@@ -879,10 +1073,11 @@ def load_config():
         custom_config = {}
 
     if custom_config.get("manager-api", {}).get("url"):
+        manager_source = _manager_api_source_config(default_config, custom_config)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            config = asyncio.run(get_config_from_api_async(custom_config))
+            config = asyncio.run(get_config_from_api_async(manager_source))
         else:
             raise RuntimeError(
                 "load_config() cannot fetch manager-api config from a running event loop; "
@@ -922,7 +1117,8 @@ async def load_config_async():
         custom_config = {}
 
     if custom_config.get("manager-api", {}).get("url"):
-        config = await get_config_from_api_async(custom_config)
+        manager_source = _manager_api_source_config(default_config, custom_config)
+        config = await get_config_from_api_async(manager_source)
     else:
         config = merge_configs(default_config, custom_config)
     config = _apply_server_endpoint_env_overrides(config)
@@ -975,6 +1171,7 @@ async def get_config_from_api_async(config):
     # If server has noprompt_templateThen read from local config
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    config_data = _apply_websocket_ping_policy(config_data, config)
     config_data = _apply_base_google_live_policy(config_data, config)
     # Manager-api payloads often omit lesson SD-pack / public asset knobs. Preserve
     # local data/.config.yaml (and later env overrides) so production lab/prod can

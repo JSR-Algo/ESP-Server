@@ -14,12 +14,15 @@ import org.apache.shiro.web.mgt.DefaultWebSecurityManager;
 import org.apache.shiro.web.session.mgt.DefaultWebSessionManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import jakarta.servlet.Filter;
 import tbot.modules.security.oauth2.Oauth2Filter;
 import tbot.modules.security.oauth2.Oauth2Realm;
 import tbot.modules.security.secret.ServerSecretFilter;
 import tbot.modules.sys.service.SysParamsService;
+import tbot.modules.device.security.DeviceChildProfileJwtFilter;
+import tbot.modules.device.security.DeviceChildProfileJwtVerifier;
 
 /**
  * ShiroConfig file of
@@ -28,6 +31,12 @@ import tbot.modules.sys.service.SysParamsService;
  */
 @Configuration
 public class ShiroConfig {
+    private DeviceChildProfileJwtVerifier childProfileJwtVerifier;
+
+    @Autowired(required = false)
+    void setChildProfileJwtVerifier(DeviceChildProfileJwtVerifier verifier) {
+        this.childProfileJwtVerifier = verifier;
+    }
 
     @Bean
     public DefaultWebSessionManager sessionManager() {
@@ -64,6 +73,7 @@ public class ShiroConfig {
         filters.put("oauth2", new Oauth2Filter());
         // Service key filter
         filters.put("server", new ServerSecretFilter(sysParamsService));
+        filters.put("childProfileJwt", new DeviceChildProfileJwtFilter(childProfileJwtVerifier));
         shiroFilter.setFilters(filters);
 
         // AddShirobuilt-in filter of
@@ -96,6 +106,7 @@ public class ShiroConfig {
         filterMap.put("/agent/chat-title/**", "server");
         filterMap.put("/agent/play/**", "anon");
         filterMap.put("/voiceClone/play/**", "anon");
+        filterMap.put("/internal/devices/*/child-profile", "childProfileJwt");
         filterMap.put("/**", "oauth2");
         shiroFilter.setFilterChainDefinitionMap(filterMap);
 

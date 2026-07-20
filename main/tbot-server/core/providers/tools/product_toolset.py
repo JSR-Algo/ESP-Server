@@ -72,31 +72,80 @@ def lesson_start_enabled(conn: Any) -> bool:
 
 
 def lesson_runtime_enabled(conn: Any) -> bool:
+    if not lesson_runtime_config_enabled(conn):
+        return False
     checker = getattr(conn, "_lesson_runtime_enabled", None)
     if callable(checker):
         try:
             return bool(checker())
         except Exception:
             return False
+    return True
+
+
+def lesson_runtime_config_enabled(conn: Any) -> bool:
+    """Fail-closed runtime admission for the single-device rollout."""
     config = getattr(conn, "config", None)
     lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
     if not isinstance(lesson_cfg, Mapping):
         return False
-    return bool(lesson_cfg.get("runtime_enabled", False))
+    if lesson_cfg.get("runtime_enabled") is not True:
+        return False
+    allowlist = lesson_cfg.get("rollout_device_allowlist")
+    if not isinstance(allowlist, list):
+        return False
+    normalized = {
+        item.strip().lower()
+        for item in allowlist
+        if isinstance(item, str) and item.strip()
+    }
+    if len(normalized) != 1:
+        return False
+    device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
+    return bool(device_id) and device_id in normalized
+
+
+def runtime_rollout_allows_device(conn: Any) -> bool:
+    """Require explicit single-device production rollout admission."""
+    return lesson_runtime_config_enabled(conn)
 
 
 def sample_lesson_enabled(conn: Any) -> bool:
     checker = getattr(conn, "_sample_lesson_enabled", None)
     if callable(checker):
         try:
-            return bool(checker())
+            configured = bool(checker())
         except Exception:
             return False
+        return configured and sample_rollout_allows_device(conn)
+    return sample_lesson_config_enabled(conn)
+
+
+def sample_lesson_config_enabled(conn: Any) -> bool:
     config = getattr(conn, "config", None)
     lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
     if not isinstance(lesson_cfg, Mapping):
         return False
-    return bool(lesson_cfg.get("sample_lesson", False))
+    return lesson_cfg.get("sample_lesson") is True and sample_rollout_allows_device(conn)
+
+
+def sample_rollout_allows_device(conn: Any) -> bool:
+    config = getattr(conn, "config", None)
+    lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    if not isinstance(lesson_cfg, Mapping):
+        return False
+    allowlist = lesson_cfg.get("rollout_device_allowlist")
+    if not isinstance(allowlist, list):
+        return False
+    normalized = {
+        item.strip().lower()
+        for item in allowlist
+        if isinstance(item, str) and item.strip()
+    }
+    if len(normalized) != 1:
+        return False
+    device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
+    return bool(device_id) and device_id in normalized
 
 
 def _configured_child_tools(conn: Any) -> list[str]:

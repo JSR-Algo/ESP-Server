@@ -93,7 +93,8 @@
             $route.path === '/feature-management' ||
             $route.path === '/course-management' ||
             $route.path === '/course-insights' ||
-            $route.path === '/lesson-monitoring',
+            $route.path === '/lesson-monitoring' ||
+            $route.path.startsWith('/lesson-visual-library'),
         }" @visible-change="handleParamDropdownVisibleChange">
           <span class="el-dropdown-link">
             <img loading="lazy" alt="" src="@/assets/header/param_management.png" :style="{
@@ -109,6 +110,7 @@
                   $route.path === '/course-management' ||
                   $route.path === '/course-insights' ||
                   $route.path === '/lesson-monitoring'
+                  || $route.path.startsWith('/lesson-visual-library')
                   ? 'brightness(0) invert(1)'
                   : 'None',
             }" />
@@ -151,6 +153,9 @@
             </el-dropdown-item>
             <el-dropdown-item @click.native="handleRouter('lessonMonitoring')">
               {{ $t("header.lessonMonitoring") }}
+            </el-dropdown-item>
+            <el-dropdown-item v-if="lessonCapabilities.sharedVisualAuthoring" @click.native="handleRouter('lessonVisualLibrary')">
+              {{ $t("header.lessonVisualLibrary") }}
             </el-dropdown-item>
           </el-dropdown-menu>
         </el-dropdown>
@@ -210,6 +215,7 @@ import i18n, { changeLanguage } from "@/i18n";
 import { mapActions, mapState } from "vuex";
 import ChangePasswordDialog from "./ChangePasswordDialog.vue"; // Import change password popup component
 import featureManager from "@/utils/featureManager"; // Import feature management utility class
+import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from "@/utils/lessonRolloutCapabilities";
 
 export default {
   name: "HeaderBar",
@@ -231,6 +237,7 @@ export default {
       showHistory: false,
       SEARCH_HISTORY_KEY: "tbot_search_history",
       MAX_HISTORY_COUNT: 3,
+      lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
       // Cascader Config
       cascaderProps: {
         expandTrigger: "click",
@@ -257,6 +264,7 @@ export default {
         courseManagement: "/course-management",
         courseInsights: "/course-insights",
         lessonMonitoring: "/lesson-monitoring",
+        lessonVisualLibrary: "/lesson-visual-library",
       }
     };
   },
@@ -343,6 +351,7 @@ export default {
     this.loadSearchHistory();
     // WaitfeatureManagerLoad features after initialization completeStatus
     await this.loadFeatureStatus();
+    this.lessonCapabilities = await loadLessonRolloutCapabilities();
   },
   //RemoveEventListener
   beforeDestroy() {

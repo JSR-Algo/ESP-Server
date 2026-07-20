@@ -1,12 +1,11 @@
-"""CR-RUN-12 — republish-on-connect evict + re-pull (tear-down ordering).
+"""CR-RUN-12 — republish-on-connect two-phase candidate activation.
 
 Exercises the version/checksum-diff branch of
 ``core.lesson.runtime._maybe_start_lesson_on_connect_impl`` (runtime.py ~1362-1423):
 
 * a runtime is already pinned for THIS assignment;
 * the backend serves a NEW manifest version (different lessonVersion/checksum);
-* the stale version's bytes are EVICTED **before** the old runtime is closed, then a
-  fresh runtime is re-pulled in place (``conn.lesson_runtime`` is replaced); and
+* the old version remains previous-known-good until a fresh runtime is READY; and
 * the whole tear-down + re-pull is DEFERRED (no evict, no close, old runtime kept)
   while ``conn.is_realtime_busy()`` is True, so it never interrupts a voice turn.
 
@@ -133,11 +132,11 @@ class _FakeWS:
 
 
 class _FakeExistingCache:
-    """Stand-in for the OLD version's asset_cache. ``evict`` is the tear-down hook the
-    republish branch must call (and call BEFORE the runtime is closed)."""
+    """Stand-in for the exact old version/checksum cache retained for rollback."""
 
     def __init__(self, calls):
         self._calls = calls
+        self.cache_key = "w01-d01-barn-say-it/v3-aaaaaaaa"
 
     async def evict(self):
         self._calls.append("evict")
@@ -180,8 +179,55 @@ class _FakeNewRuntime:
     async def start(self):
         self.started = True
 
+    async def preload_only(self):
+        self.started = True
+        return self.state != rt_mod.S_FAILED
+
+    async def start_protocol(self, *, preloaded=False):
+        return None
+
     async def close(self):
         self.closed = True
+
+
+class _FailingCandidateRuntime(_FakeNewRuntime):
+    async def preload_only(self):
+        self.started = True
+        self.state = rt_mod.S_FAILED
+        return False
+
+
+class _ObservingCandidateRuntime(_FakeNewRuntime):
+    active_during_start = None
+    candidate_during_start = None
+
+    async def preload_only(self):
+        type(self).active_during_start = self.conn.lesson_runtime
+        type(self).candidate_during_start = getattr(self.conn, "lesson_runtime_candidate", None)
+        self.started = True
+        return True
+
+
+class _CrashingCandidateRuntime(_FakeNewRuntime):
+    async def preload_only(self):
+        raise RuntimeError("candidate preload crashed")
+
+
+class _SynchronousAckCandidateRuntime(_FakeNewRuntime):
+    ack_count = 0
+
+    async def on_lesson_ack(self, _message):
+        type(self).ack_count += 1
+
+    async def start_protocol(self, *, preloaded=False):
+        from core.handle.textHandler.lessonMessageHandler import _dispatch
+
+        await _dispatch(self.conn, {"type": "lesson_ack", "body": {"acks": 1}}, "on_lesson_ack")
+
+
+class _NoSpaceGc:
+    def can_preload(self):
+        return False
 
 
 class _FakeConn:
@@ -248,7 +294,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(rt_mod, "LessonRuntime", new=_FakeNewRuntime),
         ]
 
-    async def test_version_change_evicts_then_re_pulls_in_order(self):
+    async def test_version_change_activates_candidate_then_closes_old_runtime(self):
         _FakeNewRuntime.instances = []
         calls = []
         conn = _FakeConn(busy=False)
@@ -270,11 +316,14 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             for p in patches:
                 p.stop()
 
-        # The OLD cache was evicted, and that eviction happened BEFORE the old runtime
-        # was closed (tear-down ordering — evict the disjoint version-scoped bytes,
-        # then aclose the client). This is the load-bearing ordering assertion.
-        self.assertEqual(calls, ["evict", "close"])
+        # The old runtime closes only after the candidate starts, while its exact
+        # cache identity remains retained as previous-known-good for rollback.
+        self.assertEqual(calls, ["close"])
         self.assertTrue(existing.closed)
+        self.assertEqual(
+            conn.lesson_previous_known_good_cache_key,
+            "w01-d01-barn-say-it/v3-aaaaaaaa",
+        )
 
         # A FRESH runtime was re-pulled in place for the republished version, carrying
         # the NEW manifest checksum, started, and pinned on the connection.
@@ -285,6 +334,166 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(result, existing)
         self.assertEqual(new_rt.manifest_checksum, CHK_V2)
         self.assertTrue(new_rt.started)
+
+    async def test_failed_republish_candidate_keeps_old_known_good_runtime_and_cache(self):
+        _FailingCandidateRuntime.instances = []
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_FailingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertFalse(existing.closed)
+        self.assertEqual(calls, [])
+
+    async def test_failed_candidate_for_different_assignment_keeps_old_runtime(self):
+        _FailingCandidateRuntime.instances = []
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        assignment = _assignment(lesson_version=4, assignment_version=2)
+        assignment["assignmentId"] = "asg-2"
+        patches = self._patches(assignment=assignment, manifest=_manifest(), etag=ETAG_V2)
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_FailingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertFalse(existing.closed)
+        self.assertEqual(calls, [])
+
+    async def test_candidate_does_not_take_active_routing_slot_until_start_succeeds(self):
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_ObservingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(_ObservingCandidateRuntime.active_during_start, existing)
+        self.assertIs(_ObservingCandidateRuntime.candidate_during_start, result)
+        self.assertIs(conn.lesson_runtime, result)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+
+    async def test_candidate_exception_clears_candidate_and_preserves_active_runtime(self):
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(rt_mod, "LessonRuntime", new=_CrashingCandidateRuntime)
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertFalse(existing.closed)
+
+    async def test_synchronous_prepare_ack_routes_to_candidate_after_atomic_swap(self):
+        _SynchronousAckCandidateRuntime.ack_count = 0
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches[-1] = mock.patch.object(
+            rt_mod, "LessonRuntime", new=_SynchronousAckCandidateRuntime
+        )
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertEqual(_SynchronousAckCandidateRuntime.ack_count, 1)
+        self.assertIs(conn.lesson_runtime, result)
+        self.assertTrue(existing.closed)
+
+    async def test_republish_refuses_candidate_below_five_percent_sd_free(self):
+        _FakeNewRuntime.instances = []
+        calls = []
+        conn = _FakeConn(busy=False)
+        existing = _FakeExistingRuntime(
+            calls, lesson_version=3, assignment_version=1, checksum=CHK_V1
+        )
+        conn.lesson_runtime = existing
+        patches = self._patches(
+            assignment=_assignment(lesson_version=4, assignment_version=2),
+            manifest=_manifest(),
+            etag=ETAG_V2,
+        )
+        patches.append(mock.patch.object(rt_mod, "_sd_pack_gc_for_connection", return_value=_NoSpaceGc()))
+        for patcher in patches:
+            patcher.start()
+        try:
+            result = await rt_mod._maybe_start_lesson_on_connect_impl(conn)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+
+        self.assertIs(result, existing)
+        self.assertIs(conn.lesson_runtime, existing)
+        self.assertEqual(conn.lesson_start_status["code"], "SD_PRELOAD_SPACE_LOW")
+        self.assertEqual(calls, [])
+        self.assertEqual(_FakeNewRuntime.instances, [])
 
     async def test_checksum_change_at_same_versions_evicts_then_re_pulls(self):
         """Author republish can keep lessonVersion/assignmentVersion stable while
@@ -317,7 +526,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             for p in patches:
                 p.stop()
 
-        self.assertEqual(calls, ["evict", "close"])
+        self.assertEqual(calls, ["close"])
         self.assertTrue(existing.closed)
         self.assertEqual(len(_FakeNewRuntime.instances), 1)
         new_rt = _FakeNewRuntime.instances[0]
@@ -359,7 +568,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             for p in patches:
                 p.stop()
 
-        self.assertEqual(calls, ["evict", "close"])
+        self.assertEqual(calls, ["close"])
         self.assertIs(result, conn.lesson_runtime)
         self.assertEqual(len(_FakeNewRuntime.instances), 1)
         new_manifest = _FakeNewRuntime.instances[0].kwargs["manifest"]

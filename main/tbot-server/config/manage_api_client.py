@@ -348,6 +348,7 @@ LESSON_EVENT_SENSITIVE_DETAIL_KEYS = {
     "correctness",
     "assessment",
     "evaluation",
+    "confidence",
 }
 
 def _lesson_sensitive_key(key: str) -> str:

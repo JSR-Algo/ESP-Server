@@ -44,7 +44,63 @@ export function validateAssetListResponse(payload) {
   return payload;
 }
 
+function normalizeVisualAsset(raw) {
+  const r = raw || {};
+  return {
+    assetId: r.id ?? r.assetId ?? '', assetKey: r.asset_key ?? r.assetKey ?? '', category: r.category ?? '', title: r.title ?? '',
+    versionId: r.version_id ?? r.versionId ?? '', version: Number(r.version ?? 0), profile: r.profile ?? '', storagePath: r.storage_path ?? r.storagePath ?? '',
+    sha256: r.sha256 ?? '', mimeType: r.mime_type ?? r.mimeType ?? '', bytes: Number(r.bytes ?? 0), width: Number(r.width ?? 0), height: Number(r.height ?? 0),
+    publicationState: r.publication_state ?? r.publicationState ?? 'draft', usageCount: Number(r.usage_count ?? r.usageCount ?? 0),
+  };
+}
+
 export default {
+  getRolloutCapabilities(onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lesson-rollout-capabilities`,
+      method: 'GET',
+      onSuccess,
+      onError,
+    });
+  },
+
+  listVisualAssets(filters, onSuccess, onError) {
+    const query = new URLSearchParams();
+    if (filters && filters.category) query.set('category', filters.category);
+    if (filters && filters.profile) query.set('profile', filters.profile);
+    // Force authoring refreshes past intermediary/browser validation caches.
+    query.set('_', String(Date.now()));
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets${query.toString() ? `?${query}` : ''}`, method: 'GET', onSuccess: (p) => onSuccess((Array.isArray(p) ? p : []).map(normalizeVisualAsset)), onError });
+  },
+
+  getVisualAssetDetail(assetKey, filters, onSuccess, onError) {
+    const query = new URLSearchParams();
+    if (filters && filters.sourceVersionId) query.set('sourceVersionId', filters.sourceVersionId);
+    if (filters && filters.profile) query.set('profile', filters.profile);
+    nestRequest({
+      url: `${getNestUrl()}/lesson-visual-assets/${encodeURIComponent(assetKey)}${query.toString() ? `?${query}` : ''}`,
+      method: 'GET',
+      onSuccess: (payload) => {
+        const p = payload || {};
+        const asset = p.asset || {};
+        onSuccess({
+          asset: { assetId: asset.id || '', assetKey: asset.asset_key || asset.assetKey || assetKey, category: asset.category || '', title: asset.title || '' },
+          sourceVersionId: p.sourceVersionId || p.source_version_id || '',
+          versions: (Array.isArray(p.versions) ? p.versions : []).map((row) => normalizeVisualAsset({ ...row, id: asset.id, asset_key: asset.asset_key, category: asset.category, title: asset.title })),
+          usages: Array.isArray(p.usages) ? p.usages : [],
+        });
+      },
+      onError,
+    });
+  },
+
+  visualReplacementImpact(data, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets/replacements/impact`, method: 'POST', data, onSuccess, onError });
+  },
+
+  replaceVisualAsset(data, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/lesson-visual-assets/replacements`, method: 'POST', data, onSuccess, onError });
+  },
   // GET /v1/admin/courses/:courseId/lessons -> Lesson[]
   listLessons(courseId, onSuccess, onError) {
     nestRequest({
@@ -160,6 +216,7 @@ export default {
       l1TransferHint: input.l1TransferHint || undefined,
       choices: input.choices || undefined,
       stepBody: input.stepBody || {},
+      visualRefs: Array.isArray(input.visualRefs) ? input.visualRefs : undefined,
     };
     if (input.renderOverride && input.renderOverride.expression) data.renderOverride = input.renderOverride;
     nestRequest({

@@ -1,14 +1,17 @@
 import asyncio
 import json
+
 from aiohttp import web
+
 from config.logger import setup_logging
-from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
-from core.api.vision_handler import VisionHandler
-from core.api.lesson_nudge_handler import LessonNudgeHandler
+from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
-from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+from core.api.lesson_nudge_handler import LessonNudgeHandler
+from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
+from core.api.vision_handler import VisionHandler
 
 TAG = __name__
 
@@ -34,6 +37,10 @@ class SimpleHttpServer:
             self.lesson_connections,
         )
         self.lesson_sd_fanout_handler = LessonSdFanoutHandler(
+            config,
+            self.lesson_connections,
+        )
+        self.lesson_sd_evict_handler = LessonSdEvictHandler(
             config,
             self.lesson_connections,
         )
@@ -107,6 +114,10 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/devices/{deviceId}/lesson-child-response",
                             self.lesson_nudge_handler.handle_child_response_post,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/lesson-assets/evict-cache-key",
+                            self.lesson_sd_evict_handler.handle_post,
                         ),
                         web.post(
                             "/internal/devices/{deviceId}/mcp-call",

@@ -3,6 +3,7 @@ package tbot.modules.device.dao;
 import java.util.Date;
 
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
@@ -17,5 +18,13 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
      * @return
      */
     Date getAllLastConnectedAtByAgentId(String agentId);
+
+    DeviceEntity selectChildProfileForUpdate(@Param("deviceId") String deviceId);
+
+    int replaceChildProfile(DeviceEntity device);
+
+    int clearChildProfile(DeviceEntity device);
+
+    int updateDeviceInfo(DeviceEntity device);
 
 }

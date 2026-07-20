@@ -96,6 +96,51 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
 
 
 @pytest.mark.asyncio
+async def test_raw_mcp_dispatch_uses_physical_copy_and_preserves_render_pack(monkeypatch):
+    checksum = "a" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack = {
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "localRoot": f"sd://tbot/lesson-assets/{cache_key}",
+        "assets": [
+            {
+                "key": "folder/poster one.png",
+                "path": "assets/poster one.png",
+                "url": "https://assets.example/poster.png",
+                "sha256": "b" * 64,
+                "localPath": f"sd://tbot/lesson-assets/{cache_key}/folder%2Fposter%20one.png",
+            }
+        ],
+    }
+    original = json.loads(json.dumps(pack))
+    calls = []
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_pack_mount_root": "/opt/tbot-esp32-server/data/lesson-packs"
+            }
+        }
+
+    async def capture(_conn, _client, tool, arguments, timeout):
+        calls.append((tool, arguments, timeout))
+        return {"ready": True}
+
+    monkeypatch.setattr(
+        "core.api.device_mcp_admin_handler._call_raw_mcp_tool", capture
+    )
+    await sd_pack_sync.call_sd_pack_sync_tool(Conn(), object(), pack)
+
+    assert pack == original
+    sent = calls[0][1]["assetPack"]
+    assert sent["localRoot"] == f"/sdcard/tbot/lesson-assets/{cache_key}"
+    assert sent["assets"][0]["localPath"].endswith(
+        "/folder%2Fposter%20one.png"
+    )
+
+
+@pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_skips_when_sd_pack_disabled(tmp_path):
     class Conn:
         config = {"lesson": {"asset_delivery_mode": "http_pull"}}
@@ -104,6 +149,123 @@ async def test_sync_cached_lesson_assets_to_sd_skips_when_sd_pack_disabled(tmp_p
     result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
 
     assert result["skipped"] == "sd_pack_disabled"
+
+
+@pytest.mark.asyncio
+async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v1-a"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "poster").write_bytes(b"a")
+    busy = [True, False]
+    sleeps = []
+    calls = []
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, pack):
+        calls.append(pack["cacheKey"])
+        return {"ready": True}
+
+    async def fake_sleep(_delay):
+        sleeps.append("paused")
+
+    def busy_check():
+        return busy.pop(0) if busy else False
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(
+        Conn(), busy_check=busy_check, sleep=fake_sleep
+    )
+
+    assert result["synced"] == 1
+    assert sleeps == ["paused"]
+    assert calls == ["lesson-a/v1-a"]
+
+
+@pytest.mark.asyncio
+async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_transfer(
+    monkeypatch, tmp_path
+):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v1-a"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "poster").write_bytes(b"a")
+    transfer_started = asyncio.Event()
+    first_cancelled = asyncio.Event()
+    attempts = []
+    busy = {"value": False}
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, pack):
+        attempts.append(pack["cacheKey"])
+        if len(attempts) == 1:
+            transfer_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                first_cancelled.set()
+                raise
+        return {"ready": True}
+
+    async def flip_busy():
+        await transfer_started.wait()
+        busy["value"] = True
+        await first_cancelled.wait()
+        busy["value"] = False
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    flipper = asyncio.create_task(flip_busy())
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(
+        Conn(), busy_check=lambda: busy["value"], poll_interval=0
+    )
+    await flipper
+
+    assert result["synced"] == 1
+    assert attempts == ["lesson-a/v1-a", "lesson-a/v1-a"]
+
+
+def test_cached_asset_packs_ignore_configured_sd_pack_without_valid_ready(tmp_path):
+    cache_root = tmp_path / "cache"
+    cached = cache_root / "lesson-a" / "v1-a"
+    cached.mkdir(parents=True)
+    (cached / "poster").write_bytes(b"a")
+    sd_root = tmp_path / "sd" / "lesson-assets"
+    (sd_root / "lesson-a" / "v1-a").mkdir(parents=True)
+    config = {
+        "lesson": {
+            "asset_cache_root": str(cache_root),
+            "asset_pack_mount_root": str(sd_root),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    assert list(sd_pack_sync.cached_asset_packs(config)) == []
 
 
 @pytest.mark.asyncio

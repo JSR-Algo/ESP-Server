@@ -274,7 +274,7 @@ class RepublishBranchTest(unittest.IsolatedAsyncioTestCase):
         patches = _patches(assignment=_assignment(4, 2), runtime_cls=_HealthyRuntime)
         result = await _run_impl(conn, patches)
 
-        self.assertEqual(teardown, ["evict", "close"])
+        self.assertEqual(teardown, ["close"])
         self.assertEqual(len(_HealthyRuntime.instances), 1)
         self.assertIs(result, _HealthyRuntime.instances[0])
 

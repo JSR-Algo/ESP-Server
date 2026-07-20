@@ -8,9 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterator, Optional, Set
 from urllib.parse import quote
 
+from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
 from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
@@ -24,6 +26,11 @@ def cached_asset_packs(config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     cache_root = Path(lesson_cfg.get("asset_cache_root") or DEFAULT_CACHE_ROOT)
     public_base = _lesson_asset_public_base_url(config)
     local_root = str(lesson_cfg.get("asset_pack_local_root") or DEFAULT_LOCAL_ROOT).rstrip("/")
+    pack_mount_root = lesson_cfg.get("asset_pack_mount_root")
+    shared_store = None
+    if pack_mount_root:
+        mounted = Path(str(pack_mount_root)).resolve()
+        shared_store = SharedAssetStore(mounted.parent, pack_root=mounted)
     if not public_base or not cache_root.is_dir():
         return
 
@@ -35,6 +42,8 @@ def cached_asset_packs(config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
             continue
         pack_dir = Path(dirpath)
         cache_key = pack_dir.relative_to(root).as_posix()
+        if shared_store is not None and not shared_store.is_pack_ready(cache_key):
+            continue
         assets = []
         token = base64.urlsafe_b64encode(cache_key.encode("utf-8")).decode("ascii").rstrip("=")
         for name in asset_names:
@@ -69,6 +78,9 @@ async def sync_cached_lesson_assets_to_sd(
     conn: Any,
     *,
     only_cache_keys: Optional[set] = None,
+    busy_check: Optional[Callable[[], bool]] = None,
+    sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+    poll_interval: float = 0.1,
 ) -> Dict[str, Any]:
     config = getattr(conn, "config", {}) or {}
     if not _sd_pack_enabled(config):
@@ -80,6 +92,8 @@ async def sync_cached_lesson_assets_to_sd(
     if callable(is_ready) and not await is_ready():
         return {"skipped": "mcp_not_ready"}
     synced = failed = 0
+    is_busy = busy_check or getattr(conn, "is_realtime_busy", None) or (lambda: False)
+    pause = sleep or asyncio.sleep
     packs = list(cached_asset_packs(config))
     if only_cache_keys is not None and len(only_cache_keys) > 0:
         packs = [
@@ -88,8 +102,17 @@ async def sync_cached_lesson_assets_to_sd(
             if str(pack.get("cacheKey") or "") in only_cache_keys
         ]
     for pack in packs:
+        while is_busy():
+            await pause(poll_interval)
         try:
-            result = await call_sd_pack_sync_tool(conn, mcp_client, pack)
+            result = await _call_sd_pack_sync_with_voice_guard(
+                conn,
+                mcp_client,
+                pack,
+                busy_check=is_busy,
+                sleep=pause,
+                poll_interval=poll_interval,
+            )
             if _sync_result_ready(result):
                 synced += 1
             else:
@@ -107,14 +130,47 @@ async def sync_cached_lesson_assets_to_sd(
     return {"packs": len(packs), "synced": synced, "failed": failed}
 
 
+async def _call_sd_pack_sync_with_voice_guard(
+    conn: Any,
+    mcp_client: Any,
+    pack: Dict[str, Any],
+    *,
+    busy_check: Callable[[], bool],
+    sleep: Callable[[float], Awaitable[None]],
+    poll_interval: float,
+) -> Any:
+    """Cancel an idempotent pack sync when voice wins, then retry from READY state."""
+    interval = max(0.001, float(poll_interval))
+    while True:
+        while busy_check():
+            await sleep(poll_interval)
+        transfer = asyncio.create_task(call_sd_pack_sync_tool(conn, mcp_client, pack))
+        try:
+            while not transfer.done():
+                await asyncio.sleep(0)
+                if busy_check():
+                    transfer.cancel()
+                    await asyncio.gather(transfer, return_exceptions=True)
+                    break
+                await asyncio.wait({transfer}, timeout=interval)
+            else:
+                return await transfer
+        except asyncio.CancelledError:
+            transfer.cancel()
+            await asyncio.gather(transfer, return_exceptions=True)
+            raise
+
+
 async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: Dict[str, Any]) -> Any:
     from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+    mcp_pack = build_firmware_sync_pack(pack)
 
     return await _call_raw_mcp_tool(
         conn,
         mcp_client,
         SD_PACK_SYNC_TOOL,
-        {"assetPack": pack},
+        {"assetPack": mcp_pack},
         timeout=SD_PACK_SYNC_TIMEOUT_SEC,
     )
 

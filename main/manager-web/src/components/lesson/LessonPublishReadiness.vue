@@ -11,6 +11,14 @@
       </div>
     </div>
 
+    <div v-if="issues.length" class="readiness__issues" aria-label="Validation issues">
+      <article v-for="issue in issues" :key="issue.key" :class="['readiness__issue', `is-${issue.level}`]" :data-testid="`readiness-${issue.level}-${issue.code}`">
+        <div><strong>{{ issue.code }}</strong><el-tag :type="issue.level === 'error' ? 'danger' : 'warning'" size="mini">{{ issue.level }}</el-tag></div>
+        <p>{{ issue.message }}</p>
+        <small v-if="issue.reference">{{ issue.reference }}</small>
+      </article>
+    </div>
+
     <div class="validation-result" data-testid="validation-result">
       <div class="validation-result__head">
         <strong>{{ $t('lesson.serverValidation') }}</strong>
@@ -51,12 +59,13 @@ export default {
     steps: { type: Array, default: () => [] },
     assets: { type: Array, default: () => [] },
     manifest: { type: Object, default: () => ({}) },
+    validation: { type: Object, default: null },
     validationResult: { type: Object, default: null },
     validationCurrent: { type: Boolean, default: false },
   },
   computed: {
     metrics() {
-      return calculateReadiness({ steps: this.steps, assets: this.assets, manifest: this.manifest });
+      return calculateReadiness({ steps: this.steps, assets: this.assets, manifest: this.manifest, validation: this.validation });
     },
     validationProfiles() {
       const profiles = this.validationResult && this.validationResult.profiles;
@@ -90,7 +99,7 @@ export default {
       return [
         { key: 'download', label: this.$t('lesson.budgetDownload'), value: this.formatBytes(this.metrics.downloadBytes), pass: Number.isFinite(Number(this.metrics.downloadBytes)) },
         { key: 'assets', label: this.$t('lesson.budgetAssets'), value: `${this.metrics.uniqueAssetCount} / ${this.metrics.sharedReferenceCount}`, pass: true },
-        { key: 'psram', label: this.$t('lesson.budgetPsram'), value: this.formatBytes(this.metrics.estimatedPeakPsram), pass: this.metrics.estimatedPeakPsram <= 1572864 },
+        { key: 'psram', label: this.$t('lesson.budgetPsram'), value: `${this.formatBytes(this.metrics.estimatedPeakPsram)}${this.metrics.estimateOnly ? ' (est.)' : ''}`, pass: this.metrics.estimatedPeakPsram <= 1572864 },
         { key: 'offline', label: this.$t('lesson.budgetOffline'), value: this.metrics.offlineReady ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.offlineReady },
         { key: 'paths', label: this.$t('lesson.budgetPaths'), value: this.metrics.allPathsTerminate ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.allPathsTerminate },
       ];
@@ -98,8 +107,21 @@ export default {
     budgetsReady() {
       return this.budgetRows.every((row) => row.pass);
     },
+    issues() {
+      const normalize = (issue, level, index) => {
+        const row = typeof issue === 'string' ? { message: issue } : (issue || {});
+        const code = row.code || `${level}-${index + 1}`;
+        const reference = row.stepKey ? `Step: ${row.stepKey}` : (row.assetKey ? `Asset: ${row.assetKey}` : '');
+        return { ...row, code, level, reference, message: row.message || code, key: `${level}-${code}-${reference}-${index}` };
+      };
+      return [
+        ...this.metrics.errors.map((issue, index) => normalize(issue, 'error', index)),
+        ...this.metrics.warnings.map((issue, index) => normalize(issue, 'warning', index)),
+      ];
+    },
     ready() {
-      return this.validationReady && this.budgetsReady;
+      if (this.validationResult) return this.validationReady && this.budgetsReady;
+      return !this.metrics.estimateOnly && this.metrics.errors.length === 0 && this.metrics.offlineReady && this.metrics.allPathsTerminate && this.metrics.estimatedPeakPsram <= 1572864;
     },
   },
   watch: {
@@ -134,6 +156,12 @@ export default {
 .readiness__grid>div.is-failing { border-color:#f3a89d; }
 .readiness__grid span,.validation-profiles span { color:#b9cbc5; font-size:11px; text-transform:uppercase; }
 .readiness__grid strong { font-size:13px; }
+.readiness__issues{display:grid;gap:8px;margin-top:14px}
+.readiness__issue{border-left:4px solid #e4a23b;border-radius:8px;background:rgba(255,255,255,.09);padding:10px 12px}
+.readiness__issue.is-error{border-left-color:#ff6b57}
+.readiness__issue div{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.readiness__issue p{margin:6px 0 0}
+.readiness__issue small{display:block;margin-top:5px;color:#c8d8d2}
 .validation-result { background:rgba(255,255,255,.07); border-radius:12px; margin-top:12px; padding:12px; }
 .validation-result__head { justify-content:flex-start; }
 .validation-profiles { justify-content:flex-start; margin-top:10px; }

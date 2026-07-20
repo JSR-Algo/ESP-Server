@@ -27,8 +27,22 @@ export default {
   'header.courseManagement': 'Courses',
   'header.courseInsights': 'Learner & Quality',
   'header.lessonMonitoring': 'Lesson Monitoring',
+  'header.lessonVisualLibrary': 'Visual Library',
   'header.changePassword': 'Change Password',
   'header.logout': 'Logout',
+
+  'visual.libraryTitle': 'Shared visual library',
+  'visual.libraryHint': 'Inspect immutable artwork versions and safely update every lesson that pins them.',
+  'visual.search': 'Search asset key or title', 'visual.category': 'Category', 'visual.profile': 'Profile', 'visual.profiles': 'Profiles',
+  'visual.assetKey': 'Asset key', 'visual.pinnedVersion': 'Pinned version', 'visual.usageCount': 'Uses', 'visual.inspect': 'Inspect',
+  'visual.loadFail': 'Failed to load visual assets', 'visual.dimensions': 'Dimensions', 'visual.bytes': 'File size',
+  'visual.derivativeComparison': 'Source / robot derivative', 'visual.metric': 'Metric', 'visual.source': 'Source', 'visual.robotDerivative': 'Robot derivative',
+  'visual.replaceTitle': 'Replace pinned version', 'visual.sourceVersion': 'Version being replaced', 'visual.targetVersion': 'Replacement version', 'visual.mode': 'Replacement mode',
+  'visual.affectedLessons': 'Affected lessons', 'visual.lessonIdsHint': 'Paste lesson UUIDs', 'visual.cloneHint': 'Creates a private draft asset for exactly one current draft lesson. The shared source remains unchanged.',
+  'visual.reviewImpact': 'Review replacement', 'visual.impactTitle': 'Confirm lesson impact', 'visual.impactWarning': 'Published lessons will branch to new drafts. Review active assignments before continuing.',
+  'visual.courses': 'Courses', 'visual.lessons': 'Lessons', 'visual.publishedVersions': 'Published versions', 'visual.activeAssignments': 'Active assignments',
+  'visual.impactMode': 'Mode', 'visual.confirmReplace': 'Replace versions', 'visual.replaced': 'Visual references updated', 'visual.affectedLessonsCount': '{count} lesson references use this pinned version.',
+  'visual.course': 'Course', 'visual.lesson': 'Lesson',
 
   // Course customization (NestJS authoring API via /nestjs proxy)
   'course.pageTitle': 'Courses',

@@ -113,6 +113,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     }
 
     @Override
+    public int updateDeviceInfo(DeviceEntity device) {
+        return deviceDao.updateDeviceInfo(device);
+    }
+
+    @Override
     public Boolean deviceActivation(String agentId, String activationCode) {
         if (StringUtils.isBlank(activationCode)) {
             throw new RenException(ErrorCode.ACTIVATION_CODE_EMPTY);

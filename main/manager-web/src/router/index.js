@@ -1,5 +1,7 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
+import { getLessonRolloutSessionKey, loadLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities'
+import { isLessonCapabilityNavigationCurrent } from '@/utils/lessonRolloutCapabilitiesCore.mjs'
 
 Vue.use(VueRouter)
 
@@ -259,6 +261,18 @@ const routes = [
     }
   },
   {
+    path: '/lesson-visual-library',
+    name: 'LessonVisualLibrary',
+    component: function () { return import('../views/LessonVisualLibrary.vue') },
+    meta: { requiresAuth: true, requiresSuperAdmin: true, requiredLessonCapability: 'sharedVisualAuthoring', title: 'Lesson visual library' }
+  },
+  {
+    path: '/lesson-visual-library/:assetKey',
+    name: 'LessonVisualAssetDetail',
+    component: function () { return import('../views/LessonVisualAssetDetail.vue') },
+    meta: { requiresAuth: true, requiresSuperAdmin: true, requiredLessonCapability: 'sharedVisualAuthoring', title: 'Lesson visual asset' }
+  },
+  {
     path: '/course-insights',
     name: 'CourseInsights',
     component: function () {
@@ -291,10 +305,10 @@ VueRouter.prototype.push = function push(location) {
 }
 
 // NeedLoginRoute requiring access
-const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights']
+const protectedRoutes = ['home', 'RoleConfig', 'DeviceManagement', 'UserManagement', 'ModelConfig', 'KnowledgeBaseManagement', 'KnowledgeFileUpload', 'CourseManagement', 'CourseLessons', 'LessonEditor', 'LessonMonitoring', 'CourseInsights', 'LessonVisualLibrary', 'LessonVisualAssetDetail']
 
 // Route Guard
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   // Check whether route needs protection
   if (protectedRoutes.includes(to.name)) {
     // fromlocalStorageGettoken
@@ -319,6 +333,33 @@ router.beforeEach((to, from, next) => {
     }
     if (!isSuperAdmin) {
       // Logged-in non-super-admin: deny access, send to home
+      next({ name: 'home' })
+      return
+    }
+  }
+
+  const capabilityRecord = to.matched.find(record => record.meta && record.meta.requiredLessonCapability)
+  if (capabilityRecord) {
+    const requiredCapability = capabilityRecord.meta.requiredLessonCapability
+    const capabilitySessionKey = getLessonRolloutSessionKey()
+    const capabilities = await loadLessonRolloutCapabilities()
+    let remainsAuthorized = true
+    if (to.matched.some(record => record.meta && record.meta.requiresSuperAdmin)) {
+      try {
+        remainsAuthorized = !!JSON.parse(localStorage.getItem('userInfo') || '{}').superAdmin
+      } catch (e) {
+        remainsAuthorized = false
+      }
+    }
+    if (!isLessonCapabilityNavigationCurrent(
+      capabilitySessionKey,
+      getLessonRolloutSessionKey(),
+      remainsAuthorized,
+    )) {
+      next({ name: getLessonRolloutSessionKey() ? 'home' : 'login' })
+      return
+    }
+    if (!capabilities[requiredCapability]) {
       next({ name: 'home' })
       return
     }

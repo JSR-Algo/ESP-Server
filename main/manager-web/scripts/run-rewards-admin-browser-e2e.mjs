@@ -267,7 +267,7 @@ const outcome = await executeWithSignalFinalization({
     browserTotp = computeTotp(adminMfaSecret);
     forbiddenArtifactValues.push(browserTotp);
 
-    await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.config.js'], {
+    await runCommand('npm', ['exec', '--', 'playwright', 'test', '--config=playwright.rewards.config.js'], {
       cwd: managerRoot,
       env: {
         ...buildBrowserEnvironment({ baseEnv: process.env, backendUrl: backend.url, managerPort }),

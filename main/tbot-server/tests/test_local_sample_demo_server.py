@@ -16,7 +16,12 @@ def _load_script():
 def test_build_config_uses_in_memory_local_demo_posture():
     module = _load_script()
 
-    config = module.build_config(lan_ip="192.168.0.104", ws_port=8000, http_port=8003)
+    config = module.build_config(
+        lan_ip="192.168.0.104",
+        ws_port=8000,
+        http_port=8003,
+        device_id=" 28:84:85:85:1A:80 ",
+    )
 
     assert config["read_config_from_api"] is True
     assert config["selected_module"] == {}
@@ -32,6 +37,7 @@ def test_build_config_uses_in_memory_local_demo_posture():
     assert "manager-api" not in config
     assert config["lesson"]["runtime_enabled"] is False
     assert config["lesson"]["sample_lesson"] is True
+    assert config["lesson"]["rollout_device_allowlist"] == ["28:84:85:85:1a:80"]
     assert config["lesson"]["sample_mode"] == "interactive"
     assert config["lesson"]["asset_delivery_mode"] == "sd_pack"
     assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"

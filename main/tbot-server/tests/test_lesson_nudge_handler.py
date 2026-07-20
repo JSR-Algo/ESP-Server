@@ -366,6 +366,7 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         prep = FIX["frames"]["lesson_prepare"]
         conn = _RepublishConn(api_base="https://backend.test/v1")
         conn.device_id = "14:c1:9f:d1:a8:48"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         conn.logger = _CapturingLogger()
         assignment = {
             "assignmentId": prep["assignmentId"],

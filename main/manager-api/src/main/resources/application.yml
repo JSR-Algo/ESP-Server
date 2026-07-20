@@ -43,6 +43,14 @@ renren:
     enabled: true
     exclude-urls:
 
+tbot:
+  internal:
+    child-profile-jwt:
+      public-key: ${CHILD_PROFILE_JWT_PUBLIC_KEY:}
+      issuer: ${CHILD_PROFILE_JWT_ISSUER:}
+      audience: ${CHILD_PROFILE_JWT_AUDIENCE:}
+      max-ttl-seconds: ${CHILD_PROFILE_JWT_MAX_TTL_SECONDS:300}
+
 #mybatis
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml

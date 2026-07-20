@@ -42,6 +42,7 @@ from core.lesson.errors import (
     AssetProfileUnavailable,
     PreloadTimeout,
 )
+from core.lesson.shared_asset_store import SharedAssetStore
 
 TAG = "LessonAssetCache"
 
@@ -160,12 +161,19 @@ class AssetCache:
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         max_asset_bytes: int = _DEFAULT_MAX_ASSET_BYTES,
         max_total_asset_bytes: int = _DEFAULT_MAX_TOTAL_ASSET_BYTES,
+        shared_asset_store: Optional[SharedAssetStore] = None,
     ) -> None:
         self.profile = profile
         self.asset_origin_base = (asset_origin_base or "").rstrip("/")
         self.public_base_url = (public_base_url or "").rstrip("/")
         self.asset_pack_local_root = (asset_pack_local_root or "sd://tbot/lesson-assets").rstrip("/")
         self.asset_pack_mount_root = os.path.realpath(asset_pack_mount_root) if asset_pack_mount_root else ""
+        self._shared_asset_store = shared_asset_store
+        if self.asset_pack_mount_root and self._shared_asset_store is None:
+            self._shared_asset_store = SharedAssetStore(
+                os.path.dirname(self.asset_pack_mount_root),
+                pack_root=self.asset_pack_mount_root,
+            )
         # P5 version-aware cache key: (lessonId, lessonVersion, manifest_checksum).
         # Two authored versions of the same lesson — or the same version republished
         # with different bytes (new checksum) — land in DISJOINT directories so their
@@ -270,7 +278,10 @@ class AssetCache:
             and self._asset_cache_materialized(a)
             and self._asset_pack_materialized(a)
             for a in required
-        ) and self._materialized_total_bytes(required) <= self._max_total_asset_bytes
+        ) and (
+            self._materialized_total_bytes(required) <= self._max_total_asset_bytes
+            and self._asset_pack_ready()
+        )
 
     def synthesize_preload_status(self, assignment_version: int) -> Dict[str, Any]:
         """ESP-SYNTHESIZED ``lesson_preload_status.body`` (D-PRELOAD-OWNER) — firmware
@@ -378,13 +389,19 @@ class AssetCache:
         try:
             path = self._asset_pack_path(asset)
             source = self._asset_pack_source_path(asset)
-            return (
+            materialized = (
                 os.path.exists(path)
                 and os.path.exists(source)
                 and self._hash_file(path) == self._hash_file(source)
             )
+            return materialized
         except (OSError, ValueError):
             return False
+
+    def _asset_pack_ready(self) -> bool:
+        if not self.asset_pack_mount_root or self._shared_asset_store is None:
+            return True
+        return self._shared_asset_store.is_pack_ready(self.cache_key)
 
     def _materialized_total_bytes(self, assets: List[AssetState]) -> int:
         total = 0
@@ -475,6 +492,7 @@ class AssetCache:
                 asyncio.gather(*tasks),
                 timeout=self.preload_timeout_sec,
             )
+            self._commit_asset_pack_if_complete()
         except asyncio.TimeoutError:
             await self._cancel_pending(tasks, ordered)
             raise PreloadTimeout()
@@ -548,6 +566,7 @@ class AssetCache:
                     asset.state = FAILED
                     asset.checksum_ok = False
                     asset.reason = "lesson_assets_too_large"
+        self._commit_asset_pack_if_complete()
         return self.is_ready()
 
     async def aclose(self) -> None:
@@ -769,9 +788,33 @@ class AssetCache:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.realpath(src) == os.path.realpath(dest):
             return
-        tmp = f"{dest}.part"
-        shutil.copyfile(src, tmp)
+        if self._shared_asset_store is not None:
+            digest = self._hash_file(src)
+            self._shared_asset_store.put_file_and_materialize(
+                src, digest, self.cache_key, asset.key
+            )
+            return
+        tmp = f"{dest}.{os.getpid()}.{id(self):x}.part"
+        with open(src, "rb") as source, open(tmp, "xb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
         os.replace(tmp, dest)
+
+    def _commit_asset_pack_if_complete(self) -> None:
+        if self._shared_asset_store is None or not self.asset_pack_mount_root:
+            return
+        assets = {}
+        for asset in self.required_assets:
+            if asset.state != READY or not asset.checksum_ok:
+                return
+            source = self._asset_pack_source_path(asset)
+            if not os.path.exists(source):
+                return
+            digest = self._hash_file(source)
+            assets[asset.key] = (source, digest)
+        if assets:
+            self._shared_asset_store.put_files_and_commit_pack(self.cache_key, assets)
 
     def _asset_pack_source_path(self, asset: AssetState) -> str:
         if self._requires_render_safe_derivative(asset):

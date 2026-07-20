@@ -10,11 +10,22 @@ from core.handle.abortHandle import handleAbortMessage
 from core.handle.intentHandler import handle_user_intent
 from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
+from core.activity_lease import ActivityOperation
 
 TAG = __name__
 
 
 async def handleAudioMessage(conn: "ConnectionHandler", audio):
+    lease = _try_acquire_voice_lease(conn, ActivityOperation.CLASSIC_AUDIO)
+    if lease is None:
+        return
+    try:
+        await _handle_audio_message(conn, audio)
+    finally:
+        lease.release()
+
+
+async def _handle_audio_message(conn: "ConnectionHandler", audio):
     # Whether current segment has speech
     have_voice = conn.vad.is_vad(conn, audio)
     # If DeviceJust nowWoken, briefly ignoreVADDetect
@@ -39,6 +50,18 @@ async def resume_vad_detection(conn: "ConnectionHandler"):
 async def startToChat(conn: "ConnectionHandler", text):
     if _is_google_live_connection(conn):
         return
+    lease = _try_acquire_voice_lease(conn, ActivityOperation.CLASSIC_START_TO_CHAT)
+    if lease is None:
+        return
+    delegated = False
+    try:
+        delegated = bool(await _start_to_chat(conn, text, lease))
+    finally:
+        if not delegated:
+            lease.release()
+
+
+async def _start_to_chat(conn: "ConnectionHandler", text, lease):
 
     # Check whether input isJSONFormat (include speakerInfo)
     speaker_name = None
@@ -96,7 +119,9 @@ async def startToChat(conn: "ConnectionHandler", text):
     # Prepare start new session
     conn.client_abort = False
 
-    conn.executor.submit(conn.chat, actual_text)
+    chat_future = conn.executor.submit(conn.chat, actual_text)
+    lease.release_when_done(chat_future)
+    return True
 
 
 async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
@@ -137,6 +162,25 @@ def _is_google_live_connection(conn: "ConnectionHandler"):
     config = getattr(conn, "config", {}) or {}
     voice_mode = config.get("voice_mode") if isinstance(config, dict) else {}
     return isinstance(voice_mode, dict) and voice_mode.get("type") == "google_live"
+
+
+def _try_acquire_voice_lease(conn: "ConnectionHandler", operation):
+    acquire = getattr(conn, "try_acquire_voice_lease", None)
+    if callable(acquire):
+        return acquire(operation)
+    coordinator = getattr(conn, "activity_leases", None)
+    if coordinator is None:
+        return _PermissiveLease()
+    return coordinator.try_acquire_voice(operation)
+
+
+class _PermissiveLease:
+    def release(self):
+        return None
+
+    def release_when_done(self, future):
+        return None
+
 
 async def max_out_size(conn: "ConnectionHandler"):
     if _is_google_live_connection(conn):

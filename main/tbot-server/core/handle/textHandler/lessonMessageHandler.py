@@ -23,6 +23,10 @@ TAG = __name__
 
 
 async def _dispatch(conn: Any, msg_json: Dict[str, Any], method: str) -> None:
+    if method == "on_lesson_ack":
+        accept_reset = getattr(conn, "_accept_lesson_preload_reset_ack", None)
+        if callable(accept_reset) and accept_reset(msg_json):
+            return
     runtime = getattr(conn, "lesson_runtime", None)
     if runtime is None:
         # No active lesson session (or lesson runtime disabled) -> safe no-op.

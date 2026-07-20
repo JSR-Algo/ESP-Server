@@ -4,8 +4,13 @@ import time
 import unittest
 from collections import deque
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from core.activity_lease import (
+    ActivityLeaseCoordinator,
+    ActivityOperation,
+    ExclusiveDisposition,
+)
 from plugins_func.register import Action
 from core.voice.live_admission import AdmissionDecision, AdmissionReason
 from core.voice.session_orchestrator import SessionMode
@@ -81,6 +86,10 @@ class _Conn:
         self.voice_provider = None
         self.clear_queue_calls = 0
         self.clear_speak_calls = 0
+        try:
+            self.activity_leases = ActivityLeaseCoordinator(asyncio.get_running_loop())
+        except RuntimeError:
+            self.activity_leases = None
 
     def clear_queues(self):
         self.clear_queue_calls += 1
@@ -293,6 +302,281 @@ class _EmptyAuthFailingASR:
         return "", None
 
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_lease_covers_live_open_connect_task(self):
+        conn = _Conn()
+        connect_entered = asyncio.Event()
+        connect_release = asyncio.Event()
+
+        class BlockingClient(_Client):
+            async def connect(self):
+                connect_entered.set()
+                await connect_release.wait()
+                await super().connect()
+
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: BlockingClient())
+        self.provider = provider
+        with patch.object(google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()):
+            task = asyncio.create_task(provider._open_live_session())
+            await asyncio.wait_for(connect_entered.wait(), timeout=1)
+            self.assertTrue(conn.activity_leases.has_voice_leases())
+            self.assertIsNone(
+                conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+            )
+            connect_release.set()
+            await task
+
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_covers_prewarm_background_task(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def open_live(*, preserve_live_prewarm=False):
+            self.assertTrue(preserve_live_prewarm)
+            entered.set()
+            await release.wait()
+            return True
+
+        provider._ensure_live_open_for_audio = open_live
+        provider._schedule_live_prewarm("connect")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        release.set()
+        await provider._live_prewarm_task
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_same_task_reconnect_nests_real_live_open(self):
+        conn = _Conn()
+        connect_entered = asyncio.Event()
+        connect_release = asyncio.Event()
+
+        class BlockingClient(_Client):
+            async def connect(self):
+                connect_entered.set()
+                await connect_release.wait()
+                await super().connect()
+
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: BlockingClient())
+        self.provider = provider
+        provider._get_reconnect_config = lambda: {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider._classify_error = lambda _exc: "transport"
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+        with patch.object(google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()):
+            reconnect = asyncio.create_task(provider._try_reconnect(RuntimeError("lost")))
+            await asyncio.wait_for(connect_entered.wait(), timeout=1)
+            snapshot = conn.activity_leases.diagnostic_snapshot()
+            self.assertGreaterEqual(snapshot["voiceLeaseCount"], 2)
+            self.assertEqual(len(snapshot["voiceOwners"]), 1)
+            self.assertIsNone(
+                conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+            )
+            connect_release.set()
+            self.assertTrue(await reconnect)
+
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_covers_user_text_and_wake_greeting_send(self):
+        conn = _Conn()
+        send_entered = asyncio.Event()
+        send_release = asyncio.Event()
+
+        class BlockingClient(_Client):
+            async def send_text(self, text):
+                send_entered.set()
+                await send_release.wait()
+                await super().send_text(text)
+
+        provider = self.make_provider(conn)
+        provider._client = BlockingClient()
+        provider._bridge = _Bridge()
+
+        text_task = asyncio.create_task(
+            provider.handle_text_message('{"type":"text","text":"hello"}')
+        )
+        await asyncio.wait_for(send_entered.wait(), timeout=1)
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        send_release.set()
+        await text_task
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+        send_entered.clear()
+        send_release.clear()
+        greeting_task = asyncio.create_task(provider._send_wake_greeting("test"))
+        await asyncio.wait_for(send_entered.wait(), timeout=1)
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        send_release.set()
+        await greeting_task
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_eviction_first_drops_google_open_without_client_creation(self):
+        conn = _Conn()
+        created = []
+        provider = GoogleLiveProvider(
+            conn,
+            client_factory=lambda *_args: created.append(_Client()) or created[-1],
+        )
+        self.provider = provider
+        provider._admit_live_open = AsyncMock()
+        lease = conn.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        opened = await provider._open_live_for_audio()
+
+        self.assertFalse(opened)
+        self.assertEqual(created, [])
+        provider._admit_live_open.assert_not_awaited()
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_covers_reconnect_hard_reconnect_and_silent_reopen(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def record_reconnect():
+            entered.set()
+            await release.wait()
+
+        provider._record_reconnect_attempt = record_reconnect
+        provider._get_reconnect_config = lambda: {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider._classify_error = lambda _exc: "transport"
+        provider._close_live_resources = AsyncMock()
+        provider._open_live_session = AsyncMock(return_value=True)
+        provider._forward_pending_reconnect_audio = AsyncMock()
+
+        reconnect = asyncio.create_task(provider._try_reconnect(RuntimeError("lost")))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        release.set()
+        await reconnect
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+        entered.clear()
+        release.clear()
+        provider._closing = False
+        provider._fallback_provider = None
+        provider._reconnecting = False
+        provider._close_live_resources = record_reconnect
+        provider._open_live_session = AsyncMock(return_value=True)
+        provider._pending_reconnect_audio.append((0, b"stale-success"))
+        hard = asyncio.create_task(provider._hard_reconnect_after_interrupt("test"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        release.set()
+        self.assertTrue(await hard)
+        self.assertEqual(list(provider._pending_reconnect_audio), [])
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+        entered.clear()
+        release.clear()
+        provider._client = _Client()
+        provider._consecutive_waiting_model_timeouts = provider._SILENT_LIVE_REOPEN_TIMEOUTS
+        provider._last_silent_live_reopen_at = 0.0
+        provider._record_reconnect_attempt = record_reconnect
+        provider._close_live_resources = AsyncMock()
+        provider._open_live_session_locked = AsyncMock()
+        provider._forward_pending_reconnect_audio = AsyncMock()
+        silent = asyncio.create_task(provider._reopen_silent_live_session_after_timeouts(1.0))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        self.assertTrue(conn.activity_leases.has_voice_leases())
+        release.set()
+        self.assertTrue(await silent)
+        self.assertFalse(conn.activity_leases.has_voice_leases())
+
+    async def test_activity_lease_eviction_first_hard_reconnect_discards_replay_buffer(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._pending_reconnect_audio.append((0, b"stale"))
+        lease = conn.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        reconnected = await provider._hard_reconnect_after_interrupt("test")
+
+        self.assertFalse(reconnected)
+        self.assertEqual(list(provider._pending_reconnect_audio), [])
+        self.assertFalse(provider._reconnecting)
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_runtime_failure_refusal_does_not_mutate_live_transport(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._stop_live_output_for_transport_change = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+        lease = conn.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        await provider._handle_runtime_failure(RuntimeError("lost"))
+
+        provider._stop_live_output_for_transport_change.assert_not_awaited()
+        provider._close_live_resources.assert_not_awaited()
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_refused_listen_stop_clears_local_google_input_without_finalize(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._user_stream_started_at = time.monotonic()
+        provider._user_stream_response_id = 7
+        provider._user_stream_last_speech_at = time.monotonic()
+        provider._user_stream_frames = 3
+        provider._pending_reconnect_audio.append((7, b"reconnect"))
+        provider._pending_interrupt_audio.append(b"interrupt")
+        provider._start_lesson_asr_fallback_audio.append(b"fallback")
+        provider._user_audio_window_task = asyncio.create_task(asyncio.Event().wait())
+        provider._finalize_user_audio_input = AsyncMock()
+
+        provider.discard_refused_voice_input()
+        await asyncio.sleep(0)
+
+        self.assertIsNone(provider._user_stream_started_at)
+        self.assertEqual(provider._user_stream_frames, 0)
+        self.assertEqual(list(provider._pending_reconnect_audio), [])
+        self.assertEqual(list(provider._pending_interrupt_audio), [])
+        self.assertEqual(list(provider._start_lesson_asr_fallback_audio), [])
+        self.assertIsNone(provider._user_audio_window_task)
+        provider._finalize_user_audio_input.assert_not_awaited()
+
+    async def test_activity_lease_hard_reconnect_failure_discards_replay_buffer(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._pending_reconnect_audio.append((0, b"stale-failure"))
+        provider._close_live_resources = AsyncMock()
+        provider._open_live_session = AsyncMock(side_effect=RuntimeError("lost"))
+        provider._handle_runtime_failure = AsyncMock()
+
+        reconnected = await provider._hard_reconnect_after_interrupt("test")
+
+        self.assertFalse(reconnected)
+        self.assertEqual(list(provider._pending_reconnect_audio), [])
+        provider._handle_runtime_failure.assert_awaited_once()
+
     async def asyncTearDown(self):
         provider = getattr(self, "provider", None)
         if provider is not None:
@@ -821,8 +1105,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             google_live_module.asyncio.sleep = original_sleep
 
-        self.assertTrue(idle)
-        self.assertGreaterEqual(elapsed, 16.0)
+        self.assertFalse(idle)
+        self.assertLessEqual(elapsed, 9.0)
 
     async def test_lesson_prompt_guard_infers_idle_when_live_omits_audio_end(self):
         conn = _Conn()
@@ -1052,6 +1336,113 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled[0][0], "connect")
         self.assertGreaterEqual(scheduled[0][1], 0.0)
 
+    async def test_external_close_still_cancels_in_flight_live_prewarm(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        started = asyncio.Event()
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            self.assertTrue(preserve_live_prewarm)
+            started.set()
+            await asyncio.sleep(30)
+
+        provider._ensure_live_open_for_audio = _slow_open
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await provider._close_live_resources()
+
+        self.assertIsNone(provider._live_prewarm_task)
+        self.assertTrue(prewarm.cancelled())
+
+    async def test_foreground_budget_degrade_still_cancels_in_flight_prewarm(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        started = asyncio.Event()
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            self.assertTrue(preserve_live_prewarm)
+            started.set()
+            await asyncio.sleep(30)
+
+        provider._ensure_live_open_for_audio = _slow_open
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await provider._activate_budget_degrade(
+            AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED
+        )
+
+        self.assertIsNone(provider._live_prewarm_task)
+        self.assertTrue(prewarm.cancelled())
+
+    async def test_live_open_timeout_uses_external_cleanup_semantics(self):
+        conn = _Conn()
+        conn.config["google_live"]["live_open_timeout_sec"] = 0.01
+        provider = self.make_provider(conn)
+        cleanup_flags = []
+
+        async def _slow_open(*, preserve_live_prewarm=False):
+            await asyncio.sleep(30)
+
+        async def _record_cleanup(*, preserve_live_prewarm=False):
+            cleanup_flags.append(preserve_live_prewarm)
+
+        provider._open_live_for_audio = _slow_open
+        provider._close_live_resources = _record_cleanup
+
+        self.assertFalse(await provider._ensure_live_open_for_audio())
+        self.assertEqual(cleanup_flags, [False])
+
+    async def test_completed_budget_degrade_allows_replacement_prewarm(self):
+        conn = _Conn()
+        conn.live_admission_gate = _Gate(
+            SimpleNamespace(
+                decision=AdmissionDecision.DEGRADE_TTS_ONLY,
+                reason=AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED,
+            )
+        )
+        provider = self.make_provider(conn)
+
+        provider._schedule_live_prewarm("first")
+        first = provider._live_prewarm_task
+        self.assertFalse(await asyncio.wait_for(first, timeout=1))
+
+        provider._schedule_live_prewarm("second")
+        second = provider._live_prewarm_task
+        self.assertIsNot(second, first)
+        self.assertFalse(await asyncio.wait_for(second, timeout=1))
+        self.assertFalse(second.cancelled())
+
+    async def test_owned_prewarm_cleanup_preserves_only_live_prewarm_task(self):
+        conn = _Conn()
+        conn.live_admission_gate = _Gate(
+            SimpleNamespace(
+                decision=AdmissionDecision.DEGRADE_TTS_ONLY,
+                reason=AdmissionReason.DEVICE_DAILY_BUDGET_EXHAUSTED,
+            )
+        )
+        provider = self.make_provider(conn)
+        greeting_started = asyncio.Event()
+
+        async def _greeting():
+            greeting_started.set()
+            await asyncio.sleep(30)
+
+        greeting = asyncio.create_task(_greeting())
+        provider._wake_greeting_task = greeting
+        await asyncio.wait_for(greeting_started.wait(), timeout=1)
+
+        provider._schedule_live_prewarm("test")
+        prewarm = provider._live_prewarm_task
+
+        self.assertFalse(await asyncio.wait_for(prewarm, timeout=1))
+        self.assertFalse(prewarm.cancelled())
+        self.assertTrue(greeting.cancelled())
+        self.assertIsNone(provider._wake_greeting_task)
+
     async def test_wake_word_detect_opens_listening_without_greeting(self):
         conn = _Conn()
         # Unit test: disable spoken wake greeting (production enables it).
@@ -1179,7 +1570,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._bridge = None
         opens = []
 
-        async def _open():
+        async def _open(*, preserve_live_prewarm=False):
+            self.assertFalse(preserve_live_prewarm)
             opens.append(True)
             provider._client = _Client()
             provider._bridge = _Bridge()
@@ -1519,7 +1911,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(
             provider._interaction.state,
-            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
         )
         self.assertFalse(conn.client_abort)
 
@@ -1587,18 +1979,20 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._get_user_speech_tail_sec(), 0.28)
         self.assertEqual(provider._get_user_max_capture_sec(), 4.0)
 
-    async def test_model_audio_end_reopens_input_after_waiting_model(self):
+    async def test_model_audio_end_returns_to_listening_while_echo_tail_stays_suppressed(self):
         conn = _Conn()
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()
+        provider._bridge.rms = 2500
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
 
         await provider._handle_live_event({"type": "audio_end"})
 
         self.assertEqual(provider._interaction.state, google_live_module.InteractionState.LISTENING)
+        await provider._open_user_audio_window("test_after_audio_end")
         self.assertTrue(await provider.handle_audio_bytes(b"hi-again"))
-        self.assertEqual(provider._bridge.forwarded, [b"pcm:hi-again"])
+        self.assertEqual(provider._bridge.forwarded, [])
 
     async def test_receive_loop_cancels_waiting_timeout_on_model_audio(self):
         class _HoldingClient(_Client):
@@ -1875,11 +2269,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_waiting_model_timeout_reopens_input_after_short_grace(self):
         conn = _Conn()
+        conn.config["google_live"]["waiting_model_timeout_sec"] = 0.01
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()
         provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
-        provider._waiting_model_since = time.monotonic() - 4.3
+        provider._waiting_model_since = time.monotonic() - 0.1
 
         self.assertTrue(await provider.handle_audio_bytes(b"not-stuck"))
 
@@ -2434,7 +2829,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(provider._waiting_model_since)
 
-    async def test_lesson_child_transcript_timeout_reopens_without_runtime_reprompt(self):
+    async def test_lesson_child_transcript_timeout_routes_stt_unavailable_to_runtime(self):
         conn = _Conn()
         conn.config["google_live"].update(
             {
@@ -2448,9 +2843,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         handled = []
+        failures = []
 
         async def _on_child_response(text, **kwargs):
             handled.append((text, kwargs))
+            return True
+
+        async def _on_child_response_failure(reason):
+            failures.append(reason)
             return True
 
         conn.lesson_runtime = SimpleNamespace(
@@ -2459,10 +2859,12 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             _step_completed=False,
             _child_response_window_open=True,
             on_child_response=_on_child_response,
+            on_child_response_failure=_on_child_response_failure,
         )
         provider = self.make_provider(conn)
         provider._client = _Client()
         provider._bridge = _Bridge()
+        old_bridge = provider._bridge
         provider._bridge.rms = 2200
         provider._user_audio_allowed_until = time.monotonic() + 5
 
@@ -2471,8 +2873,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(handled, [])
+        self.assertEqual(failures, ["stt_unavailable"])
         self.assertFalse(provider._lesson_child_audio_pending_transcript)
-        self.assertEqual(provider._bridge.stop_calls, 1)
+        self.assertEqual(old_bridge.stop_calls, 2)
 
     async def test_lesson_child_listen_stop_does_not_wait_for_model_audio(self):
         conn = _Conn()
@@ -3310,7 +3713,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._client = None
         provider._bridge = None
         provider._open_live_session = _open_failure
-        provider._close_live_resources = lambda: _false(None)
+        provider._close_live_resources = (
+            lambda *, preserve_live_prewarm=False: _false(None)
+        )
         self.assertFalse(await provider._ensure_live_open_for_audio())
 
     async def test_idle_loop_aec_resumption_and_reconnect_accounting_edges(self):
@@ -3399,12 +3804,16 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._get_user_audio_window_sec("listen_start"), 25.0)
 
         provider._classify_lesson_start_intent = lambda _text: {"name": "start_lesson", "arguments": {}}
+        self.assertTrue(await provider._dispatch_lesson_start_intent("start"))
+        conn.lesson_runtime = None
+        provider._suppress_start_lesson_tool_call_until = 0.0
         conn.func_handler = None
         self.assertFalse(await provider._dispatch_lesson_start_intent("start"))
         conn.func_handler = _FuncHandler(fail=True)
         self.assertFalse(await provider._dispatch_lesson_start_intent("start"))
 
         provider._client = None
+        provider._has_session_orchestrator = lambda: False
         conn.voice_consent_client = _Consent(False)
         self.assertFalse(await provider._send_lesson_start_ack(SimpleNamespace(action=Action.ERROR, response="", result="")))
         self.assertFalse(await provider.speak_lesson_step_prompt("hello"))

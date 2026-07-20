@@ -106,7 +106,7 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
     if send_mcp_initialize:
-        asyncio.create_task(send_mcp_initialize_message(conn))
+        conn.schedule_mcp_background_task(send_mcp_initialize_message(conn))
 
 
 async def checkWakeupWords(conn: "ConnectionHandler", text):

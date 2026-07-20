@@ -37,6 +37,7 @@ import tbot.modules.agent.vo.AgentVoicePrintVO;
 import tbot.modules.correctword.vo.CorrectWordSimpleVO;
 import tbot.modules.config.service.ConfigService;
 import tbot.modules.device.entity.DeviceEntity;
+import tbot.modules.device.service.ChildInterestsCodec;
 import tbot.modules.device.service.DeviceService;
 import tbot.modules.model.entity.ModelConfigEntity;
 import tbot.modules.model.service.ModelConfigService;
@@ -258,7 +259,10 @@ public class ConfigServiceImpl implements ConfigService {
         childProfile.put("device_alias", device.getAlias());
         childProfile.put("child_name", device.getChildName());
         childProfile.put("child_age", device.getChildAge());
-        childProfile.put("interests", splitProfileTags(device.getChildInterests()));
+        String interests = device.getChildInterestsJson() != null
+                ? device.getChildInterestsJson()
+                : device.getChildInterests();
+        childProfile.put("interests", splitProfileTags(interests));
         childProfile.put("learning_style", device.getLearningStyle());
         childProfile.put("vocabulary_level", device.getVocabularyLevel());
         childProfile.put("parent_career", device.getParentCareer());
@@ -266,14 +270,7 @@ public class ConfigServiceImpl implements ConfigService {
     }
 
     private List<String> splitProfileTags(String tags) {
-        if (StringUtils.isBlank(tags)) {
-            return Collections.emptyList();
-        }
-        return List.of(tags.split(","))
-                .stream()
-                .map(StringUtils::trimToNull)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+        return ChildInterestsCodec.decodeJsonOrLegacy(tags);
     }
 
     @Override

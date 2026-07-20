@@ -7,6 +7,24 @@ from core.utils.audioRateController import AudioRateController
 
 
 class AudioRateControllerCleanupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reset_preserves_empty_state_before_and_after_loop_initialization(self):
+        controller = AudioRateController()
+
+        controller.add_audio(b"before-init")
+        controller.reset()
+        self.assertIsNone(controller.queue_empty_event)
+        self.assertIsNone(controller.queue_has_data_event)
+        await controller.wait_until_empty()
+        self.assertTrue(controller.queue_empty_event.is_set())
+        self.assertFalse(controller.queue_has_data_event.is_set())
+
+        controller.add_audio(b"after-init")
+        self.assertFalse(controller.queue_empty_event.is_set())
+        self.assertTrue(controller.queue_has_data_event.is_set())
+        controller.reset()
+        self.assertTrue(controller.queue_empty_event.is_set())
+        self.assertFalse(controller.queue_has_data_event.is_set())
+
     async def test_stop_sending_and_wait_retrieves_cancelled_send_loop(self):
         controller = AudioRateController()
 

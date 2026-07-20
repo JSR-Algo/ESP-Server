@@ -571,7 +571,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_handle_connection_schedules_lesson_pull_on_boot_without_blocking_voice_route(self):
         handler = self._build_handler()
-        handler.config["lesson"] = {"runtime_enabled": True}
+        handler.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": ["robot-01"],
+        }
         allow_route_return = asyncio.Event()
         route_called = asyncio.Event()
         lesson_pull_started = asyncio.Event()
@@ -604,9 +607,9 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler._lesson_pull_on_connect = fake_lesson_pull_on_connect
         handler._save_and_close = fake_save_and_close
 
-        handle_task = asyncio.create_task(
-            handler.handle_connection(_FakeWebSocket(['{"type":"listen"}']))
-        )
+        websocket = _FakeWebSocket(['{"type":"listen"}'])
+        websocket.request.headers["device-id"] = "robot-01"
+        handle_task = asyncio.create_task(handler.handle_connection(websocket))
 
         await asyncio.wait_for(route_called.wait(), timeout=0.5)
         await asyncio.wait_for(lesson_pull_started.wait(), timeout=0.5)
@@ -698,6 +701,50 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             ),
             handler.logger.records,
         )
+
+    async def test_handle_connection_logs_close_metadata_without_reason_contents(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+
+        async def fake_initialize_private_config_async():
+            handler.bind_completed_event.set()
+
+        async def fake_background_initialize():
+            return None
+
+        async def fake_check_timeout():
+            return None
+
+        async def fake_save_and_close(ws):
+            return None
+
+        class ReasonClosingWebSocket(_FakeWebSocket):
+            async def __anext__(self):
+                close = connection_module.websockets.frames.Close(
+                    1000, "parent@example.com token=secret"
+                )
+                raise connection_module.websockets.exceptions.ConnectionClosedOK(
+                    close, None
+                )
+
+        handler._initialize_private_config_async = fake_initialize_private_config_async
+        handler._background_initialize = fake_background_initialize
+        handler._check_timeout = fake_check_timeout
+        handler._save_and_close = fake_save_and_close
+
+        await handler.handle_connection(ReasonClosingWebSocket([]))
+
+        disconnect_logs = [
+            message
+            for level, message in handler.logger.records
+            if level == "info" and "Client disconnected" in message
+        ]
+        self.assertEqual(len(disconnect_logs), 1)
+        self.assertIn("close_code=1000", disconnect_logs[0])
+        self.assertIn("close_reason_sha256=", disconnect_logs[0])
+        self.assertIn("close_reason_length=31", disconnect_logs[0])
+        self.assertNotIn("parent@example.com", disconnect_logs[0])
+        self.assertNotIn("secret", disconnect_logs[0])
 
     async def test_route_message_waits_for_bind_then_forwards_to_provider(self):
         handler = self._build_handler()

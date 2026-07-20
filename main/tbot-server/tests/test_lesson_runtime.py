@@ -16,11 +16,16 @@ import copy
 import importlib.util
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
+import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import quote
 
+from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation, ExclusiveDisposition
 from core.lesson.asset_cache import AssetCache, FAILED, READY
 from core.lesson.errors import LessonError
 from core.lesson.runtime import (
@@ -28,43 +33,53 @@ from core.lesson.runtime import (
     _child_response_success_prompt,
     _classify_child_response_intent,
 )
+from core.lesson.sample import SampleAssetCache
 
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
 
-FIXTURE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "docs",
-    "stories",
-    "US-006-learning-course-runtime",
-    "fixtures",
-    "lesson-protocol.v1.json",
+def _robot_repo_candidates():
+    candidates = []
+    configured = os.environ.get("TBOT_ROBOT_REPO")
+    if configured:
+        candidates.append(os.path.abspath(configured))
+    worktree_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    candidates.extend([worktree_root, os.path.dirname(worktree_root)])
+    git_file = os.path.join(worktree_root, ".git")
+    if os.path.isfile(git_file):
+        with open(git_file) as fh:
+            gitdir = fh.read().strip().removeprefix("gitdir:").strip()
+        marker = os.sep + "esp32-server" + os.sep + ".git" + os.sep
+        if marker in gitdir:
+            esp_repo = gitdir.split(marker, 1)[0] + os.sep + "esp32-server"
+            candidates.append(os.path.dirname(esp_repo))
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_robot_fixture(relative_path):
+    tried = [os.path.join(repo, relative_path) for repo in _robot_repo_candidates()]
+    resolved = next((path for path in tried if os.path.isfile(path)), None)
+    if resolved is None:
+        raise AssertionError("required robot fixture missing; searched: " + ", ".join(tried))
+    return resolved
+
+
+FIXTURE_PATH = _resolve_robot_fixture(
+    os.path.join("docs", "stories", "US-006-learning-course-runtime", "fixtures", "lesson-protocol.v1.json")
 )
-if not os.path.exists(FIXTURE_PATH):
-    raise unittest.SkipTest("lesson protocol fixture lives in sibling robot/docs checkout")
 
 FIX = json.load(open(FIXTURE_PATH))
 
-SEED_LESSON_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "TBOT-Firmware",
-    "lesson",
-    "lesson.json",
+SEED_LESSON_PATH = _resolve_robot_fixture(
+    os.path.join("TBOT-Firmware", "lesson", "lesson.json")
 )
-if not os.path.exists(SEED_LESSON_PATH):
-    raise unittest.SkipTest("packaged firmware lesson lives in sibling TBOT-Firmware checkout")
 
 SEED_LESSON = json.load(open(SEED_LESSON_PATH))["lesson"]
 
-BACKEND_CANONICAL_MANIFEST_PATH = os.path.join(
+_BACKEND_CANONICAL_RELATIVE_PATH = os.path.join(
+    "scripts", "seed", "076_canonical-manifest.espTft.json"
+)
+_LEGACY_BACKEND_REPO_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
     "..",
     "..",
@@ -72,10 +87,38 @@ BACKEND_CANONICAL_MANIFEST_PATH = os.path.join(
     "..",
     "..",
     "tbot-backend",
-    "scripts",
-    "seed",
-    "076_canonical-manifest.espTft.json",
-)
+))
+
+
+def _backend_canonical_manifest_candidates():
+    explicit_manifest = os.environ.get("TBOT_BACKEND_CANONICAL_MANIFEST")
+    configured_repo = os.environ.get("TBOT_BACKEND_REPO")
+    candidates = []
+    if explicit_manifest:
+        candidates.append(os.path.abspath(explicit_manifest))
+    if configured_repo:
+        candidates.append(os.path.join(os.path.abspath(configured_repo), _BACKEND_CANONICAL_RELATIVE_PATH))
+    candidates.extend(
+        [
+            os.path.join(_LEGACY_BACKEND_REPO_PATH, _BACKEND_CANONICAL_RELATIVE_PATH),
+            os.path.join(
+                _LEGACY_BACKEND_REPO_PATH,
+                "production-lesson-studio",
+                _BACKEND_CANONICAL_RELATIVE_PATH,
+            ),
+        ]
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_backend_canonical_manifest_path():
+    return next(
+        (path for path in _backend_canonical_manifest_candidates() if os.path.isfile(path)),
+        None,
+    )
+
+
+BACKEND_CANONICAL_MANIFEST_PATH = _resolve_backend_canonical_manifest_path()
 
 GUIDED_SPEAKING_FORBIDDEN_PROMPT_TERMS = (
     "watch my mouth",
@@ -364,6 +407,26 @@ class _DummyLogger:
         return None
 
 
+class _CapturingLogger(_DummyLogger):
+    def __init__(self):
+        self.events = []
+
+    def _capture(self, level, message, *args, **kwargs):
+        self.events.append((level, str(message)))
+
+    def info(self, message, *args, **kwargs):
+        self._capture("info", message, *args, **kwargs)
+
+    def debug(self, message, *args, **kwargs):
+        self._capture("debug", message, *args, **kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        self._capture("warning", message, *args, **kwargs)
+
+    def error(self, message, *args, **kwargs):
+        self._capture("error", message, *args, **kwargs)
+
+
 class _FakeWebSocket:
     def __init__(self):
         self.sent = []
@@ -420,7 +483,7 @@ class _FakeAssetCache:
         local_urls=None,
     ):
         self.preload_timeout_sec = 90
-        self.cache_key = "w01-d01-barn-say-it/v3-abcdef12"
+        self.cache_key = "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"
         self.asset_pack_local_root = "sd://sdcard/tbot/lesson-assets"
         self._ready = ready
         self._preload_error = preload_error
@@ -494,7 +557,8 @@ class _FakeAssetCache:
                     {
                         "key": key,
                         "path": source,
-                        "sha256": "abc",
+                        "url": f"https://assets.example/{source}",
+                        "sha256": "a" * 64,
                         "mediaType": media_type,
                         "critical": critical,
                         "layer": layer,
@@ -509,7 +573,8 @@ class _FakeAssetCache:
                 {
                     "key": key,
                     "path": source,
-                    "sha256": "abc",
+                    "url": f"https://assets.example/{source}",
+                    "sha256": "a" * 64,
                     "mediaType": media_type,
                     "critical": critical,
                     "layer": layer,
@@ -771,10 +836,7 @@ def _build_full_seed_story_manifest():
     firmware receives a real three-layer image stack throughout the lesson."""
     base = _build_manifest()
     frame_step = FIX["frames"]["lesson_step"]
-    backend = None
-    if os.path.exists(BACKEND_CANONICAL_MANIFEST_PATH):
-        with open(BACKEND_CANONICAL_MANIFEST_PATH) as fh:
-            backend = json.load(fh)
+    backend = _load_backend_canonical_manifest_for_test()
 
     story = [
         {"id": "s1", "type": "greeting", "completionClass": "passive", "pose": "teach"},
@@ -787,21 +849,20 @@ def _build_full_seed_story_manifest():
         {"id": "s8", "type": "feedback", "completionClass": "passive", "pose": "teach"},
         {"id": "s9", "type": "celebrate", "completionClass": "passive", "pose": "celebrate"},
     ]
-    if backend is not None:
-        assets = []
-        for asset in backend["assets"]:
-            row = copy.deepcopy(asset)
-            row.setdefault("url", "http://assets.test/" + row["path"])
-            assets.append(row)
-        base["assets"] = assets
-        story_by_id = {row["id"]: row for row in story}
-        story = [
-            {
-                **copy.deepcopy(step),
-                "completionClass": story_by_id[step["id"]]["completionClass"],
-            }
-            for step in backend["steps"]
-        ]
+    assets = []
+    for asset in backend["assets"]:
+        row = copy.deepcopy(asset)
+        row.setdefault("url", "http://assets.test/" + row["path"])
+        assets.append(row)
+    base["assets"] = assets
+    story_by_id = {row["id"]: row for row in story}
+    story = [
+        {
+            **copy.deepcopy(step),
+            "completionClass": story_by_id[step["id"]]["completionClass"],
+        }
+        for step in backend["steps"]
+    ]
     expression_by_pose = {
         "teach": "teaching",
         "listening": "listening",
@@ -864,8 +925,11 @@ def _build_full_seed_story_manifest():
     return base
 
 def _load_backend_canonical_manifest_for_test():
-    if not os.path.exists(BACKEND_CANONICAL_MANIFEST_PATH):
-        raise unittest.SkipTest("backend canonical espTft manifest lives in sibling tbot-backend checkout")
+    if BACKEND_CANONICAL_MANIFEST_PATH is None:
+        raise AssertionError(
+            "backend canonical espTft manifest is required; searched: "
+            + ", ".join(_backend_canonical_manifest_candidates())
+        )
     with open(BACKEND_CANONICAL_MANIFEST_PATH) as fh:
         return json.load(fh)
 
@@ -937,6 +1001,19 @@ class _RecordingAlarm:
 
 
 class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    def test_robot_fixture_resolver_finds_docs_and_firmware_from_feature_worktree(self):
+        self.assertTrue(os.path.isfile(FIXTURE_PATH))
+        self.assertTrue(os.path.isfile(SEED_LESSON_PATH))
+        self.assertIn(os.path.join("robot", "docs"), FIXTURE_PATH)
+        self.assertIn(os.path.join("robot", "TBOT-Firmware"), SEED_LESSON_PATH)
+
+    def test_backend_canonical_fixture_resolver_finds_complete_worktree_manifest(self):
+        self.assertIsNotNone(BACKEND_CANONICAL_MANIFEST_PATH)
+        self.assertTrue(os.path.isfile(BACKEND_CANONICAL_MANIFEST_PATH))
+        backend = _load_backend_canonical_manifest_for_test()
+        self.assertEqual(len(backend["steps"]), 9)
+        self.assertTrue(all(step.get("prompt") for step in backend["steps"]))
+
     def test_full_seed_story_fixture_stays_in_parity_with_backend_canonical_manifest(self):
         backend = _load_backend_canonical_manifest_for_test()
         manifest = _build_full_seed_story_manifest()
@@ -997,19 +1074,328 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         prep = FIX["frames"]["lesson_prepare"]
         conn = conn or _FakeConn(session_id=prep["sessionId"])
-        return LessonRuntime(
-            conn,
-            assignment=_build_assignment(),
-            manifest=manifest or _build_manifest(),
-            asset_cache=asset_cache or _FakeAssetCache(ready=True),
-            forwarder=forwarder or _FakeForwarder(),
-            manifest_checksum=_manifest_checksum(),
-            alarm=alarm,
-            **runtime_kwargs,
-        )
+        with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            return LessonRuntime(
+                conn,
+                assignment=_build_assignment(),
+                manifest=manifest or _build_manifest(),
+                asset_cache=asset_cache or _FakeAssetCache(ready=True),
+                forwarder=forwarder or _FakeForwarder(),
+                manifest_checksum=_manifest_checksum(),
+                alarm=alarm,
+                **runtime_kwargs,
+            )
 
     def _sent_frames(self, conn):
         return [json.loads(p) for p in conn.websocket.sent]
+
+    async def test_lesson_step_ack_forwards_bounded_operations_telemetry(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[9] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 2,
+        }
+        rt.conn.device_id = "robot-01"
+        rt.conn.config = {
+            "lesson": {
+                "motion_presets_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                9,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 9,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {
+                        "internalMinimumFreeBytes": 24_576,
+                        "psramFreeBytes": 1_500_000,
+                        "renderElapsedMs": 321,
+                        "degradedReason": "motionPreset",
+                        "motionDispatch": "failed",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(
+            forwarder.batches,
+            [
+                {
+                    "assignmentId": rt.assignment_id,
+                    "lessonId": rt.lesson_id,
+                    "lessonVersion": rt.lesson_version,
+                    "sessionId": rt.session_id,
+                    "events": [
+                        {
+                            "type": "step_started",
+                            "sequence": 1,
+                            "stepId": "s4",
+                            "sramFreeBytes": 24_576,
+                            "psramFreeBytes": 1_500_000,
+                            "retryCount": 2,
+                            "motionDispatch": "failed",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    async def test_lesson_step_ack_telemetry_rejects_invalid_and_unapproved_fields(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[4] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": -3,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                4,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 4,
+                    "degraded": "yes",
+                    "motionDispatch": "success",
+                    "transcript": "secret child speech",
+                    "telemetry": {
+                        "internalMinimumFreeBytes": -1,
+                        "psramFreeBytes": True,
+                        "motionDispatch": "applied",
+                        "authorization": "Bearer secret",
+                        "childResponse": "secret child speech",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(
+            forwarder.batches[0]["events"],
+            [{"type": "step_started", "sequence": 1, "stepId": "s4", "retryCount": 0}],
+        )
+        serialized = json.dumps(forwarder.batches[0])
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("robot-01", serialized)
+
+    async def test_lesson_step_ack_maps_only_firmware_motion_dispatch_enum(self):
+        from unittest.mock import AsyncMock
+
+        for firmware_value in ("success", "failed", "skipped"):
+            with self.subTest(firmware_value=firmware_value):
+                forwarder = _FakeForwarder()
+                rt = self._runtime(forwarder=forwarder)
+                rt.conn.device_id = "robot-01"
+                rt.conn.config = {
+                    "lesson": {
+                        "motion_presets_enabled": True,
+                        "rollout_device_allowlist": ["robot-01"],
+                    }
+                }
+                rt._outstanding[3] = {
+                    "type": "lesson_step",
+                    "stepId": "s4",
+                    "body": {"motion": {"present": "teach"}},
+                    "retryCount": 0,
+                }
+                rt._on_frame_acked = AsyncMock()
+
+                await rt.on_lesson_ack(
+                    _ack(
+                        3,
+                        1,
+                        step_id="s4",
+                        extra={
+                            "acks": 3,
+                            "rendered": True,
+                            "degraded": False,
+                            "telemetry": {
+                                "internalMinimumFreeBytes": 30_000,
+                                "psramFreeBytes": 2_000_000,
+                                "degradedReason": "",
+                                "motionDispatch": firmware_value,
+                            },
+                        },
+                    )
+                )
+
+                self.assertEqual(
+                    forwarder.batches[0]["events"][0]["motionDispatch"],
+                    firmware_value,
+                )
+
+    async def test_lesson_step_ack_does_not_infer_motion_success_when_enum_is_missing(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": False,
+                    "telemetry": {"degradedReason": ""},
+                },
+            )
+        )
+
+        self.assertNotIn("motionDispatch", forwarder.batches[0]["events"][0])
+
+    async def test_lesson_step_ack_marks_visual_degradation_from_firmware_reason(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {"degradedReason": "objectUnavailable"},
+                },
+            )
+        )
+
+        self.assertIs(forwarder.batches[0]["events"][0]["renderDegraded"], True)
+
+    async def test_lesson_step_ack_prefers_explicit_firmware_render_degraded_boolean(self):
+        from unittest.mock import AsyncMock
+
+        for render_degraded in (True, False):
+            with self.subTest(render_degraded=render_degraded):
+                forwarder = _FakeForwarder()
+                rt = self._runtime(forwarder=forwarder)
+                rt._outstanding[3] = {
+                    "type": "lesson_step",
+                    "stepId": "s4",
+                    "body": {"motion": {"present": "teach"}},
+                    "retryCount": 0,
+                }
+                rt._on_frame_acked = AsyncMock()
+
+                await rt.on_lesson_ack(
+                    _ack(
+                        3,
+                        1,
+                        step_id="s4",
+                        extra={
+                            "acks": 3,
+                            "rendered": True,
+                            "degraded": True,
+                            "telemetry": {
+                                "degradedReason": "motionPreset",
+                                "motionDispatch": "failed",
+                                "renderDegraded": render_degraded,
+                            },
+                        },
+                    )
+                )
+
+                self.assertIs(
+                    forwarder.batches[0]["events"][0]["renderDegraded"],
+                    render_degraded,
+                )
+
+    async def test_lesson_step_ack_omits_legacy_motion_reason_that_may_mask_visual_failure(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {"motion": {"present": "teach"}},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {
+                        "degradedReason": "motionPreset",
+                        "motionDispatch": "failed",
+                    },
+                },
+            )
+        )
+
+        self.assertNotIn("renderDegraded", forwarder.batches[0]["events"][0])
+
+    async def test_lesson_step_ack_omits_render_metric_for_ambiguous_degraded_ack(self):
+        from unittest.mock import AsyncMock
+
+        forwarder = _FakeForwarder()
+        rt = self._runtime(forwarder=forwarder)
+        rt._outstanding[3] = {
+            "type": "lesson_step",
+            "stepId": "s4",
+            "body": {},
+            "retryCount": 0,
+        }
+        rt._on_frame_acked = AsyncMock()
+
+        await rt.on_lesson_ack(
+            _ack(
+                3,
+                1,
+                step_id="s4",
+                extra={
+                    "acks": 3,
+                    "rendered": True,
+                    "degraded": True,
+                    "telemetry": {"degradedReason": ""},
+                },
+            )
+        )
+
+        self.assertNotIn("renderDegraded", forwarder.batches[0]["events"][0])
 
     async def test_preload_reports_ready_and_failed_critical_assets_to_backend(self):
         class _PreloadStatusCache(_FakeAssetCache):
@@ -1801,7 +2187,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     def test_sd_pack_source_validation_helper_edges(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn)
 
         self.assertFalse(rt._is_sd_asset_pack_source(None))
@@ -1889,7 +2275,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 pack["assets"] = [
                     {
-                        "key": f"teachingObject.extra{i}",
+                        "key": f"teachingObject.{'extra' * 50}{i}",
                         "path": f"objects/extra-{i}.png",
                         "sha256": "a" * 64,
                         "mediaType": "image/png",
@@ -1904,7 +2290,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return pack
 
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_HugeAssetPackCache(ready=True))
 
         await rt.start()
@@ -1987,13 +2373,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_pack_missing_verified_layer_mapping_fails_before_sending_lesson_step(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.voice_provider = _RecordingLessonVoiceProvider()
         manifest = _build_manifest()
         scene = manifest["steps"][0]["scene"]
         local_urls = {
-            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
+            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
         }
         rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True, local_urls=local_urls))
 
@@ -2021,16 +2407,16 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_pack_rejects_manifest_sd_layer_source_without_cache_attestation(self):
         conn = _FakeConn()
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.voice_provider = _RecordingLessonVoiceProvider()
         manifest = _build_manifest()
         scene = manifest["steps"][0]["scene"]
         local_urls = {
-            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
+            scene["backgroundScene"]["poster"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            scene["teachingObject"]["asset"]["src"]: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
         }
         fake_overlay_local = (
-            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach"
+            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach"
         )
         scene["robotOverlay"]["atlas"]["image"] = fake_overlay_local
         scene["robotOverlay"]["asset"]["src"] = fake_overlay_local
@@ -2270,12 +2656,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         object_source = scene["teachingObject"]["asset"]["src"]
         overlay_source = scene["robotOverlay"]["atlas"]["image"]
         local_urls = {
-            poster_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            object_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            overlay_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            poster_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            object_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            overlay_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2285,15 +2671,17 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.start()
         prepare = self._sent_frames(conn)[-1]
         self.assertEqual(prepare["type"], "lesson_prepare")
-        self.assertEqual(prepare["body"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(prepare["body"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         pack_assets = {asset["key"]: asset for asset in prepare["body"]["assetPack"]["assets"]}
         self.assertEqual(
             set(pack_assets),
             {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
         )
-        self.assertEqual(pack_assets["backgroundScene.poster"]["localPath"], local_urls[poster_source])
-        self.assertEqual(pack_assets["teachingObject.barn"]["localPath"], local_urls[object_source])
-        self.assertEqual(pack_assets["robotOverlay.teach"]["localPath"], local_urls[overlay_source])
+        self.assertNotIn("localPath", pack_assets["backgroundScene.poster"])
+        self.assertEqual(
+            prepare["body"]["assetPack"]["localRoot"],
+            "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+        )
 
         await rt.on_lesson_ack(
             _ack(
@@ -2302,7 +2690,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 extra={
                     "acks": 1,
                     "rendered": True,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )
@@ -2331,6 +2719,115 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(_ack(4, 5))
         self.assertEqual(rt.state, "COMPLETED")
 
+    async def test_sd_asset_pack_prepare_compacts_verbose_live_pack_under_frame_limit(self):
+        class _VerboseLiveAssetPackCache(_FakeAssetCache):
+            def asset_pack_manifest(
+                self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
+            ):
+                pack = super().asset_pack_manifest(
+                    assignment_version=assignment_version,
+                    lesson_id=lesson_id,
+                    lesson_version=lesson_version,
+                    manifest_checksum=manifest_checksum,
+                )
+                pack["assets"] = [
+                    {
+                        "key": f"robotOverlay.lesson-asset-{index:02d}@v1",
+                        "path": f"lesson-assets/{'a' * 64}",
+                        "url": (
+                            "http://192.168.1.25:8180/lesson-assets/"
+                            + ("b" * 64)
+                            + f"?asset={index}"
+                        ),
+                        "sha256": "c" * 64,
+                        "sourceSha256": "d" * 64,
+                        "size": 1024 + index,
+                        "mediaType": "image/png",
+                        "critical": index < 8,
+                        "layer": "robotOverlay",
+                        "role": "pose",
+                        "state": "READY",
+                        "checksumOk": True,
+                        "localPath": (
+                            "sd://tbot/lesson-assets/pip-farm-3m/"
+                            "v1-521760af6bb2cecd244932cab52c3ca5badeaf3d67561da1e4323af3cb404a28/"
+                            f"robotOverlay.lesson-asset-{index:02d}%40v1"
+                        ),
+                    }
+                    for index in range(20)
+                ]
+                return pack
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        rt = self._runtime(conn=conn, asset_cache=_VerboseLiveAssetPackCache(ready=True))
+
+        async def sync_ready(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 20,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
+            await rt.start()
+
+        sent = self._sent_frames(conn)
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])
+        self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
+        self.assertEqual(
+            set(sent[0]["body"]["assetPack"]["assets"][0]),
+            {"key", "state", "checksumOk", "localPath", "size"},
+        )
+
+    async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):
+        class _MaximumAssetPackCache(_FakeAssetCache):
+            def asset_pack_manifest(
+                self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
+            ):
+                pack = super().asset_pack_manifest(
+                    assignment_version=assignment_version,
+                    lesson_id=lesson_id,
+                    lesson_version=lesson_version,
+                    manifest_checksum=manifest_checksum,
+                )
+                pack["assets"] = [
+                    {
+                        "key": f"asset-{index:02d}-" + ("k" * 48),
+                        "size": 1024,
+                        "state": "READY",
+                        "checksumOk": True,
+                        "localPath": f"{pack['localRoot']}/asset-{index:02d}-" + ("k" * 48),
+                    }
+                    for index in range(64)
+                ]
+                return pack
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        rt = self._runtime(conn=conn, asset_cache=_MaximumAssetPackCache(ready=True))
+
+        async def sync_ready(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 64,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_ready):
+            await rt.start()
+
+        self.assertEqual([frame["type"] for frame in self._sent_frames(conn)], ["lesson_prepare"])
+        self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
+
     async def test_sd_asset_pack_rewrites_all_layer_image_sources_to_local_paths(self):
         manifest = _build_manifest()
         scene = manifest["steps"][0]["scene"]
@@ -2342,12 +2839,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "sha256": "40f9c095b11a67c023f62847f498cc557e7fcef45762d41787dafffd96a60b34",
         }
         local_urls = {
-            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2375,12 +2872,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }
         scene["robotOverlay"]["atlas"] = {"image": "https://cdn.test/poses/bright-teach.png"}
         local_urls = {
-            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
+            bg_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            obj_source: "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
         }
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             manifest=manifest,
@@ -2406,7 +2903,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return True
 
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _MaterializingAssetCache()
         rt = self._runtime(conn=conn, asset_cache=cache)
 
@@ -2425,7 +2922,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_calls_robot_mcp_sync_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/opt/tbot-esp32-server/data/lesson-packs",
+            }
+        }
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         calls = []
 
@@ -2440,7 +2942,16 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "sent_before_call": list(conn.websocket.sent),
                 }
             )
-            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                    "manifestChecksum": _manifest_checksum(),
+                    "downloadedCount": 3,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                }
+            )
 
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
@@ -2454,17 +2965,417 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["sent_before_call"], [])
         self.assertGreaterEqual(calls[0]["timeout"], 60)
         pack = calls[0]["args"]["assetPack"]
-        self.assertEqual(pack["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(pack["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         self.assertTrue(pack["ready"])
         self.assertEqual(
             {asset["key"] for asset in pack["assets"]},
             {"backgroundScene.poster", "teachingObject.barn", "robotOverlay.teach"},
         )
+        self.assertTrue(pack["localRoot"].startswith("/sdcard/tbot/lesson-assets/"))
+        self.assertTrue(
+            all(asset["localPath"].startswith(pack["localRoot"] + "/") for asset in pack["assets"])
+        )
+        prepare = self._sent_frames(conn)[-1]
+        self.assertEqual(prepare["type"], "lesson_prepare")
+        self.assertTrue(prepare["body"]["assetPack"]["localRoot"].startswith("sd://"))
+        render_root = prepare["body"]["assetPack"]["localRoot"].rstrip("/")
+        self.assertTrue(
+            all(
+                (
+                    asset.get("localPath")
+                    or f"{render_root}/{quote(asset['key'], safe='')}"
+                ).startswith("sd://")
+                for asset in prepare["body"]["assetPack"]["assets"]
+            )
+        )
+
+    async def test_sd_asset_pack_cold_sync_emits_authoritative_attestation_markers(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+
+        async def cold_sync(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=cold_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("lesson_preload_ready", messages)
+        self.assertIn("checksum_verified", messages)
+        self.assertIn("downloadedCount=3", messages)
+        self.assertIn("skippedCount=0", messages)
+        self.assertIn("assetCount=3", messages)
+        duration_match = re.search(r"durationMs=(\d+)", messages)
+        self.assertIsNotNone(duration_match)
+        self.assertGreaterEqual(int(duration_match.group(1)), 1)
+        self.assertNotIn("asset_cache_hit", messages)
+
+    async def test_sd_sample_uses_fixed_advertised_sync_tool(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def capture_call(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return {
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][0], "self_lesson_assets_sync_sample_to_sd")
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_sample_uses_fixed_raw_sync_tool_when_unlisted(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _MissingLessonAssetToolMcpClient()
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def raw_call(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return json.dumps({
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            })
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", new=raw_call):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][0], "self.lesson_assets.sync_sample_to_sd")
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_sample_rejects_malformed_fixed_sync_result(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample")
+        rt = self._runtime(conn=conn, asset_cache=cache)
+
+        async def malformed(*_args, **_kwargs):
+            return {"directory": "/wrong", "downloadedCount": 6, "files": []}
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=malformed):
+            self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+
+    async def test_sd_sample_rejects_invalid_base_before_any_tool_dispatch(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="file:///tmp/sample")
+        calls = []
+
+        async def unexpected_dispatch(*_args, **_kwargs):
+            calls.append((_args, _kwargs))
+            return {"directory": "/wrong", "downloadedCount": 0, "files": []}
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=unexpected_dispatch):
+            self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+        self.assertEqual(calls, [])
+
+    async def test_sd_sample_normalizes_only_trailing_slashes_before_dispatch(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.mcp_client.tools["self_lesson_assets_sync_sample_to_sd"] = {}
+        cache = SampleAssetCache(sd_pack=True, asset_base="https://cdn.example/sample///")
+        digests = {
+            asset["path"]: asset["sha256"]
+            for asset in cache.asset_pack_manifest(
+                assignment_version=1,
+                lesson_id="sample-barn-say-it",
+                lesson_version=1,
+                manifest_checksum="a" * 64,
+            )["assets"]
+        }
+        calls = []
+
+        async def capture_dispatch(_conn, _client, tool_name, args, timeout=30):
+            calls.append((tool_name, copy.deepcopy(args), timeout))
+            return {
+                "directory": "/sdcard/tbot/lesson-assets/sample-barn",
+                "downloadedCount": 6,
+                "files": [
+                    {"file": name, "bytes": 1, "sha256": digests[name]}
+                    for name in cache.firmware_sample_sync_files()
+                ],
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_dispatch):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(calls[0][1], {"base_url": "https://cdn.example/sample"})
+
+    async def test_sd_asset_pack_warm_sync_emits_cache_hit_only_for_all_skipped(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+
+        async def warm_sync(*_args, **_kwargs):
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                    "packChecksum": _manifest_checksum(),
+                    "downloadedCount": 0,
+                    "skippedCount": 3,
+                    "failedCount": 0,
+                }
+            )
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=warm_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("lesson_preload_ready", messages)
+        self.assertIn("checksum_verified", messages)
+        self.assertIn("asset_cache_hit", messages)
+        self.assertIn("downloadedCount=0", messages)
+        self.assertIn("skippedCount=3", messages)
+
+    async def test_sd_asset_pack_rejects_invalid_attestation_without_success_markers(self):
+        invalid_results = (
+            {
+                "ready": False,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "wrong-cache-key",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 2,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": -1,
+                "failedCount": 1,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": "forged-checksum",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "packChecksum": "contradictory-checksum",
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            },
+        )
+
+        for result in invalid_results:
+            with self.subTest(result=result):
+                conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+                conn.mcp_client = _ReadyLessonAssetMcpClient()
+                conn.logger = _CapturingLogger()
+
+                async def invalid_sync(*_args, _result=result, **_kwargs):
+                    return _result
+
+                rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+                with patch("core.lesson.runtime.call_mcp_tool", new=invalid_sync):
+                    self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+
+                messages = "\n".join(message for _level, message in conn.logger.events)
+                self.assertNotIn("lesson_preload_ready", messages)
+                self.assertNotIn("checksum_verified", messages)
+                self.assertNotIn("asset_cache_hit", messages)
+
+    async def test_sd_asset_pack_waits_for_mcp_discovery_before_prepare(self):
+        class _EventuallyReadyMcpClient(_ReadyLessonAssetMcpClient):
+            def __init__(self):
+                super().__init__()
+                self.ready_checks = 0
+
+            async def is_ready(self):
+                self.ready_checks += 1
+                return self.ready_checks >= 2
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_ready_timeout_sec": 1,
+                "sd_sync_ready_poll_sec": 0.001,
+            }
+        }
+        conn.mcp_client = _EventuallyReadyMcpClient()
+        calls = []
+
+        async def capture_call(*args, **kwargs):
+            calls.append((args, kwargs, list(conn.websocket.sent)))
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+            await rt.start()
+
+        self.assertGreaterEqual(conn.mcp_client.ready_checks, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], [])
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_recovers_stale_firmware_lesson_before_retrying_sync(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        resets = []
+        sync_calls = []
+
+        async def request_lesson_preload_reset(**kwargs):
+            resets.append(kwargs)
+            return True
+
+        async def sync_after_reset(*args, **kwargs):
+            sync_calls.append((args, kwargs))
+            if len(sync_calls) == 1:
+                raise RuntimeError("MCP tools disabled during lesson")
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_after_reset):
+            await rt.start()
+
+        self.assertEqual(len(resets), 1)
+        self.assertEqual(resets[0]["assignment_id"], rt.assignment_id)
+        self.assertEqual(resets[0]["lesson_id"], rt.lesson_id)
+        self.assertEqual(len(sync_calls), 2)
+        self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
+
+    async def test_sd_asset_pack_sync_waits_for_voice_idle_before_starting(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        busy = True
+        attempts = 0
+
+        def is_realtime_busy():
+            return busy
+
+        async def voice_preemptible_sync(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        conn.is_realtime_busy = is_realtime_busy
+        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=voice_preemptible_sync):
+            sync_task = asyncio.create_task(rt._sync_sd_asset_pack_to_robot())
+            await asyncio.sleep(0.08)
+            self.assertEqual(attempts, 0)
+            busy = False
+            self.assertTrue(await asyncio.wait_for(sync_task, timeout=1))
+
+        self.assertEqual(attempts, 1)
 
     async def test_sd_asset_pack_raw_syncs_unlisted_internal_robot_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _MissingLessonAssetToolMcpClient()
         calls = []
 
@@ -2479,7 +3390,16 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "sent_before_call": list(conn.websocket.sent),
                 }
             )
-            return json.dumps({"ready": True, "downloadedCount": 3, "failedCount": 0})
+            return json.dumps(
+                {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                    "manifestChecksum": _manifest_checksum(),
+                    "downloadedCount": 3,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                }
+            )
 
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
@@ -2490,7 +3410,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["tool_name"], "self.lesson_assets.sync_to_sd")
         self.assertEqual(calls[0]["sent_before_call"], [])
         self.assertGreaterEqual(calls[0]["timeout"], 60)
-        self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-abcdef12")
+        self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
 
     async def test_sd_asset_pack_mcp_sync_failure_falls_back_to_online_urls(self):
@@ -2500,7 +3420,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         object_source = scene["teachingObject"]["asset"]["src"]
         overlay_source = scene["robotOverlay"]["atlas"]["image"]
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True))
 
@@ -2545,7 +3465,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     features=features,
                     session_id=FIX["frames"]["lesson_prepare"]["sessionId"],
                 )
-                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.config = {
+                    "lesson": {
+                        "asset_delivery_mode": "sd_pack",
+                        "sd_sync_ready_timeout_sec": 0,
+                    }
+                }
                 conn.mcp_client = mcp_client
                 rt = self._runtime(
                     conn=conn,
@@ -2570,7 +3495,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_not_ready_falls_back_to_online_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         finished = []
 
         async def finish_lesson_mode(*, reason):
@@ -2598,7 +3523,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             # Device claims MCP so a missing client is a real sync failure.
             features={"lesson": True, "renderer": "teebot-lesson-renderer.v1", "mcp": True},
         )
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = None  # sync cannot run → online fallback
         finished = []
 
@@ -2620,7 +3545,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_preload_error_fails_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             asset_cache=_FakeAssetCache(
@@ -2637,7 +3562,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_materialize_crash_emits_retryable_error_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(
             conn=conn,
             asset_cache=_FakeAssetCache(preload_error=OSError("sdcard full")),
@@ -2653,7 +3578,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_must_report_ready_before_start(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
         await rt.start()
@@ -2667,7 +3592,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_must_match_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
 
         await rt.start()
@@ -2691,7 +3616,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_requires_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = ""
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -2704,7 +3629,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 extra={
                     "acks": 1,
                     "rendered": True,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )
@@ -2717,7 +3642,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_rejects_non_string_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = 123
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -2743,7 +3668,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sd_asset_pack_prepare_ack_rejects_blank_current_cache_key(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
-        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         cache = _FakeAssetCache(ready=True)
         cache.cache_key = "   "
         rt = self._runtime(conn=conn, asset_cache=cache)
@@ -2837,7 +3762,15 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn)
 
         await rt.start()
-        await rt.on_lesson_ack({"type": "lesson_ack"})
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": rt.session_id,
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+            }
+        )
 
         self.assertIsNotNone(rt._preload_task)
         await rt._preload_task
@@ -2848,11 +3781,50 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         rt = self._runtime(conn=conn)
 
         await rt.start()
-        await rt.on_lesson_ack({"type": "lesson_ack", "sequence": 1})
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": rt.session_id,
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+                "sequence": 1,
+            }
+        )
 
         self.assertIsNotNone(rt._preload_task)
         await rt._preload_task
         self.assertIn("lesson_start", [f["type"] for f in self._sent_frames(conn)])
+
+    async def test_stale_legacy_empty_lesson_ack_without_current_identity_is_ignored(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack({"type": "lesson_ack", "sequence": 1})
+
+        self.assertIsNone(rt._preload_task)
+        self.assertEqual([f["type"] for f in self._sent_frames(conn)], ["lesson_prepare"])
+
+    async def test_delayed_legacy_empty_lesson_ack_from_prior_session_is_ignored(self):
+        conn = _FakeConn()
+        rt = self._runtime(conn=conn)
+
+        await rt.start()
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "assignmentId": rt.assignment_id,
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "lessonId": rt.lesson_id,
+                "lessonVersion": rt.lesson_version,
+                "sequence": 1,
+            }
+        )
+
+        self.assertEqual(set(rt._outstanding), {1})
+        self.assertIsNone(rt._preload_task)
+        self.assertEqual([f["type"] for f in self._sent_frames(conn)], ["lesson_prepare"])
 
     # 3) lesson_start gated until ready ------------------------------------------
 
@@ -3724,7 +4696,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         step_ids = [f["stepId"] for f in self._sent_frames(conn) if f["type"] == "lesson_step"]
         self.assertEqual(step_ids, [step["id"] for step in manifest["steps"]])
         self.assertEqual(conn.voice_provider.child_response_windows, [True, True, True, True])
-        self.assertEqual(conn.voice_provider.prompts, [step["prompt"] for step in manifest["steps"]])
+        expected_prompts = []
+        for step in manifest["steps"]:
+            expected_prompts.append(step["prompt"])
+            if step["completionClass"] == "interactive":
+                expected_prompts.append("Đúng rồi! barn!")
+        self.assertEqual(conn.voice_provider.prompts, expected_prompts)
+        for prompt in conn.voice_provider.prompts:
+            self.assertNotRegex(prompt.lower(), r"\b(wrong|sai|không đúng)\b")
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_stop")
         self.assertEqual(rt._steps_completed, 9)
 
@@ -3818,12 +4797,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "s9": ("celebrate", "robotOverlay.celebrate", "bright-celebrate.png"),
         }
         local_urls = {
-            "barn-round-field-poster.jpg": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/backgroundScene.poster",
-            "barn.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/teachingObject.barn",
-            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.teach",
-            "bright-listening.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.listening",
-            "bright-thinking.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.thinking",
-            "bright-celebrate.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-abcdef12/robotOverlay.celebrate",
+            "barn-round-field-poster.jpg": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/backgroundScene.poster",
+            "barn.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/teachingObject.barn",
+            "bright-teach.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.teach",
+            "bright-listening.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.listening",
+            "bright-thinking.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.thinking",
+            "bright-celebrate.png": "sd://sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3/robotOverlay.celebrate",
         }
         local_urls.update(
             {
@@ -3885,7 +4864,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "acks": prepare["sequence"],
                     "rendered": True,
                     "degraded": False,
-                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-abcdef12"},
+                    "assetPack": {"ready": True, "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"},
                 },
             )
         )
@@ -4559,8 +5538,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lesson_stop", [f["type"] for f in self._sent_frames(conn)])
         self.assertEqual(
             provider.prompts,
-            [manifest["steps"][0]["prompt"]],
+            [manifest["steps"][0]["prompt"], "Đúng rồi! barn!"],
         )
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
 
         completed_events = [
             event
@@ -4625,9 +5605,10 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await rt.on_child_response("barn", source="internal_dev_endpoint"))
 
         self.assertEqual(provider.closed_child_response_windows, 1)
-        self.assertEqual(provider.prompts, ["Say barn."])
+        self.assertEqual(provider.prompts, ["Say barn.", "Đúng rồi! barn!"])
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
         await rt.on_lesson_ack(_ack(4, 4, step_id="s5"))
-        self.assertEqual(provider.prompts, ["Say barn.", "Now say barn again."])
+        self.assertEqual(provider.prompts, ["Say barn.", "Đúng rồi! barn!", "Now say barn again."])
         self.assertLess(
             provider.events.index(("close", None)),
             provider.events.index(("prompt", "Now say barn again.")),
@@ -5045,7 +6026,11 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.state, "RUNNING")
         self.assertIsNone(rt.last_error)
         self.assertEqual(provider.child_response_windows, [True, True])
-        self.assertEqual(provider.prompts[-1], "Con thử nói lại nhé.")
+        self.assertEqual(
+            provider.prompts[-1],
+            "Không sao, con từ từ nhé. Thử nói lại khi con sẵn sàng.",
+        )
+        self.assertNotRegex(provider.prompts[-1].lower(), r"\b(wrong|sai|không đúng)\b")
         self.assertNotIn("lesson_error", [f["type"] for f in self._sent_frames(conn)])
         event_types = [event.get("type") for batch in forwarder.batches for event in batch.get("events", [])]
         self.assertNotIn("lesson_failed", event_types)
@@ -5826,17 +6811,19 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
-    async def test_assignment_pull_uses_device_id_without_minting_device_token(self):
+    async def test_assignment_pull_mints_backend_identity_and_threads_device_token(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
         import config.manage_api_client as mac
         import config.device_token_client as dtc
 
         conn = _RepublishConn()
         conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         assignment_calls = []
 
-        async def _resolve_device_identity(*args, **kwargs):
-            raise AssertionError("lesson pull must not mint a device token")
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            self.assertEqual(device_id, "AA:BB:CC:DD:EE:FF")
+            return "backend-device-uuid", "device-token"
 
         async def _get_child_name(client, base_url, device_id, *, token=None):
             return None
@@ -5855,7 +6842,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             renderer_capabilities=None,
             lesson_version=None,
         ):
-            self.assertIsNone(token)
+            self.assertEqual(token, "device-token")
             return _build_manifest(), f'"lesson-3-espTft-{_manifest_checksum()}"'
 
         saved = (
@@ -5879,8 +6866,61 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             ) = saved
 
         self.assertIsNotNone(result)
-        self.assertEqual(assignment_calls, [("AA:BB:CC:DD:EE:FF", None)])
+        self.assertEqual(assignment_calls, [("backend-device-uuid", "device-token")])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
+
+    async def test_identity_and_manifest_logs_use_authoritative_normalized_fields(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+
+        conn = _RepublishConn(api_base="http://backend.test/v1///")
+        conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
+        conn.logger = _CapturingLogger()
+        backend_device_id = "14140000-0000-4000-8000-000000000004"
+        manifest = {**_build_manifest(), "courseId": "course-from-manifest"}
+        assignment = {**_build_assignment(), "courseId": "must-not-be-logged-as-authoritative"}
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return backend_device_id, "device-token"
+
+        async def _get_child_name(client, base_url, device_id, *, token=None):
+            return None
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return assignment
+
+        async def _get_manifest(*args, **kwargs):
+            return manifest, f'"lesson-3-espTft-{_manifest_checksum()}"'
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_device_child_name,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_device_child_name = _get_child_name
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_device_child_name,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+            ) = saved
+
+        self.assertIsNotNone(result)
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("apiBase=http://backend.test/v1", messages)
+        self.assertIn("deviceMac=AA:BB:CC:DD:EE:FF", messages)
+        self.assertIn(f"backendDeviceId={backend_device_id}", messages)
+        self.assertIn("courseId=course-from-manifest", messages)
+        self.assertNotIn("must-not-be-logged-as-authoritative", messages)
 
     async def test_no_current_assignment_sets_user_visible_start_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -6053,6 +7093,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RepublishConn()
         conn.device_id = "AA:BB:CC:DD:EE:FF"
+        conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         events = []
 
         class _CapturingLogger(_DummyLogger):
@@ -6085,7 +7126,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent, [])
         self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("lesson backend assignment unavailable" in message for _level, message in events),
+            any("lesson backend identity unavailable" in message for _level, message in events),
             events,
         )
 
@@ -6122,7 +7163,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.websocket.sent, [])
         self.assertEqual(conn.lesson_start_status["code"], "BACKEND_UNAVAILABLE")
         self.assertTrue(
-            any("lesson backend assignment unavailable" in message for _level, message in events),
+            any("lesson backend identity unavailable" in message for _level, message in events),
             events,
         )
 
@@ -6140,7 +7181,13 @@ class _RepublishConn:
         self.session_id = FIX["frames"]["lesson_prepare"]["sessionId"]
         self.device_id = "dev-republish"
         self.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v1"}
-        self.config = {"lesson": {"api_base": api_base, "runtime_enabled": True}}
+        self.config = {
+            "lesson": {
+                "api_base": api_base,
+                "runtime_enabled": True,
+                "rollout_device_allowlist": [self.device_id],
+            }
+        }
         self.lesson_runtime = None
         self.lesson_voice_alarm = None
         self._busy = busy
@@ -6208,22 +7255,34 @@ class _PinnedRuntime:
         assignment_version,
         manifest_checksum=None,
         state="RUNNING",
+        session_id="11111111-1111-4111-8111-111111111111",
+        terminal_pending=False,
+        terminal_replay_result=True,
     ):
         self.assignment_id = assignment_id
         self.lesson_version = lesson_version
         self.assignment_version = assignment_version
         self.manifest_checksum = manifest_checksum or _manifest_checksum()
         self.state = state
+        self.session_id = session_id
         self.asset_cache = _EvictableCache()
         self.closed = False
         self.terminal_replay_calls = 0
+        self.terminal_replay_result = terminal_replay_result
+        self.forwarder = type(
+            "_PinnedForwarder",
+            (),
+            {"pending_terminal_batch": {"events": [{"type": "lesson_failed"}]} if terminal_pending else None},
+        )()
 
     async def close(self):
         self.closed = True
 
     async def replay_pending_terminal_event(self):
         self.terminal_replay_calls += 1
-        return True
+        if self.terminal_replay_result:
+            self.forwarder.pending_terminal_batch = None
+        return self.terminal_replay_result
 
 
 class _EvictableCache:
@@ -6238,6 +7297,27 @@ class _EvictableCache:
 
 
 class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import core.lesson.forwarder as forwarder_module
+
+        self._saved_terminal_store = forwarder_module._DEFAULT_TERMINAL_STORE
+        self._saved_pending_terminal_batches = dict(
+            forwarder_module._PENDING_TERMINAL_BATCHES
+        )
+        forwarder_module._PENDING_TERMINAL_BATCHES.clear()
+        forwarder_module._DEFAULT_TERMINAL_STORE = (
+            forwarder_module.MemoryTerminalReplayStore()
+        )
+
+    def tearDown(self):
+        import core.lesson.forwarder as forwarder_module
+
+        forwarder_module._PENDING_TERMINAL_BATCHES.clear()
+        forwarder_module._PENDING_TERMINAL_BATCHES.update(
+            self._saved_pending_terminal_batches
+        )
+        forwarder_module._DEFAULT_TERMINAL_STORE = self._saved_terminal_store
+
     def _patch_backend(self, assignment, manifest, etag='"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'):
         """Monkeypatch the REAL config.manage_api_client attributes the runtime
         resolves at call time (conftest does NOT stub this module). Returns an undo callable."""
@@ -6286,10 +7366,19 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         return _undo
 
-    def _assignment(self, *, lesson_version, assignment_version, state="ASSIGNED", manifest_checksum=None):
+    def _assignment(
+        self,
+        *,
+        lesson_version,
+        assignment_version,
+        state="ASSIGNED",
+        manifest_checksum=None,
+        assignment_id=None,
+        session_id=None,
+    ):
         prep = FIX["frames"]["lesson_prepare"]
-        return {
-            "assignmentId": prep["assignmentId"],
+        assignment = {
+            "assignmentId": assignment_id or prep["assignmentId"],
             "assignmentVersion": assignment_version,
             "lessonId": prep["lessonId"],
             "lessonVersion": lesson_version,
@@ -6297,6 +7386,73 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             "profile": "espTft",
             "state": state,
         }
+        if session_id is not None:
+            assignment["sessionId"] = session_id
+        return assignment
+
+    async def test_new_assignment_on_same_websocket_mints_run_uuid_for_frames_and_events(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        conversational_session = conn.session_id
+        historical_assignment_session = "22222222-2222-4222-8222-222222222222"
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
+        undo = self._patch_backend(
+            self._assignment(
+                lesson_version=3,
+                assignment_version=1,
+                assignment_id="new-assignment",
+                session_id=historical_assignment_session,
+            ),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(uuid.UUID(result.session_id).version, 4)
+        self.assertNotEqual(result.session_id, conversational_session)
+        self.assertNotEqual(result.session_id, historical_assignment_session)
+        self.assertEqual(conn.session_id, conversational_session)
+        self.assertTrue(prior.closed)
+        frames = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual({frame["sessionId"] for frame in frames}, {result.session_id})
+
+        forwarder = _FakeForwarder()
+        result.forwarder = forwarder
+        result._forward({"type": "lesson_started"})
+        self.assertEqual(forwarder.batches[0]["sessionId"], result.session_id)
+
+    async def test_reconnect_ignores_historical_assignment_session_and_mints_new_run_uuid(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        historical_assignment_session = "33333333-3333-4333-8333-333333333333"
+        undo = self._patch_backend(
+            self._assignment(
+                lesson_version=3,
+                assignment_version=1,
+                session_id=historical_assignment_session,
+            ),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertEqual(uuid.UUID(result.session_id).version, 4)
+        self.assertNotEqual(result.session_id, historical_assignment_session)
+        self.assertNotEqual(result.session_id, conn.session_id)
 
     async def test_missing_config_skips_lesson_start_with_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -6491,6 +7647,166 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entered, ["lesson_start"])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
 
+    async def test_connect_preload_keeps_conversation_mode_until_assets_are_ready(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "CONVERSATION"
+        entered = []
+        modes_seen_during_preload = []
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn.session_mode = "LESSON"
+
+        async def blocked_preload(_runtime):
+            modes_seen_during_preload.append(conn.session_mode)
+            return False
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(runtime_module.LessonRuntime, "preload_only", new=blocked_preload):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(modes_seen_during_preload, ["CONVERSATION"])
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.lesson_start_status["code"], "START_REFUSED")
+
+    async def test_start_protocol_crash_releases_lesson_mode_when_no_prior_runtime(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        entered = []
+        released = []
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def crash_start_protocol(_runtime, *, preloaded=False):
+            self.assertTrue(preloaded)
+            raise RuntimeError("prepare send crashed")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=crash_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, ["lesson_start_failed"])
+        self.assertIsNone(conn.lesson_runtime)
+
+    async def test_candidate_lesson_error_keeps_prior_runtime_in_lesson_mode(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
+        released = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def reject_preload(_runtime):
+            raise LessonError("ASSET_CHECKSUM_MISMATCH", "bad candidate")
+
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(runtime_module.LessonRuntime, "preload_only", new=reject_preload):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, prior)
+        self.assertIs(conn.lesson_runtime, prior)
+        self.assertEqual(prior.session_id, prior_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
+        self.assertEqual(released, [])
+        self.assertFalse(prior.closed)
+
+    async def test_candidate_preload_failure_is_silent_until_activation(self):
+        import core.lesson.asset_cache as asset_cache_module
+        import core.lesson.forwarder as forwarder_module
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"]["asset_delivery_mode"] = "sd_pack"
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        prior_session_id = prior.session_id
+        conversational_session_id = conn.session_id
+        released = []
+        candidate_forwarders = []
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        class _CandidateForwarder(_FakeForwarder):
+            def __init__(self, **_kwargs):
+                super().__init__()
+                candidate_forwarders.append(self)
+
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(forwarder_module, "LessonEventForwarder", _CandidateForwarder), patch.object(
+                asset_cache_module,
+                "AssetCache",
+                side_effect=lambda **_kwargs: _FakeAssetCache(
+                    preload_error=LessonError("ASSET_CHECKSUM_MISMATCH", "bad candidate")
+                ),
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, prior)
+        self.assertIs(conn.lesson_runtime, prior)
+        self.assertEqual(prior.session_id, prior_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
+        self.assertFalse(prior.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(released, [])
+        self.assertEqual(candidate_forwarders[0].batches, [])
+
     async def test_start_refused_releases_lesson_mode_and_surfaces_status(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
@@ -6659,6 +7975,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             assignment_id=prep["assignmentId"], lesson_version=3, assignment_version=1
         )
         conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        conversational_session_id = conn.session_id
 
         undo = self._patch_backend(
             self._assignment(lesson_version=3, assignment_version=1), _build_manifest()
@@ -6671,6 +7989,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         # Same version -> idempotent no-op: existing kept, NOT torn down, NO new frame.
         self.assertIs(result, pinned)
         self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(conn.session_id, conversational_session_id)
         self.assertFalse(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.websocket.sent, [])
@@ -6730,11 +8050,517 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
         self.assertIs(conn.lesson_runtime, result)
-        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertEqual(pinned.terminal_replay_calls, 0)
         self.assertTrue(pinned.closed)
         self.assertFalse(pinned.asset_cache.evicted)
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
         self.assertEqual([json.loads(p)["type"] for p in conn.websocket.sent], ["lesson_prepare"])
+
+    async def test_unchanged_failed_session_with_local_pending_terminal_blocks_restart_on_replay_failure(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_pending=True,
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_unchanged_failed_session_with_local_pending_terminal_skips_restart_after_replay_success(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_pending=True,
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_unchanged_failed_session_rechecks_terminal_pending_after_manifest_fetch_failure(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_unchanged_failed_session_rechecks_terminal_pending_after_manifest_fetch_success(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_terminal_pending_after_manifest_fetch_failure(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_terminal_pending_after_manifest_fetch_success(self):
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        get_manifest = mac.get_lesson_manifest
+
+        async def inject_pending_during_manifest(*args, **kwargs):
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return await get_manifest(*args, **kwargs)
+
+        mac.get_lesson_manifest = inject_pending_during_manifest
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_candidate_preload_failure(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        candidates = []
+        entered = []
+
+        async def inject_pending_during_preload(candidate):
+            candidates.append(candidate)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=inject_pending_during_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_candidate_preload_success(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+        candidates = []
+        entered = []
+
+        async def inject_pending_during_preload(candidate):
+            candidates.append(candidate)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=inject_pending_during_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, [])
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_enter_mode_failure(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "CONVERSATION"
+        conn.audio_channel_owner = "CONVERSATION"
+        mode_changes = []
+
+        def set_session_mode(mode, *, reason=""):
+            conn.session_mode = mode
+            conn.audio_channel_owner = mode
+            mode_changes.append((mode, reason))
+            return mode
+
+        conn._set_session_mode = set_session_mode
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=False,
+        )
+        conn.lesson_runtime = pinned
+        pinned_session_id = pinned.session_id
+        candidates = []
+        entered = []
+        released = []
+
+        async def preload(candidate):
+            candidates.append(candidate)
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn._set_session_mode("LESSON", reason=reason)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime, "preload_only", new=preload
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.session_id, pinned_session_id)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, [])
+        self.assertEqual(conn.session_mode, "CONVERSATION")
+        self.assertEqual(conn.audio_channel_owner, "CONVERSATION")
+        self.assertEqual(mode_changes[-1], ("CONVERSATION", "lesson_candidate_aborted"))
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
+
+    async def test_changed_assignment_version_rechecks_old_terminal_after_enter_mode_success(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.session_mode = "LESSON"
+        conn.audio_channel_owner = "LESSON"
+        mode_changes = []
+
+        def set_session_mode(mode, *, reason=""):
+            conn.session_mode = mode
+            conn.audio_channel_owner = mode
+            mode_changes.append((mode, reason))
+            return mode
+
+        conn._set_session_mode = set_session_mode
+        prep = FIX["frames"]["lesson_prepare"]
+        pinned = _PinnedRuntime(
+            assignment_id=prep["assignmentId"],
+            lesson_version=3,
+            assignment_version=1,
+            state="FAILED",
+            terminal_replay_result=True,
+        )
+        conn.lesson_runtime = pinned
+        candidates = []
+        entered = []
+        released = []
+
+        async def preload(candidate):
+            candidates.append(candidate)
+            return True
+
+        async def enter_lesson_mode(*, reason):
+            entered.append(reason)
+            conn._set_session_mode("LESSON", reason=reason)
+            pinned.forwarder.pending_terminal_batch = {
+                "events": [{"type": "lesson_failed"}]
+            }
+
+        async def release_lesson_mode(*, reason):
+            released.append(reason)
+
+        async def unexpected_start_protocol(_candidate, *, preloaded=False):
+            raise AssertionError("terminal barrier must run before candidate protocol start")
+
+        conn.enter_lesson_mode = enter_lesson_mode
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=2, state="ASSIGNED"),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime, "preload_only", new=preload
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=unexpected_start_protocol,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, pinned)
+        self.assertIs(conn.lesson_runtime, pinned)
+        self.assertEqual(pinned.terminal_replay_calls, 1)
+        self.assertFalse(pinned.closed)
+        self.assertEqual(entered, ["lesson_start"])
+        self.assertEqual(released, [])
+        self.assertEqual(conn.session_mode, "LESSON")
+        self.assertEqual(conn.audio_channel_owner, "LESSON")
+        self.assertEqual(mode_changes[-1], ("LESSON", "lesson_candidate_aborted"))
+        self.assertEqual(conn.websocket.sent, [])
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertTrue(candidates[0]._closed)
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
 
     async def test_unchanged_completed_session_replays_pending_terminal_event_on_reconnect_once(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
@@ -6746,6 +8572,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             lesson_version=3,
             assignment_version=1,
             state="COMPLETED",
+            terminal_pending=True,
         )
         conn.lesson_runtime = pinned
 
@@ -6760,12 +8587,14 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, pinned)
         self.assertEqual(pinned.terminal_replay_calls, 1)
         self.assertEqual(conn.websocket.sent, [])
+        self.assertEqual(self.manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
 
     async def test_fresh_reconnect_replays_dead_lettered_terminal_event_before_restart(self):
         import httpx
         import config.manage_api_client as mac
         import config.device_token_client as dtc
-        from core.lesson.forwarder import LessonEventForwarder
+        from core.lesson.forwarder import LessonEventForwarder, get_terminal_replay_store
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         prep = FIX["frames"]["lesson_prepare"]
@@ -6816,8 +8645,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
         mac.post_lesson_event = _post_lesson_event
+        conn = _RepublishConn()
         try:
-            result = await maybe_start_lesson_on_connect(_RepublishConn())
+            result = await maybe_start_lesson_on_connect(conn)
         finally:
             (
                 dtc.resolve_device_identity,
@@ -6826,8 +8656,80 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 mac.post_lesson_event,
             ) = saved
 
+        await get_terminal_replay_store().clear("dev-republish", terminal)
+
         self.assertIsNone(result)
         self.assertEqual(replayed, [terminal])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAYED")
+
+    async def test_fresh_reconnect_blocks_restart_when_terminal_replay_post_fails(self):
+        import httpx
+        import config.manage_api_client as mac
+        import config.device_token_client as dtc
+        from core.lesson.forwarder import LessonEventForwarder, get_terminal_replay_store
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        prep = FIX["frames"]["lesson_prepare"]
+        terminal = {
+            "assignmentId": prep["assignmentId"],
+            "sessionId": "sess_reconnect_terminal_failed",
+            "events": [{"type": "lesson_completed", "completedAt": 1_700_000_000_000}],
+        }
+
+        async def _fail_post(_client, _base_url, _device_id, _batch, *, token=None):
+            request = httpx.Request("POST", "http://backend.test/v1/devices/dev-republish/lesson-events")
+            response = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError("backend hiccup", request=request, response=response)
+
+        old_forwarder = LessonEventForwarder(
+            device_id="dev-republish",
+            base_url="http://backend.test/v1",
+            post_fn=_fail_post,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=0,
+        )
+        old_forwarder.enqueue(terminal)
+        await old_forwarder._queue.join()
+        await old_forwarder.aclose()
+
+        manifest_calls = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            return device_id, "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return self._assignment(lesson_version=3, assignment_version=1, state="ASSIGNED")
+
+        async def _get_manifest(*_args, **_kwargs):
+            manifest_calls.append(True)
+            return _build_manifest(), '"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'
+
+        saved = (
+            dtc.resolve_device_identity,
+            mac.get_current_assignment,
+            mac.get_lesson_manifest,
+            mac.post_lesson_event,
+        )
+        dtc.resolve_device_identity = _resolve_device_identity
+        mac.get_current_assignment = _get_assignment
+        mac.get_lesson_manifest = _get_manifest
+        mac.post_lesson_event = _fail_post
+        conn = _RepublishConn()
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            (
+                dtc.resolve_device_identity,
+                mac.get_current_assignment,
+                mac.get_lesson_manifest,
+                mac.post_lesson_event,
+            ) = saved
+
+        await get_terminal_replay_store().clear("dev-republish", terminal)
+
+        self.assertIsNone(result)
+        self.assertEqual(manifest_calls, [])
+        self.assertEqual(conn.lesson_start_status["code"], "TERMINAL_REPLAY_PENDING")
 
     async def test_fresh_reconnect_replays_dead_lettered_child_inactivity_before_restart(self):
         import httpx
@@ -6918,9 +8820,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         finally:
             undo()
 
-        # Old cache evicted + old runtime closed; a FRESH runtime is pinned and it
-        # already emitted lesson_prepare for the new version (no reconnect needed).
-        self.assertTrue(pinned.asset_cache.evicted)
+        # Old exact cache remains rollback-safe; the old runtime closes only after
+        # the fresh candidate emitted lesson_prepare for the new version.
+        self.assertFalse(pinned.asset_cache.evicted)
         self.assertTrue(pinned.closed)
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
@@ -6957,7 +8859,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         finally:
             undo()
 
-        self.assertTrue(pinned.asset_cache.evicted)
+        self.assertFalse(pinned.asset_cache.evicted)
         self.assertTrue(pinned.closed)
         self.assertIsNotNone(result)
         self.assertIsNot(result, pinned)
@@ -7030,12 +8932,17 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pull_uses_server_api_url_fallback_and_fetches_esptft_manifest(self):
         import config.manage_api_client as mac
+        import config.device_token_client as dtc
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
         conn = _RepublishConn(api_base=None)
         conn.config["lesson"].pop("api_base", None)
         conn.config["server"] = {"api_url": "http://course-backend.test/v1"}
         calls = []
+
+        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+            calls.append(("identity", base_url, device_id))
+            return "backend-device-uuid", "device-token"
 
         async def _get_assignment(client, base_url, device_id, *, token=None):
             calls.append(("assignment", base_url, device_id, token))
@@ -7054,17 +8961,18 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             calls.append(("manifest", base_url, lesson_id, profile, token, lesson_version))
             return _build_manifest(), '"lesson-3-espTft-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"'
 
-        saved = (mac.get_current_assignment, mac.get_lesson_manifest)
+        saved = (mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity)
         mac.get_current_assignment = _get_assignment
         mac.get_lesson_manifest = _get_manifest
+        dtc.resolve_device_identity = _resolve_device_identity
         try:
             result = await maybe_start_lesson_on_connect(conn)
         finally:
-            mac.get_current_assignment, mac.get_lesson_manifest = saved
+            mac.get_current_assignment, mac.get_lesson_manifest, dtc.resolve_device_identity = saved
 
         self.assertIsNotNone(result)
         self.assertIn(
-            ("assignment", "http://course-backend.test/v1", "dev-republish", None),
+            ("assignment", "http://course-backend.test/v1", "backend-device-uuid", "device-token"),
             calls,
         )
         self.assertIn(
@@ -7073,7 +8981,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 "http://course-backend.test/v1",
                 FIX["frames"]["lesson_prepare"]["lessonId"],
                 "espTft",
-                None,
+                "device-token",
                 3,
             ),
             calls,
@@ -7095,7 +9003,8 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn = _RepublishConn()
         undo = self._patch_backend(assignment, _build_manifest())
         try:
-            rt = await maybe_start_lesson_on_connect(conn)
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                rt = await maybe_start_lesson_on_connect(conn)
         finally:
             undo()
 
@@ -7177,8 +9086,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = _RecordingLessonVoiceProvider()
         undo = self._patch_backend(assignment, manifest)
         try:
-            response = start_lesson_module.start_lesson(conn)
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                response = start_lesson_module.start_lesson(conn)
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -7290,8 +9200,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = _RecordingLessonVoiceProvider()
         undo = self._patch_backend(assignment, manifest)
         try:
-            response = start_lesson_module.start_lesson(conn)
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                response = start_lesson_module.start_lesson(conn)
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -7422,8 +9333,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("bắt đầu khoá học")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("bắt đầu khoá học")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -7553,8 +9465,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         conn.voice_provider = provider
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("học bài đi")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("học bài đi")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
 
@@ -7746,8 +9659,9 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         )
         undo = self._patch_backend(assignment, manifest)
         try:
-            handled = await provider._on_user_transcript("bắt đầu bài học")
-            rt = await conn.lesson_pull_task
+            with patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+                handled = await provider._on_user_transcript("bắt đầu bài học")
+                rt = await conn.lesson_pull_task
         finally:
             undo()
             asset_cache_mod.AssetCache = saved_asset_cache
@@ -7821,6 +9735,47 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(opened_windows), len(interactive_steps))
         self.assertEqual(rt.state, "COMPLETED")
         self.assertEqual(rt._steps_completed, 9)
+
+class ActivityLeaseLessonMutationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_start_refuses_exclusive_lease_inside_shared_lock(self):
+        from core.lesson import runtime as runtime_module
+
+        lock = asyncio.Lock()
+        await lock.acquire()
+        conn = SimpleNamespace(
+            _lesson_pull_lock=lock,
+            activity_leases=ActivityLeaseCoordinator(asyncio.get_running_loop()),
+        )
+        async def forbidden(_conn):
+            self.fail("lesson mutation must not run during exclusive eviction")
+
+        task = None
+        with patch(
+            "core.providers.tools.product_toolset.lesson_runtime_enabled",
+            return_value=True,
+        ), patch.object(runtime_module, "_maybe_start_lesson_on_connect_impl", forbidden):
+            task = asyncio.create_task(runtime_module.maybe_start_lesson_on_connect(conn))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                lease = conn.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+                lock.release()
+                result = await task
+            finally:
+                if lock.locked():
+                    lock.release()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "CACHE_EVICTION_RESERVED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,10 @@ def ensure_project_root_on_path() -> None:
         sys.path.insert(0, root)
 
 
-def build_config(*, lan_ip: str, ws_port: int, http_port: int) -> dict:
+def build_config(*, lan_ip: str, ws_port: int, http_port: int, device_id: str) -> dict:
+    normalized_device_id = device_id.strip().lower()
+    if not normalized_device_id:
+        raise ValueError("device_id must identify the single local demo robot")
     return {
         "read_config_from_api": True,
         "selected_module": {},
@@ -51,6 +54,7 @@ def build_config(*, lan_ip: str, ws_port: int, http_port: int) -> dict:
         "lesson": {
             "runtime_enabled": False,
             "sample_lesson": True,
+            "rollout_device_allowlist": [normalized_device_id],
             "sample_mode": "interactive",
             "asset_delivery_mode": "sd_pack",
             "asset_pack_local_root": "sd://tbot/lesson-assets",
@@ -77,14 +81,19 @@ def status_lines(*, lan_ip: str, ws_port: int, http_port: int) -> list[str]:
     ]
 
 
-async def serve(*, lan_ip: str, ws_port: int, http_port: int) -> None:
+async def serve(*, lan_ip: str, ws_port: int, http_port: int, device_id: str) -> None:
     os.environ["TBOT_LOCAL_SAMPLE_DEMO_BYPASS"] = "1"
     ensure_project_root_on_path()
 
     from core.http_server import SimpleHttpServer
     from core.websocket_server import WebSocketServer
 
-    config = build_config(lan_ip=lan_ip, ws_port=ws_port, http_port=http_port)
+    config = build_config(
+        lan_ip=lan_ip,
+        ws_port=ws_port,
+        http_port=http_port,
+        device_id=device_id,
+    )
     ws = WebSocketServer(config)
     http = SimpleHttpServer(config, ws.lesson_connections)
     tasks = [asyncio.create_task(ws.start()), asyncio.create_task(http.start())]
@@ -116,11 +125,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lan-ip", default=None, help="Mac LAN IP reachable by the robot")
     parser.add_argument("--ws-port", type=int, default=8000)
     parser.add_argument("--http-port", type=int, default=8003)
+    parser.add_argument(
+        "--device-id",
+        required=True,
+        help="Device ID/MAC of the single robot admitted to the local sample demo",
+    )
     args = parser.parse_args(argv)
 
     lan_ip = args.lan_ip or _default_lan_ip()
     try:
-        asyncio.run(serve(lan_ip=lan_ip, ws_port=args.ws_port, http_port=args.http_port))
+        asyncio.run(
+            serve(
+                lan_ip=lan_ip,
+                ws_port=args.ws_port,
+                http_port=args.http_port,
+                device_id=args.device_id,
+            )
+        )
     except KeyboardInterrupt:
         return 0
     return 0

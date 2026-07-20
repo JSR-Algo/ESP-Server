@@ -20,7 +20,7 @@
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
-        <el-button size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
+        <el-button v-if="lessonCapabilities.exactEspTftPreview" size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
           {{ $t('lesson.publish') }}
         </el-button>
@@ -41,6 +41,88 @@
         <div class="kv"><span class="muted">{{ $t('lesson.checksum') }}</span><span class="mono">{{ preview.checksum }}</span></div>
         <div class="kv"><span class="muted">etag</span><span class="mono">{{ preview.etag }}</span></div>
       </el-card>
+      <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
+        <div class="canonical-demo__copy">
+          <span class="eyebrow">SOURCE / ADMIN DEMO</span>
+          <h3>Original farm scene</h3>
+          <p>The video is an author reference only. The exact robot preview uses the pinned static poster and overlays.</p>
+          <span class="mono small">{{ canonicalDemo.sourceFolder }}/{{ canonicalDemo.adminPreview.sourcePath }}</span>
+          <div class="canonical-demo__sources" aria-label="Canonical source assets">
+            <img v-for="asset in canonicalDemo.sourceAssets" :key="asset.sourcePath" data-testid="canonical-source-asset" :src="asset.url" :alt="asset.sourcePath" />
+          </div>
+        </div>
+        <video
+          data-testid="canonical-source-video"
+          muted
+          controls
+          playsinline
+          preload="metadata"
+          :poster="canonicalDemo.adminPreview.posterUrl"
+          :src="canonicalDemo.adminPreview.url"
+        />
+      </section>
+
+      <section v-if="lesson" class="lesson-studio">
+        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
+        <main class="lesson-studio__canvas">
+          <div class="lesson-studio__toolbar">
+            <div>
+              <span class="eyebrow">VISUAL LESSON BUILDER</span>
+              <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
+            </div>
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingSelectedStep" :disabled="!selectedStepDirty" @click="saveSelectedStepStudio">
+              Save step
+            </el-button>
+          </div>
+          <div v-if="selectedStep" class="lesson-studio__workbench">
+            <div>
+              <el-card shadow="never" class="step-content-panel">
+                <div slot="header"><strong>Step content</strong></div>
+                <el-form label-position="top" size="small">
+                  <el-form-item :label="$t('lesson.prompt')" required>
+                    <el-input :value="selectedContent.prompt" data-testid="lesson-step-prompt" type="textarea" :rows="2" :disabled="!isDraft" @input="updateSelectedContent('prompt', $event)" />
+                  </el-form-item>
+                  <div class="grid-2">
+                    <el-form-item :label="$t('lesson.subjectLabel')" required>
+                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft" @input="updateSelectedContent('subject', $event)" />
+                    </el-form-item>
+                    <el-form-item :label="$t('lesson.helperText')">
+                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft" @input="updateSelectedContent('helperText', $event)" />
+                    </el-form-item>
+                  </div>
+                  <el-form-item :label="$t('lesson.l1TransferHint')">
+                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft" @input="updateSelectedContent('l1TransferHint', $event)" />
+                  </el-form-item>
+                </el-form>
+              </el-card>
+              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
+              <SharedAssetPicker
+                v-if="lessonCapabilities.sharedVisualAuthoring"
+                :assets="sharedVisualAssets"
+                :selected-key="selectedObjectKey"
+                category="teachingObject"
+                @select="selectSharedAsset"
+                @inspect="inspectSharedAsset"
+                @clone="cloneSharedAsset"
+              />
+            </div>
+            <RobotLessonPreview
+              v-if="lessonCapabilities.exactEspTftPreview && previewManifest"
+              :manifest="previewManifest"
+              :step-index="selectedStepIndex"
+              initial-path="correct"
+              @path-change="onPreviewPathChange"
+            />
+            <div v-else-if="lessonCapabilities.exactEspTftPreview" class="preview-empty">
+              <strong>Robot preview</strong>
+              <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
+              <el-button size="small" @click="doPreview">Generate preview</el-button>
+            </div>
+          </div>
+          <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
+          <LessonPublishReadiness :steps="studioSteps" :assets="sharedVisualAssets" :manifest="previewManifest || {}" :validation="validationResult" />
+        </main>
+      </section>
 
       <section v-if="lesson" class="lesson-studio">
         <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
@@ -418,8 +500,20 @@ import {
   templateVisualRefTransition,
   mergeStepBodyForSave,
 } from '@/components/lesson/tvideo-template-logic';
+import {
+  addChoice as appendStepChoice,
+  buildCreateStepPayload,
+  buildSaveStepRequest,
+  createLessonStepEditorState,
+  createStepDialogState,
+  removeChoice as removeStepChoice,
+  resolveSaveSuccess,
+} from '@/components/lesson/lesson-step-editor-state';
 import Api from '@/apis/api';
 import { isUncertainNestError } from '@/apis/nestHttp';
+import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
+import { loadCanonicalDemoContext } from '@/utils/canonicalDemoContext.mjs';
+import { createAuthoringDirtyHandle } from '@/utils/serviceWorkerUpdateSafety.mjs';
 
 export default {
   name: 'LessonEditor',
@@ -440,13 +534,18 @@ export default {
     TvideoVariantBatchPanel,
   },
   data() {
+    const stepEditor = createLessonStepEditorState();
+    const lessonUpdateSafety = createAuthoringDirtyHandle();
     return {
       lesson: null,
+      lessonCapabilities: { ...NO_LESSON_ROLLOUT_CAPABILITIES },
+      canonicalDemo: null,
+      canonicalDemoLoadSequence: 0,
       steps: [],
       stepTypes: [],
       loading: false,
-      reordering: false,
-      addingStep: false,
+      stepEditor,
+      lessonUpdateSafety,
       validating: false,
       validationResult: null,
       validationProofVersion: -1,
@@ -465,13 +564,11 @@ export default {
       publishReconcileRequestId: 0,
       readinessReady: false,
       renaming: false,
-      stepDialogVisible: false,
-      stepForm: this.blankStepForm(),
-      correctChoiceId: '',
       lastSubject: '',
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
       sharedBackgrounds: [],
+      sharedVisualAssets: [],
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
       partsOfSpeech: ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'determiner'],
@@ -483,7 +580,6 @@ export default {
       ],
       preview: null,
       publishMessage: '',
-      selectedStepIndex: 0,
       promptDraft: '',
       promptDirty: false,
       promptStepKey: '',
@@ -491,7 +587,12 @@ export default {
       promptSaveRequestId: 0,
       selectedStepDrafts: {},
       selectedAssetDrafts: {},
+      selectedContentDrafts: {},
       dirtyStepKeys: {},
+      savingStepKeys: {},
+      stepDraftRevisions: {},
+      addingStep: false,
+      reordering: false,
       stepEditRevisions: {},
       savingStep: false,
       previewManifest: null,
@@ -507,6 +608,8 @@ export default {
       assetAppliedReadEpoch: 0,
       assetLatestReadEpoch: 0,
       editorDestroying: false,
+      studioRevision: 0,
+      previewPath: null,
       renameVisible: false,
       titleDraft: '',
       generatingVariants: false,
@@ -523,6 +626,36 @@ export default {
     };
   },
   computed: {
+    selectedStepIndex: {
+      get() { return this.stepEditor.selectedStepIndex; },
+      set(value) { this.stepEditor.selectedStepIndex = value; },
+    },
+    stepDialogVisible: {
+      get() { return this.stepEditor.dialogVisible; },
+      set(value) { this.stepEditor.dialogVisible = value; },
+    },
+    stepForm: {
+      get() { return this.stepEditor.form; },
+      set(value) { this.stepEditor.form = value; },
+    },
+    correctChoiceId: {
+      get() { return this.stepEditor.correctChoiceId; },
+      set(value) { this.stepEditor.correctChoiceId = value; },
+    },
+    addingStep: {
+      get() { return this.stepEditor.adding; },
+      set(value) { this.stepEditor.adding = value; },
+    },
+    reordering: {
+      get() { return this.stepEditor.reordering; },
+      set(value) { this.stepEditor.reordering = value; },
+    },
+    selectedStepDrafts() { return this.stepEditor.authoringDrafts; },
+    selectedContentDrafts() { return this.stepEditor.contentDrafts; },
+    selectedAssetDrafts() { return this.stepEditor.assetDrafts; },
+    dirtyStepKeys() { return this.stepEditor.dirtyKeys; },
+    savingStepKeys() { return this.stepEditor.savingKeys; },
+    stepDraftRevisions() { return this.stepEditor.draftRevisions; },
     lessonId() {
       return this.$route.query.lessonId;
     },
@@ -572,6 +705,22 @@ export default {
     assetMutating() {
       return Object.keys(this.assetMutationTokens).length > 0;
     },
+    savingSelectedStep() {
+      return Boolean(this.selectedStep && this.savingStepKeys[this.selectedStep.stepKey]);
+    },
+    hasUnsavedDrafts() {
+      return Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]);
+    },
+    hasPendingAuthoringChanges() {
+      return this.hasUnsavedDrafts
+        || this.stepDialogVisible
+        || this.renameVisible
+        || this.addingStep
+        || this.reordering
+        || this.renaming
+        || this.publishing
+        || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key]);
+    },
     selectedAuthoring: {
       get() {
         if (!this.selectedStep) return mergeAuthoringFields({}, {});
@@ -583,6 +732,7 @@ export default {
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.bumpStepEditRevision(this.selectedStep.stepKey);
+        this.markStudioChanged(this.selectedStep.stepKey);
         this.invalidatePreview();
       },
     },
@@ -598,10 +748,31 @@ export default {
         this.selectedAuthoring = next;
       },
     },
+    selectedContent: {
+      get() {
+        if (!this.selectedStep) return { prompt: '', subject: '', helperText: '', l1TransferHint: '' };
+        return this.selectedContentDrafts[this.selectedStep.stepKey] || {
+          prompt: this.selectedStep.prompt || '',
+          subject: this.selectedStep.subject || '',
+          helperText: this.selectedStep.helperText || '',
+          l1TransferHint: this.selectedStep.l1TransferHint || '',
+        };
+      },
+      set(value) {
+        if (!this.selectedStep) return;
+        this.$set(this.selectedContentDrafts, this.selectedStep.stepKey, value);
+        this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
+        this.markStudioChanged(this.selectedStep.stepKey);
+      },
+    },
     selectedObjectKey() {
       if (this.selectedStep && this.selectedAssetDrafts[this.selectedStep.stepKey]) {
         return this.selectedAssetDrafts[this.selectedStep.stepKey].assetKey;
       }
+      const visualRef = this.selectedStep && Array.isArray(this.selectedStep.visualRefs)
+        ? this.selectedStep.visualRefs.find((ref) => ref.slot === 'teachingObject')
+        : null;
+      if (visualRef) return visualRef.assetKey || visualRef.asset_key || '';
       const body = this.selectedStep && this.selectedStep.stepBody;
       return body && body.teachingObject && body.teachingObject.asset
         ? body.teachingObject.asset.key
@@ -610,13 +781,25 @@ export default {
     studioSteps() {
       return this.steps.map((step) => {
         const authored = this.selectedStepDrafts[step.stepKey];
-        return authored ? { ...step, stepBody: { ...(step.stepBody || {}), ...authored } } : step;
+        const content = this.selectedContentDrafts[step.stepKey];
+        return authored || content
+          ? { ...step, ...(content || {}), stepBody: { ...(step.stepBody || {}), ...(authored || {}) } }
+          : step;
       });
     },
   },
   watch: {
     selectedStepKey() {
       this.resetPromptDraft(this.selectedStep);
+    },
+    '$route.query.demoSource'() {
+      this.loadCanonicalDemo();
+    },
+    hasPendingAuthoringChanges: {
+      immediate: true,
+      handler(value) {
+        this.lessonUpdateSafety.setDirty(value);
+      },
     },
     // Mirror subject into vocab.word + scene.primaryWord while they track it
     // (don't clobber an author-edited value).
@@ -632,6 +815,8 @@ export default {
       this.$router.replace('/course-management');
       return;
     }
+    this.loadLessonCapabilities();
+    this.loadCanonicalDemo();
     this.fetchAll();
   },
   beforeDestroy() {
@@ -644,8 +829,25 @@ export default {
     this.publishRequestId += 1;
     this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
+    this.canonicalDemoLoadSequence += 1;
+    this.lessonUpdateSafety.release();
   },
   methods: {
+    async loadCanonicalDemo() {
+      const sequence = ++this.canonicalDemoLoadSequence;
+      try {
+        const demo = await loadCanonicalDemoContext(this.$route.query.demoSource);
+        if (sequence === this.canonicalDemoLoadSequence && !this._isBeingDestroyed) this.canonicalDemo = demo;
+      } catch (error) {
+        if (sequence !== this.canonicalDemoLoadSequence || this._isBeingDestroyed) return;
+        this.canonicalDemo = null;
+        this.$message.warning(error instanceof Error ? error.message : 'Canonical demo could not be loaded');
+      }
+    },
+    async loadLessonCapabilities() {
+      this.lessonCapabilities = await loadLessonRolloutCapabilities();
+      if (this.lessonCapabilities.sharedVisualAuthoring) this.fetchSharedVisualAssets();
+    },
     statusType(status) {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
@@ -941,6 +1143,16 @@ export default {
         (msg) => { this.checkingVariantReadiness = false; this.$message.error(msg); },
       );
     },
+    markStudioChanged(stepKey) {
+      this.studioRevision += 1;
+      if (stepKey) this.$set(this.stepDraftRevisions, stepKey, Number(this.stepDraftRevisions[stepKey] || 0) + 1);
+      this.validationResult = null;
+      this.previewManifest = null;
+    },
+    updateSelectedContent(field, value) {
+      if (!this.selectedStep || !this.isDraft) return;
+      this.selectedContent = { ...this.selectedContent, [field]: value };
+    },
     // A step carries an expression override when its persisted expression differs
     // from the stepType-derived default. Server-derived steps look "auto"; we flag
     // the divergence so authors see which rows were overridden.
@@ -964,118 +1176,6 @@ export default {
     },
     removeWindow(i) {
       this.stepForm.scene.activeWindows.splice(i, 1);
-    },
-    assetByKey(key) {
-      return this.bundleAssets.find((a) => a.assetKey === key) || null;
-    },
-    // Build the stepBody.vocab object, dropping empty sub-fields. Returns null when
-    // nothing was authored. locale = lesson locale (default 'vi').
-    buildVocab(subject) {
-      const v = this.stepForm.vocab;
-      const word = (v.word || subject || '').trim();
-      const out = {};
-      if (word) out.word = word;
-      if ((v.ipa || '').trim()) out.ipa = v.ipa.trim();
-      if (v.partOfSpeech) out.partOfSpeech = v.partOfSpeech;
-      const tr = (v.translationVi || '').trim();
-      if (tr) {
-        const loc = (this.lesson && this.lesson.locale) || 'vi';
-        out.translation = { [loc]: tr };
-      }
-      if ((v.definition || '').trim()) out.definition = v.definition.trim();
-      const examples = (v.examples || [])
-        .filter((e) => (e.text || '').trim())
-        .map((e) => {
-          const ex = { text: e.text.trim() };
-          if ((e.translation || '').trim()) ex.translation = e.translation.trim();
-          return ex;
-        });
-      if (examples.length) out.examples = examples;
-      // Only emit when more than the auto-mirrored word is present.
-      return Object.keys(out).length > (out.word ? 1 : 0) || out.word ? out : null;
-    },
-    // Build the stepBody.scene object from the lifted bundle assets, matching the
-    // 076 seed shape. Returns null when nothing was authored.
-    buildScene(subject) {
-      const s = this.stepForm.scene;
-      const scene = {};
-      const bg = this.assetByKey(s.backgroundKey);
-      if (bg) {
-        scene.backgroundScene = {
-          mode: 'poster',
-          poster: { key: bg.assetKey, src: bg.path || bg.url, fit: s.fit || 'cover', sha256: bg.sha256 },
-          video: null,
-          altCaption: (s.altCaption || '').trim(),
-        };
-      }
-      const obj = this.assetByKey(s.objectKey);
-      if (obj) {
-        const teachingObject = {
-          primaryWord: (s.primaryWord || subject || '').trim(),
-          supportWords: Array.isArray(s.supportWords) ? s.supportWords.filter(Boolean) : [],
-          placement: { anchor: s.placementAnchor || 'center', paddingTopPercent: 8 },
-          asset: { key: obj.assetKey, src: obj.path || obj.url, sha256: obj.sha256 },
-        };
-        // focusTarget: model step only; clamp [0,1] + enforce tStart<tEnd here so a
-        // bad window cannot 400 the lesson at publish.
-        if (this.stepForm.stepType === 'model' && s.activeWindows.length) {
-          const clamp = (n) => Math.min(1, Math.max(0, Number(n) || 0));
-          const windows = s.activeWindows
-            .map((w) => ({
-              tStart: Math.max(0, Number(w.tStart) || 0),
-              tEnd: Math.max(0, Number(w.tEnd) || 0),
-              x: clamp(w.x), y: clamp(w.y), w: clamp(w.w), h: clamp(w.h),
-            }))
-            .filter((w) => w.tStart < w.tEnd);
-          if (windows.length) {
-            teachingObject.focusTarget = {
-              activeWindows: windows,
-              successUtterance: (s.successUtterance || '').trim(),
-              missUtterance: (s.missUtterance || '').trim(),
-            };
-          }
-        }
-        scene.teachingObject = teachingObject;
-      }
-      if (Object.keys(scene).length) {
-        const expressionByType = {
-          greeting: 'teaching',
-          review: 'teaching',
-          focus: 'teaching',
-          model: 'teaching',
-          listen: 'listening',
-          repeat: 'listening',
-          fillBlank: 'thinking',
-          feedback: 'teaching',
-          celebrate: 'celebrating',
-        };
-        const poseByExpression = {
-          teaching: 'teach',
-          listening: 'listening',
-          thinking: 'thinking',
-          celebrating: 'celebrate',
-        };
-        const expression = this.stepForm.renderExpression || expressionByType[this.stepForm.stepType] || 'teaching';
-        const pose = poseByExpression[expression] || 'teach';
-        const overlay = this.assetByKey('robotOverlay.' + pose);
-        const overlaySrc = overlay && (overlay.path || overlay.url);
-        if (overlaySrc) {
-          scene.robotOverlay = {
-            robotState: pose === 'celebrate' ? 'celebrating' : (pose === 'listening' || pose === 'thinking' ? pose : 'talking'),
-            pose,
-            expression,
-            anchor: 'bottomLeft',
-            pivot: { x: 0.5, y: 1.0 },
-            asset: { key: overlay.assetKey, src: overlaySrc, sha256: overlay.sha256 },
-            atlas: { image: overlaySrc, cell: 0 },
-            pointerEvents: 'none',
-          };
-        }
-        scene.audio = { via: 'tts' };
-        scene.timeoutSec = Number(s.timeoutSec) || 12;
-        return scene;
-      }
-      return null;
     },
     fetchAll() {
       this.loading = true;
@@ -1477,6 +1577,62 @@ export default {
       this.$delete(this.dirtyStepKeys, stepKey);
       this.previewManifest = null;
     },
+    fetchSharedVisualAssets() {
+      Api.lesson.listVisualAssets(
+        { category: 'teachingObject', profile: 'espTft' },
+        (assets) => { this.sharedVisualAssets = assets; },
+        (msg) => this.$message.error(msg),
+      );
+    },
+    inspectSharedAsset(asset) {
+      if (!this.lessonCapabilities.sharedVisualAuthoring) return;
+      this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
+    },
+    cloneSharedAsset(asset) {
+      if (!this.lessonCapabilities.sharedVisualAuthoring) return;
+      this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey }, query: { mode: 'cloneForLesson', lessonId: this.lessonId } });
+    },
+    onPreviewPathChange(payload) {
+      this.previewPath = payload;
+    },
+    saveSelectedStepStudio() {
+      const step = this.selectedStep;
+      if (!step || !this.isDraft) return;
+      const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
+      const request = buildSaveStepRequest({
+        step,
+        authoring: this.selectedAuthoring,
+        content: this.selectedContent,
+        selectedAsset: this.selectedAssetDrafts[step.stepKey],
+        savedRevision,
+      });
+      this.$set(this.savingStepKeys, step.stepKey, true);
+      // A commit changes persisted lesson truth even when it clears the last dirty
+      // draft, so every validation/preview launched before this point is stale.
+      this.studioRevision += 1;
+      this.validationResult = null;
+      this.previewManifest = null;
+      Api.lesson.updateStep(
+        this.lessonId, request.stepKey, request.payload,
+        (updated) => {
+          this.$delete(this.savingStepKeys, step.stepKey);
+          if (resolveSaveSuccess({
+            currentRevision: this.stepDraftRevisions[step.stepKey],
+            savedRevision: request.savedRevision,
+          }).clearDraft) {
+            this.$delete(this.selectedStepDrafts, step.stepKey);
+            this.$delete(this.selectedContentDrafts, step.stepKey);
+            this.$delete(this.selectedAssetDrafts, step.stepKey);
+            this.$delete(this.dirtyStepKeys, step.stepKey);
+          }
+          this.previewManifest = null;
+          this.validationResult = null;
+          this.fetchSteps();
+          this.$message.success('Step saved to the lesson draft.');
+        },
+        (msg) => { this.$delete(this.savingStepKeys, step.stepKey); this.validationResult = null; this.previewManifest = null; this.$message.error(msg); },
+      );
+    },
     moveStep(index, delta) {
       const target = index + delta;
       if (target < 0 || target >= this.steps.length) return;
@@ -1488,7 +1644,7 @@ export default {
       Api.lesson.reorderSteps(
         this.lessonId,
         order,
-        (rows) => { this.invalidatePreview(); this.reordering = false; this.steps = rows; },
+        (rows) => { this.invalidatePreview(); this.markStudioChanged(); this.reordering = false; this.steps = rows; },
         (msg, error) => {
           this.reordering = false;
           this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
@@ -1502,7 +1658,7 @@ export default {
           Api.lesson.deleteStep(
             this.lessonId,
             row.stepKey,
-            (rows) => { this.invalidatePreview(); this.steps = rows; },
+            (rows) => { this.invalidatePreview(); this.markStudioChanged(); this.steps = rows; },
             (msg, error) => {
               this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
               this.$message.error(msg);
@@ -1512,77 +1668,41 @@ export default {
         .catch(() => {});
     },
     openStepDialog() {
-      const firstId = 'c1';
-      const form = this.blankStepForm();
-      form.stepType = this.stepTypes.length ? this.stepTypes[0].stepType : '';
-      form.subject = this.lastSubject || '';
-      form.choices = [{ id: firstId, label: '' }, { id: 'c2', label: '' }];
-      // Prefill vocab.word + scene.primaryWord from the carried subject.
-      form.vocab.word = this.lastSubject || '';
-      form.scene.primaryWord = this.lastSubject || '';
-      this.stepForm = form;
-      this.correctChoiceId = firstId;
-      this.stepDialogVisible = true;
+      const dialog = createStepDialogState({ stepTypes: this.stepTypes, lastSubject: this.lastSubject });
+      this.stepForm = dialog.form;
+      this.correctChoiceId = dialog.correctChoiceId;
+      this.stepDialogVisible = dialog.visible;
     },
     addChoice() {
-      const id = 'c' + (this.stepForm.choices.length + 1);
-      this.stepForm.choices.push({ id, label: '' });
+      this.stepForm = appendStepChoice(this.stepForm);
     },
     removeChoice(index) {
-      const removed = this.stepForm.choices[index];
-      this.stepForm.choices.splice(index, 1);
-      if (removed && removed.id === this.correctChoiceId) {
-        this.correctChoiceId = this.stepForm.choices.length ? this.stepForm.choices[0].id : '';
-      }
+      const result = removeStepChoice(this.stepForm, index, this.correctChoiceId);
+      this.stepForm = result.form;
+      this.correctChoiceId = result.correctChoiceId;
     },
     addStep() {
       const f = this.stepForm;
-      if (!f.stepType || !f.prompt || !f.subject) {
-        this.$message.warning(this.$t('lesson.stepRequired'));
+      const result = buildCreateStepPayload({
+        form: f,
+        correctChoiceId: this.correctChoiceId,
+        assets: this.bundleAssets,
+        locale: (this.lesson && this.lesson.locale) || 'vi',
+      });
+      if (!result.ok) {
+        this.$message.warning(this.$t(`lesson.${result.reason}`));
         return;
       }
-      const payload = {
-        stepType: f.stepType,
-        prompt: f.prompt,
-        subject: f.subject,
-        helperText: f.helperText,
-        l1TransferHint: f.l1TransferHint,
-      };
-      // fillBlank: build {id,label,isCorrect} with single-correct enforced client-side
-      if (this.isChoiceStep) {
-        const rows = f.choices.filter((c) => (c.label || '').trim());
-        if (rows.length < 2 || !rows.some((c) => c.id === this.correctChoiceId)) {
-          this.$message.warning(this.$t('lesson.fillBlankNeedsChoices'));
-          return;
-        }
-        payload.choices = rows.map((c, i) => ({
-          id: c.id || ('c' + (i + 1)),
-          label: c.label.trim(),
-          isCorrect: c.id === this.correctChoiceId,
-        }));
-      }
-      // Assemble stepBody from the Scene composer + structured Vocabulary. Both are
-      // optional; only send a non-empty stepBody (the server defaults to {}).
-      const stepBody = {};
-      const scene = this.buildScene(f.subject);
-      if (scene) Object.assign(stepBody, scene);
-      const vocab = this.buildVocab(f.subject);
-      if (vocab) stepBody.vocab = vocab;
-      Object.assign(stepBody, mergeAuthoringFields({}, {
-        teachingWord: { text: (f.scene.primaryWord || f.subject || '').trim().toUpperCase() },
-      }));
-      if (Object.keys(stepBody).length) payload.stepBody = stepBody;
-      // Per-step robot-face override (server validates against firmware-supported set).
-      if (f.renderExpression) payload.renderOverride = { expression: f.renderExpression };
       this.addingStep = true;
       Api.lesson.createStep(
         this.lessonId,
-        payload,
+        result.payload,
         () => {
           this.invalidatePreview();
           this.addingStep = false;
           this.stepDialogVisible = false;
           this.lastSubject = f.subject; // prefill next step + teachingObject asset key
+          this.markStudioChanged();
           this.fetchSteps();
         },
         (msg, error) => {
@@ -1748,6 +1868,18 @@ export default {
         && this.simulationEvidence
         && this.simulationProofVersion === this.proofVersion
         && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
+=======
+          this.previewing = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
+          this.preview = { checksum: res.checksum, etag: res.etag };
+          this.previewManifest = res.manifest || null;
+        },
+        (msg) => {
+          this.previewing = false;
+          if (requestedRevision !== this.studioRevision || this.hasUnsavedDrafts) return;
+          this.$message.error(msg);
+        },
+>>>>>>> fix/hil-task7-auth-order
       );
     },
     publishReviewIsCurrent(snapshot = this.publishReviewSnapshot) {
@@ -2147,6 +2279,12 @@ export default {
 .muted { color: #909399; }
 .danger-text { color: #f56c6c; }
 .preview-card { margin-bottom: 16px; }
+.canonical-demo { align-items:center; background:#17312d; border-radius:20px; color:#fff8df; display:grid; gap:20px; grid-template-columns:minmax(220px,.75fr) minmax(320px,1.25fr); margin-bottom:18px; overflow:hidden; padding:18px; }
+.canonical-demo__copy h3 { font-family:Georgia,serif; font-size:25px; margin:5px 0 8px; }
+.canonical-demo__copy p { color:#c7d7d1; line-height:1.5; margin:0 0 12px; max-width:480px; }
+.canonical-demo__sources { display:flex; gap:8px; margin-top:14px; }
+.canonical-demo__sources img { background:#f6ecd1; border:1px solid rgba(255,255,255,.2); border-radius:9px; height:58px; object-fit:contain; width:76px; }
+.canonical-demo video { background:#0c1c19; border-radius:14px; display:block; max-height:360px; object-fit:cover; width:100%; }
 .choice-group { display: block; }
 .choice-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
@@ -2162,5 +2300,5 @@ export default {
 .preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }
 @media (max-width:1100px) { .lesson-studio__workbench { grid-template-columns:1fr; } }
-@media (max-width:760px) { .lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
+@media (max-width:760px) { .canonical-demo,.lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
 </style>

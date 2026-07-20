@@ -23,7 +23,10 @@ import re
 import math
 import time
 import unicodedata
+import uuid
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from core.lesson.errors import (
     LessonError,
@@ -41,9 +44,16 @@ from core.lesson.errors import (
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
+from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
+from core.lesson.motion_presets import dispatch_motion_preset
+from core.lesson.sd_pack_mcp_payload import (
+    FirmwareSyncPackError,
+    build_firmware_sync_pack,
+)
 
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
+SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 SD_ASSET_SYNC_TIMEOUT_SEC = 120
 
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
@@ -148,6 +158,7 @@ S_PRELOADING = "PRELOADING"
 S_READY = "READY"
 S_RUNNING = "RUNNING"
 S_PAUSED = "PAUSED"
+_SD_PACK_BOOT_CLEANED_ROOTS: set[Path] = set()
 S_COMPLETED = "COMPLETED"
 S_FAILED = "FAILED"
 
@@ -602,6 +613,14 @@ def _spoken_step_prompt(step: Dict[str, Any]) -> Optional[str]:
         ask = story_beat.get("ask")
         if isinstance(ask, str) and ask.strip():
             return ask.strip()
+
+    interaction = step.get("interaction")
+    if isinstance(interaction, dict) and interaction.get("template") == "safeSpeaking":
+        return fun_pattern_prompt(
+            interaction.get("funPattern"),
+            _target_vocab_word(_coerce_expected_child_responses(step), step),
+        )
+    if uses_guided_ask:
         return "What do you see?"
 
     prompt = step.get("prompt")
@@ -672,6 +691,20 @@ def _positive_int(value: Any) -> Optional[int]:
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+    return None
+
+
+def _bounded_non_negative_number(value: Any, maximum: int = 0xFFFFFFFF) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0 or value > maximum:
+        return None
+    return value
+
+
+def _operations_motion_result(value: Any) -> Optional[str]:
+    if value in {"success", "failed", "skipped"}:
+        return value
     return None
 
 def _finite_float_or_default(value: Any, default: float) -> float:
@@ -786,10 +819,10 @@ class LessonRuntime:
         self.lesson_id = assignment.get("lessonId")
         self.lesson_version = int(assignment.get("lessonVersion", 1))
         self.profile = assignment.get("profile", "espTft")
-        # sessionId SHOULD equal the WS session_id; a fresh WS connection already
-        # mints a fresh session_id, which cleanly resumes the (assignmentId,sessionId)
-        # sequence namespace on ESP restart (plan §6.3.5 — "fresh sessionId" option).
-        self.session_id = assignment.get("sessionId") or getattr(conn, "session_id", None)
+        # A lesson run owns its protocol/event identity. It must not inherit either
+        # the conversational websocket session or a historical assignment payload,
+        # because a reconnect or republish starts a fresh sequence namespace.
+        self.session_id = str(uuid.uuid4())
         self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
         self.manifest = manifest
         self.manifest_checksum = manifest_checksum
@@ -836,6 +869,9 @@ class LessonRuntime:
         self._passive_dwell_task: Optional[asyncio.Task] = None
         self._child_response_timeout_task: Optional[asyncio.Task] = None
         self._child_response_timeout_count = 0
+        self._safe_speaking_session: Optional[SafeSpeakingSession] = None
+        self._motion_task: Optional[asyncio.Task] = None
+        self._motion_generation = 0
         self._step_seq: Optional[int] = None
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
@@ -863,9 +899,12 @@ class LessonRuntime:
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Validate gates, then send ``lesson_prepare`` (seq 1). Raises a
-        ``LessonError`` for any pre-send gate failure (capability / protocol /
-        profile) so the caller logs it and NEVER puts a frame on the wire."""
+        """Preload/attest first, then publish the first protocol frame."""
+        if await self.preload_only():
+            await self.start_protocol(preloaded=True)
+
+    async def preload_only(self) -> bool:
+        """Validate and materialize assets without sending ``lesson_prepare``."""
         features = getattr(self.conn, "features", None)
         if not lesson_capability_ok(features):
             # D-CAP-FLAG: absence = no support; MUST NOT send lesson_prepare.
@@ -913,7 +952,12 @@ class LessonRuntime:
         if self._use_sd_asset_pack():
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
-                return
+                return False
+        return True
+
+    async def start_protocol(self, *, preloaded: bool = False) -> None:
+        if not preloaded and not await self.preload_only():
+            return
         await self._emit("lesson_prepare", body=self._prepare_body())
 
     async def close(self) -> None:
@@ -927,9 +971,16 @@ class LessonRuntime:
         for task in list(self._preload_status_report_tasks):
             if not task.done():
                 task.cancel()
+        self._motion_generation += 1
+        motion_task = self._motion_task
+        self._motion_task = None
+        if motion_task is not None and not motion_task.done():
+            motion_task.cancel()
         if self._preload_status_report_tasks:
             await asyncio.gather(*self._preload_status_report_tasks, return_exceptions=True)
             self._preload_status_report_tasks.clear()
+        if motion_task is not None:
+            await asyncio.gather(motion_task, return_exceptions=True)
         if self.forwarder is not None:
             await self.forwarder.aclose()
         if self.asset_cache is not None:
@@ -939,7 +990,14 @@ class LessonRuntime:
         if self._closed:
             return False
         current = getattr(self.conn, "lesson_runtime", None)
-        return current is None or current is self
+        candidate = getattr(self.conn, "lesson_runtime_candidate", None)
+        return current is None or current is self or candidate is self
+
+    def _is_pre_activation_fallback_candidate(self) -> bool:
+        """True while a replacement is preloading behind a live fallback runtime."""
+        current = getattr(self.conn, "lesson_runtime", None)
+        candidate = getattr(self.conn, "lesson_runtime_candidate", None)
+        return candidate is self and current is not None and current is not self
 
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
@@ -987,7 +1045,48 @@ class LessonRuntime:
             return
         self._outstanding.pop(acked, None)
         self._cancel_frame_ack_timeout()
+        self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
+
+    def _forward_lesson_step_ack_telemetry(
+        self,
+        frame: Dict[str, Any],
+        ack_body: Dict[str, Any],
+        inbound_sequence: Any,
+    ) -> None:
+        if frame.get("type") != "lesson_step":
+            return
+        telemetry = ack_body.get("telemetry")
+        telemetry = telemetry if isinstance(telemetry, dict) else {}
+        event: Dict[str, Any] = {
+            "type": "step_started",
+            "sequence": inbound_sequence if isinstance(inbound_sequence, int) and not isinstance(inbound_sequence, bool) else None,
+            "stepId": frame.get("stepId"),
+            "retryCount": max(0, min(_int_or_default(frame.get("retryCount"), 0), 1000)),
+        }
+        degraded_reason = telemetry.get("degradedReason")
+        explicit_render_degraded = telemetry.get("renderDegraded")
+        if isinstance(explicit_render_degraded, bool):
+            event["renderDegraded"] = explicit_render_degraded
+        elif degraded_reason in {
+            "backgroundUnavailable",
+            "objectUnavailable",
+            "overlayUnavailable",
+            "optionalLayerMissing",
+        }:
+            event["renderDegraded"] = True
+        elif degraded_reason == "" and ack_body.get("degraded") is False:
+            event["renderDegraded"] = False
+        sram_free = _bounded_non_negative_number(telemetry.get("internalMinimumFreeBytes"))
+        if sram_free is not None:
+            event["sramFreeBytes"] = sram_free
+        psram_free = _bounded_non_negative_number(telemetry.get("psramFreeBytes"))
+        if psram_free is not None:
+            event["psramFreeBytes"] = psram_free
+        motion_result = _operations_motion_result(telemetry.get("motionDispatch"))
+        if motion_result is not None:
+            event["motionDispatch"] = motion_result
+        self._forward(event)
 
     def _legacy_empty_ack_outstanding_seq(self, msg_json: Dict[str, Any], body: Dict[str, Any]) -> Optional[int]:
         if msg_json.get("type") != "lesson_ack":
@@ -1001,7 +1100,7 @@ class LessonRuntime:
             ("lessonVersion", self.lesson_version),
         )
         for key, expected in expected_fields:
-            if key in msg_json and expected is not None and msg_json.get(key) != expected:
+            if expected is not None and msg_json.get(key) != expected:
                 return None
         if len(self._outstanding) != 1:
             return None
@@ -1097,6 +1196,14 @@ class LessonRuntime:
 
         expected_responses = _coerce_expected_child_responses(self._step)
         response_intent = _classify_child_response_intent(response, expected_responses)
+        if self._uses_safe_speaking():
+            branch = {
+                CHILD_RESPONSE_INTENT_CORRECT: "correct",
+                CHILD_RESPONSE_INTENT_NEAR_MISS: "brave_try",
+                CHILD_RESPONSE_INTENT_HELP_OR_REPEAT: "help_or_repeat",
+                CHILD_RESPONSE_INTENT_VIETNAMESE_OBJECT: "supported",
+            }.get(response_intent, "incorrect")
+            return await self._handle_safe_speaking_branch(branch)
         if response_intent != CHILD_RESPONSE_INTENT_CORRECT:
             self._cancel_child_response_timeout()
             self._close_child_response_window()
@@ -1153,6 +1260,159 @@ class LessonRuntime:
             await self._wait_lesson_prompt_idle()
         await self._maybe_finish_step()
         return True
+
+    async def on_child_response_failure(self, reason: str = "stt_failure") -> bool:
+        """Typed no-transcript hook for voice providers and timeout integrations."""
+        if not self._uses_safe_speaking() or not self._child_response_window_still_current(
+            self._step_id, self._step_seq
+        ):
+            return False
+        branch = "silence" if str(reason or "").lower() in {"silence", "no_speech", "timeout"} else "stt_failure"
+        return await self._handle_safe_speaking_branch(branch)
+
+    def _uses_safe_speaking(self) -> bool:
+        interaction = (self._step or {}).get("interaction")
+        return (
+            self._lesson_rollout_control_enabled("playful_interactions_enabled")
+            and isinstance(interaction, dict)
+            and interaction.get("template") == "safeSpeaking"
+        )
+
+    def _lesson_rollout_control_enabled(self, key: str) -> bool:
+        config = getattr(self.conn, "config", {})
+        lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+        if not isinstance(lesson_cfg, dict) or lesson_cfg.get(key) is not True:
+            return False
+        allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+        if not allowlist:
+            return False
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
+        return device_id in allowlist
+
+    def _safe_speaking(self) -> SafeSpeakingSession:
+        if self._safe_speaking_session is None:
+            interaction = (self._step or {}).get("interaction") or {}
+            expected = _coerce_expected_child_responses(self._step)
+            self._safe_speaking_session = SafeSpeakingSession(
+                max_attempts=interaction.get("maxAttempts", 3),
+                target_word=_target_vocab_word(expected, self._step),
+            )
+        return self._safe_speaking_session
+
+    async def _handle_safe_speaking_branch(self, branch: str) -> bool:
+        self._cancel_child_response_timeout()
+        self._close_child_response_window()
+        decision = self._safe_speaking().decide(branch)
+        self._dispatch_step_motion(decision.motion_slot)
+        await self._speak_lesson_prompt_text(
+            decision.prompt,
+            step_id=self._step_id,
+            continue_listening=not decision.advance,
+        )
+        if not decision.advance:
+            await self._open_child_response_window()
+            if self._child_response_window_still_current(self._step_id, self._step_seq):
+                self._start_child_response_timeout()
+            return True
+
+        self._forward_safe_speaking_completion(decision.result, decision.outcome)
+        self._forward_story_progress()
+        self._step_completed = True
+        await self._wait_lesson_prompt_idle()
+        await self._maybe_finish_step()
+        return True
+
+    def _forward_safe_speaking_completion(self, result: str, response_class: str) -> None:
+        interaction = (self._step or {}).get("interaction") or {}
+        pattern = interaction.get("funPattern")
+        if pattern not in FUN_PATTERN_PROMPTS:
+            pattern = "copyMyMove"
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": self._step_id,
+                "stepType": (self._step or {}).get("type"),
+                "result": result if result in {"success", "miss", "timeout"} else "miss",
+                "detail": {
+                    "responseClass": response_class,
+                    "interactionTemplate": "safeSpeaking",
+                    "attempts": self._safe_speaking().attempts,
+                    "funPattern": pattern,
+                },
+            }
+        )
+
+    def _forward_story_progress(self) -> None:
+        story = (self._step or {}).get("storyBeat")
+        if not isinstance(story, dict):
+            return
+        def bounded(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value[:128] if value else None
+
+        event = {
+            "type": "story_progress",
+            # Backend dedupe keys include event sequence. Keep storyline beats in a
+            # stable negative namespace that cannot collide with step_completed's
+            # legacy ``-step_seq`` synthetic sequence.
+            "sequence": -(
+                1_000_000
+                + (self._step_seq if isinstance(self._step_seq, int) else self._step_index + 1)
+            ),
+            "stepId": self._step_id,
+            "petReaction": bounded(story.get("successReaction")),
+            "unitGrowth": bounded(story.get("unitGrowth") or story.get("unitProgress")),
+            "nextTease": bounded(story.get("nextTease")),
+        }
+        if any(value is not None for key, value in event.items() if key not in {"type", "stepId"}):
+            self._forward(event)
+
+    def _dispatch_step_motion(self, slot: str) -> None:
+        motion = (self._step or {}).get("motion")
+        if not isinstance(motion, dict):
+            return
+        preset = motion.get(slot)
+        if not isinstance(preset, str):
+            return
+        if not self._lesson_rollout_control_enabled("motion_presets_enabled"):
+            self._log("info", f"lesson_motion_dispatch outcome=disabled preset={preset}")
+            return
+        self._motion_generation += 1
+        generation = self._motion_generation
+        step_id = self._step_id
+        step_seq = self._step_seq
+        previous = self._motion_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def run_serialized_motion() -> None:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            if (
+                self._closed
+                or generation != self._motion_generation
+                or step_id != self._step_id
+                or step_seq != self._step_seq
+            ):
+                return
+            try:
+                dispatched = await dispatch_motion_preset(self.conn, preset)
+                if dispatched:
+                    self._log("info", f"lesson_motion_dispatch outcome=applied preset={preset}")
+                else:
+                    self._log("warning", f"lesson_motion_dispatch outcome=failed preset={preset}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    f"lesson_motion_dispatch outcome=failed preset={preset} error={type(exc).__name__}",
+                )
+
+        self._motion_task = asyncio.create_task(run_serialized_motion())
 
     async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
@@ -1218,6 +1478,7 @@ class LessonRuntime:
             # TeeBot starts teaching or listening for the child's reply.
             prompt_handed_off = False
             if self._step is not None:
+                self._dispatch_step_motion("present")
                 prompt_handed_off = await self._speak_step_prompt(self._step)
             if not self._is_active_runtime():
                 return
@@ -1248,6 +1509,7 @@ class LessonRuntime:
                     return
                 self._step_completed = True
             else:
+                self._dispatch_step_motion("listen")
                 await self._open_child_response_window()
                 if self._child_response_window_still_current(self._step_id, self._step_seq):
                     self._start_child_response_timeout()
@@ -1265,6 +1527,12 @@ class LessonRuntime:
             await self._notify_lesson_terminal("lesson_completed")
 
     async def _notify_lesson_terminal(self, reason: str) -> None:
+        if self._is_pre_activation_fallback_candidate():
+            self._log(
+                "warning",
+                f"candidate terminal side effects suppressed before activation reason={reason}",
+            )
+            return
         # Only real terminal states may leave LESSON mode. Non-terminal callers
         # (historically online-fallback miswired as a notify) must not kick the
         # child out mid-start.
@@ -1470,6 +1738,7 @@ class LessonRuntime:
         self._step_completed = False
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
+        self._safe_speaking_session = None
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
@@ -1810,6 +2079,9 @@ class LessonRuntime:
     async def _handle_child_response_timeout(self, step_id: Optional[str]) -> None:
         if not self._is_active_runtime():
             return
+        if self._uses_safe_speaking():
+            await self.on_child_response_failure("silence")
+            return
         self._child_response_timeout_count += 1
         self._close_child_response_window()
         if self._child_response_timeout_count < self._max_child_response_timeouts():
@@ -2113,6 +2385,12 @@ class LessonRuntime:
         await self._notify_lesson_terminal("lesson_frame_too_large")
 
     async def _emit_error(self, err: LessonError) -> None:
+        if self._is_pre_activation_fallback_candidate():
+            self._log(
+                "warning",
+                f"candidate lesson_error suppressed before activation code={err.code}",
+            )
+            return
         seq = self._next_seq()
         frame = self._envelope("lesson_error", step_id=None, sequence=seq, body=err.to_body())
         await self._send(json.dumps(frame, ensure_ascii=False))
@@ -2137,16 +2415,58 @@ class LessonRuntime:
             "criticalAssets": self._critical_assets_payload(),
             "preloadTimeoutSec": int(self.asset_cache.preload_timeout_sec),
         }
+        motion_enabled = self._lesson_rollout_control_enabled("motion_presets_enabled")
+        playful_enabled = self._lesson_rollout_control_enabled("playful_interactions_enabled")
+        if motion_enabled or playful_enabled:
+            body["runtimeControls"] = {
+                "motionPresetsEnabled": motion_enabled,
+                "playfulInteractionsEnabled": playful_enabled,
+            }
         if self._use_sd_asset_pack():
             pack = getattr(self.asset_cache, "asset_pack_manifest", None)
             if callable(pack):
-                body["assetPack"] = pack(
-                    assignment_version=self.assignment_version,
-                    lesson_id=self.lesson_id,
-                    lesson_version=self.lesson_version,
-                    manifest_checksum=self.manifest_checksum,
+                body["assetPack"] = self._prepare_asset_pack_payload(
+                    pack(
+                        assignment_version=self.assignment_version,
+                        lesson_id=self.lesson_id,
+                        lesson_version=self.lesson_version,
+                        manifest_checksum=self.manifest_checksum,
+                    )
                 )
         return body
+
+    @staticmethod
+    def _prepare_asset_pack_payload(pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only fields consumed by firmware's prepare-time SD attestation."""
+        top_level_keys = (
+            "assignmentVersion",
+            "lessonId",
+            "lessonVersion",
+            "manifestChecksum",
+            "cacheKey",
+            "localRoot",
+            "ready",
+        )
+        payload = {key: pack[key] for key in top_level_keys if key in pack}
+        asset_keys = ("key", "state", "checksumOk", "size")
+        local_root = str(pack.get("localRoot") or "").rstrip("/")
+        payload_assets = []
+        for asset in pack.get("assets", []):
+            if not isinstance(asset, dict):
+                continue
+            compact = {key: asset[key] for key in asset_keys if key in asset}
+            key = asset.get("key")
+            local_path = asset.get("localPath")
+            derived_path = (
+                f"{local_root}/{quote(key, safe='')}"
+                if local_root and isinstance(key, str) and key
+                else None
+            )
+            if isinstance(local_path, str) and local_path and local_path != derived_path:
+                compact["localPath"] = local_path
+            payload_assets.append(compact)
+        payload["assets"] = payload_assets
+        return payload
 
     def _critical_assets_payload(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -2208,7 +2528,10 @@ class LessonRuntime:
         prompt = step.get("prompt")
         if prompt is not None:
             body["prompt"] = prompt
-        for key in ("subject", "helperText", "l1TransferHint", "choices", *STEP_METADATA_KEYS):
+        for key in (
+            "subject", "helperText", "l1TransferHint", "choices", "teachingWord",
+            "interaction", "motion", *STEP_METADATA_KEYS,
+        ):
             value = step.get(key)
             if value is not None:
                 body[key] = value
@@ -2333,58 +2656,201 @@ class LessonRuntime:
             features = getattr(self.conn, "features", {}) or {}
             return not bool(features.get("mcp"))
         is_ready = getattr(mcp_client, "is_ready", None)
-        if callable(is_ready) and not await is_ready():
-            return False
-        pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
-        if not callable(pack_builder):
-            return False
-        pack = pack_builder(
-            assignment_version=self.assignment_version,
-            lesson_id=self.lesson_id,
-            lesson_version=self.lesson_version,
-            manifest_checksum=self.manifest_checksum,
+        if callable(is_ready):
+            lesson_cfg = _lesson_config(getattr(self.conn, "config", {}) or {})
+            ready_timeout = _finite_float_or_default(
+                lesson_cfg.get("sd_sync_ready_timeout_sec", 8.0), 8.0
+            )
+            ready_poll = max(
+                0.001,
+                _finite_float_or_default(
+                    lesson_cfg.get("sd_sync_ready_poll_sec", 0.05), 0.05
+                ),
+            )
+            deadline = time.monotonic() + max(0.0, ready_timeout)
+            while not await is_ready():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                await asyncio.sleep(min(ready_poll, remaining))
+        sample_request_builder = getattr(
+            self.asset_cache, "firmware_sample_sync_request", None
         )
-        if not isinstance(pack, dict) or not pack.get("assets"):
-            return False
-        try:
+        sample_result_validator = getattr(
+            self.asset_cache, "validate_firmware_sample_sync_result", None
+        )
+        sample_request = None
+        pack = None
+        mcp_pack = None
+        if callable(sample_request_builder):
+            sample_request = sample_request_builder()
+            if not isinstance(sample_request, dict) or not callable(sample_result_validator):
+                return False
+        else:
+            pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
+            if not callable(pack_builder):
+                return False
+            pack = pack_builder(
+                assignment_version=self.assignment_version,
+                lesson_id=self.lesson_id,
+                lesson_version=self.lesson_version,
+                manifest_checksum=self.manifest_checksum,
+            )
+            if not isinstance(pack, dict) or not pack.get("assets"):
+                return False
+            try:
+                mcp_pack = build_firmware_sync_pack(pack)
+            except FirmwareSyncPackError:
+                self._log("warning", "robot SD sync pack invalid")
+                return False
+
+        async def call_sync_once() -> Any:
             has_tool = getattr(mcp_client, "has_tool", None)
+            if sample_request is not None:
+                if callable(has_tool) and has_tool(SAMPLE_SD_ASSET_SYNC_TOOL):
+                    return await call_mcp_tool(
+                        self.conn,
+                        mcp_client,
+                        SAMPLE_SD_ASSET_SYNC_TOOL,
+                        sample_request,
+                        timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    )
+                from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+                return await _call_raw_mcp_tool(
+                    self.conn,
+                    mcp_client,
+                    "self.lesson_assets.sync_sample_to_sd",
+                    sample_request,
+                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                )
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
-                result = await call_mcp_tool(
+                return await call_mcp_tool(
                     self.conn,
                     mcp_client,
                     SD_ASSET_SYNC_TOOL,
-                    {"assetPack": pack},
+                    {"assetPack": mcp_pack},
                     timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
                 )
-            else:
-                from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+            from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
-                result = await _call_raw_mcp_tool(
-                    self.conn,
-                    mcp_client,
-                    "self.lesson_assets.sync_to_sd",
-                    {"assetPack": pack},
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
-                )
+            return await _call_raw_mcp_tool(
+                self.conn,
+                mcp_client,
+                "self.lesson_assets.sync_to_sd",
+                {"assetPack": mcp_pack},
+                timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+            )
+
+        async def call_sync() -> Any:
+            busy_check = getattr(self.conn, "is_realtime_busy", None)
+            if not callable(busy_check):
+                return await call_sync_once()
+            poll = 0.05
+            while busy_check():
+                await asyncio.sleep(poll)
+            return await call_sync_once()
+
+        sync_started_at = time.monotonic()
+        try:
+            result = await call_sync()
         except Exception as exc:
-            self._log("warning", f"robot SD sync failed: {type(exc).__name__}")
+            reset = getattr(self.conn, "request_lesson_preload_reset", None)
+            if "MCP tools disabled during lesson" not in str(exc) or not callable(reset):
+                self._log("warning", f"robot SD sync failed: {type(exc).__name__}")
+                return False
+            try:
+                recovered = await reset(
+                    assignment_id=self.assignment_id,
+                    lesson_id=self.lesson_id,
+                    profile=self.profile,
+                )
+                if not recovered:
+                    return False
+                result = await call_sync()
+            except Exception as retry_exc:
+                self._log(
+                    "warning",
+                    f"robot SD sync recovery failed: {type(retry_exc).__name__}",
+                )
+                return False
+        duration_ms = max(1, int(round((time.monotonic() - sync_started_at) * 1000)))
+        if sample_request is not None:
+            if not sample_result_validator(result):
+                self._log("warning", "robot sample SD sync returned invalid result")
+                return False
+            self._log("info", f"sample_sd_sync_ready durationMs={duration_ms}")
+            return True
+        attestation = self._sd_asset_sync_attestation(result, pack)
+        if attestation is None:
+            self._log("warning", "robot SD sync returned invalid attestation")
             return False
-        return self._sd_asset_sync_result_ready(result)
+        marker_fields = (
+            f"cacheKey={attestation['cacheKey']} "
+            f"assetCount={attestation['assetCount']} "
+            f"downloadedCount={attestation['downloadedCount']} "
+            f"skippedCount={attestation['skippedCount']} "
+            f"failedCount={attestation['failedCount']} "
+            f"durationMs={duration_ms}"
+        )
+        self._log("info", f"lesson_preload_ready {marker_fields}")
+        self._log(
+            "info",
+            "checksum_verified "
+            f"cacheKey={attestation['cacheKey']} "
+            f"manifestChecksum={self.manifest_checksum} "
+            f"assetCount={attestation['assetCount']}",
+        )
+        if (
+            attestation["downloadedCount"] == 0
+            and attestation["skippedCount"] == attestation["assetCount"]
+        ):
+            self._log("info", f"asset_cache_hit {marker_fields}")
+        return True
 
-    def _sd_asset_sync_result_ready(self, result: Any) -> bool:
+    def _sd_asset_sync_attestation(
+        self, result: Any, requested_pack: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         if isinstance(result, str):
             try:
                 result = json.loads(result)
             except json.JSONDecodeError:
-                return False
+                return None
         if not isinstance(result, dict):
-            return False
-        if result.get("ready") is False:
-            return False
-        failed = result.get("failedCount")
-        if isinstance(failed, int) and failed > 0:
-            return False
-        return True
+            return None
+        assets = requested_pack.get("assets")
+        expected_cache_key = requested_pack.get("cacheKey")
+        expected_checksum = requested_pack.get("manifestChecksum")
+        if (
+            not isinstance(assets, list)
+            or not isinstance(expected_cache_key, str)
+            or not isinstance(expected_checksum, str)
+            or not expected_checksum
+            or expected_checksum != self.manifest_checksum
+        ):
+            return None
+        if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+            return None
+        response_checksums = [
+            result[key]
+            for key in ("manifestChecksum", "packChecksum")
+            if key in result
+        ]
+        if not response_checksums or any(value != expected_checksum for value in response_checksums):
+            return None
+        counts = {}
+        for key in ("downloadedCount", "skippedCount", "failedCount"):
+            value = result.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            counts[key] = value
+        if counts["failedCount"] != 0 or sum(counts.values()) != len(assets):
+            return None
+        return {
+            "cacheKey": expected_cache_key,
+            "assetCount": len(assets),
+            **counts,
+        }
 
     def _ack_reports_asset_pack_ready(self, ack_body: Dict[str, Any]) -> bool:
         pack = ack_body.get("assetPack")
@@ -2438,11 +2904,24 @@ async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
     await between the getattr and the assignment), so two schedulers racing here both
     end up using the same lock, then run the impl serially — the loser re-reads
     conn.lesson_runtime and returns the winner's session instead of duplicating it."""
+    from core.providers.tools.product_toolset import lesson_runtime_enabled
+
+    if not lesson_runtime_enabled(conn):
+        _set_lesson_start_status(conn, "ROLLOUT_BLOCKED", "Robot chưa được bật bài học.")
+        return None
     lock = getattr(conn, "_lesson_pull_lock", None)
     if lock is None:
         lock = asyncio.Lock()
         conn._lesson_pull_lock = lock
     async with lock:
+        activity_leases = getattr(conn, "activity_leases", None)
+        if activity_leases is not None and activity_leases.has_exclusive_lease():
+            _set_lesson_start_status(
+                conn,
+                "CACHE_EVICTION_RESERVED",
+                "Robot đang xác minh bộ nhớ bài học.",
+            )
+            return None
         return await _maybe_start_lesson_on_connect_impl(conn)
 
 
@@ -2459,6 +2938,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     lesson_cfg = _lesson_config(config)
     server_cfg = _server_config(config)
     base_url = lesson_cfg.get("api_base") or server_cfg.get("api_url")
+    if isinstance(base_url, str):
+        base_url = base_url.rstrip("/")
     device_id = getattr(conn, "device_id", None)
     logger = getattr(conn, "logger", None)
     _log_context: Dict[str, Any] = {}
@@ -2494,7 +2975,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         _log("info", "lesson pull-on-connect skipped: no api_base or device_id")
         return None
 
-    token = lesson_cfg.get("device_token")  # D-RUNTOKEN: optional, ops/backend follow-up.
+    token = lesson_cfg.get("device_token")
 
     try:
         import httpx
@@ -2529,10 +3010,31 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         limits=httpx.Limits(max_keepalive_connections=0),
         follow_redirects=True,
     ) as client:
-        # Use the WebSocket device identity directly. The robot voice path must not
-        # depend on dynamic DeviceToken minting; unclaimed devices can make the
-        # backend pull fail without blocking the realtime connection.
-        backend_device_id = device_id
+        try:
+            from config.device_token_client import resolve_device_identity
+
+            backend_device_id, minted_token = await resolve_device_identity(
+                client, base_url, device_id, logger=logger
+            )
+        except Exception as exc:  # pragma: no cover - client is fail-soft by contract
+            _backend_unavailable("identity", exc)
+            return None
+        if not backend_device_id or not minted_token:
+            _set_lesson_start_status(
+                conn,
+                "BACKEND_UNAVAILABLE",
+                "Robot chưa kết nối được máy chủ bài học. Con thử lại sau nhé.",
+            )
+            _log("warning", "lesson backend identity unavailable")
+            return None
+        token = minted_token
+        _log(
+            "info",
+            "lesson backend identity resolved "
+            f"apiBase={base_url} "
+            f"deviceMac={device_id} "
+            f"backendDeviceId={backend_device_id}",
+        )
         # Best-effort: address the child by name in plain CONVERSATION. The name
         # the parent sets in the mobile app lives in the backend child profile, NOT
         # the esp manager-api ``ai_device.child_name`` the agent-models config
@@ -2599,22 +3101,79 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         # non-empty str (else we returned at metadata_errors); the false edge of this
         # defensive guard is unreachable on this path.
         if isinstance(assignment_id, str) and assignment_id:  # pragma: no cover - assignmentId non-empty str enforced upstream
+            existing_runtime = getattr(conn, "lesson_runtime", None)
+            existing_forwarder = getattr(existing_runtime, "forwarder", None)
+            local_terminal_pending = getattr(
+                existing_forwarder, "pending_terminal_batch", None
+            )
+            if (
+                getattr(existing_runtime, "assignment_id", None) == assignment_id
+                and local_terminal_pending is not None
+            ):
+                replay_local = getattr(existing_runtime, "replay_pending_terminal_event", None)
+                replayed_local = False
+                if callable(replay_local):
+                    try:
+                        replayed_local = bool(await replay_local())
+                    except Exception as exc:
+                        _log(
+                            "warning",
+                            f"local terminal lesson event replay failed: {type(exc).__name__}",
+                        )
+                if replayed_local:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAYED",
+                        "Robot đã đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("info", "replayed local pending terminal lesson event; skipping lesson restart")
+                else:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAY_PENDING",
+                        "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("warning", "local pending terminal lesson event blocks lesson restart")
+                return existing_runtime
             try:
-                from core.lesson.forwarder import replay_stored_terminal_event
-
-                replayed_terminal = await replay_stored_terminal_event(
-                    device_id=backend_device_id,
-                    assignment_id=assignment_id,
-                    base_url=base_url,
-                    token=token,
-                    client=client,
-                    logger=logger,
+                from core.lesson.forwarder import (
+                    get_terminal_replay_store,
+                    replay_stored_terminal_event,
                 )
-            except Exception as exc:  # pragma: no cover - replay is best-effort
+
+                terminal_store = get_terminal_replay_store()
+                pending_terminal = await terminal_store.load(backend_device_id, assignment_id)
+                if pending_terminal is None:
+                    terminal_replay_state = "none"
+                else:
+                    replayed_terminal = await replay_stored_terminal_event(
+                        device_id=backend_device_id,
+                        assignment_id=assignment_id,
+                        base_url=base_url,
+                        token=token,
+                        client=client,
+                        logger=logger,
+                        terminal_store=terminal_store,
+                    )
+                    terminal_replay_state = "replayed" if replayed_terminal else "blocked"
+            except Exception as exc:
                 _log("warning", f"stored terminal lesson event replay failed: {type(exc).__name__}")
-                replayed_terminal = False
-            if replayed_terminal:
-                _log("info", "replayed pending terminal lesson event; skipping lesson restart")
+                terminal_replay_state = "blocked"
+            if terminal_replay_state != "none":
+                if terminal_replay_state == "replayed":
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAYED",
+                        "Robot đã đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("info", "replayed pending terminal lesson event; skipping lesson restart")
+                else:
+                    _set_lesson_start_status(
+                        conn,
+                        "TERMINAL_REPLAY_PENDING",
+                        "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                    )
+                    _log("warning", "pending terminal lesson event blocks lesson restart")
                 return None
         profile = assignment.get("profile", "espTft")
         try:
@@ -2701,6 +3260,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"assignmentVersion={assignment.get('assignmentVersion')} "
         f"manifestChecksum={new_manifest_checksum} "
         f"profile={manifest.get('profile') or profile} "
+        f"courseId={manifest.get('courseId', '')} "
         f"deviceId={device_id} "
         f"backendDeviceId={backend_device_id} "
         f"childId={assignment.get('childId', '')} "
@@ -2708,19 +3268,49 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"assetCount={len(manifest.get('assets', []) or [])} "
         f"storyBeat={_compact_json(_manifest_story_log_summary(manifest))}",
     )
+    republish_previous = None
     if existing is not None and getattr(existing, "assignment_id", None) == assignment.get("assignmentId"):
+        # Re-check after the awaited store/manifest calls above. A terminal
+        # forwarder can acquire a local pending batch during that window even
+        # when the earlier durable/local checks observed none. This barrier must
+        # run before the unchanged/republish split so neither path can replace the
+        # runtime while its terminal event still needs durable acknowledgement.
+        existing_forwarder = getattr(existing, "forwarder", None)
+        local_terminal_pending = getattr(
+            existing_forwarder, "pending_terminal_batch", None
+        )
+        if local_terminal_pending is not None:
+            replay = getattr(existing, "replay_pending_terminal_event", None)
+            replayed_terminal = False
+            if callable(replay):
+                try:
+                    replayed_terminal = bool(await replay())
+                except Exception as exc:
+                    _log(
+                        "warning",
+                        f"terminal lesson event replay failed: {type(exc).__name__}",
+                    )
+            if replayed_terminal:
+                _set_lesson_start_status(
+                    conn,
+                    "TERMINAL_REPLAYED",
+                    "Robot đã đồng bộ kết quả bài học trước đó.",
+                )
+                _log("info", "replayed terminal lesson event after manifest fetch")
+            else:
+                _set_lesson_start_status(
+                    conn,
+                    "TERMINAL_REPLAY_PENDING",
+                    "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+                )
+                _log("warning", "pending terminal lesson event blocks runtime replacement")
+            return existing
         unchanged = (
             existing.lesson_version == new_lesson_version
             and existing.assignment_version == new_assignment_version
             and getattr(existing, "manifest_checksum", "") == new_manifest_checksum
         )
         if unchanged:
-            replay = getattr(existing, "replay_pending_terminal_event", None)
-            if getattr(existing, "state", None) in (S_COMPLETED, S_FAILED) and callable(replay):
-                try:
-                    await replay()
-                except Exception as exc:  # pragma: no cover - replay is best-effort
-                    _log("warning", f"terminal lesson event replay failed: {type(exc).__name__}")
             if getattr(existing, "state", None) in (S_PAUSED, S_FAILED):
                 _log(
                     "info",
@@ -2750,20 +3340,75 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 "info",
                 "lesson republish-on-connect: version/checksum changed "
                 f"v{existing.lesson_version}/a{existing.assignment_version}/m{getattr(existing, 'manifest_checksum', '')[:8]} -> "
-                f"v{new_lesson_version}/a{new_assignment_version}/m{new_manifest_checksum[:8]}; tearing down + re-pulling",
+                f"v{new_lesson_version}/a{new_assignment_version}/m{new_manifest_checksum[:8]}; preparing candidate",
             )
-            old_cache = getattr(existing, "asset_cache", None)
-            try:
-                # Republish EVICTS the old version's bytes (disjoint version-scoped dir),
-                # unlike a plain reconnect close() which keeps verified bytes for
-                # re-attest. evict() reuses aclose() for client teardown.
-                if old_cache is not None and hasattr(old_cache, "evict"):
-                    await old_cache.evict()
-                await existing.close()  # forwarder + (idempotent) asset client teardown
-            except Exception as exc:  # pragma: no cover - teardown is best-effort
-                _log("warning", f"old lesson runtime teardown failed: {type(exc).__name__}")
-            conn.lesson_runtime = None
-            # fall through to a fresh pull of the republished version below.
+            # Keep the exact old version/checksum alive until the candidate has
+            # completed preload and READY attestation. GC protects this runtime's
+            # cache key as previous-known-good after candidate activation.
+            republish_previous = existing
+
+    # A different assignment is also a candidate transition: the currently
+    # running lesson remains usable until the new assignment reaches READY.
+    if republish_previous is None and getattr(conn, "lesson_runtime", None) is existing:
+        republish_previous = existing
+
+    gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
+    activation = None
+    candidate_identity = None
+    if gc is not None:
+        if not gc.can_preload():
+            _set_lesson_start_status(
+                conn,
+                "SD_PRELOAD_SPACE_LOW",
+                "Thẻ nhớ còn dưới ngưỡng an toàn để tải bài học mới.",
+            )
+            _log("warning", "lesson preload refused: SD free space below preload floor")
+            return republish_previous
+        candidate_cache_key = AssetCache._compose_cache_key(
+            str(assignment.get("lessonId") or "lesson"),
+            int(assignment.get("lessonVersion", 1)),
+            new_manifest_checksum,
+        )
+        candidate_identity = {
+            "cacheKey": candidate_cache_key,
+            "lessonVersion": new_lesson_version,
+            "manifestChecksum": new_manifest_checksum,
+        }
+        activation = _sd_pack_activation_for_connection(conn, gc)
+        if activation is not None:
+            old_cache = getattr(republish_previous, "asset_cache", None)
+            old_cache_key = getattr(old_cache, "cache_key", None)
+            if isinstance(old_cache_key, str) and old_cache_key:
+                activation.set_current_if_empty(
+                    {
+                        "cacheKey": old_cache_key,
+                        "lessonVersion": int(getattr(republish_previous, "lesson_version", 0)),
+                        "manifestChecksum": str(
+                            getattr(republish_previous, "manifest_checksum", "")
+                        ),
+                    }
+                )
+            activation.begin_candidate(candidate_identity)
+        result = gc.collect_one(
+            active_cache_key=getattr(
+                getattr(getattr(conn, "lesson_runtime", None), "asset_cache", None),
+                "cache_key",
+                None,
+            ),
+            preloading_cache_key=candidate_cache_key,
+            current_cache_key=(
+                activation.current_cache_key
+                if activation is not None
+                else getattr(conn, "lesson_current_cache_key", None)
+            ),
+            previous_known_good_cache_key=(
+                activation.previous_known_good_cache_key
+                if activation is not None
+                else getattr(conn, "lesson_previous_known_good_cache_key", None)
+            ),
+        )
+        if result.get("deleted"):
+            _log("info", f"lesson SD GC deleted cacheKey={result['deleted']}")
 
     asset_cache = AssetCache(
         assets=[
@@ -2845,43 +3490,263 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         alarm=alarm,
         preload_status_reporter=_report_preload_status,
     )
-    # Close any prior runtime for a DIFFERENT assignment before replacing it, so its
-    # forwarder worker task + asset httpx client are not leaked (deep-audit #7). The
-    # same-assignment republish path above already closed + nulled it (prior is None
-    # there); this catches the new-assignment case that fell straight through.
+    # Terminal same-assignment rebuilds may already have closed their runtime. Live
+    # current runtimes, including a different assignment, stay open as the fallback
+    # until the candidate passes READY attestation below.
     prior = getattr(conn, "lesson_runtime", None)
-    if prior is not None and prior is not runtime:
+    if prior is not None and prior is not runtime and prior is not republish_previous:
         try:
             await prior.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
-    conn.lesson_runtime = runtime
+    conn.lesson_runtime_candidate = runtime
+    mode_not_captured = object()
+
+    async def _abort_candidate_for_fallback_terminal(
+        phase: str, *, restore_mode: Any = mode_not_captured
+    ) -> bool:
+        previous_forwarder = getattr(republish_previous, "forwarder", None)
+        previous_terminal_pending = getattr(
+            previous_forwarder, "pending_terminal_batch", None
+        )
+        if republish_previous is None or previous_terminal_pending is None:
+            return False
+        replay_previous = getattr(
+            republish_previous, "replay_pending_terminal_event", None
+        )
+        replayed_previous = False
+        if callable(replay_previous):
+            try:
+                replayed_previous = bool(await replay_previous())
+            except Exception as exc:
+                _log(
+                    "warning",
+                    f"{phase} terminal lesson event replay failed: {type(exc).__name__}",
+                )
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
+        if activation is not None:
+            activation.abort_candidate()
+        try:
+            await runtime.close()
+        except Exception as exc:
+            _log(
+                "warning",
+                f"terminal-barrier candidate teardown failed: {type(exc).__name__}",
+            )
+        if restore_mode is not mode_not_captured:
+            set_session_mode = getattr(conn, "_set_session_mode", None)
+            if callable(set_session_mode):
+                try:
+                    set_session_mode(restore_mode, reason="lesson_candidate_aborted")
+                except Exception as exc:
+                    _log(
+                        "warning",
+                        f"lesson candidate mode rollback failed: {type(exc).__name__}",
+                    )
+            elif hasattr(conn, "session_mode"):
+                conn.session_mode = restore_mode
+                if hasattr(conn, "audio_channel_owner"):
+                    conn.audio_channel_owner = restore_mode
+        if replayed_previous:
+            _set_lesson_start_status(
+                conn,
+                "TERMINAL_REPLAYED",
+                "Robot đã đồng bộ kết quả bài học trước đó.",
+            )
+            _log("info", f"replayed fallback terminal lesson event phase={phase}")
+        else:
+            _set_lesson_start_status(
+                conn,
+                "TERMINAL_REPLAY_PENDING",
+                "Robot đang chờ đồng bộ kết quả bài học trước đó.",
+            )
+            _log("warning", f"fallback terminal lesson event blocks candidate phase={phase}")
+        return True
+
     try:
-        enter_lesson = getattr(conn, "enter_lesson_mode", None)
-        if callable(enter_lesson):
-            await enter_lesson(reason="lesson_start")
-        await runtime.start()
-        if runtime.state == S_FAILED:
+        preload_only = getattr(runtime, "preload_only", None)
+        start_protocol = getattr(runtime, "start_protocol", None)
+        split_start = callable(preload_only) and callable(start_protocol)
+        if split_start:
+            preloaded = await preload_only()
+        else:  # Compatibility for injected/legacy runtime implementations.
+            enter_lesson = getattr(conn, "enter_lesson_mode", None)
+            if callable(enter_lesson):
+                await enter_lesson(reason="lesson_start")
+            conn.lesson_runtime = runtime
+            conn.lesson_runtime_candidate = None
+            await runtime.start()
+            preloaded = True
+        if not preloaded or runtime.state == S_FAILED:
             _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
-            if getattr(conn, "lesson_runtime", None) is runtime:
-                conn.lesson_runtime = None
+            if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                conn.lesson_runtime_candidate = None
             try:
                 await runtime.close()
             except Exception as exc:  # pragma: no cover - teardown is best-effort
                 _log("warning", f"failed lesson runtime teardown failed: {type(exc).__name__}")
-            return None
+            if activation is not None:
+                activation.abort_candidate()
+            return republish_previous
+        if split_start and await _abort_candidate_for_fallback_terminal("post_preload"):
+            return republish_previous
+        if split_start:
+            enter_lesson = getattr(conn, "enter_lesson_mode", None)
+            previous_session_mode = getattr(conn, "session_mode", mode_not_captured)
+            if callable(enter_lesson):
+                await enter_lesson(reason="lesson_start")
+            if await _abort_candidate_for_fallback_terminal(
+                "post_enter_lesson_mode", restore_mode=previous_session_mode
+            ):
+                return republish_previous
+            # No await is allowed between this final terminal check, synchronous
+            # asset activation, and the runtime swap.
+            if activation is not None and candidate_identity is not None:
+                if not activation.verify_for_activation(candidate_identity) or not activation.activate_candidate(
+                    candidate_identity
+                ):
+                    _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
+                    if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                        conn.lesson_runtime_candidate = None
+                    activation.abort_candidate()
+                    await runtime.close()
+                    return republish_previous
+            conn.lesson_runtime = runtime
+            conn.lesson_runtime_candidate = None
+            await start_protocol(preloaded=True)
+        elif activation is not None and candidate_identity is not None:
+            # Preserve compatibility-runtime ordering: legacy start() already ran.
+            if not activation.verify_for_activation(candidate_identity) or not activation.activate_candidate(
+                candidate_identity
+            ):
+                _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
+                if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+                    conn.lesson_runtime_candidate = None
+                activation.abort_candidate()
+                await runtime.close()
+                return republish_previous
         _set_lesson_start_status(conn, "STARTED")
+        if republish_previous is not None:
+            old_cache = getattr(republish_previous, "asset_cache", None)
+            old_cache_key = getattr(old_cache, "cache_key", None)
+            if isinstance(old_cache_key, str) and old_cache_key:
+                conn.lesson_previous_known_good_cache_key = old_cache_key
+            conn.lesson_current_cache_key = getattr(asset_cache, "cache_key", None)
+            try:
+                await republish_previous.close()
+            except Exception as exc:  # pragma: no cover - teardown is best-effort
+                _log("warning", f"old lesson runtime teardown failed: {type(exc).__name__}")
     except LessonError as err:
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson start refused: {err.code}")
-        release_lesson = getattr(conn, "release_lesson_mode", None)
-        if callable(release_lesson):
-            await release_lesson(reason="lesson_start_refused")
+        if republish_previous is None:
+            release_lesson = getattr(conn, "release_lesson_mode", None)
+            if callable(release_lesson):
+                await release_lesson(reason="lesson_start_refused")
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
         if getattr(conn, "lesson_runtime", None) is runtime:
-            conn.lesson_runtime = None
+            conn.lesson_runtime = republish_previous
+        if activation is not None:
+            previous = activation.previous_known_good
+            if previous is None or not activation.rollback(previous):
+                activation.abort_candidate()
         try:
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"refused lesson runtime teardown failed: {type(exc).__name__}")
-        return None
+        return republish_previous
+    except Exception as exc:  # noqa: BLE001 - candidate failure must preserve active runtime
+        _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
+        _log("warning", f"lesson candidate crashed: {type(exc).__name__}")
+        if republish_previous is None:
+            release_lesson = getattr(conn, "release_lesson_mode", None)
+            if callable(release_lesson):
+                await release_lesson(reason="lesson_start_failed")
+        if getattr(conn, "lesson_runtime_candidate", None) is runtime:
+            conn.lesson_runtime_candidate = None
+        if getattr(conn, "lesson_runtime", None) is runtime:
+            conn.lesson_runtime = republish_previous
+        if activation is not None:
+            previous = activation.previous_known_good
+            if previous is None or not activation.rollback(previous):
+                activation.abort_candidate()
+        try:
+            await runtime.close()
+        except Exception as close_exc:  # pragma: no cover - teardown is best-effort
+            _log("warning", f"crashed lesson runtime teardown failed: {type(close_exc).__name__}")
+        return republish_previous
     return runtime
+
+
+def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
+    mount_root = lesson_cfg.get("asset_pack_mount_root")
+    if not mount_root:
+        return None
+    try:
+        from core.lesson.sd_pack_gc import SdPackGarbageCollector
+        from core.lesson.shared_asset_store import SharedAssetStore
+
+        mounted = Path(str(mount_root)).resolve()
+        store = SharedAssetStore(mounted.parent, pack_root=mounted, cleanup_on_init=False)
+        runtime = getattr(conn, "lesson_runtime", None)
+        render_busy = lambda: getattr(runtime, "state", None) in (S_RUNNING, S_PAUSED)
+        gc = SdPackGarbageCollector(
+            mounted,
+            shared_store=store,
+            quota_bytes=_positive_int_or_default(lesson_cfg.get("sd_cache_quota_bytes", 0), 0),
+            gc_free_percent=lesson_cfg.get("sd_gc_free_percent", 20),
+            preload_min_free_percent=lesson_cfg.get("sd_preload_min_free_percent", 5),
+            voice_busy=getattr(conn, "is_realtime_busy", None),
+            render_busy=render_busy,
+        )
+        if mounted not in _SD_PACK_BOOT_CLEANED_ROOTS:
+            gc.boot_cleanup()
+            _SD_PACK_BOOT_CLEANED_ROOTS.add(mounted)
+        return gc
+    except (OSError, TypeError) as exc:
+        logger = getattr(conn, "logger", None)
+        if logger is not None:
+            logger.warning(f"lesson SD GC unavailable: {type(exc).__name__}")
+        return None
+
+
+def _sd_pack_activation_for_connection(conn: Any, gc: Any) -> Any:
+    activation = getattr(conn, "lesson_sd_pack_activation", None)
+    if activation is not None:
+        return activation
+    try:
+        from core.lesson.sd_pack_gc import SdPackActivationState
+
+        activation = SdPackActivationState(gc.shared_store)
+        conn.lesson_sd_pack_activation = activation
+        return activation
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def rollback_sd_pack_assignment(conn: Any, assignment: Dict[str, Any]) -> bool:
+    """Re-attest and activate only the exact backend rollback identity."""
+    activation = getattr(conn, "lesson_sd_pack_activation", None)
+    if activation is None or not isinstance(assignment, dict):
+        return False
+    lesson_id = assignment.get("lessonId")
+    lesson_version = assignment.get("lessonVersion")
+    checksum = assignment.get("manifestChecksum")
+    if not isinstance(lesson_id, str) or not isinstance(lesson_version, int):
+        return False
+    if not isinstance(checksum, str) or not checksum:
+        return False
+    from core.lesson.asset_cache import AssetCache
+
+    identity = {
+        "cacheKey": AssetCache._compose_cache_key(lesson_id, lesson_version, checksum),
+        "lessonVersion": lesson_version,
+        "manifestChecksum": checksum,
+    }
+    if not activation.rollback(identity):
+        return False
+    conn.lesson_current_cache_key = activation.current_cache_key
+    conn.lesson_previous_known_good_cache_key = activation.previous_known_good_cache_key
+    return True

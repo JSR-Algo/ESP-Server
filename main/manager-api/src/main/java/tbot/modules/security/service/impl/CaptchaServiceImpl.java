@@ -37,6 +37,10 @@ public class CaptchaServiceImpl implements CaptchaService {
     private SysParamsService sysParamsService;
     @Value("${renren.redis.open}")
     private boolean open;
+    @Value("${TBOT_E2E_CAPTCHA_ENABLED:false}")
+    private boolean e2eCaptchaEnabled;
+    @Value("${TBOT_E2E_CAPTCHA_CODE:}")
+    private String e2eCaptchaCode;
     /**
      * Local Cache 5Minute Expiry
      */
@@ -51,13 +55,44 @@ public class CaptchaServiceImpl implements CaptchaService {
         response.setDateHeader("Expires", 0);
 
         // Generate captcha
-        SpecCaptcha captcha = new SpecCaptcha(150, 40);
+        SpecCaptcha captcha = createCaptcha();
         captcha.setLen(5);
         captcha.setCharType(Captcha.TYPE_DEFAULT);
         captcha.out(response.getOutputStream());
 
         // Save to cache
-        setCache(uuid, captcha.text());
+        setCache(uuid, captchaTextForCache(captcha));
+    }
+
+    private SpecCaptcha createCaptcha() {
+        if (isDeterministicE2eCaptchaEnabled()) {
+            return new DeterministicSpecCaptcha(150, 40, e2eCaptchaCode);
+        }
+        return new SpecCaptcha(150, 40);
+    }
+
+    String captchaTextForCache(SpecCaptcha captcha) {
+        return isDeterministicE2eCaptchaEnabled() ? e2eCaptchaCode : captcha.text();
+    }
+
+    private boolean isDeterministicE2eCaptchaEnabled() {
+        return e2eCaptchaEnabled && StringUtils.isNotBlank(e2eCaptchaCode)
+                && e2eCaptchaCode.matches("[A-Za-z0-9]{5}");
+    }
+
+    private static final class DeterministicSpecCaptcha extends SpecCaptcha {
+        private final char[] fixedChars;
+
+        private DeterministicSpecCaptcha(int width, int height, String code) {
+            super(width, height);
+            fixedChars = code.toCharArray();
+        }
+
+        @Override
+        protected char[] alphas() {
+            chars = new String(fixedChars);
+            return fixedChars.clone();
+        }
     }
 
     @Override

@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import importlib.util
 import json
 import queue
@@ -7,7 +8,9 @@ import types
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from core.activity_lease import ActivityOperation, ExclusiveDisposition
 
 _ROUTING_TESTS_PATH = Path(__file__).with_name("test_connection_voice_provider_routing.py")
 _ROUTING_SPEC = importlib.util.spec_from_file_location(
@@ -247,6 +250,698 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_lease_drops_voice_ingress_but_dispatches_control_and_abort(self):
+        handler = _build_handler()
+        handler.bind_completed_event.set()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.client_audio_buffer.extend(b"buffered")
+        handler.asr_audio.extend([b"buffered"])
+        provider_calls = []
+        refused_stop_calls = []
+
+        class Provider:
+            async def handle_text_message(self, message):
+                provider_calls.append(("text", message))
+                return True
+
+            async def handle_audio_bytes(self, message):
+                provider_calls.append(("audio", message))
+                return True
+
+            def discard_refused_voice_input(self):
+                refused_stop_calls.append(True)
+
+        handler.voice_provider = Provider()
+        dispatched = []
+        original_handle_text = connection_module.handleTextMessage
+        connection_module.handleTextMessage = lambda conn, message: asyncio.sleep(
+            0, result=dispatched.append(message)
+        )
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        try:
+            await handler._route_message(b"audio")
+            await handler._route_message('{"type":"text","text":"hello"}')
+            await handler._route_message('{"type":"listen","state":"start"}')
+            await handler._route_message('{"type":"listen","state":"detect","text":"TeeBot"}')
+            await handler._route_message('{"type":"listen","state":"stop"}')
+            for message in (
+                '{"type":"hello"}',
+                '{"type":"ping"}',
+                '{"type":"mcp"}',
+                '{"type":"lesson_ack"}',
+                '{"type":"lesson_progress"}',
+                '{"type":"lesson_error"}',
+                '{"type":"abort"}',
+            ):
+                await handler._route_message(message)
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+            lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(refused_stop_calls, [True])
+        self.assertEqual(len(dispatched), 7)
+        self.assertEqual(handler.client_audio_buffer, bytearray())
+        self.assertEqual(handler.asr_audio, [])
+
+    async def test_activity_lease_refuses_conversation_mode_without_mutating_mode(self):
+        handler = _build_handler()
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        entered = await handler.enter_conversation_mode(reason="test")
+
+        self.assertFalse(entered)
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.DORMANT)
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_refuses_lesson_finish_before_mode_or_tts_mutation(self):
+        handler = _build_handler()
+        handler.session_mode = connection_module.SessionMode.LESSON
+        handler.audio_channel_owner = connection_module.SessionMode.LESSON
+        handler.client_is_speaking = True
+        handler.websocket = _SendWebSocket()
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+
+        await handler.finish_lesson_mode(reason="completed")
+
+        self.assertEqual(handler.session_mode, connection_module.SessionMode.LESSON)
+        self.assertTrue(handler.client_is_speaking)
+        self.assertEqual(handler.websocket.sent, [])
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_refuses_voice_init_before_private_config_mutation(self):
+        handler = _build_handler()
+        handler.config["voice_mode"] = {"type": "classic_pipeline"}
+        handler.config["provider_setting"] = "original"
+
+        class Provider:
+            def __init__(self):
+                self.started = 0
+                self.closed = 0
+
+            async def start_session(self):
+                self.started += 1
+
+            async def close(self):
+                self.closed += 1
+
+        old_provider = Provider()
+        new_provider = type("NewProvider", (Provider,), {})()
+        handler.voice_provider = old_provider
+        config_calls = []
+        factory_calls = []
+
+        async def private_config():
+            config_calls.append(True)
+            handler.config["voice_mode"] = {"type": "google_live"}
+            handler.config["provider_setting"] = "private"
+
+        handler._initialize_private_config_async = private_config
+        original_factory = connection_module.create_voice_session_provider
+        connection_module.create_voice_session_provider = lambda _conn: (
+            factory_calls.append(True) or new_provider
+        )
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        try:
+            await handler._initialize_voice_session_async()
+        finally:
+            connection_module.create_voice_session_provider = original_factory
+
+        self.assertEqual(config_calls, [])
+        self.assertEqual(factory_calls, [])
+        self.assertEqual(handler.config["voice_mode"], {"type": "classic_pipeline"})
+        self.assertEqual(handler.config["provider_setting"], "original")
+        self.assertIs(handler.voice_provider, old_provider)
+        self.assertEqual(old_provider.started, 0)
+        self.assertEqual(old_provider.closed, 0)
+        self.assertEqual(new_provider.started, 0)
+        self.assertEqual(new_provider.closed, 0)
+        lease.complete_exclusive(ExclusiveDisposition.DEFINITIVE)
+
+    async def test_activity_lease_voice_init_owns_config_and_provider_switch_lifecycle(self):
+        handler = _build_handler()
+        handler.config["voice_mode"] = {"type": "classic_pipeline"}
+        config_entered = asyncio.Event()
+        config_release = asyncio.Event()
+
+        class Provider:
+            def __init__(self):
+                self.started = 0
+                self.closed = 0
+
+            async def start_session(self):
+                self.started += 1
+
+            async def close(self):
+                self.closed += 1
+
+        old_provider = Provider()
+        new_provider = type("NewProvider", (Provider,), {})()
+        handler.voice_provider = old_provider
+
+        async def private_config():
+            config_entered.set()
+            await config_release.wait()
+            handler.config["voice_mode"] = {"type": "google_live"}
+
+        handler._initialize_private_config_async = private_config
+        original_factory = connection_module.create_voice_session_provider
+        connection_module.create_voice_session_provider = lambda _conn: new_provider
+        task = asyncio.create_task(handler._initialize_voice_session_async())
+        await asyncio.wait_for(config_entered.wait(), timeout=1)
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        try:
+            config_release.set()
+            await task
+        finally:
+            connection_module.create_voice_session_provider = original_factory
+
+        self.assertIsNone(lease)
+        self.assertEqual(handler.config["voice_mode"], {"type": "google_live"})
+        self.assertIs(handler.voice_provider, new_provider)
+        self.assertEqual(old_provider.closed, 1)
+        self.assertEqual(new_provider.started, 1)
+        self.assertEqual(new_provider.closed, 0)
+
+    async def test_activity_lease_coordinator_uses_connection_loop_and_single_lesson_lock(self):
+        handler = _build_handler()
+
+        self.assertIs(handler.activity_leases._loop, asyncio.get_running_loop())
+        lock = handler._lesson_pull_lock
+        self.assertIsNotNone(lock)
+        self.assertIs(handler._ensure_activity_leases(), handler.activity_leases)
+        self.assertIs(handler._lesson_pull_lock, lock)
+
+    async def test_activity_lease_sticky_exclusive_closes_exactly_once_on_teardown(self):
+        handler = _build_handler()
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        self.assertIsNotNone(lease)
+        lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+        self.assertTrue(handler.activity_leases.has_exclusive_lease())
+        close_calls = []
+        original_close = handler.activity_leases.close
+
+        def close_once():
+            close_calls.append(True)
+            original_close()
+
+        handler.activity_leases.close = close_once
+        await handler.close()
+        await handler.close()
+
+        self.assertEqual(close_calls, [True])
+        self.assertFalse(handler.activity_leases.has_exclusive_lease())
+
+    async def test_activity_lease_classic_silence_self_close_ends_coordinator_closed(self):
+        import core.handle.receiveAudioHandle as receive_audio
+
+        handler = _build_handler()
+        handler.vad = types.SimpleNamespace(is_vad=lambda _conn, _audio: False)
+        handler.asr = types.SimpleNamespace(
+            close=AsyncMock(),
+            receive_audio=AsyncMock(),
+        )
+        handler.last_activity_time = 1_000.0
+        handler.config["close_connection_no_voice_time"] = 1
+        handler.config["end_prompt"] = {"enable": False}
+
+        with patch.object(receive_audio.time, "time", return_value=3.0):
+            await receive_audio.handleAudioMessage(handler, b"silence")
+
+        handler.asr.receive_audio.assert_awaited_once_with(handler, b"silence", False)
+        self.assertEqual(
+            handler.activity_leases.diagnostic_snapshot(),
+            {
+                "closed": True,
+                "voiceLeaseCount": 0,
+                "voiceOwners": [],
+                "exclusive": None,
+            },
+        )
+
+    async def test_activity_lease_teardown_drains_tracked_eviction_before_close(self):
+        handler = _build_handler()
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        close_observations = []
+        original_close = handler.activity_leases.close
+
+        async def tracked_eviction():
+            async with handler._lesson_pull_lock:
+                lease = handler.activity_leases.try_acquire_eviction(
+                    ActivityOperation.LESSON_CACHE_EVICT,
+                    busy_probe=lambda: False,
+                )
+                self.assertIsNotNone(lease)
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+                    lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+
+        def observing_close():
+            close_observations.append(
+                (cancelled.is_set(), len(handler.mcp_background_tasks))
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        task = handler.schedule_mcp_background_task(tracked_eviction())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        await handler.close()
+        await handler.close()
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(handler.mcp_background_tasks, set())
+        self.assertEqual(close_observations, [(True, 0)])
+        self.assertFalse(handler.activity_leases.has_exclusive_lease())
+
+    async def test_activity_lease_teardown_closes_after_async_voice_and_executor_cleanup(self):
+        handler = _build_handler()
+        entered = asyncio.Event()
+        observations = []
+
+        async def held_voice_operation():
+            try:
+                with handler.voice_activity_lease(
+                    ActivityOperation.CONNECTION_CONVERSATION
+                ) as allowed:
+                    self.assertTrue(allowed)
+                    entered.set()
+                    await asyncio.Event().wait()
+            finally:
+                observations.append(
+                    (
+                        "voice-task-finished",
+                        handler.activity_leases.diagnostic_snapshot(),
+                    )
+                )
+
+        class Provider:
+            async def close(self):
+                observations.append(
+                    ("provider-close", handler.activity_leases.diagnostic_snapshot())
+                )
+
+        class Executor:
+            def shutdown(self, *, wait, cancel_futures):
+                observations.append(
+                    (
+                        "executor-shutdown",
+                        wait,
+                        cancel_futures,
+                        handler.activity_leases.diagnostic_snapshot(),
+                    )
+                )
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                ("coordinator-close", handler.activity_leases.diagnostic_snapshot())
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        handler.voice_provider = Provider()
+        handler.executor = Executor()
+        handler.voice_provider_task = asyncio.create_task(held_voice_operation())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        await handler.close()
+        await handler.close()
+
+        self.assertEqual(
+            [observation[0] for observation in observations],
+            [
+                "provider-close",
+                "voice-task-finished",
+                "executor-shutdown",
+                "coordinator-close",
+                "provider-close",
+            ],
+        )
+        provider_snapshot = observations[0][1]
+        self.assertFalse(provider_snapshot["closed"])
+        self.assertEqual(provider_snapshot["voiceLeaseCount"], 1)
+        task_snapshot = observations[1][1]
+        self.assertFalse(task_snapshot["closed"])
+        self.assertEqual(task_snapshot["voiceLeaseCount"], 0)
+        executor_snapshot = observations[2][3]
+        self.assertFalse(executor_snapshot["closed"])
+        self.assertEqual(executor_snapshot["voiceLeaseCount"], 0)
+        self.assertEqual(observations[2][1], False)
+        self.assertEqual(observations[2][2], True)
+        self.assertFalse(observations[3][1]["closed"])
+        self.assertTrue(handler.activity_leases.diagnostic_snapshot()["closed"])
+
+    async def test_activity_lease_sticky_exclusive_survives_until_final_teardown_stage(self):
+        handler = _build_handler()
+        observations = []
+        lease = handler.activity_leases.try_acquire_eviction(
+            ActivityOperation.LESSON_CACHE_EVICT,
+            busy_probe=lambda: False,
+        )
+        lease.complete_exclusive(ExclusiveDisposition.AMBIGUOUS)
+
+        class Executor:
+            def shutdown(self, *, wait):
+                observations.append(
+                    (
+                        "executor-shutdown",
+                        wait,
+                        handler.activity_leases.diagnostic_snapshot(),
+                    )
+                )
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                ("coordinator-close", handler.activity_leases.diagnostic_snapshot())
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        handler.executor = Executor()
+
+        await handler.close()
+        await handler.close()
+
+        self.assertEqual(
+            [observation[0] for observation in observations],
+            ["executor-shutdown", "coordinator-close"],
+        )
+        executor_snapshot = observations[0][2]
+        self.assertFalse(executor_snapshot["closed"])
+        self.assertTrue(executor_snapshot["exclusive"]["sticky"])
+        close_snapshot = observations[1][1]
+        self.assertFalse(close_snapshot["closed"])
+        self.assertTrue(close_snapshot["exclusive"]["sticky"])
+        self.assertTrue(handler.activity_leases.diagnostic_snapshot()["closed"])
+
+    async def test_activity_lease_teardown_finalizes_voice_and_executor_after_cleanup_failure(self):
+        handler = _build_handler()
+        entered = asyncio.Event()
+        observations = []
+
+        async def held_voice_operation():
+            try:
+                with handler.voice_activity_lease(
+                    ActivityOperation.CONNECTION_CONVERSATION
+                ) as allowed:
+                    self.assertTrue(allowed)
+                    entered.set()
+                    await asyncio.Event().wait()
+            finally:
+                observations.append("voice-task-finished")
+
+        class Provider:
+            async def close(self):
+                observations.append("provider-close")
+
+        class Executor:
+            def shutdown(self, *, wait, cancel_futures):
+                observations.append(("executor-shutdown", wait, cancel_futures))
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                (
+                    "coordinator-close",
+                    handler.voice_provider_task.done(),
+                    handler.activity_leases.diagnostic_snapshot()["voiceLeaseCount"],
+                )
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        handler.vad = types.SimpleNamespace(
+            release_conn_resources=lambda _conn: (_ for _ in ()).throw(
+                RuntimeError("injected cleanup failure")
+            )
+        )
+        handler.voice_provider = Provider()
+        handler.executor = Executor()
+        handler.voice_provider_task = asyncio.create_task(held_voice_operation())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        await handler.close()
+
+        self.assertEqual(
+            observations,
+            [
+                "provider-close",
+                "voice-task-finished",
+                ("executor-shutdown", False, True),
+                ("coordinator-close", True, 0),
+            ],
+        )
+        self.assertTrue(handler.voice_provider_task.done())
+        self.assertIsNone(handler.executor)
+
+    async def test_activity_lease_teardown_finalizes_before_propagating_cancellation(self):
+        handler = _build_handler()
+        cleanup_entered = asyncio.Event()
+        voice_entered = asyncio.Event()
+        observations = []
+
+        async def blocked_cleanup():
+            cleanup_entered.set()
+            await asyncio.Event().wait()
+
+        async def held_voice_operation():
+            try:
+                with handler.voice_activity_lease(
+                    ActivityOperation.CONNECTION_CONVERSATION
+                ) as allowed:
+                    self.assertTrue(allowed)
+                    voice_entered.set()
+                    await asyncio.Event().wait()
+            finally:
+                observations.append("voice-task-finished")
+
+        class Provider:
+            async def close(self):
+                observations.append("provider-close")
+
+        class Executor:
+            def shutdown(self, *, wait, cancel_futures):
+                observations.append(("executor-shutdown", wait, cancel_futures))
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                (
+                    "coordinator-close",
+                    handler.voice_provider_task.done(),
+                    handler.activity_leases.diagnostic_snapshot()["voiceLeaseCount"],
+                )
+            )
+            original_close()
+
+        handler._close_connection_owned_mcp_callers = blocked_cleanup
+        handler.activity_leases.close = observing_close
+        handler.voice_provider = Provider()
+        handler.executor = Executor()
+        handler.voice_provider_task = asyncio.create_task(held_voice_operation())
+        await asyncio.wait_for(voice_entered.wait(), timeout=1)
+        close_task = asyncio.create_task(handler.close())
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+
+        close_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+
+        self.assertEqual(
+            observations,
+            [
+                "provider-close",
+                "voice-task-finished",
+                ("executor-shutdown", False, True),
+                ("coordinator-close", True, 0),
+            ],
+        )
+        self.assertTrue(handler.voice_provider_task.done())
+        self.assertIsNone(handler.executor)
+
+    async def test_activity_lease_teardown_propagates_cancellation_during_voice_task_drain(self):
+        handler = _build_handler()
+        voice_entered = asyncio.Event()
+        drain_entered = asyncio.Event()
+        observations = []
+
+        async def held_voice_operation():
+            try:
+                with handler.voice_activity_lease(
+                    ActivityOperation.CONNECTION_CONVERSATION
+                ) as allowed:
+                    self.assertTrue(allowed)
+                    voice_entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        drain_entered.set()
+                        await asyncio.Event().wait()
+                        raise
+            finally:
+                observations.append("voice-task-finished")
+
+        class Executor:
+            def shutdown(self, *, wait, cancel_futures):
+                observations.append(("executor-shutdown", wait, cancel_futures))
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                (
+                    "coordinator-close",
+                    handler.voice_provider_task.done(),
+                    handler.activity_leases.diagnostic_snapshot()["voiceLeaseCount"],
+                )
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        handler.voice_provider = None
+        handler.executor = Executor()
+        handler.voice_provider_task = asyncio.create_task(held_voice_operation())
+        await asyncio.wait_for(voice_entered.wait(), timeout=1)
+        close_task = asyncio.create_task(handler.close())
+        await asyncio.wait_for(drain_entered.wait(), timeout=1)
+
+        close_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+
+        self.assertEqual(
+            observations,
+            [
+                "voice-task-finished",
+                ("executor-shutdown", False, True),
+                ("coordinator-close", True, 0),
+            ],
+        )
+        self.assertIsNone(handler.executor)
+
+    async def test_activity_lease_teardown_drains_voice_task_after_repeated_cancellation(self):
+        handler = _build_handler()
+        voice_entered = asyncio.Event()
+        provider_cancellations = asyncio.Queue()
+        allow_voice_finish = asyncio.Event()
+        observations = []
+
+        async def cancellation_resistant_voice_operation():
+            try:
+                with handler.voice_activity_lease(
+                    ActivityOperation.CONNECTION_CONVERSATION
+                ) as allowed:
+                    self.assertTrue(allowed)
+                    voice_entered.set()
+                    while not allow_voice_finish.is_set():
+                        try:
+                            await allow_voice_finish.wait()
+                        except asyncio.CancelledError:
+                            provider_cancellations.put_nowait(True)
+            finally:
+                observations.append("voice-task-finished")
+
+        class Executor:
+            def shutdown(self, *, wait, cancel_futures):
+                observations.append(("executor-shutdown", wait, cancel_futures))
+
+        original_close = handler.activity_leases.close
+
+        def observing_close():
+            observations.append(
+                (
+                    "coordinator-close",
+                    handler.voice_provider_task.done(),
+                    handler.activity_leases.diagnostic_snapshot()["voiceLeaseCount"],
+                )
+            )
+            original_close()
+
+        handler.activity_leases.close = observing_close
+        handler.voice_provider = None
+        handler.executor = Executor()
+        handler.voice_provider_task = asyncio.create_task(
+            cancellation_resistant_voice_operation()
+        )
+        await asyncio.wait_for(voice_entered.wait(), timeout=1)
+        close_task = asyncio.create_task(handler.close())
+
+        try:
+            await asyncio.wait_for(provider_cancellations.get(), timeout=1)
+            for _ in range(3):
+                close_task.cancel()
+                await asyncio.wait_for(provider_cancellations.get(), timeout=1)
+            close_task.cancel()
+            await asyncio.sleep(0)
+
+            self.assertFalse(close_task.done())
+            self.assertFalse(handler.voice_provider_task.done())
+            self.assertEqual(observations, [])
+
+            allow_voice_finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await close_task
+        finally:
+            allow_voice_finish.set()
+            if not close_task.done():
+                close_task.cancel()
+            try:
+                await close_task
+            except asyncio.CancelledError:
+                pass
+            if not handler.voice_provider_task.done():
+                handler.voice_provider_task.cancel()
+            try:
+                await handler.voice_provider_task
+            except asyncio.CancelledError:
+                pass
+
+        self.assertEqual(
+            observations,
+            [
+                "voice-task-finished",
+                ("executor-shutdown", False, True),
+                ("coordinator-close", True, 0),
+            ],
+        )
+        self.assertTrue(handler.voice_provider_task.done())
+        self.assertIsNone(handler.executor)
+        pending_drains = [
+            task
+            for task in asyncio.all_tasks()
+            if not task.done()
+            and "cancel_and_drain" in getattr(task.get_coro(), "__qualname__", "")
+        ]
+        self.assertEqual(pending_drains, [])
+
     def test_websocket_timeout_allows_sixty_minute_live_sessions(self):
         handler = _build_handler()
 
@@ -346,8 +1041,8 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.last_live_activity_at = 1.0
         handler.config["google_live"] = {"idle_timeout_sec": "bad"}
 
-        self.assertFalse(await handler.close_live_if_idle(now=40.0))
-        self.assertTrue(await handler.close_live_if_idle(now=47.0))
+        self.assertFalse(await handler.close_live_if_idle(now=900.0))
+        self.assertTrue(await handler.close_live_if_idle(now=901.0))
         self.assertEqual(handler.session_mode, connection_module.SessionMode.DORMANT)
 
     async def test_wait_for_voice_provider_ready_covers_cancel_and_done_paths(self):
@@ -1311,8 +2006,10 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _AsyncClose(fail=True)
         handler.voice_provider_task = asyncio.create_task(asyncio.sleep(60))
         handler.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
-        handler.lesson_runtime = _AsyncClose(fail=True)
-        handler.safety_event_forwarder = _AsyncAClose(fail=True)
+        lesson_runtime = _AsyncClose(fail=True)
+        safety_forwarder = _AsyncAClose(fail=True)
+        handler.lesson_runtime = lesson_runtime
+        handler.safety_event_forwarder = safety_forwarder
         handler.audio_rate_controller = types.SimpleNamespace(
             reset=lambda: setattr(handler, "rate_reset", True),
             stop_sending_and_wait=lambda: _future_result(),
@@ -1333,13 +2030,188 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.audio_buffer, bytearray())
         self.assertIsNone(handler.timeout_task)
         self.assertTrue(handler.func_handler.cleaned)
-        self.assertTrue(handler.lesson_runtime.closed)
-        self.assertTrue(handler.safety_event_forwarder.closed)
+        self.assertTrue(lesson_runtime.closed)
+        self.assertTrue(safety_forwarder.closed)
+        self.assertIsNone(handler.lesson_runtime)
+        self.assertIsNone(handler.safety_event_forwarder)
         self.assertTrue(handler.rate_reset)
         self.assertTrue(handler.rate_stopped)
         self.assertTrue(handler.tts.closed)
         self.assertTrue(handler.asr.closed)
         self.assertIsNone(handler.executor)
+
+    async def test_close_cancels_mcp_tasks_before_tool_cleanup(self):
+        handler = _build_handler()
+        task_started = asyncio.Event()
+        task_cancelled = asyncio.Event()
+        release_work = asyncio.Event()
+        post_close_calls = []
+        cleanup_observations = []
+
+        async def blocked_mcp_work():
+            task_started.set()
+            try:
+                await release_work.wait()
+                post_close_calls.append("device-tool-call")
+            finally:
+                task_cancelled.set()
+
+        class ObservingToolHandler:
+            async def cleanup(self):
+                cleanup_observations.append(
+                    (task_cancelled.is_set(), len(handler.mcp_background_tasks))
+                )
+
+        handler.func_handler = ObservingToolHandler()
+        task = handler.schedule_mcp_background_task(blocked_mcp_work())
+        await asyncio.wait_for(task_started.wait(), timeout=0.5)
+
+        await handler.close()
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(cleanup_observations, [(True, 0)])
+        self.assertTrue(handler.mcp_tasks_closed)
+        release_work.set()
+        await asyncio.sleep(0)
+        self.assertEqual(post_close_calls, [])
+
+        async def late_mcp_work():
+            post_close_calls.append("post-close-send")
+
+        self.assertIsNone(handler.schedule_mcp_background_task(late_mcp_work()))
+        await asyncio.sleep(0)
+        self.assertEqual(post_close_calls, [])
+
+    async def test_close_stops_all_lesson_mcp_callers_before_tool_cleanup(self):
+        handler = _build_handler()
+        release = asyncio.Event()
+        stopped = set()
+        post_cleanup_sends = []
+        cleanup_started = False
+
+        async def caller(name):
+            try:
+                await release.wait()
+                if cleanup_started:
+                    post_cleanup_sends.append(name)
+            finally:
+                stopped.add(name)
+
+        class Runtime:
+            def __init__(self, name):
+                self.name = name
+                self.closed = False
+
+            async def close(self):
+                await asyncio.sleep(0)
+                self.closed = True
+                stopped.add(self.name)
+
+        class Forwarder:
+            def __init__(self):
+                self.closed = False
+
+            async def aclose(self):
+                await asyncio.sleep(0)
+                self.closed = True
+                stopped.add("safety-forwarder")
+
+        active = Runtime("active-runtime")
+        candidate = Runtime("candidate-runtime")
+        forwarder = Forwarder()
+        handler.lesson_runtime = active
+        handler.lesson_runtime_candidate = candidate
+        handler.safety_event_forwarder = forwarder
+        handler.lesson_pull_task = asyncio.create_task(caller("lesson-pull"))
+        handler.sd_pack_sync_task = asyncio.create_task(caller("sd-pack-sync"))
+
+        class ObservingToolHandler:
+            async def cleanup(self):
+                nonlocal cleanup_started
+                cleanup_started = True
+                self_snapshot = {
+                    "stopped": set(stopped),
+                    "lesson_pull_task": handler.lesson_pull_task,
+                    "sd_pack_sync_task": handler.sd_pack_sync_task,
+                    "lesson_runtime": handler.lesson_runtime,
+                    "lesson_runtime_candidate": handler.lesson_runtime_candidate,
+                    "safety_event_forwarder": handler.safety_event_forwarder,
+                }
+                handler.tool_cleanup_snapshot = self_snapshot
+
+        handler.func_handler = ObservingToolHandler()
+        await asyncio.sleep(0)
+
+        await handler.close()
+        release.set()
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            handler.tool_cleanup_snapshot["stopped"],
+            {
+                "lesson-pull",
+                "sd-pack-sync",
+                "active-runtime",
+                "candidate-runtime",
+                "safety-forwarder",
+            },
+        )
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_pull_task"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["sd_pack_sync_task"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_runtime"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["lesson_runtime_candidate"])
+        self.assertIsNone(handler.tool_cleanup_snapshot["safety_event_forwarder"])
+        self.assertTrue(active.closed)
+        self.assertTrue(candidate.closed)
+        self.assertTrue(forwarder.closed)
+        self.assertEqual(post_cleanup_sends, [])
+
+    async def test_failed_mcp_task_exception_is_retrieved_and_logged_by_type_only(self):
+        handler = _build_handler()
+        finished = asyncio.Event()
+        loop_contexts = []
+        loop = asyncio.get_running_loop()
+        prior_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+
+        async def fail():
+            finished.set()
+            raise RuntimeError("parent@example.com token=secret")
+
+        try:
+            handler.schedule_mcp_background_task(fail())
+            await asyncio.wait_for(finished.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(prior_handler)
+
+        self.assertEqual(loop_contexts, [])
+        warning_messages = [
+            str(args[0])
+            for level, args, _kwargs in handler.logger.messages
+            if level == "warning" and args
+        ]
+        self.assertEqual(
+            warning_messages,
+            ["MCP background task failed errorType=RuntimeError"],
+        )
+        self.assertNotIn("parent@example.com", warning_messages[0])
+        self.assertNotIn("secret", warning_messages[0])
+
+    async def test_completed_mcp_task_is_removed_from_connection_tracking(self):
+        handler = _build_handler()
+
+        async def complete():
+            return "done"
+
+        task = handler.schedule_mcp_background_task(complete())
+        self.assertIn(task, handler.mcp_background_tasks)
+        self.assertEqual(await task, "done")
+        await asyncio.sleep(0)
+
+        self.assertEqual(handler.mcp_background_tasks, set())
 
     async def test_check_timeout_uses_bind_first_activity_and_logs_close_errors(self):
         handler = _build_handler()
@@ -1450,7 +2322,11 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.config["lesson"] = "bad"
         self.assertFalse(handler._lesson_runtime_enabled())
         self.assertFalse(handler._sample_lesson_enabled())
-        handler.config["lesson"] = {"runtime_enabled": True}
+        handler.device_id = "robot-01"
+        handler.config["lesson"] = {
+            "runtime_enabled": True,
+            "rollout_device_allowlist": ["robot-01"],
+        }
         self.assertTrue(handler._lesson_runtime_enabled())
         handler._disable_lesson_runtime()
         self.assertFalse(handler.config["lesson"]["runtime_enabled"])
@@ -1477,10 +2353,64 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handler.is_realtime_busy())
         handler.voice_provider._interaction.state = types.SimpleNamespace(value="IDLE")
         self.assertFalse(handler.is_realtime_busy())
+        handler.voice_provider._interaction.state = types.SimpleNamespace(value="LISTENING")
+        self.assertFalse(handler.is_realtime_busy())
         handler.voice_provider = types.SimpleNamespace(
             _fallback_provider=types.SimpleNamespace(_interaction=types.SimpleNamespace(state="MUSIC_PLAYING"))
         )
         self.assertTrue(handler.is_realtime_busy())
+
+    async def test_realtime_busy_covers_audio_decode_while_state_is_listening(self):
+        handler = _build_handler()
+        handler.session_mode = connection_module.SessionMode.CONVERSATION
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle_audio_bytes(_audio):
+            started.set()
+            await release.wait()
+            return True
+
+        handler.voice_provider = types.SimpleNamespace(
+            _interaction=types.SimpleNamespace(state=types.SimpleNamespace(value="LISTENING")),
+            handle_audio_bytes=handle_audio_bytes,
+        )
+
+        route_task = asyncio.create_task(handler._route_audio_message(b"opus-frame"))
+        await started.wait()
+        self.assertTrue(handler.is_realtime_busy())
+        release.set()
+        self.assertTrue(await route_task)
+        self.assertFalse(handler.is_realtime_busy())
+
+    async def test_lesson_preload_reset_waits_for_matching_firmware_ack(self):
+        handler = _build_handler()
+        handler.websocket = _SendWebSocket()
+        handler.device_id = "AA:BB:CC:DD:EE:FF"
+
+        reset_task = asyncio.create_task(
+            handler.request_lesson_preload_reset(
+                assignment_id="assignment-1",
+                lesson_id="lesson-1",
+                profile="espTft",
+            )
+        )
+        while not handler.websocket.sent:
+            await asyncio.sleep(0)
+
+        frame = handler.websocket.sent[0]
+        self.assertEqual(frame["type"], "lesson_prepare")
+        self.assertTrue(frame["body"]["preloadResetOnly"])
+        self.assertTrue(
+            handler._accept_lesson_preload_reset_ack(
+                {
+                    "type": "lesson_ack",
+                    "sessionId": frame["sessionId"],
+                    "body": {"acks": 1},
+                }
+            )
+        )
+        self.assertTrue(await reset_task)
 
     async def test_lesson_pull_on_connect_swallows_runtime_import_or_start_failures(self):
         handler = _build_handler()

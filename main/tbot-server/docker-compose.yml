@@ -11,17 +11,23 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - LESSON_RUNTIME_ENABLED=${LESSON_RUNTIME_ENABLED:-false}
+      - LESSON_MOTION_PRESETS_ENABLED=${LESSON_MOTION_PRESETS_ENABLED:-false}
+      - LESSON_PLAYFUL_INTERACTIONS_ENABLED=${LESSON_PLAYFUL_INTERACTIONS_ENABLED:-false}
+      - LESSON_ROLLOUT_DEVICE_ALLOWLIST=${LESSON_ROLLOUT_DEVICE_ALLOWLIST:-}
+      - LESSON_STORAGE_HIL_DEVICE_ALLOWLIST=${LESSON_STORAGE_HIL_DEVICE_ALLOWLIST:-}
+      - TBOT_PUBLIC_WEBSOCKET_URL=${TBOT_PUBLIC_WEBSOCKET_URL:-}
       - COURSE_BACKEND_URL=${COURSE_BACKEND_URL:-}
       - LESSON_ASSET_ORIGIN_BASE=${LESSON_ASSET_ORIGIN_BASE:-}
       - TBOT_DEVICE_MINT_SECRET=${TBOT_DEVICE_MINT_SECRET:-}
       # Public base robots use to download lesson packs (must match real cache bytes).
       - LESSON_ASSET_PUBLIC_BASE_URL=${LESSON_ASSET_PUBLIC_BASE_URL:-}
       - LESSON_ASSET_DELIVERY_MODE=${LESSON_ASSET_DELIVERY_MODE:-}
+      - LESSON_ASSET_PACK_MOUNT_ROOT=${LESSON_ASSET_PACK_MOUNT_ROOT:-}
       - LESSON_SD_FANOUT_CONCURRENCY=${LESSON_SD_FANOUT_CONCURRENCY:-4}
       # Built-in interactive "say the word" speaking lesson (start_lesson loads it with
-      # no backend assignment). Defaults match config.yaml so Docker does not silently
-      # disable the spoken sample flow.
-      - LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-true}
+      # no backend assignment). Dark by default; explicitly enable it for one allowlisted
+      # demo robot only.
+      - LESSON_SAMPLE_ENABLED=${LESSON_SAMPLE_ENABLED:-false}
       - LESSON_SAMPLE_MODE=${LESSON_SAMPLE_MODE:-interactive}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - TBOT_GOOGLE_LIVE_API_KEY=${TBOT_GOOGLE_LIVE_API_KEY:-}

@@ -1,0 +1,12 @@
+services:
+  postgres:
+    container_name: tbot-rewards-e2e-pg
+    ports:
+      - "55432:5432"
+
+# Keep the disposable rewards database out of the persistent admin-browser
+# fixture volume. This also prevents Compose from adopting/recreating a volume
+# owned by a differently named project when switching between the two suites.
+volumes:
+  lesson-studio-pg-data:
+    name: tbot-rewards-e2e-pg-data

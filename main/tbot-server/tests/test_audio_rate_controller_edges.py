@@ -33,6 +33,85 @@ def _controller(frame_duration=10):
     return controller
 
 
+def test_controller_constructs_without_a_running_loop_and_rebinds_between_loops():
+    controller = _controller(frame_duration=1)
+    assert controller.queue_empty_event is None
+    assert controller.queue_has_data_event is None
+
+    async def run_once(packet):
+        sent = []
+
+        async def send_audio(value):
+            sent.append(value)
+
+        task = controller.start_sending(send_audio)
+        controller.add_audio(packet)
+        await controller.wait_until_empty()
+        await controller.stop_sending_and_wait()
+        return sent, task.get_loop(), controller.queue_empty_event
+
+    first_sent, first_loop, first_empty_event = asyncio.run(run_once(b"first"))
+    second_sent, second_loop, second_empty_event = asyncio.run(run_once(b"second"))
+
+    assert first_sent == [b"first"]
+    assert second_sent == [b"second"]
+    assert first_loop is not second_loop
+    assert first_empty_event is not second_empty_event
+
+
+def test_controller_rejects_rebind_while_sender_is_owned_by_another_loop():
+    controller = _controller()
+    owner_loop = asyncio.new_event_loop()
+
+    async def send_audio(_packet):
+        return None
+
+    try:
+        task = owner_loop.run_until_complete(
+            owner_loop.create_task(_start_controller(controller, send_audio))
+        )
+        with pytest.raises(RuntimeError, match="active sender.*different event loop"):
+            asyncio.run(controller.wait_until_empty())
+    finally:
+        task.cancel()
+        owner_loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        owner_loop.close()
+
+
+def test_controller_rejects_rebind_while_empty_waiter_is_owned_by_another_loop():
+    controller = _controller()
+    controller.add_audio(b"queued")
+    owner_loop = asyncio.new_event_loop()
+
+    async def bind_waiter():
+        task = asyncio.create_task(controller.wait_until_empty())
+        await asyncio.sleep(0)
+        return task
+
+    async def attempt_rebind():
+        controller._ensure_loop_primitives()
+
+    waiter = owner_loop.run_until_complete(bind_waiter())
+    owner_empty_event = controller.queue_empty_event
+    try:
+        assert not waiter.done()
+        with pytest.raises(RuntimeError, match="active waiter.*different event loop"):
+            asyncio.run(attempt_rebind())
+    finally:
+        owner_loop.call_soon(owner_empty_event.set)
+        owner_loop.run_until_complete(waiter)
+        owner_loop.close()
+
+    asyncio.run(attempt_rebind())
+    assert controller.queue_empty_event is not owner_empty_event
+
+
+async def _start_controller(controller, send_audio):
+    task = controller.start_sending(send_audio)
+    await asyncio.sleep(0)
+    return task
+
+
 def test_add_audio_and_message_recover_queue_timing_and_reset(monkeypatch):
     controller = _controller(frame_duration=100)
     controller.play_position = 500
@@ -43,8 +122,8 @@ def test_add_audio_and_message_recover_queue_timing_and_reset(monkeypatch):
         scoped.setattr(audioRateController.time, "monotonic", lambda: next(times))
         controller.add_audio(b"packet")
         assert list(controller.queue) == [("audio", b"packet")]
-        assert not controller.queue_empty_event.is_set()
-        assert controller.queue_has_data_event.is_set()
+        assert controller.queue_empty_event is None
+        assert controller.queue_has_data_event is None
         assert any(level == "debug" and "Queue recovered" in msg for level, msg in controller.logger.records)
 
         controller._drain_queue()
@@ -73,6 +152,7 @@ def test_add_audio_and_message_recover_queue_timing_and_reset(monkeypatch):
 @pytest.mark.asyncio
 async def test_check_queue_sends_messages_audio_and_logs_callback_failures(monkeypatch):
     controller = _controller(frame_duration=10)
+    controller._ensure_loop_primitives()
     sent = []
     message_calls = []
     monkeypatch.setattr(audioRateController.time, "monotonic", lambda: 10.0)

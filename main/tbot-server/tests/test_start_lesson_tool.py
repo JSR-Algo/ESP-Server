@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from plugins_func.functions import start_lesson as start_lesson_module
 from plugins_func.register import Action
+from core.providers.tools.product_toolset import product_tool_names
 
 
 class _Logger:
@@ -31,6 +32,14 @@ class _Conn:
         self._enabled = enabled
         self._sample = sample
         self._pull = pull
+        self.device_id = "robot-01"
+        self.config = {
+            "lesson": {
+                "runtime_enabled": enabled,
+                "sample_lesson": sample,
+                "rollout_device_allowlist": [self.device_id],
+            }
+        }
 
     def _lesson_runtime_enabled(self):
         return self._enabled
@@ -54,6 +63,61 @@ class _VoiceProvider:
 
 
 class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_with_no_allowlist_is_blocked_even_when_runtime_is_off(self):
+        from core.lesson import sample as sample_module
+
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)
+        conn.device_id = "robot-01"
+        conn.config = {"lesson": {"runtime_enabled": False, "sample_lesson": True}}
+
+        response = start_lesson_module.start_lesson(conn)
+
+        self.assertEqual(response.result, "Lesson runtime disabled")
+        with patch.object(sample_module, "_start_sample_lesson_impl") as sample_impl:
+            self.assertIsNone(await sample_module.start_sample_lesson(conn))
+            sample_impl.assert_not_called()
+
+    async def test_rollout_allowlist_blocks_sample_tool_and_direct_start_for_other_robot(self):
+        from core.lesson import sample as sample_module
+
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=True, sample=True)
+        conn.device_id = "robot-02"
+        conn.config = {
+            "lesson": {
+                "runtime_enabled": True,
+                "sample_lesson": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
+
+        self.assertNotIn("start_lesson", product_tool_names(conn))
+        response = start_lesson_module.start_lesson(conn)
+
+        self.assertEqual(response.action, Action.RESPONSE)
+        self.assertEqual(response.result, "Lesson runtime disabled")
+        self.assertIsNone(conn.lesson_pull_task)
+        self.assertEqual(conn.pull_calls, 0)
+        with patch.object(sample_module, "_start_sample_lesson_impl") as sample_impl:
+            self.assertIsNone(await sample_module.start_sample_lesson(conn))
+            sample_impl.assert_not_called()
+
+    async def test_runtime_rollout_with_empty_allowlist_blocks_sample_fail_closed(self):
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)
+        conn.device_id = "robot-01"
+        conn.config = {
+            "lesson": {
+                "runtime_enabled": True,
+                "sample_lesson": True,
+                "rollout_device_allowlist": [],
+            }
+        }
+
+        self.assertNotIn("start_lesson", product_tool_names(conn))
+        response = start_lesson_module.start_lesson(conn)
+
+        self.assertEqual(response.result, "Lesson runtime disabled")
+        self.assertIsNone(conn.lesson_pull_task)
+
     async def test_returns_disabled_response_without_scheduling_pull(self):
         conn = _Conn(loop=asyncio.get_running_loop(), enabled=False)
 
@@ -264,9 +328,10 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
                 self.config = {
                     "lesson": {
                         "api_base": "http://backend.test/v1",
-                        "runtime_enabled": True,
-                        "sample_lesson": True,
-                    }
+                    "runtime_enabled": True,
+                    "sample_lesson": True,
+                    "rollout_device_allowlist": ["AA:BB:CC:DD:EE:FF"],
+                }
                 }
                 self.voice_provider = _VoiceProvider()
 
@@ -388,6 +453,13 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
             loop=asyncio.get_running_loop(),
             logger=_Logger(),
             lesson_pull_task=None,
+            device_id="robot-01",
+            config={
+                "lesson": {
+                    "runtime_enabled": True,
+                    "rollout_device_allowlist": ["robot-01"],
+                }
+            },
             _lesson_runtime_enabled=lambda: True,
         )
 

@@ -1,0 +1,29 @@
+{
+  "stepIndex": 0,
+  "path": "nearMiss",
+  "manifest": {
+    "manifestVersion": "teebot-lesson-renderer.v1",
+    "lessonId": "five-minute-apple",
+    "lessonVersion": 7,
+    "profile": "espTft",
+    "durationMinutes": 5,
+    "steps": [{
+      "id": "name-apple",
+      "prompt": "What fruit is this?",
+      "motionPreset": "listen-lean",
+      "scene": {
+        "backgroundScene": { "mode": "poster", "poster": { "src": "/fixtures/orchard.jpg", "fit": "cover" }, "video": null },
+        "teachingObject": { "primaryWord": "apple", "asset": { "src": "/fixtures/apple.png" } },
+        "robotOverlay": { "pose": "listen", "anchor": "bottomLeft", "asset": { "src": "/fixtures/robot-listen.png" } }
+      },
+      "responsePaths": {
+        "correct": { "prompt": "Yes, apple!", "motionPreset": "celebrate" },
+        "nearMiss": { "prompt": "Almost. Listen: apple.", "motionPreset": "encourage" },
+        "incorrect": { "prompt": "Let's try apple together.", "motionPreset": "gentle-shake" },
+        "silence": { "prompt": "You can point or say apple.", "motionPreset": "patient-wait" },
+        "sttUnavailable": { "prompt": "I cannot hear right now. Let's listen together.", "motionPreset": "calm-idle" },
+        "missingOptionalVisual": { "prompt": "Look at the apple card.", "motionPreset": "teach" }
+      }
+    }]
+  }
+}

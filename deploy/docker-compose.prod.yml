@@ -1,5 +1,3 @@
-version: "2.4"
-
 services:
   tbot-wss-lb:
     image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
@@ -45,8 +43,8 @@ services:
       # with no backend assignment; LESSON_RUNTIME_ENABLED / COURSE_BACKEND_URL drive
       # the real assigned-lesson path. Previously unforwarded, so these env vars never
       # reached the app — set them in /opt/tbot/.env to take effect.
-      LESSON_RUNTIME_ENABLED: ${LESSON_RUNTIME_ENABLED:-}
-      LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-}
+      LESSON_RUNTIME_ENABLED: ${LESSON_RUNTIME_ENABLED:-false}
+      LESSON_SAMPLE_ENABLED: ${LESSON_SAMPLE_ENABLED:-false}
       LESSON_SAMPLE_ASSET_BASE: ${LESSON_SAMPLE_ASSET_BASE:-}
       LESSON_SAMPLE_STEP_DWELL_SEC: ${LESSON_SAMPLE_STEP_DWELL_SEC:-}
       LESSON_SAMPLE_MODE: ${LESSON_SAMPLE_MODE:-}
@@ -57,6 +55,10 @@ services:
       LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE}
       LESSON_ASSET_PUBLIC_BASE_URL: ${LESSON_ASSET_PUBLIC_BASE_URL:-}
       LESSON_ASSET_DELIVERY_MODE: ${LESSON_ASSET_DELIVERY_MODE:-}
+      LESSON_MOTION_PRESETS_ENABLED: ${LESSON_MOTION_PRESETS_ENABLED:-false}
+      LESSON_PLAYFUL_INTERACTIONS_ENABLED: ${LESSON_PLAYFUL_INTERACTIONS_ENABLED:-false}
+      LESSON_ROLLOUT_DEVICE_ALLOWLIST: ${LESSON_ROLLOUT_DEVICE_ALLOWLIST:-}
+      LESSON_STORAGE_HIL_DEVICE_ALLOWLIST: ${LESSON_STORAGE_HIL_DEVICE_ALLOWLIST:-}
       LESSON_ASSET_PACK_LOCAL_ROOT: ${LESSON_ASSET_PACK_LOCAL_ROOT:-}
       LESSON_ASSET_PACK_MOUNT_ROOT: ${LESSON_ASSET_PACK_MOUNT_ROOT:-}
       LESSON_STEP_TIMEOUT_FLOOR_SEC: ${LESSON_STEP_TIMEOUT_FLOOR_SEC:-}
@@ -66,6 +68,12 @@ services:
     expose:
       - "8000"
       - "8003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket, urllib.request; socket.create_connection(('127.0.0.1', 8000), timeout=3).close(); urllib.request.urlopen('http://127.0.0.1:8003/tbot/ota/', timeout=3).read(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/data:/opt/tbot-esp32-server/data
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/models:/opt/tbot-esp32-server/models
@@ -97,12 +105,22 @@ services:
       # by editing these env vars and restarting -- no image rebuild.
       NESTJS_UPSTREAM_HOST: ${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}
       NESTJS_TOKEN: ${NESTJS_TOKEN:-}
+      # Backend-signed child-profile projection requests. The private key remains
+      # backend-only; Spring receives the matching verification material.
+      TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
+      TBOT_PROFILE_SYNC_JWT_ISSUER: ${TBOT_PROFILE_SYNC_JWT_ISSUER:-tbot-backend}
+      TBOT_PROFILE_SYNC_JWT_AUDIENCE: ${TBOT_PROFILE_SYNC_JWT_AUDIENCE:-tbot-manager-api}
+      CHILD_PROFILE_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
+      CHILD_PROFILE_JWT_ISSUER: ${TBOT_PROFILE_SYNC_JWT_ISSUER:-tbot-backend}
+      CHILD_PROFILE_JWT_AUDIENCE: ${TBOT_PROFILE_SYNC_JWT_AUDIENCE:-tbot-manager-api}
     ports:
       - "${TBOT_ADMIN_PORT:-8002}:8002"
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
     networks:
-      - tbot
+      tbot:
+        aliases:
+          - manager-api
 
   tbot-esp32-server-db:
     image: ${MYSQL_IMAGE:-mysql:8.4}

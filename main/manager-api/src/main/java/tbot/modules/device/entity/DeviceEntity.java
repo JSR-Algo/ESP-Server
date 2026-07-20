@@ -49,6 +49,9 @@ public class DeviceEntity {
     @Schema(description = "Comma-separated child interests for lesson personalization")
     private String childInterests;
 
+    @Schema(description = "Canonical child interests JSON managed by profile projection")
+    private String childInterestsJson;
+
     @Schema(description = "Preferred learning style for lesson personalization")
     private String learningStyle;
 
@@ -57,6 +60,18 @@ public class DeviceEntity {
 
     @Schema(description = "Parent career topic for lesson personalization")
     private String parentCareer;
+
+    @Schema(description = "Canonical child profile ID")
+    private String childProfileId;
+
+    @Schema(description = "Child birth year")
+    private Integer childBirthYear;
+
+    @Schema(description = "Last applied child profile revision")
+    private Long childProfileRevision;
+
+    @Schema(description = "SHA-256 of the canonical child profile projection")
+    private String childProfilePayloadHash;
 
     @Schema(description = "Agent ID")
     private String agentId;
