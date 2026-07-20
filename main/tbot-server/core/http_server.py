@@ -9,6 +9,10 @@ from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.lesson.esp_build_identity import (
+    approved_identities_from_config,
+    esp_build_identity_metrics_fields,
+)
 
 TAG = __name__
 
@@ -215,6 +219,7 @@ class SimpleHttpServer:
 
     def _runtime_forwarder_metrics(self):
         devices = []
+        approved_identities = approved_identities_from_config(self.config)
         forwarder_dropped_total = 0
         safety_forwarder_dropped_total = 0
         alarms = 0
@@ -253,6 +258,7 @@ class SimpleHttpServer:
             }
             if client_id:
                 device["clientId"] = str(client_id)
+            device.update(esp_build_identity_metrics_fields(headers, approved_identities))
             devices.append(device)
 
         return {

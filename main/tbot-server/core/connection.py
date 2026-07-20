@@ -51,33 +51,16 @@ from core.utils.util import get_system_error_response
 from core.utils import textUtils
 from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.connection_headers import (
+    preserve_request_headers,
+    sanitize_headers_for_log,
+    single_header,
+)
 
 
 TAG = __name__
 
-_SENSITIVE_HEADER_NAMES = {
-    "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
-    "x-auth-token",
-    "x-mint-secret",
-    "cookie",
-    "set-cookie",
-}
-
-
-def _sanitize_headers_for_log(headers):
-    if not isinstance(headers, dict):
-        return {}
-    sanitized = {}
-    for key, value in headers.items():
-        name = str(key)
-        if name.casefold() in _SENSITIVE_HEADER_NAMES:
-            sanitized[name] = "<redacted>"
-        else:
-            sanitized[name] = value
-    return sanitized
+_sanitize_headers_for_log = sanitize_headers_for_log
 
 
 def _float_or_none(value):
@@ -286,7 +269,8 @@ class ConnectionHandler:
             self.loop = asyncio.get_running_loop()
 
             # Get and validateheaders
-            self.headers = dict(ws.request.headers)
+            self.headers = preserve_request_headers(ws.request.headers)
+            self.client_id = single_header(self.headers, "client-id")
             real_ip = self.headers.get("x-real-ip") or self.headers.get(
                 "x-forwarded-for"
             )
@@ -295,10 +279,10 @@ class ConnectionHandler:
             else:
                 self.client_ip = ws.remote_address[0]
             self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - Headers: {_sanitize_headers_for_log(self.headers)}"
+                f"{self.client_ip} conn - Headers: {sanitize_headers_for_log(self.headers)}"
             )
 
-            self.device_id = self.headers.get("device-id", None)
+            self.device_id = single_header(self.headers, "device-id")
 
             # Auth Passed,Continue Processing
             self.websocket = ws
