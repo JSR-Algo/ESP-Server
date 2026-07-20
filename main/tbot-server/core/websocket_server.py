@@ -52,8 +52,24 @@ from core.utils.util import check_vad_update, check_asr_update
 TAG = __name__
 
 
+def _header_values(headers, name):
+    raw_items = getattr(headers, "raw_items", None)
+    items = raw_items() if callable(raw_items) else headers.items()
+    folded = name.casefold()
+    return [str(value) for key, value in items if str(key).casefold() == folded]
+
+
+def _single_header(headers, name, default=None):
+    values = _header_values(headers, name)
+    if len(values) > 1:
+        raise ValueError(f"duplicate {name} header")
+    return values[0] if values else default
+
+
 class WebSocketServer:
     def __init__(self, config: dict):
+        from core.connection_registry import ConnectionRegistry
+
         self.config = config
         self.logger = setup_logging()
         self.config_lock = None
@@ -107,7 +123,7 @@ class WebSocketServer:
             expire_seconds=expire_seconds,
             device_revoked_after=auth_config.get("device_revoked_after", {}),
         )
-        self.lesson_connections = {}
+        self.lesson_connections = ConnectionRegistry()
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
         self.is_draining = False
@@ -154,10 +170,16 @@ class WebSocketServer:
         current_task = asyncio.current_task()
         if current_task is not None:
             self._connection_tasks.add(current_task)
-        self._copy_query_identity_headers(websocket)
-        headers = dict(websocket.request.headers)
         try:
-            if headers.get("device-id", None) is None:
+            self._copy_query_identity_headers(websocket)
+            headers = websocket.request.headers
+            try:
+                device_id = _single_header(headers, "device-id")
+            except ValueError:
+                await websocket.send("Authentication failed")
+                await websocket.close()
+                return
+            if device_id is None:
                 if not getattr(websocket.request, "path", ""):
                     self.logger.bind(tag=TAG).error("Cannot get request path")
                     await websocket.close()
@@ -186,7 +208,6 @@ class WebSocketServer:
             # CreateConnectionHandlerPass current whenserverInstance
             from core.connection import ConnectionHandler
 
-            device_id = headers.get("device-id")
             handler = ConnectionHandler(
                 self.config,
                 self._vad,
@@ -198,7 +219,7 @@ class WebSocketServer:
             )
             if device_id:
                 handler.device_id = device_id
-                self.lesson_connections[device_id] = handler
+                await self.lesson_connections.replace(device_id, handler)
             self._active_device_connections += 1
             try:
                 await handler.handle_connection(websocket)
@@ -208,8 +229,10 @@ class WebSocketServer:
                 self._active_device_connections = max(
                     0, self._active_device_connections - 1
                 )
-                if device_id and self.lesson_connections.get(device_id) is handler:
-                    self.lesson_connections.pop(device_id, None)
+                if device_id:
+                    await self.lesson_connections.remove_if_current(
+                        device_id, handler
+                    )
                 # Force close connection (if not closed yet)
                 try:
                     # Safely checkWebSocketStatusAnd close
@@ -237,8 +260,9 @@ class WebSocketServer:
         if not request_path:
             return
         query_params = parse_qs(urlparse(request_path).query)
+        headers = websocket.request.headers
         for name in ("device-id", "client-id"):
-            if websocket.request.headers.get(name, None) is None and name in query_params:
+            if not _header_values(headers, name) and name in query_params:
                 websocket.request.headers[name] = query_params[name][0]
 
     async def _http_response(self, websocket, request_headers):
@@ -306,15 +330,19 @@ class WebSocketServer:
     async def _handle_auth(self, websocket: websockets.ServerConnection):
         # Authenticate first, then connect
         if self.auth_enable:
-            headers = dict(websocket.request.headers)
-            device_id = headers.get("device-id", None)
-            client_id = headers.get("client-id", None)
+            headers = websocket.request.headers
+            try:
+                device_id = _single_header(headers, "device-id")
+                client_id = _single_header(headers, "client-id")
+                authorization = _single_header(headers, "authorization", "")
+            except ValueError as exc:
+                raise AuthenticationError("Duplicate authentication header") from exc
             if self.allowed_devices and device_id in self.allowed_devices:
                 # IfBelongs toDevices in whitelist, no validationtokendirectly allow
                 return
             else:
                 # Otherwise Verifytoken
-                token = headers.get("authorization", "")
+                token = authorization
                 if token.startswith("Bearer "):
                     token = token[7:]  # Remove'Bearer 'Prefix
                 else:
