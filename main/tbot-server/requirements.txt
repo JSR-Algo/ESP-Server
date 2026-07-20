@@ -2,7 +2,7 @@
 # Requires Python >=3.10. Keep these pins stable unless tested.
 torch==2.2.2
 torchaudio==2.2.2
-numpy==1.26.4
+numpy==2.4.6
 #--------- PR3 server-side AEC: requires libspeexdsp-dev + swig at build time
 speexdsp==0.1.1
 # cozepy 0.20.0 requires websockets<15.0.0; keep this pin stable.
