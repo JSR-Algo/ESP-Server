@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import asyncio
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from aiohttp import web
 
@@ -91,7 +93,7 @@ def _is_robot_motion_tool(tool_name: str) -> bool:
     return tool_name.startswith(_ROBOT_MOTION_TOOL_PREFIXES)
 
 
-def _normalize_mac(value) -> Optional[str]:
+def _normalize_mac(value) -> str | None:
     value = str(value or "").strip().lower()
     parts = value.split(":")
     if len(parts) != 6 or any(
@@ -141,7 +143,7 @@ def _has_canonical_hil_cache_key(tool_name: str, args) -> bool:
     return cache_key.split("/", 1)[0].startswith("hil-")
 
 
-def _hil_timeout(body: dict) -> Optional[int]:
+def _hil_timeout(body: dict) -> int | None:
     if "timeoutSeconds" not in body:
         return None
     timeout = body.get("timeoutSeconds")
@@ -164,7 +166,7 @@ async def _call_raw_mcp_tool(
     args: dict,
     *,
     timeout: int = 30,
-    on_dispatched: Optional[Callable[[], None]] = None,
+    on_dispatched: Callable[[], None] | None = None,
 ):
     if not isinstance(args, dict):
         raise ValueError(f"Parameters must be dictionary type, actual type: {type(args)}")
@@ -247,27 +249,13 @@ class DeviceMCPAdminHandler:
 
         args = body.get("args", {})
         timeout = _mcp_call_timeout(tool_name)
-        is_hil_timeout_path = False
-        if is_hil_tool:
-            if not isinstance(args, dict):
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            try:
-                override = _hil_timeout(body)
-            except ValueError:
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            if override is not None:
-                timeout = override
-            is_hil_timeout_path = True
-        elif "timeoutSeconds" in body:
-            if tool_name not in _HIL_TRIGGER_TOOLS or not _has_canonical_hil_cache_key(
-                tool_name, args
-            ):
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            try:
-                timeout = _hil_timeout(body)
-            except ValueError:
-                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
-            is_hil_timeout_path = True
+        has_timeout_override = "timeoutSeconds" in body
+        is_hil_trigger_timeout_path = (
+            has_timeout_override and tool_name in _HIL_TRIGGER_TOOLS
+        )
+        if has_timeout_override and not (is_hil_tool or is_hil_trigger_timeout_path):
+            return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+        is_hil_timeout_path = is_hil_tool or is_hil_trigger_timeout_path
 
         device_id = request.match_info.get("deviceId", "")
         try:
@@ -290,6 +278,23 @@ class DeviceMCPAdminHandler:
 
         if is_hil_timeout_path and not _hil_device_is_allowlisted(self.config, conn):
             return _hil_error("HIL_DEVICE_NOT_ALLOWLISTED", status=403)
+
+        if is_hil_tool:
+            if not isinstance(args, dict):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            try:
+                override = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            if override is not None:
+                timeout = override
+        elif is_hil_trigger_timeout_path:
+            if not _has_canonical_hil_cache_key(tool_name, args):
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
+            try:
+                timeout = _hil_timeout(body)
+            except ValueError:
+                return _hil_error("HIL_TOOL_FORBIDDEN", status=403)
 
         mcp_client = getattr(conn, "mcp_client", None)
         if mcp_client is None:

@@ -3,7 +3,7 @@ import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 class _FakeRequest:
@@ -353,6 +353,56 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
                 "message": "HIL MCP request rejected",
             },
         )
+
+    async def test_hil_connection_and_mac_gate_precede_timeout_and_key_validation(self):
+        from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        offline = DeviceMCPAdminHandler(
+            {"lesson": {"storage_hil_device_allowlist": [self.HIL_MAC]}},
+            {},
+        )
+        nonallowlisted, _ = self._hil_handler(allowlist=[])
+        requests = (
+            {
+                "toolName": self.HIL_TOOLS[0],
+                "allowUnlisted": True,
+                "timeoutSeconds": "invalid-before-gate",
+                "args": {},
+            },
+            {
+                "toolName": "self.lesson_assets.evict_cache_key",
+                "timeoutSeconds": "invalid-before-gate",
+                "args": {"cacheKey": "not-canonical"},
+            },
+        )
+
+        for handler in (offline, nonallowlisted):
+            timeout_validation = Mock(
+                side_effect=AssertionError("timeout validation ran before device gate")
+            )
+            key_validation = Mock(
+                side_effect=AssertionError("key validation ran before device gate")
+            )
+            with patch(
+                "core.api.device_mcp_admin_handler._hil_timeout",
+                timeout_validation,
+            ), patch(
+                "core.api.device_mcp_admin_handler._has_canonical_hil_cache_key",
+                key_validation,
+            ):
+                for body in requests:
+                    response = await handler.handle_post(
+                        _FakeRequest(device_id="route-device-uuid", body=body)
+                    )
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(
+                        (await _response_json(response))["error"],
+                        "HIL_DEVICE_NOT_ALLOWLISTED",
+                    )
+
+            timeout_validation.assert_not_called()
+            key_validation.assert_not_called()
 
     async def test_valid_hil_paths_without_mcp_client_return_sanitized_hil_failure(self):
         os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
