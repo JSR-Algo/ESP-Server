@@ -86,7 +86,7 @@ _TRIGGER_INDEX = ORDINARY_ARTIFACTS.index("trigger-response.json")
 POWER_LOSS_ARTIFACTS = (
     ORDINARY_ARTIFACTS[:_TRIGGER_INDEX]
     + (
-        "checkpoint-reached-utc.txt", "power-removed-utc.txt", "reboot-serial.log",
+        "checkpoint-reached-utc.txt", "power-removal-confirmed-utc.txt", "reboot-serial.log",
         "post-reboot-inspect.json",
     )
     + ORDINARY_ARTIFACTS[_TRIGGER_INDEX + 1 :]
@@ -1722,11 +1722,17 @@ def await_power_loss_disconnect(
     completion_lock = threading.Lock()
     completion_observed = {}
     completion_recorded = threading.Event()
+    removal_prompt = {"started": False, "startedUtc": None}
 
     def record_completion(_future):
+        with completion_lock:
+            prompt_started = removal_prompt["started"]
+            prompt_started_utc = removal_prompt["startedUtc"]
         observed = clock()
         with completion_lock:
             completion_observed["utc"] = observed
+            completion_observed["afterRemovalPromptStart"] = prompt_started
+            completion_observed["removalPromptStartedUtc"] = prompt_started_utc
         completion_recorded.set()
 
     def observed_completion_utc():
@@ -1736,6 +1742,20 @@ def await_power_loss_disconnect(
         )
         with completion_lock:
             return completion_observed.get("utc")
+
+    def mark_prompt_started():
+        started_utc = clock()
+        with completion_lock:
+            require(not removal_prompt["started"], "removal prompt marker duplicated")
+            removal_prompt["started"] = True
+            removal_prompt["startedUtc"] = started_utc
+            completed_before_prompt = future.done()
+            if completed_before_prompt:
+                removal_prompt["started"] = False
+        require(
+            not completed_before_prompt,
+            "trigger completed before removal prompt marker",
+        )
 
     future.add_done_callback(record_completion)
     require(not future.done(), "trigger completed before READY boundary")
@@ -1747,18 +1767,30 @@ def await_power_loss_disconnect(
             _strict_utc(observed_completion_utc()) > _strict_utc(boundary_utc),
             "trigger completed before power-cut boundary",
         )
-    remove_power_prompt()
+    remove_power_prompt(mark_prompt_started)
+    with completion_lock:
+        prompt_was_marked = removal_prompt["started"]
+    require(prompt_was_marked, "removal prompt marker missing")
     removal_confirmed_utc = clock()
     try:
         result = future.result(timeout=timeout_seconds)
     except HilDisconnectError:
         disconnect_observed_utc = observed_completion_utc()
+        with completion_lock:
+            completed_after_prompt = completion_observed.get("afterRemovalPromptStart")
+            prompt_started_utc = completion_observed.get("removalPromptStartedUtc")
+        require(completed_after_prompt is True, "disconnect completed before removal prompt")
         boundary_time = _strict_utc(boundary_utc)
+        prompt_started_time = _strict_utc(prompt_started_utc)
         disconnect_time = _strict_utc(disconnect_observed_utc)
         confirmation_time = _strict_utc(removal_confirmed_utc)
         require(
             disconnect_time > boundary_time,
             "disconnect completed before power-cut boundary",
+        )
+        require(
+            disconnect_time >= prompt_started_time,
+            "disconnect completed before removal prompt",
         )
         require(
             disconnect_time <= confirmation_time,
@@ -2127,10 +2159,10 @@ def run_scenario(arguments, scenario, *, operator_input=input):
                             "Press Enter when ready."
                         )
 
-                    def remove_power_now():
-                        operator_input(
-                            "READY boundary recorded. Remove robot power now, then press Enter."
-                        )
+                    def remove_power_now(mark_prompt_started):
+                        print("READY boundary recorded. Remove robot power now.", flush=True)
+                        mark_prompt_started()
+                        operator_input("Press Enter after robot power is removed.")
 
                     disconnect_evidence = await_power_loss_disconnect(
                         future,
@@ -2314,7 +2346,7 @@ def run_scenario(arguments, scenario, *, operator_input=input):
             payloads.update(
                 {
                     "checkpoint-reached-utc.txt": f"{checkpoint_utc}\n".encode("ascii"),
-                    "power-removed-utc.txt": f"{power_removal_confirmed_utc}\n".encode("ascii"),
+                    "power-removal-confirmed-utc.txt": f"{power_removal_confirmed_utc}\n".encode("ascii"),
                     "reboot-serial.log": (redact_text(reboot_serial, (secret,)) or "<no reboot output>\n").encode("utf-8"),
                     "post-reboot-inspect.json": json_bytes(post_reboot_inspect),
                 }

@@ -50,7 +50,7 @@ HIL_ORDINARY_REQUIRED=(
 HIL_POWER_REQUIRED=tuple(
     name for name in HIL_ORDINARY_REQUIRED if name != 'trigger-response.json'
 )[:-1]+(
-    'checkpoint-reached-utc.txt','power-removed-utc.txt','reboot-serial.log',
+    'checkpoint-reached-utc.txt','power-removal-confirmed-utc.txt','reboot-serial.log',
     'post-reboot-inspect.json','SHA256SUMS',
 )
 HIL_BUILD_FIELDS={
@@ -834,7 +834,7 @@ def _power_loss_timestamp_artifact_errors(result,evidence_dir):
     root=Path(evidence_dir); errors=[]
     expected={
         'checkpoint-reached-utc.txt':result.get('checkpointReachedUtc'),
-        'power-removed-utc.txt':result.get('powerRemovalConfirmedUtc'),
+        'power-removal-confirmed-utc.txt':result.get('powerRemovalConfirmedUtc'),
     }
     for name,value in expected.items():
         path=root/name
@@ -1203,7 +1203,7 @@ def main():
             assert validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,later:hil_result[earlier]})
         assert not validate_hil_storage_result(HIL_POWER_LOSS_SCENARIO,{**hil_result,'powerRemovalConfirmedUtc':hil_result['disconnectObservedUtc']})
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory); checkpoint=root/'checkpoint-reached-utc.txt'; removed=root/'power-removed-utc.txt'
+            root=Path(directory); checkpoint=root/'checkpoint-reached-utc.txt'; removed=root/'power-removal-confirmed-utc.txt'
             checkpoint.write_text(hil_result['checkpointReachedUtc']+'\n')
             removed.write_text(hil_result['powerRemovalConfirmedUtc']+'\n')
             assert not _power_loss_timestamp_artifact_errors(hil_result,root)
