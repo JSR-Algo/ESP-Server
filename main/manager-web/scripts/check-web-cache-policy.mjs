@@ -55,6 +55,26 @@ expectRegex(
   /args:[\s\S]*VUE_APP_NEST_AUTH_DISABLED:\s*\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}/,
   'Compose must expose the bypass build arg with a safe default',
 );
+expectRegex(
+  'deploy/build-local.sh',
+  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}"/,
+  'the VPS release builder must default the Nest auth mode safely',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED\}" npm run build/,
+  'the fast host build must compile manager-web with the selected Nest auth mode',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /-e "VUE_APP_NEST_AUTH_DISABLED=\$\{VUE_APP_NEST_AUTH_DISABLED\}"[\s\S]*node:18/,
+  'the fast Docker fallback must compile manager-web with the selected Nest auth mode',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /Dockerfile-web"[\s\S]*--build-arg "VUE_APP_NEST_AUTH_DISABLED=\$\{VUE_APP_NEST_AUTH_DISABLED\}"/,
+  'the full Docker web build must receive the selected Nest auth mode',
+);
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');

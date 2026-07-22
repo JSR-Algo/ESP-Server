@@ -15,6 +15,7 @@ BUILD_BASE=0
 FAST_GOOGLE_LIVE=0
 FAST_WEB=1
 ONLY="all"
+VUE_APP_NEST_AUTH_DISABLED="${VUE_APP_NEST_AUTH_DISABLED:-false}"
 
 usage() {
   cat <<'USAGE'
@@ -37,6 +38,11 @@ Options:
   --only <all|server|web>  Build only one side (default: all).
   --no-latest              Do not tag latest-local convenience aliases.
   -h, --help               Show help.
+
+Environment:
+  VUE_APP_NEST_AUTH_DISABLED
+                           Set to true only for the Cloudflare Access-protected
+                           admin release (default: false).
 USAGE
 }
 
@@ -52,9 +58,10 @@ need_cmd() {
 run_manager_web_build() {
   printf 'Building manager web assets locally\n'
   if command -v npm >/dev/null 2>&1; then
-    (cd "${PROJECT_DIR}/main/manager-web" && npm ci && npm run build)
+    (cd "${PROJECT_DIR}/main/manager-web" && npm ci && VUE_APP_NEST_AUTH_DISABLED="${VUE_APP_NEST_AUTH_DISABLED}" npm run build)
   else
     docker run --rm \
+      -e "VUE_APP_NEST_AUTH_DISABLED=${VUE_APP_NEST_AUTH_DISABLED}" \
       -v "${PROJECT_DIR}/main/manager-web:/app" \
       -v tbot-manager-web-npm-cache:/root/.npm \
       -w /app \
@@ -169,6 +176,8 @@ while (($#)); do
 done
 
 [[ -n "${TAG}" ]] || die "--tag is required"
+[[ "${VUE_APP_NEST_AUTH_DISABLED}" == "true" || "${VUE_APP_NEST_AUTH_DISABLED}" == "false" ]] \
+  || die "VUE_APP_NEST_AUTH_DISABLED must be true or false"
 need_cmd docker
 docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
 
@@ -179,6 +188,7 @@ printf 'Project: %s\n' "${PROJECT_DIR}"
 printf 'Git SHA: %s\n' "${SHA}"
 printf 'Git state: %s\n' "${STATE}"
 printf 'Tag: %s\n' "${TAG}"
+printf 'Nest auth disabled in manager web: %s\n' "${VUE_APP_NEST_AUTH_DISABLED}"
 
 BUILD_ARGS=()
 if [[ -n "${PLATFORM}" ]]; then
@@ -232,6 +242,7 @@ else
   docker_build \
     --pull \
     -f "${PROJECT_DIR}/Dockerfile-web" \
+    --build-arg "VUE_APP_NEST_AUTH_DISABLED=${VUE_APP_NEST_AUTH_DISABLED}" \
     -t "${WEB_IMAGE}:${TAG}" \
     -t "${WEB_IMAGE}:${SHA}" \
     "${PROJECT_DIR}"
