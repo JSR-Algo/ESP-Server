@@ -110,6 +110,7 @@ services:
       # every /nestjs/ route (all Courses / Lesson admin pages).
       NESTJS_UPSTREAM_SCHEME: ${NESTJS_UPSTREAM_SCHEME:-https}
       NESTJS_TOKEN: ${NESTJS_TOKEN:-}
+      NESTJS_ADMIN_PROXY_KEY: ${NESTJS_ADMIN_PROXY_KEY:-}
       # htpasswd line gating /nestjs/. Mandatory whenever NESTJS_TOKEN is set —
       # start.sh refuses to boot with a token but no gate.
       NESTJS_BASIC_HTPASSWD: ${NESTJS_BASIC_HTPASSWD:-}
