@@ -36,15 +36,27 @@ function expectNotContains(relativePath, needle) {
 expectContains('docs/docker/start.sh', ': "${NESTJS_ADMIN_PROXY_KEY:=}"');
 expectContains('docs/docker/start.sh', 'NESTJS_ADMIN_PROXY_KEY_ESCAPED=');
 expectContains('docs/docker/start.sh', '__NESTJS_ADMIN_PROXY_KEY__');
+expectContains('docs/docker/start.sh', 'NESTJS_ADMIN_PROXY_KEY contains unsupported characters');
 expectContains(
   'docs/docker/nginx.conf',
   'proxy_set_header X-TBOT-Admin-Key "__NESTJS_ADMIN_PROXY_KEY__";',
 );
+expectContains('docs/docker/nginx.conf', 'location = /_nestjs_manager_auth {');
+expectContains(
+  'docs/docker/nginx.conf',
+  'proxy_pass http://127.0.0.1:8003/tbot/user/proxy-auth;',
+);
+expectContains(
+  'docs/docker/nginx.conf',
+  'proxy_set_header Authorization $http_authorization;',
+);
+expectContains('docs/docker/nginx.conf', 'auth_request /_nestjs_manager_auth;');
 expectContains(
   'deploy/docker-compose.prod.yml',
   'NESTJS_ADMIN_PROXY_KEY: ${NESTJS_ADMIN_PROXY_KEY:-}',
 );
 expectContains('deploy/.env.example', 'NESTJS_ADMIN_PROXY_KEY=');
+expectContains('deploy/.env.example', 'NESTJS_UPSTREAM_SCHEME=');
 expectContains('deploy/redeploy-web.sh', 'NESTJS_ADMIN_PROXY_KEY');
 expectNotContains('Dockerfile-web', 'NESTJS_ADMIN_PROXY_KEY');
 expectNotContains('main/manager-web/src', 'NESTJS_ADMIN_PROXY_KEY');

@@ -50,6 +50,11 @@ expectContains(
   'proxy_set_header X-TBOT-Admin-Key "__NESTJS_ADMIN_PROXY_KEY__";',
   'nginx must overwrite browser input with the server-only admin proxy key',
 );
+expectContains(
+  'docs/docker/nginx.conf',
+  'auth_request /_nestjs_manager_auth;',
+  'the proxy key must only be injected after manager super-admin authentication',
+);
 expectRegex(
   'Dockerfile-web',
   /ARG VUE_APP_NEST_AUTH_DISABLED=false[\s\S]*ENV VUE_APP_NEST_AUTH_DISABLED=\$VUE_APP_NEST_AUTH_DISABLED[\s\S]*RUN npm run build/,

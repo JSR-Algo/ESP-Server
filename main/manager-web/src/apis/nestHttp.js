@@ -159,6 +159,17 @@ function nestTokenHeader() {
     : {};
 }
 
+function managerTokenHeader() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('token') || 'null');
+    return stored && typeof stored.token === 'string' && stored.token.length > 0
+      ? { Authorization: 'Bearer ' + stored.token }
+      : {};
+  } catch (e) {
+    return {};
+  }
+}
+
 export function nestRequest({ url, method = 'GET', data, onSuccess, onError }) {
   RequestService.sendRequest()
     .url(url)
@@ -184,7 +195,8 @@ export function nestRequest({ url, method = 'GET', data, onSuccess, onError }) {
  * `multipart/form-data` with the correct boundary for a FormData body, avoiding
  * the content-type ambiguity that breaks an explicitly-JSON request layer. Auth
  * is handled by the `/nestjs` proxy (it injects the NestJS bearer), so no
- * Authorization header is sent here. `path` is relative to getNestUrl().
+ * The manager bearer is sent so nginx can authorize the proxy request before
+ * replacing it with the server-only NestJS credential.
  */
 export function nestUpload(path, file, fields, onSuccess, onError) {
   const fd = new FormData();
@@ -194,7 +206,11 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
       if (fields[k] != null) fd.append(k, fields[k]);
     });
   }
-  fetch(`${getNestUrl()}${path}`, { method: 'POST', body: fd, headers: nestTokenHeader() })
+  fetch(`${getNestUrl()}${path}`, {
+    method: 'POST',
+    body: fd,
+    headers: { ...managerTokenHeader(), ...nestTokenHeader() },
+  })
     .then(async (r) => {
       let body = {};
       try {

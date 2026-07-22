@@ -7,10 +7,13 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -161,6 +164,33 @@ public class LoginController {
         Result<UserDetail> result = new Result<>();
         result.setData(user);
         return result;
+    }
+
+    @GetMapping("/proxy-auth")
+    @Operation(summary = "Validate a manager super-admin token for the nginx NestJS proxy")
+    public ResponseEntity<Void> proxyAuth(
+            @RequestHeader(value = "Authorization", required = false) String authorization) {
+        if (StringUtils.isBlank(authorization) || !authorization.startsWith("Bearer ")) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        String token = authorization.substring("Bearer ".length()).trim();
+        if (token.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        try {
+            SysUserDTO user = sysUserTokenService.getUserByToken(token);
+            if (user == null || !Integer.valueOf(1).equals(user.getStatus())) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+            if (!Integer.valueOf(1).equals(user.getSuperAdmin())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            return ResponseEntity.noContent().build();
+        } catch (RenException error) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
     }
 
     @PutMapping("/change-password")

@@ -22,5 +22,10 @@ assert.match(app, /v-if="!nestAuthDisabled"/);
 assert.match(app, /if \(!this\.nestAuthDisabled\).*addEventListener/s);
 assert.match(http, /shouldPromptForNestAuth/);
 assert.match(http, /shouldSendNestSessionToken/);
+assert.match(http, /function managerTokenHeader\(\)/);
+assert.match(
+  http,
+  /fetch\([\s\S]*headers:\s*\{\s*\.\.\.managerTokenHeader\(\),\s*\.\.\.nestTokenHeader\(\)\s*\}/,
+);
 
 console.log('Nest auth mode contracts PASS');

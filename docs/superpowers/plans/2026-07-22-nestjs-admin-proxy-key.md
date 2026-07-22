@@ -632,7 +632,8 @@ Prove all of these:
 
 ```text
 GET https://admin.tjbot.vn/                                  -> 200
-GET https://admin.tjbot.vn/nestjs/v1/admin/courses          -> 200 through nginx
+GET public nginx admin endpoint without manager bearer      -> 401/403
+GET nginx admin endpoint with manager super-admin bearer    -> 200
 GET private CMS /v1/admin/courses without X-TBOT-Admin-Key  -> 401
 GET private CMS /v1/admin/courses with an incorrect key     -> 401
 GET private CMS /v1/health                                  -> 200
