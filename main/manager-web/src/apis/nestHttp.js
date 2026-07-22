@@ -2,6 +2,7 @@ import { getNestUrl } from './api';
 import RequestService from './httpRequest';
 import {
   isNestAuthDisabled,
+  shouldClearManagerAuth,
   shouldPromptForNestAuth,
   shouldSendNestSessionToken,
 } from '../utils/nestAuthModeCore.mjs';
@@ -87,10 +88,9 @@ export function normalizeStepType(raw) {
   };
 }
 
-// Clear the per-user NestJS session token when AdminSessionGuard rejects it
-// (expired/invalid/missing). Do NOT bounce to manager-api login — that logs the
-// operator out of the console even though manager-api auth is still valid.
-// Instead emit a UI event so App.vue can open NestLoginDialog ("Author sign-in").
+// A 401 means different things by deployment mode. Legacy mode asks for a
+// NestJS author session; server-key mode is gated by the manager bearer, so a
+// 401 means the manager session is stale and must return to manager login.
 // NOTE: we clear localStorage directly (not nestAuth.setNestToken) to avoid a
 // circular import — nestAuth.js already imports from this module.
 export function clearNestSession(status = 401) {
@@ -98,6 +98,18 @@ export function clearNestSession(status = 401) {
     localStorage.removeItem(NEST_TOKEN_KEY);
   } catch (e) {
     /* ignore */
+  }
+  if (shouldClearManagerAuth({ disabled: nestAuthDisabled, status })) {
+    try {
+      localStorage.removeItem('token');
+      localStorage.removeItem('userInfo');
+    } catch (e) {
+      /* ignore */
+    }
+    if (typeof window !== 'undefined' && window.location) {
+      window.location.hash = '#/login';
+    }
+    return;
   }
   if (
     shouldPromptForNestAuth({ disabled: nestAuthDisabled, status })
