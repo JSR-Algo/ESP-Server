@@ -23,9 +23,33 @@ if [ -n "${NESTJS_TOKEN}" ]; then
 fi
 # Escape sed replacement metacharacters in the token header (&, \, |).
 NESTJS_AUTH_HEADER_ESCAPED=$(printf '%s' "${NESTJS_AUTH_HEADER}" | sed -e 's/[&|\\]/\\&/g')
+
+# HTTP Basic gate for /nestjs/. NESTJS_BASIC_HTPASSWD carries a ready-made
+# htpasswd line ("user:$apr1$..."), so no password hashing tool is needed in the
+# image and no credential is ever baked into a layer.
+#
+# The gate is REQUIRED whenever a shared NESTJS_TOKEN is configured: nginx adds
+# that token to every proxied request, so an ungated /nestjs/ would grant the
+# whole authoring API to anonymous callers. Fail closed rather than silently
+# serving an open authoring bridge.
+: "${NESTJS_BASIC_HTPASSWD:=}"
+if [ -n "${NESTJS_BASIC_HTPASSWD}" ]; then
+  printf '%s\n' "${NESTJS_BASIC_HTPASSWD}" > /etc/nginx/.nestjs_htpasswd
+  chmod 600 /etc/nginx/.nestjs_htpasswd
+  NESTJS_BASIC_REALM='"TBOT authoring"'
+else
+  if [ -n "${NESTJS_TOKEN}" ]; then
+    echo "start.sh: NESTJS_TOKEN is set but NESTJS_BASIC_HTPASSWD is empty — refusing to expose an unauthenticated authoring bridge" >&2
+    exit 1
+  fi
+  : > /etc/nginx/.nestjs_htpasswd
+  NESTJS_BASIC_REALM='off'
+fi
+
 sed -e "s|__NESTJS_UPSTREAM_HOST__|${NESTJS_UPSTREAM_HOST}|g" \
     -e "s|__NESTJS_UPSTREAM_SCHEME__|${NESTJS_UPSTREAM_SCHEME}|g" \
     -e "s|__NESTJS_AUTH_HEADER__|${NESTJS_AUTH_HEADER_ESCAPED}|g" \
+    -e "s|__NESTJS_BASIC_REALM__|${NESTJS_BASIC_REALM}|g" \
     /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 # 启动Nginx（前台运行保持容器存活）

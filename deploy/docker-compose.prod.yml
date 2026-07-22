@@ -104,7 +104,15 @@ services:
       # nginx at container start (start.sh). Repoint the NestJS course backend later
       # by editing these env vars and restarting -- no image rebuild.
       NESTJS_UPSTREAM_HOST: ${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}
+      # Was missing here while /opt/tbot/.env already set it: the container fell
+      # back to start.sh's https default and spoke TLS to a plain-HTTP upstream,
+      # producing "SSL_do_handshake() failed (wrong version number)" and a 502 on
+      # every /nestjs/ route (all Courses / Lesson admin pages).
+      NESTJS_UPSTREAM_SCHEME: ${NESTJS_UPSTREAM_SCHEME:-https}
       NESTJS_TOKEN: ${NESTJS_TOKEN:-}
+      # htpasswd line gating /nestjs/. Mandatory whenever NESTJS_TOKEN is set —
+      # start.sh refuses to boot with a token but no gate.
+      NESTJS_BASIC_HTPASSWD: ${NESTJS_BASIC_HTPASSWD:-}
       # Backend-signed child-profile projection requests. The private key remains
       # backend-only; Spring receives the matching verification material.
       TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
