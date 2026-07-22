@@ -1,7 +1,11 @@
 <template>
   <div id="app">
     <router-view />
-    <nest-login-dialog ref="nestLogin" @logged-in="onNestLoggedIn" />
+    <nest-login-dialog
+      v-if="!nestAuthDisabled"
+      ref="nestLogin"
+      @logged-in="onNestLoggedIn"
+    />
     <cache-viewer v-if="isCDNEnabled" :visible.sync="showCacheViewer" />
   </div>
 </template>
@@ -49,6 +53,7 @@ nav {
 import CacheViewer from '@/components/CacheViewer.vue';
 import NestLoginDialog from '@/components/NestLoginDialog.vue';
 import { logCacheStatus } from '@/utils/cacheViewer';
+import { isNestAuthDisabled } from '@/utils/nestAuthModeCore.mjs';
 
 export default {
   name: 'App',
@@ -59,6 +64,7 @@ export default {
   data() {
     return {
       showCacheViewer: false,
+      nestAuthDisabled: isNestAuthDisabled(),
       isCDNEnabled: process.env.VUE_APP_USE_CDN === 'true'
     };
   },
@@ -71,7 +77,9 @@ export default {
     // Course/Learner/Monitoring pages use NestJS admin auth (separate from manager-api).
     // nestHttp emits this when a /nestjs request gets 401 so we can prompt Author sign-in
     // without logging the user out of the manager console.
-    window.addEventListener('tbot:nest-auth-required', this.openNestLogin);
+    if (!this.nestAuthDisabled) {
+      window.addEventListener('tbot:nest-auth-required', this.openNestLogin);
+    }
 
     // Check whether mobile device andVUE_APP_H5_URLNot empty, if both conditions met then jump toH5Page
     if (this.isMobileDevice() && process.env.VUE_APP_H5_URL) {
@@ -108,7 +116,9 @@ export default {
     }
   },
   beforeDestroy() {
-    window.removeEventListener('tbot:nest-auth-required', this.openNestLogin);
+    if (!this.nestAuthDisabled) {
+      window.removeEventListener('tbot:nest-auth-required', this.openNestLogin);
+    }
     // Only WhenEnableCDNRemove only whenEventListen
     if (this.isCDNEnabled) {
       document.removeEventListener('keydown', this.handleKeyDown);
@@ -116,6 +126,7 @@ export default {
   },
   methods: {
     openNestLogin() {
+      if (this.nestAuthDisabled) return;
       if (this.$refs.nestLogin && typeof this.$refs.nestLogin.open === 'function') {
         this.$refs.nestLogin.open();
       }

@@ -1,5 +1,12 @@
 import { getNestUrl } from './api';
 import RequestService from './httpRequest';
+import {
+  isNestAuthDisabled,
+  shouldPromptForNestAuth,
+  shouldSendNestSessionToken,
+} from '../utils/nestAuthModeCore.mjs';
+
+const nestAuthDisabled = isNestAuthDisabled();
 
 /**
  * Shared helpers for talking to the NestJS tbot-backend authoring API
@@ -86,13 +93,17 @@ export function normalizeStepType(raw) {
 // Instead emit a UI event so App.vue can open NestLoginDialog ("Author sign-in").
 // NOTE: we clear localStorage directly (not nestAuth.setNestToken) to avoid a
 // circular import — nestAuth.js already imports from this module.
-export function clearNestSession() {
+export function clearNestSession(status = 401) {
   try {
     localStorage.removeItem(NEST_TOKEN_KEY);
   } catch (e) {
     /* ignore */
   }
-  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+  if (
+    shouldPromptForNestAuth({ disabled: nestAuthDisabled, status })
+    && typeof window !== 'undefined'
+    && typeof window.dispatchEvent === 'function'
+  ) {
     window.dispatchEvent(new CustomEvent('tbot:nest-auth-required'));
   }
 }
@@ -143,7 +154,9 @@ function nestTokenHeader() {
   } catch (e) {
     token = null;
   }
-  return token ? { 'X-Nest-Authorization': 'Bearer ' + token } : {};
+  return shouldSendNestSessionToken({ disabled: nestAuthDisabled, token })
+    ? { 'X-Nest-Authorization': 'Bearer ' + token }
+    : {};
 }
 
 export function nestRequest({ url, method = 'GET', data, onSuccess, onError }) {
