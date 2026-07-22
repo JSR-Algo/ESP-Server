@@ -40,6 +40,21 @@ expectRegex(
   /set\s+\$nest_auth\s+"__NESTJS_AUTH_HEADER__";[\s\S]*if\s*\(\$http_x_nest_authorization\)[\s\S]*rewrite\s+\^\/nestjs\/\(\.\*\)\$\s+\/\$1\s+break;/m,
   'Nest auth selection must run before the terminating rewrite break',
 );
+expectContains(
+  'docs/docker/nginx.conf',
+  'proxy_set_header Cf-Access-Jwt-Assertion $http_cf_access_jwt_assertion;',
+  'the Cloudflare assertion must be explicitly forwarded to NestJS',
+);
+expectRegex(
+  'Dockerfile-web',
+  /ARG VUE_APP_NEST_AUTH_DISABLED=false[\s\S]*ENV VUE_APP_NEST_AUTH_DISABLED=\$VUE_APP_NEST_AUTH_DISABLED[\s\S]*RUN npm run build/,
+  'the Vue production build must receive the Nest auth bypass flag',
+);
+expectRegex(
+  'main/tbot-server/docker-compose_all.yml',
+  /args:[\s\S]*VUE_APP_NEST_AUTH_DISABLED:\s*\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}/,
+  'Compose must expose the bypass build arg with a safe default',
+);
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');
