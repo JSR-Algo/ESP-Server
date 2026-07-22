@@ -56,6 +56,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile-web
+      args:
+        VUE_APP_NEST_AUTH_DISABLED: ${VUE_APP_NEST_AUTH_DISABLED:-false}
     image: local/tbot-server:web
     container_name: tbot-esp32-server-web
     restart: always

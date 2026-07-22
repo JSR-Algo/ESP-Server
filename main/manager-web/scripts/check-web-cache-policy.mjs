@@ -40,6 +40,41 @@ expectRegex(
   /set\s+\$nest_auth\s+"__NESTJS_AUTH_HEADER__";[\s\S]*if\s*\(\$http_x_nest_authorization\)[\s\S]*rewrite\s+\^\/nestjs\/\(\.\*\)\$\s+\/\$1\s+break;/m,
   'Nest auth selection must run before the terminating rewrite break',
 );
+expectContains(
+  'docs/docker/nginx.conf',
+  'proxy_set_header Cf-Access-Jwt-Assertion $http_cf_access_jwt_assertion;',
+  'the Cloudflare assertion must be explicitly forwarded to NestJS',
+);
+expectRegex(
+  'Dockerfile-web',
+  /ARG VUE_APP_NEST_AUTH_DISABLED=false[\s\S]*ENV VUE_APP_NEST_AUTH_DISABLED=\$VUE_APP_NEST_AUTH_DISABLED[\s\S]*RUN npm run build/,
+  'the Vue production build must receive the Nest auth bypass flag',
+);
+expectRegex(
+  'main/tbot-server/docker-compose_all.yml',
+  /args:[\s\S]*VUE_APP_NEST_AUTH_DISABLED:\s*\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}/,
+  'Compose must expose the bypass build arg with a safe default',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}"/,
+  'the VPS release builder must default the Nest auth mode safely',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED\}" npm run build/,
+  'the fast host build must compile manager-web with the selected Nest auth mode',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /-e "VUE_APP_NEST_AUTH_DISABLED=\$\{VUE_APP_NEST_AUTH_DISABLED\}"[\s\S]*node:18/,
+  'the fast Docker fallback must compile manager-web with the selected Nest auth mode',
+);
+expectRegex(
+  'deploy/build-local.sh',
+  /Dockerfile-web"[\s\S]*--build-arg "VUE_APP_NEST_AUTH_DISABLED=\$\{VUE_APP_NEST_AUTH_DISABLED\}"/,
+  'the full Docker web build must receive the selected Nest auth mode',
+);
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');

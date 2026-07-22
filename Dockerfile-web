@@ -4,6 +4,8 @@ WORKDIR /app
 COPY main/manager-web/package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY main/manager-web .
+ARG VUE_APP_NEST_AUTH_DISABLED=false
+ENV VUE_APP_NEST_AUTH_DISABLED=$VUE_APP_NEST_AUTH_DISABLED
 RUN npm run build
 
 # 第二阶段：构建移动端H5
