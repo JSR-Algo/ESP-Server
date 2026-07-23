@@ -10,6 +10,7 @@ import pytest
 
 from core.lesson.sd_pack_materializer import (
     MaterializationError,
+    _PinnedAddressAsyncNetworkBackend,
     materialize_lesson_sd_pack,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
@@ -77,6 +78,29 @@ async def _private_resolver(host):
 
 def _sd_path(key):
     return f"/sdcard/tbot/lesson-assets/{CACHE_KEY}/{quote(key, safe='')}"
+
+
+class _Connector:
+    def __init__(self):
+        self.calls = []
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.calls.append(
+            {
+                "host": host,
+                "port": port,
+                "timeout": timeout,
+                "local_address": local_address,
+                "socket_options": socket_options,
+            }
+        )
+        return object()
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise AssertionError("unix sockets are not used for pinned lesson asset downloads")
+
+    async def sleep(self, seconds):
+        return None
 
 
 def _manifest(**overrides):
@@ -450,7 +474,7 @@ async def test_public_dns_resolution_is_required_before_streaming(tmp_path):
         resolver=resolver,
     )
 
-    assert seen == ["assets.example", "assets.example"]
+    assert seen == ["assets.example"]
     assert client.requests == [
         "https://assets.example/poster.jpg?sig=secret",
         "https://assets.example/barn.png",
@@ -560,6 +584,71 @@ async def test_url_credentials_are_rejected_without_leaking_secret(tmp_path):
 
     assert exc_info.value.code == "INVALID_URL"
     assert "private-token" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_connects_to_attested_ip_not_hostname():
+    connector = _Connector()
+    backend = _PinnedAddressAsyncNetworkBackend(
+        {"assets.example": ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]},
+        delegate=connector,
+    )
+
+    await backend.connect_tcp("assets.example", 443, timeout=3.0)
+    await backend.connect_tcp("assets.example", 443, timeout=3.0)
+
+    assert [call["host"] for call in connector.calls] == [
+        "93.184.216.34",
+        "2606:2800:220:1:248:1893:25c8:1946",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_encoded_asset_basename_length_boundary(tmp_path):
+    key = "a" * 200
+    manifest = _manifest()
+    manifest["assets"] = [
+        {
+            "key": key,
+            "sha256": POSTER_SHA,
+            "size": len(POSTER),
+            "mediaType": "image/jpeg",
+            "critical": True,
+            "onlineUrl": "https://assets.example/poster.jpg?sig=secret",
+            "sdPath": _sd_path(key),
+        }
+    ]
+    result = await materialize_lesson_sd_pack(
+        manifest,
+        config=_config(tmp_path),
+        client=_Client({"https://assets.example/poster.jpg?sig=secret": [POSTER]}),
+        resolver=_public_resolver,
+    )
+    assert result["ready"] is True
+
+    one_over = deepcopy(manifest)
+    one_over["assets"][0]["key"] = "a" * 201
+    one_over["assets"][0]["sdPath"] = _sd_path("a" * 201)
+    with pytest.raises(MaterializationError) as ascii_over:
+        await materialize_lesson_sd_pack(
+            one_over,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert ascii_over.value.code == "INVALID_ASSET_KEY"
+
+    expanded = deepcopy(manifest)
+    expanded["assets"][0]["key"] = "é" * 34
+    expanded["assets"][0]["sdPath"] = _sd_path("é" * 34)
+    with pytest.raises(MaterializationError) as unicode_over:
+        await materialize_lesson_sd_pack(
+            expanded,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert unicode_over.value.code == "INVALID_ASSET_KEY"
 
 
 @pytest.mark.asyncio

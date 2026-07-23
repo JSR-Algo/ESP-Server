@@ -17,6 +17,8 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
+import httpcore
+from httpcore._backends.auto import AutoBackend
 
 from config.logger import setup_logging
 from core.lesson.cache_key_contract import CacheEvictionRefused, validate_cache_key
@@ -25,6 +27,9 @@ from core.lesson.shared_asset_store import SharedAssetStore
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
 MAX_CONFIG_BYTES = 2 * 1024 * 1024 * 1024
+# Leaves room for SharedAssetStore's ".pid.uuid.part" atomic temp suffix under
+# FAT-style 255-byte component limits.
+MAX_ENCODED_BASENAME_BYTES = 200
 _TOP_LEVEL_FIELDS = frozenset(
     {"lessonId", "lessonVersion", "profile", "manifestChecksum", "cacheKey", "assets"}
 )
@@ -47,6 +52,75 @@ _METRICS = {
     "rejected": 0,
     "checksum_failures": 0,
 }
+
+class _PinnedAddressAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
+    def __init__(
+        self,
+        pinned_addresses: Mapping[str, Iterable[str]],
+        *,
+        delegate: Optional[httpcore.AsyncNetworkBackend] = None,
+    ) -> None:
+        self._pinned = {
+            str(host): tuple(str(address) for address in addresses)
+            for host, addresses in pinned_addresses.items()
+        }
+        self._delegate = delegate or AutoBackend()
+        self._next_index: Dict[str, int] = {}
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        addresses = self._pinned.get(host)
+        if not addresses:
+            raise httpcore.ConnectError("pinned address missing")
+        index = self._next_index.get(host, 0)
+        self._next_index[host] = index + 1
+        pinned_host = addresses[index % len(addresses)]
+        return await self._delegate.connect_tcp(
+            pinned_host,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._delegate.connect_unix_socket(
+            path,
+            timeout=timeout,
+            socket_options=socket_options,
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        return await self._delegate.sleep(seconds)
+
+class _PinnedAddressAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, pinned_addresses: Mapping[str, Iterable[str]]) -> None:
+        super().__init__(trust_env=False, http2=False, retries=0)
+        self._pool = httpcore.AsyncConnectionPool(
+            http1=True,
+            http2=False,
+            retries=0,
+            network_backend=_PinnedAddressAsyncNetworkBackend(pinned_addresses),
+        )
+
+def _pinned_async_client(pinned_addresses: Mapping[str, Iterable[str]]) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=_PinnedAddressAsyncHTTPTransport(pinned_addresses),
+        timeout=60.0,
+        follow_redirects=False,
+        trust_env=False,
+    )
 
 
 @dataclass
@@ -102,15 +176,15 @@ async def materialize_lesson_sd_pack(
             _log(log, "warning", cache_key, 0, start, "rejected", error.code)
             raise error
 
+    pinned_addresses = await _attest_manifest_urls(normalized, resolver)
     own_client = client is None
-    http_client = client or httpx.AsyncClient(timeout=60.0, follow_redirects=False)
+    http_client = client or _pinned_async_client(pinned_addresses)
     staging_root = _staging_root(config, store)
     staging = Path(tempfile.mkdtemp(prefix=".materialize-", dir=str(staging_root)))
     downloaded: Dict[str, tuple[Path, str]] = {}
     total_bytes = 0
     try:
         for asset in normalized["assets"]:
-            await _attest_url_addresses(asset["onlineUrl"], resolver)
             path, count = await _download_asset(
                 http_client,
                 asset,
@@ -313,11 +387,13 @@ def _validate_asset(
         raise _bad("INVALID_ASSET", "Asset must be an object")
     _reject_field_delta(set(item.keys()), _ASSET_FIELDS)
     key = item.get("key")
-    if not isinstance(key, str) or not key or len(key.encode("utf-8")) > 160:
+    if not isinstance(key, str) or not key:
         raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
     if key in (".", "..") or any(ord(ch) < 32 for ch in key):
         raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
     encoded = quote(key, safe="")
+    if len(encoded.encode("ascii")) > MAX_ENCODED_BASENAME_BYTES:
+        raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
     if not encoded or encoded in (".", "..") or "/" in encoded or "\\" in encoded:
         raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
     digest = _sha256_value(item.get("sha256"), "INVALID_ASSET_SHA256")
@@ -420,11 +496,11 @@ def _validate_literal_host(host: str) -> None:
 async def _attest_url_addresses(
     url: str,
     resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]],
-) -> None:
+) -> list[str]:
     host = urlsplit(url).hostname or ""
     try:
-        ipaddress.ip_address(host.strip("[]"))
-        return
+        address = ipaddress.ip_address(host.strip("[]"))
+        return [str(address)]
     except ValueError:
         pass
     lookup = resolver or _default_resolver
@@ -464,6 +540,18 @@ async def _attest_url_addresses(
                 False,
                 "Asset URL host must resolve to public addresses",
             )
+    return [str(ipaddress.ip_address(str(value).strip("[]"))) for value in addresses]
+
+async def _attest_manifest_urls(
+    manifest: Mapping[str, Any],
+    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]],
+) -> Dict[str, list[str]]:
+    pinned: Dict[str, list[str]] = {}
+    for asset in manifest["assets"]:
+        host = urlsplit(asset["onlineUrl"]).hostname or ""
+        if host not in pinned:
+            pinned[host] = await _attest_url_addresses(asset["onlineUrl"], resolver)
+    return pinned
 
 async def _default_resolver(host: str) -> list[str]:
     def resolve() -> list[str]:
