@@ -101,11 +101,23 @@ class SharedAssetStore:
         except (OSError, ValueError):
             return False
 
-    def commit_pack(self, cache_key: str, assets: Mapping[str, str]) -> Path:
+    def commit_pack(
+        self,
+        cache_key: str,
+        assets: Mapping[str, str],
+        *,
+        manifest: Optional[Mapping[str, Any]] = None,
+    ) -> Path:
         with self._gc_lock(exclusive=False):
-            return self._commit_pack_locked(cache_key, assets)
+            return self._commit_pack_locked(cache_key, assets, manifest=manifest)
 
-    def _commit_pack_locked(self, cache_key: str, assets: Mapping[str, str]) -> Path:
+    def _commit_pack_locked(
+        self,
+        cache_key: str,
+        assets: Mapping[str, str],
+        *,
+        manifest: Optional[Mapping[str, Any]] = None,
+    ) -> Path:
         pack_dir = self._pack_dir(cache_key)
         with self._pack_lock(cache_key, exclusive=True):
             self._recover_pack_unlocked(cache_key)
@@ -123,7 +135,7 @@ class SharedAssetStore:
                     self._atomic_link(staging / name, self.asset_path(digest))
                     normalized[str(key)] = digest
 
-                manifest = {"cacheKey": cache_key, "assets": normalized}
+                manifest = self._pack_manifest(cache_key, normalized, manifest)
                 manifest_bytes = json.dumps(
                     manifest, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
@@ -192,11 +204,7 @@ class SharedAssetStore:
                     continue
                 try:
                     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    assets = manifest.get("assets")
-                    if isinstance(assets, dict):
-                        reachable.update(
-                            digest for digest in assets.values() if isinstance(digest, str)
-                        )
+                    reachable.update(self._manifest_digests(manifest))
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     continue
         deleted = []
@@ -228,7 +236,11 @@ class SharedAssetStore:
             return self._materialize_pack_asset_locked(cache_key, key, digest)
 
     def put_files_and_commit_pack(
-        self, cache_key: str, assets: Mapping[str, tuple[Any, str]]
+        self,
+        cache_key: str,
+        assets: Mapping[str, tuple[Any, str]],
+        *,
+        manifest: Optional[Mapping[str, Any]] = None,
     ) -> Path:
         """Atomically lease all CAS inputs until the READY pack is committed."""
         with self._gc_lock(exclusive=False):
@@ -236,7 +248,7 @@ class SharedAssetStore:
             for key, (source, digest) in assets.items():
                 self._put_file_locked(source, digest)
                 digests[key] = digest
-            return self._commit_pack_locked(cache_key, digests)
+            return self._commit_pack_locked(cache_key, digests, manifest=manifest)
 
     def _materialize_pack_asset_locked(self, cache_key: str, key: str, digest: str) -> Path:
         digest = self._validate_digest(digest)
@@ -273,14 +285,18 @@ class SharedAssetStore:
             manifest = json.loads(manifest_bytes.decode("utf-8"))
             if manifest.get("cacheKey") != cache_key:
                 return False
-            assets = manifest.get("assets")
-            if not isinstance(assets, dict) or ready.get("assetCount") != len(assets):
+            assets = self._manifest_asset_records(manifest)
+            if assets is None or ready.get("assetCount") != len(assets):
                 return False
-            for key, digest in assets.items():
+            for key, record in assets.items():
+                digest = record["sha256"]
                 if not self._attest_unlocked(digest):
                     return False
                 pack_asset = pack_dir / self._pack_asset_name(key)
                 if not pack_asset.is_file() or self._hash_file(pack_asset) != digest:
+                    return False
+                size = record.get("size")
+                if size is not None and pack_asset.stat().st_size != size:
                     return False
             return True
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -449,6 +465,92 @@ class SharedAssetStore:
         if not key:
             raise ValueError("asset key must not be empty")
         return quote(str(key), safe="")
+
+    def _pack_manifest(
+        self,
+        cache_key: str,
+        assets: Mapping[str, str],
+        manifest: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if manifest is None:
+            return {"cacheKey": cache_key, "assets": dict(assets)}
+        if not isinstance(manifest, Mapping):
+            raise ValueError("invalid pack manifest")
+        if manifest.get("cacheKey") != cache_key:
+            raise ValueError("manifest cacheKey mismatch")
+        raw_assets = manifest.get("assets")
+        if not isinstance(raw_assets, list):
+            raise ValueError("manifest assets must be a list")
+        seen: Set[str] = set()
+        for item in raw_assets:
+            if not isinstance(item, Mapping):
+                raise ValueError("invalid manifest asset")
+            key = item.get("key")
+            digest = item.get("sha256")
+            size = item.get("size")
+            if not isinstance(key, str) or key not in assets:
+                raise ValueError("manifest asset key mismatch")
+            if key in seen:
+                raise ValueError("duplicate manifest asset key")
+            seen.add(key)
+            if self._validate_digest(str(digest or "")) != assets[key]:
+                raise ValueError("manifest asset digest mismatch")
+            path = self.asset_path(assets[key])
+            try:
+                actual_size = path.stat().st_size
+            except OSError as exc:
+                raise ValueError("manifest asset missing from CAS") from exc
+            if type(size) is not int or size != actual_size:
+                raise ValueError("manifest asset size mismatch")
+        if seen != set(assets.keys()):
+            raise ValueError("manifest does not cover staged assets")
+        return dict(manifest)
+
+    @staticmethod
+    def _manifest_assets(manifest: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+        records = SharedAssetStore._manifest_asset_records(manifest)
+        if records is None:
+            return None
+        return {key: record["sha256"] for key, record in records.items()}
+
+    @staticmethod
+    def _manifest_asset_records(
+        manifest: Mapping[str, Any],
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        assets = manifest.get("assets")
+        if isinstance(assets, dict):
+            normalized = {}
+            for key, digest in assets.items():
+                if not isinstance(key, str) or not isinstance(digest, str):
+                    return None
+                normalized[key] = {"sha256": digest}
+            return normalized
+        if isinstance(assets, list):
+            normalized = {}
+            for item in assets:
+                if not isinstance(item, dict):
+                    return None
+                key = item.get("key")
+                digest = item.get("sha256")
+                size = item.get("size")
+                if (
+                    not isinstance(key, str)
+                    or not isinstance(digest, str)
+                    or type(size) is not int
+                    or size < 0
+                    or key in normalized
+                ):
+                    return None
+                normalized[key] = {"sha256": digest, "size": size}
+            return normalized
+        return None
+
+    @classmethod
+    def _manifest_digests(cls, manifest: Mapping[str, Any]) -> Set[str]:
+        assets = cls._manifest_assets(manifest)
+        if not assets:
+            return set()
+        return {digest for digest in assets.values() if isinstance(digest, str)}
 
     @staticmethod
     def _validate_digest(digest: str) -> str:

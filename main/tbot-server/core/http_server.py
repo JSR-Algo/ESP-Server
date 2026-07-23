@@ -8,6 +8,7 @@ from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
+from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
@@ -45,6 +46,10 @@ class SimpleHttpServer:
             self.lesson_connections,
         )
         self.lesson_sd_evict_handler = LessonSdEvictHandler(
+            config,
+            self.lesson_connections,
+        )
+        self.lesson_sd_materialize_handler = LessonSdMaterializeHandler(
             config,
             self.lesson_connections,
         )
@@ -132,6 +137,10 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/lesson-assets/sd-fanout",
                             self.lesson_sd_fanout_handler.handle_post,
+                        ),
+                        web.post(
+                            "/internal/lesson-assets/materialize",
+                            self.lesson_sd_materialize_handler.handle_post,
                         ),
                         web.get(
                             "/internal/lesson-assets/sd-fanout/pending",
