@@ -300,6 +300,51 @@ async def test_drain_pending_clears_only_ready_callback_success_and_retains_fail
         "lesson-b/v1-bbb"
     ]
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_lesson", "mcp_client", "expected_reason"),
+    [
+        ({}, object(), "sd_pack_disabled"),
+        ({"asset_delivery_mode": "sd_pack"}, None, "no_mcp_client"),
+        (
+            {"asset_delivery_mode": "sd_pack"},
+            type("M", (), {"is_ready": lambda self: asyncio.sleep(0, result=False)})(),
+            "mcp_not_ready",
+        ),
+    ],
+)
+async def test_drain_pending_skipped_sync_retains_without_callback_and_one_attempt(
+    monkeypatch,
+    config_lesson,
+    mcp_client,
+    expected_reason,
+):
+    store = InMemoryLessonSdPendingStore(random=lambda: 0.0)
+    sd_pack_fanout.set_pending_store_for_tests(store)
+    await store.mark("dev-1", {"lesson-a/v1-aaa"})
+    callback_calls = []
+
+    class Conn:
+        def __init__(self):
+            self.device_id = "dev-1"
+            self.config = {"lesson": config_lesson}
+            self.mcp_client = mcp_client
+
+    async def post_one(*_args, **kwargs):
+        callback_calls.append(kwargs["result"])
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
+
+    result = await sd_pack_fanout.drain_pending_for_connection(Conn())
+
+    assert result["skipped"] == expected_reason
+    assert result["retainedCacheKeys"] == ["lesson-a/v1-aaa"]
+    assert result["errorCode"] == expected_reason.upper()
+    assert callback_calls == []
+    pending = await store.load("dev-1")
+    assert pending["cacheKeys"] == ["lesson-a/v1-aaa"]
+    assert pending["attemptCount"] == 2
+
 
 @pytest.mark.asyncio
 async def test_drain_pending_partial_callback_failure_retains_only_failed_callback_key(
@@ -393,6 +438,7 @@ async def test_immediate_fanout_partial_callback_failure_does_not_readd_cleared_
     assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
         "lesson-b/v1-bbb"
     ]
+    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["attemptCount"] == 1
 
 
 @pytest.mark.asyncio

@@ -253,7 +253,8 @@ async def fanout_sd_pack_sync(
             if not device_id:
                 continue
             keys = set(_retry_cache_keys_for_device(failed, device_id) or pack_keys)
-            await selected_store.mark(device_id, keys)
+            if device_id in offline_set:
+                await selected_store.mark(device_id, keys)
             _log_outcome(
                 "pending_offline" if device_id in offline_set else "retry_wait",
                 device_id,
@@ -386,6 +387,13 @@ async def _sync_callback_and_update_pending(
     except Exception:
         await store.mark(backend_device_id, keys)
         raise
+    if isinstance(result, dict) and result.get("skipped"):
+        reason = _stable_error_code(result.get("skipped")) or "skipped"
+        await store.mark(backend_device_id, keys)
+        result["clearedCacheKeys"] = []
+        result["retainedCacheKeys"] = keys
+        result["errorCode"] = reason.upper()
+        return result
     cleared, retained, errors = await _post_per_cache_results(
         config,
         backend_device_id=backend_device_id,
