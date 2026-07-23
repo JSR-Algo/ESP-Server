@@ -631,6 +631,7 @@ async def post_lesson_sd_sync_result(
         f"{_lesson_base(str(base_url or '').rstrip('/'))}/internal/lesson-asset-sync/device-result",
         json=_normalize_lesson_sd_sync_result(result),
         headers={"Accept": "application/json", "X-Mint-Secret": secret},
+        follow_redirects=False,
     )
     response.raise_for_status()
     payload = response.json()

@@ -21,6 +21,8 @@ import importlib.util
 import os
 import unittest
 
+import httpx
+
 
 def _load_real_manage_api_client():
     """Load a fresh, isolated copy of the real ``config.manage_api_client`` from
@@ -478,6 +480,49 @@ class PostLessonSdSyncResultContractTest(unittest.IsolatedAsyncioTestCase):
                 "ready": True,
                 "errorCode": "bad_code_token_secret",
             },
+        )
+
+    async def test_redirect_does_not_replay_mint_secret_to_location(self):
+        hits = []
+
+        async def handler(request):
+            hits.append((str(request.url), request.headers.get("X-Mint-Secret")))
+            if request.url.host == "backend.test":
+                return httpx.Response(
+                    307,
+                    headers={"Location": "https://evil.test/capture"},
+                    request=request,
+                )
+            return httpx.Response(200, json={"data": {"accepted": True}}, request=request)
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        )
+        try:
+            with self.assertRaises(httpx.HTTPStatusError):
+                await MAC.post_lesson_sd_sync_result(
+                    client,
+                    BASE,
+                    {
+                        "deviceId": "device-uuid-9",
+                        "cacheKey": "lesson-a/v1-aaa",
+                        "downloadedCount": 1,
+                        "ready": True,
+                    },
+                    mint_secret="mint-secret",
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(
+            hits,
+            [
+                (
+                    "http://backend.test/v1/internal/lesson-asset-sync/device-result",
+                    "mint-secret",
+                )
+            ],
         )
 
 if __name__ == "__main__":

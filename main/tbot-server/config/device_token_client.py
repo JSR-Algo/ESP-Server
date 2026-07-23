@@ -19,6 +19,7 @@ Design notes:
 
 import os
 import time
+from contextlib import suppress
 
 # {mac: (device_uuid, token, cached_at_epoch)} — cache for ~14 min (token TTL 15m).
 _cache = {}
@@ -32,10 +33,8 @@ def _secret():
 def _log(logger, level, message):
     if logger is None:
         return
-    try:
+    with suppress(Exception):
         getattr(logger.bind(tag="DeviceToken"), level)(message)
-    except Exception:
-        pass
 
 
 async def resolve_device_identity(client, base_url, mac, *, logger=None):
@@ -64,6 +63,7 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
             url,
             json={"mac": mac},
             headers={"X-Mint-Secret": secret, "Authorization": f"Bearer {secret}"},
+            follow_redirects=False,
         )
         resp.raise_for_status()
         data = (resp.json() or {}).get("data") or {}

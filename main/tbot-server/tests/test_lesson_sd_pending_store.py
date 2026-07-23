@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from core.lesson.sd_pack_pending_store import (
@@ -110,6 +112,79 @@ class RedisApiOnlyFake:
         if num is None:
             return members[start:]
         return members[start : start + num]
+
+class EvalRedisFake(RedisApiOnlyFake):
+    def __init__(self, *, cluster_enabled=0):
+        super().__init__()
+        self.cluster_enabled = cluster_enabled
+        self.eval_calls = []
+        self.info_calls = []
+
+    async def info(self, section=None):
+        self.info_calls.append(section)
+        return {"cluster_enabled": self.cluster_enabled}
+
+    async def eval(self, script, numkeys, *args):
+        keys = args[:numkeys]
+        argv = args[numkeys:]
+        self.eval_calls.append((numkeys, keys, argv))
+        if "return encoded" in script:
+            value_key, due_key, created_key = keys
+            device_id = argv[0]
+            cache_keys = json.loads(argv[1])
+            work = json.loads(argv[3])
+            existing = await self.get(value_key)
+            if existing:
+                current = json.loads(existing)
+                work["cacheKeys"] = sorted({*current.get("cacheKeys", []), *cache_keys})
+                work["createdAt"] = current.get("createdAt") or work["createdAt"]
+                work["attemptCount"] = int(current.get("attemptCount") or 0) + 1
+            encoded = json.dumps(work, separators=(",", ":"))
+            await self.set(value_key, encoded, ex=int(argv[6]))
+            await self.zadd(due_key, {device_id: float(argv[4])})
+            await self.zadd(created_key, {device_id: float(argv[5])})
+            await self.expire(due_key, int(argv[6]))
+            await self.expire(created_key, int(argv[6]))
+            return encoded
+        if "ZRANGEBYSCORE" in script:
+            (due_key,) = keys
+            now = float(argv[0])
+            limit = int(argv[1])
+            lease_score = float(argv[2])
+            namespace = argv[3]
+            members = await self.zrangebyscore(due_key, "-inf", now, start=0, num=limit)
+            claimed = []
+            for member in members:
+                value_key = f"{namespace}:lesson-sd-pending:{member}"
+                if await self.get(value_key):
+                    await self.zadd(due_key, {member: lease_score})
+                    claimed.append(member)
+                else:
+                    await self.zrem(due_key, member)
+            return claimed
+        value_key, due_key, created_key = keys
+        device_id = argv[0]
+        clear = set(json.loads(argv[1]))
+        expected = sorted(json.loads(argv[2]))
+        existing = await self.get(value_key)
+        if not existing:
+            await self.zrem(due_key, device_id)
+            await self.zrem(created_key, device_id)
+            return 0
+        current = json.loads(existing)
+        current_keys = sorted(current.get("cacheKeys", []))
+        remaining = [key for key in current_keys if key not in clear]
+        if not remaining:
+            if not expected or current_keys == expected:
+                await self.delete(value_key)
+                await self.zrem(due_key, device_id)
+                await self.zrem(created_key, device_id)
+        else:
+            current["cacheKeys"] = remaining
+            await self.set(value_key, json.dumps(current, separators=(",", ":")), ex=int(argv[3]))
+            await self.expire(due_key, int(argv[3]))
+            await self.expire(created_key, int(argv[3]))
+        return 1
 
 
 class Clock:
@@ -248,3 +323,45 @@ async def test_redis_atomic_clear_does_not_erase_newly_marked_key():
     await store.mark("dev-1", {"lesson-b/v1"})
 
     assert (await store.load("dev-1"))["cacheKeys"] == ["lesson-b/v1"]
+
+@pytest.mark.asyncio
+async def test_redis_lua_path_requires_standalone_redis_and_sanitizes_cluster_error():
+    redis = EvalRedisFake(cluster_enabled=1)
+    store = RedisLessonSdPendingStore(redis, namespace="ns", random=lambda: 0.0)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await store.mark("dev-1", {"lesson-a/v1"})
+
+    message = str(exc_info.value)
+    assert "standalone Redis" in message
+    assert "redis://" not in message
+    assert "password" not in message
+    assert redis.eval_calls == []
+    assert redis.info_calls == ["cluster"]
+
+@pytest.mark.asyncio
+async def test_redis_lua_scripts_cover_mark_claim_partial_and_final_clear():
+    redis = EvalRedisFake(cluster_enabled=0)
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
+
+    await store.mark("dev-1", {"lesson-a/v1", "lesson-b/v1"})
+    clock.epoch += 2
+    assert await store.claim_due(limit=5) == ["dev-1"]
+    await store.clear(
+        "dev-1",
+        {"lesson-a/v1"},
+        expected_cache_keys={"lesson-a/v1", "lesson-b/v1"},
+    )
+    assert (await store.load("dev-1"))["cacheKeys"] == ["lesson-b/v1"]
+    await store.clear("dev-1", {"lesson-b/v1"}, expected_cache_keys={"lesson-b/v1"})
+    assert await store.load("dev-1") is None
+
+    assert [call[0] for call in redis.eval_calls] == [3, 1, 3, 3]
+    assert redis.eval_calls[0][1] == (
+        "ns:lesson-sd-pending:dev-1",
+        "ns:lesson-sd-pending:due",
+        "ns:lesson-sd-pending:created",
+    )
+    assert redis.eval_calls[1][1] == ("ns:lesson-sd-pending:due",)
+    assert redis.info_calls == ["cluster"]

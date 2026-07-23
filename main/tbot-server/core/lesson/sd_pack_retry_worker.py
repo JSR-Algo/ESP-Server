@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import suppress
 from typing import Any
 
 from config.device_token_client import resolve_device_identity
 from core.lesson.sd_pack_fanout import drain_pending_for_connection
+
+logger = logging.getLogger(__name__)
 
 
 class LessonSdOnlineIndex:
@@ -41,7 +44,7 @@ class LessonSdOnlineIndex:
         if client is None:
             import httpx
 
-            client = httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+            client = httpx.AsyncClient(timeout=10.0, follow_redirects=False)
             close_client = True
         try:
             backend_device_id, _token = await resolve_device_identity(
@@ -103,10 +106,24 @@ class LessonSdRetryWorker:
 
     async def _run(self) -> None:
         while self._running:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log_iteration_failure(exc, self.interval_sec)
             await asyncio.sleep(self.interval_sec)
 
     async def run_once(self) -> dict[str, int]:
+        try:
+            return await self._run_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log_iteration_failure(exc, self.interval_sec)
+            return {"checked": 0, "retried": 0, "skippedOffline": 0}
+
+    async def _run_once(self) -> dict[str, int]:
         claim_due = getattr(self.store, "claim_due", None)
         if callable(claim_due):
             due_ids = await claim_due(limit=self.batch_size)
@@ -151,6 +168,19 @@ def _retry_batch_size() -> int:
     except ValueError:
         value = 25
     return max(1, min(value, 250))
+
+def _log_iteration_failure(exc: Exception, interval_sec: float) -> None:
+    logger.warning(
+        "lesson_sd_retry_worker iteration_failed error=%s sleep_sec=%.3f",
+        _stable_error_code(type(exc).__name__),
+        max(0.0, float(interval_sec or 0.0)),
+    )
+
+def _stable_error_code(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "UNKNOWN"
+    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in raw)[:80]
 
 def _looks_like_mac(value: str) -> bool:
     compact = str(value or "").strip().replace("-", ":")

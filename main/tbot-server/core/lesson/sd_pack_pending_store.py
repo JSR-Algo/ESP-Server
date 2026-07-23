@@ -278,6 +278,7 @@ class RedisLessonSdPendingStore:
         self.lease_sec = max(1, int(lease_sec or 60))
         self._clock = clock
         self._random = random
+        self._standalone_lua_checked = False
 
     async def mark(self, device_id: str, cache_keys: Iterable[str] | None = None) -> None:
         device_id = _normalize_device_id(device_id)
@@ -443,6 +444,7 @@ class RedisLessonSdPendingStore:
         eval_fn = getattr(self.redis, "eval", None)
         if not callable(eval_fn):
             return False
+        await self._ensure_standalone_for_lua()
         await eval_fn(
             _MARK_LUA,
             3,
@@ -468,6 +470,7 @@ class RedisLessonSdPendingStore:
         eval_fn = getattr(self.redis, "eval", None)
         if not callable(eval_fn):
             return False
+        await self._ensure_standalone_for_lua()
         await eval_fn(
             _CLEAR_LUA,
             3,
@@ -485,6 +488,7 @@ class RedisLessonSdPendingStore:
         eval_fn = getattr(self.redis, "eval", None)
         if not callable(eval_fn):
             return None
+        await self._ensure_standalone_for_lua()
         members = await eval_fn(
             _CLAIM_DUE_LUA,
             1,
@@ -495,6 +499,30 @@ class RedisLessonSdPendingStore:
             self.namespace,
         )
         return [_decode_member(member) for member in members if _decode_member(member)]
+
+    async def _ensure_standalone_for_lua(self) -> None:
+        if self._standalone_lua_checked:
+            return
+        info_fn = getattr(self.redis, "info", None)
+        if not callable(info_fn):
+            self._standalone_lua_checked = True
+            return
+        try:
+            try:
+                info = await info_fn("cluster")
+            except TypeError:
+                info = await info_fn()
+        except Exception as exc:
+            raise RuntimeError(
+                "lesson SD pending store requires standalone Redis; Redis capability check failed "
+                f"({type(exc).__name__})"
+            ) from exc
+        enabled = _redis_cluster_enabled(info)
+        if enabled:
+            raise RuntimeError(
+                "lesson SD pending store requires standalone Redis; Redis Cluster is not supported"
+            )
+        self._standalone_lua_checked = True
 
 
 def create_lesson_sd_pending_store() -> LessonSdPendingStore:
@@ -553,6 +581,24 @@ def _decode_member(member: Any) -> str:
     if isinstance(member, bytes):
         return member.decode("utf-8")
     return str(member or "").strip()
+
+
+def _redis_cluster_enabled(info: Any) -> bool:
+    if isinstance(info, bytes):
+        info = info.decode("utf-8", errors="replace")
+    if isinstance(info, str):
+        for line in info.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "cluster_enabled":
+                return str(value).strip() == "1"
+        return False
+    if not isinstance(info, dict):
+        return False
+    value = info.get("cluster_enabled")
+    cluster = info.get("cluster")
+    if value is None and isinstance(cluster, dict):
+        value = cluster.get("cluster_enabled")
+    return str(value).strip().lower() in {"1", "true", "yes"}
 
 
 def _run_coro_sync(coro):

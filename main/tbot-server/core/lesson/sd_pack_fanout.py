@@ -342,7 +342,7 @@ async def _resolve_backend_device_id_for_conn(conn: Any, config: dict[str, Any])
     try:
         from config.device_token_client import resolve_device_identity
 
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
             backend_device_id, _token = await resolve_device_identity(
                 client, base_url, raw_device_id, logger=None
             )
@@ -464,7 +464,7 @@ async def _post_one_sync_result(config: dict[str, Any], *, result: dict[str, Any
     mint_secret = os.getenv("TBOT_DEVICE_MINT_SECRET", "")
     if not base_url or not mint_secret:
         raise RuntimeError("lesson SD sync result callback not configured")
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
         await post_lesson_sd_sync_result(
             client,
             base_url,

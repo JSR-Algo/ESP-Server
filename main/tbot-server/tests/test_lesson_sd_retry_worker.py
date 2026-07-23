@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -187,3 +188,39 @@ async def test_worker_start_stop_has_single_lifecycle_task():
 
     await worker.stop()
     assert first.done()
+
+@pytest.mark.asyncio
+async def test_worker_loop_survives_claim_due_failure_and_retries_next_tick(monkeypatch, caplog):
+    calls = {"claim": 0}
+    drained = asyncio.Event()
+    caplog.set_level("WARNING")
+
+    class Store:
+        async def claim_due(self, *, limit):
+            calls["claim"] += 1
+            if calls["claim"] == 1:
+                raise RuntimeError("redis://:password@host/0")
+            return ["uuid-1"]
+
+        async def load(self, device_id):
+            return {"cacheKeys": ["lesson-a/v1"]}
+
+    async def drain(*_args, **_kwargs):
+        drained.set()
+
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.drain_pending_for_connection", drain)
+
+    index = LessonSdOnlineIndex()
+    index.upsert("uuid-1", SimpleNamespace(device_id="uuid-1"))
+    worker = LessonSdRetryWorker(Store(), index, interval_sec=0.01, batch_size=10)
+
+    task = worker.start()
+    await asyncio.wait_for(drained.wait(), timeout=1.0)
+
+    assert task is not None and not task.done()
+    assert calls["claim"] >= 2
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "RuntimeError" in logged
+    assert "redis://" not in logged
+    assert "password" not in logged
+    await worker.stop()
