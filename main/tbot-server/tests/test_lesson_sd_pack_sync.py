@@ -89,10 +89,99 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
     assert result["packs"] == 2
     assert result["synced"] == 2
     assert result["failed"] == 0
+    assert result["resultsByCacheKey"] == {
+        "lesson-a/v1-a": {
+            "cacheKey": "lesson-a/v1-a",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+        "lesson-b/v2-b": {
+            "cacheKey": "lesson-b/v2-b",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+    }
     assert calls == [
         ("self.lesson_assets.sync_to_sd", "lesson-a/v1-a"),
         ("self.lesson_assets.sync_to_sd", "lesson-b/v2-b"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_counts(
+    monkeypatch, tmp_path
+):
+    cache_root = tmp_path / "lesson_assets"
+    first = cache_root / "lesson-a" / "v1-a"
+    second = cache_root / "lesson-b" / "v2-b"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "backgroundScene.poster").write_bytes(b"a")
+    (second / "teachingObject.barn").write_bytes(b"b")
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, pack):
+        if pack["cacheKey"] == "lesson-a/v1-a":
+            return {
+                "ready": True,
+                "downloadedCount": 2,
+                "skippedCount": 1,
+                "failedCount": 0,
+                "criticalFailedCount": 0,
+            }
+        return {
+            "ready": False,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 2,
+            "criticalFailedCount": 1,
+            "errorCode": " SD failed/token=secret ",
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 1
+    assert result["resultsByCacheKey"] == {
+        "lesson-a/v1-a": {
+            "cacheKey": "lesson-a/v1-a",
+            "downloadedCount": 2,
+            "skippedCount": 1,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+        "lesson-b/v2-b": {
+            "cacheKey": "lesson-b/v2-b",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 2,
+            "criticalFailedCount": 1,
+            "ready": False,
+            "errorCode": "SD_failed_token_secret",
+        },
+    }
 
 
 @pytest.mark.asyncio

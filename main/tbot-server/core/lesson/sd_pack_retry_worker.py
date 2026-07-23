@@ -33,6 +33,8 @@ class LessonSdOnlineIndex:
         if not raw_device_id:
             return None
         if not self.api_base:
+            if _looks_like_mac(raw_device_id):
+                return None
             self.upsert(raw_device_id, conn)
             return raw_device_id
         close_client = False
@@ -103,7 +105,11 @@ class LessonSdRetryWorker:
             await asyncio.sleep(self.interval_sec)
 
     async def run_once(self) -> dict[str, int]:
-        due_ids = await self.store.due(limit=self.batch_size)
+        claim_due = getattr(self.store, "claim_due", None)
+        if callable(claim_due):
+            due_ids = await claim_due(limit=self.batch_size)
+        else:
+            due_ids = await self.store.due(limit=self.batch_size)
         checked = retried = skipped = 0
         for backend_device_id in due_ids:
             checked += 1
@@ -122,6 +128,7 @@ class LessonSdRetryWorker:
                     backend_device_id=backend_device_id,
                 )
             except Exception:
+                await self.store.mark(backend_device_id, pending["cacheKeys"])
                 continue
             retried += 1
         return {"checked": checked, "retried": retried, "skippedOffline": skipped}
@@ -141,3 +148,13 @@ def _retry_batch_size() -> int:
     except ValueError:
         value = 25
     return max(1, min(value, 250))
+
+def _looks_like_mac(value: str) -> bool:
+    compact = str(value or "").strip().replace("-", ":")
+    parts = compact.split(":")
+    if len(parts) != 6:
+        return False
+    return all(
+        len(part) == 2 and all(ch in "0123456789abcdefABCDEF" for ch in part)
+        for part in parts
+    )

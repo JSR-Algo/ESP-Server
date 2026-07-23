@@ -65,6 +65,31 @@ async def test_worker_retains_pending_on_sync_or_callback_failure(monkeypatch):
 
     assert result == {"checked": 1, "retried": 0, "skippedOffline": 0}
     assert (await store.load("uuid-1"))["cacheKeys"] == ["lesson-a/v1"]
+    assert (await store.load("uuid-1"))["attemptCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_claim_due_so_two_workers_do_not_process_same_device(monkeypatch):
+    clock = Clock()
+    store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
+    await store.mark("uuid-1", {"lesson-a/v1"})
+    clock.epoch += 2
+    calls = []
+
+    async def drain(conn, *, store=None, pending=None, backend_device_id=None):
+        calls.append(backend_device_id)
+        await store.clear(backend_device_id, pending["cacheKeys"])
+
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.drain_pending_for_connection", drain)
+
+    index = LessonSdOnlineIndex()
+    index.upsert("uuid-1", SimpleNamespace(name="one"))
+    first = LessonSdRetryWorker(store, index, batch_size=10)
+    second = LessonSdRetryWorker(store, index, batch_size=10)
+
+    assert await first.run_once() == {"checked": 1, "retried": 1, "skippedOffline": 0}
+    assert await second.run_once() == {"checked": 0, "retried": 0, "skippedOffline": 0}
+    assert calls == ["uuid-1"]
 
 
 @pytest.mark.asyncio

@@ -7,12 +7,14 @@ import base64
 import hashlib
 import json
 import os
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterator, Optional, Set
+from typing import Any
 from urllib.parse import quote
 
-from core.lesson.shared_asset_store import SharedAssetStore
 from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
+from core.lesson.shared_asset_store import SharedAssetStore
 from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
@@ -21,7 +23,7 @@ DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 
 
-def cached_asset_packs(config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
     lesson_cfg = _lesson_config(config)
     cache_root = Path(lesson_cfg.get("asset_cache_root") or DEFAULT_CACHE_ROOT)
     public_base = _lesson_asset_public_base_url(config)
@@ -77,11 +79,11 @@ def cached_asset_packs(config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
 async def sync_cached_lesson_assets_to_sd(
     conn: Any,
     *,
-    only_cache_keys: Optional[set] = None,
-    busy_check: Optional[Callable[[], bool]] = None,
-    sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+    only_cache_keys: set | None = None,
+    busy_check: Callable[[], bool] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
     poll_interval: float = 0.1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     config = getattr(conn, "config", {}) or {}
     if not _sd_pack_enabled(config):
         return {"skipped": "sd_pack_disabled"}
@@ -92,6 +94,7 @@ async def sync_cached_lesson_assets_to_sd(
     if callable(is_ready) and not await is_ready():
         return {"skipped": "mcp_not_ready"}
     synced = failed = 0
+    results_by_cache_key: dict[str, dict[str, Any]] = {}
     is_busy = busy_check or getattr(conn, "is_realtime_busy", None) or (lambda: False)
     pause = sleep or asyncio.sleep
     packs = list(cached_asset_packs(config))
@@ -113,27 +116,54 @@ async def sync_cached_lesson_assets_to_sd(
                 sleep=pause,
                 poll_interval=poll_interval,
             )
+            cache_key = str(pack.get("cacheKey") or "")
             if _sync_result_ready(result):
                 synced += 1
             else:
                 failed += 1
+            results_by_cache_key[cache_key] = normalize_firmware_sync_result(
+                cache_key, result
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             failed += 1
+            cache_key = str(pack.get("cacheKey") or "")
+            results_by_cache_key[cache_key] = normalize_firmware_sync_result(
+                cache_key,
+                {
+                    "ready": False,
+                    "downloadedCount": 0,
+                    "skippedCount": 0,
+                    "failedCount": 1,
+                    "criticalFailedCount": 1,
+                    "errorCode": type(exc).__name__,
+                },
+            )
             if _is_unknown_sd_pack_sync_tool_error(exc):
                 _log(conn, "warning", "cached SD pack sync unsupported: firmware missing self.lesson_assets.sync_to_sd")
-                return {"packs": len(packs), "synced": synced, "failed": failed, "unsupported": True}
+                return {
+                    "packs": len(packs),
+                    "synced": synced,
+                    "failed": failed,
+                    "unsupported": True,
+                    "resultsByCacheKey": results_by_cache_key,
+                }
             _log(conn, "warning", f"cached SD pack sync failed cache_key={pack.get('cacheKey')} error={type(exc).__name__}")
         await asyncio.sleep(0)
     _log(conn, "info", f"cached SD pack sync complete packs={len(packs)} synced={synced} failed={failed}")
-    return {"packs": len(packs), "synced": synced, "failed": failed}
+    return {
+        "packs": len(packs),
+        "synced": synced,
+        "failed": failed,
+        "resultsByCacheKey": results_by_cache_key,
+    }
 
 
 async def _call_sd_pack_sync_with_voice_guard(
     conn: Any,
     mcp_client: Any,
-    pack: Dict[str, Any],
+    pack: dict[str, Any],
     *,
     busy_check: Callable[[], bool],
     sleep: Callable[[float], Awaitable[None]],
@@ -161,7 +191,7 @@ async def _call_sd_pack_sync_with_voice_guard(
             raise
 
 
-async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: Dict[str, Any]) -> Any:
+async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: dict[str, Any]) -> Any:
     from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
     mcp_pack = build_firmware_sync_pack(pack)
@@ -199,23 +229,23 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _sd_pack_enabled(config: Dict[str, Any]) -> bool:
+def _sd_pack_enabled(config: dict[str, Any]) -> bool:
     lesson_cfg = _lesson_config(config)
     mode = str(lesson_cfg.get("asset_delivery_mode") or "").strip().lower()
     return mode == "sd_pack" or lesson_cfg.get("sd_asset_pack_enabled") is True
 
 
-def _lesson_config(config: Dict[str, Any]) -> Dict[str, Any]:
+def _lesson_config(config: dict[str, Any]) -> dict[str, Any]:
     lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
     return lesson_cfg if isinstance(lesson_cfg, dict) else {}
 
 
-def _server_config(config: Dict[str, Any]) -> Dict[str, Any]:
+def _server_config(config: dict[str, Any]) -> dict[str, Any]:
     server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
     return server_cfg if isinstance(server_cfg, dict) else {}
 
 
-def _lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
+def _lesson_asset_public_base_url(config: dict[str, Any]) -> str:
     lesson_cfg = _lesson_config(config)
     server_cfg = _server_config(config)
     explicit = (
@@ -268,6 +298,45 @@ def _sync_result_ready(result: Any) -> bool:
     return not (isinstance(failed, int) and failed > 0)
 
 
+def normalize_firmware_sync_result(cache_key: str, result: Any) -> dict[str, Any]:
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            result = {"ready": False, "failedCount": 1, "criticalFailedCount": 1}
+    if not isinstance(result, dict):
+        result = {"ready": False, "failedCount": 1, "criticalFailedCount": 1}
+    critical_failed = _bounded_count(result.get("criticalFailedCount"))
+    failed = _bounded_count(result.get("failedCount"))
+    ready = bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+    body = {
+        "cacheKey": str(cache_key or "").strip(),
+        "downloadedCount": _bounded_count(
+            result.get("downloadedCount", 1 if ready else 0)
+        ),
+        "skippedCount": _bounded_count(result.get("skippedCount")),
+        "failedCount": failed,
+        "criticalFailedCount": critical_failed,
+        "ready": ready,
+    }
+    error_code = _stable_error_code(result.get("errorCode"))
+    if error_code:
+        body["errorCode"] = error_code
+    return body
+
+def _bounded_count(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(parsed, 1_000_000))
+
+def _stable_error_code(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in raw)[:80]
+
 def _is_unknown_sd_pack_sync_tool_error(exc: Exception) -> bool:
     message = str(exc)
     return "Unknown tool" in message and SD_PACK_SYNC_TOOL in message
@@ -276,7 +345,5 @@ def _log(conn: Any, level: str, message: str) -> None:
     logger = getattr(conn, "logger", None)
     if logger is None:
         return
-    try:
+    with suppress(Exception):
         getattr(logger.bind(tag="LessonSdPackSync"), level)(message)
-    except Exception:
-        pass

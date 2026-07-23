@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import warnings
+from contextlib import suppress
 
 warnings.filterwarnings(
     "ignore",
@@ -15,8 +16,9 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-import websockets
-from config.logger import setup_logging
+import websockets  # noqa: E402
+
+from config.logger import setup_logging  # noqa: E402
 
 
 class SuppressInvalidHandshakeFilter(logging.Filter):
@@ -44,10 +46,10 @@ def _setup_websockets_logger():
 _setup_websockets_logger()
 
 
-from config.config_loader import get_config_from_api_async
-from core.auth import AuthManager, AuthenticationError
-from core.utils.modules_initialize import initialize_modules
-from core.utils.util import check_vad_update, check_asr_update
+from config.config_loader import get_config_from_api_async  # noqa: E402
+from core.auth import AuthenticationError, AuthManager  # noqa: E402
+from core.utils.modules_initialize import initialize_modules  # noqa: E402
+from core.utils.util import check_asr_update, check_vad_update  # noqa: E402
 
 TAG = __name__
 
@@ -106,11 +108,11 @@ class WebSocketServer:
                 False,
                 False,
             )
-        self._vad = modules["vad"] if "vad" in modules else None
-        self._asr = modules["asr"] if "asr" in modules else None
-        self._llm = modules["llm"] if "llm" in modules else None
-        self._intent = modules["intent"] if "intent" in modules else None
-        self._memory = modules["memory"] if "memory" in modules else None
+        self._vad = modules.get("vad", None)
+        self._asr = modules.get("asr", None)
+        self._llm = modules.get("llm", None)
+        self._intent = modules.get("intent", None)
+        self._memory = modules.get("memory", None)
 
         auth_config = self.config["server"].get("auth", {})
         self.auth_enable = auth_config.get("enabled", False)
@@ -161,13 +163,12 @@ class WebSocketServer:
             if still_pending:
                 await asyncio.gather(*still_pending, return_exceptions=True)
             for task in done:
-                try:
+                with suppress(Exception):
                     task.result()
-                except Exception:
-                    pass
 
     async def _handle_connection(self, websocket: websockets.ServerConnection):
         current_task = asyncio.current_task()
+        handler = None
         if current_task is not None:
             self._connection_tasks.add(current_task)
         try:
@@ -233,12 +234,14 @@ class WebSocketServer:
                     await self.lesson_connections.remove_if_current(
                         device_id, handler
                     )
+                index = getattr(self, "lesson_sd_online_index", None)
+                invalidate = getattr(index, "invalidate_connection", None)
+                if callable(invalidate):
+                    invalidate(handler)
                 # Force close connection (if not closed yet)
                 try:
                     # Safely checkWebSocketStatusAnd close
-                    if hasattr(websocket, "closed") and not websocket.closed:
-                        await websocket.close()
-                    elif hasattr(websocket, "state") and websocket.state.name != "CLOSED":
+                    if hasattr(websocket, "closed") and not websocket.closed or hasattr(websocket, "state") and websocket.state.name != "CLOSED":
                         await websocket.close()
                     else:
                         # If noneclosedAttribute, try close directly
@@ -289,7 +292,7 @@ class WebSocketServer:
                 if new_config is None:
                     self.logger.bind(tag=TAG).error("Get new config failed")
                     return False
-                self.logger.bind(tag=TAG).info(f"Get new config succeeded")
+                self.logger.bind(tag=TAG).info("Get new config succeeded")
                 # Check VAD and ASR Whether type needs update
                 update_vad = check_vad_update(self.config, new_config)
                 update_asr = check_asr_update(self.config, new_config)
@@ -321,7 +324,7 @@ class WebSocketServer:
                     self._intent = modules["intent"]
                 if "memory" in modules:
                     self._memory = modules["memory"]
-                self.logger.bind(tag=TAG).info(f"Update config task completed")
+                self.logger.bind(tag=TAG).info("Update config task completed")
                 return True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Failed to update server config: {str(e)}")

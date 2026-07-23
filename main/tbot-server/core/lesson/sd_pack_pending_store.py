@@ -11,6 +11,91 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, TypedDict
 
 LESSON_SD_PENDING_TTL_SEC = 30 * 24 * 60 * 60
+LESSON_SD_PENDING_LEASE_SEC = 60
+
+_MARK_LUA = """
+local existing = redis.call('GET', KEYS[1])
+local work = cjson.decode(ARGV[4])
+if existing then
+  local current = cjson.decode(existing)
+  local seen = {}
+  local merged = {}
+  for _, key in ipairs(current.cacheKeys or {}) do
+    if not seen[key] then seen[key] = true; table.insert(merged, key) end
+  end
+  for _, key in ipairs(cjson.decode(ARGV[2]) or {}) do
+    if not seen[key] then seen[key] = true; table.insert(merged, key) end
+  end
+  table.sort(merged)
+  work.cacheKeys = merged
+  work.createdAt = current.createdAt or work.createdAt
+  work.attemptCount = tonumber(current.attemptCount or 0) + 1
+end
+local encoded = cjson.encode(work)
+redis.call('SET', KEYS[1], encoded, 'EX', tonumber(ARGV[7]))
+redis.call('ZADD', KEYS[2], tonumber(ARGV[5]), ARGV[1])
+redis.call('ZADD', KEYS[3], tonumber(ARGV[6]), ARGV[1])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[7]))
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[7]))
+return encoded
+"""
+
+_CLEAR_LUA = """
+local existing = redis.call('GET', KEYS[1])
+if not existing then
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  redis.call('ZREM', KEYS[3], ARGV[1])
+  return 0
+end
+local current = cjson.decode(existing)
+local clear = {}
+for _, key in ipairs(cjson.decode(ARGV[2]) or {}) do clear[key] = true end
+local expected = {}
+local expected_count = 0
+for _, key in ipairs(cjson.decode(ARGV[3]) or {}) do
+  if not expected[key] then expected_count = expected_count + 1 end
+  expected[key] = true
+end
+local current_count = 0
+local matches_expected = expected_count > 0
+for _, key in ipairs(current.cacheKeys or {}) do
+  current_count = current_count + 1
+  if expected_count > 0 and not expected[key] then matches_expected = false end
+end
+if expected_count > 0 and current_count ~= expected_count then matches_expected = false end
+local remaining = {}
+for _, key in ipairs(current.cacheKeys or {}) do
+  if not clear[key] then table.insert(remaining, key) end
+end
+if #remaining == 0 then
+  if matches_expected then
+    redis.call('DEL', KEYS[1])
+    redis.call('ZREM', KEYS[2], ARGV[1])
+    redis.call('ZREM', KEYS[3], ARGV[1])
+  end
+else
+  current.cacheKeys = remaining
+  redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[4]))
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+  redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
+end
+return 1
+"""
+
+_CLAIM_DUE_LUA = """
+local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+local claimed = {}
+for _, member in ipairs(members) do
+  local value_key = ARGV[4] .. ':lesson-sd-pending:' .. member
+  if redis.call('GET', value_key) then
+    redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), member)
+    table.insert(claimed, member)
+  else
+    redis.call('ZREM', KEYS[1], member)
+  end
+end
+return claimed
+"""
 
 
 class PendingLessonSdWork(TypedDict):
@@ -24,7 +109,14 @@ class LessonSdPendingStore(Protocol):
     async def mark(self, device_id: str, cache_keys: Iterable[str] | None = None) -> None: ...
     async def load(self, device_id: str) -> PendingLessonSdWork | None: ...
     async def due(self, *, limit: int) -> list[str]: ...
-    async def clear(self, device_id: str, cache_keys: Iterable[str]) -> None: ...
+    async def claim_due(self, *, limit: int) -> list[str]: ...
+    async def clear(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_cache_keys: Iterable[str] | None = None,
+    ) -> None: ...
     async def snapshot(self) -> dict[str, PendingLessonSdWork]: ...
 
 
@@ -68,9 +160,11 @@ class InMemoryLessonSdPendingStore:
         *,
         clock: Callable[[], float] = time.time,
         random: Callable[[], float] = lambda: 0.0,
+        lease_sec: int = 60,
     ) -> None:
         self._clock = clock
         self._random = random
+        self.lease_sec = max(1, int(lease_sec or 60))
         self._items: dict[str, PendingLessonSdWork] = {}
         self._lock = asyncio.Lock()
 
@@ -113,7 +207,30 @@ class InMemoryLessonSdPendingStore:
             ]
         return [device_id for device_id, _ in sorted(due, key=lambda item: (item[1], item[0]))[:limit]]
 
-    async def clear(self, device_id: str, cache_keys: Iterable[str]) -> None:
+    async def claim_due(self, *, limit: int) -> list[str]:
+        limit = max(0, int(limit or 0))
+        if limit <= 0:
+            return []
+        now = self._clock()
+        lease_until = utc_iso(now + self.lease_sec)
+        async with self._lock:
+            due = [
+                (device_id, epoch_from_iso(work["nextAttemptAt"]))
+                for device_id, work in self._items.items()
+                if epoch_from_iso(work["nextAttemptAt"]) <= now
+            ]
+            claimed = [device_id for device_id, _ in sorted(due, key=lambda item: (item[1], item[0]))[:limit]]
+            for device_id in claimed:
+                self._items[device_id]["nextAttemptAt"] = lease_until
+            return claimed
+
+    async def clear(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_cache_keys: Iterable[str] | None = None,
+    ) -> None:
         device_id = _normalize_device_id(device_id)
         keys = set(normalize_cache_keys(cache_keys))
         if not device_id or not keys:
@@ -122,10 +239,12 @@ class InMemoryLessonSdPendingStore:
             existing = self._items.get(device_id)
             if existing is None:
                 return
+            expected = normalize_cache_keys(expected_cache_keys)
+            expected_matches = bool(expected) and existing["cacheKeys"] == expected
             remaining = [key for key in existing["cacheKeys"] if key not in keys]
             if remaining:
                 existing["cacheKeys"] = remaining
-            else:
+            elif not expected or expected_matches:
                 self._items.pop(device_id, None)
 
     async def snapshot(self) -> dict[str, PendingLessonSdWork]:
@@ -146,12 +265,14 @@ class RedisLessonSdPendingStore:
         *,
         namespace: str = "prod",
         ttl_sec: int = LESSON_SD_PENDING_TTL_SEC,
+        lease_sec: int = 60,
         clock: Callable[[], float] = time.time,
         random: Callable[[], float] = lambda: 0.0,
     ) -> None:
         self.redis = redis
         self.namespace = str(namespace or "prod")
         self.ttl_sec = max(60, int(ttl_sec or LESSON_SD_PENDING_TTL_SEC))
+        self.lease_sec = max(1, int(lease_sec or 60))
         self._clock = clock
         self._random = random
 
@@ -159,7 +280,6 @@ class RedisLessonSdPendingStore:
         device_id = _normalize_device_id(device_id)
         if not device_id:
             return
-        key = self._key(device_id)
         existing = await self.load(device_id)
         now = self._clock()
         attempt_count = int((existing or {}).get("attemptCount") or 0) + 1
@@ -171,9 +291,12 @@ class RedisLessonSdPendingStore:
             "createdAt": created_at,
             "nextAttemptAt": utc_iso(now + _retry_delay(attempt_count, self._random)),
         }
-        await self.redis.set(key, json.dumps(work, separators=(",", ":")), ex=self.ttl_sec)
-        await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(work["nextAttemptAt"])})
-        await self.redis.expire(self._due_key(), self.ttl_sec)
+        if not await self._eval_mark(device_id, normalize_cache_keys(cache_keys), work):
+            await self.redis.set(self._key(device_id), json.dumps(work, separators=(",", ":")), ex=self.ttl_sec)
+            await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(work["nextAttemptAt"])})
+            await self.redis.zadd(self._created_key(), {device_id: epoch_from_iso(work["createdAt"])})
+            await self.redis.expire(self._due_key(), self.ttl_sec)
+            await self.redis.expire(self._created_key(), self.ttl_sec)
 
     async def load(self, device_id: str) -> PendingLessonSdWork | None:
         device_id = _normalize_device_id(device_id)
@@ -201,23 +324,62 @@ class RedisLessonSdPendingStore:
         )
         return [_decode_member(member) for member in members if _decode_member(member)]
 
-    async def clear(self, device_id: str, cache_keys: Iterable[str]) -> None:
+    async def claim_due(self, *, limit: int) -> list[str]:
+        limit = max(0, int(limit or 0))
+        if limit <= 0:
+            return []
+        lease_score = self._clock() + self.lease_sec
+        claimed = await self._eval_claim_due(limit, lease_score)
+        if claimed is not None:
+            return claimed
+        members = await self.redis.zrangebyscore(
+            self._due_key(), "-inf", self._clock(), start=0, num=limit
+        )
+        claimed = []
+        for member in members:
+            device_id = _decode_member(member)
+            if not device_id:
+                continue
+            if await self.load(device_id) is None:
+                await self.redis.zrem(self._due_key(), device_id)
+                await self.redis.zrem(self._created_key(), device_id)
+                continue
+            await self.redis.zadd(self._due_key(), {device_id: lease_score})
+            claimed.append(device_id)
+        return claimed
+
+    async def clear(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_cache_keys: Iterable[str] | None = None,
+    ) -> None:
         device_id = _normalize_device_id(device_id)
         keys = set(normalize_cache_keys(cache_keys))
         if not device_id or not keys:
             return
+        if await self._eval_clear(device_id, keys, normalize_cache_keys(expected_cache_keys)):
+            return
         existing = await self.load(device_id)
         if existing is None:
             return
+        expected = normalize_cache_keys(expected_cache_keys)
+        expected_matches = bool(expected) and existing["cacheKeys"] == expected
         remaining = [key for key in existing["cacheKeys"] if key not in keys]
         if not remaining:
+            if expected and not expected_matches:
+                return
             await self.redis.delete(self._key(device_id))
             await self.redis.zrem(self._due_key(), device_id)
+            await self.redis.zrem(self._created_key(), device_id)
             return
         existing["cacheKeys"] = remaining
         await self.redis.set(self._key(device_id), json.dumps(existing, separators=(",", ":")), ex=self.ttl_sec)
         await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(existing["nextAttemptAt"])})
+        await self.redis.zadd(self._created_key(), {device_id: epoch_from_iso(existing["createdAt"])})
         await self.redis.expire(self._due_key(), self.ttl_sec)
+        await self.redis.expire(self._created_key(), self.ttl_sec)
 
     async def snapshot(self) -> dict[str, PendingLessonSdWork]:
         members = await self.redis.zrangebyscore(
@@ -232,6 +394,12 @@ class RedisLessonSdPendingStore:
         return out
 
     def metrics(self) -> dict[str, int]:
+        zsets = getattr(self.redis, "zsets", None)
+        if isinstance(zsets, dict):
+            created = zsets.get(self._created_key(), {})
+            if created:
+                oldest = min(float(score) for score in created.values())
+                return {"lesson_sd_pending_age_seconds": max(0, int(self._clock() - oldest))}
         return {"lesson_sd_pending_age_seconds": 0}
 
     def _key(self, device_id: str) -> str:
@@ -239,6 +407,71 @@ class RedisLessonSdPendingStore:
 
     def _due_key(self) -> str:
         return _due_key(self.namespace)
+
+    def _created_key(self) -> str:
+        return f"{self.namespace}:lesson-sd-pending:created"
+
+    async def _eval_mark(
+        self,
+        device_id: str,
+        cache_keys: list[str],
+        work: PendingLessonSdWork,
+    ) -> bool:
+        eval_fn = getattr(self.redis, "eval", None)
+        if not callable(eval_fn):
+            return False
+        await eval_fn(
+            _MARK_LUA,
+            3,
+            self._key(device_id),
+            self._due_key(),
+            self._created_key(),
+            device_id,
+            json.dumps(cache_keys, separators=(",", ":")),
+            utc_iso(self._clock()),
+            json.dumps(work, separators=(",", ":")),
+            str(epoch_from_iso(work["nextAttemptAt"])),
+            str(epoch_from_iso(work["createdAt"])),
+            str(self.ttl_sec),
+        )
+        return True
+
+    async def _eval_clear(
+        self,
+        device_id: str,
+        cache_keys: set[str],
+        expected_cache_keys: list[str],
+    ) -> bool:
+        eval_fn = getattr(self.redis, "eval", None)
+        if not callable(eval_fn):
+            return False
+        await eval_fn(
+            _CLEAR_LUA,
+            3,
+            self._key(device_id),
+            self._due_key(),
+            self._created_key(),
+            device_id,
+            json.dumps(sorted(cache_keys), separators=(",", ":")),
+            json.dumps(expected_cache_keys, separators=(",", ":")),
+            str(self.ttl_sec),
+        )
+        return True
+
+    async def _eval_claim_due(self, limit: int, lease_score: float) -> list[str] | None:
+        eval_fn = getattr(self.redis, "eval", None)
+        if not callable(eval_fn):
+            return None
+        members = await eval_fn(
+            _CLAIM_DUE_LUA,
+            1,
+            self._due_key(),
+            str(self._clock()),
+            str(int(limit)),
+            str(lease_score),
+            self.namespace,
+        )
+        return [_decode_member(member) for member in members if _decode_member(member)]
 
 
 def create_lesson_sd_pending_store() -> LessonSdPendingStore:
@@ -258,6 +491,7 @@ def create_lesson_sd_pending_store() -> LessonSdPendingStore:
             redis_asyncio.from_url(redis_url, decode_responses=True),
             namespace=os.getenv("TBOT_LIVE_REDIS_NAMESPACE", "prod"),
             ttl_sec=_int_env("LESSON_SD_PENDING_TTL_SEC", LESSON_SD_PENDING_TTL_SEC),
+            lease_sec=_int_env("LESSON_SD_PENDING_LEASE_SEC", LESSON_SD_PENDING_LEASE_SEC),
         )
     if env in {"prod", "production"} and not allow_memory:
         raise RuntimeError("Redis is required for durable lesson SD pending work in production")

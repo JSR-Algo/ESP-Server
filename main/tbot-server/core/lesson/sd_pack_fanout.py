@@ -181,12 +181,13 @@ async def fanout_sd_pack_sync(
             return {"kind": "offline", "deviceId": device_id}
         async with sem:
             try:
-                result = await _sync_and_callback(
+                result = await _sync_callback_and_update_pending(
                     conn,
                     config or {},
                     backend_device_id=device_id,
                     cache_keys=pack_keys,
                     only_cache_keys=only_keys,
+                    store=selected_store,
                 )
             except Exception as exc:
                 return {
@@ -213,14 +214,13 @@ async def fanout_sd_pack_sync(
 
             packs_total = _nonnegative_int((result or {}).get("packs"))
             failed_count = _nonnegative_int((result or {}).get("failed"))
-            synced_count = _nonnegative_int((result or {}).get("synced"))
+            synced_count = len((result or {}).get("clearedCacheKeys") or [])
             entry = {
                 "deviceId": device_id,
                 "ok": failed_count == 0 and packs_total > 0,
                 "result": result,
             }
             if entry["ok"] or synced_count > 0:
-                await selected_store.clear(device_id, pack_keys)
                 _log_outcome("sync_complete", device_id, pack_keys)
                 return {"kind": "synced", "entry": entry, "retry": False}
             return {"kind": "failed", "entry": entry, "retry": True}
@@ -310,21 +310,17 @@ async def drain_pending_for_connection(
         device_id,
         keys if keys else [ALL_PACKS_MARKER],
     )
-    result = await _sync_and_callback(
+    result = await _sync_callback_and_update_pending(
         conn,
         getattr(conn, "config", {}) or {},
         backend_device_id=device_id,
         cache_keys=keys,
         only_cache_keys=only,
+        store=selected_store,
     )
-    failed_count = _nonnegative_int((result or {}).get("failed"))
-    packs_total = _nonnegative_int((result or {}).get("packs"))
-    synced_count = _nonnegative_int((result or {}).get("synced"))
-    if failed_count == 0 and (packs_total > 0 or synced_count > 0):
-        await selected_store.clear(device_id, keys)
+    if result.get("clearedCacheKeys"):
         _log_outcome("sync_complete", device_id, keys)
     else:
-        await selected_store.mark(device_id, keys)
         _log_outcome("retry_wait", device_id, keys)
     return result
 
@@ -338,7 +334,7 @@ async def _resolve_backend_device_id_for_conn(conn: Any, config: dict[str, Any])
         return None
     base_url = _backend_base_url(config)
     if not base_url:
-        return raw_device_id
+        return None if _looks_like_mac(raw_device_id) else raw_device_id
     try:
         from config.device_token_client import resolve_device_identity
 
@@ -347,9 +343,9 @@ async def _resolve_backend_device_id_for_conn(conn: Any, config: dict[str, Any])
                 client, base_url, raw_device_id, logger=None
             )
     except Exception:
-        return raw_device_id
+        return None if _looks_like_mac(raw_device_id) else raw_device_id
     if not backend_device_id:
-        return raw_device_id
+        return None if _looks_like_mac(raw_device_id) else raw_device_id
     with suppress(Exception):
         conn._lesson_sd_backend_device_id = str(backend_device_id)
     return str(backend_device_id)
@@ -365,34 +361,42 @@ async def _resolve_online_connections(
 
     index = online_index or LessonSdOnlineIndex(api_base=_backend_base_url(config))
     resolved: dict[str, Any] = {}
-    for key, conn in connections.items():
+    for _key, conn in connections.items():
         backend_id = await index.resolve_and_upsert(conn)
-        resolved[str(backend_id or key)] = conn
+        if backend_id:
+            resolved[str(backend_id)] = conn
     return resolved
 
 
-async def _sync_and_callback(
+async def _sync_callback_and_update_pending(
     conn: Any,
     config: dict[str, Any],
     *,
     backend_device_id: str,
     cache_keys: Iterable[str],
     only_cache_keys: set[str] | None,
+    store: LessonSdPendingStore,
 ) -> dict[str, Any]:
-    result = await sync_cached_lesson_assets_to_sd(conn, only_cache_keys=only_cache_keys)
-    failed_count = _nonnegative_int((result or {}).get("failed"))
-    packs_total = _nonnegative_int((result or {}).get("packs"))
-    synced_count = _nonnegative_int((result or {}).get("synced"))
-    if failed_count != 0 or (packs_total <= 0 and synced_count <= 0):
-        return result
     keys = normalize_cache_keys(cache_keys)
-    if keys:
-        await _post_sync_results(
-            config,
-            backend_device_id=backend_device_id,
-            cache_keys=keys,
-            sync_result=result,
-        )
+    try:
+        result = await sync_cached_lesson_assets_to_sd(conn, only_cache_keys=only_cache_keys)
+    except Exception:
+        await store.mark(backend_device_id, keys)
+        raise
+    cleared, retained, errors = await _post_per_cache_results(
+        config,
+        backend_device_id=backend_device_id,
+        cache_keys=keys,
+        sync_result=result,
+    )
+    if cleared:
+        await store.clear(backend_device_id, cleared, expected_cache_keys=keys)
+    if retained:
+        await store.mark(backend_device_id, retained)
+    result["clearedCacheKeys"] = cleared
+    result["retainedCacheKeys"] = retained
+    if errors:
+        raise errors[0]
     return result
 
 
@@ -403,29 +407,53 @@ async def _post_sync_results(
     cache_keys: list[str],
     sync_result: dict[str, Any],
 ) -> None:
+    _cleared, _retained, errors = await _post_per_cache_results(
+        config,
+        backend_device_id=backend_device_id,
+        cache_keys=cache_keys,
+        sync_result=sync_result,
+    )
+    if errors:
+        raise errors[0]
+
+async def _post_per_cache_results(
+    config: dict[str, Any],
+    *,
+    backend_device_id: str,
+    cache_keys: list[str],
+    sync_result: dict[str, Any],
+) -> tuple[list[str], list[str], list[Exception]]:
+    cleared: list[str] = []
+    retained: list[str] = []
+    errors: list[Exception] = []
+    per_cache = _results_by_cache_key(sync_result, cache_keys)
+    for cache_key in cache_keys:
+        result = _dto_from_cache_result(backend_device_id, cache_key, per_cache.get(cache_key))
+        ready_for_clear = result["ready"] and result["criticalFailedCount"] == 0
+        try:
+            await _post_one_sync_result(config, result=result)
+        except Exception as exc:
+            retained.append(cache_key)
+            errors.append(exc)
+            continue
+        if ready_for_clear:
+            cleared.append(cache_key)
+        else:
+            retained.append(cache_key)
+    return cleared, normalize_cache_keys(retained), errors
+
+async def _post_one_sync_result(config: dict[str, Any], *, result: dict[str, Any]) -> None:
     base_url = _backend_base_url(config)
     mint_secret = os.getenv("TBOT_DEVICE_MINT_SECRET", "")
     if not base_url or not mint_secret:
         raise RuntimeError("lesson SD sync result callback not configured")
-    downloaded = _nonnegative_int(sync_result.get("synced"))
-    failed = _nonnegative_int(sync_result.get("failed"))
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        for cache_key in cache_keys:
-            await post_lesson_sd_sync_result(
-                client,
-                base_url,
-                {
-                    "deviceId": backend_device_id,
-                    "cacheKey": cache_key,
-                    "downloadedCount": downloaded,
-                    "skippedCount": 0,
-                    "failedCount": failed,
-                    "criticalFailedCount": failed,
-                    "ready": failed == 0,
-                    "errorCode": "" if failed == 0 else "SD_SYNC_FAILED",
-                },
-                mint_secret=mint_secret,
-            )
+        await post_lesson_sd_sync_result(
+            client,
+            base_url,
+            result,
+            mint_secret=mint_secret,
+        )
 
 
 def _backend_base_url(config: dict[str, Any]) -> str:
@@ -452,6 +480,59 @@ def _stable_error_message(exc: Exception) -> str:
         return type(exc).__name__
     return message.splitlines()[0][:160]
 
+
+def _results_by_cache_key(sync_result: dict[str, Any], cache_keys: list[str]) -> dict[str, Any]:
+    raw = sync_result.get("resultsByCacheKey") if isinstance(sync_result, dict) else None
+    if isinstance(raw, dict):
+        return {str(key): value for key, value in raw.items()}
+    return dict.fromkeys(cache_keys, sync_result)
+
+def _dto_from_cache_result(
+    backend_device_id: str,
+    cache_key: str,
+    result: Any,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        result = {}
+    critical_failed = _bounded_count(result.get("criticalFailedCount"))
+    failed = _bounded_count(result.get("failedCount"))
+    ready = bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+    body = {
+        "deviceId": str(backend_device_id or "").strip(),
+        "cacheKey": str(cache_key or "").strip(),
+        "downloadedCount": _bounded_count(result.get("downloadedCount")),
+        "skippedCount": _bounded_count(result.get("skippedCount")),
+        "failedCount": failed,
+        "criticalFailedCount": critical_failed,
+        "ready": ready,
+    }
+    error_code = _stable_error_code(result.get("errorCode"))
+    if error_code:
+        body["errorCode"] = error_code
+    return body
+
+def _bounded_count(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(parsed, 1_000_000))
+
+def _stable_error_code(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in raw)[:80]
+
+def _looks_like_mac(value: str) -> bool:
+    compact = str(value or "").strip().replace("-", ":")
+    parts = compact.split(":")
+    if len(parts) != 6:
+        return False
+    return all(
+        len(part) == 2 and all(ch in "0123456789abcdefABCDEF" for ch in part)
+        for part in parts
+    )
 
 def _log_outcome(outcome: str, backend_device_id: str, cache_keys: Iterable[str]) -> None:
     for cache_key in cache_keys:

@@ -131,3 +131,51 @@ async def test_pending_age_metric_reports_oldest_due_age_seconds():
     clock.epoch += 90
 
     assert store.metrics()["lesson_sd_pending_age_seconds"] == 90
+
+
+@pytest.mark.asyncio
+async def test_redis_claim_due_is_exclusive_and_leases_before_transfer():
+    redis = FakeRedis()
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(
+        redis,
+        namespace="ns",
+        ttl_sec=123,
+        lease_sec=30,
+        clock=clock,
+        random=lambda: 0.0,
+    )
+    await store.mark("dev-1", {"lesson-a/v1"})
+    clock.epoch += 2
+
+    assert await store.claim_due(limit=10) == ["dev-1"]
+    assert await store.claim_due(limit=10) == []
+    assert redis.zsets["ns:lesson-sd-pending:due"]["dev-1"] == 1_700_000_032
+
+
+@pytest.mark.asyncio
+async def test_redis_metrics_reports_oldest_pending_age_after_restart():
+    redis = FakeRedis()
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
+    await store.mark("newer", {"lesson-b/v1"})
+    clock.epoch += 40
+    await store.mark("older", {"lesson-a/v1"})
+    clock.epoch += 50
+
+    reloaded = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
+
+    assert reloaded.metrics()["lesson_sd_pending_age_seconds"] == 90
+
+
+@pytest.mark.asyncio
+async def test_redis_atomic_clear_does_not_erase_newly_marked_key():
+    redis = FakeRedis()
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
+    await store.mark("dev-1", {"lesson-a/v1"})
+
+    await store.clear("dev-1", {"lesson-a/v1"}, expected_cache_keys={"lesson-a/v1"})
+    await store.mark("dev-1", {"lesson-b/v1"})
+
+    assert (await store.load("dev-1"))["cacheKeys"] == ["lesson-b/v1"]
