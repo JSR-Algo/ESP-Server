@@ -17,6 +17,8 @@ from core.lesson.esp_build_identity import (
     approved_identities_from_config,
     esp_build_identity_metrics_fields,
 )
+from core.lesson.sd_pack_fanout import get_pending_store
+from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryWorker
 
 TAG = __name__
 
@@ -33,6 +35,21 @@ class SimpleHttpServer:
             lesson_connections if lesson_connections is not None else {},
         )
         self.lesson_connections = lesson_connections if lesson_connections is not None else {}
+        self.lesson_sd_pending_store = get_pending_store()
+        lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+        server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
+        if not isinstance(lesson_cfg, dict):
+            lesson_cfg = {}
+        if not isinstance(server_cfg, dict):
+            server_cfg = {}
+        self.lesson_sd_online_index = LessonSdOnlineIndex(
+            api_base=str(lesson_cfg.get("api_base") or server_cfg.get("api_url") or "").rstrip("/")
+        )
+        self.lesson_sd_retry_worker = LessonSdRetryWorker(
+            self.lesson_sd_pending_store,
+            self.lesson_sd_online_index,
+            connections=self.lesson_connections,
+        )
         self.lesson_nudge_handler = LessonNudgeHandler(
             config,
             self.lesson_connections,
@@ -44,6 +61,8 @@ class SimpleHttpServer:
         self.lesson_sd_fanout_handler = LessonSdFanoutHandler(
             config,
             self.lesson_connections,
+            pending_store=self.lesson_sd_pending_store,
+            online_index=self.lesson_sd_online_index,
         )
         self.lesson_sd_evict_handler = LessonSdEvictHandler(
             config,
@@ -173,10 +192,14 @@ class SimpleHttpServer:
                 await runner.setup()
                 site = web.TCPSite(runner, host, port)
                 await site.start()
+                self.lesson_sd_retry_worker.start()
 
                 # Keep service running
-                while True:
-                    await asyncio.sleep(3600)  # Every 1 Check once per hour
+                try:
+                    while True:
+                        await asyncio.sleep(3600)  # Every 1 Check once per hour
+                finally:
+                    await self.lesson_sd_retry_worker.stop()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"HTTP server start failed: {e}")
             import traceback

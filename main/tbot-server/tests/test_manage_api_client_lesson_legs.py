@@ -91,6 +91,9 @@ class _RecordingClient:
             raise AssertionError("client.request called more times than queued responses")
         return self._responses.pop(0)
 
+    async def post(self, url, **kwargs):
+        return await self.request("POST", url, **kwargs)
+
     @property
     def last(self):
         return self.calls[-1]
@@ -433,6 +436,48 @@ class PostPreloadStatusContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.last["json"],
             {"assignmentId": "a1", "assetId": "a2", "state": "FAILED"},
+        )
+
+class PostLessonSdSyncResultContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pins_internal_device_result_endpoint_mint_secret_and_counts(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": True}})])
+
+        data = await MAC.post_lesson_sd_sync_result(
+            client,
+            BASE,
+            {
+                "deviceId": "device-uuid-9",
+                "cacheKey": "lesson-a/v1-aaa",
+                "downloadedCount": 1,
+                "skippedCount": -3,
+                "failedCount": "0",
+                "criticalFailedCount": None,
+                "ready": True,
+                "errorCode": "bad code/token=secret",
+            },
+            mint_secret="mint-secret",
+        )
+
+        self.assertEqual(data, {"accepted": True})
+        self.assertEqual(client.last["method"], "POST")
+        self.assertEqual(
+            client.last["url"],
+            "http://backend.test/v1/internal/lesson-asset-sync/device-result",
+        )
+        self.assertEqual(client.last["headers"]["Accept"], "application/json")
+        self.assertEqual(client.last["headers"]["X-Mint-Secret"], "mint-secret")
+        self.assertEqual(
+            client.last["json"],
+            {
+                "deviceId": "device-uuid-9",
+                "cacheKey": "lesson-a/v1-aaa",
+                "downloadedCount": 1,
+                "skippedCount": 0,
+                "failedCount": 0,
+                "criticalFailedCount": 0,
+                "ready": True,
+                "errorCode": "bad_code_token_secret",
+            },
         )
 
 if __name__ == "__main__":
