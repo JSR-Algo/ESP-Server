@@ -8,9 +8,9 @@ from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
-from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.vision_handler import VisionHandler
 from core.lesson.esp_build_identity import (
@@ -74,7 +74,6 @@ class SimpleHttpServer:
     async def start(self):
         try:
             server_config = self.config["server"]
-            read_config_from_api = self.config.get("read_config_from_api", False)
             host = server_config.get("ip", "0.0.0.0")
             port = int(server_config.get("http_port", 8003))
 
@@ -187,7 +186,7 @@ class SimpleHttpServer:
 
     def _preload_voice_alarm_snapshots(self):
         devices = []
-        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections):
             connection = self.lesson_connections.get(device_id)
             alarm = getattr(connection, "lesson_voice_alarm", None)
             if alarm is None or not hasattr(alarm, "snapshot"):
@@ -244,7 +243,7 @@ class SimpleHttpServer:
         safety_forwarder_dropped_total = 0
         alarms = 0
 
-        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections):
             connection = self.lesson_connections.get(device_id)
             runtime = getattr(connection, "lesson_runtime", None)
             forwarder = getattr(runtime, "forwarder", None)
