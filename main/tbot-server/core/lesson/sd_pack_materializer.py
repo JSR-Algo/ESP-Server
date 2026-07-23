@@ -155,35 +155,41 @@ async def materialize_lesson_sd_pack(
 ) -> Dict[str, Any]:
     start = time.monotonic()
     log = logger or setup_logging()
-    normalized = _validate_manifest(manifest, config)
-    store = _shared_store(config)
-    cache_key = normalized["cacheKey"]
-    if store.is_pack_ready(cache_key):
-        replay_status = _replay_status(store, normalized)
-        if replay_status == "match":
-            _METRICS["replayed"] += 1
-            result = _result(cache_key, len(normalized["assets"]), 0, len(normalized["assets"]))
-            _log(log, "info", cache_key, 0, start, "replayed", None)
-            return result
-        if replay_status == "mismatch":
-            _METRICS["rejected"] += 1
-            error = MaterializationError(
-                "PACK_REPLAY_MISMATCH",
-                409,
-                False,
-                "READY lesson asset pack does not match manifest",
-            )
-            _log(log, "warning", cache_key, 0, start, "rejected", error.code)
-            raise error
-
-    pinned_addresses = await _attest_manifest_urls(normalized, resolver)
-    own_client = client is None
-    http_client = client or _pinned_async_client(pinned_addresses)
-    staging_root = _staging_root(config, store)
-    staging = Path(tempfile.mkdtemp(prefix=".materialize-", dir=str(staging_root)))
-    downloaded: Dict[str, tuple[Path, str]] = {}
+    cache_key = _safe_cache_key_for_log(manifest)
+    own_client = False
+    http_client = None
+    staging: Optional[Path] = None
     total_bytes = 0
     try:
+        normalized = _validate_manifest(manifest, config)
+        cache_key = normalized["cacheKey"]
+        store = _shared_store(config)
+        if store.is_pack_ready(cache_key):
+            replay_status = _replay_status(store, normalized)
+            if replay_status == "match":
+                _METRICS["replayed"] += 1
+                result = _result(
+                    cache_key,
+                    len(normalized["assets"]),
+                    0,
+                    len(normalized["assets"]),
+                )
+                _log(log, "info", cache_key, 0, start, "replayed", None)
+                return result
+            if replay_status == "mismatch":
+                raise MaterializationError(
+                    "PACK_REPLAY_MISMATCH",
+                    409,
+                    False,
+                    "READY lesson asset pack does not match manifest",
+                )
+
+        pinned_addresses = await _attest_manifest_urls(normalized, resolver)
+        own_client = client is None
+        http_client = client or _pinned_async_client(pinned_addresses)
+        staging_root = _staging_root(config, store)
+        staging = Path(tempfile.mkdtemp(prefix=".materialize-", dir=str(staging_root)))
+        downloaded: Dict[str, tuple[Path, str]] = {}
         for asset in normalized["assets"]:
             path, count = await _download_asset(
                 http_client,
@@ -204,19 +210,18 @@ async def materialize_lesson_sd_pack(
         _log(log, "info", cache_key, total_bytes, start, "accepted", None)
         return result
     except asyncio.CancelledError:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
         _log(log, "warning", cache_key, total_bytes, start, "cancelled", "CANCELLED")
         raise
     except MaterializationError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        _METRICS["rejected"] += 1
-        if exc.code == "CHECKSUM_MISMATCH":
-            _METRICS["checksum_failures"] += 1
-        _log(log, "warning", cache_key, total_bytes, start, "rejected", exc.code)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        _record_rejected(log, cache_key, total_bytes, start, exc, level="warning")
         raise
     except Exception as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        _METRICS["rejected"] += 1
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
         error = MaterializationError(
             "STORAGE_ERROR",
             500,
@@ -224,17 +229,40 @@ async def materialize_lesson_sd_pack(
             "Failed to materialize lesson asset pack",
             {"type": type(exc).__name__},
         )
-        _log(log, "error", cache_key, total_bytes, start, "rejected", error.code)
+        _record_rejected(log, cache_key, total_bytes, start, error, level="error")
         raise error from exc
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
-        if own_client:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        if own_client and http_client is not None:
             await http_client.aclose()
 
 
 def materialization_metrics() -> Dict[str, int]:
     return dict(_METRICS)
 
+
+def _record_rejected(
+    logger: Any,
+    cache_key: str,
+    byte_count: int,
+    start: float,
+    error: MaterializationError,
+    *,
+    level: str,
+) -> None:
+    _METRICS["rejected"] += 1
+    if error.code == "CHECKSUM_MISMATCH":
+        _METRICS["checksum_failures"] += 1
+    _log(logger, level, cache_key, byte_count, start, "rejected", error.code)
+
+def _safe_cache_key_for_log(manifest: Any) -> str:
+    if not isinstance(manifest, Mapping):
+        return ""
+    try:
+        return validate_cache_key(manifest.get("cacheKey"))
+    except Exception:
+        return ""
 
 async def _download_asset(
     client: Any,

@@ -11,6 +11,7 @@ import pytest
 from core.lesson.sd_pack_materializer import (
     MaterializationError,
     _PinnedAddressAsyncNetworkBackend,
+    _METRICS,
     materialize_lesson_sd_pack,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
@@ -101,6 +102,24 @@ class _Connector:
 
     async def sleep(self, seconds):
         return None
+
+
+class _Logger:
+    def __init__(self):
+        self.entries = []
+
+    def bind(self, **kwargs):
+        self.entries.append(("bind", kwargs))
+        return self
+
+    def warning(self, message):
+        self.entries.append(("warning", message))
+
+    def error(self, message):
+        self.entries.append(("error", message))
+
+    def info(self, message):
+        self.entries.append(("info", message))
 
 
 def _manifest(**overrides):
@@ -584,6 +603,85 @@ async def test_url_credentials_are_rejected_without_leaking_secret(tmp_path):
 
     assert exc_info.value.code == "INVALID_URL"
     assert "private-token" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate", "code", "secret"),
+    [
+        (lambda manifest: manifest.update({"unexpected": "private-token"}), "UNKNOWN_FIELD", "private-token"),
+        (
+            lambda manifest: manifest["assets"][0].update(
+                {"sdPath": "sd://private-token/tbot/lesson-assets/bad"}
+            ),
+            "INVALID_SD_PATH",
+            "private-token",
+        ),
+        (
+            lambda manifest: manifest["assets"][0].update(
+                {"onlineUrl": "https://evil.example/poster.jpg?sig=private-token"}
+            ),
+            "DISALLOWED_ORIGIN",
+            "private-token",
+        ),
+    ],
+)
+async def test_early_rejections_are_counted_once_and_logged_safely(
+    tmp_path,
+    mutate,
+    code,
+    secret,
+):
+    before = dict(_METRICS)
+    logger = _Logger()
+    manifest = _manifest()
+    mutate(manifest)
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            manifest,
+            config=_config(tmp_path),
+            client=_Client({}),
+            logger=logger,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == code
+    assert _METRICS["rejected"] == before["rejected"] + 1
+    assert _METRICS["checksum_failures"] == before["checksum_failures"]
+    binds = [entry for kind, entry in logger.entries if kind == "bind"]
+    assert binds[-1]["cacheKey"] == CACHE_KEY
+    assert binds[-1]["result"] == "rejected"
+    assert binds[-1]["errorCode"] == code
+    joined = json.dumps(logger.entries, sort_keys=True)
+    assert secret not in joined
+    assert "sig=" not in joined
+    assert "https://evil.example" not in joined
+
+
+@pytest.mark.asyncio
+async def test_private_dns_rejection_is_counted_once_and_does_not_log_private_ip(tmp_path):
+    before = dict(_METRICS)
+    logger = _Logger()
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=_Client({}),
+            logger=logger,
+            resolver=_private_resolver,
+        )
+
+    assert exc_info.value.code == "PRIVATE_ADDRESS"
+    assert _METRICS["rejected"] == before["rejected"] + 1
+    assert _METRICS["checksum_failures"] == before["checksum_failures"]
+    binds = [entry for kind, entry in logger.entries if kind == "bind"]
+    assert binds[-1]["cacheKey"] == CACHE_KEY
+    assert binds[-1]["result"] == "rejected"
+    assert binds[-1]["errorCode"] == "PRIVATE_ADDRESS"
+    joined = json.dumps(logger.entries, sort_keys=True)
+    assert "10.0.0.7" not in joined
 
 
 @pytest.mark.asyncio
