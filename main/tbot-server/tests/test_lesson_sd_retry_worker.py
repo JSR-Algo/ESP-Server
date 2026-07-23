@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.lesson import sd_pack_fanout
 from core.lesson.sd_pack_pending_store import InMemoryLessonSdPendingStore
 from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryWorker
 
@@ -48,7 +49,7 @@ async def test_worker_retries_online_due_without_reconnect_and_respects_batch(mo
 
 
 @pytest.mark.asyncio
-async def test_worker_retains_pending_on_sync_or_callback_failure(monkeypatch):
+async def test_worker_does_not_mutate_pending_when_invoked_drain_raises(monkeypatch):
     clock = Clock()
     store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
     await store.mark("uuid-1", {"lesson-a/v1"})
@@ -65,7 +66,31 @@ async def test_worker_retains_pending_on_sync_or_callback_failure(monkeypatch):
 
     assert result == {"checked": 1, "retried": 0, "skippedOffline": 0}
     assert (await store.load("uuid-1"))["cacheKeys"] == ["lesson-a/v1"]
-    assert (await store.load("uuid-1"))["attemptCount"] == 2
+    assert (await store.load("uuid-1"))["attemptCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_sync_exception_is_marked_once_by_drain_helper(monkeypatch):
+    clock = Clock()
+    store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
+    await store.mark("uuid-1", {"lesson-a/v1"})
+    clock.epoch += 3
+
+    async def fail_sync(*_args, **_kwargs):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", fail_sync)
+
+    index = LessonSdOnlineIndex()
+    index.upsert("uuid-1", SimpleNamespace(device_id="uuid-1", config={}))
+
+    result = await LessonSdRetryWorker(store, index, batch_size=10).run_once()
+
+    pending = await store.load("uuid-1")
+    assert result == {"checked": 1, "retried": 0, "skippedOffline": 0}
+    assert pending["cacheKeys"] == ["lesson-a/v1"]
+    assert pending["attemptCount"] == 2
+    assert pending["nextAttemptAt"] == "2023-11-14T22:13:25Z"
 
 
 @pytest.mark.asyncio

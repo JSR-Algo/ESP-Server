@@ -130,7 +130,8 @@ class LessonSdRetryWorker:
                     backend_device_id=backend_device_id,
                 )
             except Exception:
-                await self.store.mark(backend_device_id, pending["cacheKeys"])
+                # drain_pending_for_connection owns pending clear/mark decisions
+                # once invoked, including transfer exceptions and callback failures.
                 continue
             retried += 1
         return {"checked": checked, "retried": retried, "skippedOffline": skipped}
