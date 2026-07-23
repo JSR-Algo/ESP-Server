@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from aiohttp import web
 
 from core.api.lesson_nudge_handler import LessonNudgeHandler
@@ -24,7 +26,17 @@ class LessonSdMaterializeHandler:
 
         try:
             body = await request.json()
-        except Exception:
+        except web.HTTPRequestEntityTooLarge:
+            return web.json_response(
+                {
+                    "error": "REQUEST_ENTITY_TOO_LARGE",
+                    "message": "Request body is too large",
+                    "retryable": False,
+                    "details": {},
+                },
+                status=413,
+            )
+        except (json.JSONDecodeError, ValueError, TypeError):
             return web.json_response(
                 {
                     "error": "INVALID_REQUEST",

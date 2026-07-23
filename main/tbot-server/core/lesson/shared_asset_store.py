@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
-import hashlib
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import shutil
 import threading
 import uuid
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Set
+from typing import Any
 from urllib.parse import quote
-
 
 FailureHook = Callable[[str, Path], None]
 
+
+PACK_COMMIT_ACCEPTED = "accepted"
+PACK_COMMIT_REPLAYED = "replayed"
+
+class PackReplayMismatchError(ValueError):
+    pass
 
 class SharedAssetStore:
     """Store verified bytes once and expose versioned lesson pack entries.
@@ -27,7 +33,7 @@ class SharedAssetStore:
     the underlying asset bytes.
     """
 
-    _active_parts: Set[str] = set()
+    _active_parts: set[str] = set()
     _active_parts_lock = threading.RLock()
 
     def __init__(
@@ -35,7 +41,7 @@ class SharedAssetStore:
         root: Any,
         *,
         pack_root: Any = None,
-        failure_hook: Optional[FailureHook] = None,
+        failure_hook: FailureHook | None = None,
         cleanup_on_init: bool = True,
     ) -> None:
         self.root = Path(root).resolve()
@@ -106,36 +112,48 @@ class SharedAssetStore:
         cache_key: str,
         assets: Mapping[str, str],
         *,
-        manifest: Optional[Mapping[str, Any]] = None,
+        manifest: Mapping[str, Any] | None = None,
+        return_status: bool = False,
     ) -> Path:
         with self._gc_lock(exclusive=False):
-            return self._commit_pack_locked(cache_key, assets, manifest=manifest)
+            path, status = self._commit_pack_locked(cache_key, assets, manifest=manifest)
+            return (path, status) if return_status else path
 
     def _commit_pack_locked(
         self,
         cache_key: str,
         assets: Mapping[str, str],
         *,
-        manifest: Optional[Mapping[str, Any]] = None,
-    ) -> Path:
+        manifest: Mapping[str, Any] | None = None,
+    ) -> tuple[Path, str]:
         pack_dir = self._pack_dir(cache_key)
         with self._pack_lock(cache_key, exclusive=True):
             self._recover_pack_unlocked(cache_key)
-            staging = pack_dir.with_name(".{}.staging".format(pack_dir.name))
-            backup = pack_dir.with_name(".{}.backup".format(pack_dir.name))
+            rich_manifest = manifest is not None
+            normalized: dict[str, str] = {}
+            for key, digest in assets.items():
+                normalized[str(key)] = self._validate_digest(digest)
+            manifest = self._pack_manifest(cache_key, normalized, manifest)
+            if rich_manifest:
+                existing = self._ready_manifest_unlocked(pack_dir, cache_key)
+                if existing is not None:
+                    status = self._existing_ready_status(existing, manifest, normalized)
+                    if status == PACK_COMMIT_REPLAYED:
+                        return pack_dir, PACK_COMMIT_REPLAYED
+                    if status == "mismatch":
+                        raise PackReplayMismatchError("ready pack manifest mismatch")
+            staging = pack_dir.with_name(f".{pack_dir.name}.staging")
+            backup = pack_dir.with_name(f".{pack_dir.name}.backup")
             shutil.rmtree(staging, ignore_errors=True)
             staging.mkdir(parents=True, exist_ok=False)
             try:
-                normalized: Dict[str, str] = {}
                 for key, digest in assets.items():
                     digest = self._validate_digest(digest)
                     if not self._attest_unlocked(digest):
                         raise ValueError("cannot commit pack with unattested asset")
                     name = self._pack_asset_name(key)
                     self._atomic_link(staging / name, self.asset_path(digest))
-                    normalized[str(key)] = digest
 
-                manifest = self._pack_manifest(cache_key, normalized, manifest)
                 manifest_bytes = json.dumps(
                     manifest, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
@@ -163,14 +181,14 @@ class SharedAssetStore:
                 shutil.rmtree(backup, ignore_errors=True)
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
-        return pack_dir
+        return pack_dir, PACK_COMMIT_ACCEPTED
 
     def delete_pack(
         self,
         cache_key: str,
         *,
         sweep: bool = False,
-        protected_cache_keys: Set[str] = frozenset(),
+        protected_cache_keys: set[str] = frozenset(),
     ) -> list[str]:
         """Delete one pack under cross-process GC + per-pack exclusion."""
         with self._gc_lock(exclusive=True):
@@ -179,7 +197,7 @@ class SharedAssetStore:
                 if not pack_dir.exists():
                     return []
                 tombstone = pack_dir.with_name(
-                    ".{}.{}.gc".format(pack_dir.name, uuid.uuid4().hex)
+                    f".{pack_dir.name}.{uuid.uuid4().hex}.gc"
                 )
                 os.replace(str(pack_dir), str(tombstone))
                 self._fsync_dir(pack_dir.parent)
@@ -188,11 +206,11 @@ class SharedAssetStore:
                 return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
         return []
 
-    def sweep_unreferenced_cas(self, protected_cache_keys: Set[str] = frozenset()) -> list[str]:
+    def sweep_unreferenced_cas(self, protected_cache_keys: set[str] = frozenset()) -> list[str]:
         with self._gc_lock(exclusive=True):
             return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
 
-    def _sweep_unreferenced_cas_unlocked(self, protected: Set[str]) -> list[str]:
+    def _sweep_unreferenced_cas_unlocked(self, protected: set[str]) -> list[str]:
         reachable = set()
         if self.pack_root.exists():
             for manifest_path in self.pack_root.rglob("pack.json"):
@@ -240,15 +258,17 @@ class SharedAssetStore:
         cache_key: str,
         assets: Mapping[str, tuple[Any, str]],
         *,
-        manifest: Optional[Mapping[str, Any]] = None,
+        manifest: Mapping[str, Any] | None = None,
+        return_status: bool = False,
     ) -> Path:
         """Atomically lease all CAS inputs until the READY pack is committed."""
         with self._gc_lock(exclusive=False):
-            digests: Dict[str, str] = {}
+            digests: dict[str, str] = {}
             for key, (source, digest) in assets.items():
                 self._put_file_locked(source, digest)
                 digests[key] = digest
-            return self._commit_pack_locked(cache_key, digests, manifest=manifest)
+            path, status = self._commit_pack_locked(cache_key, digests, manifest=manifest)
+            return (path, status) if return_status else path
 
     def _materialize_pack_asset_locked(self, cache_key: str, key: str, digest: str) -> Path:
         digest = self._validate_digest(digest)
@@ -301,6 +321,68 @@ class SharedAssetStore:
             return True
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return False
+
+    def _ready_manifest_unlocked(
+        self,
+        pack_dir: Path,
+        cache_key: str,
+    ) -> dict[str, Any] | None:
+        try:
+            if not self._is_pack_dir_ready(pack_dir, cache_key):
+                return None
+            return json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _existing_ready_status(
+        self,
+        existing: Mapping[str, Any],
+        incoming: Mapping[str, Any],
+        staged_assets: Mapping[str, str],
+    ) -> str:
+        assets = existing.get("assets")
+        if isinstance(assets, dict):
+            return (
+                "historical-compatible"
+                if {str(key): str(value) for key, value in assets.items()} == dict(staged_assets)
+                else "mismatch"
+            )
+        if isinstance(assets, list):
+            return (
+                PACK_COMMIT_REPLAYED
+                if self._rich_manifest_projection(existing) == self._rich_manifest_projection(incoming)
+                else "mismatch"
+            )
+        return "mismatch"
+
+    @staticmethod
+    def _rich_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
+        assets = manifest.get("assets")
+        if not isinstance(assets, list):
+            return {}
+        return {
+            "cacheKey": manifest.get("cacheKey"),
+            "lessonId": manifest.get("lessonId"),
+            "lessonVersion": manifest.get("lessonVersion"),
+            "profile": manifest.get("profile"),
+            "manifestChecksum": manifest.get("manifestChecksum"),
+            "assets": sorted(
+                (
+                    {
+                        "key": asset.get("key"),
+                        "sha256": asset.get("sha256"),
+                        "size": asset.get("size"),
+                        "mediaType": asset.get("mediaType"),
+                        "critical": asset.get("critical"),
+                        "onlineUrl": asset.get("onlineUrl"),
+                        "sdPath": asset.get("sdPath"),
+                    }
+                    for asset in assets
+                    if isinstance(asset, Mapping)
+                ),
+                key=lambda asset: str(asset.get("key")),
+            ),
+        }
 
     def cleanup_parts(self) -> int:
         removed = 0
@@ -408,8 +490,8 @@ class SharedAssetStore:
 
     def _recover_pack_unlocked(self, cache_key: str) -> None:
         pack_dir = self._pack_dir(cache_key)
-        backup = pack_dir.with_name(".{}.backup".format(pack_dir.name))
-        staging = pack_dir.with_name(".{}.staging".format(pack_dir.name))
+        backup = pack_dir.with_name(f".{pack_dir.name}.backup")
+        staging = pack_dir.with_name(f".{pack_dir.name}.staging")
         pack_valid = self._is_pack_dir_ready(pack_dir, cache_key)
         backup_valid = self._is_pack_dir_ready(backup, cache_key)
         if pack_valid:
@@ -470,8 +552,8 @@ class SharedAssetStore:
         self,
         cache_key: str,
         assets: Mapping[str, str],
-        manifest: Optional[Mapping[str, Any]],
-    ) -> Dict[str, Any]:
+        manifest: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         if manifest is None:
             return {"cacheKey": cache_key, "assets": dict(assets)}
         if not isinstance(manifest, Mapping):
@@ -481,7 +563,7 @@ class SharedAssetStore:
         raw_assets = manifest.get("assets")
         if not isinstance(raw_assets, list):
             raise ValueError("manifest assets must be a list")
-        seen: Set[str] = set()
+        seen: set[str] = set()
         for item in raw_assets:
             if not isinstance(item, Mapping):
                 raise ValueError("invalid manifest asset")
@@ -507,7 +589,7 @@ class SharedAssetStore:
         return dict(manifest)
 
     @staticmethod
-    def _manifest_assets(manifest: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+    def _manifest_assets(manifest: Mapping[str, Any]) -> dict[str, str] | None:
         records = SharedAssetStore._manifest_asset_records(manifest)
         if records is None:
             return None
@@ -516,7 +598,7 @@ class SharedAssetStore:
     @staticmethod
     def _manifest_asset_records(
         manifest: Mapping[str, Any],
-    ) -> Optional[Dict[str, Dict[str, Any]]]:
+    ) -> dict[str, dict[str, Any]] | None:
         assets = manifest.get("assets")
         if isinstance(assets, dict):
             normalized = {}
@@ -546,7 +628,7 @@ class SharedAssetStore:
         return None
 
     @classmethod
-    def _manifest_digests(cls, manifest: Mapping[str, Any]) -> Set[str]:
+    def _manifest_digests(cls, manifest: Mapping[str, Any]) -> set[str]:
         assets = cls._manifest_assets(manifest)
         if not assets:
             return set()
@@ -570,7 +652,7 @@ class SharedAssetStore:
     @staticmethod
     def _temp_path(target: Path) -> Path:
         return target.with_name(
-            "{}.{}.{}.part".format(target.name, os.getpid(), uuid.uuid4().hex)
+            f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.part"
         )
 
     @staticmethod
@@ -584,10 +666,8 @@ class SharedAssetStore:
 
     @staticmethod
     def _safe_unlink(path: Path) -> None:
-        try:
+        with suppress(FileNotFoundError):
             path.unlink()
-        except FileNotFoundError:
-            pass
 
     def _notify(self, stage: str, path: Path) -> None:
         if self._failure_hook is not None:

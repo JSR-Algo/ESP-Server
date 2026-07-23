@@ -11,18 +11,23 @@ import shutil
 import socket
 import tempfile
 import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
-import httpx
 import httpcore
+import httpx
 from httpcore._backends.auto import AutoBackend
 
 from config.logger import setup_logging
 from core.lesson.cache_key_contract import CacheEvictionRefused, validate_cache_key
-from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.shared_asset_store import (
+    PACK_COMMIT_REPLAYED,
+    PackReplayMismatchError,
+    SharedAssetStore,
+)
 
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
@@ -58,14 +63,14 @@ class _PinnedAddressAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         self,
         pinned_addresses: Mapping[str, Iterable[str]],
         *,
-        delegate: Optional[httpcore.AsyncNetworkBackend] = None,
+        delegate: httpcore.AsyncNetworkBackend | None = None,
     ) -> None:
         self._pinned = {
             str(host): tuple(str(address) for address in addresses)
             for host, addresses in pinned_addresses.items()
         }
         self._delegate = delegate or AutoBackend()
-        self._next_index: Dict[str, int] = {}
+        self._next_index: dict[str, int] = {}
 
     async def connect_tcp(
         self,
@@ -129,14 +134,14 @@ class MaterializationError(Exception):
     status: int
     retryable: bool
     message: str = ""
-    details: Optional[Mapping[str, Any]] = None
+    details: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         super().__init__(self.message or self.code)
         self.message = self.message or self.code
         self.details = dict(self.details or {})
 
-    def to_response(self) -> Dict[str, Any]:
+    def to_response(self) -> dict[str, Any]:
         return {
             "error": self.code,
             "message": self.message,
@@ -151,14 +156,14 @@ async def materialize_lesson_sd_pack(
     config: Mapping[str, Any],
     client: Any = None,
     logger: Any = None,
-    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]] = None,
-) -> Dict[str, Any]:
+    resolver: Callable[[str], Awaitable[Iterable[str]]] | None = None,
+) -> dict[str, Any]:
     start = time.monotonic()
     log = logger or setup_logging()
     cache_key = _safe_cache_key_for_log(manifest)
     own_client = False
     http_client = None
-    staging: Optional[Path] = None
+    staging: Path | None = None
     total_bytes = 0
     try:
         normalized = _validate_manifest(manifest, config)
@@ -189,7 +194,7 @@ async def materialize_lesson_sd_pack(
         http_client = client or _pinned_async_client(pinned_addresses)
         staging_root = _staging_root(config, store)
         staging = Path(tempfile.mkdtemp(prefix=".materialize-", dir=str(staging_root)))
-        downloaded: Dict[str, tuple[Path, str]] = {}
+        downloaded: dict[str, tuple[Path, str]] = {}
         for asset in normalized["assets"]:
             path, count = await _download_asset(
                 http_client,
@@ -200,11 +205,17 @@ async def materialize_lesson_sd_pack(
             )
             total_bytes += count
             downloaded[asset["key"]] = (path, asset["sha256"])
-        store.put_files_and_commit_pack(
+        _pack_path, commit_status = store.put_files_and_commit_pack(
             cache_key,
             downloaded,
             manifest=_public_pack_manifest(normalized),
+            return_status=True,
         )
+        if commit_status == PACK_COMMIT_REPLAYED:
+            _METRICS["replayed"] += 1
+            result = _result(cache_key, len(normalized["assets"]), 0, len(normalized["assets"]))
+            _log(log, "info", cache_key, 0, start, "replayed", None)
+            return result
         _METRICS["accepted"] += 1
         result = _result(cache_key, len(normalized["assets"]), len(normalized["assets"]), 0)
         _log(log, "info", cache_key, total_bytes, start, "accepted", None)
@@ -219,6 +230,17 @@ async def materialize_lesson_sd_pack(
             shutil.rmtree(staging, ignore_errors=True)
         _record_rejected(log, cache_key, total_bytes, start, exc, level="warning")
         raise
+    except PackReplayMismatchError as exc:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        error = MaterializationError(
+            "PACK_REPLAY_MISMATCH",
+            409,
+            False,
+            "READY lesson asset pack does not match manifest",
+        )
+        _record_rejected(log, cache_key, total_bytes, start, error, level="warning")
+        raise error from exc
     except Exception as exc:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
@@ -238,7 +260,7 @@ async def materialize_lesson_sd_pack(
             await http_client.aclose()
 
 
-def materialization_metrics() -> Dict[str, int]:
+def materialization_metrics() -> dict[str, int]:
     return dict(_METRICS)
 
 
@@ -346,7 +368,7 @@ async def _download_asset(
     return target, count
 
 
-def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         raise _bad("INVALID_MANIFEST", "Manifest must be an object")
     _reject_field_delta(set(manifest.keys()), _TOP_LEVEL_FIELDS, require_all=True)
@@ -410,7 +432,7 @@ def _validate_asset(
     max_file: int,
     allowed: set[str],
     production: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if not isinstance(item, Mapping):
         raise _bad("INVALID_ASSET", "Asset must be an object")
     _reject_field_delta(set(item.keys()), _ASSET_FIELDS)
@@ -523,7 +545,7 @@ def _validate_literal_host(host: str) -> None:
 
 async def _attest_url_addresses(
     url: str,
-    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]],
+    resolver: Callable[[str], Awaitable[Iterable[str]]] | None,
 ) -> list[str]:
     host = urlsplit(url).hostname or ""
     try:
@@ -572,9 +594,9 @@ async def _attest_url_addresses(
 
 async def _attest_manifest_urls(
     manifest: Mapping[str, Any],
-    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]],
-) -> Dict[str, list[str]]:
-    pinned: Dict[str, list[str]] = {}
+    resolver: Callable[[str], Awaitable[Iterable[str]]] | None,
+) -> dict[str, list[str]]:
+    pinned: dict[str, list[str]] = {}
     for asset in manifest["assets"]:
         host = urlsplit(asset["onlineUrl"]).hostname or ""
         if host not in pinned:
@@ -694,7 +716,7 @@ def _is_production(config: Mapping[str, Any]) -> bool:
     return any(str(value).strip().lower() == "production" for value in values)
 
 
-def _result(cache_key: str, asset_count: int, downloaded: int, skipped: int) -> Dict[str, Any]:
+def _result(cache_key: str, asset_count: int, downloaded: int, skipped: int) -> dict[str, Any]:
     return {
         "cacheKey": cache_key,
         "ready": True,
@@ -704,7 +726,7 @@ def _result(cache_key: str, asset_count: int, downloaded: int, skipped: int) -> 
     }
 
 
-def _public_pack_manifest(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+def _public_pack_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "cacheKey": manifest["cacheKey"],
         "lessonId": manifest["lessonId"],
@@ -734,7 +756,7 @@ def _replay_status(store: SharedAssetStore, manifest: Mapping[str, Any]) -> str:
     incoming_projection = _replay_manifest_projection(manifest)
     return "match" if stored_projection == incoming_projection else "mismatch"
 
-def _replay_manifest_projection(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+def _replay_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "cacheKey": manifest.get("cacheKey"),
         "lessonId": manifest.get("lessonId"),
@@ -766,7 +788,7 @@ def _log(
     byte_count: int,
     start: float,
     result: str,
-    code: Optional[str],
+    code: str | None,
 ) -> None:
     try:
         bound = logger.bind(

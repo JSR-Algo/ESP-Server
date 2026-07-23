@@ -1,17 +1,19 @@
 import asyncio
 import hashlib
+import inspect
 import json
-import os
 from copy import deepcopy
-from urllib.parse import quote
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 
 import pytest
+from aiohttp import web
 
 from core.lesson.sd_pack_materializer import (
+    _METRICS,
     MaterializationError,
     _PinnedAddressAsyncNetworkBackend,
-    _METRICS,
     materialize_lesson_sd_pack,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
@@ -49,7 +51,9 @@ class _StreamResponse:
     async def aiter_bytes(self, chunk_size=65536):
         for chunk in self._chunks:
             if self._on_chunk is not None:
-                self._on_chunk()
+                maybe_wait = self._on_chunk()
+                if inspect.isawaitable(maybe_wait):
+                    await maybe_wait
             yield chunk
             await asyncio.sleep(0)
 
@@ -835,8 +839,146 @@ async def test_historical_digest_manifest_is_not_replayed_as_rich_pack(tmp_path)
     assert isinstance(rich["assets"], list)
 
 
+@pytest.mark.asyncio
+async def test_concurrent_identical_materializations_yield_one_accept_and_one_locked_replay(tmp_path):
+    entered = 0
+    release = asyncio.Event()
+
+    async def barrier():
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            release.set()
+        await release.wait()
+
+    before = dict(_METRICS)
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/barn.png": [BARN],
+        },
+        on_chunk=barrier,
+    )
+
+    results = await asyncio.gather(
+        materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        ),
+        materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        ),
+    )
+
+    assert sorted(result["downloadedCount"] for result in results) == [0, 2]
+    assert sorted(result["skippedCount"] for result in results) == [0, 2]
+    assert _METRICS["accepted"] == before["accepted"] + 1
+    assert _METRICS["replayed"] == before["replayed"] + 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_conflicting_materializations_keep_first_ready_pack(tmp_path):
+    entered = 0
+    release = asyncio.Event()
+    changed = deepcopy(_manifest())
+    changed["assets"][0]["sha256"] = _sha(b"changed")
+    changed["assets"][0]["size"] = len(b"changed")
+    changed["assets"][0]["onlineUrl"] = "https://assets.example/changed.jpg"
+
+    async def barrier():
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            release.set()
+        await release.wait()
+
+    before = dict(_METRICS)
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/changed.jpg": [b"changed"],
+            "https://assets.example/barn.png": [BARN],
+        },
+        on_chunk=barrier,
+    )
+
+    results = await asyncio.gather(
+        materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        ),
+        materialize_lesson_sd_pack(
+            changed,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        ),
+        return_exceptions=True,
+    )
+
+    accepted = [result for result in results if isinstance(result, dict)]
+    rejected = [result for result in results if isinstance(result, MaterializationError)]
+    assert len(accepted) == 1
+    assert accepted[0]["downloadedCount"] == 2
+    assert len(rejected) == 1
+    assert rejected[0].code == "PACK_REPLAY_MISMATCH"
+    assert _METRICS["accepted"] == before["accepted"] + 1
+    assert _METRICS["rejected"] == before["rejected"] + 1
+    pack = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json"
+    stored = json.loads(pack.read_text(encoding="utf-8"))
+    assert stored["assets"][0]["onlineUrl"] in {
+        "https://assets.example/poster.jpg?sig=secret",
+        "https://assets.example/changed.jpg",
+    }
+
+
+@pytest.mark.asyncio
+async def test_historical_digest_manifest_incompatible_rejects_without_upgrade(tmp_path):
+    store = SharedAssetStore(
+        tmp_path / "sd" / "tbot",
+        pack_root=tmp_path / "sd" / "tbot" / "lesson-assets",
+    )
+    wrong = _sha(b"wrong")
+    store.put_bytes(b"wrong", wrong)
+    store.put_bytes(BARN, BARN_SHA)
+    store.commit_pack(
+        CACHE_KEY,
+        {
+            "backgroundScene.poster": wrong,
+            "teachingObject.barn": BARN_SHA,
+        },
+    )
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=_Client(
+                {
+                    "https://assets.example/poster.jpg?sig=secret": [POSTER],
+                    "https://assets.example/barn.png": [BARN],
+                }
+            ),
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "PACK_REPLAY_MISMATCH"
+    manifest = json.loads(
+        (tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert isinstance(manifest["assets"], dict)
+
+
 def test_handler_route_is_registered():
-    source = open("core/http_server.py", encoding="utf-8").read()
+    source = Path("core/http_server.py").read_text(encoding="utf-8")
     assert "lesson_sd_materialize_handler" in source
     assert '"/internal/lesson-assets/materialize"' in source
 
@@ -926,3 +1068,32 @@ async def test_materialize_handler_returns_sanitized_materialization_errors(monk
         "retryable": False,
         "details": {"assetKey": "backgroundScene.poster"},
     }
+
+
+@pytest.mark.asyncio
+async def test_materialize_handler_preserves_request_entity_too_large(monkeypatch):
+    from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
+
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
+    handler = LessonSdMaterializeHandler({}, {})
+
+    response = await handler.handle_post(
+        _Request(json_error=web.HTTPRequestEntityTooLarge(max_size=10, actual_size=11))
+    )
+
+    assert response.status == 413
+    assert _json_response(response)["error"] == "REQUEST_ENTITY_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_materialize_handler_malformed_json_returns_400(monkeypatch):
+    from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
+
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
+    handler = LessonSdMaterializeHandler({}, {})
+
+    response = await handler.handle_post(_Request(json_error=ValueError("private-token")))
+
+    assert response.status == 400
+    assert _json_response(response)["error"] == "INVALID_REQUEST"
+    assert "private-token" not in response.text
