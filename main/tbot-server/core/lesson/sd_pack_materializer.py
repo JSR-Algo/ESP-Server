@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
+import json
 import os
 import shutil
+import socket
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
-from urllib.parse import quote, urlsplit
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -74,6 +77,7 @@ async def materialize_lesson_sd_pack(
     config: Mapping[str, Any],
     client: Any = None,
     logger: Any = None,
+    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]] = None,
 ) -> Dict[str, Any]:
     start = time.monotonic()
     log = logger or setup_logging()
@@ -81,10 +85,22 @@ async def materialize_lesson_sd_pack(
     store = _shared_store(config)
     cache_key = normalized["cacheKey"]
     if store.is_pack_ready(cache_key):
-        _METRICS["replayed"] += 1
-        result = _result(cache_key, len(normalized["assets"]), 0, len(normalized["assets"]))
-        _log(log, "info", cache_key, 0, start, "replayed", None)
-        return result
+        replay_status = _replay_status(store, normalized)
+        if replay_status == "match":
+            _METRICS["replayed"] += 1
+            result = _result(cache_key, len(normalized["assets"]), 0, len(normalized["assets"]))
+            _log(log, "info", cache_key, 0, start, "replayed", None)
+            return result
+        if replay_status == "mismatch":
+            _METRICS["rejected"] += 1
+            error = MaterializationError(
+                "PACK_REPLAY_MISMATCH",
+                409,
+                False,
+                "READY lesson asset pack does not match manifest",
+            )
+            _log(log, "warning", cache_key, 0, start, "rejected", error.code)
+            raise error
 
     own_client = client is None
     http_client = client or httpx.AsyncClient(timeout=60.0, follow_redirects=False)
@@ -94,6 +110,7 @@ async def materialize_lesson_sd_pack(
     total_bytes = 0
     try:
         for asset in normalized["assets"]:
+            await _attest_url_addresses(asset["onlineUrl"], resolver)
             path, count = await _download_asset(
                 http_client,
                 asset,
@@ -157,6 +174,14 @@ async def _download_asset(
     count = 0
     try:
         async with client.stream("GET", asset["onlineUrl"]) as response:
+            if 300 <= int(getattr(response, "status_code", 0)) < 400:
+                raise MaterializationError(
+                    "REDIRECT_NOT_ALLOWED",
+                    400,
+                    False,
+                    "Asset URL redirects are not allowed",
+                    {"assetKey": asset["key"]},
+                )
             response.raise_for_status()
             with target.open("xb") as handle:
                 async for chunk in response.aiter_bytes(CHUNK_SIZE):
@@ -315,8 +340,8 @@ def _validate_asset(
     online_url = _alias(item, "onlineUrl", "url")
     sd_path = _alias(item, "sdPath", "localPath")
     _validate_url(online_url, allowed, production)
-    expected_suffix = f"/{cache_key}/{encoded}"
-    if not isinstance(sd_path, str) or not sd_path.endswith(expected_suffix):
+    expected_sd_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
+    if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     return {
         "key": key,
@@ -359,11 +384,93 @@ def _validate_url(url: str, allowed: set[str], production: bool) -> None:
     parts = urlsplit(url)
     if not parts.scheme or not parts.netloc or parts.username or parts.password:
         raise _bad("INVALID_URL", "Invalid asset URL")
+    if parts.fragment:
+        raise _bad("URL_FRAGMENT", "Asset URL fragments are not allowed")
     if production and parts.scheme != "https":
         raise _bad("NON_HTTPS_URL", "Production asset URLs must use HTTPS")
     origin = f"{parts.scheme}://{parts.netloc}"
     if origin not in allowed:
         raise _bad("DISALLOWED_ORIGIN", "Asset URL origin is not allowed")
+    _validate_url_path(parts.path)
+    _validate_literal_host(parts.hostname or "")
+
+def _validate_url_path(path: str) -> None:
+    if "\\" in path or _contains_encoded_separator(path):
+        raise _bad("UNSAFE_URL_PATH", "Asset URL path is unsafe")
+    decoded = path
+    for _index in range(2):
+        decoded = unquote(decoded)
+        if "\\" in decoded or _contains_encoded_separator(decoded):
+            raise _bad("UNSAFE_URL_PATH", "Asset URL path is unsafe")
+        if any(segment in (".", "..") for segment in decoded.split("/")):
+            raise _bad("UNSAFE_URL_PATH", "Asset URL path is unsafe")
+
+def _contains_encoded_separator(path: str) -> bool:
+    lower = path.lower()
+    return "%2f" in lower or "%5c" in lower
+
+def _validate_literal_host(host: str) -> None:
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return
+    if not address.is_global:
+        raise _bad("PRIVATE_ADDRESS", "Asset URL host must resolve to public addresses")
+
+async def _attest_url_addresses(
+    url: str,
+    resolver: Optional[Callable[[str], Awaitable[Iterable[str]]]],
+) -> None:
+    host = urlsplit(url).hostname or ""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return
+    except ValueError:
+        pass
+    lookup = resolver or _default_resolver
+    try:
+        addresses = list(await lookup(host))
+    except MaterializationError:
+        raise
+    except Exception as exc:
+        raise MaterializationError(
+            "DNS_RESOLUTION_FAILED",
+            502,
+            True,
+            "Asset URL host could not be resolved",
+            {"type": type(exc).__name__},
+        ) from exc
+    if not addresses:
+        raise MaterializationError(
+            "DNS_RESOLUTION_FAILED",
+            502,
+            True,
+            "Asset URL host could not be resolved",
+        )
+    for value in addresses:
+        try:
+            address = ipaddress.ip_address(str(value).strip("[]"))
+        except ValueError as exc:
+            raise MaterializationError(
+                "DNS_RESOLUTION_FAILED",
+                502,
+                True,
+                "Asset URL host resolved to an invalid address",
+            ) from exc
+        if not address.is_global:
+            raise MaterializationError(
+                "PRIVATE_ADDRESS",
+                400,
+                False,
+                "Asset URL host must resolve to public addresses",
+            )
+
+async def _default_resolver(host: str) -> list[str]:
+    def resolve() -> list[str]:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        return sorted({info[4][0] for info in infos})
+
+    return await asyncio.to_thread(resolve)
 
 
 def _safe_lesson_id(value: Any) -> str:
@@ -492,6 +599,50 @@ def _public_pack_manifest(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _replay_status(store: SharedAssetStore, manifest: Mapping[str, Any]) -> str:
+    """Return match, mismatch, or historical for an already READY pack."""
+    try:
+        pack_dir = (store.pack_root / manifest["cacheKey"]).resolve()
+        root = store.pack_root.resolve()
+        if root not in pack_dir.parents:
+            return "mismatch"
+        stored = json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return "mismatch"
+    assets = stored.get("assets") if isinstance(stored, dict) else None
+    if isinstance(assets, dict):
+        return "historical"
+    if not isinstance(assets, list):
+        return "mismatch"
+    stored_projection = _replay_manifest_projection(stored)
+    incoming_projection = _replay_manifest_projection(manifest)
+    return "match" if stored_projection == incoming_projection else "mismatch"
+
+def _replay_manifest_projection(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "cacheKey": manifest.get("cacheKey"),
+        "lessonId": manifest.get("lessonId"),
+        "lessonVersion": manifest.get("lessonVersion"),
+        "profile": manifest.get("profile"),
+        "manifestChecksum": manifest.get("manifestChecksum"),
+        "assets": sorted(
+            (
+                {
+                    "key": asset.get("key"),
+                    "sha256": asset.get("sha256"),
+                    "size": asset.get("size"),
+                    "mediaType": asset.get("mediaType"),
+                    "critical": asset.get("critical"),
+                    "onlineUrl": asset.get("onlineUrl"),
+                    "sdPath": asset.get("sdPath"),
+                }
+                for asset in manifest.get("assets", [])
+                if isinstance(asset, Mapping)
+            ),
+            key=lambda asset: str(asset.get("key")),
+        ),
+    }
+
 def _log(
     logger: Any,
     level: str,
@@ -520,4 +671,3 @@ def _log(
         )
     except Exception:
         return
-

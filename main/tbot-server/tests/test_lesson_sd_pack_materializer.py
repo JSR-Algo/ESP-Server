@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+from copy import deepcopy
 from urllib.parse import quote
 from unittest.mock import AsyncMock, patch
 
@@ -27,9 +28,10 @@ CACHE_KEY = f"pip-farm-3m/v7-{MANIFEST_SHA}"
 
 
 class _StreamResponse:
-    def __init__(self, chunks, *, status=200, on_chunk=None):
+    def __init__(self, chunks, *, status=200, headers=None, on_chunk=None):
         self._chunks = list(chunks)
         self.status_code = status
+        self.headers = dict(headers or {})
         self._on_chunk = on_chunk
 
     async def __aenter__(self):
@@ -59,7 +61,22 @@ class _Client:
     def stream(self, method, url):
         assert method == "GET"
         self.requests.append(url)
-        return _StreamResponse(self.mapping[url], on_chunk=self._on_chunk)
+        value = self.mapping[url]
+        if isinstance(value, _StreamResponse):
+            return value
+        return _StreamResponse(value, on_chunk=self._on_chunk)
+
+
+async def _public_resolver(host):
+    return ["93.184.216.34"]
+
+
+async def _private_resolver(host):
+    return ["10.0.0.7"]
+
+
+def _sd_path(key):
+    return f"/sdcard/tbot/lesson-assets/{CACHE_KEY}/{quote(key, safe='')}"
 
 
 def _manifest(**overrides):
@@ -77,7 +94,7 @@ def _manifest(**overrides):
                 "mediaType": "image/jpeg",
                 "critical": True,
                 "onlineUrl": "https://assets.example/poster.jpg?sig=secret",
-                "sdPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/{quote('backgroundScene.poster', safe='')}",
+                "sdPath": _sd_path("backgroundScene.poster"),
             },
             {
                 "key": "teachingObject.barn",
@@ -86,7 +103,7 @@ def _manifest(**overrides):
                 "mediaType": "image/png",
                 "critical": True,
                 "url": "https://assets.example/barn.png",
-                "localPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/{quote('teachingObject.barn', safe='')}",
+                "localPath": _sd_path("teachingObject.barn"),
             },
         ],
     }
@@ -128,6 +145,7 @@ async def test_valid_bounded_stream_materializes_atomic_ready_pack(tmp_path):
         _manifest(),
         config=_config(tmp_path),
         client=client,
+        resolver=_public_resolver,
     )
 
     assert result == {
@@ -158,8 +176,18 @@ async def test_ready_replay_without_redownload(tmp_path):
             "https://assets.example/barn.png": [BARN],
         }
     )
-    await materialize_lesson_sd_pack(_manifest(), config=_config(tmp_path), client=client)
-    replay = await materialize_lesson_sd_pack(_manifest(), config=_config(tmp_path), client=client)
+    await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
+    replay = await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
 
     assert replay == {
         "cacheKey": CACHE_KEY,
@@ -184,7 +212,12 @@ async def test_checksum_mismatch_is_terminal_and_sanitized(tmp_path):
     )
 
     with pytest.raises(MaterializationError) as exc_info:
-        await materialize_lesson_sd_pack(_manifest(), config=_config(tmp_path), client=client)
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
 
     exc = exc_info.value
     assert exc.code == "CHECKSUM_MISMATCH"
@@ -209,7 +242,12 @@ async def test_declared_size_mismatch_rejected(tmp_path):
     )
 
     with pytest.raises(MaterializationError) as exc_info:
-        await materialize_lesson_sd_pack(bad, config=_config(tmp_path), client=client)
+        await materialize_lesson_sd_pack(
+            bad,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
 
     assert exc_info.value.code == "DECLARED_SIZE_MISMATCH"
 
@@ -224,13 +262,23 @@ async def test_per_file_and_total_pack_byte_limits(tmp_path, monkeypatch):
         }
     )
     with pytest.raises(MaterializationError) as per_file:
-        await materialize_lesson_sd_pack(_manifest(), config=_config(tmp_path), client=client)
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
     assert per_file.value.code == "FILE_TOO_LARGE"
 
     monkeypatch.setenv("LESSON_SD_MAX_FILE_BYTES", "64")
     monkeypatch.setenv("LESSON_SD_MAX_PACK_BYTES", str(len(POSTER) + len(BARN) - 1))
     with pytest.raises(MaterializationError) as total:
-        await materialize_lesson_sd_pack(_manifest(), config=_config(tmp_path), client=client)
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
     assert total.value.code == "PACK_TOO_LARGE"
 
 
@@ -240,14 +288,24 @@ async def test_non_https_url_in_production_and_disallowed_origin_rejected(tmp_pa
     non_https = _manifest()
     non_https["assets"][0]["onlineUrl"] = "http://assets.example/poster.jpg"
     with pytest.raises(MaterializationError) as scheme:
-        await materialize_lesson_sd_pack(non_https, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            non_https,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
     assert scheme.value.code == "NON_HTTPS_URL"
 
     monkeypatch.delenv("APP_ENV", raising=False)
     blocked = _manifest()
     blocked["assets"][0]["onlineUrl"] = "https://evil.example/poster.jpg"
     with pytest.raises(MaterializationError) as origin:
-        await materialize_lesson_sd_pack(blocked, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            blocked,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
     assert origin.value.code == "DISALLOWED_ORIGIN"
 
 
@@ -255,18 +313,33 @@ async def test_non_https_url_in_production_and_disallowed_origin_rejected(tmp_pa
 async def test_strict_schema_alias_conflicts_and_unsafe_paths_rejected(tmp_path):
     extra = _manifest(extra="nope")
     with pytest.raises(MaterializationError) as unknown:
-        await materialize_lesson_sd_pack(extra, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            extra,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
     assert unknown.value.code == "UNKNOWN_FIELD"
 
     conflict = _manifest()
     conflict["assets"][0]["url"] = "https://assets.example/other.jpg"
     with pytest.raises(MaterializationError) as alias:
-        await materialize_lesson_sd_pack(conflict, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            conflict,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
     assert alias.value.code == "ALIAS_CONFLICT"
 
     traversal = _manifest(cacheKey="../x/v1-" + MANIFEST_SHA)
     with pytest.raises(MaterializationError) as cache_key:
-        await materialize_lesson_sd_pack(traversal, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            traversal,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
     assert cache_key.value.code == "INVALID_CACHE_KEY"
 
 
@@ -274,11 +347,16 @@ async def test_strict_schema_alias_conflicts_and_unsafe_paths_rejected(tmp_path)
 async def test_fat_case_insensitive_encoded_basename_collision_rejected(tmp_path):
     bad = _manifest()
     bad["assets"][1]["key"] = "backgroundscene.poster"
-    bad["assets"][1]["sdPath"] = f"sd://tbot/lesson-assets/{CACHE_KEY}/backgroundscene.poster"
+    bad["assets"][1]["sdPath"] = _sd_path("backgroundscene.poster")
     bad["assets"][1].pop("localPath")
 
     with pytest.raises(MaterializationError) as exc_info:
-        await materialize_lesson_sd_pack(bad, config=_config(tmp_path), client=_Client({}))
+        await materialize_lesson_sd_pack(
+            bad,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
 
     assert exc_info.value.code == "BASENAME_COLLISION"
 
@@ -304,7 +382,12 @@ async def test_interrupted_staging_cleanup_and_no_visibility_before_ready(tmp_pa
     )
 
     with pytest.raises(MaterializationError) as exc_info:
-        await materialize_lesson_sd_pack(_manifest(), config=config, client=client)
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=config,
+            client=client,
+            resolver=_public_resolver,
+        )
 
     assert exc_info.value.code == "STORAGE_ERROR"
     assert seen_before_ready == [False]
@@ -315,6 +398,254 @@ async def test_interrupted_staging_cleanup_and_no_visibility_before_ready(tmp_pa
     ).is_pack_ready(CACHE_KEY)
     assert not list(root.rglob("*.staging"))
     assert not list(root.rglob("*.part"))
+
+
+@pytest.mark.asyncio
+async def test_literal_and_resolved_private_addresses_are_rejected(tmp_path, monkeypatch):
+    private_literal = _manifest()
+    private_literal["assets"][0]["onlineUrl"] = "https://127.0.0.1/poster.jpg"
+    monkeypatch.setenv(
+        "LESSON_ASSET_ALLOWED_ORIGINS",
+        "https://assets.example,https://127.0.0.1",
+    )
+
+    with pytest.raises(MaterializationError) as literal:
+        await materialize_lesson_sd_pack(
+            private_literal,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert literal.value.code == "PRIVATE_ADDRESS"
+
+    with pytest.raises(MaterializationError) as resolved:
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_private_resolver,
+        )
+    assert resolved.value.code == "PRIVATE_ADDRESS"
+
+
+@pytest.mark.asyncio
+async def test_public_dns_resolution_is_required_before_streaming(tmp_path):
+    seen = []
+
+    async def resolver(host):
+        seen.append(host)
+        return ["93.184.216.34"]
+
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/barn.png": [BARN],
+        }
+    )
+
+    await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=resolver,
+    )
+
+    assert seen == ["assets.example", "assets.example"]
+    assert client.requests == [
+        "https://assets.example/poster.jpg?sig=secret",
+        "https://assets.example/barn.png",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "code"),
+    [
+        ("https://assets.example/poster.jpg#secret", "URL_FRAGMENT"),
+        ("https://assets.example/assets/../poster.jpg", "UNSAFE_URL_PATH"),
+        ("https://assets.example/assets/%2e%2e/poster.jpg", "UNSAFE_URL_PATH"),
+        ("https://assets.example/assets/%252e%252e/poster.jpg", "UNSAFE_URL_PATH"),
+        ("https://assets.example/assets/%5cposter.jpg", "UNSAFE_URL_PATH"),
+        ("https://assets.example/assets%2fposter.jpg", "UNSAFE_URL_PATH"),
+    ],
+)
+async def test_unsafe_url_fragments_and_paths_are_rejected(tmp_path, url, code):
+    bad = _manifest()
+    bad["assets"][0]["onlineUrl"] = url
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            bad,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_redirect_responses_are_rejected_without_following(tmp_path):
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": _StreamResponse(
+                [],
+                status=302,
+                headers={"Location": "https://127.0.0.1/private"},
+            ),
+            "https://assets.example/barn.png": [BARN],
+        }
+    )
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            _manifest(),
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "REDIRECT_NOT_ALLOWED"
+    assert client.requests == ["https://assets.example/poster.jpg?sig=secret"]
+
+
+@pytest.mark.asyncio
+async def test_wrong_sd_path_prefix_or_scheme_is_rejected(tmp_path):
+    wrong_scheme = _manifest()
+    wrong_scheme["assets"][0]["sdPath"] = f"sd://tbot/lesson-assets/{CACHE_KEY}/backgroundScene.poster"
+    with pytest.raises(MaterializationError) as scheme:
+        await materialize_lesson_sd_pack(
+            wrong_scheme,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert scheme.value.code == "INVALID_SD_PATH"
+
+    wrong_prefix = _manifest()
+    wrong_prefix["assets"][0]["sdPath"] = f"/tmp/tbot/lesson-assets/{CACHE_KEY}/backgroundScene.poster"
+    with pytest.raises(MaterializationError) as prefix:
+        await materialize_lesson_sd_pack(
+            wrong_prefix,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert prefix.value.code == "INVALID_SD_PATH"
+
+    mismatch = _manifest()
+    mismatch["assets"][0]["localPath"] = _sd_path("backgroundScene.poster.other")
+    with pytest.raises(MaterializationError) as alias:
+        await materialize_lesson_sd_pack(
+            mismatch,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+    assert alias.value.code == "ALIAS_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_url_credentials_are_rejected_without_leaking_secret(tmp_path):
+    bad = _manifest()
+    bad["assets"][0]["onlineUrl"] = "https://user:private-token@assets.example/poster.jpg"
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            bad,
+            config=_config(tmp_path),
+            client=_Client({}),
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "INVALID_URL"
+    assert "private-token" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest["assets"][0].update({"size": len(POSTER) + 1}),
+        lambda manifest: manifest["assets"][0].update({"sha256": "b" * 64}),
+        lambda manifest: manifest["assets"][0].update({"onlineUrl": "https://assets.example/changed.jpg"}),
+        lambda manifest: manifest["assets"][0].update({"mediaType": "image/webp"}),
+        lambda manifest: manifest["assets"][0].update({"critical": False}),
+        lambda manifest: manifest["assets"][0].update({"key": "backgroundScene.changed"}),
+    ],
+)
+async def test_replay_rejects_rich_manifest_metadata_mismatch_without_download(tmp_path, mutate):
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/barn.png": [BARN],
+        }
+    )
+    await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
+    before_requests = list(client.requests)
+    changed = deepcopy(_manifest())
+    mutate(changed)
+    if changed["assets"][0]["key"] == "backgroundScene.changed":
+        changed["assets"][0]["sdPath"] = _sd_path("backgroundScene.changed")
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            changed,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "PACK_REPLAY_MISMATCH"
+    assert client.requests == before_requests
+
+
+@pytest.mark.asyncio
+async def test_historical_digest_manifest_is_not_replayed_as_rich_pack(tmp_path):
+    store = SharedAssetStore(
+        tmp_path / "sd" / "tbot",
+        pack_root=tmp_path / "sd" / "tbot" / "lesson-assets",
+    )
+    store.put_bytes(POSTER, POSTER_SHA)
+    store.put_bytes(BARN, BARN_SHA)
+    store.commit_pack(
+        CACHE_KEY,
+        {
+            "backgroundScene.poster": POSTER_SHA,
+            "teachingObject.barn": BARN_SHA,
+        },
+    )
+    assert store.is_pack_ready(CACHE_KEY)
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/barn.png": [BARN],
+        }
+    )
+
+    result = await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
+
+    assert result["downloadedCount"] == 2
+    assert client.requests == [
+        "https://assets.example/poster.jpg?sig=secret",
+        "https://assets.example/barn.png",
+    ]
+    rich = json.loads(
+        (tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert isinstance(rich["assets"], list)
 
 
 def test_handler_route_is_registered():
