@@ -195,6 +195,7 @@ uploadfile
 
 # OMC/agent orchestration state and logs
 .omx/
+.worktrees/
 *.log
 
 # Python bytecode caches at any depth
