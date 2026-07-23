@@ -69,7 +69,7 @@ def _single_header(headers, name, default=None):
 
 
 class WebSocketServer:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, lesson_sd_online_index=None):
         from core.connection_registry import ConnectionRegistry
 
         self.config = config
@@ -126,6 +126,7 @@ class WebSocketServer:
             device_revoked_after=auth_config.get("device_revoked_after", {}),
         )
         self.lesson_connections = ConnectionRegistry()
+        self.lesson_sd_online_index = lesson_sd_online_index
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
         self.is_draining = False

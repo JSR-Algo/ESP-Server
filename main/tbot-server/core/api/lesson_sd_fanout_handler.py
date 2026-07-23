@@ -77,10 +77,24 @@ class LessonSdFanoutHandler:
             {
                 "data": {
                     "pending": await pending_snapshot(self.pending_store),
-                    "onlineDeviceIds": sorted(
-                        str(k) for k in (self.connections or {}) if k
-                    ),
+                    "onlineDeviceIds": await self._online_backend_device_ids(),
                 }
             },
             status=200,
         )
+
+    async def _online_backend_device_ids(self) -> list[str]:
+        if self.online_index is None:
+            return []
+        resolve = getattr(self.online_index, "resolve_and_upsert", None)
+        if not callable(resolve):
+            return []
+        resolved = []
+        for conn in (self.connections or {}).values():
+            try:
+                backend_id = await resolve(conn)
+            except Exception:
+                continue
+            if backend_id:
+                resolved.append(str(backend_id))
+        return sorted(set(resolved))

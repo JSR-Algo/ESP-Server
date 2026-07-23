@@ -39,6 +39,14 @@ class FakeRedis:
         for member in members:
             current.pop(member, None)
 
+    async def zrange(self, key, start=0, end=-1, withscores=False):
+        members = sorted(self.zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))
+        stop = None if end == -1 else end + 1
+        selected = members[start:stop]
+        if withscores:
+            return selected
+        return [member for member, _score in selected]
+
     async def zrangebyscore(self, key, min_score, max_score, start=0, num=None):
         current = self.zsets.get(key, {})
         min_score = float("-inf") if min_score == "-inf" else float(min_score)
@@ -54,6 +62,54 @@ class FakeRedis:
 
     async def zcard(self, key):
         return len(self.zsets.get(key, {}))
+
+class RedisApiOnlyFake:
+    def __init__(self):
+        self.values = {}
+        self._zsets = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.values[key] = value
+
+    async def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+            self._zsets.pop(key, None)
+
+    async def expire(self, key, ttl):
+        return None
+
+    async def zadd(self, key, mapping):
+        self._zsets.setdefault(key, {}).update(mapping)
+
+    async def zrem(self, key, *members):
+        current = self._zsets.setdefault(key, {})
+        for member in members:
+            current.pop(member, None)
+
+    async def zrange(self, key, start=0, end=-1, withscores=False):
+        members = sorted(self._zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))
+        stop = None if end == -1 else end + 1
+        selected = members[start:stop]
+        if withscores:
+            return selected
+        return [member for member, _score in selected]
+
+    async def zrangebyscore(self, key, min_score, max_score, start=0, num=None):
+        current = self._zsets.get(key, {})
+        min_score = float("-inf") if min_score == "-inf" else float(min_score)
+        max_score = float("inf") if max_score == "+inf" else float(max_score)
+        members = [
+            member
+            for member, score in sorted(current.items(), key=lambda item: (item[1], item[0]))
+            if min_score <= float(score) <= max_score
+        ]
+        if num is None:
+            return members[start:]
+        return members[start : start + num]
 
 
 class Clock:
@@ -166,6 +222,19 @@ async def test_redis_metrics_reports_oldest_pending_age_after_restart():
     reloaded = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
 
     assert reloaded.metrics()["lesson_sd_pending_age_seconds"] == 90
+
+@pytest.mark.asyncio
+async def test_redis_metrics_uses_redis_api_and_skips_stale_created_members():
+    redis = RedisApiOnlyFake()
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(redis, namespace="ns", clock=clock, random=lambda: 0.0)
+    await store.mark("stale", {"lesson-stale/v1"})
+    await redis.delete("ns:lesson-sd-pending:stale")
+    clock.epoch += 40
+    await store.mark("valid", {"lesson-a/v1"})
+    clock.epoch += 50
+
+    assert store.metrics()["lesson_sd_pending_age_seconds"] == 50
 
 
 @pytest.mark.asyncio

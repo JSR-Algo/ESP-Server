@@ -5,6 +5,7 @@ import types
 import pytest
 
 from core import http_server as http_module
+from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.http_server import SimpleHttpServer
 
 
@@ -25,6 +26,10 @@ class _HeaderMapping:
 
     def get(self, name, default=None):
         return self.value if name == "Client-Id" else default
+
+class _Request:
+    def __init__(self, headers=None):
+        self.headers = headers or {}
 
 
 def _config(**server_overrides):
@@ -219,3 +224,29 @@ async def test_http_server_start_logs_and_reraises_start_failure(monkeypatch):
 
     assert any("HTTP server start failed" in message for _level, message in server.logger.messages)
     assert any("Error stack:" in message for _level, message in server.logger.messages)
+
+@pytest.mark.asyncio
+async def test_lesson_sd_pending_status_reports_resolved_backend_ids_only(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    config = {"server": {"api_url": "http://backend.test/v1"}}
+    resolved = {
+        "AA:BB:CC:DD:EE:01": "uuid-1",
+        "AA:BB:CC:DD:EE:02": None,
+    }
+
+    class Index:
+        async def resolve_and_upsert(self, conn):
+            return resolved.get(conn.device_id)
+
+    connections = {
+        "AA:BB:CC:DD:EE:01": types.SimpleNamespace(device_id="AA:BB:CC:DD:EE:01"),
+        "AA:BB:CC:DD:EE:02": types.SimpleNamespace(device_id="AA:BB:CC:DD:EE:02"),
+    }
+    handler = LessonSdFanoutHandler(config, connections, online_index=Index())
+
+    response = await handler.handle_get_pending(_Request(headers={"X-Mint-Secret": "mint"}))
+    body = json.loads(response.text)
+
+    assert body["data"]["onlineDeviceIds"] == ["uuid-1"]
+    assert "AA:BB:CC:DD:EE:01" not in response.text
+    assert "AA:BB:CC:DD:EE:02" not in response.text

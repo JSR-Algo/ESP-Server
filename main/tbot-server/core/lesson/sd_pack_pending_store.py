@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -12,6 +14,7 @@ from typing import Any, Protocol, TypedDict
 
 LESSON_SD_PENDING_TTL_SEC = 30 * 24 * 60 * 60
 LESSON_SD_PENDING_LEASE_SEC = 60
+logger = logging.getLogger(__name__)
 
 _MARK_LUA = """
 local existing = redis.call('GET', KEYS[1])
@@ -394,13 +397,33 @@ class RedisLessonSdPendingStore:
         return out
 
     def metrics(self) -> dict[str, int]:
-        zsets = getattr(self.redis, "zsets", None)
-        if isinstance(zsets, dict):
-            created = zsets.get(self._created_key(), {})
-            if created:
-                oldest = min(float(score) for score in created.values())
-                return {"lesson_sd_pending_age_seconds": max(0, int(self._clock() - oldest))}
+        try:
+            return _run_coro_sync(self._metrics_async())
+        except Exception as exc:
+            logger.warning("lesson SD pending Redis metrics unavailable: %s", type(exc).__name__)
         return {"lesson_sd_pending_age_seconds": 0}
+
+    async def _metrics_async(self) -> dict[str, int]:
+        while True:
+            oldest = await self.redis.zrange(self._created_key(), 0, 0, withscores=True)
+            if not oldest:
+                return {"lesson_sd_pending_age_seconds": 0}
+            member, score = oldest[0]
+            device_id = _decode_member(member)
+            if not device_id:
+                return {"lesson_sd_pending_age_seconds": 0}
+            work = await self.load(device_id)
+            if work is None:
+                await self.redis.zrem(self._created_key(), device_id)
+                await self.redis.zrem(self._due_key(), device_id)
+                continue
+            try:
+                created = float(score)
+            except (TypeError, ValueError):
+                created = epoch_from_iso(work["createdAt"])
+            return {
+                "lesson_sd_pending_age_seconds": max(0, int(self._clock() - created))
+            }
 
     def _key(self, device_id: str) -> str:
         return _pending_key(self.namespace, device_id)
@@ -530,6 +553,28 @@ def _decode_member(member: Any) -> str:
     if isinstance(member, bytes):
         return member.decode("utf-8")
     return str(member or "").strip()
+
+
+def _run_coro_sync(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def _int_env(name: str, default: int) -> int:

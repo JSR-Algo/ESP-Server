@@ -227,8 +227,8 @@ async def test_drain_pending_callback_failure_remains_pending_and_replays(monkey
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_fail_once)
 
-    with pytest.raises(RuntimeError):
-        await sd_pack_fanout.drain_pending_for_connection(Conn())
+    first = await sd_pack_fanout.drain_pending_for_connection(Conn())
+    assert first["callbackErrors"][0]["type"] == "RuntimeError"
     assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
         "lesson-a/v1-aaa"
     ]
@@ -336,12 +336,63 @@ async def test_drain_pending_partial_callback_failure_retains_only_failed_callba
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
 
-    with pytest.raises(RuntimeError):
-        await sd_pack_fanout.drain_pending_for_connection(Conn())
+    result = await sd_pack_fanout.drain_pending_for_connection(Conn())
+    assert result["callbackErrors"][0]["type"] == "RuntimeError"
 
     pending = (await sd_pack_fanout.pending_snapshot())["dev-1"]
     assert pending["cacheKeys"] == ["lesson-b/v1-bbb"]
     assert pending["attemptCount"] == 2
+
+@pytest.mark.asyncio
+async def test_immediate_fanout_partial_callback_failure_does_not_readd_cleared_key(
+    monkeypatch, tmp_path
+):
+    _write_pack(tmp_path, "lesson-a/v1-aaa")
+    _write_pack(tmp_path, "lesson-b/v1-bbb")
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    class Conn:
+        def __init__(self):
+            self.device_id = "dev-1"
+            self.config = config
+            self.mcp_client = type(
+                "M",
+                (),
+                {"is_ready": lambda self: asyncio.sleep(0, result=True)},
+            )()
+
+    async def fake_call(_conn, _mcp_client, _pack):
+        return {"ready": True, "failedCount": 0, "criticalFailedCount": 0}
+
+    async def post_one(*_args, **kwargs):
+        if kwargs["result"]["cacheKey"] == "lesson-b/v1-bbb":
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-1": Conn()},
+        lesson_id="lesson",
+    )
+
+    assert result["queued"] == [
+        {
+            "deviceId": "dev-1",
+            "cacheKeys": ["lesson-b/v1-bbb"],
+            "reason": "retry-after-fail",
+        }
+    ]
+    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
+        "lesson-b/v1-bbb"
+    ]
 
 
 @pytest.mark.asyncio

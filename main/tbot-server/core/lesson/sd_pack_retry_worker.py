@@ -47,6 +47,8 @@ class LessonSdOnlineIndex:
             backend_device_id, _token = await resolve_device_identity(
                 client, self.api_base, raw_device_id, logger=None
             )
+        except Exception:
+            return None
         finally:
             if close_client:
                 await client.aclose()

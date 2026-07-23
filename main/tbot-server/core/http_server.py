@@ -24,7 +24,7 @@ TAG = __name__
 
 
 class SimpleHttpServer:
-    def __init__(self, config: dict, lesson_connections=None):
+    def __init__(self, config: dict, lesson_connections=None, *, lesson_sd_online_index=None):
         self.config = config
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
@@ -42,8 +42,10 @@ class SimpleHttpServer:
             lesson_cfg = {}
         if not isinstance(server_cfg, dict):
             server_cfg = {}
-        self.lesson_sd_online_index = LessonSdOnlineIndex(
-            api_base=str(lesson_cfg.get("api_base") or server_cfg.get("api_url") or "").rstrip("/")
+        self.lesson_sd_online_index = lesson_sd_online_index or LessonSdOnlineIndex(
+            api_base=str(
+                lesson_cfg.get("api_base") or server_cfg.get("api_url") or ""
+            ).rstrip("/")
         )
         self.lesson_sd_retry_worker = LessonSdRetryWorker(
             self.lesson_sd_pending_store,

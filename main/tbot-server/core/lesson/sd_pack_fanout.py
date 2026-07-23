@@ -215,14 +215,17 @@ async def fanout_sd_pack_sync(
             packs_total = _nonnegative_int((result or {}).get("packs"))
             failed_count = _nonnegative_int((result or {}).get("failed"))
             synced_count = len((result or {}).get("clearedCacheKeys") or [])
+            retained_keys = normalize_cache_keys((result or {}).get("retainedCacheKeys") or [])
             entry = {
                 "deviceId": device_id,
-                "ok": failed_count == 0 and packs_total > 0,
+                "ok": failed_count == 0 and packs_total > 0 and not retained_keys,
                 "result": result,
             }
-            if entry["ok"] or synced_count > 0:
+            if entry["ok"]:
                 _log_outcome("sync_complete", device_id, pack_keys)
                 return {"kind": "synced", "entry": entry, "retry": False}
+            if synced_count > 0:
+                _log_outcome("sync_partial", device_id, result.get("clearedCacheKeys") or [])
             return {"kind": "failed", "entry": entry, "retry": True}
 
     outcomes = await asyncio.gather(*[_sync_one(device_id) for device_id in sync_ids])
@@ -249,7 +252,7 @@ async def fanout_sd_pack_sync(
         for device_id in list(dict.fromkeys([*offline_ids, *retry_ids])):
             if not device_id:
                 continue
-            keys = set(pack_keys) if (lesson_id or cache_key) else set(pack_keys)
+            keys = set(_retry_cache_keys_for_device(failed, device_id) or pack_keys)
             await selected_store.mark(device_id, keys)
             _log_outcome(
                 "pending_offline" if device_id in offline_set else "retry_wait",
@@ -396,7 +399,13 @@ async def _sync_callback_and_update_pending(
     result["clearedCacheKeys"] = cleared
     result["retainedCacheKeys"] = retained
     if errors:
-        raise errors[0]
+        result["callbackErrors"] = [
+            {
+                "type": type(error).__name__,
+                "message": _stable_error_message(error),
+            }
+            for error in errors
+        ]
     return result
 
 
@@ -479,6 +488,18 @@ def _stable_error_message(exc: Exception) -> str:
     if not message:
         return type(exc).__name__
     return message.splitlines()[0][:160]
+
+
+def _retry_cache_keys_for_device(failed: list[dict[str, Any]], device_id: str) -> list[str]:
+    for entry in failed:
+        if str(entry.get("deviceId") or "") != str(device_id):
+            continue
+        result = entry.get("result")
+        if isinstance(result, dict):
+            keys = normalize_cache_keys(result.get("retainedCacheKeys") or [])
+            if keys:
+                return keys
+    return []
 
 
 def _results_by_cache_key(sync_result: dict[str, Any], cache_keys: list[str]) -> dict[str, Any]:

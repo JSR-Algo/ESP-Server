@@ -136,6 +136,20 @@ async def test_online_index_resolves_mac_once_per_connection_and_invalidates(mon
 
 
 @pytest.mark.asyncio
+async def test_online_index_omits_identity_when_resolver_raises(monkeypatch):
+    async def resolver(*_args, **_kwargs):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.resolve_device_identity", resolver)
+
+    index = LessonSdOnlineIndex(api_base="http://backend.test/v1")
+    conn = SimpleNamespace(device_id="AA:BB:CC:DD:EE:FF")
+
+    assert await index.resolve_and_upsert(conn, client=object()) is None
+    assert index.get("AA:BB:CC:DD:EE:FF") is None
+
+
+@pytest.mark.asyncio
 async def test_worker_start_stop_has_single_lifecycle_task():
     store = InMemoryLessonSdPendingStore()
     index = LessonSdOnlineIndex()

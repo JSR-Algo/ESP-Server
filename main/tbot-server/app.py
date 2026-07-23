@@ -3,25 +3,26 @@ from scripts.check_python_runtime import require_supported_runtime
 if __name__ == "__main__":
     require_supported_runtime()
 
-import sys
-import uuid
-import signal
 import asyncio
 import os
+import signal
+import sys
+import uuid
+from contextlib import suppress
+
 try:
     from aioconsole import ainput
 except ModuleNotFoundError:
 
     async def ainput(prompt: str = ""):
         return await asyncio.to_thread(input, prompt)
-from config.settings import load_config
-from config.config_loader import load_config_async, get_project_dir
+from config.config_loader import get_project_dir, load_config_async
 from config.logger import setup_logging
-from core.utils.util import get_local_ip, validate_mcp_endpoint
 from core.http_server import SimpleHttpServer
-from core.websocket_server import WebSocketServer
-from core.utils.util import check_ffmpeg_installed
+from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex
 from core.utils.gc_manager import get_gc_manager
+from core.utils.util import check_ffmpeg_installed, get_local_ip, validate_mcp_endpoint
+from core.websocket_server import WebSocketServer
 
 # Pre-import Google Live client at server startup. This forces the heavy
 # google.genai SDK import (~95-105s on first import: protobuf, grpc, auth
@@ -30,12 +31,8 @@ from core.utils.gc_manager import get_gc_manager
 # WebSocket handshake, which exceeds the device-side WS idle timeout and the
 # device disconnects mid-init ("Đang kết nối → chờ → văng").
 # Cost is paid once at server boot where time doesn't matter.
-try:
+with suppress(ImportError):
     import core.voice.google_live.client  # noqa: F401 — triggers eager genai import
-except ImportError:
-    # google.genai package missing — Live mode will fail at runtime with a
-    # clear RuntimeError; do not block server startup over an optional dep.
-    pass
 
 TAG = __name__
 logger = setup_logging()
@@ -72,7 +69,7 @@ def _resolve_auth_key(config) -> str:
 
     key_path = os.path.join(get_project_dir(), AUTH_KEY_FILE)
     try:
-        with open(key_path, "r", encoding="utf-8") as file:
+        with open(key_path, encoding="utf-8") as file:
             auth_key = file.read().strip()
         if auth_key and not _contains_placeholder(auth_key):
             return auth_key
@@ -83,11 +80,33 @@ def _resolve_auth_key(config) -> str:
     os.makedirs(os.path.dirname(key_path), exist_ok=True)
     with open(key_path, "w", encoding="utf-8") as file:
         file.write(auth_key + "\n")
-    try:
+    with suppress(OSError):
         os.chmod(key_path, 0o600)
-    except OSError:
-        pass
     return auth_key
+
+
+def _lesson_sd_api_base(config) -> str:
+    lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
+    if not isinstance(lesson_cfg, dict):
+        lesson_cfg = {}
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+    return str(lesson_cfg.get("api_base") or server_cfg.get("api_url") or "").rstrip("/")
+
+
+def _build_servers(config):
+    lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+    ws_server = WebSocketServer(
+        config,
+        lesson_sd_online_index=lesson_sd_online_index,
+    )
+    ota_server = SimpleHttpServer(
+        config,
+        ws_server.lesson_connections,
+        lesson_sd_online_index=lesson_sd_online_index,
+    )
+    return ws_server, ota_server
 
 
 async def wait_for_exit() -> None:
@@ -105,10 +124,8 @@ async def wait_for_exit() -> None:
         await stop_event.wait()
     else:
         # Keep process alive until Ctrl-C breaks asyncio.run().
-        try:
+        with suppress(KeyboardInterrupt):
             await asyncio.Future()
-        except KeyboardInterrupt:  # Ctrl‑C
-            pass
 
 
 async def monitor_stdin():
@@ -135,11 +152,9 @@ async def main():
     gc_manager = get_gc_manager(interval_seconds=300)
     await gc_manager.start()
 
-    # Start websocket server.
-    ws_server = WebSocketServer(config)
+    # Start websocket and HTTP servers with one shared lesson SD online index.
+    ws_server, ota_server = _build_servers(config)
     ws_task = asyncio.create_task(ws_server.start())
-    # Start simple HTTP server.
-    ota_server = SimpleHttpServer(config, ws_server.lesson_connections)
     ota_task = asyncio.create_task(ota_server.start())
 
     read_config_from_api = config.get("read_config_from_api", False)
