@@ -641,6 +641,8 @@ async def post_lesson_sd_sync_result(
     return None
 
 def _normalize_lesson_sd_sync_result(result: Dict) -> Dict:
+    from core.lesson.sd_pack_sync import normalize_lesson_sd_error_code
+
     def count(name: str) -> int:
         try:
             value = int(result.get(name) or 0)
@@ -657,10 +659,7 @@ def _normalize_lesson_sd_sync_result(result: Dict) -> Dict:
         "criticalFailedCount": count("criticalFailedCount"),
         "ready": bool(result.get("ready")),
     }
-    error_code = str(result.get("errorCode") or "").strip()
+    error_code = normalize_lesson_sd_error_code(result.get("errorCode"))
     if error_code:
-        body["errorCode"] = "".join(
-            ch if ch.isalnum() or ch in {"_", "-", "."} else "_"
-            for ch in error_code
-        )[:80]
+        body["errorCode"] = error_code
     return body

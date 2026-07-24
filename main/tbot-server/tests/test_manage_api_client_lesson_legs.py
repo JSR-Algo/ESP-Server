@@ -19,10 +19,12 @@ mirroring tests/test_lesson_forwarder.py.
 
 import importlib.util
 import os
+import re
 import unittest
 
 import httpx
 
+_BACKEND_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 def _load_real_manage_api_client():
     """Load a fresh, isolated copy of the real ``config.manage_api_client`` from
@@ -481,6 +483,39 @@ class PostLessonSdSyncResultContractTest(unittest.IsolatedAsyncioTestCase):
                 "errorCode": "bad_code_token_secret",
             },
         )
+
+    async def test_sync_result_error_code_matches_backend_safe_regex(self):
+        cases = [
+            ("OPTIONAL_THUMBNAIL_FAILED", "optional_thumbnail_failed"),
+            (" --Critical.Asset Failed/token ", "critical_asset_failed_token"),
+            ("___...9BAD", "9bad"),
+            ("___---...", None),
+            ("A" * 80, "a" * 64),
+        ]
+
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": True}})])
+
+                await MAC.post_lesson_sd_sync_result(
+                    client,
+                    BASE,
+                    {
+                        "deviceId": "device-uuid-9",
+                        "cacheKey": "lesson-a/v1-aaa",
+                        "ready": False,
+                        "criticalFailedCount": 1,
+                        "errorCode": raw,
+                    },
+                    mint_secret="mint-secret",
+                )
+
+                body = client.last["json"]
+                if expected is None:
+                    self.assertNotIn("errorCode", body)
+                else:
+                    self.assertEqual(body["errorCode"], expected)
+                    self.assertRegex(body["errorCode"], _BACKEND_ERROR_CODE_RE)
 
     async def test_redirect_does_not_replay_mint_secret_to_location(self):
         hits = []
