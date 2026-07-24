@@ -35,7 +35,7 @@ def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if pack_mount_root:
         mounted = Path(str(pack_mount_root)).resolve()
         shared_store = SharedAssetStore(mounted.parent, pack_root=mounted)
-    if not public_base or not cache_root.is_dir():
+    if not cache_root.is_dir():
         return
 
     root = cache_root.resolve()
@@ -52,6 +52,8 @@ def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
             rich_pack = _ready_rich_asset_pack(pack_dir, cache_key)
             if rich_pack is not None:
                 yield rich_pack
+            continue
+        if not public_base:
             continue
         assets = []
         token = base64.urlsafe_b64encode(cache_key.encode("utf-8")).decode("ascii").rstrip("=")

@@ -137,6 +137,60 @@ def test_cached_asset_packs_preserve_ready_rich_pack_metadata(tmp_path):
     assert poster_asset["localPath"] == poster_asset["sdPath"]
     assert by_key["teachingObject.barn"]["critical"] is False
 
+def test_cached_asset_packs_yield_ready_rich_pack_without_public_base_url(tmp_path):
+    checksum = "fedcba9876543210" * 4
+    cache_key = f"lesson-a/v3-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    poster = b"poster"
+    poster_sha = hashlib.sha256(poster).hexdigest()
+    store.put_bytes(poster, poster_sha)
+    manifest = {
+        "assignmentVersion": 9,
+        "lessonId": "lesson-a",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "ready": True,
+        "assets": [
+            {
+                "key": "backgroundScene.poster",
+                "sha256": poster_sha,
+                "size": len(poster),
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg?sig=secret&expires=1",
+                "sdPath": _rich_sd_path(cache_key, "backgroundScene.poster"),
+            }
+        ],
+    }
+    store.commit_pack(cache_key, {"backgroundScene.poster": poster_sha}, manifest=manifest)
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {
+                "lesson": {
+                    "asset_cache_root": str(pack_root),
+                    "asset_pack_mount_root": str(pack_root),
+                }
+            }
+        )
+    )
+
+    assert len(packs) == 1
+    asset = packs[0]["assets"][0]
+    assert asset["onlineUrl"] == "https://assets.example/poster.jpg?sig=secret&expires=1"
+    assert asset["url"] == asset["onlineUrl"]
+    assert asset["sdPath"] == _rich_sd_path(cache_key, "backgroundScene.poster")
+    assert asset["localPath"] == asset["sdPath"]
+    assert asset["sha256"] == poster_sha
+    assert len(asset["sha256"]) == 64
+    assert asset["sha256"] == asset["sha256"].lower()
+    assert asset["size"] == len(poster)
+    assert type(asset["size"]) is int
+    assert asset["mediaType"] == "image/jpeg"
+    assert asset["critical"] is True
+
 def test_cached_asset_packs_fail_closed_for_malformed_rich_pack(tmp_path):
     checksum = "0123456789abcdef" * 4
     cache_key = f"lesson-a/v3-{checksum}"
