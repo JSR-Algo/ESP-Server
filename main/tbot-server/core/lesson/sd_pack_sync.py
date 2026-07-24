@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
@@ -21,6 +22,7 @@ SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
 SD_PACK_SYNC_TIMEOUT_SEC = 120
 DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
+_LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -39,41 +41,56 @@ def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
     root = cache_root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
-        asset_names = _asset_names(filenames)
-        if not asset_names:
-            continue
         pack_dir = Path(dirpath)
         cache_key = pack_dir.relative_to(root).as_posix()
+        asset_names = _asset_names(filenames)
+        if "pack.json" not in filenames and not asset_names:
+            continue
         if shared_store is not None and not shared_store.is_pack_ready(cache_key):
+            continue
+        if shared_store is not None and "pack.json" in filenames:
+            rich_pack = _ready_rich_asset_pack(pack_dir, cache_key)
+            if rich_pack is not None:
+                yield rich_pack
             continue
         assets = []
         token = base64.urlsafe_b64encode(cache_key.encode("utf-8")).decode("ascii").rstrip("=")
         for name in asset_names:
             source_path = _download_source_path(pack_dir / name)
+            url = f"{public_base}/tbot/lesson-assets/{token}/{quote(name, safe='')}"
+            local_path = f"{local_root}/{cache_key}/{quote(name, safe='')}"
             assets.append(
                 {
                     "key": name,
                     "path": name,
-                    "url": f"{public_base}/tbot/lesson-assets/{token}/{quote(name, safe='')}",
+                    "url": url,
+                    "onlineUrl": url,
                     "sha256": _sha256_file(source_path),
                     "size": source_path.stat().st_size,
+                    "mediaType": "application/octet-stream",
                     "critical": True,
                     "state": "READY",
                     "checksumOk": True,
-                    "localPath": f"{local_root}/{cache_key}/{quote(name, safe='')}",
+                    "sdPath": local_path,
+                    "localPath": local_path,
                 }
             )
+        checksum = _manifest_checksum_from_cache_key(cache_key)
+        canonical_checksum = checksum if _LOWER_SHA256_RE.fullmatch(checksum) else ""
         if assets:
-            yield {
+            pack = {
                 "assignmentVersion": 0,
                 "lessonId": _lesson_id_from_cache_key(cache_key),
                 "lessonVersion": _lesson_version_from_cache_key(cache_key),
-                "manifestChecksum": _manifest_checksum_from_cache_key(cache_key),
+                "manifestChecksum": canonical_checksum,
                 "cacheKey": cache_key,
                 "localRoot": f"{local_root}/{cache_key}",
                 "ready": True,
                 "assets": assets,
             }
+            if checksum and not canonical_checksum:
+                pack["historicalManifestChecksum"] = checksum
+            yield pack
 
 
 async def sync_cached_lesson_assets_to_sd(
@@ -208,10 +225,104 @@ async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: dict[str, Any
 def _asset_names(filenames: list[str]) -> list[str]:
     names = []
     for name in sorted(filenames):
-        if name.startswith(".") or name.endswith(".part") or name.endswith(".render.jpg"):
+        if (
+            name.startswith(".")
+            or name in {"READY", "pack.json"}
+            or name.endswith(".part")
+            or name.endswith(".render.jpg")
+        ):
             continue
         names.append(name)
     return names
+
+def _ready_rich_asset_pack(pack_dir: Path, cache_key: str) -> dict[str, Any] | None:
+    try:
+        manifest = json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("cacheKey") != cache_key:
+        return None
+    raw_assets = manifest.get("assets")
+    if not isinstance(raw_assets, list) or not raw_assets:
+        return None
+    assets = []
+    seen: set[str] = set()
+    for item in raw_assets:
+        asset = _rich_asset_record(item, pack_dir, cache_key)
+        if asset is None or asset["key"] in seen:
+            return None
+        seen.add(asset["key"])
+        assets.append(asset)
+    checksum = manifest.get("manifestChecksum")
+    if not isinstance(checksum, str) or _LOWER_SHA256_RE.fullmatch(checksum) is None:
+        return None
+    return {
+        "assignmentVersion": _safe_int(manifest.get("assignmentVersion"), 0),
+        "lessonId": str(manifest.get("lessonId") or _lesson_id_from_cache_key(cache_key)),
+        "lessonVersion": _safe_int(
+            manifest.get("lessonVersion"),
+            _lesson_version_from_cache_key(cache_key),
+        ),
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "localRoot": f"/sdcard/tbot/lesson-assets/{cache_key}",
+        "ready": True,
+        "assets": sorted(assets, key=lambda asset: asset["key"]),
+    }
+
+def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    key = item.get("key")
+    sha256 = item.get("sha256")
+    size = item.get("size")
+    media_type = item.get("mediaType")
+    critical = item.get("critical")
+    online_url = item.get("onlineUrl")
+    sd_path = item.get("sdPath")
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(sha256, str)
+        or _LOWER_SHA256_RE.fullmatch(sha256) is None
+        or type(size) is not int
+        or size < 0
+        or not isinstance(media_type, str)
+        or not media_type.strip()
+        or type(critical) is not bool
+        or not isinstance(online_url, str)
+        or not online_url
+        or not isinstance(sd_path, str)
+        or sd_path != f"/sdcard/tbot/lesson-assets/{cache_key}/{quote(key, safe='')}"
+    ):
+        return None
+    source_path = pack_dir / quote(key, safe="")
+    try:
+        if (
+            not source_path.is_file()
+            or source_path.stat().st_size != size
+            or _sha256_file(source_path) != sha256
+        ):
+            return None
+    except OSError:
+        return None
+    return {
+        "key": key,
+        "path": key,
+        "url": online_url,
+        "onlineUrl": online_url,
+        "sha256": sha256,
+        "size": size,
+        "mediaType": media_type,
+        "critical": critical,
+        "state": "READY",
+        "checksumOk": True,
+        "sdPath": sd_path,
+        "localPath": sd_path,
+    }
+
+def _safe_int(value: Any, default: int) -> int:
+    return value if type(value) is int and value >= 0 else default
 
 
 def _download_source_path(path: Path) -> Path:
