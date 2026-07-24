@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
 import pytest
 
+import core.lesson.global_generation_poller as poller_module
 from core.lesson.global_generation_poller import (
     GlobalGenerationPoller,
     canonical_json,
 )
 
 CMS_URL = "https://cms.example/v1/public/lesson-assets/latest"
-NOW = datetime(2026, 7, 24, 0, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 24, 0, 0, tzinfo=timezone.utc)
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 
@@ -539,3 +541,106 @@ async def test_default_client_disables_redirects_and_environment(monkeypatch) ->
     assert captured["timeout"].read == 15
     await poller.stop()
     assert captured["closed"] is True
+
+
+def test_poller_source_remains_python_310_compatible() -> None:
+    source = inspect.getsource(poller_module)
+    assert "datetime.UTC" not in source
+    assert "from datetime import UTC" not in source
+    assert "asyncio.timeout" not in source
+    assert "asyncio.wait_for" in source
+    assert "except asyncio.TimeoutError" in source
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_polls_serialize_and_second_uses_new_etag() -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            await asyncio.sleep(0)
+            return _response(payload, etag=etag)
+        return httpx.Response(304)
+
+    store = FakeStore()
+    callback_calls: list[dict] = []
+
+    async def callback(data: dict) -> None:
+        callback_calls.append(data)
+        await asyncio.sleep(0)
+
+    poller = GlobalGenerationPoller(
+        _config(), store, callback, http=_client(handler), clock=lambda: NOW
+    )
+    first, second = await asyncio.gather(poller.run_once(), poller.run_once())
+    assert {first["state"], second["state"]} == {"accepted", "not_modified"}
+    assert store.desired == [(8, checksum, etag)]
+    assert len(callback_calls) == 1
+    assert "if-none-match" not in requests[0].headers
+    assert requests[1].headers["if-none-match"] == etag
+
+
+@pytest.mark.asyncio
+async def test_stop_cancellation_releases_poll_lock_without_deadlock() -> None:
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await blocker.wait()
+        return httpx.Response(503)
+
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=_client(handler), clock=lambda: NOW
+    )
+    poller.start()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    waiting_poll = asyncio.create_task(poller.run_once())
+    await asyncio.wait_for(poller.stop(), timeout=1)
+    result = await asyncio.wait_for(waiting_poll, timeout=1)
+    assert result == {"state": "rejected", "errorCode": "cms_http_status"}
+
+
+@pytest.mark.asyncio
+async def test_store_failure_has_distinct_sanitized_code_and_preserves_accepted() -> None:
+    class FailingStore(FakeStore):
+        async def set_desired(self, generation: int, index_checksum: str, etag: str) -> None:
+            raise RuntimeError("redis://secret-host/private-data")
+
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    callback_calls: list[dict] = []
+    store = FailingStore()
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+    result = await GlobalGenerationPoller(
+        _config(), store, callback_calls.append, http=client, clock=lambda: NOW
+    ).run_once()
+    assert result == {"state": "rejected", "errorCode": "generation_store_failed"}
+    assert (await store.snapshot())["acceptedGeneration"] == 7
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_callback_failure_has_distinct_sanitized_code_and_preserves_accepted() -> None:
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    store = FakeStore()
+
+    async def callback(data: dict) -> None:
+        raise RuntimeError("https://secret.example/path?token=private")
+
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+    result = await GlobalGenerationPoller(
+        _config(), store, callback, http=client, clock=lambda: NOW
+    ).run_once()
+    assert result == {"state": "rejected", "errorCode": "generation_callback_failed"}
+    assert (await store.snapshot())["acceptedGeneration"] == 7
+    assert store.desired == [(8, checksum, f'"lesson-assets-g8-{checksum}"')]

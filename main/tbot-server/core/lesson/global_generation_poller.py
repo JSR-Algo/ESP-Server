@@ -11,7 +11,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -103,7 +103,7 @@ class GlobalGenerationPoller:
         on_generation: Callable[[dict[str, Any]], Awaitable[Any] | Any],
         *,
         http: Any = None,
-        clock: Callable[[], Any] = lambda: datetime.now(UTC),
+        clock: Callable[[], Any] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
     ) -> None:
         self.config = config
@@ -119,6 +119,7 @@ class GlobalGenerationPoller:
         self._etag: str | None = None
         self._payload: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._run_lock = asyncio.Lock()
         self._owns_http = http is None
         self.http = http or httpx.AsyncClient(
             timeout=httpx.Timeout(15.0, connect=3.0),
@@ -141,6 +142,10 @@ class GlobalGenerationPoller:
             await self.http.aclose()
 
     async def run_once(self) -> dict[str, str]:
+        async with self._run_lock:
+            return await self._run_once_locked()
+
+    async def _run_once_locked(self) -> dict[str, str]:
         try:
             response = await self._request()
             if response["status"] == 304:
@@ -154,12 +159,22 @@ class GlobalGenerationPoller:
             )
             if response["etag"] != expected_etag:
                 raise _PollRejected("cms_etag_mismatch")
-            await self.store.set_desired(
-                data["generation"], data["indexChecksum"], expected_etag
-            )
-            callback_result = self.on_generation(data)
-            if inspect.isawaitable(callback_result):
-                await callback_result
+            try:
+                await self.store.set_desired(
+                    data["generation"], data["indexChecksum"], expected_etag
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise _PollRejected("generation_store_failed") from None
+            try:
+                callback_result = self.on_generation(data)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise _PollRejected("generation_callback_failed") from None
             self._etag = expected_etag
             self._payload = data
             self._log("info", "accepted")
@@ -192,9 +207,8 @@ class GlobalGenerationPoller:
 
     async def _request(self) -> dict[str, Any]:
         try:
-            async with asyncio.timeout(15.0):
-                return await self._request_with_redirects()
-        except TimeoutError:
+            return await asyncio.wait_for(self._request_with_redirects(), timeout=15.0)
+        except asyncio.TimeoutError:
             raise _PollRejected("cms_request_failed") from None
 
     async def _request_with_redirects(self) -> dict[str, Any]:
@@ -543,14 +557,11 @@ def _utc_timestamp(value: Any, *, code: str = "cms_invalid_clock") -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
             raise _PollRejected(code)
-        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
         raise _PollRejected(code)
     try:
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        parsed = datetime.fromisoformat(normalized)
+        datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         raise _PollRejected(code) from None
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise _PollRejected(code)
     return value
