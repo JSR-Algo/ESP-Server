@@ -41,6 +41,13 @@
         <div class="kv"><span class="muted">{{ $t('lesson.checksum') }}</span><span class="mono">{{ preview.checksum }}</span></div>
         <div class="kv"><span class="muted">etag</span><span class="mono">{{ preview.etag }}</span></div>
       </el-card>
+      <LessonSdSyncStatus
+        v-if="lesson && lesson.status === 'published' && sdSyncStatus"
+        :status="sdSyncStatus"
+        :loading="sdSyncLoading"
+        :retrying="sdSyncRetrying"
+        @retry="retrySdSync"
+      />
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
         <div class="canonical-demo__copy">
           <span class="eyebrow">SOURCE / ADMIN DEMO</span>
@@ -478,6 +485,7 @@ import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
 import LessonPublishReviewDialog from '@/components/lesson/LessonPublishReviewDialog.vue';
+import LessonSdSyncStatus from '@/components/lesson/LessonSdSyncStatus.vue';
 import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue';
 import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
@@ -524,6 +532,7 @@ export default {
     LessonInteractionPanel,
     LessonPublishReadiness,
     LessonPublishReviewDialog,
+    LessonSdSyncStatus,
     LessonSimulationPanel,
     LessonStepPromptEditor,
     LessonStepNavigator,
@@ -623,6 +632,12 @@ export default {
       sharedImpactRebindError: '',
       sharedImpactUncertainCloneKey: '',
       sharedImpactReconciling: false,
+      lessonLoadRequestId: 0,
+      sdSyncStatus: null,
+      sdSyncLoading: false,
+      sdSyncRetrying: false,
+      sdSyncRequestId: 0,
+      sdSyncPollTimer: null,
     };
   },
   computed: {
@@ -795,6 +810,15 @@ export default {
     '$route.query.demoSource'() {
       this.loadCanonicalDemo();
     },
+    '$route.query.lessonId'(value, previous) {
+      if (value === previous) return;
+      if (!value) {
+        this.$router.replace('/course-management');
+        return;
+      }
+      this.resetSdSyncStatus();
+      this.fetchAll();
+    },
     hasPendingAuthoringChanges: {
       immediate: true,
       handler(value) {
@@ -829,6 +853,8 @@ export default {
     this.publishRequestId += 1;
     this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
+    this.sdSyncRequestId += 1;
+    this.clearSdSyncStatusPoll();
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
@@ -1178,15 +1204,22 @@ export default {
       this.stepForm.scene.activeWindows.splice(i, 1);
     },
     fetchAll() {
+      const requestId = this.lessonLoadRequestId + 1;
+      const lessonId = this.lessonId;
+      this.lessonLoadRequestId = requestId;
+      this.resetSdSyncStatus();
       this.loading = true;
       Api.lesson.getLesson(
-        this.lessonId,
+        lessonId,
         (l) => {
+          if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lesson = l;
           this.loading = false;
+          this.loadSdSyncStatus();
           this.fetchSteps();
         },
         (msg) => {
+          if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.loading = false;
           this.$message.error(msg);
         },
@@ -1208,7 +1241,9 @@ export default {
       );
     },
     fetchSteps(options = {}) {
-      Api.lesson.listSteps(this.lessonId, (rows) => {
+      const lessonId = this.lessonId;
+      Api.lesson.listSteps(lessonId, (rows) => {
+        if (this.editorDestroying || lessonId !== this.lessonId) return;
         const selectedKey = this.selectedStepKey;
         this.steps = rows;
         const matchingIndex = rows.findIndex((step) => step.stepKey === selectedKey);
@@ -1226,9 +1261,86 @@ export default {
         }
         if (options.onSuccess) options.onSuccess(rows, promptStateApplied);
       }, (msg) => {
+        if (this.editorDestroying || lessonId !== this.lessonId) return;
         this.$message.error(msg);
         if (options.onError) options.onError(msg);
       });
+    },
+    resetSdSyncStatus() {
+      this.clearSdSyncStatusPoll();
+      this.sdSyncStatus = null;
+      this.sdSyncLoading = false;
+      this.sdSyncRetrying = false;
+      this.sdSyncRequestId += 1;
+    },
+    clearSdSyncStatusPoll() {
+      if (this.sdSyncPollTimer) {
+        clearTimeout(this.sdSyncPollTimer);
+        this.sdSyncPollTimer = null;
+      }
+    },
+    sdSyncIsIncomplete(status) {
+      return Boolean(status && status.state !== 'complete');
+    },
+    scheduleSdSyncStatusPoll(status = this.sdSyncStatus) {
+      this.clearSdSyncStatusPoll();
+      if (this.editorDestroying || !this.lesson || this.lesson.status !== 'published' || !this.sdSyncIsIncomplete(status)) return false;
+      const lessonId = this.lessonId;
+      this.sdSyncPollTimer = setTimeout(() => {
+        this.sdSyncPollTimer = null;
+        if (!this.editorDestroying && lessonId === this.lessonId) this.loadSdSyncStatus({ silent: true });
+      }, 10000);
+      return true;
+    },
+    loadSdSyncStatus(options = {}) {
+      if (this.editorDestroying || !this.lesson || this.lesson.status !== 'published') {
+        this.resetSdSyncStatus();
+        return false;
+      }
+      const requestId = this.sdSyncRequestId + 1;
+      const lessonId = this.lessonId;
+      this.sdSyncRequestId = requestId;
+      this.clearSdSyncStatusPoll();
+      if (!options.silent) this.sdSyncLoading = true;
+      Api.lesson.getSdSyncStatus(
+        lessonId,
+        (status) => {
+          if (this.editorDestroying || requestId !== this.sdSyncRequestId || lessonId !== this.lessonId) return;
+          this.sdSyncLoading = false;
+          this.sdSyncStatus = status;
+          this.scheduleSdSyncStatusPoll(status);
+        },
+        (msg) => {
+          if (this.editorDestroying || requestId !== this.sdSyncRequestId || lessonId !== this.lessonId) return;
+          this.sdSyncLoading = false;
+          this.sdSyncStatus = null;
+          this.clearSdSyncStatusPoll();
+          if (!options.silent) this.$message.error(msg);
+        },
+      );
+      return true;
+    },
+    retrySdSync(deviceIds) {
+      if (this.editorDestroying || !this.lesson || this.lesson.status !== 'published' || this.sdSyncRetrying) return false;
+      const lessonId = this.lessonId;
+      this.sdSyncRetrying = true;
+      Api.lesson.retrySdSync(
+        lessonId,
+        deviceIds,
+        () => {
+          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          this.sdSyncRetrying = false;
+          this.$message.success(this.$t('lesson.sdSyncRetryQueued'));
+          this.loadSdSyncStatus();
+        },
+        (msg) => {
+          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          this.sdSyncRetrying = false;
+          this.$message.error(this.$t('lesson.sdSyncRetryFailed', { reason: msg }));
+          this.loadSdSyncStatus({ silent: true });
+        },
+      );
+      return true;
     },
     resetPromptDraft(step) {
       this.promptStepKey = step ? step.stepKey : '';
@@ -2058,7 +2170,7 @@ export default {
           targetComparison,
           targetEvidence,
         };
-        this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
+        this.publishMessage = this.$t('lesson.publishedOfflineSyncContinues', { v: result.lessonVersion, checksum: result.checksum });
         this.fetchAll();
       };
       this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });

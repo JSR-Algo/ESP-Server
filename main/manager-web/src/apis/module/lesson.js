@@ -18,6 +18,102 @@ import {
  */
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
+const SD_SYNC_STATES = new Set(['complete', 'syncing', 'offline_pending', 'failed']);
+
+function normalizeSdSyncState(value) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim().replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`).replace(/[\s-]+/g, '_').toLowerCase();
+  if (normalized === 'in_progress' || normalized === 'pending' || normalized === 'syncing') return 'syncing';
+  if (normalized === 'offline' || normalized === 'offline_pending') return 'offline_pending';
+  if (normalized === 'complete' || normalized === 'failed') return normalized;
+  return '';
+}
+
+function validSafeCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validNullableTimestamp(value) {
+  return value === null || value === undefined || (typeof value === 'string' && value.trim() && !Number.isNaN(Date.parse(value)));
+}
+
+function normalizeNullableTimestamp(value) {
+  return value === undefined ? null : value;
+}
+
+function validNullableChecksum(value) {
+  return value === null || value === undefined || value === '' || (typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value));
+}
+
+function normalizeSdSyncDevice(raw) {
+  if (!raw || Array.isArray(raw) || typeof raw !== 'object') return null;
+  const deviceId = raw.deviceId ?? raw.device_id ?? raw.id;
+  const state = normalizeSdSyncState(raw.state ?? raw.syncState ?? raw.sync_state);
+  const version = raw.version ?? raw.lessonVersion ?? raw.lesson_version ?? null;
+  const checksum = raw.checksum ?? raw.manifestChecksum ?? raw.manifest_checksum ?? null;
+  const lastSuccessAt = normalizeNullableTimestamp(raw.lastSuccessAt ?? raw.last_success_at);
+  const lastErrorAt = normalizeNullableTimestamp(raw.lastErrorAt ?? raw.last_error_at);
+  const error = raw.error ?? raw.lastError ?? raw.last_error ?? '';
+  if (typeof deviceId !== 'string' || !deviceId.trim() || !SD_SYNC_STATES.has(state)) return null;
+  if (version !== null && version !== undefined && !validSafeCount(version)) return null;
+  if (!validNullableChecksum(checksum) || !validNullableTimestamp(lastSuccessAt) || !validNullableTimestamp(lastErrorAt)) return null;
+  if (error !== null && error !== undefined && typeof error !== 'string') return null;
+  return {
+    deviceId: deviceId.trim(),
+    state,
+    version,
+    checksum: checksum || '',
+    lastSuccessAt,
+    lastErrorAt,
+    error: error || '',
+  };
+}
+
+export function normalizeLessonSdSyncStatus(payload) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') return null;
+  const state = normalizeSdSyncState(payload.state ?? payload.syncState ?? payload.sync_state);
+  const total = payload.total;
+  const complete = payload.complete;
+  const syncing = payload.syncing ?? payload.inProgress ?? payload.in_progress;
+  const offlinePending = payload.offlinePending ?? payload.offline_pending;
+  const failed = payload.failed;
+  const version = payload.version ?? payload.lessonVersion ?? payload.lesson_version ?? null;
+  const checksum = payload.checksum ?? payload.manifestChecksum ?? payload.manifest_checksum ?? null;
+  const lastSuccessAt = normalizeNullableTimestamp(payload.lastSuccessAt ?? payload.last_success_at);
+  const lastErrorAt = normalizeNullableTimestamp(payload.lastErrorAt ?? payload.last_error_at);
+  const devices = Array.isArray(payload.devices) ? payload.devices.map(normalizeSdSyncDevice) : null;
+  if (!SD_SYNC_STATES.has(state) || !devices || devices.some((device) => !device)) return null;
+  if (![total, complete, syncing, offlinePending, failed].every(validSafeCount)) return null;
+  if (complete + syncing + offlinePending + failed !== total) return null;
+  if (complete > total || syncing > total || offlinePending > total || failed > total) return null;
+  if (devices.length !== total) return null;
+  const deviceCounts = devices.reduce((counts, device) => {
+    const key = device.state === 'offline_pending' ? 'offlinePending' : device.state;
+    counts[key] += 1;
+    return counts;
+  }, { complete: 0, syncing: 0, offlinePending: 0, failed: 0 });
+  if (deviceCounts.complete !== complete || deviceCounts.syncing !== syncing
+    || deviceCounts.offlinePending !== offlinePending || deviceCounts.failed !== failed) return null;
+  if (state === 'complete' && !(total > 0 && complete === total)) return null;
+  if (state === 'failed' && failed < 1) return null;
+  if (state === 'offline_pending' && offlinePending < 1) return null;
+  if (state === 'syncing' && total > 0 && syncing < 1 && offlinePending < 1) return null;
+  if (version !== null && version !== undefined && !validSafeCount(version)) return null;
+  if (!validNullableChecksum(checksum) || !validNullableTimestamp(lastSuccessAt) || !validNullableTimestamp(lastErrorAt)) return null;
+  return {
+    state,
+    total,
+    complete,
+    syncing,
+    offlinePending,
+    failed,
+    version,
+    checksum: checksum || '',
+    lastSuccessAt,
+    lastErrorAt,
+    devices,
+  };
+}
 
 export function validateAssetListResponse(payload) {
   if (!payload || Array.isArray(payload) || typeof payload !== 'object'
@@ -288,6 +384,36 @@ export default {
           code: 'INVALID_ASSET_LIST_RESPONSE',
         });
       },
+      onError,
+    });
+  },
+
+  getSdSyncStatus(lessonId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync`,
+      method: 'GET',
+      onSuccess: (payload) => {
+        const normalized = normalizeLessonSdSyncStatus(payload);
+        if (normalized) {
+          if (onSuccess) onSuccess(normalized);
+          return;
+        }
+        if (onError) onError('Lesson SD sync status response violated the backend contract.', {
+          status: 200,
+          contract: true,
+          code: 'INVALID_SD_SYNC_STATUS_RESPONSE',
+        });
+      },
+      onError,
+    });
+  },
+
+  retrySdSync(lessonId, deviceIds, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync/retry`,
+      method: 'POST',
+      data: { deviceIds: Array.isArray(deviceIds) ? deviceIds : undefined },
+      onSuccess,
       onError,
     });
   },

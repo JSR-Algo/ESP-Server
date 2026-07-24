@@ -10,6 +10,7 @@
     "test:course-robot-e2e-ui": "node scripts/check-course-robot-e2e-ui-contracts.mjs",
     "test:tvideo-template": "node scripts/check-tvideo-template-contracts.mjs",
     "test:lesson-editor-ui": "node scripts/check-lesson-editor-ui-contracts.mjs",
+    "test:lesson-sd-sync-ui": "node scripts/check-lesson-sd-sync-ui.mjs",
     "test:lesson-builder-logic": "node scripts/check-lesson-builder-logic.cjs",
     "test:rewards-admin-browser-runner": "node --test tests/scripts/rewards-admin-browser-lifecycle.test.mjs",
     "test:e2e:rewards-admin:live": "node scripts/run-rewards-admin-browser-e2e.mjs",
