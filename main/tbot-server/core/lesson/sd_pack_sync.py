@@ -407,8 +407,7 @@ def _sync_result_ready(result: Any) -> bool:
         return False
     if result.get("ready") is False:
         return False
-    failed = result.get("failedCount")
-    return not (isinstance(failed, int) and failed > 0)
+    return _bounded_count(result.get("criticalFailedCount")) == 0
 
 
 def normalize_firmware_sync_result(cache_key: str, result: Any) -> dict[str, Any]:

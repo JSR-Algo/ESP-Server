@@ -398,6 +398,55 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
         },
     }
 
+@pytest.mark.asyncio
+async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_ready(
+    monkeypatch, tmp_path
+):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v1-a"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "optional-art.png").write_bytes(b"a")
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, _pack):
+        return {
+            "ready": True,
+            "downloadedCount": 2,
+            "skippedCount": 0,
+            "failedCount": 1,
+            "criticalFailedCount": 0,
+            "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert result["resultsByCacheKey"]["lesson-a/v1-a"] == {
+        "cacheKey": "lesson-a/v1-a",
+        "downloadedCount": 2,
+        "skippedCount": 0,
+        "failedCount": 1,
+        "criticalFailedCount": 0,
+        "ready": True,
+        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+    }
+
 
 @pytest.mark.asyncio
 async def test_raw_mcp_dispatch_uses_physical_copy_and_preserves_render_pack(monkeypatch):

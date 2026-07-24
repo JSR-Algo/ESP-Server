@@ -157,6 +157,187 @@ async def test_fanout_queues_failed_online_for_reconnect_retry(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_fanout_returns_one_contract_device_row_per_requested_device(
+    monkeypatch, tmp_path
+):
+    _write_pack(tmp_path, "lesson-a/v1-aaa")
+    _write_pack(tmp_path, "lesson-b/v1-bbb")
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    class Conn:
+        def __init__(self, device_id):
+            self.device_id = device_id
+            self.config = config
+
+    async def fake_sync(conn, *_args, **_kwargs):
+        if conn.device_id == "dev-ok":
+            return {
+                "packs": 2,
+                "synced": 2,
+                "failed": 0,
+                "resultsByCacheKey": {
+                    "lesson-a/v1-aaa": {
+                        "ready": True,
+                        "downloadedCount": 2,
+                        "skippedCount": 0,
+                        "failedCount": 1,
+                        "criticalFailedCount": 0,
+                        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+                    },
+                    "lesson-b/v1-bbb": {
+                        "ready": True,
+                        "downloadedCount": 1,
+                        "skippedCount": 1,
+                        "failedCount": 0,
+                        "criticalFailedCount": 0,
+                    },
+                },
+            }
+        return {
+            "packs": 2,
+            "synced": 1,
+            "failed": 1,
+            "resultsByCacheKey": {
+                "lesson-a/v1-aaa": {
+                    "ready": False,
+                    "downloadedCount": 0,
+                    "skippedCount": 0,
+                    "failedCount": 2,
+                    "criticalFailedCount": 1,
+                    "errorCode": "CRITICAL_ASSET_FAILED",
+                },
+                "lesson-b/v1-bbb": {
+                    "ready": True,
+                    "downloadedCount": 1,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                    "criticalFailedCount": 0,
+                },
+            },
+        }
+
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", fake_sync)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-ok": Conn("dev-ok"), "dev-bad": Conn("dev-bad")},
+        device_ids=["dev-ok", "dev-offline", "dev-bad", "dev-ok"],
+        lesson_id="lesson",
+    )
+
+    assert [device["deviceId"] for device in result["devices"]] == [
+        "dev-ok",
+        "dev-offline",
+        "dev-bad",
+    ]
+    assert len({device["deviceId"] for device in result["devices"]}) == 3
+    by_device = {device["deviceId"]: device for device in result["devices"]}
+    assert by_device["dev-ok"] == {
+        "deviceId": "dev-ok",
+        "state": "COMPLETE",
+        "downloadedCount": 3,
+        "skippedCount": 1,
+        "failedCount": 1,
+        "criticalFailedCount": 0,
+        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+        "retryable": False,
+    }
+    assert by_device["dev-offline"] == {
+        "deviceId": "dev-offline",
+        "state": "PENDING_OFFLINE",
+        "downloadedCount": 0,
+        "skippedCount": 0,
+        "failedCount": 0,
+        "criticalFailedCount": 0,
+        "retryable": True,
+    }
+    assert by_device["dev-bad"] == {
+        "deviceId": "dev-bad",
+        "state": "RETRY_WAIT",
+        "downloadedCount": 1,
+        "skippedCount": 0,
+        "failedCount": 2,
+        "criticalFailedCount": 1,
+        "errorCode": "CRITICAL_ASSET_FAILED",
+        "retryable": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
+    monkeypatch, tmp_path
+):
+    _write_pack(tmp_path, "lesson-a/v1-aaa")
+    _write_pack(tmp_path, "lesson-b/v1-bbb")
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    class Conn:
+        def __init__(self):
+            self.device_id = "dev-1"
+            self.config = config
+            self.mcp_client = type(
+                "M",
+                (),
+                {"is_ready": lambda self: asyncio.sleep(0, result=True)},
+            )()
+
+    async def fake_call(_conn, _mcp_client, _pack):
+        return {
+            "ready": True,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+        }
+
+    async def post_one(*_args, **kwargs):
+        if kwargs["result"]["cacheKey"] == "lesson-b/v1-bbb":
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-1": Conn()},
+        device_ids=["dev-1"],
+        lesson_id="lesson",
+    )
+
+    assert result["devices"] == [
+        {
+            "deviceId": "dev-1",
+            "state": "RETRY_WAIT",
+            "downloadedCount": 2,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "errorCode": "CALLBACK_ERROR",
+            "retryable": True,
+        }
+    ]
+    assert result["queued"] == [
+        {
+            "deviceId": "dev-1",
+            "cacheKeys": ["lesson-b/v1-bbb"],
+            "reason": "retry-after-fail",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_drain_pending_on_reconnect(monkeypatch, tmp_path):
     _write_pack(tmp_path, "lesson-a/v1-aaa")
     config = {

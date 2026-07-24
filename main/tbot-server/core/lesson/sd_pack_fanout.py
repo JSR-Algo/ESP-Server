@@ -142,6 +142,8 @@ async def fanout_sd_pack_sync(
     )
     pack_keys = [str(p.get("cacheKey") or "") for p in packs if p.get("cacheKey")]
     target_filter = _normalize_device_ids(device_ids)
+    if target_filter is not None:
+        target_filter = list(dict.fromkeys(target_filter))
     connections = connections or {}
     resolved_connections = await _resolve_online_connections(
         config or {}, connections, online_index=online_index
@@ -159,12 +161,38 @@ async def fanout_sd_pack_sync(
     failed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     queued: list[dict[str, Any]] = []
+    device_rows_by_id: dict[str, dict[str, Any]] = {}
 
     if not packs:
+        requested = target_filter if target_filter is not None else online_ids
+        offline_set = {
+            device_id
+            for device_id in requested
+            if device_id and device_id not in resolved_connections
+        }
+        for device_id in requested:
+            if not device_id:
+                continue
+            if device_id in offline_set:
+                device_rows_by_id[device_id] = _device_row(
+                    device_id,
+                    state="PENDING_OFFLINE",
+                    retryable=queue_offline,
+                )
+            else:
+                device_rows_by_id[device_id] = _device_row(
+                    device_id,
+                    state="COMPLETE",
+                    retryable=False,
+                )
         return {
             "packs": 0,
             "packKeys": [],
             "onlineDeviceIds": online_ids,
+            "devices": _ordered_device_rows(
+                target_filter if target_filter is not None else online_ids,
+                device_rows_by_id,
+            ),
             "synced": synced,
             "failed": failed,
             "queued": queued,
@@ -178,7 +206,15 @@ async def fanout_sd_pack_sync(
     async def _sync_one(device_id: str) -> dict[str, Any]:
         conn = resolved_connections.get(device_id)
         if conn is None:
-            return {"kind": "offline", "deviceId": device_id}
+            return {
+                "kind": "offline",
+                "deviceId": device_id,
+                "device": _device_row(
+                    device_id,
+                    state="PENDING_OFFLINE",
+                    retryable=queue_offline,
+                ),
+            }
         async with sem:
             try:
                 result = await _sync_callback_and_update_pending(
@@ -190,19 +226,34 @@ async def fanout_sd_pack_sync(
                     store=selected_store,
                 )
             except Exception as exc:
+                error_code = _stable_error_code(type(exc).__name__) or "SYNC_ERROR"
                 return {
                     "kind": "failed",
+                    "device": _device_row(
+                        device_id,
+                        state="RETRY_WAIT",
+                        retryable=True,
+                        error_code=error_code,
+                    ),
                     "entry": {
                         "deviceId": device_id,
                         "ok": False,
                         "error": f"{type(exc).__name__}: {_stable_error_message(exc)}",
+                        "errorCode": error_code,
                     },
                     "retry": True,
                 }
 
             if isinstance(result, dict) and result.get("skipped"):
+                error_code = _stable_error_code(result.get("errorCode") or result.get("skipped"))
                 return {
                     "kind": "skipped",
+                    "device": _device_row(
+                        device_id,
+                        state="RETRY_WAIT",
+                        retryable=True,
+                        error_code=error_code or "SKIPPED",
+                    ),
                     "entry": {
                         "deviceId": device_id,
                         "ok": False,
@@ -213,25 +264,45 @@ async def fanout_sd_pack_sync(
                 }
 
             packs_total = _nonnegative_int((result or {}).get("packs"))
-            failed_count = _nonnegative_int((result or {}).get("failed"))
             synced_count = len((result or {}).get("clearedCacheKeys") or [])
             retained_keys = normalize_cache_keys((result or {}).get("retainedCacheKeys") or [])
+            device_row = _device_row_from_sync_result(
+                device_id,
+                result if isinstance(result, dict) else {},
+                pack_keys,
+                retained_keys=retained_keys,
+            )
             entry = {
                 "deviceId": device_id,
-                "ok": failed_count == 0 and packs_total > 0 and not retained_keys,
+                "ok": device_row["state"] == "COMPLETE" and packs_total > 0,
                 "result": result,
             }
             if entry["ok"]:
                 _log_outcome("sync_complete", device_id, pack_keys)
-                return {"kind": "synced", "entry": entry, "retry": False}
+                return {
+                    "kind": "synced",
+                    "device": device_row,
+                    "entry": entry,
+                    "retry": False,
+                }
             if synced_count > 0:
                 _log_outcome("sync_partial", device_id, result.get("clearedCacheKeys") or [])
-            return {"kind": "failed", "entry": entry, "retry": True}
+            return {
+                "kind": "failed",
+                "device": device_row,
+                "entry": entry,
+                "retry": True,
+            }
 
     outcomes = await asyncio.gather(*[_sync_one(device_id) for device_id in sync_ids])
     retry_ids: list[str] = []
     for outcome in outcomes:
         kind = outcome.get("kind")
+        row = outcome.get("device")
+        if isinstance(row, dict):
+            device_id = str(row.get("deviceId") or "")
+            if device_id and device_id not in device_rows_by_id:
+                device_rows_by_id[device_id] = row
         if kind == "offline":
             offline_ids.append(str(outcome.get("deviceId") or ""))
             continue
@@ -246,6 +317,14 @@ async def fanout_sd_pack_sync(
             device_id = str((entry or {}).get("deviceId") or "")
             if device_id:
                 retry_ids.append(device_id)
+
+    for device_id in dict.fromkeys(d for d in offline_ids if d):
+        if device_id not in device_rows_by_id:
+            device_rows_by_id[device_id] = _device_row(
+                device_id,
+                state="PENDING_OFFLINE",
+                retryable=queue_offline,
+            )
 
     if queue_offline:
         offline_set = {d for d in offline_ids if d}
@@ -268,10 +347,12 @@ async def fanout_sd_pack_sync(
                 }
             )
 
+    device_order = target_filter if target_filter is not None else online_ids
     return {
         "packs": len(packs),
         "packKeys": pack_keys,
         "onlineDeviceIds": online_ids,
+        "devices": _ordered_device_rows(device_order, device_rows_by_id),
         "synced": synced,
         "failed": failed,
         "queued": queued,
@@ -497,6 +578,90 @@ def _stable_error_message(exc: Exception) -> str:
         return type(exc).__name__
     return message.splitlines()[0][:160]
 
+
+def _ordered_device_rows(
+    device_order: Iterable[str],
+    rows_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_device_id in device_order:
+        device_id = str(raw_device_id or "").strip()
+        if not device_id or device_id in seen:
+            continue
+        seen.add(device_id)
+        row = rows_by_id.get(device_id)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+def _device_row(
+    device_id: str,
+    *,
+    state: str,
+    retryable: bool,
+    downloaded: int = 0,
+    skipped: int = 0,
+    failed: int = 0,
+    critical_failed: int = 0,
+    error_code: str = "",
+) -> dict[str, Any]:
+    row = {
+        "deviceId": str(device_id or "").strip(),
+        "state": state,
+        "downloadedCount": _bounded_count(downloaded),
+        "skippedCount": _bounded_count(skipped),
+        "failedCount": _bounded_count(failed),
+        "criticalFailedCount": _bounded_count(critical_failed),
+    }
+    stable_error = _stable_error_code(error_code)
+    if stable_error:
+        row["errorCode"] = stable_error
+    row["retryable"] = bool(retryable)
+    return row
+
+def _device_row_from_sync_result(
+    device_id: str,
+    sync_result: dict[str, Any],
+    cache_keys: list[str],
+    *,
+    retained_keys: list[str],
+) -> dict[str, Any]:
+    downloaded = skipped = failed = critical_failed = 0
+    all_ready = bool(cache_keys)
+    error_code = ""
+    per_cache = _results_by_cache_key(sync_result, cache_keys)
+    for cache_key in cache_keys:
+        result = per_cache.get(cache_key)
+        dto = _dto_from_cache_result(device_id, cache_key, result)
+        downloaded += dto["downloadedCount"]
+        skipped += dto["skippedCount"]
+        failed += dto["failedCount"]
+        critical_failed += dto["criticalFailedCount"]
+        all_ready = all_ready and dto["ready"] and dto["criticalFailedCount"] == 0
+        if not error_code and dto.get("errorCode"):
+            error_code = str(dto["errorCode"])
+    if sync_result.get("callbackErrors") and retained_keys:
+        error_code = error_code or "CALLBACK_ERROR"
+    if retained_keys:
+        state = "RETRY_WAIT"
+        retryable = True
+    elif all_ready and critical_failed == 0:
+        state = "COMPLETE"
+        retryable = False
+    else:
+        state = "RETRY_WAIT"
+        retryable = True
+    return _device_row(
+        device_id,
+        state=state,
+        retryable=retryable,
+        downloaded=downloaded,
+        skipped=skipped,
+        failed=failed,
+        critical_failed=critical_failed,
+        error_code=error_code,
+    )
 
 def _retry_cache_keys_for_device(failed: list[dict[str, Any]], device_id: str) -> list[str]:
     for entry in failed:
