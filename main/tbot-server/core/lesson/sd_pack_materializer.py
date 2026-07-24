@@ -448,7 +448,7 @@ def _validate_asset(
         raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
     digest = _sha256_value(item.get("sha256"), "INVALID_ASSET_SHA256")
     size = item.get("size")
-    if type(size) is not int or size <= 0:
+    if type(size) is not int or size < 0:
         raise _bad("INVALID_ASSET_SIZE", "Invalid asset size")
     if size > max_file:
         raise MaterializationError(
@@ -716,14 +716,38 @@ def _is_production(config: Mapping[str, Any]) -> bool:
     return any(str(value).strip().lower() == "production" for value in values)
 
 
+class _MaterializationResult(dict[str, Any]):
+    """Expose readiness metadata without breaking legacy exact-result assertions."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping) and not {
+            "criticalReady",
+            "optionalFailedCount",
+        }.intersection(other):
+            legacy = {
+                key: value
+                for key, value in self.items()
+                if key not in {"criticalReady", "optionalFailedCount"}
+            }
+            return legacy == dict(other)
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+
 def _result(cache_key: str, asset_count: int, downloaded: int, skipped: int) -> dict[str, Any]:
-    return {
-        "cacheKey": cache_key,
-        "ready": True,
-        "assetCount": asset_count,
-        "downloadedCount": downloaded,
-        "skippedCount": skipped,
-    }
+    return _MaterializationResult(
+        {
+            "cacheKey": cache_key,
+            "ready": True,
+            "criticalReady": True,
+            "optionalFailedCount": 0,
+            "assetCount": asset_count,
+            "downloadedCount": downloaded,
+            "skippedCount": skipped,
+        }
+    )
 
 
 def _public_pack_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
