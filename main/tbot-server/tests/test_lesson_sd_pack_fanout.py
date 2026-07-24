@@ -1,10 +1,12 @@
 import asyncio
+import re
 
 import pytest
 
 from core.lesson import sd_pack_fanout, sd_pack_sync
 from core.lesson.sd_pack_pending_store import InMemoryLessonSdPendingStore
 
+_BACKEND_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 @pytest.fixture(autouse=True)
 def _clear_pending(monkeypatch):
@@ -188,7 +190,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
                         "skippedCount": 0,
                         "failedCount": 1,
                         "criticalFailedCount": 0,
-                        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+                        "errorCode": " --OPTIONAL.THUMBNAIL FAILED!!! ",
                     },
                     "lesson-b/v1-bbb": {
                         "ready": True,
@@ -210,7 +212,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
                     "skippedCount": 0,
                     "failedCount": 2,
                     "criticalFailedCount": 1,
-                    "errorCode": "CRITICAL_ASSET_FAILED",
+                    "errorCode": " --CRITICAL/ASSET FAILED!!! ",
                 },
                 "lesson-b/v1-bbb": {
                     "ready": True,
@@ -245,7 +247,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
         "skippedCount": 1,
         "failedCount": 1,
         "criticalFailedCount": 0,
-        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+        "errorCode": "optional_thumbnail_failed_",
         "retryable": False,
     }
     assert by_device["dev-offline"] == {
@@ -264,9 +266,12 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
         "skippedCount": 0,
         "failedCount": 2,
         "criticalFailedCount": 1,
-        "errorCode": "CRITICAL_ASSET_FAILED",
+        "errorCode": "critical_asset_failed_",
         "retryable": True,
     }
+    for device in result["devices"]:
+        if "errorCode" in device:
+            assert _BACKEND_ERROR_CODE_RE.fullmatch(device["errorCode"])
 
 
 @pytest.mark.asyncio
@@ -324,10 +329,11 @@ async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
             "skippedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
-            "errorCode": "CALLBACK_ERROR",
+            "errorCode": "callback_error",
             "retryable": True,
         }
     ]
+    assert _BACKEND_ERROR_CODE_RE.fullmatch(result["devices"][0]["errorCode"])
     assert result["queued"] == [
         {
             "deviceId": "dev-1",
@@ -335,6 +341,49 @@ async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
             "reason": "retry-after-fail",
         }
     ]
+
+@pytest.mark.asyncio
+async def test_fanout_device_row_error_code_is_backend_safe_and_capped(
+    monkeypatch, tmp_path
+):
+    _write_pack(tmp_path, "lesson-a/v1-aaa")
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    class Conn:
+        device_id = "dev-1"
+
+    async def fake_sync(_conn, *_args, **_kwargs):
+        return {
+            "packs": 1,
+            "synced": 0,
+            "failed": 1,
+            "resultsByCacheKey": {
+                "lesson-a/v1-aaa": {
+                    "ready": False,
+                    "failedCount": 1,
+                    "criticalFailedCount": 1,
+                    "errorCode": "___..." + ("A" * 80),
+                }
+            },
+        }
+
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", fake_sync)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-1": Conn()},
+        device_ids=["dev-1"],
+        lesson_id="lesson-a",
+    )
+
+    assert result["devices"][0]["errorCode"] == "a" * 64
+    assert _BACKEND_ERROR_CODE_RE.fullmatch(result["devices"][0]["errorCode"])
 
 
 @pytest.mark.asyncio
@@ -477,6 +526,8 @@ async def test_drain_pending_clears_only_ready_callback_success_and_retains_fail
     assert callbacks[0]["criticalFailedCount"] == 0
     assert callbacks[1]["failedCount"] == 2
     assert callbacks[1]["criticalFailedCount"] == 1
+    assert callbacks[1]["errorCode"] == "firmware_failed"
+    assert _BACKEND_ERROR_CODE_RE.fullmatch(callbacks[1]["errorCode"])
     assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
         "lesson-b/v1-bbb"
     ]
@@ -520,7 +571,8 @@ async def test_drain_pending_skipped_sync_retains_without_callback_and_one_attem
 
     assert result["skipped"] == expected_reason
     assert result["retainedCacheKeys"] == ["lesson-a/v1-aaa"]
-    assert result["errorCode"] == expected_reason.upper()
+    assert result["errorCode"] == expected_reason
+    assert _BACKEND_ERROR_CODE_RE.fullmatch(result["errorCode"])
     assert callback_calls == []
     pending = await store.load("dev-1")
     assert pending["cacheKeys"] == ["lesson-a/v1-aaa"]

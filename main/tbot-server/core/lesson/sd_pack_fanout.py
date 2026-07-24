@@ -18,7 +18,11 @@ from core.lesson.sd_pack_pending_store import (
     create_lesson_sd_pending_store,
     normalize_cache_keys,
 )
-from core.lesson.sd_pack_sync import cached_asset_packs, sync_cached_lesson_assets_to_sd
+from core.lesson.sd_pack_sync import (
+    cached_asset_packs,
+    normalize_lesson_sd_error_code,
+    sync_cached_lesson_assets_to_sd,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -473,7 +477,7 @@ async def _sync_callback_and_update_pending(
         await store.mark(backend_device_id, keys)
         result["clearedCacheKeys"] = []
         result["retainedCacheKeys"] = keys
-        result["errorCode"] = reason.upper()
+        result["errorCode"] = reason
         return result
     cleared, retained, errors = await _post_per_cache_results(
         config,
@@ -713,10 +717,7 @@ def _bounded_count(value: Any) -> int:
     return max(0, min(parsed, 1_000_000))
 
 def _stable_error_code(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in raw)[:80]
+    return normalize_lesson_sd_error_code(value)
 
 def _looks_like_mac(value: str) -> bool:
     compact = str(value or "").strip().replace("-", ":")

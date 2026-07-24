@@ -23,6 +23,7 @@ SD_PACK_SYNC_TIMEOUT_SEC = 120
 DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_ERROR_CODE_MAX_LEN = 64
 
 
 def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -443,11 +444,30 @@ def _bounded_count(value: Any) -> int:
         return 0
     return max(0, min(parsed, 1_000_000))
 
-def _stable_error_code(value: Any) -> str:
+def normalize_lesson_sd_error_code(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in raw)[:80]
+    normalized = []
+    in_separator_run = False
+    for ch in raw.lower():
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch == "_":
+            normalized.append(ch)
+            in_separator_run = False
+            continue
+        if not in_separator_run:
+            normalized.append("_")
+            in_separator_run = True
+    while normalized and not (
+        ("a" <= normalized[0] <= "z") or ("0" <= normalized[0] <= "9")
+    ):
+        normalized.pop(0)
+    if not any(("a" <= ch <= "z") or ("0" <= ch <= "9") for ch in normalized):
+        return ""
+    return "".join(normalized)[:_ERROR_CODE_MAX_LEN]
+
+def _stable_error_code(value: Any) -> str:
+    return normalize_lesson_sd_error_code(value)
 
 def _is_unknown_sd_pack_sync_tool_error(exc: Exception) -> bool:
     message = str(exc)

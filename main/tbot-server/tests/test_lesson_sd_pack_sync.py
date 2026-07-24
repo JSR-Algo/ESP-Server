@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,6 +12,7 @@ from core.lesson import sd_pack_sync
 from core.lesson.shared_asset_store import SharedAssetStore
 from core.providers.tools.device_mcp import mcp_handler
 
+_BACKEND_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -394,9 +396,29 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             "failedCount": 2,
             "criticalFailedCount": 1,
             "ready": False,
-            "errorCode": "SD_failed_token_secret",
+            "errorCode": "sd_failed_token_secret",
         },
     }
+
+def test_normalize_firmware_sync_result_error_code_matches_backend_regex():
+    cases = [
+        (" SD failed/token=secret ", "sd_failed_token_secret"),
+        ("___...OPTIONAL--THUMBNAIL FAILED!!!", "optional_thumbnail_failed_"),
+        ("9Already_OK", "9already_ok"),
+        ("A" * 80, "a" * 64),
+        ("___---...", ""),
+    ]
+
+    for raw, expected in cases:
+        result = sd_pack_sync.normalize_firmware_sync_result(
+            "lesson-a/v1-a",
+            {"ready": False, "criticalFailedCount": 1, "errorCode": raw},
+        )
+        if expected:
+            assert result["errorCode"] == expected
+            assert _BACKEND_ERROR_CODE_RE.fullmatch(result["errorCode"])
+        else:
+            assert "errorCode" not in result
 
 @pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_ready(
@@ -444,7 +466,7 @@ async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_r
         "failedCount": 1,
         "criticalFailedCount": 0,
         "ready": True,
-        "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+        "errorCode": "optional_thumbnail_failed",
     }
 
 
