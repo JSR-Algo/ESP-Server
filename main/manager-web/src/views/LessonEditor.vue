@@ -2170,8 +2170,10 @@ export default {
           targetComparison,
           targetEvidence,
         };
-        this.publishMessage = this.$t('lesson.publishedOfflineSyncContinues', { v: result.lessonVersion, checksum: result.checksum });
-        this.fetchAll();
+        if (verified) {
+          this.publishMessage = this.$t('lesson.publishedOfflineSyncContinues', { v: result.lessonVersion, checksum: result.checksum });
+          this.fetchAll();
+        }
       };
       this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
       this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });

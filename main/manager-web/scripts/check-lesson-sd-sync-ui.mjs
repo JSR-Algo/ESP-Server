@@ -81,6 +81,11 @@ expectContains('src/views/LessonEditor.vue', 'scheduleSdSyncStatusPoll', 'editor
 expectContains('src/views/LessonEditor.vue', 'clearSdSyncStatusPoll', 'editor must stop sync timers on teardown and transitions');
 expectContains('src/views/LessonEditor.vue', 'retrySdSync', 'editor must wire retry action to the API');
 expectContains('src/views/LessonEditor.vue', 'lesson.publishedOfflineSyncContinues', 'publish message must say offline sync continues asynchronously');
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /if\s*\(verified\)\s*\{[\s\S]*?publishMessage\s*=\s*this\.\$t\('lesson\.publishedOfflineSyncContinues'[\s\S]*?fetchAll\(\)[\s\S]*?\}/m,
+  'offline sync success messaging and status refresh must only run after independent publish verification passes',
+);
 expectContains('src/components/lesson/LessonSdSyncStatus.vue', "lesson.sdSyncTitle", 'status component must use localized title');
 expectContains('src/components/lesson/LessonSdSyncStatus.vue', "@click=\"$emit('retry'", 'retry action must be emitted by the component');
 expectRegex(
@@ -163,10 +168,17 @@ for (const malformed of [
   { ...validStatus, complete: 3 },
   { ...validStatus, total: -1 },
   { ...validStatus, state: 'ready' },
+  { ...validStatus, version: null },
+  { ...validStatus, version: undefined },
+  { ...validStatus, checksum: null },
+  { ...validStatus, checksum: '' },
   { ...validStatus, checksum: 'bad' },
   { ...validStatus, lastSuccessAt: 'not-a-date' },
   { ...validStatus, syncing: 1, complete: 1 },
   { ...validStatus, state: 'complete', complete: 1, failed: 1, devices: [{ ...validStatus.devices[0] }, { ...validStatus.devices[1], state: 'failed' }] },
+  { ...validStatus, devices: [{ ...validStatus.devices[0], version: 2 }, validStatus.devices[1]] },
+  { ...validStatus, devices: [{ ...validStatus.devices[0], checksum: 'b'.repeat(64) }, validStatus.devices[1]] },
+  { ...validStatus, devices: [{ ...validStatus.devices[0], checksum: '' }, validStatus.devices[1]] },
   { ...validStatus, devices: [{ ...validStatus.devices[0], state: 'ready' }] },
   { ...validStatus, devices: [{ ...validStatus.devices[0], deviceId: '' }] },
 ]) {

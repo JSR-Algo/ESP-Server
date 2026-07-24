@@ -100,6 +100,11 @@ export function normalizeLessonSdSyncStatus(payload) {
   if (state === 'syncing' && total > 0 && syncing < 1 && offlinePending < 1) return null;
   if (version !== null && version !== undefined && !validSafeCount(version)) return null;
   if (!validNullableChecksum(checksum) || !validNullableTimestamp(lastSuccessAt) || !validNullableTimestamp(lastErrorAt)) return null;
+  const hasCurrentVersion = validSafeCount(version);
+  const hasCurrentChecksum = typeof checksum === 'string' && /^[a-f0-9]{64}$/i.test(checksum);
+  if (state === 'complete' && (!hasCurrentVersion || !hasCurrentChecksum)) return null;
+  if (hasCurrentVersion && hasCurrentChecksum && devices.some((device) => device.state === 'complete'
+    && (device.version !== version || device.checksum !== checksum))) return null;
   return {
     state,
     total,
