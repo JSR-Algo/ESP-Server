@@ -364,6 +364,93 @@ async def test_cache_key_over_200_bytes_fails_with_stable_sanitized_code() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "published_at",
+    ["2026-07-24 00:00:00+00:00", "2026-07-24T00:00+00:00"],
+)
+async def test_published_at_rejects_non_rfc3339_datetime_forms(published_at: str) -> None:
+    payload = _payload()
+    payload["data"]["publishedAt"] = published_at
+    checksum = payload["data"]["indexChecksum"]
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+    result = await GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=client, clock=lambda: NOW
+    ).run_once()
+    assert result == {"state": "rejected", "errorCode": "cms_invalid_published_at"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "published_at",
+    [
+        "2026-07-24T00:00:00Z",
+        "2026-07-24T00:00:00.123456Z",
+        "2026-07-24T00:00:00+00:00",
+        "2026-07-24T00:00:00.1+00:00",
+    ],
+)
+async def test_published_at_accepts_strict_utc_rfc3339(published_at: str) -> None:
+    payload = _payload()
+    payload["data"]["publishedAt"] = published_at
+    checksum = payload["data"]["indexChecksum"]
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+    result = await GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=client, clock=lambda: NOW
+    ).run_once()
+    assert result["state"] == "accepted"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://bad host", "https://bad\thost", "https://-bad.example", "https://bad_.example"],
+)
+def test_configured_allowed_origin_rejects_malformed_hostname(origin: str) -> None:
+    config = _config()
+    config["lesson"]["asset_allowed_origins"] = origin
+    with pytest.raises(ValueError, match="HTTPS origins"):
+        GlobalGenerationPoller(config, FakeStore(), lambda data: None)
+
+
+@pytest.mark.asyncio
+async def test_malformed_matching_asset_origin_never_reaches_callback() -> None:
+    config = _config()
+    config["lesson"]["asset_allowed_origins"] = "https://bad host"
+    callback_calls: list[dict] = []
+    with pytest.raises(ValueError, match="HTTPS origins"):
+        GlobalGenerationPoller(config, FakeStore(), callback_calls.append)
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_asset_url_with_parser_stripped_hostname_control_is_rejected() -> None:
+    payload = _payload()
+    asset = payload["data"]["index"][0]["assets"][0]
+    asset["onlineUrl"] = asset["url"] = "https://cdn.example\t/assets/file.png"
+    payload["data"]["indexChecksum"] = hashlib.sha256(
+        canonical_json(payload["data"]["index"])
+    ).hexdigest()
+    checksum = payload["data"]["indexChecksum"]
+    callback_calls: list[dict] = []
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+    result = await GlobalGenerationPoller(
+        _config(), FakeStore(), callback_calls.append, http=client, clock=lambda: NOW
+    ).run_once()
+    assert result == {"state": "rejected", "errorCode": "cms_asset_url_rejected"}
+    assert callback_calls == []
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://cdn.example", "https://127.0.0.1:8443", "https://[2001:db8::1]:9443"],
+)
+def test_configured_allowed_origin_accepts_valid_host_kinds(origin: str) -> None:
+    config = _config()
+    config["lesson"]["asset_allowed_origins"] = origin
+    poller = GlobalGenerationPoller(config, FakeStore(), lambda data: None, http=object())
+    assert poller.allowed_origins
+
+
+@pytest.mark.asyncio
 async def test_rejects_nan_oversized_body_and_non_200_without_leaking_details() -> None:
     cases = [
         (httpx.Response(200, content=b'{"data":{"generation":NaN}}'), "cms_invalid_json"),

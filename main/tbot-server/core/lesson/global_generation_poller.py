@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import ipaddress
 import json
 import os
 import re
@@ -63,6 +64,11 @@ _ASSET_FIELDS = frozenset(
 )
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _LESSON_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_RFC3339_UTC_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|\+00:00)$"
+)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _FAT_FORBIDDEN_RE = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
 _FAT_DEVICE_RE = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)")
@@ -438,9 +444,11 @@ def _js_sort_key(value: str) -> bytes:
 
 def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
     try:
+        if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+            raise ValueError
         parts = urlsplit(url)
         scheme = parts.scheme.lower()
-        hostname = (parts.hostname or "").lower()
+        hostname = _normalized_hostname(parts.hostname or "")
         port = parts.port
     except (TypeError, ValueError):
         raise _PollRejected("cms_invalid_url") from None
@@ -456,6 +464,30 @@ def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
     return scheme, hostname, port or (443 if scheme == "https" else 80)
 
 
+def _normalized_hostname(hostname: str) -> str:
+    if not hostname:
+        raise ValueError
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if ":" in hostname or "%" in hostname:
+            raise ValueError from None
+        try:
+            ascii_hostname = hostname.encode("ascii").decode("ascii").lower()
+        except UnicodeEncodeError:
+            raise ValueError from None
+        canonical = ascii_hostname[:-1] if ascii_hostname.endswith(".") else ascii_hostname
+        if not canonical or len(canonical) > 253:
+            raise ValueError from None
+        labels = canonical.split(".")
+        if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
+            raise ValueError from None
+        if len(labels) == 4 and all(label.isdigit() for label in labels):
+            raise ValueError from None
+        return ascii_hostname
+    return address.compressed.lower()
+
+
 def _allowed_origins(config: Mapping[str, Any]) -> set[tuple[str, str, int]]:
     raw = os.environ.get("LESSON_ASSET_ALLOWED_ORIGINS")
     if raw is None:
@@ -465,8 +497,13 @@ def _allowed_origins(config: Mapping[str, Any]) -> set[tuple[str, str, int]]:
         item = item.strip()
         if not item:
             continue
-        parts = urlsplit(item)
-        origin = _origin(item, allowed_schemes={"https"})
+        try:
+            parts = urlsplit(item)
+            origin = _origin(item, allowed_schemes={"https"})
+        except ValueError:
+            raise ValueError(
+                "LESSON_ASSET_ALLOWED_ORIGINS must contain HTTPS origins"
+            ) from None
         if parts.path not in {"", "/"} or parts.query:
             raise ValueError("LESSON_ASSET_ALLOWED_ORIGINS must contain HTTPS origins")
         origins.add(origin)
@@ -507,7 +544,7 @@ def _utc_timestamp(value: Any, *, code: str = "cms_invalid_clock") -> str:
         if value.tzinfo is None or value.utcoffset() is None:
             raise _PollRejected(code)
         return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    if not isinstance(value, str):
+    if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
         raise _PollRejected(code)
     try:
         normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
