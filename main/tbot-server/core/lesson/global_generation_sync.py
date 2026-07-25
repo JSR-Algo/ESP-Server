@@ -19,7 +19,45 @@ from core.lesson.sd_pack_materializer import (
 _DEFAULT_CONCURRENCY = 3
 _MAX_CONCURRENCY = 8
 _ERROR_CODE_RE = re.compile(r"[^a-z0-9]+")
-_MATERIALIZATION_CODE_RE = re.compile(r"^[A-Za-z0-9 _-]{1,128}$")
+_MATERIALIZATION_ERROR_CODES = {
+    "ALIAS_CONFLICT": "alias_conflict",
+    "BASENAME_COLLISION": "basename_collision",
+    "CACHE_KEY_MISMATCH": "cache_key_mismatch",
+    "CHECKSUM_MISMATCH": "checksum_mismatch",
+    "DECLARED_SIZE_MISMATCH": "declared_size_mismatch",
+    "DISALLOWED_ORIGIN": "disallowed_origin",
+    "DNS_RESOLUTION_FAILED": "dns_resolution_failed",
+    "DOWNLOAD_FAILED": "download_failed",
+    "DUPLICATE_ASSET_KEY": "duplicate_asset_key",
+    "FILE_TOO_LARGE": "file_too_large",
+    "INVALID_ASSET": "invalid_asset",
+    "INVALID_ASSETS": "invalid_assets",
+    "INVALID_ASSET_KEY": "invalid_asset_key",
+    "INVALID_ASSET_SHA256": "invalid_asset_sha256",
+    "INVALID_ASSET_SIZE": "invalid_asset_size",
+    "INVALID_CACHE_KEY": "invalid_cache_key",
+    "INVALID_CRITICAL": "invalid_critical",
+    "INVALID_LESSON_ID": "invalid_lesson_id",
+    "INVALID_LESSON_VERSION": "invalid_lesson_version",
+    "INVALID_LIMIT": "invalid_limit",
+    "INVALID_MANIFEST": "invalid_manifest",
+    "INVALID_MANIFEST_CHECKSUM": "invalid_manifest_checksum",
+    "INVALID_MEDIA_TYPE": "invalid_media_type",
+    "INVALID_PROFILE": "invalid_profile",
+    "INVALID_SD_PATH": "invalid_sd_path",
+    "INVALID_URL": "invalid_url",
+    "MISSING_FIELD": "missing_field",
+    "NON_HTTPS_URL": "non_https_url",
+    "PACK_REPLAY_MISMATCH": "pack_replay_mismatch",
+    "PACK_TOO_LARGE": "pack_too_large",
+    "PRIVATE_ADDRESS": "private_address",
+    "REDIRECT_NOT_ALLOWED": "redirect_not_allowed",
+    "STORAGE_ERROR": "storage_error",
+    "STORAGE_NOT_CONFIGURED": "storage_not_configured",
+    "UNKNOWN_FIELD": "unknown_field",
+    "UNSAFE_URL_PATH": "unsafe_url_path",
+    "URL_FRAGMENT": "url_fragment",
+}
 _SAFE_FANOUT_COUNT_KEYS = frozenset(
     {
         "deviceCount",
@@ -149,14 +187,14 @@ def _strict_pack(pack: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _materialize_concurrency(config: Mapping[str, Any]) -> int:
-    raw = os.environ.get("LESSON_GENERATION_MATERIALIZE_CONCURRENCY")
-    if raw is None:
-        lesson = config.get("lesson", {}) if isinstance(config, Mapping) else {}
-        raw = (
-            lesson.get("generation_materialize_concurrency", _DEFAULT_CONCURRENCY)
-            if isinstance(lesson, Mapping)
-            else _DEFAULT_CONCURRENCY
-        )
+    env_value = os.environ.get("LESSON_GENERATION_MATERIALIZE_CONCURRENCY")
+    lesson = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    config_value: Any = (
+        lesson.get("generation_materialize_concurrency", _DEFAULT_CONCURRENCY)
+        if isinstance(lesson, Mapping)
+        else _DEFAULT_CONCURRENCY
+    )
+    raw: Any = env_value if env_value is not None else config_value
     if type(raw) is bool:
         raise ValueError("invalid materialization concurrency")
     try:
@@ -196,9 +234,9 @@ def _normalize_error_code(value: Any, *, fallback: str) -> str:
 
 
 def _normalize_materialization_code(value: Any) -> str:
-    if not isinstance(value, str) or _MATERIALIZATION_CODE_RE.fullmatch(value) is None:
+    if not isinstance(value, str):
         return "generation_materialization_failed"
-    return _normalize_error_code(value, fallback="generation_materialization_failed")
+    return _MATERIALIZATION_ERROR_CODES.get(value, "generation_materialization_failed")
 
 
 def _utc_timestamp(value: Any, *, offset_seconds: int = 0) -> str:

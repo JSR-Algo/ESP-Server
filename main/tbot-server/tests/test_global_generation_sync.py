@@ -272,15 +272,46 @@ async def test_materialization_error_uses_only_normalized_stable_code():
 
 
 @pytest.mark.asyncio
-async def test_safe_materialization_error_code_is_normalized_to_snake_case():
+async def test_unknown_safe_looking_materialization_code_is_rejected():
     store = _Store()
 
     async def materialize(pack, *, config):
-        raise MaterializationError("CHECKSUM-MISMATCH", 400, False, "private details")
+        raise MaterializationError(
+            "REDIS TOKEN PRIVATE HOST", 500, True, "private details"
+        )
 
     result = await GlobalGenerationSync({}, store, pytest.fail, materialize=materialize).apply(_payload(1))
 
-    assert result["errorCode"] == "checksum_mismatch"
+    assert result["errorCode"] == "generation_materialization_failed"
+    assert store.retries[0][0] == "generation_materialization_failed"
+    assert not {"redis", "token", "private", "host"}.intersection(
+        result["errorCode"].split("_")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("CHECKSUM_MISMATCH", "checksum_mismatch"),
+        ("DOWNLOAD_FAILED", "download_failed"),
+        ("DECLARED_SIZE_MISMATCH", "declared_size_mismatch"),
+        ("FILE_TOO_LARGE", "file_too_large"),
+        ("PACK_REPLAY_MISMATCH", "pack_replay_mismatch"),
+        ("INVALID_LIMIT", "invalid_limit"),
+        ("STORAGE_NOT_CONFIGURED", "storage_not_configured"),
+    ],
+)
+async def test_known_materialization_codes_use_precise_stable_allowlist(code, expected):
+    store = _Store()
+
+    async def materialize(pack, *, config):
+        raise MaterializationError(code, 500, True, "private details")
+
+    result = await GlobalGenerationSync({}, store, pytest.fail, materialize=materialize).apply(_payload(1))
+
+    assert result["errorCode"] == expected
+    assert store.retries[0][0] == expected
 
 
 @pytest.mark.asyncio
