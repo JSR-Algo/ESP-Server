@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -80,7 +81,16 @@ class FakeRedis:
             if "DELETE_SESSION" in script:
                 self.hashes[key].pop(field, None)
             elif "TOUCH_SESSION" in script:
-                current["expiresAt"] = float(args[4])
+                expires_at = current.get("expiresAt")
+                now = float(args[4])
+                if (
+                    isinstance(expires_at, bool)
+                    or not isinstance(expires_at, (int, float))
+                    or not math.isfinite(float(expires_at))
+                    or float(expires_at) <= now
+                ):
+                    return 0
+                current["expiresAt"] = float(args[5])
                 self.hashes.setdefault(key, {})[field] = json.dumps(current)
                 self.touch_calls += 1
             else:
@@ -153,7 +163,9 @@ async def test_unclaimed_raw_session_syncs_without_identity_or_callback_contract
     )
 
     assert calls == [(connection, {"lesson/v1"})]
-    source = inspect.getsource(inspect.getmodule(GlobalGenerationSessions)).lower()
+    module = inspect.getmodule(GlobalGenerationSessions)
+    assert module is not None
+    source = inspect.getsource(module).lower()
     for forbidden in (
         "resolve_device_identity",
         "post_lesson_sd_sync_result",
@@ -541,7 +553,9 @@ async def test_disconnect_and_new_generation_cancel_session_retry_task():
 
 
 def test_source_does_not_store_raw_ids_in_shared_rows():
-    source = inspect.getsource(inspect.getmodule(GlobalGenerationSessions))
+    module = inspect.getmodule(GlobalGenerationSessions)
+    assert module is not None
+    source = inspect.getsource(module)
     assert "sha256" in source
     assert '"rawId"' not in source
 
@@ -667,6 +681,72 @@ async def test_active_heartbeat_refreshes_expiry_without_resetting_current_state
 
 
 @pytest.mark.asyncio
+async def test_expired_lease_cannot_be_revived_by_recovered_heartbeat():
+    clock = Clock(100.0)
+    stalled = asyncio.Event()
+
+    async def heartbeat_sleep(delay):
+        if not stalled.is_set():
+            clock.value += 91.0
+            stalled.set()
+            return
+        await asyncio.Future()
+
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(
+        redis,
+        clock=clock,
+        heartbeat_sleep=heartbeat_sleep,
+        heartbeat_interval=30.0,
+        session_ttl=90.0,
+    )
+    connection = object()
+    await sessions.register("stalled", connection)
+    session = sessions._by_connection[id(connection)]
+    heartbeat_task = session.heartbeat_task
+    assert heartbeat_task is not None
+    await stalled.wait()
+    for _ in range(20):
+        if heartbeat_task.done():
+            break
+        await asyncio.sleep(0)
+
+    assert await sessions._shared_fence(session) is False
+    assert heartbeat_task.done()
+    assert redis.touch_calls == 0
+    assert await sessions.aggregate(1) == {
+        "connected": 0,
+        "current": 0,
+        "retrying": 0,
+        "failed": 0,
+    }
+    await sessions.unregister("stalled", connection)
+
+
+@pytest.mark.asyncio
+async def test_touch_rejects_expiry_boundary_and_nonnumeric_expiry():
+    clock = Clock(100.0)
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+    connection = object()
+    await sessions.register("boundary", connection)
+    session = sessions._by_connection[id(connection)]
+    field = session.raw_hash
+
+    clock.value = 190.0
+    assert await sessions._touch_shared(session) is False
+    assert redis.touch_calls == 0
+
+    row = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][field])
+    row["expiresAt"] = "not-a-number"
+    redis.hashes[GLOBAL_SESSIONS_KEY][field] = json.dumps(row)
+    clock.value = 150.0
+    assert await sessions._touch_shared(session) is False
+    assert redis.touch_calls == 0
+    await sessions.unregister("boundary", connection)
+
+
+@pytest.mark.asyncio
 async def test_expired_cleanup_cannot_delete_newer_replacement():
     clock = Clock(100.0)
 
@@ -777,7 +857,9 @@ async def test_malformed_shared_row_is_repaired_on_register_and_rejected_by_othe
 
 
 def test_lua_scripts_use_protected_json_decode():
-    source = inspect.getsource(inspect.getmodule(GlobalGenerationSessions))
+    module = inspect.getmodule(GlobalGenerationSessions)
+    assert module is not None
+    source = inspect.getsource(module)
     assert source.count("pcall(cjson.decode") >= 4
 
 

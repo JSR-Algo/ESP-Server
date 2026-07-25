@@ -73,7 +73,14 @@ local ok, decoded = pcall(cjson.decode, current)
 if not ok or type(decoded) ~= 'table' then return 0 end
 if tonumber(decoded.connectionGeneration or 0) ~= tonumber(ARGV[2]) then return 0 end
 if decoded.sessionId ~= ARGV[3] then return 0 end
-decoded.expiresAt = tonumber(ARGV[4])
+local expires_at = tonumber(decoded.expiresAt)
+local now = tonumber(ARGV[4])
+local next_expires_at = tonumber(ARGV[5])
+if not expires_at or not now or not next_expires_at then return 0 end
+if expires_at ~= expires_at or now ~= now or next_expires_at ~= next_expires_at then return 0 end
+if math.abs(expires_at) == math.huge or math.abs(now) == math.huge or math.abs(next_expires_at) == math.huge then return 0 end
+if expires_at <= now or next_expires_at <= now then return 0 end
+decoded.expiresAt = next_expires_at
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(decoded))
 return 1
 """
@@ -535,7 +542,9 @@ class GlobalGenerationSessions:
         except Exception:
             return None
         row = _decode_row(raw)
-        if row is None:
+        if row is None or not _valid_shared_row(row):
+            return False
+        if float(row["expiresAt"]) <= self._now():
             return False
         return (
             row.get("connectionGeneration") == session.connection_generation
@@ -633,6 +642,7 @@ class GlobalGenerationSessions:
             ):
                 return False
             try:
+                now = self._now()
                 result = await self.redis.eval(
                     _TOUCH_SCRIPT,
                     1,
@@ -640,7 +650,8 @@ class GlobalGenerationSessions:
                     session.raw_hash,
                     str(session.connection_generation),
                     session.session_id,
-                    str(self._expires_at()),
+                    str(now),
+                    str(self._expires_at(now)),
                 )
                 return int(result) == 1
             except asyncio.CancelledError:
@@ -672,8 +683,8 @@ class GlobalGenerationSessions:
             raise ValueError("clock must return a finite epoch number")
         return value
 
-    def _expires_at(self) -> float:
-        return self._now() + self._session_ttl
+    def _expires_at(self, now: float | None = None) -> float:
+        return (self._now() if now is None else now) + self._session_ttl
 
 
 def _normalize_raw_id(raw_id: str) -> str:
