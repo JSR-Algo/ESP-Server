@@ -35,6 +35,7 @@ class FakeRedis:
         self.hashes = {}
         self.values = {}
         self.lock = asyncio.Lock()
+        self.touch_calls = 0
 
     async def incr(self, key):
         async with self.lock:
@@ -53,13 +54,21 @@ class FakeRedis:
         field = args[1]
         async with self.lock:
             current_raw = self.hashes.get(key, {}).get(field)
-            current = json.loads(current_raw) if current_raw else None
+            try:
+                current = json.loads(current_raw) if current_raw else None
+            except (TypeError, ValueError):
+                current = None
+                malformed = True
+            else:
+                malformed = False
             if "REGISTER_SESSION" in script:
                 generation, row = int(args[2]), args[3]
-                if current and int(current.get("connectionGeneration", 0)) >= generation:
+                if not malformed and current and int(current.get("connectionGeneration", 0)) >= generation:
                     return 0
                 self.hashes.setdefault(key, {})[field] = row
                 return 1
+            if malformed:
+                return 0
             generation, session_id = int(args[2]), args[3]
             if not current:
                 return 0
@@ -70,9 +79,21 @@ class FakeRedis:
                 return 0
             if "DELETE_SESSION" in script:
                 self.hashes[key].pop(field, None)
+            elif "TOUCH_SESSION" in script:
+                current["expiresAt"] = float(args[4])
+                self.hashes.setdefault(key, {})[field] = json.dumps(current)
+                self.touch_calls += 1
             else:
                 self.hashes.setdefault(key, {})[field] = args[4]
             return 1
+
+
+class Clock:
+    def __init__(self, value: float):
+        self.value = value
+
+    def __call__(self):
+        return self.value
 
 
 async def _no_sleep(_delay):
@@ -178,6 +199,8 @@ async def test_reconnect_replacement_fences_stale_unregister_and_sync_result():
     old = SimpleNamespace(name="old")
     new = SimpleNamespace(name="new")
     await sessions.register("AA:BB:CC:DD:EE:FF", old)
+    old_heartbeat = sessions._by_connection[id(old)].heartbeat_task
+    assert old_heartbeat is not None
     old_sync = asyncio.create_task(
         sessions.sync_on_connect(
             old, accepted_generation=4, checksum=CHECKSUM, packs=[_pack("lesson/v1")]
@@ -185,6 +208,7 @@ async def test_reconnect_replacement_fences_stale_unregister_and_sync_result():
     )
     await asyncio.sleep(0)
     await sessions.register("aa-bb-cc-dd-ee-ff", new)
+    assert old_heartbeat.done()
     await sessions.unregister("aa:bb:cc:dd:ee:ff", old)
     release_old.set()
     await old_sync
@@ -247,11 +271,15 @@ async def test_older_register_cannot_overwrite_newer_replica_session():
     await redis.first_eval_started.wait()
     await second.register("same", new)
     redis.release_first_eval.set()
-    await old_register
+    with pytest.raises(global_generation_sessions.GlobalGenerationSessionsError) as caught:
+        await old_register
 
     field = hashlib.sha256(b"same").hexdigest()
     row = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][field])
+    assert caught.value.code == "generation_session_register_failed"
     assert row["connectionGeneration"] == 2
+    assert first._by_raw == {}
+    assert first._by_connection == {}
     assert await first.sync_on_connect(
         old, accepted_generation=1, checksum=CHECKSUM, packs=[_pack("a")]
     ) == {"state": "failed", "errorCode": "session_not_current"}
@@ -376,6 +404,7 @@ async def test_fanout_reraises_non_exception_base_exception_from_gather(monkeypa
     sessions = GlobalGenerationSessions(FakeRedis())
     connection = object()
     await sessions.register("one", connection)
+    real_gather = asyncio.gather
 
     async def base_exception_result(*aws, **_kwargs):
         for awaitable in aws:
@@ -391,6 +420,8 @@ async def test_fanout_reraises_non_exception_base_exception_from_gather(monkeypa
             index_checksum=CHECKSUM,
             packs=[_pack("a")],
         )
+    monkeypatch.setattr(global_generation_sessions.asyncio, "gather", real_gather)
+    await sessions.unregister("one", connection)
 
 
 @pytest.mark.asyncio
@@ -513,6 +544,241 @@ def test_source_does_not_store_raw_ids_in_shared_rows():
     source = inspect.getsource(inspect.getmodule(GlobalGenerationSessions))
     assert "sha256" in source
     assert '"rawId"' not in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["incr", "eval", "non_success"])
+async def test_failed_register_raises_safely_and_rolls_back_all_local_state(failure):
+    class BrokenRedis(FakeRedis):
+        async def incr(self, key):
+            if failure == "incr":
+                raise RuntimeError("redis://secret@private/register")
+            return await super().incr(key)
+
+        async def eval(self, script, numkeys, *args):
+            if "REGISTER_SESSION" in script:
+                if failure == "eval":
+                    raise RuntimeError("private redis row")
+                if failure == "non_success":
+                    return 0
+            return await super().eval(script, numkeys, *args)
+
+    sessions = GlobalGenerationSessions(BrokenRedis())
+    started_tasks = []
+    sessions._start_heartbeat = lambda session: started_tasks.append(("heartbeat", session))
+    sessions._start_worker = lambda session, *, immediate: started_tasks.append(
+        ("retry", session, immediate)
+    )
+    await sessions.fanout(
+        generation=8,
+        index_checksum=CHECKSUM,
+        packs=[_pack("a")],
+    )
+    connection = object()
+
+    with pytest.raises(global_generation_sessions.GlobalGenerationSessionsError) as caught:
+        await sessions.register("raw-session", connection)
+
+    assert caught.value.code == "generation_session_register_failed"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert sessions._by_raw == {}
+    assert sessions._by_connection == {}
+    assert started_tasks == []
+    prompt = sessions.notify_mcp_ready(connection)
+    assert prompt is not None
+    assert await prompt == {"state": "failed", "errorCode": "session_not_current"}
+
+
+@pytest.mark.asyncio
+async def test_expired_hard_dead_row_is_ignored_and_fenced_deleted():
+    clock = Clock(100.0)
+    redis = FakeRedis()
+    field = hashlib.sha256(b"dead").hexdigest()
+    redis.hashes[GLOBAL_SESSIONS_KEY] = {
+        field: json.dumps(
+            {
+                "sessionId": "opaque-dead-session",
+                "connectionGeneration": 7,
+                "observedGeneration": 3,
+                "observedChecksum": CHECKSUM,
+                "status": "current",
+                "retryAttempt": 0,
+                "expiresAt": 99.0,
+            }
+        )
+    }
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+
+    assert await sessions.aggregate(3) == {
+        "connected": 0,
+        "current": 0,
+        "retrying": 0,
+        "failed": 0,
+    }
+    assert field not in redis.hashes[GLOBAL_SESSIONS_KEY]
+
+
+@pytest.mark.asyncio
+async def test_active_heartbeat_refreshes_expiry_without_resetting_current_state():
+    clock = Clock(1_000.0)
+    blocker = asyncio.Event()
+
+    async def heartbeat_sleep(delay):
+        if clock.value == 1_000.0:
+            clock.value += delay
+            return
+        await blocker.wait()
+
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(
+        redis,
+        sync=lambda _connection, *, only_cache_keys: _ready(*only_cache_keys),
+        clock=clock,
+        heartbeat_sleep=heartbeat_sleep,
+        heartbeat_interval=30.0,
+        session_ttl=90.0,
+    )
+    connection = object()
+    await sessions.register("active", connection)
+    await sessions.sync_on_connect(
+        connection,
+        accepted_generation=4,
+        checksum=CHECKSUM,
+        packs=[_pack("a")],
+    )
+    for _ in range(20):
+        if redis.touch_calls:
+            break
+        await asyncio.sleep(0)
+
+    row = json.loads(next(iter(redis.hashes[GLOBAL_SESSIONS_KEY].values())))
+    assert redis.touch_calls == 1
+    assert row["expiresAt"] == 1_120.0
+    assert row["observedGeneration"] == 4
+    assert row["status"] == "current"
+    assert await sessions.aggregate(4) == {
+        "connected": 1,
+        "current": 1,
+        "retrying": 0,
+        "failed": 0,
+    }
+    await sessions.unregister("active", connection)
+
+
+@pytest.mark.asyncio
+async def test_expired_cleanup_cannot_delete_newer_replacement():
+    clock = Clock(100.0)
+
+    class ReplacingRedis(FakeRedis):
+        async def eval(self, script, numkeys, *args):
+            if "DELETE_SESSION" in script:
+                key, field = args[:2]
+                self.hashes.setdefault(key, {})[field] = json.dumps(
+                    {
+                        "sessionId": "new-session",
+                        "connectionGeneration": 8,
+                        "observedGeneration": None,
+                        "observedChecksum": None,
+                        "status": "retrying",
+                        "retryAttempt": 0,
+                        "expiresAt": 190.0,
+                    }
+                )
+            return await super().eval(script, numkeys, *args)
+
+    redis = ReplacingRedis()
+    field = hashlib.sha256(b"same").hexdigest()
+    redis.hashes[GLOBAL_SESSIONS_KEY] = {
+        field: json.dumps(
+            {
+                "sessionId": "old-session",
+                "connectionGeneration": 7,
+                "observedGeneration": 3,
+                "observedChecksum": CHECKSUM,
+                "status": "current",
+                "retryAttempt": 0,
+                "expiresAt": 99.0,
+            }
+        )
+    }
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+
+    assert (await sessions.aggregate(3))["connected"] == 0
+    replacement = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][field])
+    assert replacement["connectionGeneration"] == 8
+    assert (await sessions.aggregate(3))["connected"] == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_store_outage_does_not_advance_or_leak_errors():
+    clock = Clock(100.0)
+    second_sleep = asyncio.Event()
+
+    class OutageRedis(FakeRedis):
+        fail_reads = False
+
+        async def hget(self, key, field):
+            if self.fail_reads:
+                raise RuntimeError("redis://secret@private/heartbeat")
+            return await super().hget(key, field)
+
+    redis = OutageRedis()
+
+    async def heartbeat_sleep(delay):
+        if not redis.fail_reads:
+            redis.fail_reads = True
+            clock.value += delay
+            return
+        second_sleep.set()
+        await asyncio.Future()
+
+    sessions = GlobalGenerationSessions(
+        redis,
+        clock=clock,
+        heartbeat_sleep=heartbeat_sleep,
+        heartbeat_interval=30.0,
+        session_ttl=90.0,
+    )
+    connection = object()
+    await sessions.register("outage", connection)
+    session = sessions._by_connection[id(connection)]
+    await second_sleep.wait()
+
+    row = json.loads(next(iter(redis.hashes[GLOBAL_SESSIONS_KEY].values())))
+    assert row["observedGeneration"] is None
+    assert row["expiresAt"] == 190.0
+    assert session.heartbeat_task is not None
+    assert not session.heartbeat_task.done()
+    heartbeat_task = session.heartbeat_task
+    await sessions.unregister("outage", connection)
+    assert heartbeat_task.done()
+
+
+@pytest.mark.asyncio
+async def test_malformed_shared_row_is_repaired_on_register_and_rejected_by_other_scripts():
+    redis = FakeRedis()
+    field = hashlib.sha256(b"malformed").hexdigest()
+    redis.hashes[GLOBAL_SESSIONS_KEY] = {field: "{not-json"}
+    sessions = GlobalGenerationSessions(redis)
+    connection = object()
+
+    await sessions.register("malformed", connection)
+
+    repaired = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][field])
+    assert repaired["connectionGeneration"] == 1
+    session = sessions._by_connection[id(connection)]
+    redis.hashes[GLOBAL_SESSIONS_KEY][field] = "{still-not-json"
+    assert await sessions._set_status(session, status="failed") is False
+    assert await sessions._touch_shared(session) is False
+    assert await sessions._delete_shared(session) is False
+    assert redis.hashes[GLOBAL_SESSIONS_KEY][field] == "{still-not-json"
+    await sessions.unregister("malformed", connection)
+
+
+def test_lua_scripts_use_protected_json_decode():
+    source = inspect.getsource(inspect.getmodule(GlobalGenerationSessions))
+    assert source.count("pcall(cjson.decode") >= 4
 
 
 class _Logger:

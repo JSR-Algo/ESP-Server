@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import inspect
 import json
+import math
 import re
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -29,9 +31,10 @@ _REGISTER_SCRIPT = """
 -- REGISTER_SESSION
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if current then
-  local decoded = cjson.decode(current)
-  if tonumber(decoded.connectionGeneration or 0) >= tonumber(ARGV[2]) then
-    return 0
+  local ok, decoded = pcall(cjson.decode, current)
+  if ok and type(decoded) == 'table' then
+    local current_generation = tonumber(decoded.connectionGeneration)
+    if current_generation and current_generation >= tonumber(ARGV[2]) then return 0 end
   end
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
@@ -42,7 +45,8 @@ _UPDATE_SCRIPT = """
 -- UPDATE_SESSION
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if not current then return 0 end
-local decoded = cjson.decode(current)
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or type(decoded) ~= 'table' then return 0 end
 if tonumber(decoded.connectionGeneration or 0) ~= tonumber(ARGV[2]) then return 0 end
 if decoded.sessionId ~= ARGV[3] then return 0 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[4])
@@ -53,10 +57,24 @@ _DELETE_SCRIPT = """
 -- DELETE_SESSION
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if not current then return 0 end
-local decoded = cjson.decode(current)
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or type(decoded) ~= 'table' then return 0 end
 if tonumber(decoded.connectionGeneration or 0) ~= tonumber(ARGV[2]) then return 0 end
 if decoded.sessionId ~= ARGV[3] then return 0 end
 redis.call('HDEL', KEYS[1], ARGV[1])
+return 1
+"""
+
+_TOUCH_SCRIPT = """
+-- TOUCH_SESSION
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if not current then return 0 end
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or type(decoded) ~= 'table' then return 0 end
+if tonumber(decoded.connectionGeneration or 0) ~= tonumber(ARGV[2]) then return 0 end
+if decoded.sessionId ~= ARGV[3] then return 0 end
+decoded.expiresAt = tonumber(ARGV[4])
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(decoded))
 return 1
 """
 
@@ -70,12 +88,17 @@ class _Session:
     connection: Any
     retry_attempt: int = 0
     retry_task: asyncio.Task | None = None
+    heartbeat_task: asyncio.Task | None = None
     active: bool = True
 
 
 class GlobalGenerationSessionsError(RuntimeError):
-    def __init__(self) -> None:
-        self.code = "generation_sessions_store_unavailable"
+    _SAFE_CODES = frozenset(
+        {"generation_session_register_failed", "generation_sessions_store_unavailable"}
+    )
+
+    def __init__(self, code: str = "generation_sessions_store_unavailable") -> None:
+        self.code = code if code in self._SAFE_CODES else "generation_sessions_store_unavailable"
         super().__init__(self.code)
 
 
@@ -86,12 +109,25 @@ class GlobalGenerationSessions:
         *,
         sync: Callable[..., Any] = sync_cached_lesson_assets_to_sd,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        clock: Callable[[], float] = time.time,
+        heartbeat_sleep: Callable[[float], Any] = asyncio.sleep,
+        heartbeat_interval: float = 30.0,
+        session_ttl: float = 90.0,
     ) -> None:
         if redis is None:
             raise ValueError("redis is required")
+        heartbeat_interval = _positive_finite(heartbeat_interval, "heartbeat_interval")
+        session_ttl = _positive_finite(session_ttl, "session_ttl")
+        if session_ttl <= heartbeat_interval:
+            raise ValueError("session_ttl must be greater than heartbeat_interval")
         self.redis = redis
         self._sync = sync
         self._sleep = sleep
+        self._clock = clock
+        self._heartbeat_sleep = heartbeat_sleep
+        self._heartbeat_interval = heartbeat_interval
+        self._session_ttl = session_ttl
+        self._now()
         self._lock = asyncio.Lock()
         self._by_raw: dict[str, _Session] = {}
         self._by_connection: dict[int, _Session] = {}
@@ -103,7 +139,18 @@ class GlobalGenerationSessions:
     async def register(self, raw_id: str, connection: Any) -> None:
         normalized = _normalize_raw_id(raw_id)
         raw_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        generation = int(await self.redis.incr(GLOBAL_SESSIONS_SEQUENCE_KEY))
+        generation_failed = False
+        try:
+            generation = int(await self.redis.incr(GLOBAL_SESSIONS_SEQUENCE_KEY))
+            if generation <= 0:
+                generation_failed = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            generation = 0
+            generation_failed = True
+        if generation_failed:
+            raise GlobalGenerationSessionsError("generation_session_register_failed")
         session = _Session(
             normalized_raw_id=normalized,
             raw_hash=raw_hash,
@@ -111,7 +158,11 @@ class GlobalGenerationSessions:
             connection_generation=generation,
             connection=connection,
         )
-        row = _session_row(session, status="retrying")
+        row = _session_row(
+            session,
+            status="retrying",
+            expires_at=self._expires_at(),
+        )
 
         old_tasks = []
         async with self._lock:
@@ -123,9 +174,10 @@ class GlobalGenerationSessions:
                 old.active = False
                 if self._by_raw.get(old.normalized_raw_id) is old:
                     self._by_raw.pop(old.normalized_raw_id, None)
-                if old.retry_task is not None and not old.retry_task.done():
-                    old.retry_task.cancel()
-                    old_tasks.append(old.retry_task)
+                for task in (old.retry_task, old.heartbeat_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        old_tasks.append(task)
             self._by_raw[normalized] = session
             self._by_connection[id(connection)] = session
 
@@ -133,17 +185,15 @@ class GlobalGenerationSessions:
             await asyncio.gather(*set(old_tasks), return_exceptions=True)
         registered = await self._register_shared(session, row)
         if not registered:
-            async with self._lock:
-                session.active = False
-                if self._by_raw.get(normalized) is session:
-                    self._by_raw.pop(normalized, None)
-            return
+            await self._rollback_registration(session)
+            raise GlobalGenerationSessionsError("generation_session_register_failed")
+        self._start_heartbeat(session)
         if self._accepted_generation is not None:
             self._start_worker(session, immediate=True)
 
     async def unregister(self, raw_id: str, connection: Any) -> None:
         normalized = _normalize_raw_id(raw_id)
-        task = None
+        tasks = []
         async with self._lock:
             session = self._by_connection.get(id(connection))
             if (
@@ -154,13 +204,14 @@ class GlobalGenerationSessions:
                 return
             self._by_connection.pop(id(connection), None)
             session.active = False
-            task = session.retry_task
-            if task is not None and not task.done():
-                task.cancel()
+            for task in (session.retry_task, session.heartbeat_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    tasks.append(task)
             if self._by_raw.get(normalized) is session:
                 self._by_raw.pop(normalized, None)
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._delete_shared(session)
 
     async def sync_on_connect(
@@ -268,9 +319,17 @@ class GlobalGenerationSessions:
             store_unavailable = True
         if store_unavailable:
             raise GlobalGenerationSessionsError()
-        for raw in dict(raw_rows or {}).values():
+        now = self._now()
+        for raw_field, raw in dict(raw_rows or {}).items():
             row = _decode_row(raw)
             if row is None or not _valid_shared_row(row):
+                continue
+            if float(row["expiresAt"]) <= now:
+                await self._delete_shared_fence(
+                    _decode_text(raw_field),
+                    row["connectionGeneration"],
+                    row["sessionId"],
+                )
                 continue
             counts["connected"] += 1
             if row.get("observedGeneration") == accepted_generation:
@@ -367,6 +426,44 @@ class GlobalGenerationSessions:
         if session.retry_task is task:
             session.retry_task = None
 
+    def _start_heartbeat(self, session: _Session) -> None:
+        if not session.active:
+            return
+        current = session.heartbeat_task
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(self._heartbeat_worker(session))
+        session.heartbeat_task = task
+        task.add_done_callback(lambda done: self._heartbeat_done(session, done))
+
+    def _heartbeat_done(self, session: _Session, task: asyncio.Task) -> None:
+        if session.heartbeat_task is task:
+            session.heartbeat_task = None
+
+    async def _heartbeat_worker(self, session: _Session) -> None:
+        try:
+            while await self._local_session_current(session):
+                fence = await self._shared_fence(session)
+                if fence is False:
+                    return
+                await self._heartbeat_sleep(self._heartbeat_interval)
+                if not await self._local_session_current(session):
+                    return
+                fence = await self._shared_fence(session)
+                if fence is False:
+                    return
+                if fence is None:
+                    continue
+                touched = await self._touch_shared(session)
+                if touched is False:
+                    return
+                if not await self._local_session_current(session):
+                    return
+                if await self._shared_fence(session) is False:
+                    return
+        except asyncio.CancelledError:
+            raise
+
     async def _retry_worker(self, session: _Session, *, immediate: bool) -> None:
         try:
             while session.active:
@@ -422,6 +519,14 @@ class GlobalGenerationSessions:
                 and self._accepted_generation in (None, generation)
             )
 
+    async def _local_session_current(self, session: _Session) -> bool:
+        async with self._lock:
+            return (
+                session.active
+                and self._by_raw.get(session.normalized_raw_id) is session
+                and self._by_connection.get(id(session.connection)) is session
+            )
+
     async def _shared_fence(self, session: _Session) -> bool | None:
         try:
             raw = await self.redis.hget(GLOBAL_SESSIONS_KEY, session.raw_hash)
@@ -466,6 +571,7 @@ class GlobalGenerationSessions:
             status=status,
             observed_generation=observed_generation,
             observed_checksum=observed_checksum,
+            expires_at=self._expires_at(),
         )
         async with self._lock:
             if (
@@ -491,20 +597,83 @@ class GlobalGenerationSessions:
                 return False
 
     async def _delete_shared(self, session: _Session) -> bool:
+        return await self._delete_shared_fence(
+            session.raw_hash,
+            session.connection_generation,
+            session.session_id,
+        )
+
+    async def _delete_shared_fence(
+        self,
+        raw_hash: str,
+        connection_generation: int,
+        session_id: str,
+    ) -> bool:
         try:
             result = await self.redis.eval(
                 _DELETE_SCRIPT,
                 1,
                 GLOBAL_SESSIONS_KEY,
-                session.raw_hash,
-                str(session.connection_generation),
-                session.session_id,
+                raw_hash,
+                str(connection_generation),
+                session_id,
             )
             return int(result) == 1
         except asyncio.CancelledError:
             raise
         except Exception:
             return False
+
+    async def _touch_shared(self, session: _Session) -> bool | None:
+        async with self._lock:
+            if (
+                not session.active
+                or self._by_raw.get(session.normalized_raw_id) is not session
+                or self._by_connection.get(id(session.connection)) is not session
+            ):
+                return False
+            try:
+                result = await self.redis.eval(
+                    _TOUCH_SCRIPT,
+                    1,
+                    GLOBAL_SESSIONS_KEY,
+                    session.raw_hash,
+                    str(session.connection_generation),
+                    session.session_id,
+                    str(self._expires_at()),
+                )
+                return int(result) == 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+    async def _rollback_registration(self, session: _Session) -> None:
+        tasks = []
+        async with self._lock:
+            session.active = False
+            if self._by_raw.get(session.normalized_raw_id) is session:
+                self._by_raw.pop(session.normalized_raw_id, None)
+            if self._by_connection.get(id(session.connection)) is session:
+                self._by_connection.pop(id(session.connection), None)
+            for task in (session.retry_task, session.heartbeat_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _now(self) -> float:
+        value = self._clock()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("clock must return a finite epoch number")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("clock must return a finite epoch number")
+        return value
+
+    def _expires_at(self) -> float:
+        return self._now() + self._session_ttl
 
 
 def _normalize_raw_id(raw_id: str) -> str:
@@ -579,6 +748,7 @@ def _session_row(
     status: str,
     observed_generation: int | None = None,
     observed_checksum: str | None = None,
+    expires_at: float,
 ) -> dict[str, Any]:
     return {
         "sessionId": session.session_id,
@@ -587,6 +757,7 @@ def _session_row(
         "observedChecksum": observed_checksum,
         "status": status,
         "retryAttempt": session.retry_attempt,
+        "expiresAt": expires_at,
     }
 
 
@@ -612,11 +783,36 @@ def _valid_shared_row(row: dict[str, Any]) -> bool:
         and type(row.get("connectionGeneration")) is int
         and row["connectionGeneration"] > 0
         and row.get("status") in {"current", "retrying", "failed"}
+        and _is_finite_epoch(row.get("expiresAt"))
         and (
             row.get("observedGeneration") is None
             or type(row.get("observedGeneration")) is int
         )
     )
+
+
+def _is_finite_epoch(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a positive finite number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return normalized
+
+
+def _decode_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _valid_generation(value: Any) -> bool:

@@ -333,3 +333,47 @@ class WebSocketServerManagerBootstrapTest(unittest.IsolatedAsyncioTestCase):
                 ("unregister", "AA-BB-CC-DD-EE-FF", registered),
             ],
         )
+
+    async def test_failed_global_session_register_does_not_unregister_handler(self):
+        events = []
+
+        class Sessions:
+            async def register(self, raw_id, connection):
+                events.append(("register", raw_id, connection))
+                raise RuntimeError("sanitized registration failure")
+
+            async def unregister(self, raw_id, connection):
+                events.append(("unregister", raw_id, connection))
+
+        server = self._build_server(
+            {
+                "selected_module": {},
+                "server": {
+                    "auth_key": "test-secret",
+                    "auth": {"enabled": False},
+                },
+            },
+            global_generation_sessions=Sessions(),
+        )
+        websocket = _FakeWebSocket(
+            headers={"device-id": "raw-session", "client-id": "client"}
+        )
+
+        import core.connection as connection_module
+
+        original = connection_module.ConnectionHandler
+
+        class Handler:
+            def __init__(self, *_args, **_kwargs):
+                self.device_id = None
+
+            async def handle_connection(self, _websocket):
+                events.append(("handle", self.device_id, self))
+
+        try:
+            connection_module.ConnectionHandler = Handler
+            await server._handle_connection(websocket)
+        finally:
+            connection_module.ConnectionHandler = original
+
+        self.assertEqual([event[0] for event in events], ["register", "handle"])
