@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.connection import ConnectionHandler
-from core.lesson import sd_pack_fanout, sd_pack_sync
+from core.lesson import global_generation_sessions, sd_pack_fanout, sd_pack_sync
 from core.lesson.global_generation_sessions import (
     GLOBAL_SESSIONS_KEY,
     GlobalGenerationSessions,
@@ -287,6 +287,135 @@ async def test_all_expected_critical_results_are_required(result, expected_statu
 
     assert sync_result["state"] == expected_status
     assert (await sessions.aggregate(5))["current"] == 0
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
+async def test_skipped_item_cannot_mark_generation_observed_despite_ready_fields():
+    async def sync(_connection, *, only_cache_keys):
+        return {
+            "resultsByCacheKey": {
+                "a": {
+                    "state": "skipped",
+                    "ready": True,
+                    "criticalFailedCount": 0,
+                }
+            }
+        }
+
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, sync=sync, sleep=_no_sleep)
+    connection = object()
+    await sessions.register("one", connection)
+
+    result = await sessions.sync_on_connect(
+        connection,
+        accepted_generation=5,
+        checksum=CHECKSUM,
+        packs=[_pack("a")],
+    )
+
+    row = json.loads(next(iter(redis.hashes[GLOBAL_SESSIONS_KEY].values())))
+    assert result == {"state": "retrying", "errorCode": "sync_skipped"}
+    assert row["observedGeneration"] is None
+    assert await sessions.aggregate(5) == {
+        "connected": 1,
+        "current": 0,
+        "retrying": 1,
+        "failed": 0,
+    }
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_store_failure_raises_only_sanitized_domain_error():
+    class BrokenRedis(FakeRedis):
+        async def hgetall(self, key):
+            raise RuntimeError("redis://user:secret@private-host/session-value")
+
+    sessions = GlobalGenerationSessions(BrokenRedis())
+
+    with pytest.raises(global_generation_sessions.GlobalGenerationSessionsError) as caught:
+        await sessions.aggregate(3)
+
+    assert caught.value.code == "generation_sessions_store_unavailable"
+    assert str(caught.value) == "generation_sessions_store_unavailable"
+    assert "secret" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_fanout_propagates_sanitized_aggregate_store_failure():
+    class BrokenRedis(FakeRedis):
+        async def hgetall(self, key):
+            raise RuntimeError("private redis value")
+
+    redis = BrokenRedis()
+    sessions = GlobalGenerationSessions(
+        redis,
+        sync=lambda _connection, *, only_cache_keys: _ready(*only_cache_keys),
+    )
+    connection = object()
+    await sessions.register("one", connection)
+
+    with pytest.raises(global_generation_sessions.GlobalGenerationSessionsError) as caught:
+        await sessions.fanout(
+            generation=4,
+            index_checksum=CHECKSUM,
+            packs=[_pack("a")],
+        )
+
+    assert caught.value.code == "generation_sessions_store_unavailable"
+    assert "private" not in str(caught.value)
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
+async def test_fanout_reraises_non_exception_base_exception_from_gather(monkeypatch):
+    sessions = GlobalGenerationSessions(FakeRedis())
+    connection = object()
+    await sessions.register("one", connection)
+
+    async def base_exception_result(*aws, **_kwargs):
+        for awaitable in aws:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+        return [SystemExit()]
+
+    monkeypatch.setattr(global_generation_sessions.asyncio, "gather", base_exception_result)
+
+    with pytest.raises(SystemExit):
+        await sessions.fanout(
+            generation=1,
+            index_checksum=CHECKSUM,
+            packs=[_pack("a")],
+        )
+
+
+@pytest.mark.asyncio
+async def test_fanout_type_guards_non_mapping_normal_result(monkeypatch):
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, sleep=_no_sleep)
+    connection = object()
+    await sessions.register("one", connection)
+    real_gather = asyncio.gather
+
+    async def invalid_normal_result(*aws, **_kwargs):
+        for awaitable in aws:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+        return [object()]
+
+    monkeypatch.setattr(global_generation_sessions.asyncio, "gather", invalid_normal_result)
+    result = await sessions.fanout(
+        generation=1,
+        index_checksum=CHECKSUM,
+        packs=[_pack("a")],
+    )
+
+    assert result == {"attempted": 1, "current": 0, "retrying": 1, "failed": 0}
+    monkeypatch.setattr(global_generation_sessions.asyncio, "gather", real_gather)
     await sessions.unregister("one", connection)
 
 

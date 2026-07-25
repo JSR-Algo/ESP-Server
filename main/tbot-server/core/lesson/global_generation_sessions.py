@@ -20,6 +20,10 @@ GLOBAL_SESSIONS_SEQUENCE_KEY = "lesson-assets:global-sessions:v1:sequence"
 
 _MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$|^(?:[0-9a-f]{2}-){5}[0-9a-f]{2}$")
 _RETRY_DELAYS = (5, 10, 20, 40, 80, 160, 300)
+_TERMINAL_RESULT_STATES = frozenset({"invalid", "invalid_result", "unsupported"})
+_RETRYABLE_SKIP_STATES = frozenset(
+    {"client_unavailable", "mcp_client_not_ready", "mcp_not_ready", "no_client", "skipped"}
+)
 
 _REGISTER_SCRIPT = """
 -- REGISTER_SESSION
@@ -67,6 +71,12 @@ class _Session:
     retry_attempt: int = 0
     retry_task: asyncio.Task | None = None
     active: bool = True
+
+
+class GlobalGenerationSessionsError(RuntimeError):
+    def __init__(self) -> None:
+        self.code = "generation_sessions_store_unavailable"
+        super().__init__(self.code)
 
 
 class GlobalGenerationSessions:
@@ -233,19 +243,31 @@ class GlobalGenerationSessions:
         for session, result in zip(sessions, results, strict=True):
             if isinstance(result, asyncio.CancelledError):
                 raise result
-            if isinstance(result, Exception) or result.get("state") == "retrying":
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception):
+                    raise result
+                self._start_worker(session, immediate=False)
+                continue
+            if not isinstance(result, Mapping):
+                self._start_worker(session, immediate=False)
+                continue
+            if result.get("state") == "retrying":
                 self._start_worker(session, immediate=False)
         counts = await self.aggregate(generation)
         return _fanout_counts(len(sessions), counts)
 
     async def aggregate(self, accepted_generation: int) -> dict[str, int]:
         counts = {"connected": 0, "current": 0, "retrying": 0, "failed": 0}
+        store_unavailable = False
         try:
             raw_rows = await self.redis.hgetall(GLOBAL_SESSIONS_KEY)
         except asyncio.CancelledError:
             raise
         except Exception:
-            return counts
+            raw_rows = {}
+            store_unavailable = True
+        if store_unavailable:
+            raise GlobalGenerationSessionsError()
         for raw in dict(raw_rows or {}).values():
             row = _decode_row(raw)
             if row is None or not _valid_shared_row(row):
@@ -316,7 +338,7 @@ class GlobalGenerationSessions:
             await self._set_status(session, status="retrying")
             return {"state": "retrying", "errorCode": "session_fence_unavailable"}
 
-        state = _sync_result_state(result, pack_keys)
+        state, error_code = _sync_result_outcome(result, pack_keys)
         if state == "current":
             updated = await self._set_status(
                 session,
@@ -329,7 +351,7 @@ class GlobalGenerationSessions:
                 return {"state": "current"}
             return {"state": "retrying", "errorCode": "session_fence_unavailable"}
         await self._set_status(session, status=state)
-        return {"state": state, "errorCode": "sync_result_incomplete"}
+        return {"state": state, "errorCode": error_code}
 
     def _start_worker(self, session: _Session, *, immediate: bool) -> None:
         if not session.active:
@@ -510,29 +532,45 @@ def _pack_keys(packs: Any) -> tuple[str, ...] | None:
     return tuple(keys)
 
 
-def _sync_result_state(result: Any, expected: tuple[str, ...]) -> str:
+def _sync_result_outcome(result: Any, expected: tuple[str, ...]) -> tuple[str, str | None]:
     if not isinstance(result, Mapping):
-        return "failed"
+        return "failed", "sync_result_invalid"
+    if result.get("unsupported") is True:
+        return "failed", "sync_unsupported"
+    skipped = str(result.get("skipped", "")).strip().lower()
+    if skipped:
+        if skipped == "sd_pack_disabled":
+            return "failed", "sync_unsupported"
+        return "retrying", "sync_skipped"
     state = str(result.get("state", "")).strip().lower()
-    if state in {"unsupported", "invalid", "invalid_result"}:
-        return "failed"
+    if state in _TERMINAL_RESULT_STATES:
+        return "failed", "sync_unsupported" if state == "unsupported" else "sync_result_invalid"
+    if state in _RETRYABLE_SKIP_STATES:
+        return "retrying", "sync_skipped"
     results = result.get("resultsByCacheKey")
     if not isinstance(results, Mapping):
-        return "failed"
+        return "failed", "sync_result_invalid"
     for key in expected:
         item = results.get(key)
         if not isinstance(item, Mapping):
-            return "retrying"
+            return "retrying", "sync_result_incomplete"
+        if item.get("unsupported") is True:
+            return "failed", "sync_unsupported"
+        if item.get("skipped"):
+            return "retrying", "sync_skipped"
         item_state = str(item.get("state", item.get("status", ""))).strip().lower()
-        if item_state in {"unsupported", "invalid", "invalid_result"}:
-            return "failed"
+        if item_state in _TERMINAL_RESULT_STATES:
+            code = "sync_unsupported" if item_state == "unsupported" else "sync_result_invalid"
+            return "failed", code
+        if item_state in _RETRYABLE_SKIP_STATES:
+            return "retrying", "sync_skipped"
         ready = item.get("ready")
         critical_failed = item.get("criticalFailedCount")
         if not isinstance(ready, bool) or type(critical_failed) is not int:
-            return "failed"
+            return "failed", "sync_result_invalid"
         if ready is not True or critical_failed != 0:
-            return "retrying"
-    return "current"
+            return "retrying", "sync_result_incomplete"
+    return "current", None
 
 
 def _session_row(
