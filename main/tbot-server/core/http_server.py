@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json
 import os
+from typing import Protocol, runtime_checkable
 
 from aiohttp import web
 
@@ -25,14 +26,28 @@ from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryW
 TAG = __name__
 
 
+class _GenerationPoller(Protocol):
+    def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+class _GenerationStatus(Protocol):
+    async def snapshot(self) -> dict[str, object]: ...
+
+
+@runtime_checkable
+class _RunnerCleanup(Protocol):
+    async def cleanup(self) -> None: ...
+
+
 def _env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() == "true"
 
 
-async def _cleanup_runner(runner) -> None:
-    cleanup = getattr(runner, "cleanup", None)
-    if callable(cleanup):
-        await cleanup()
+async def _cleanup_runner(runner: object) -> None:
+    if isinstance(runner, _RunnerCleanup):
+        await runner.cleanup()
 
 
 class SimpleHttpServer:
@@ -42,8 +57,8 @@ class SimpleHttpServer:
         lesson_connections=None,
         *,
         lesson_sd_online_index=None,
-        generation_poller=None,
-        generation_status=None,
+        generation_poller: _GenerationPoller | None = None,
+        generation_status: _GenerationStatus | None = None,
         generation_redis=None,
         owns_generation_redis=False,
     ):
@@ -261,9 +276,10 @@ class SimpleHttpServer:
         if self._background_started:
             return
         self._background_started = True
-        if self.generation_poller is not None:
+        poller = self.generation_poller
+        if poller is not None:
             self._poller_started = True
-            self.generation_poller.start()
+            poller.start()
         if _env_enabled("TBOT_ENABLE_BACKGROUND_WORKERS") and _env_enabled(
             "LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED"
         ):
@@ -277,7 +293,9 @@ class SimpleHttpServer:
         failed = False
         if self._poller_started:
             try:
-                await self.generation_poller.stop()
+                poller = self.generation_poller
+                if poller is not None:
+                    await poller.stop()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -308,7 +326,10 @@ class SimpleHttpServer:
 
     async def handle_generation_status(self, _request):
         try:
-            payload = await self.generation_status.snapshot()
+            status = self.generation_status
+            if status is None:
+                raise RuntimeError("generation status unavailable")
+            payload = await status.snapshot()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -406,7 +427,7 @@ class SimpleHttpServer:
             safety_forwarder_dropped_total += safety_dropped
             client_id = getattr(connection, "client_id", None)
             headers = getattr(connection, "headers", None)
-            if not client_id and hasattr(headers, "get"):
+            if not client_id and headers is not None and hasattr(headers, "get"):
                 client_id = headers.get("client-id") or headers.get("Client-Id")
             device = {
                 "deviceId": device_id,

@@ -77,18 +77,28 @@ def _error_code(value: Any) -> str | None:
     return "generation_status_error"
 
 
-def _counts(value: Any) -> dict[str, int]:
+def _validated_count(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= _MAX_COUNT:
+        raise ValueError("invalid connection aggregate")
+    return value
+
+
+def _counts(value: object) -> dict[str, int]:
     if not isinstance(value, dict):
         raise ValueError("invalid connection aggregate")
-    names = ("connected", "current", "retrying", "failed")
-    counts = {name: value.get(name) for name in names}
-    if any(type(count) is not int or not 0 <= count <= _MAX_COUNT for count in counts.values()):
-        raise ValueError("invalid connection aggregate")
-    connected = counts["connected"]
-    buckets = (counts["current"], counts["retrying"], counts["failed"])
+    connected = _validated_count(value.get("connected"))
+    current = _validated_count(value.get("current"))
+    retrying = _validated_count(value.get("retrying"))
+    failed = _validated_count(value.get("failed"))
+    buckets = (current, retrying, failed)
     if any(count > connected for count in buckets) or sum(buckets) != connected:
         raise ValueError("invalid connection aggregate")
-    return counts
+    return {
+        "connected": connected,
+        "current": current,
+        "retrying": retrying,
+        "failed": failed,
+    }
 
 
 def _state(raw: dict[str, Any], accepted: int | None, checksum: str | None) -> str:
