@@ -198,10 +198,13 @@ async def test_valid_bounded_stream_materializes_atomic_ready_pack(tmp_path):
     assert result == {
         "cacheKey": CACHE_KEY,
         "ready": True,
+        "criticalReady": True,
+        "optionalFailedCount": 0,
         "assetCount": 2,
         "downloadedCount": 2,
         "skippedCount": 0,
     }
+    assert type(result) is dict
     store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=tmp_path / "sd" / "tbot" / "lesson-assets")
     assert store.is_pack_ready(CACHE_KEY)
     pack = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY
@@ -239,10 +242,13 @@ async def test_ready_replay_without_redownload(tmp_path):
     assert replay == {
         "cacheKey": CACHE_KEY,
         "ready": True,
+        "criticalReady": True,
+        "optionalFailedCount": 0,
         "assetCount": 2,
         "downloadedCount": 0,
         "skippedCount": 2,
     }
+    assert type(replay) is dict
     assert client.requests == [
         "https://assets.example/poster.jpg?sig=secret",
         "https://assets.example/barn.png",

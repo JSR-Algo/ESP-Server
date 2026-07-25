@@ -16,6 +16,7 @@ from core.lesson.global_generation_poller import (
     GlobalGenerationPoller,
     canonical_json,
 )
+from core.lesson.global_generation_sync import GlobalGenerationSync
 
 CMS_URL = "https://cms.example/v1/public/lesson-assets/latest"
 NOW = datetime(2026, 7, 24, 0, 0, tzinfo=timezone.utc)
@@ -143,6 +144,81 @@ async def test_valid_200_stores_desired_before_callback_and_then_uses_etag() -> 
     assert "if-none-match" not in requests[0].headers
     assert requests[1].headers["if-none-match"] == etag
     assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_wait_callback_does_not_cache_etag_and_retries_fresh_200() -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.headers.get("if-none-match") == etag:
+            return httpx.Response(304)
+        return _response(payload, etag=etag)
+
+    class IntegrationStore(FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.retry_attempt = 0
+            self.accepted_generation = 7
+
+        async def snapshot(self) -> dict:
+            return {
+                "etag": self.restored_etag,
+                "acceptedGeneration": self.accepted_generation,
+                "retryAttempt": self.retry_attempt,
+            }
+
+        async def mark_materializing(self, generation: int) -> None:
+            return None
+
+        async def accept(
+            self, generation: int, index_checksum: str, accepted_at: str
+        ) -> None:
+            self.accepted_generation = generation
+            self.retry_attempt = 0
+
+        async def mark_retry(
+            self, error_code: str, attempt: int, next_retry_at: str
+        ) -> None:
+            self.retry_attempt = attempt
+
+    attempts = 0
+
+    async def materialize(pack, *, config):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient private materialization detail")
+        return {
+            "cacheKey": pack["cacheKey"],
+            "ready": True,
+            "criticalReady": True,
+            "optionalFailedCount": 0,
+        }
+
+    async def fanout(generation, index_checksum, packs):
+        return {"syncedCount": 1}
+
+    store = IntegrationStore()
+    sync = GlobalGenerationSync(_config(), store, fanout, materialize=materialize)
+    poller = GlobalGenerationPoller(
+        _config(), store, sync.apply, http=_client(handler), clock=lambda: NOW
+    )
+
+    assert await poller.run_once() == {
+        "state": "rejected",
+        "errorCode": "generation_callback_retry",
+    }
+    assert "if-none-match" not in requests[0].headers
+    assert await poller.run_once() == {"state": "accepted"}
+    assert "if-none-match" not in requests[1].headers
+    assert await poller.run_once() == {"state": "not_modified"}
+    assert requests[2].headers["if-none-match"] == etag
+    assert attempts == 2
 
 
 @pytest.mark.asyncio

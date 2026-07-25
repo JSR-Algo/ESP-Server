@@ -167,14 +167,22 @@ class GlobalGenerationPoller:
                 raise
             except Exception:
                 raise _PollRejected("generation_store_failed") from None
+            callback_retry = False
             try:
                 callback_result = self.on_generation(data)
                 if inspect.isawaitable(callback_result):
-                    await callback_result
+                    callback_result = await callback_result
+                callback_retry = (
+                    isinstance(callback_result, Mapping)
+                    and "state" in callback_result
+                    and callback_result.get("state") != "ready"
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 raise _PollRejected("generation_callback_failed") from None
+            if callback_retry:
+                raise _PollRejected("generation_callback_retry")
             self._etag = expected_etag
             self._payload = data
             self._log("info", "accepted")

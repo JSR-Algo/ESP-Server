@@ -504,24 +504,21 @@ async def test_zero_byte_asset_materializes_with_complete_readiness_fields(tmp_p
     assert (Path(root) / cache_key / "empty.bin").read_bytes() == b""
 
 
-def test_materializer_result_readiness_fields_preserve_legacy_dict_equality():
+def test_materializer_result_is_plain_dict_with_complete_readiness_shape():
     from core.lesson.sd_pack_materializer import _result
 
     result = _result("lesson/v1-" + CHECKSUM, 1, 1, 0)
 
-    legacy = {
+    assert type(result) is dict
+    assert result == {
         "cacheKey": "lesson/v1-" + CHECKSUM,
         "ready": True,
+        "criticalReady": True,
+        "optionalFailedCount": 0,
         "assetCount": 1,
         "downloadedCount": 1,
         "skippedCount": 0,
     }
-    assert result == legacy
-    assert legacy == result
-    assert (result != legacy) is False
-    assert (legacy != result) is False
-    assert result["criticalReady"] is True
-    assert result["optionalFailedCount"] == 0
 
 
 async def _async(value):
