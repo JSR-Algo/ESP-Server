@@ -15,12 +15,20 @@ ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_FILES = [
     ROOT / "app.py",
     ROOT / "core/http_server.py",
+    ROOT / "core/websocket_server.py",
+    ROOT / "core/connection.py",
     ROOT / "core/lesson/global_generation_poller.py",
     ROOT / "core/lesson/global_generation_sync.py",
     ROOT / "core/lesson/global_generation_status.py",
     ROOT / "core/lesson/global_generation_store.py",
     ROOT / "core/lesson/global_generation_sessions.py",
+    ROOT / "core/lesson/sd_pack_sync.py",
 ]
+REQUIRED_PRODUCTION_FILES = {
+    ROOT / "core/websocket_server.py",
+    ROOT / "core/connection.py",
+    ROOT / "core/lesson/sd_pack_sync.py",
+}
 FORBIDDEN_IMPORTS = {
     "resolve_device_identity",
     "post_lesson_sd_sync_result",
@@ -71,6 +79,7 @@ def _call_name(node: ast.AST) -> str | None:
 
 
 def test_global_generation_source_uses_closed_public_file_list_without_identity_dependencies():
+    assert REQUIRED_PRODUCTION_FILES <= set(PRODUCTION_FILES)
     missing = [path for path in PRODUCTION_FILES if not path.is_file()]
     assert missing == []
 
