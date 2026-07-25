@@ -9,7 +9,10 @@ from aiohttp.test_utils import make_mocked_request
 from core import http_server as http_module
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.http_server import SimpleHttpServer
-from core.lesson.global_generation_status import GlobalGenerationStatusError
+from core.lesson.global_generation_status import (
+    GlobalGenerationStatus,
+    GlobalGenerationStatusError,
+)
 
 
 class _Logger:
@@ -252,6 +255,26 @@ async def test_generation_status_handler_returns_sanitized_unavailable_response(
     assert response.status == 503
     assert json.loads(response.text) == {"error": "generation_status_unavailable"}
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_generation_status_handler_fails_closed_for_corrupt_connection_partition():
+    class Store:
+        async def snapshot(self):
+            return {}
+
+    class Sessions:
+        async def aggregate(self, _generation):
+            return {"connected": 1, "current": 1, "retrying": 1, "failed": 1}
+
+    response = await SimpleHttpServer(
+        _config(), generation_status=GlobalGenerationStatus(Store(), Sessions())
+    ).handle_generation_status(None)
+
+    assert response.status == 503
+    assert json.loads(response.text) == {"error": "generation_status_unavailable"}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "current" not in response.text
 
 
 @pytest.mark.asyncio

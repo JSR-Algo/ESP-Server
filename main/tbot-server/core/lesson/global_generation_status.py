@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime
 from typing import Any
 
 _CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -32,6 +33,7 @@ class GlobalGenerationStatus:
             raw = raw if isinstance(raw, dict) else {}
             accepted = _positive_int(raw.get("acceptedGeneration"))
             counts = await self.sessions.aggregate(accepted or 0)
+            connections = _counts(counts)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -42,7 +44,7 @@ class GlobalGenerationStatus:
             "acceptedGeneration": accepted,
             "indexChecksum": checksum,
             "materializationState": _state(raw, accepted, checksum),
-            "connections": _counts(counts),
+            "connections": connections,
             "lastPollAt": _timestamp(raw.get("lastPollAt")),
             "lastMaterializedAt": _timestamp(raw.get("lastMaterializedAt")),
             "lastErrorCode": _error_code(raw.get("lastErrorCode")),
@@ -58,7 +60,13 @@ def _checksum(value: Any) -> str | None:
 
 
 def _timestamp(value: Any) -> str | None:
-    return value if isinstance(value, str) and _TIMESTAMP_RE.fullmatch(value) else None
+    if not isinstance(value, str) or _TIMESTAMP_RE.fullmatch(value) is None:
+        return None
+    try:
+        datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    return value
 
 
 def _error_code(value: Any) -> str | None:
@@ -69,21 +77,18 @@ def _error_code(value: Any) -> str | None:
     return "generation_status_error"
 
 
-def _count(value: Any) -> int:
-    if type(value) is not int:
-        return 0
-    return min(_MAX_COUNT, max(0, value))
-
-
 def _counts(value: Any) -> dict[str, int]:
-    raw = value if isinstance(value, dict) else {}
-    connected = _count(raw.get("connected"))
-    return {
-        "connected": connected,
-        "current": min(connected, _count(raw.get("current"))),
-        "retrying": min(connected, _count(raw.get("retrying"))),
-        "failed": min(connected, _count(raw.get("failed"))),
-    }
+    if not isinstance(value, dict):
+        raise ValueError("invalid connection aggregate")
+    names = ("connected", "current", "retrying", "failed")
+    counts = {name: value.get(name) for name in names}
+    if any(type(count) is not int or not 0 <= count <= _MAX_COUNT for count in counts.values()):
+        raise ValueError("invalid connection aggregate")
+    connected = counts["connected"]
+    buckets = (counts["current"], counts["retrying"], counts["failed"])
+    if any(count > connected for count in buckets) or sum(buckets) != connected:
+        raise ValueError("invalid connection aggregate")
+    return counts
 
 
 def _state(raw: dict[str, Any], accepted: int | None, checksum: str | None) -> str:
