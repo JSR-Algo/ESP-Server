@@ -80,6 +80,20 @@ class FakeRedis:
                 return 0
             if "DELETE_SESSION" in script:
                 self.hashes[key].pop(field, None)
+            elif "UPDATE_SESSION" in script:
+                expires_at = current.get("expiresAt")
+                now = float(args[4])
+                next_expires_at = float(args[5])
+                if (
+                    isinstance(expires_at, bool)
+                    or not isinstance(expires_at, (int, float))
+                    or not math.isfinite(float(expires_at))
+                    or float(expires_at) <= now
+                    or not math.isfinite(next_expires_at)
+                    or next_expires_at <= now
+                ):
+                    return 0
+                self.hashes.setdefault(key, {})[field] = args[6]
             elif "TOUCH_SESSION" in script:
                 expires_at = current.get("expiresAt")
                 now = float(args[4])
@@ -744,6 +758,77 @@ async def test_touch_rejects_expiry_boundary_and_nonnumeric_expiry():
     assert await sessions._touch_shared(session) is False
     assert redis.touch_calls == 0
     await sessions.unregister("boundary", connection)
+
+
+@pytest.mark.asyncio
+async def test_expired_direct_status_update_cannot_refresh_lease():
+    clock = Clock(100.0)
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+    connection = object()
+    await sessions.register("expired-status", connection)
+    session = sessions._by_connection[id(connection)]
+    original = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][session.raw_hash])
+
+    clock.value = 190.0
+    assert await sessions._set_status(session, status="failed") is False
+    unchanged = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][session.raw_hash])
+    assert unchanged == original
+    assert (await sessions.aggregate(1))["connected"] == 0
+    await sessions.unregister("expired-status", connection)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("accepted_generation", "packs", "expected"),
+    [
+        (0, [_pack("a")], {"state": "failed", "errorCode": "invalid_generation"}),
+        (1, [_pack("a"), _pack("a")], {"state": "failed", "errorCode": "invalid_packs"}),
+    ],
+)
+async def test_expired_public_validation_failure_cannot_revive_lease(
+    accepted_generation, packs, expected
+):
+    clock = Clock(100.0)
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+    connection = object()
+    await sessions.register("expired-public", connection)
+    session = sessions._by_connection[id(connection)]
+    original_expiry = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][session.raw_hash])["expiresAt"]
+
+    clock.value = 191.0
+    result = await sessions.sync_on_connect(
+        connection,
+        accepted_generation=accepted_generation,
+        checksum=CHECKSUM,
+        packs=packs,
+    )
+
+    row = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][session.raw_hash])
+    assert result == expected
+    assert row["expiresAt"] == original_expiry
+    assert (await sessions.aggregate(1))["connected"] == 0
+    await sessions.unregister("expired-public", connection)
+
+
+@pytest.mark.asyncio
+async def test_active_status_update_refreshes_expiry_and_preserves_fence():
+    clock = Clock(100.0)
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, clock=clock)
+    connection = object()
+    await sessions.register("active-status", connection)
+    session = sessions._by_connection[id(connection)]
+
+    clock.value = 150.0
+    assert await sessions._set_status(session, status="failed") is True
+
+    row = json.loads(redis.hashes[GLOBAL_SESSIONS_KEY][session.raw_hash])
+    assert row["expiresAt"] == 240.0
+    assert row["status"] == "failed"
+    assert await sessions._shared_fence(session) is True
+    await sessions.unregister("active-status", connection)
 
 
 @pytest.mark.asyncio

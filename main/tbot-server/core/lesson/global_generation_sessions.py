@@ -49,7 +49,14 @@ local ok, decoded = pcall(cjson.decode, current)
 if not ok or type(decoded) ~= 'table' then return 0 end
 if tonumber(decoded.connectionGeneration or 0) ~= tonumber(ARGV[2]) then return 0 end
 if decoded.sessionId ~= ARGV[3] then return 0 end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[4])
+local expires_at = tonumber(decoded.expiresAt)
+local now = tonumber(ARGV[4])
+local next_expires_at = tonumber(ARGV[5])
+if not expires_at or not now or not next_expires_at then return 0 end
+if expires_at ~= expires_at or now ~= now or next_expires_at ~= next_expires_at then return 0 end
+if math.abs(expires_at) == math.huge or math.abs(now) == math.huge or math.abs(next_expires_at) == math.huge then return 0 end
+if expires_at <= now or next_expires_at <= now then return 0 end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[6])
 return 1
 """
 
@@ -575,13 +582,6 @@ class GlobalGenerationSessions:
         observed_generation: int | None = None,
         observed_checksum: str | None = None,
     ) -> bool:
-        row = _session_row(
-            session,
-            status=status,
-            observed_generation=observed_generation,
-            observed_checksum=observed_checksum,
-            expires_at=self._expires_at(),
-        )
         async with self._lock:
             if (
                 not session.active
@@ -590,6 +590,14 @@ class GlobalGenerationSessions:
             ):
                 return False
             try:
+                now = self._now()
+                row = _session_row(
+                    session,
+                    status=status,
+                    observed_generation=observed_generation,
+                    observed_checksum=observed_checksum,
+                    expires_at=self._expires_at(now),
+                )
                 result = await self.redis.eval(
                     _UPDATE_SCRIPT,
                     1,
@@ -597,6 +605,8 @@ class GlobalGenerationSessions:
                     session.raw_hash,
                     str(session.connection_generation),
                     session.session_id,
+                    str(now),
+                    str(self._expires_at(now)),
                     _encode_row(row),
                 )
                 return int(result) == 1
