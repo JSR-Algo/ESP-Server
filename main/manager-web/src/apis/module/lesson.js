@@ -18,106 +18,146 @@ import {
  */
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
-const SD_SYNC_STATES = new Set(['complete', 'syncing', 'offline_pending', 'failed']);
-
-function normalizeSdSyncState(value) {
-  if (typeof value !== 'string') return '';
-  const normalized = value.trim().replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`).replace(/[\s-]+/g, '_').toLowerCase();
-  if (normalized === 'in_progress' || normalized === 'pending' || normalized === 'syncing') return 'syncing';
-  if (normalized === 'offline' || normalized === 'offline_pending') return 'offline_pending';
-  if (normalized === 'complete' || normalized === 'failed') return normalized;
-  return '';
-}
+const BUILD_STATES = new Set(['idle', 'pending', 'building', 'failed']);
+const MATERIALIZATION_STATES = new Set(['empty', 'polling', 'materializing', 'retry_wait', 'ready']);
+const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
+const ERROR_CODE_PATTERN = /^[a-z0-9][a-z0-9_]{0,63}$/;
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 
 function validSafeCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-function validNullableTimestamp(value) {
-  return value === null || value === undefined || (typeof value === 'string' && value.trim() && !Number.isNaN(Date.parse(value)));
+function validPositiveSafeInteger(value) {
+  return validSafeCount(value) && value > 0;
 }
 
-function normalizeNullableTimestamp(value) {
-  return value === undefined ? null : value;
+function validNullableTimestamp(value) {
+  if (value === null) return true;
+  if (typeof value !== 'string') return false;
+  const match = TIMESTAMP_PATTERN.exec(value);
+  const parsed = Date.parse(value);
+  if (!match || Number.isNaN(parsed)) return false;
+  const date = new Date(parsed);
+  return Number(match[1]) > 0
+    && date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() + 1 === Number(match[2])
+    && date.getUTCDate() === Number(match[3])
+    && date.getUTCHours() === Number(match[4])
+    && date.getUTCMinutes() === Number(match[5])
+    && date.getUTCSeconds() === Number(match[6]);
+}
+
+function validNullableErrorCode(value) {
+  return value === null || (typeof value === 'string' && ERROR_CODE_PATTERN.test(value));
 }
 
 function validNullableChecksum(value) {
-  return value === null || value === undefined || value === '' || (typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value));
+  return value === null || (typeof value === 'string' && CHECKSUM_PATTERN.test(value));
 }
 
-function normalizeSdSyncDevice(raw) {
-  if (!raw || Array.isArray(raw) || typeof raw !== 'object') return null;
-  const deviceId = raw.deviceId ?? raw.device_id ?? raw.id;
-  const state = normalizeSdSyncState(raw.state ?? raw.syncState ?? raw.sync_state);
-  const version = raw.version ?? raw.lessonVersion ?? raw.lesson_version ?? null;
-  const checksum = raw.checksum ?? raw.manifestChecksum ?? raw.manifest_checksum ?? null;
-  const lastSuccessAt = normalizeNullableTimestamp(raw.lastSuccessAt ?? raw.last_success_at);
-  const lastErrorAt = normalizeNullableTimestamp(raw.lastErrorAt ?? raw.last_error_at);
-  const error = raw.error ?? raw.lastError ?? raw.last_error ?? '';
-  if (typeof deviceId !== 'string' || !deviceId.trim() || !SD_SYNC_STATES.has(state)) return null;
-  if (version !== null && version !== undefined && !validSafeCount(version)) return null;
-  if (!validNullableChecksum(checksum) || !validNullableTimestamp(lastSuccessAt) || !validNullableTimestamp(lastErrorAt)) return null;
-  if (error !== null && error !== undefined && typeof error !== 'string') return null;
-  return {
-    deviceId: deviceId.trim(),
-    state,
-    version,
-    checksum: checksum || '',
-    lastSuccessAt,
-    lastErrorAt,
-    error: error || '',
-  };
-}
+export function normalizeLessonAssetGenerationStatus(buildPayload, cmsPayload, espPayload) {
+  const build = buildPayload && buildPayload.data ? buildPayload.data : buildPayload;
+  const cms = cmsPayload && cmsPayload.data ? cmsPayload.data : cmsPayload;
+  const esp = espPayload;
+  if (![build, cms, esp].every((value) => value && !Array.isArray(value) && typeof value === 'object')) return null;
 
-export function normalizeLessonSdSyncStatus(payload) {
-  if (!payload || Array.isArray(payload) || typeof payload !== 'object') return null;
-  const state = normalizeSdSyncState(payload.state ?? payload.syncState ?? payload.sync_state);
-  const total = payload.total;
-  const complete = payload.complete;
-  const syncing = payload.syncing ?? payload.inProgress ?? payload.in_progress;
-  const offlinePending = payload.offlinePending ?? payload.offline_pending;
-  const failed = payload.failed;
-  const version = payload.version ?? payload.lessonVersion ?? payload.lesson_version ?? null;
-  const checksum = payload.checksum ?? payload.manifestChecksum ?? payload.manifest_checksum ?? null;
-  const lastSuccessAt = normalizeNullableTimestamp(payload.lastSuccessAt ?? payload.last_success_at);
-  const lastErrorAt = normalizeNullableTimestamp(payload.lastErrorAt ?? payload.last_error_at);
-  const devices = Array.isArray(payload.devices) ? payload.devices.map(normalizeSdSyncDevice) : null;
-  if (!SD_SYNC_STATES.has(state) || !devices || devices.some((device) => !device)) return null;
-  if (![total, complete, syncing, offlinePending, failed].every(validSafeCount)) return null;
-  if (complete + syncing + offlinePending + failed !== total) return null;
-  if (complete > total || syncing > total || offlinePending > total || failed > total) return null;
-  if (devices.length !== total) return null;
-  const deviceCounts = devices.reduce((counts, device) => {
-    const key = device.state === 'offline_pending' ? 'offlinePending' : device.state;
-    counts[key] += 1;
-    return counts;
-  }, { complete: 0, syncing: 0, offlinePending: 0, failed: 0 });
-  if (deviceCounts.complete !== complete || deviceCounts.syncing !== syncing
-    || deviceCounts.offlinePending !== offlinePending || deviceCounts.failed !== failed) return null;
-  if (state === 'complete' && !(total > 0 && complete === total)) return null;
-  if (state === 'failed' && failed < 1) return null;
-  if (state === 'offline_pending' && offlinePending < 1) return null;
-  if (state === 'syncing' && total > 0 && syncing < 1 && offlinePending < 1) return null;
-  if (version !== null && version !== undefined && !validSafeCount(version)) return null;
-  if (!validNullableChecksum(checksum) || !validNullableTimestamp(lastSuccessAt) || !validNullableTimestamp(lastErrorAt)) return null;
-  const hasCurrentVersion = validSafeCount(version);
-  const hasCurrentChecksum = typeof checksum === 'string' && /^[a-f0-9]{64}$/i.test(checksum);
-  if (state === 'complete' && (!hasCurrentVersion || !hasCurrentChecksum)) return null;
-  if (hasCurrentVersion && hasCurrentChecksum && devices.some((device) => device.state === 'complete'
-    && (device.version !== version || device.checksum !== checksum))) return null;
+  const buildState = build.state;
+  const pendingCount = build.pendingCount;
+  const lastBuildAt = build.updatedAt;
+  const buildErrorCode = build.lastErrorCode;
+  if (!BUILD_STATES.has(buildState) || !validSafeCount(pendingCount)
+    || !validNullableTimestamp(lastBuildAt) || !validNullableErrorCode(buildErrorCode)) return null;
+
+  const generation = cms.generation;
+  const curriculumLessonCount = cms.curriculumLessonCount;
+  const packCount = cms.packCount;
+  const indexChecksum = cms.indexChecksum;
+  if (!validPositiveSafeInteger(generation) || !validSafeCount(curriculumLessonCount)
+    || !validSafeCount(packCount) || typeof indexChecksum !== 'string'
+    || !CHECKSUM_PATTERN.test(indexChecksum) || !validNullableTimestamp(cms.publishedAt)) return null;
+  if (cms.publishedAt === null) return null;
+  if (cms.index !== undefined) {
+    if (!Array.isArray(cms.index) || cms.index.length !== packCount) return null;
+    const curriculumFromIndex = cms.index.reduce((count, pack) => (
+      pack && !Array.isArray(pack) && typeof pack === 'object' && pack.classification === 'curriculum'
+        ? count + 1
+        : count
+    ), 0);
+    if (cms.index.some((pack) => !pack || Array.isArray(pack) || typeof pack !== 'object'
+      || !['curriculum', 'demo'].includes(pack.classification))
+      || curriculumFromIndex !== curriculumLessonCount) return null;
+  }
+
+  const acceptedGeneration = esp.acceptedGeneration;
+  const acceptedChecksum = esp.indexChecksum;
+  const materializationState = esp.materializationState;
+  const connections = esp.connections;
+  const lastPollAt = esp.lastPollAt;
+  const lastMaterializedAt = esp.lastMaterializedAt;
+  const espErrorCode = esp.lastErrorCode;
+  if (!(acceptedGeneration === null || validPositiveSafeInteger(acceptedGeneration))
+    || !validNullableChecksum(acceptedChecksum) || !MATERIALIZATION_STATES.has(materializationState)
+    || !connections || Array.isArray(connections) || typeof connections !== 'object'
+    || !validNullableTimestamp(lastPollAt) || !validNullableTimestamp(lastMaterializedAt)
+    || !validNullableErrorCode(espErrorCode)) return null;
+  const { connected, current, retrying, failed } = connections;
+  if (![connected, current, retrying, failed].every(validSafeCount)
+    || current + retrying + failed !== connected) return null;
+
   return {
-    state,
-    total,
-    complete,
-    syncing,
-    offlinePending,
+    generation,
+    curriculumLessonCount,
+    packCount,
+    buildState,
+    pendingCount,
+    materializationState,
+    connected,
+    current,
+    retrying,
     failed,
-    version,
-    checksum: checksum || '',
-    lastSuccessAt,
-    lastErrorAt,
-    devices,
+    allConnectedCurrent: generation === acceptedGeneration
+      && indexChecksum === acceptedChecksum
+      && materializationState === 'ready'
+      && connected > 0
+      && current === connected
+      && retrying === 0
+      && failed === 0
+      && buildState === 'idle',
+    lastBuildAt,
+    lastPollAt,
+    lastMaterializedAt,
+    lastErrorCode: buildErrorCode || espErrorCode || null,
   };
+}
+
+function generationStatusError(code, status) {
+  return {
+    code,
+    ...(Number.isSafeInteger(status) ? { status } : {}),
+  };
+}
+
+function fetchPublicGenerationJson(url) {
+  let request;
+  try {
+    request = fetch(url, {
+      method: 'GET',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (error) {
+    return Promise.reject(generationStatusError('GENERATION_STATUS_NETWORK_ERROR'));
+  }
+  return Promise.resolve(request)
+    .then((response) => {
+      if (!response || response.status !== 200) {
+        throw generationStatusError('GENERATION_STATUS_HTTP_ERROR', response && response.status);
+      }
+      return Promise.resolve(response.json()).catch(() => {
+        throw generationStatusError('GENERATION_STATUS_INVALID_JSON');
+      });
+    });
 }
 
 export function validateAssetListResponse(payload) {
@@ -393,34 +433,35 @@ export default {
     });
   },
 
-  getSdSyncStatus(lessonId, onSuccess, onError) {
-    nestRequest({
-      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync`,
-      method: 'GET',
-      onSuccess: (payload) => {
-        const normalized = normalizeLessonSdSyncStatus(payload);
-        if (normalized) {
-          if (onSuccess) onSuccess(normalized);
-          return;
-        }
-        if (onError) onError('Lesson SD sync status response violated the backend contract.', {
-          status: 200,
-          contract: true,
-          code: 'INVALID_SD_SYNC_STATUS_RESPONSE',
-        });
-      },
-      onError,
+  getLessonAssetGenerationStatus(onSuccess, onError) {
+    let settled = false;
+    const buildRequest = new Promise((resolve, reject) => {
+      nestRequest({
+        url: `${getNestUrl()}/lesson-assets/generation-status`,
+        method: 'GET',
+        onSuccess: resolve,
+        onError: () => reject(generationStatusError('GENERATION_STATUS_ADMIN_ERROR')),
+      });
     });
-  },
+    const cmsRequest = fetchPublicGenerationJson('/v1/public/lesson-assets/latest');
+    const espRequest = fetchPublicGenerationJson('/public/lesson-assets/generation');
 
-  retrySdSync(lessonId, deviceIds, onSuccess, onError) {
-    nestRequest({
-      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync/retry`,
-      method: 'POST',
-      data: { deviceIds: Array.isArray(deviceIds) ? deviceIds : undefined },
-      onSuccess,
-      onError,
-    });
+    Promise.all([buildRequest, cmsRequest, espRequest])
+      .then(([buildPayload, cmsPayload, espPayload]) => {
+        if (settled) return;
+        const normalized = normalizeLessonAssetGenerationStatus(buildPayload, cmsPayload, espPayload);
+        if (!normalized) throw generationStatusError('INVALID_LESSON_ASSET_GENERATION_STATUS', 200);
+        settled = true;
+        if (onSuccess) onSuccess(normalized);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        const metadata = error && typeof error === 'object' && typeof error.code === 'string'
+          ? generationStatusError(error.code, error.status)
+          : generationStatusError('GENERATION_STATUS_UNAVAILABLE');
+        if (onError) onError('Lesson generation rollout status is unavailable.', metadata);
+      });
   },
 
   // GET /v1/admin/assets/:assetId/impact -> authoritative shared usage details

@@ -1,194 +1,234 @@
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 
 const root = process.cwd();
+const checksum = 'a'.repeat(64);
 
 function read(rel) {
   return fs.readFileSync(path.join(root, rel), 'utf8');
 }
 
 function expectContains(file, needle, reason) {
-  const body = read(file);
-  if (!body.includes(needle)) {
-    throw new Error(`${file} missing ${needle}: ${reason}`);
-  }
+  assert.ok(read(file).includes(needle), `${file} missing ${needle}: ${reason}`);
+}
+
+function expectAbsent(file, needle, reason) {
+  assert.ok(!read(file).includes(needle), `${file} contains forbidden ${needle}: ${reason}`);
 }
 
 function expectRegex(file, regex, reason) {
-  const body = read(file);
-  if (!regex.test(body)) {
-    throw new Error(`${file} missing ${regex}: ${reason}`);
-  }
+  assert.match(read(file), regex, `${file}: ${reason}`);
 }
 
-function extractObjectMethod(source, name) {
-  const methodPattern = new RegExp(`\\n\\s{2,4}${name}\\(`);
-  const match = methodPattern.exec(source);
-  if (!match) throw new Error(`${name} method not found`);
-  const start = match.index + match[0].lastIndexOf(name);
-  const paramsStart = source.indexOf('(', start);
-  const paramsEnd = source.indexOf(')', paramsStart);
-  const braceStart = source.indexOf('{', paramsEnd);
-  let depth = 0;
-  for (let i = braceStart; i < source.length; i += 1) {
-    if (source[i] === '{') depth += 1;
-    if (source[i] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        const params = source.slice(paramsStart + 1, paramsEnd);
-        const body = source.slice(braceStart + 1, i);
-        return `function ${name}(${params}) {${body}}`;
-      }
-    }
-  }
-  throw new Error(`${name} method body not closed`);
-}
-
-function loadLessonApiPrelude() {
-  const source = read('src/apis/module/lesson.js');
-  const end = source.indexOf('\nexport default');
-  if (end < 0) throw new Error('lesson API default export not found');
-  return vm.runInNewContext(`${source.slice(0, end)
+function loadLessonApi(context = {}) {
+  const source = read('src/apis/module/lesson.js')
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];\n/g, '')
-    .replace(/export function /g, 'function ')}
-    ({ normalizeLessonSdSyncStatus });
-  `, { Array, Date, Number, RegExp, Set });
-}
-
-function loadLessonApiMethod(name) {
-  const source = read('src/apis/module/lesson.js');
-  const prelude = loadLessonApiPrelude();
-  return vm.runInNewContext(`(${extractObjectMethod(source, name)})`, {
-    getNestUrl: () => '/nestjs',
-    nestRequest: (request) => { globalThis.__lastNestRequest = request; },
-    normalizeLessonSdSyncStatus: prelude.normalizeLessonSdSyncStatus,
+    .replace(/export function /g, 'function ')
+    .replace('export default {', 'const lessonApi = {');
+  return vm.runInNewContext(`${source}\n({ lessonApi, normalizeLessonAssetGenerationStatus });`, {
+    URLSearchParams,
     Array,
-    Number,
-    RegExp,
     Date,
     Error,
+    JSON,
+    Math,
+    Number,
+    Object,
+    Promise,
+    RegExp,
+    Set,
+    String,
+    ...context,
   });
 }
 
-expectContains('src/apis/module/lesson.js', 'getSdSyncStatus', 'lesson API must expose status loading');
-expectContains('src/apis/module/lesson.js', 'retrySdSync', 'lesson API must expose retry');
-expectContains('src/apis/module/lesson.js', 'normalizeLessonSdSyncStatus', 'SD sync status must be normalized before UI use');
-expectContains('src/apis/module/lesson.js', 'INVALID_SD_SYNC_STATUS_RESPONSE', 'malformed SD sync responses must fail structurally');
-expectContains('src/views/LessonEditor.vue', 'LessonSdSyncStatus', 'published lesson editor must render SD sync status');
-expectContains('src/views/LessonEditor.vue', 'loadSdSyncStatus', 'editor must load SD sync status for published lessons');
-expectContains('src/views/LessonEditor.vue', 'scheduleSdSyncStatusPoll', 'editor must poll only incomplete sync states');
-expectContains('src/views/LessonEditor.vue', 'clearSdSyncStatusPoll', 'editor must stop sync timers on teardown and transitions');
-expectContains('src/views/LessonEditor.vue', 'retrySdSync', 'editor must wire retry action to the API');
-expectContains('src/views/LessonEditor.vue', 'lesson.publishedOfflineSyncContinues', 'publish message must say offline sync continues asynchronously');
-expectRegex(
-  'src/views/LessonEditor.vue',
-  /if\s*\(verified\)\s*\{[\s\S]*?publishMessage\s*=\s*this\.\$t\('lesson\.publishedOfflineSyncContinues'[\s\S]*?fetchAll\(\)[\s\S]*?\}/m,
-  'offline sync success messaging and status refresh must only run after independent publish verification passes',
-);
-expectContains('src/components/lesson/LessonSdSyncStatus.vue', "lesson.sdSyncTitle", 'status component must use localized title');
-expectContains('src/components/lesson/LessonSdSyncStatus.vue', "@click=\"$emit('retry'", 'retry action must be emitted by the component');
-expectRegex(
-  'src/components/lesson/LessonSdSyncStatus.vue',
-  /complete\s*===\s*total\s*&&\s*total\s*>\s*0/,
-  'UI must never infer offline availability for zero-device or partial sync states',
-);
-expectRegex(
-  'src/views/LessonEditor.vue',
-  /beforeDestroy\(\)[\s\S]*?clearSdSyncStatusPoll/,
-  'editor teardown must clear SD sync polling',
-);
+function cmsFixture(overrides = {}) {
+  const index = Array.from({ length: 27 }, (_, position) => ({
+    lessonId: `lesson-${position + 1}`,
+    classification: position < 26 ? 'curriculum' : 'demo',
+  }));
+  return {
+    data: {
+      generation: 8,
+      curriculumLessonCount: 26,
+      packCount: 27,
+      indexChecksum: checksum,
+      publishedAt: '2026-07-24T00:00:00Z',
+      index,
+      ...overrides,
+    },
+  };
+}
+
+const buildFixture = {
+  data: {
+    state: 'idle',
+    pendingCount: 0,
+    updatedAt: '2026-07-24T00:00:00Z',
+    lastErrorCode: null,
+  },
+};
+const espFixture = {
+  acceptedGeneration: 8,
+  indexChecksum: checksum,
+  materializationState: 'ready',
+  connections: { connected: 2, current: 2, retrying: 0, failed: 0 },
+  lastPollAt: '2026-07-24T00:00:00Z',
+  lastMaterializedAt: '2026-07-24T00:00:01Z',
+  lastErrorCode: null,
+};
+
+expectContains('src/apis/module/lesson.js', 'normalizeLessonAssetGenerationStatus', 'aggregate status must be strictly normalized');
+expectContains('src/apis/module/lesson.js', 'getLessonAssetGenerationStatus', 'lesson API must load the three aggregate sources');
+expectAbsent('src/apis/module/lesson.js', 'getSdSyncStatus', 'per-lesson device status API is obsolete');
+expectAbsent('src/apis/module/lesson.js', 'retrySdSync', 'rollout status is read-only');
+expectAbsent('src/apis/module/lesson.js', '/sd-sync/retry', 'the obsolete retry POST endpoint must be removed');
+expectContains('src/views/LessonEditor.vue', 'LessonSdSyncStatus', 'published lesson editor must render rollout status');
+expectContains('src/views/LessonEditor.vue', 'loadLessonAssetGenerationStatus', 'editor must load rollout status');
+expectContains('src/views/LessonEditor.vue', 'scheduleLessonAssetGenerationPoll', 'editor must poll incomplete rollouts');
+expectContains('src/views/LessonEditor.vue', 'clearLessonAssetGenerationPoll', 'editor must clear polling during teardown');
+expectAbsent('src/views/LessonEditor.vue', '@retry=', 'editor must not render a retry action');
+expectAbsent('src/views/LessonEditor.vue', 'sdSyncRetrying', 'editor must not retain retry state');
+expectRegex('src/views/LessonEditor.vue', /beforeDestroy\(\)[\s\S]*?clearLessonAssetGenerationPoll/, 'editor teardown must clear rollout polling');
+
+const component = 'src/components/lesson/LessonSdSyncStatus.vue';
+for (const needle of ['generation', 'curriculumLessonCount', 'packCount', 'connected', 'current', 'retrying', 'failed', 'allConnectedCurrent']) {
+  expectContains(component, needle, `aggregate component must render ${needle}`);
+}
+for (const forbidden of ['el-table', 'el-collapse', 'el-button', 'deviceId', "$emit('retry'", 'sdSyncChecksum']) {
+  expectAbsent(component, forbidden, 'aggregate UI must not expose per-device details or retry controls');
+}
+expectContains(component, 'lesson.sdSyncOfflineDisclaimer', 'offline/never-seen robots require a permanent disclaimer');
+expectContains(component, 'lesson.sdSyncAllConnectedCurrent', 'success wording must be conditional');
 
 for (const locale of ['en', 'zh_CN', 'zh_TW', 'vi']) {
   for (const key of [
-    'lesson.sdSyncComplete',
-    'lesson.sdSyncSyncing',
-    'lesson.sdSyncOfflinePending',
-    'lesson.sdSyncFailed',
-    'lesson.sdSyncRetry',
-    'lesson.publishedOfflineSyncContinues',
-  ]) {
-    expectContains(`src/i18n/${locale}.js`, `'${key}'`, `${locale} locale must translate ${key}`);
-  }
+    'lesson.sdSyncTitle', 'lesson.sdSyncGeneration', 'lesson.sdSyncCurriculumLessons',
+    'lesson.sdSyncTotalPacks', 'lesson.sdSyncConnected', 'lesson.sdSyncCurrent',
+    'lesson.sdSyncRetrying', 'lesson.sdSyncFailed', 'lesson.sdSyncAllConnectedCurrent',
+    'lesson.sdSyncOfflineDisclaimer', 'lesson.sdSyncBuildState',
+    'lesson.sdSyncMaterializationState', 'lesson.sdSyncLastBuild', 'lesson.sdSyncLastPoll',
+    'lesson.sdSyncLastMaterialized',
+  ]) expectContains(`src/i18n/${locale}.js`, `'${key}'`, `${locale} locale must translate ${key}`);
+}
+expectContains('src/i18n/vi.js', 'Tất cả robot đang kết nối đã nhận thế hệ mới nhất.', 'Vietnamese success wording is product-approved');
+expectContains('src/i18n/vi.js', 'Robot đang tắt hoặc chưa từng kết nối sẽ tự đồng bộ khi kết nối lại; trạng thái này không xác nhận các robot đó đã cập nhật.', 'Vietnamese disclaimer is product-approved');
+
+const forbiddenClaims = /all robots (?:are )?updated|all robots have (?:been )?updated|tất cả robot đã (?:được )?cập nhật|所有机器人(?:均|都)?已更新|所有機器人(?:均|都)?已更新/i;
+for (const file of [component, 'src/i18n/en.js', 'src/i18n/vi.js', 'src/i18n/zh_CN.js', 'src/i18n/zh_TW.js']) {
+  assert.doesNotMatch(read(file), forbiddenClaims, `${file} must not claim powered-off robots are updated`);
 }
 
-let request;
-globalThis.__lastNestRequest = null;
-const getSdSyncStatus = loadLessonApiMethod('getSdSyncStatus');
-getSdSyncStatus('lesson-1', () => {}, () => {});
-request = globalThis.__lastNestRequest;
-if (!request || request.url !== '/nestjs/lessons/lesson-1/sd-sync' || request.method !== 'GET') {
-  throw new Error('getSdSyncStatus must call GET /lessons/:lessonId/sd-sync');
-}
+const { normalizeLessonAssetGenerationStatus } = loadLessonApi();
+const normalized = normalizeLessonAssetGenerationStatus(buildFixture, cmsFixture(), espFixture);
+assert.deepEqual(JSON.parse(JSON.stringify(normalized)), {
+  generation: 8,
+  curriculumLessonCount: 26,
+  packCount: 27,
+  buildState: 'idle',
+  pendingCount: 0,
+  materializationState: 'ready',
+  connected: 2,
+  current: 2,
+  retrying: 0,
+  failed: 0,
+  allConnectedCurrent: true,
+  lastBuildAt: '2026-07-24T00:00:00Z',
+  lastPollAt: '2026-07-24T00:00:00Z',
+  lastMaterializedAt: '2026-07-24T00:00:01Z',
+  lastErrorCode: null,
+});
+assert.equal(normalizeLessonAssetGenerationStatus(buildFixture, cmsFixture({ generation: 9 }), espFixture).allConnectedCurrent, false, 'generation mismatch must not be success');
+assert.equal(normalizeLessonAssetGenerationStatus(buildFixture, cmsFixture({ indexChecksum: 'b'.repeat(64) }), espFixture).allConnectedCurrent, false, 'checksum mismatch must not be success');
+assert.equal(normalizeLessonAssetGenerationStatus(buildFixture, cmsFixture(), { ...espFixture, connections: { connected: 0, current: 0, retrying: 0, failed: 0 } }).allConnectedCurrent, false, 'zero connected robots must not be success');
 
-globalThis.__lastNestRequest = null;
-const retrySdSync = loadLessonApiMethod('retrySdSync');
-retrySdSync('lesson-1', ['dev-a'], () => {}, () => {});
-request = globalThis.__lastNestRequest;
-if (!request || request.url !== '/nestjs/lessons/lesson-1/sd-sync/retry' || request.method !== 'POST') {
-  throw new Error('retrySdSync must call POST /lessons/:lessonId/sd-sync/retry');
-}
-if (!request.data || JSON.stringify(request.data.deviceIds) !== JSON.stringify(['dev-a'])) {
-  throw new Error('retrySdSync must include an array deviceIds payload when provided');
-}
-retrySdSync('lesson-1', 'dev-a', () => {}, () => {});
-request = globalThis.__lastNestRequest;
-if (!request.data || request.data.deviceIds !== undefined) {
-  throw new Error('retrySdSync must not send a concrete deviceIds list for non-array input');
-}
+for (const [build, cms, esp] of [
+  [{ data: { ...buildFixture.data, state: 'complete' } }, cmsFixture(), espFixture],
+  [{ data: { ...buildFixture.data, pendingCount: -1 } }, cmsFixture(), espFixture],
+  [{ data: { ...buildFixture.data, updatedAt: 'yesterday' } }, cmsFixture(), espFixture],
+  [{ data: { ...buildFixture.data, updatedAt: undefined } }, cmsFixture(), espFixture],
+  [buildFixture, cmsFixture({ generation: 0 }), espFixture],
+  [buildFixture, cmsFixture({ packCount: 26 }), espFixture],
+  [buildFixture, cmsFixture({ curriculumLessonCount: 25 }), espFixture],
+  [buildFixture, cmsFixture({ indexChecksum: checksum.toUpperCase() }), espFixture],
+  [buildFixture, cmsFixture({ publishedAt: 'invalid' }), espFixture],
+  [buildFixture, cmsFixture({ publishedAt: '2026-02-30T00:00:00Z' }), espFixture],
+  [buildFixture, cmsFixture(), { ...espFixture, acceptedGeneration: 0 }],
+  [buildFixture, cmsFixture(), { ...espFixture, materializationState: 'complete' }],
+  [buildFixture, cmsFixture(), { ...espFixture, connections: { connected: 2, current: 2, retrying: 1, failed: 0 } }],
+  [buildFixture, cmsFixture(), { ...espFixture, lastPollAt: 'invalid' }],
+  [buildFixture, cmsFixture(), { ...espFixture, lastPollAt: undefined }],
+  [buildFixture, cmsFixture(), { ...espFixture, lastErrorCode: 'Secret: token' }],
+]) assert.equal(normalizeLessonAssetGenerationStatus(build, cms, esp), null, 'corrupt aggregate source must be rejected');
 
+const calls = [];
+let adminRequest;
+const fetchResolvers = new Map();
+const fetchMock = (url, options) => {
+  calls.push({ url, options });
+  return new Promise((resolve, reject) => fetchResolvers.set(url, { resolve, reject }));
+};
+const { lessonApi } = loadLessonApi({
+  getNestUrl: () => '/nestjs/v1/admin',
+  fetch: fetchMock,
+  nestRequest: (request) => { adminRequest = request; },
+  nestUpload: () => {},
+  normalizeLesson: (value) => value,
+  normalizeStep: (value) => value,
+  normalizeStepType: (value) => value,
+});
 let successes = 0;
 let failures = 0;
-let errorPayload = null;
-getSdSyncStatus('lesson-1', () => { successes += 1; }, (message, error) => {
-  failures += 1;
-  errorPayload = { message, error };
-});
-request = globalThis.__lastNestRequest;
-const validStatus = {
-  state: 'complete',
-  total: 2,
-  complete: 2,
-  syncing: 0,
-  offlinePending: 0,
-  failed: 0,
-  version: 3,
-  checksum: 'a'.repeat(64),
-  lastSuccessAt: '2026-07-24T00:00:00.000Z',
-  lastErrorAt: null,
-  devices: [
-    { deviceId: 'dev-a', state: 'complete', version: 3, checksum: 'a'.repeat(64), lastSuccessAt: '2026-07-24T00:00:00.000Z', lastErrorAt: null, error: '' },
-    { deviceId: 'dev-b', state: 'complete', version: 3, checksum: 'a'.repeat(64), lastSuccessAt: '2026-07-24T00:00:00.000Z', lastErrorAt: null, error: '' },
-  ],
-};
-request.onSuccess(validStatus);
-if (successes !== 1 || failures) throw new Error('valid SD sync response must pass unchanged after normalization');
-for (const malformed of [
-  {},
-  { ...validStatus, complete: 3 },
-  { ...validStatus, total: -1 },
-  { ...validStatus, state: 'ready' },
-  { ...validStatus, version: null },
-  { ...validStatus, version: undefined },
-  { ...validStatus, checksum: null },
-  { ...validStatus, checksum: '' },
-  { ...validStatus, checksum: 'bad' },
-  { ...validStatus, lastSuccessAt: 'not-a-date' },
-  { ...validStatus, syncing: 1, complete: 1 },
-  { ...validStatus, state: 'complete', complete: 1, failed: 1, devices: [{ ...validStatus.devices[0] }, { ...validStatus.devices[1], state: 'failed' }] },
-  { ...validStatus, devices: [{ ...validStatus.devices[0], version: 2 }, validStatus.devices[1]] },
-  { ...validStatus, devices: [{ ...validStatus.devices[0], checksum: 'b'.repeat(64) }, validStatus.devices[1]] },
-  { ...validStatus, devices: [{ ...validStatus.devices[0], checksum: '' }, validStatus.devices[1]] },
-  { ...validStatus, devices: [{ ...validStatus.devices[0], state: 'ready' }] },
-  { ...validStatus, devices: [{ ...validStatus.devices[0], deviceId: '' }] },
-]) {
-  successes = 0;
-  failures = 0;
-  errorPayload = null;
-  request.onSuccess(malformed);
-  if (successes || failures !== 1 || !errorPayload.error || errorPayload.error.code !== 'INVALID_SD_SYNC_STATUS_RESPONSE') {
-    throw new Error('malformed SD sync payloads must fail exactly once with INVALID_SD_SYNC_STATUS_RESPONSE');
-  }
+let result;
+lessonApi.getLessonAssetGenerationStatus((value) => { successes += 1; result = value; }, () => { failures += 1; });
+assert.equal(adminRequest.url, '/nestjs/v1/admin/lesson-assets/generation-status');
+assert.equal(adminRequest.method, 'GET');
+assert.deepEqual(calls.map(({ url }) => url).sort(), ['/public/lesson-assets/generation', '/v1/public/lesson-assets/latest']);
+for (const { options } of calls) {
+  assert.equal(options.method, 'GET');
+  assert.equal(options.credentials, 'omit');
+  assert.ok(!Object.keys(options.headers || {}).some((key) => key.toLowerCase() === 'authorization'), 'public GET must not send Authorization');
 }
+adminRequest.onSuccess(buildFixture.data);
+fetchResolvers.get('/v1/public/lesson-assets/latest').resolve({ status: 200, json: async () => cmsFixture() });
+fetchResolvers.get('/public/lesson-assets/generation').resolve({ status: 200, json: async () => espFixture });
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(successes, 1);
+assert.equal(failures, 0);
+assert.equal(result.allConnectedCurrent, true);
 
-console.log('Lesson SD sync UI contracts passed');
+let failureMeta;
+adminRequest = null;
+calls.length = 0;
+fetchResolvers.clear();
+lessonApi.getLessonAssetGenerationStatus(() => { successes += 1; }, (message, meta) => { failures += 1; failureMeta = { message, meta }; });
+fetchResolvers.get('/v1/public/lesson-assets/latest').resolve({ status: 503, json: async () => ({ secret: 'must-not-leak' }) });
+await new Promise((resolve) => setTimeout(resolve, 0));
+adminRequest.onError('upstream failed', { status: 500, url: 'https://secret', token: 'secret' });
+fetchResolvers.get('/public/lesson-assets/generation').reject(new Error('https://secret/token'));
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(failures, 1, 'first terminal failure must call onError exactly once');
+assert.equal(successes, 1, 'late failures must not call onSuccess');
+assert.equal(failureMeta.meta.status, 503);
+assert.ok(!JSON.stringify(failureMeta).includes('secret'), 'errors must not leak bodies, URLs, or tokens');
+
+expectContains('vue.config.js', "'/public/lesson-assets/generation'", 'dev server must proxy ESP aggregate status same-origin');
+expectContains('vue.config.js', "'/v1/public/lesson-assets/latest'", 'dev server must proxy CMS latest same-origin');
+expectContains('vue.config.js', 'ESP_STATUS_TARGET', 'ESP proxy target must be configurable');
+expectAbsent('src/apis/module/lesson.js', 'esp.tjbot.vn', 'browser API must not use a cross-origin ESP URL');
+const nginx = read('../../deploy/nginx/tjbot.vn.conf');
+const adminServer = nginx.slice(nginx.indexOf('server_name admin.tjbot.vn'), nginx.indexOf('server_name esp.tjbot.vn'));
+for (const location of ['location = /public/lesson-assets/generation', 'location = /v1/public/lesson-assets/latest']) {
+  assert.ok(adminServer.includes(location), `admin.tjbot.vn missing ${location}`);
+}
+for (const requirement of ['limit_req zone=lesson_public_read', 'Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Assertion ""']) {
+  assert.ok(adminServer.includes(requirement), `admin public proxies missing ${requirement}`);
+}
+assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
+assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
+assert.equal((adminServer.match(/if \(\$request_method !~ \^\(GET\|HEAD\)\$\) \{ return 405; \}/g) || []).length, 2, 'admin public proxies must reject mutations');
+assert.ok(!/auth_basic|auth_request/.test(adminServer), 'admin public proxies must bypass interactive and subrequest auth');
+
+console.log('Lesson generation rollout UI contracts passed');

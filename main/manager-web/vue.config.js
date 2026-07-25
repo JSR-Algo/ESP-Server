@@ -23,6 +23,7 @@ dotenv.config();
 // Load local dev overrides (NestJS proxy target + admin token; gitignored).
 if (!browserE2E) dotenv.config({ path: '.env.development.local', override: true });
 const nestjsTarget = browserE2ETarget || process.env.NESTJS_TARGET || 'http://localhost:3000';
+const espStatusTarget = process.env.ESP_STATUS_TARGET || 'http://127.0.0.1:8003';
 const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
 
 // 定义CDN资源列表，确保Service Worker也能访问
@@ -52,6 +53,17 @@ module.exports = defineConfig({
     proxy: {
       '/tbot': {
         target: 'http://127.0.0.1:8002',
+        changeOrigin: true
+      },
+      '/public/lesson-assets/generation': {
+        target: espStatusTarget,
+        changeOrigin: true,
+        bypass(req) {
+          return req.url.split('?')[0] === '/public/lesson-assets/generation' ? undefined : req.url;
+        }
+      },
+      '/v1/public/lesson-assets/latest': {
+        target: nestjsTarget,
         changeOrigin: true
       },
       // Course-customization CRUD is owned by the NestJS tbot-backend

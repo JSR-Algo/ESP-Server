@@ -1,27 +1,30 @@
 <template>
-  <el-card v-if="status" shadow="never" class="sd-sync-status" data-testid="lesson-sd-sync-status">
+  <el-card
+    v-if="status"
+    v-loading="loading"
+    shadow="never"
+    class="sd-sync-status"
+    data-testid="lesson-sd-sync-status"
+    :aria-label="$t('lesson.sdSyncTitle')"
+  >
     <div slot="header" class="sd-sync-status__header">
       <div>
         <strong>{{ $t('lesson.sdSyncTitle') }}</strong>
-        <p class="sd-sync-status__hint">{{ availabilityText }}</p>
+        <p class="sd-sync-status__hint">{{ stateDescription }}</p>
       </div>
-      <div class="sd-sync-status__actions">
-        <el-tag :type="stateTagType" size="small" effect="plain">
-          {{ stateLabel }}
-        </el-tag>
-        <el-button
-          size="small"
-          type="primary"
-          icon="el-icon-refresh"
-          :loading="retrying"
-          :disabled="retryDisabled"
-          :aria-label="$t('lesson.sdSyncRetry')"
-          @click="$emit('retry', retryDeviceIds)"
-        >
-          {{ $t('lesson.sdSyncRetry') }}
-        </el-button>
-      </div>
+      <el-tag :type="stateTagType" size="small" effect="plain">
+        {{ stateLabel }}
+      </el-tag>
     </div>
+
+    <el-alert
+      v-if="status.allConnectedCurrent"
+      class="sd-sync-status__success"
+      type="success"
+      :closable="false"
+      show-icon
+      :title="$t('lesson.sdSyncAllConnectedCurrent')"
+    />
 
     <div class="sd-sync-status__counts" :aria-label="$t('lesson.sdSyncCounters')">
       <div v-for="item in counters" :key="item.key" class="sd-sync-status__count">
@@ -30,43 +33,37 @@
       </div>
     </div>
 
-    <div class="sd-sync-status__meta">
-      <div class="kv"><span class="muted">{{ $t('lesson.sdSyncVersion') }}</span><span class="mono">{{ displayValue(status.version) }}</span></div>
-      <div class="kv"><span class="muted">{{ $t('lesson.sdSyncChecksum') }}</span><span class="mono">{{ displayValue(status.checksum) }}</span></div>
-      <div class="kv"><span class="muted">{{ $t('lesson.sdSyncLastSuccess') }}</span><span>{{ formatTimestamp(status.lastSuccessAt) }}</span></div>
-      <div class="kv"><span class="muted">{{ $t('lesson.sdSyncLastError') }}</span><span>{{ formatTimestamp(status.lastErrorAt) }}</span></div>
+    <div class="sd-sync-status__meta" :aria-label="$t('lesson.sdSyncMetadata')">
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncBuildState') }}</span>
+        <span>{{ buildStateLabel }}</span>
+      </div>
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncMaterializationState') }}</span>
+        <span>{{ materializationStateLabel }}</span>
+      </div>
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncLastBuild') }}</span>
+        <span>{{ formatTimestamp(status.lastBuildAt) }}</span>
+      </div>
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncLastPoll') }}</span>
+        <span>{{ formatTimestamp(status.lastPollAt) }}</span>
+      </div>
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncLastMaterialized') }}</span>
+        <span>{{ formatTimestamp(status.lastMaterializedAt) }}</span>
+      </div>
+      <div class="kv">
+        <span class="muted">{{ $t('lesson.sdSyncLastErrorCode') }}</span>
+        <span>{{ displayValue(status.lastErrorCode) }}</span>
+      </div>
     </div>
 
-    <el-collapse class="sd-sync-status__devices">
-      <el-collapse-item :title="$t('lesson.sdSyncDevices')" name="devices">
-        <el-table :data="status.devices" size="mini" stripe style="width: 100%">
-          <el-table-column prop="deviceId" :label="$t('lesson.sdSyncDevice')" min-width="150" />
-          <el-table-column :label="$t('lesson.sdSyncState')" width="130">
-            <template slot-scope="scope">
-              <el-tag :type="deviceTagType(scope.row.state)" size="mini" effect="plain">
-                {{ labelForState(scope.row.state) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="version" :label="$t('lesson.sdSyncVersion')" width="90">
-            <template slot-scope="scope">{{ displayValue(scope.row.version) }}</template>
-          </el-table-column>
-          <el-table-column :label="$t('lesson.sdSyncChecksum')" min-width="180">
-            <template slot-scope="scope"><span class="mono">{{ displayValue(scope.row.checksum) }}</span></template>
-          </el-table-column>
-          <el-table-column :label="$t('lesson.sdSyncLastSuccess')" min-width="160">
-            <template slot-scope="scope">{{ formatTimestamp(scope.row.lastSuccessAt) }}</template>
-          </el-table-column>
-          <el-table-column :label="$t('lesson.sdSyncLastError')" min-width="160">
-            <template slot-scope="scope">{{ formatTimestamp(scope.row.lastErrorAt) }}</template>
-          </el-table-column>
-          <el-table-column prop="error" :label="$t('lesson.sdSyncError')" min-width="180">
-            <template slot-scope="scope">{{ displayValue(scope.row.error) }}</template>
-          </el-table-column>
-          <template slot="empty"><span class="muted">{{ $t('lesson.sdSyncNoDevices') }}</span></template>
-        </el-table>
-      </el-collapse-item>
-    </el-collapse>
+    <div class="sd-sync-status__disclaimer" role="note">
+      <i class="el-icon-info" aria-hidden="true" />
+      <span>{{ $t('lesson.sdSyncOfflineDisclaimer') }}</span>
+    </div>
   </el-card>
 </template>
 
@@ -76,63 +73,58 @@ export default {
   props: {
     status: { type: Object, default: null },
     loading: { type: Boolean, default: false },
-    retrying: { type: Boolean, default: false },
   },
   computed: {
-    total() { return Number(this.status && this.status.total) || 0; },
-    offlineReady() {
-      if (!this.status) return false;
-      const { complete, total } = this.status;
-      return complete === total && total > 0;
-    },
-    retryDisabled() {
-      return this.loading || this.retrying || !this.status || this.status.state === 'complete';
-    },
-    retryDeviceIds() {
-      if (!this.status || !Array.isArray(this.status.devices)) return undefined;
-      const ids = this.status.devices
-        .filter((device) => device.state !== 'complete')
-        .map((device) => device.deviceId)
-        .filter(Boolean);
-      return ids.length ? ids : undefined;
-    },
-    stateTagType() {
-      return this.deviceTagType(this.status.state);
-    },
-    stateLabel() {
-      return this.labelForState(this.status.state);
-    },
-    availabilityText() {
-      if (this.offlineReady) return this.$t('lesson.sdSyncOfflineAvailable');
-      if (!this.total) return this.$t('lesson.sdSyncNoDevices');
-      return this.$t('lesson.sdSyncNotOfflineReady');
-    },
     counters() {
       return [
-        { key: 'total', label: this.$t('lesson.sdSyncTotal'), value: this.status.total },
-        { key: 'complete', label: this.$t('lesson.sdSyncComplete'), value: this.status.complete },
-        { key: 'syncing', label: this.$t('lesson.sdSyncSyncing'), value: this.status.syncing },
-        { key: 'offlinePending', label: this.$t('lesson.sdSyncOfflinePending'), value: this.status.offlinePending },
+        { key: 'generation', label: this.$t('lesson.sdSyncGeneration'), value: this.status.generation },
+        { key: 'curriculumLessonCount', label: this.$t('lesson.sdSyncCurriculumLessons'), value: this.status.curriculumLessonCount },
+        { key: 'packCount', label: this.$t('lesson.sdSyncTotalPacks'), value: this.status.packCount },
+        { key: 'connected', label: this.$t('lesson.sdSyncConnected'), value: this.status.connected },
+        { key: 'current', label: this.$t('lesson.sdSyncCurrent'), value: this.status.current },
+        { key: 'retrying', label: this.$t('lesson.sdSyncRetrying'), value: this.status.retrying },
         { key: 'failed', label: this.$t('lesson.sdSyncFailed'), value: this.status.failed },
-        { key: 'remaining', label: this.$t('lesson.sdSyncRemaining'), value: Math.max(0, this.status.total - this.status.complete) },
       ];
+    },
+    stateKey() {
+      if (this.status.allConnectedCurrent) return 'AllCurrent';
+      if (this.status.buildState === 'failed' || this.status.failed > 0) return 'Failed';
+      if (this.status.connected === 0) return 'NoConnected';
+      if (['pending', 'building'].includes(this.status.buildState)) return 'Building';
+      if (this.status.materializationState === 'materializing') return 'Materializing';
+      if (this.status.retrying > 0 || this.status.materializationState === 'retry_wait') return 'Retrying';
+      if (['empty', 'polling'].includes(this.status.materializationState)) return 'Polling';
+      if (this.status.current < this.status.connected) return 'RollingOut';
+      return 'GenerationMismatch';
+    },
+    stateLabel() {
+      return this.$t(`lesson.sdSyncState${this.stateKey}`);
+    },
+    stateDescription() {
+      return this.$t(`lesson.sdSyncState${this.stateKey}Description`);
+    },
+    stateTagType() {
+      if (this.stateKey === 'AllCurrent') return 'success';
+      if (this.stateKey === 'Failed') return 'danger';
+      if (['Building', 'Materializing', 'Retrying', 'RollingOut'].includes(this.stateKey)) return 'warning';
+      return 'info';
+    },
+    buildStateLabel() {
+      const label = this.$t(`lesson.sdSyncBuild${this.capitalize(this.status.buildState)}`);
+      return this.status.pendingCount > 0
+        ? this.$t('lesson.sdSyncBuildWithPending', { state: label, count: this.status.pendingCount })
+        : label;
+    },
+    materializationStateLabel() {
+      return this.$t(`lesson.sdSyncMaterialization${this.pascalCase(this.status.materializationState)}`);
     },
   },
   methods: {
-    labelForState(state) {
-      const key = {
-        complete: 'lesson.sdSyncComplete',
-        syncing: 'lesson.sdSyncSyncing',
-        offline_pending: 'lesson.sdSyncOfflinePending',
-        failed: 'lesson.sdSyncFailed',
-      }[state] || 'lesson.sdSyncUnknown';
-      return this.$t(key);
+    capitalize(value) {
+      return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : '';
     },
-    deviceTagType(state) {
-      if (state === 'complete') return 'success';
-      if (state === 'failed') return 'danger';
-      if (state === 'offline_pending') return 'warning';
-      return 'info';
+    pascalCase(value) {
+      return String(value || '').split('_').map(this.capitalize).join('');
     },
     displayValue(value) {
       return value === null || value === undefined || value === '' ? this.$t('lesson.sdSyncUnavailable') : value;
@@ -140,8 +132,7 @@ export default {
     formatTimestamp(value) {
       if (!value) return this.$t('lesson.sdSyncUnavailable');
       const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return this.$t('lesson.sdSyncUnavailable');
-      return date.toLocaleString();
+      return Number.isNaN(date.getTime()) ? this.$t('lesson.sdSyncUnavailable') : date.toLocaleString();
     },
   },
 };
@@ -163,42 +154,39 @@ export default {
   line-height: 1.4;
   margin: 4px 0 0;
 }
-.sd-sync-status__actions {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
+.sd-sync-status__success {
+  margin-bottom: 12px;
 }
 .sd-sync-status__counts {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(6, minmax(88px, 1fr));
-  margin-bottom: 12px;
+  grid-template-columns: repeat(7, minmax(88px, 1fr));
+  margin-bottom: 14px;
 }
 .sd-sync-status__count {
   background: #f5f7fa;
   border: 1px solid #ebeef5;
   border-radius: 6px;
   min-width: 0;
-  padding: 8px;
+  padding: 9px;
 }
 .sd-sync-status__count span {
   color: #909399;
   display: block;
   font-size: 12px;
+  line-height: 1.3;
 }
 .sd-sync-status__count strong {
   color: #303133;
   display: block;
   font-size: 18px;
-  margin-top: 3px;
+  margin-top: 4px;
 }
 .sd-sync-status__meta {
   display: grid;
-  gap: 6px 16px;
+  gap: 8px 20px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-bottom: 8px;
+  margin-bottom: 14px;
 }
 .kv {
   display: flex;
@@ -207,30 +195,47 @@ export default {
 }
 .kv .muted {
   color: #909399;
-  flex: 0 0 120px;
+  flex: 0 0 150px;
 }
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  word-break: break-all;
+.sd-sync-status__disclaimer {
+  align-items: flex-start;
+  background: #f4f4f5;
+  border-radius: 4px;
+  color: #606266;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  line-height: 1.5;
+  padding: 9px 11px;
 }
-@media (max-width: 900px) {
+.sd-sync-status__disclaimer i {
+  margin-top: 2px;
+}
+@media (max-width: 1100px) {
   .sd-sync-status__counts {
-    grid-template-columns: repeat(3, minmax(88px, 1fr));
-  }
-  .sd-sync-status__meta {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(4, minmax(88px, 1fr));
   }
 }
-@media (max-width: 600px) {
+@media (max-width: 700px) {
+  .sd-sync-status__counts,
+  .sd-sync-status__meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .kv {
+    display: block;
+  }
+  .kv .muted {
+    display: block;
+    margin-bottom: 2px;
+  }
+}
+@media (max-width: 460px) {
   .sd-sync-status__header {
     align-items: flex-start;
     flex-direction: column;
   }
-  .sd-sync-status__actions {
-    justify-content: flex-start;
-  }
-  .sd-sync-status__counts {
-    grid-template-columns: repeat(2, minmax(88px, 1fr));
+  .sd-sync-status__meta {
+    grid-template-columns: 1fr;
   }
 }
 </style>
