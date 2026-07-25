@@ -69,7 +69,13 @@ def _single_header(headers, name, default=None):
 
 
 class WebSocketServer:
-    def __init__(self, config: dict, *, lesson_sd_online_index=None):
+    def __init__(
+        self,
+        config: dict,
+        *,
+        lesson_sd_online_index=None,
+        global_generation_sessions=None,
+    ):
         from core.connection_registry import ConnectionRegistry
 
         self.config = config
@@ -127,6 +133,7 @@ class WebSocketServer:
         )
         self.lesson_connections = ConnectionRegistry()
         self.lesson_sd_online_index = lesson_sd_online_index
+        self.global_generation_sessions = global_generation_sessions
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
         self.is_draining = False
@@ -170,6 +177,7 @@ class WebSocketServer:
     async def _handle_connection(self, websocket: websockets.ServerConnection):
         current_task = asyncio.current_task()
         handler = None
+        global_session_registered = False
         if current_task is not None:
             self._connection_tasks.add(current_task)
         try:
@@ -222,6 +230,16 @@ class WebSocketServer:
             if device_id:
                 handler.device_id = device_id
                 await self.lesson_connections.replace(device_id, handler)
+                sessions = self.global_generation_sessions
+                if sessions is not None:
+                    try:
+                        await sessions.register(device_id, handler)
+                        global_session_registered = True
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).warning(
+                            "Global generation session register failed errorType={}",
+                            type(exc).__name__,
+                        )
             self._active_device_connections += 1
             try:
                 await handler.handle_connection(websocket)
@@ -235,6 +253,16 @@ class WebSocketServer:
                     await self.lesson_connections.remove_if_current(
                         device_id, handler
                     )
+                    if global_session_registered:
+                        try:
+                            await self.global_generation_sessions.unregister(
+                                device_id, handler
+                            )
+                        except Exception as exc:
+                            self.logger.bind(tag=TAG).warning(
+                                "Global generation session unregister failed errorType={}",
+                                type(exc).__name__,
+                            )
                 index = getattr(self, "lesson_sd_online_index", None)
                 invalidate = getattr(index, "invalidate_connection", None)
                 if callable(invalidate):

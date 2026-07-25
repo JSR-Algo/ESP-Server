@@ -1,6 +1,6 @@
-import unittest
 import asyncio
 import json
+import unittest
 from types import SimpleNamespace
 
 import core.websocket_server as websocket_server
@@ -34,13 +34,15 @@ class _FakeWebSocket:
 
 
 class WebSocketServerManagerBootstrapTest(unittest.IsolatedAsyncioTestCase):
-    def _build_server(self, config):
+    def _build_server(self, config, *, global_generation_sessions=None):
         original_initialize_modules = websocket_server.initialize_modules
         original_setup_logging = websocket_server.setup_logging
         try:
             websocket_server.initialize_modules = lambda *args, **kwargs: {}
             websocket_server.setup_logging = lambda: _DummyLogger()
-            return websocket_server.WebSocketServer(config)
+            return websocket_server.WebSocketServer(
+                config, global_generation_sessions=global_generation_sessions
+            )
         finally:
             websocket_server.initialize_modules = original_initialize_modules
             websocket_server.setup_logging = original_setup_logging
@@ -280,3 +282,54 @@ class WebSocketServerManagerBootstrapTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(server.is_draining)
         self.assertTrue(active.done())
+
+    async def test_raw_generation_session_registers_and_unregisters_exact_handler(self):
+        events = []
+
+        class Sessions:
+            async def register(self, raw_id, connection):
+                events.append(("register", raw_id, connection))
+
+            async def unregister(self, raw_id, connection):
+                events.append(("unregister", raw_id, connection))
+
+        server = self._build_server(
+            {
+                "selected_module": {},
+                "server": {
+                    "auth_key": "test-secret",
+                    "auth": {"enabled": False},
+                },
+            },
+            global_generation_sessions=Sessions(),
+        )
+        websocket = _FakeWebSocket(
+            headers={"device-id": "AA-BB-CC-DD-EE-FF", "client-id": "client"}
+        )
+
+        import core.connection as connection_module
+
+        original = connection_module.ConnectionHandler
+
+        class Handler:
+            def __init__(self, *_args, **_kwargs):
+                self.device_id = None
+
+            async def handle_connection(self, _websocket):
+                events.append(("handle", self.device_id, self))
+
+        try:
+            connection_module.ConnectionHandler = Handler
+            await server._handle_connection(websocket)
+        finally:
+            connection_module.ConnectionHandler = original
+
+        registered = events[0][2]
+        self.assertEqual(
+            events,
+            [
+                ("register", "AA-BB-CC-DD-EE-FF", registered),
+                ("handle", "AA-BB-CC-DD-EE-FF", registered),
+                ("unregister", "AA-BB-CC-DD-EE-FF", registered),
+            ],
+        )
