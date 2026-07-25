@@ -19,6 +19,11 @@ except ModuleNotFoundError:
 from config.config_loader import get_project_dir, load_config_async
 from config.logger import setup_logging
 from core.http_server import SimpleHttpServer
+from core.lesson.global_generation_poller import GlobalGenerationPoller
+from core.lesson.global_generation_sessions import GlobalGenerationSessions
+from core.lesson.global_generation_status import GlobalGenerationStatus
+from core.lesson.global_generation_store import GlobalGenerationStore
+from core.lesson.global_generation_sync import GlobalGenerationSync
 from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex
 from core.utils.gc_manager import get_gc_manager
 from core.utils.util import check_ffmpeg_installed, get_local_ip, validate_mcp_endpoint
@@ -95,16 +100,85 @@ def _lesson_sd_api_base(config) -> str:
     return str(lesson_cfg.get("api_base") or server_cfg.get("api_url") or "").rstrip("/")
 
 
-def _build_servers(config):
+def _generation_enabled(config) -> bool:
+    env_value = os.environ.get("LESSON_GENERATION_CMS_URL")
+    if isinstance(env_value, str) and env_value.strip():
+        return True
+    lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+    return bool(
+        isinstance(lesson_cfg, dict)
+        and isinstance(lesson_cfg.get("generation_cms_url"), str)
+        and lesson_cfg["generation_cms_url"].strip()
+    )
+
+
+def _build_servers(
+    config,
+    *,
+    websocket_server_factory=None,
+    http_server_factory=None,
+    redis_factory=None,
+    store_factory=None,
+    sessions_factory=None,
+    sync_factory=None,
+    poller_factory=None,
+    status_factory=None,
+):
+    websocket_server_factory = websocket_server_factory or WebSocketServer
+    http_server_factory = http_server_factory or SimpleHttpServer
     lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
-    ws_server = WebSocketServer(
+    if not _generation_enabled(config):
+        ws_server = websocket_server_factory(
+            config,
+            lesson_sd_online_index=lesson_sd_online_index,
+        )
+        ota_server = http_server_factory(
+            config,
+            ws_server.lesson_connections,
+            lesson_sd_online_index=lesson_sd_online_index,
+        )
+        return ws_server, ota_server
+
+    redis_url = os.environ.get("REDIS_URL")
+    if not isinstance(redis_url, str) or not redis_url.strip():
+        raise RuntimeError("REDIS_URL is required for global lesson generation")
+    if redis_factory is None:
+        from redis import asyncio as redis_asyncio
+
+        redis_factory = redis_asyncio.from_url
+    store_factory = store_factory or GlobalGenerationStore
+    sessions_factory = sessions_factory or GlobalGenerationSessions
+    sync_factory = sync_factory or GlobalGenerationSync
+    poller_factory = poller_factory or GlobalGenerationPoller
+    status_factory = status_factory or GlobalGenerationStatus
+
+    redis = redis_factory(redis_url.strip(), decode_responses=True)
+    store = store_factory(redis)
+    sessions = sessions_factory(store.redis)
+
+    async def fanout_adapter(generation, index_checksum, packs):
+        return await sessions.fanout(
+            generation=generation,
+            index_checksum=index_checksum,
+            packs=packs,
+        )
+
+    generation_sync = sync_factory(config, store, fanout_adapter)
+    poller = poller_factory(config, store, generation_sync.apply)
+    status = status_factory(store, sessions)
+    ws_server = websocket_server_factory(
         config,
         lesson_sd_online_index=lesson_sd_online_index,
+        global_generation_sessions=sessions,
     )
-    ota_server = SimpleHttpServer(
+    ota_server = http_server_factory(
         config,
         ws_server.lesson_connections,
         lesson_sd_online_index=lesson_sd_online_index,
+        generation_poller=poller,
+        generation_status=status,
+        generation_redis=redis,
+        owns_generation_redis=True,
     )
     return ws_server, ota_server
 
@@ -225,6 +299,13 @@ async def main():
             )
         except Exception as exc:
             logger.bind(tag=TAG).warning("WebSocket drain failed: {}", exc)
+
+        # Global sessions must unregister while Redis is alive. Only after the
+        # websocket drain may the HTTP lifecycle stop the poller and close Redis.
+        try:
+            await ota_server.stop_background_services()
+        except Exception:
+            logger.bind(tag=TAG).warning("HTTP background service shutdown failed")
 
         # Stop global GC manager.
         await gc_manager.stop()

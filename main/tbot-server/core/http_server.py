@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import json
+import os
 
 from aiohttp import web
 
@@ -23,8 +25,28 @@ from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryW
 TAG = __name__
 
 
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
+async def _cleanup_runner(runner) -> None:
+    cleanup = getattr(runner, "cleanup", None)
+    if callable(cleanup):
+        await cleanup()
+
+
 class SimpleHttpServer:
-    def __init__(self, config: dict, lesson_connections=None, *, lesson_sd_online_index=None):
+    def __init__(
+        self,
+        config: dict,
+        lesson_connections=None,
+        *,
+        lesson_sd_online_index=None,
+        generation_poller=None,
+        generation_status=None,
+        generation_redis=None,
+        owns_generation_redis=False,
+    ):
         self.config = config
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
@@ -74,6 +96,15 @@ class SimpleHttpServer:
             config,
             self.lesson_connections,
         )
+        self.generation_poller = generation_poller
+        self.generation_status = generation_status
+        self.generation_redis = generation_redis
+        self.owns_generation_redis = bool(owns_generation_redis)
+        self._background_started = False
+        self._background_stopped = False
+        self._poller_started = False
+        self._legacy_worker_started = False
+        self._generation_redis_closed = False
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """GetwebsocketAddress
@@ -93,6 +124,7 @@ class SimpleHttpServer:
         return f"ws://{local_ip}:{port}/tbot/v1/"
 
     async def start(self):
+        runner = None
         try:
             server_config = self.config["server"]
             host = server_config.get("ip", "0.0.0.0")
@@ -188,26 +220,108 @@ class SimpleHttpServer:
                         ),
                     ]
                 )
+                if self.generation_status is not None:
+                    app.add_routes(
+                        [
+                            web.get(
+                                "/public/lesson-assets/generation",
+                                self.handle_generation_status,
+                            )
+                        ]
+                    )
 
                 # Run Service
                 runner = web.AppRunner(app)
                 await runner.setup()
                 site = web.TCPSite(runner, host, port)
                 await site.start()
-                self.lesson_sd_retry_worker.start()
+                self.start_background_services()
 
                 # Keep service running
                 try:
                     while True:
                         await asyncio.sleep(3600)  # Every 1 Check once per hour
                 finally:
-                    await self.lesson_sd_retry_worker.stop()
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"HTTP server start failed: {e}")
-            import traceback
-
-            self.logger.bind(tag=TAG).error(f"Error stack: {traceback.format_exc()}")
+                    await self.stop_background_services()
+                    await _cleanup_runner(runner)
+                    runner = None
+        except asyncio.CancelledError:
+            if runner is not None:
+                await self.stop_background_services()
+                await _cleanup_runner(runner)
             raise
+        except Exception:
+            if runner is not None:
+                await self.stop_background_services()
+                await _cleanup_runner(runner)
+            self.logger.bind(tag=TAG).error("HTTP server start failed")
+            raise
+
+    def start_background_services(self) -> None:
+        if self._background_started:
+            return
+        self._background_started = True
+        if self.generation_poller is not None:
+            self._poller_started = True
+            self.generation_poller.start()
+        if _env_enabled("TBOT_ENABLE_BACKGROUND_WORKERS") and _env_enabled(
+            "LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED"
+        ):
+            self.lesson_sd_retry_worker.start()
+            self._legacy_worker_started = True
+
+    async def stop_background_services(self) -> None:
+        if self._background_stopped:
+            return
+        self._background_stopped = True
+        failed = False
+        if self._poller_started:
+            try:
+                await self.generation_poller.stop()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failed = True
+        if self._legacy_worker_started:
+            try:
+                await self.lesson_sd_retry_worker.stop()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failed = True
+        if self.owns_generation_redis and not self._generation_redis_closed:
+            self._generation_redis_closed = True
+            close = getattr(self.generation_redis, "aclose", None) or getattr(
+                self.generation_redis, "close", None
+            )
+            if callable(close):
+                try:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+        if failed:
+            raise RuntimeError("generation_background_stop_failed") from None
+
+    async def handle_generation_status(self, _request):
+        try:
+            payload = await self.generation_status.snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return web.json_response(
+                {"error": "generation_status_unavailable"},
+                status=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(
+            payload,
+            status=200,
+            headers={"Cache-Control": "public, max-age=5"},
+        )
 
     def _preload_voice_alarm_snapshots(self):
         devices = []
