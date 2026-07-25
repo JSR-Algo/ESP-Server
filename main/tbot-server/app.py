@@ -4,11 +4,13 @@ if __name__ == "__main__":
     require_supported_runtime()
 
 import asyncio
+import inspect
 import os
 import signal
 import sys
 import uuid
 from contextlib import suppress
+from typing import cast
 
 try:
     from aioconsole import ainput
@@ -127,17 +129,46 @@ def _build_servers(
     websocket_server_factory = websocket_server_factory or WebSocketServer
     http_server_factory = http_server_factory or SimpleHttpServer
     lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+    if _generation_enabled(config):
+        raise RuntimeError("enabled generation servers require _build_servers_async")
+    ws_server = websocket_server_factory(
+        config,
+        lesson_sd_online_index=lesson_sd_online_index,
+    )
+    ota_server = http_server_factory(
+        config,
+        ws_server.lesson_connections,
+        lesson_sd_online_index=lesson_sd_online_index,
+    )
+    return ws_server, ota_server
+
+
+async def _close_async_resource(resource) -> None:
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
+async def _build_servers_async(
+    config,
+    *,
+    websocket_server_factory=None,
+    http_server_factory=None,
+    redis_factory=None,
+    store_factory=None,
+    sessions_factory=None,
+    sync_factory=None,
+    poller_factory=None,
+    status_factory=None,
+):
     if not _generation_enabled(config):
-        ws_server = websocket_server_factory(
+        return _build_servers(
             config,
-            lesson_sd_online_index=lesson_sd_online_index,
+            websocket_server_factory=websocket_server_factory,
+            http_server_factory=http_server_factory,
         )
-        ota_server = http_server_factory(
-            config,
-            ws_server.lesson_connections,
-            lesson_sd_online_index=lesson_sd_online_index,
-        )
-        return ws_server, ota_server
 
     redis_url = os.environ.get("REDIS_URL")
     if not isinstance(redis_url, str) or not redis_url.strip():
@@ -152,35 +183,49 @@ def _build_servers(
     poller_factory = poller_factory or GlobalGenerationPoller
     status_factory = status_factory or GlobalGenerationStatus
 
-    redis = redis_factory(redis_url.strip(), decode_responses=True)
-    store = store_factory(redis)
-    sessions = sessions_factory(store.redis)
+    redis = None
+    poller = None
+    try:
+        redis = redis_factory(redis_url.strip(), decode_responses=True)
+        store = store_factory(redis)
+        sessions = sessions_factory(store.redis)
 
-    async def fanout_adapter(generation, index_checksum, packs):
-        return await sessions.fanout(
-            generation=generation,
-            index_checksum=index_checksum,
-            packs=packs,
+        async def fanout_adapter(generation, index_checksum, packs):
+            return await sessions.fanout(
+                generation=generation,
+                index_checksum=index_checksum,
+                packs=packs,
+            )
+
+        generation_sync = sync_factory(config, store, fanout_adapter)
+        poller = poller_factory(config, store, generation_sync.apply)
+        status = status_factory(store, sessions)
+        lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+        websocket_server_factory = websocket_server_factory or WebSocketServer
+        http_server_factory = http_server_factory or SimpleHttpServer
+        ws_server = websocket_server_factory(
+            config,
+            lesson_sd_online_index=lesson_sd_online_index,
+            global_generation_sessions=sessions,
         )
-
-    generation_sync = sync_factory(config, store, fanout_adapter)
-    poller = poller_factory(config, store, generation_sync.apply)
-    status = status_factory(store, sessions)
-    ws_server = websocket_server_factory(
-        config,
-        lesson_sd_online_index=lesson_sd_online_index,
-        global_generation_sessions=sessions,
-    )
-    ota_server = http_server_factory(
-        config,
-        ws_server.lesson_connections,
-        lesson_sd_online_index=lesson_sd_online_index,
-        generation_poller=poller,
-        generation_status=status,
-        generation_redis=redis,
-        owns_generation_redis=True,
-    )
-    return ws_server, ota_server
+        ota_server = http_server_factory(
+            config,
+            ws_server.lesson_connections,
+            lesson_sd_online_index=lesson_sd_online_index,
+            generation_poller=poller,
+            generation_status=status,
+            generation_redis=redis,
+            owns_generation_redis=True,
+        )
+        return ws_server, ota_server
+    except BaseException:
+        if poller is not None:
+            with suppress(BaseException):
+                await poller.stop()
+        if redis is not None:
+            with suppress(BaseException):
+                await _close_async_resource(redis)
+        raise
 
 
 async def wait_for_exit() -> None:
@@ -227,7 +272,7 @@ async def main():
     await gc_manager.start()
 
     # Start websocket and HTTP servers with one shared lesson SD online index.
-    ws_server, ota_server = _build_servers(config)
+    ws_server, ota_server = await _build_servers_async(config)
     ws_task = asyncio.create_task(ws_server.start())
     ota_task = asyncio.create_task(ota_server.start())
 
@@ -251,10 +296,10 @@ async def main():
             logger.bind(tag=TAG).info("mcp endpoint is\t{}", mcp_endpoint)
             # Convert MCP endpoint into call endpoint.
             mcp_endpoint = mcp_endpoint.replace("/mcp/", "/call/")
-            config["mcp_endpoint"] = mcp_endpoint
+            cast(dict, config)["mcp_endpoint"] = mcp_endpoint
         else:
             logger.bind(tag=TAG).error("mcp endpoint does not meet spec")
-            config["mcp_endpoint"] = "your MCP websocket endpoint"
+            cast(dict, config)["mcp_endpoint"] = "your MCP websocket endpoint"
 
     # Read websocket config with safe default.
     websocket_port = 8000

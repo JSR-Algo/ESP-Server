@@ -411,14 +411,18 @@ async def test_stop_closes_only_owned_generation_redis_after_services():
 @pytest.mark.asyncio
 async def test_stop_still_closes_owned_redis_when_poller_stop_fails():
     calls = []
+    attempts = 0
 
     class Poller:
         def start(self):
             calls.append("start")
 
         async def stop(self):
+            nonlocal attempts
             calls.append("stop")
-            raise RuntimeError("redis://token@secret")
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("redis://token@secret")
 
     class Redis:
         async def aclose(self):
@@ -434,6 +438,146 @@ async def test_stop_still_closes_owned_redis_when_poller_stop_fails():
 
     assert raised.value.__cause__ is None
     assert calls == ["start", "stop", "close"]
+
+    await server.stop_background_services()
+
+    assert calls == ["start", "stop", "close", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_stop_retries_only_redis_after_transient_close_failure():
+    calls = []
+    close_attempts = 0
+
+    class Poller:
+        def start(self):
+            calls.append("poller.start")
+
+        async def stop(self):
+            calls.append("poller.stop")
+
+    class Redis:
+        async def aclose(self):
+            nonlocal close_attempts
+            close_attempts += 1
+            calls.append("redis.close")
+            if close_attempts == 1:
+                raise RuntimeError("transient secret")
+
+    server = SimpleHttpServer(
+        _config(), generation_poller=Poller(), generation_redis=Redis(), owns_generation_redis=True
+    )
+    server.start_background_services()
+
+    with pytest.raises(RuntimeError, match="generation_background_stop_failed"):
+        await server.stop_background_services()
+    await server.stop_background_services()
+
+    assert calls == ["poller.start", "poller.stop", "redis.close", "redis.close"]
+
+
+@pytest.mark.asyncio
+async def test_stop_retries_cancelled_redis_cleanup_without_repeating_poller():
+    calls = []
+    close_attempts = 0
+
+    class Poller:
+        def start(self):
+            pass
+
+        async def stop(self):
+            calls.append("poller.stop")
+
+    class Redis:
+        async def aclose(self):
+            nonlocal close_attempts
+            close_attempts += 1
+            calls.append("redis.close")
+            if close_attempts == 1:
+                raise asyncio.CancelledError()
+
+    server = SimpleHttpServer(
+        _config(), generation_poller=Poller(), generation_redis=Redis(), owns_generation_redis=True
+    )
+    server.start_background_services()
+
+    with pytest.raises(asyncio.CancelledError):
+        await server.stop_background_services()
+    await server.stop_background_services()
+
+    assert calls == ["poller.stop", "redis.close", "redis.close"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stops_clean_each_resource_once():
+    calls = []
+    release = asyncio.Event()
+
+    class Poller:
+        def start(self):
+            pass
+
+        async def stop(self):
+            calls.append("poller.stop")
+            await release.wait()
+
+    class Redis:
+        async def aclose(self):
+            calls.append("redis.close")
+
+    server = SimpleHttpServer(
+        _config(), generation_poller=Poller(), generation_redis=Redis(), owns_generation_redis=True
+    )
+    server.start_background_services()
+    first = asyncio.create_task(server.stop_background_services())
+    await asyncio.sleep(0)
+    second = asyncio.create_task(server.stop_background_services())
+    release.set()
+
+    await asyncio.gather(first, second)
+
+    assert calls == ["poller.stop", "redis.close"]
+
+
+@pytest.mark.asyncio
+async def test_stop_retries_legacy_worker_without_repeating_finished_resources(monkeypatch):
+    calls = []
+    attempts = 0
+
+    class Poller:
+        def start(self):
+            pass
+
+        async def stop(self):
+            calls.append("poller.stop")
+
+    class Legacy:
+        def start(self):
+            calls.append("legacy.start")
+
+        async def stop(self):
+            nonlocal attempts
+            attempts += 1
+            calls.append("legacy.stop")
+            if attempts == 1:
+                raise RuntimeError("transient secret")
+
+    monkeypatch.setenv("TBOT_ENABLE_BACKGROUND_WORKERS", "true")
+    monkeypatch.setenv("LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED", "true")
+    server = SimpleHttpServer(_config(), generation_poller=Poller())
+    server.lesson_sd_retry_worker = Legacy()
+    server.start_background_services()
+
+    with pytest.raises(RuntimeError, match="generation_background_stop_failed"):
+        await server.stop_background_services()
+    await server.stop_background_services()
+
+    assert calls == [
+        "legacy.start",
+        "poller.stop",
+        "legacy.stop",
+        "legacy.stop",
+    ]
 
 
 @pytest.mark.asyncio
@@ -472,7 +616,8 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
     assert "location = /public/lesson-assets/generation" in nginx
     assert "proxy_pass http://127.0.0.1:8003" in nginx
     assert "location = /v1/public/lesson-assets/latest" in nginx
-    assert "proxy_pass http://tbot-cms-api:3000" in nginx
+    assert "proxy_pass http://127.0.0.1:3000" in nginx
+    assert "127.0.0.1:3000:3000" in nginx
     assert nginx.count('if ($request_method !~ ^(GET|HEAD)$) { return 405; }') >= 2
     for header in ("Authorization", "Cookie", "X-Admin-Key", "Cf-Access-Jwt-Assertion", "Cf-Access-Client-Id", "Cf-Access-Client-Secret"):
         assert nginx.count(f'proxy_set_header {header} "";') >= 2
@@ -600,7 +745,7 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
     monkeypatch.setenv("REDIS_URL", "redis://redis.example/0")
     monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
 
-    app._build_servers(
+    await app._build_servers_async(
         config,
         websocket_server_factory=WS,
         http_server_factory=HTTP,
@@ -621,7 +766,8 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
     )
 
 
-def test_build_servers_enabled_rejects_missing_redis(monkeypatch):
+@pytest.mark.asyncio
+async def test_build_servers_enabled_rejects_missing_redis(monkeypatch):
     import app
 
     monkeypatch.setenv(
@@ -631,12 +777,183 @@ def test_build_servers_enabled_rejects_missing_redis(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="REDIS_URL"):
-        app._build_servers(
+        await app._build_servers_async(
             {
                 "server": {},
                 "lesson": {"asset_allowed_origins": "https://cdn.example"},
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_enabled_build_closes_redis_when_poller_validation_fails(monkeypatch):
+    import app
+
+    calls = []
+
+    class Redis:
+        async def aclose(self):
+            calls.append("redis.close")
+
+    monkeypatch.setenv("REDIS_URL", "redis://redis.example/0")
+
+    with pytest.raises(ValueError, match="LESSON_ASSET_ALLOWED_ORIGINS"):
+        await app._build_servers_async(
+            {
+                "server": {},
+                "lesson": {
+                    "generation_cms_url": "https://cms.example/v1/public/lesson-assets/latest"
+                },
+            },
+            redis_factory=lambda *_args, **_kwargs: Redis(),
+        )
+
+    assert calls == ["redis.close"]
+
+
+@pytest.mark.asyncio
+async def test_enabled_build_cancellation_cleans_constructed_poller_and_redis(monkeypatch):
+    import app
+
+    calls = []
+
+    class Redis:
+        async def aclose(self):
+            calls.append("redis.close")
+
+    class Store:
+        def __init__(self, redis):
+            self.redis = redis
+
+    class Sessions:
+        def __init__(self, _redis):
+            pass
+
+        async def fanout(self, **_kwargs):
+            return {}
+
+    class Sync:
+        def __init__(self, _config, _store, _fanout):
+            pass
+
+        async def apply(self, _payload):
+            return {}
+
+    class Poller:
+        def __init__(self, _config, _store, _callback):
+            pass
+
+        async def stop(self):
+            calls.append("poller.stop")
+
+    class Status:
+        def __init__(self, _store, _sessions):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setenv("REDIS_URL", "redis://redis.example/0")
+
+    with pytest.raises(asyncio.CancelledError):
+        await app._build_servers_async(
+            {
+                "server": {},
+                "lesson": {
+                    "generation_cms_url": "https://cms.example/v1/public/lesson-assets/latest",
+                    "asset_allowed_origins": "https://cdn.example",
+                },
+            },
+            redis_factory=lambda *_args, **_kwargs: Redis(),
+            store_factory=Store,
+            sessions_factory=Sessions,
+            sync_factory=Sync,
+            poller_factory=Poller,
+            status_factory=Status,
+        )
+
+    assert calls == ["poller.stop", "redis.close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["store", "sessions", "sync", "poller", "status", "ws", "http"])
+async def test_enabled_build_cleans_partial_resources_once(monkeypatch, failure_stage):
+    import app
+
+    calls = []
+
+    class Redis:
+        async def aclose(self):
+            calls.append("redis.close")
+
+    redis = Redis()
+
+    class Store:
+        def __init__(self, dependency):
+            if failure_stage == "store":
+                raise RuntimeError("store failed")
+            self.redis = dependency
+
+    class Sessions:
+        def __init__(self, _dependency):
+            if failure_stage == "sessions":
+                raise RuntimeError("sessions failed")
+
+        async def fanout(self, **_kwargs):
+            return {}
+
+    class Sync:
+        def __init__(self, _config, _store, _fanout):
+            if failure_stage == "sync":
+                raise RuntimeError("sync failed")
+
+        async def apply(self, _payload):
+            return {}
+
+    class Poller:
+        def __init__(self, _config, _store, _callback):
+            if failure_stage == "poller":
+                raise RuntimeError("poller failed")
+
+        async def stop(self):
+            calls.append("poller.stop")
+
+    class Status:
+        def __init__(self, _store, _sessions):
+            if failure_stage == "status":
+                raise RuntimeError("status failed")
+
+    class WS:
+        def __init__(self, *_args, **_kwargs):
+            if failure_stage == "ws":
+                raise RuntimeError("ws failed")
+            self.lesson_connections = {}
+
+    class HTTP:
+        def __init__(self, *_args, **_kwargs):
+            if failure_stage == "http":
+                raise RuntimeError("http failed")
+
+    monkeypatch.setenv("REDIS_URL", "redis://redis.example/0")
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        await app._build_servers_async(
+            {
+                "server": {},
+                "lesson": {
+                    "generation_cms_url": "https://cms.example/v1/public/lesson-assets/latest",
+                    "asset_allowed_origins": "https://cdn.example",
+                },
+            },
+            websocket_server_factory=WS,
+            http_server_factory=HTTP,
+            redis_factory=lambda *_args, **_kwargs: redis,
+            store_factory=Store,
+            sessions_factory=Sessions,
+            sync_factory=Sync,
+            poller_factory=Poller,
+            status_factory=Status,
+        )
+
+    assert calls.count("redis.close") == 1
+    assert calls.count("poller.stop") == (1 if failure_stage in {"status", "ws", "http"} else 0)
 
 @pytest.mark.asyncio
 async def test_lesson_sd_pending_status_reports_resolved_backend_ids_only(monkeypatch):

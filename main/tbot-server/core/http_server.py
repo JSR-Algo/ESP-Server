@@ -117,8 +117,11 @@ class SimpleHttpServer:
         self.owns_generation_redis = bool(owns_generation_redis)
         self._background_started = False
         self._background_stopped = False
+        self._background_stop_lock = asyncio.Lock()
         self._poller_started = False
+        self._poller_stopped = False
         self._legacy_worker_started = False
+        self._legacy_worker_stopped = False
         self._generation_redis_closed = False
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
@@ -287,42 +290,50 @@ class SimpleHttpServer:
             self._legacy_worker_started = True
 
     async def stop_background_services(self) -> None:
-        if self._background_stopped:
-            return
-        self._background_stopped = True
-        failed = False
-        if self._poller_started:
-            try:
-                poller = self.generation_poller
-                if poller is not None:
-                    await poller.stop()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failed = True
-        if self._legacy_worker_started:
-            try:
-                await self.lesson_sd_retry_worker.stop()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failed = True
-        if self.owns_generation_redis and not self._generation_redis_closed:
-            self._generation_redis_closed = True
-            close = getattr(self.generation_redis, "aclose", None) or getattr(
-                self.generation_redis, "close", None
-            )
-            if callable(close):
+        async with self._background_stop_lock:
+            if self._background_stopped:
+                return
+            failed = False
+            poller = self.generation_poller
+            if poller is not None and not self._poller_stopped:
                 try:
-                    result = close()
-                    if inspect.isawaitable(result):
-                        await result
+                    await poller.stop()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     failed = True
-        if failed:
-            raise RuntimeError("generation_background_stop_failed") from None
+                else:
+                    self._poller_stopped = True
+            if self._legacy_worker_started and not self._legacy_worker_stopped:
+                try:
+                    await self.lesson_sd_retry_worker.stop()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+                else:
+                    self._legacy_worker_stopped = True
+            if self.owns_generation_redis and not self._generation_redis_closed:
+                close = getattr(self.generation_redis, "aclose", None) or getattr(
+                    self.generation_redis, "close", None
+                )
+                try:
+                    if callable(close):
+                        result = close()
+                        if inspect.isawaitable(result):
+                            await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+                else:
+                    self._generation_redis_closed = True
+            poller_done = poller is None or self._poller_stopped
+            legacy_done = not self._legacy_worker_started or self._legacy_worker_stopped
+            redis_done = not self.owns_generation_redis or self._generation_redis_closed
+            self._background_stopped = poller_done and legacy_done and redis_done
+            if failed:
+                raise RuntimeError("generation_background_stop_failed") from None
 
     async def handle_generation_status(self, _request):
         try:
