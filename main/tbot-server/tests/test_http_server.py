@@ -625,10 +625,17 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
     assert "proxy_hide_header Cache-Control" not in nginx
 
 
-def test_nginx_public_generation_reads_do_not_share_cloudflared_origin_rate_limit():
+def test_nginx_public_generation_reads_use_bounded_uri_egress_and_cache_only_latest():
     nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
 
     assert "zone=lesson_public_read" not in nginx
+    assert (
+        'limit_req_zone "$uri" zone=lesson_public_egress:1m rate=100r/s;' in nginx
+    )
+    assert "$host|$uri" not in nginx
+    assert nginx.count(
+        "limit_req zone=lesson_public_egress burst=180 nodelay;"
+    ) == 4
     locations = []
     for path in (
         "/public/lesson-assets/generation",
@@ -653,7 +660,8 @@ def test_nginx_public_generation_reads_do_not_share_cloudflared_origin_rate_limi
 
     assert len(locations) == 4
     for location in locations:
-        assert "limit_req " not in location
+        assert "limit_req zone=lesson_public_egress burst=180 nodelay;" in location
+        assert "limit_req_status 429;" in location
         assert 'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' in location
         for header in (
             "Authorization",
@@ -666,6 +674,25 @@ def test_nginx_public_generation_reads_do_not_share_cloudflared_origin_rate_limi
             "Cf-Access-Client-Secret",
         ):
             assert f'proxy_set_header {header} "";' in location
+
+    latest_locations = [
+        location
+        for location in locations
+        if "location = /v1/public/lesson-assets/latest" in location
+    ]
+    status_locations = [
+        location
+        for location in locations
+        if "location = /public/lesson-assets/generation" in location
+    ]
+    assert len(latest_locations) == 2
+    assert len(status_locations) == 2
+    for location in latest_locations:
+        assert "proxy_cache lesson_generation;" in location
+        assert 'proxy_cache_key "lesson-assets-latest";' in location
+    for location in status_locations:
+        assert "proxy_cache " not in location
+        assert "proxy_cache_key " not in location
 
 
 def _nginx_server_block(nginx: str, server_name: str) -> str:

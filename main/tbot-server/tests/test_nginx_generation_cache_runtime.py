@@ -93,6 +93,7 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
     rendered_config = tmp_path / "tjbot.vn.conf"
     rendered_config.write_text(
         NGINX_CONFIG.read_text(encoding="utf-8")
+        .replace("listen 80;", "listen 80 default_server;", 1)
         .replace("127.0.0.1:3300", f"host.docker.internal:{upstream_port}")
         .replace("127.0.0.1:8003", f"host.docker.internal:{upstream_port}"),
         encoding="utf-8",
@@ -142,8 +143,7 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         assert cold_headers["etag"] == ETAG
         assert cold_body == b""
         requests = [
-            ("admin.tjbot.vn" if index % 2 else "esp.tjbot.vn", f"?variant={index}")
-            for index in range(96)
+            (f"rotated-{index}.invalid", f"?variant={index}") for index in range(96)
         ]
         with ThreadPoolExecutor(max_workers=96) as executor:
             responses = list(
@@ -177,6 +177,28 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         assert conditional_status == 304
         assert conditional_headers["etag"] == ETAG
         assert conditional_body == b""
+        assert upstream.request_count == 1
+
+        # Let the valid burst drain before proving Host rotation cannot evade the cap.
+        time.sleep(2)
+        abusive_requests = [
+            (f"attacker-{index}.invalid", f"?abuse={index}") for index in range(500)
+        ]
+        with ThreadPoolExecutor(max_workers=160) as executor:
+            abusive_responses = list(
+                executor.map(
+                    lambda item: _request(
+                        nginx_port,
+                        f"/v1/public/lesson-assets/latest{item[1]}",
+                        host=item[0],
+                    ),
+                    abusive_requests,
+                )
+            )
+        abusive_statuses = [status for status, _headers, _body in abusive_responses]
+        assert set(abusive_statuses) <= {200, 429}
+        assert 200 in abusive_statuses
+        assert 429 in abusive_statuses
         assert upstream.request_count == 1
 
         assert _request(nginx_port, "/v1/public/lesson-assets/latest", method="POST")[0] == 405

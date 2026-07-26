@@ -252,9 +252,10 @@ for (const requirement of ['Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Asser
 assert.doesNotMatch(nginx, /zone=lesson_public_read\b/, 'obsolete shared cloudflared origin bucket must be removed');
 assert.match(
   nginx,
-  /limit_req_zone\s+"\$host\|\$uri"\s+zone=lesson_public_egress:1m\s+rate=100r\/s;/,
-  'public egress must use a high bounded host+URI bucket instead of client IP behind cloudflared',
+  /limit_req_zone\s+"\$uri"\s+zone=lesson_public_egress:1m\s+rate=100r\/s;/,
+  'public egress must use a bounded canonical URI bucket shared across hostnames',
 );
+assert.doesNotMatch(nginx, /\$host\|\$uri/, 'attacker-controlled Host must not create new egress buckets');
 assert.match(
   nginx,
   /proxy_cache_path\s+\/var\/cache\/nginx\/lesson-generation[^;]*keys_zone=lesson_generation:1m[^;]*;/,
@@ -270,7 +271,9 @@ for (const location of publicGenerationLocations) {
   assert.match(location, /limit_req_status\s+429;/, 'public generation egress overflow must return 429');
 }
 const latestLocations = extractNginxBlocks(nginx, 'location = /v1/public/lesson-assets/latest');
+const statusLocations = extractNginxBlocks(nginx, 'location = /public/lesson-assets/generation');
 assert.equal(latestLocations.length, 2, 'CMS latest route must exist on both public hostnames');
+assert.equal(statusLocations.length, 2, 'ESP generation status route must exist on both public hostnames');
 for (const location of latestLocations) {
   for (const requirement of [
     'proxy_cache lesson_generation',
@@ -282,6 +285,9 @@ for (const location of latestLocations) {
     'proxy_set_header If-None-Match ""',
     'proxy_set_header Accept-Encoding "identity"',
   ]) assert.ok(location.includes(requirement), `CMS latest proxy missing ${requirement}`);
+}
+for (const location of statusLocations) {
+  assert.doesNotMatch(location, /proxy_cache(?:_key)?\s/, 'ESP status must remain uncached');
 }
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
