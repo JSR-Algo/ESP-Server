@@ -1,0 +1,35 @@
+# Render the placeholders on the VPS. Never commit the rendered file.
+tunnel: <TUNNEL_UUID>
+credentials-file: <CREDENTIALS_FILE>
+
+# cloudflared uses the first matching rule. Public generation reads must reach
+# host Nginx so its method limits, header stripping, and CMS/ESP split apply.
+ingress:
+  - hostname: admin.tjbot.vn
+    path: "^/v1/public/lesson-assets/latest$"
+    service: http://127.0.0.1
+  - hostname: admin.tjbot.vn
+    path: "^/public/lesson-assets/generation$"
+    service: http://127.0.0.1
+  - hostname: admin.tjbot.vn
+    service: http://127.0.0.1:8002
+
+  - hostname: esp.tjbot.vn
+    path: "^/v1/public/lesson-assets/latest$"
+    service: http://127.0.0.1
+  - hostname: esp.tjbot.vn
+    path: "^/tbot/ota/.*"
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: "^/internal/.*"
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: "^/mcp/vision/.*"
+    service: http://127.0.0.1:8003
+  - hostname: esp.tjbot.vn
+    path: "^/tbot/v1/.*"
+    service: http://127.0.0.1:8000
+  - hostname: esp.tjbot.vn
+    service: http://127.0.0.1:8003
+
+  - service: http_status:404
