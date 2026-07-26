@@ -3270,15 +3270,21 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
                 conn.mcp_client = _ReadyLessonAssetMcpClient()
                 conn.logger = _CapturingLogger()
+                calls = []
 
                 async def invalid_sync(*_args, _result=result, **_kwargs):
+                    calls.append(_result)
                     return _result
 
-                rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+                rt = self._runtime(
+                    conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True)
+                )
                 with patch("core.lesson.runtime.call_mcp_tool", new=invalid_sync):
                     self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
 
+                self.assertEqual(calls, [result])
                 messages = "\n".join(message for _level, message in conn.logger.events)
+                self.assertIn("robot SD sync returned invalid attestation", messages)
                 self.assertNotIn("lesson_preload_ready", messages)
                 self.assertNotIn("checksum_verified", messages)
                 self.assertNotIn("asset_cache_hit", messages)
