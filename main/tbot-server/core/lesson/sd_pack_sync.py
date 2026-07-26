@@ -28,10 +28,12 @@ _ERROR_CODE_MAX_LEN = 64
 
 def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
     lesson_cfg = _lesson_config(config)
-    cache_root = Path(lesson_cfg.get("asset_cache_root") or DEFAULT_CACHE_ROOT)
+    pack_mount_root = lesson_cfg.get("asset_pack_mount_root")
+    cache_root = Path(
+        lesson_cfg.get("asset_cache_root") or pack_mount_root or DEFAULT_CACHE_ROOT
+    )
     public_base = _lesson_asset_public_base_url(config)
     local_root = str(lesson_cfg.get("asset_pack_local_root") or DEFAULT_LOCAL_ROOT).rstrip("/")
-    pack_mount_root = lesson_cfg.get("asset_pack_mount_root")
     shared_store = None
     if pack_mount_root:
         mounted = Path(str(pack_mount_root)).resolve()
