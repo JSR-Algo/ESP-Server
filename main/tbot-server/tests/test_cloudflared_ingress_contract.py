@@ -6,6 +6,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_TEMPLATE = REPO_ROOT / "deploy/cloudflared/config.yml.example"
+NGINX_CONFIG = REPO_ROOT / "deploy/nginx/tjbot.vn.conf"
 CLOUDFLARED = shutil.which("cloudflared")
 
 
@@ -129,3 +130,33 @@ def test_template_contains_placeholders_instead_of_tunnel_credentials():
     assert "<TUNNEL_UUID>" in raw
     assert "<CREDENTIALS_FILE>" in raw
     assert "credentials-file: /root/.cloudflared/" not in raw
+
+
+def _exact_location_blocks(config: str, path: str) -> list[str]:
+    marker = f"location = {path} {{"
+    blocks: list[str] = []
+    cursor = 0
+    while (start := config.find(marker, cursor)) >= 0:
+        depth = 0
+        for index in range(start, len(config)):
+            if config[index] == "{":
+                depth += 1
+            elif config[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(config[start : index + 1])
+                    cursor = index + 1
+                    break
+        else:
+            raise AssertionError(f"unterminated location block for {path}")
+    return blocks
+
+
+def test_latest_index_routes_disable_compression_to_preserve_the_strong_etag():
+    blocks = _exact_location_blocks(
+        NGINX_CONFIG.read_text(encoding="utf-8"),
+        "/v1/public/lesson-assets/latest",
+    )
+
+    assert len(blocks) == 2
+    assert all("gzip off;" in block for block in blocks)
