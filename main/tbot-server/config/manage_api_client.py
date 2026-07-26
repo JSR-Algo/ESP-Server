@@ -1,6 +1,7 @@
-import os
+# ruff: noqa: B904, N818, SIM105, SIM108, UP006, UP035, UP045
 import base64
-from typing import Optional, Dict
+import os
+from typing import Dict, Optional
 
 import httpx
 
@@ -248,7 +249,7 @@ async def report(
     try:
         return await ManageApiClient._instance._execute_async_request(
             "POST",
-            f"/agent/chat-history/report",
+            "/agent/chat-history/report",
             json={
                 "macAddress": mac_address,
                 "sessionId": session_id,
@@ -608,3 +609,57 @@ async def post_preload_status(
     if isinstance(payload, dict):
         return payload.get("data") or payload
     return None
+
+async def post_lesson_sd_sync_result(
+    client,
+    base_url: str,
+    result: Dict,
+    *,
+    mint_secret: str,
+) -> Optional[Dict]:
+    """POST one device SD-pack sync result to the lesson backend."""
+    if not isinstance(result, dict):
+        raise ValueError("result must be a dict")
+    device_id = str(result.get("deviceId") or "").strip()
+    cache_key = str(result.get("cacheKey") or "").strip()
+    if not device_id or not cache_key:
+        raise ValueError("result requires deviceId and cacheKey")
+    secret = str(mint_secret or "").strip()
+    if not secret:
+        raise ValueError("mint_secret is required")
+    response = await client.post(
+        f"{_lesson_base(str(base_url or '').rstrip('/'))}/internal/lesson-asset-sync/device-result",
+        json=_normalize_lesson_sd_sync_result(result),
+        headers={"Accept": "application/json", "X-Mint-Secret": secret},
+        follow_redirects=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        return data if isinstance(data, dict) else data
+    return None
+
+def _normalize_lesson_sd_sync_result(result: Dict) -> Dict:
+    from core.lesson.sd_pack_sync import normalize_lesson_sd_error_code
+
+    def count(name: str) -> int:
+        try:
+            value = int(result.get(name) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    body = {
+        "deviceId": str(result.get("deviceId") or "").strip(),
+        "cacheKey": str(result.get("cacheKey") or "").strip(),
+        "downloadedCount": count("downloadedCount"),
+        "skippedCount": count("skippedCount"),
+        "failedCount": count("failedCount"),
+        "criticalFailedCount": count("criticalFailedCount"),
+        "ready": bool(result.get("ready")),
+    }
+    error_code = normalize_lesson_sd_error_code(result.get("errorCode"))
+    if error_code:
+        body["errorCode"] = error_code
+    return body

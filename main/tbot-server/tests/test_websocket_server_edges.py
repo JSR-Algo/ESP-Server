@@ -236,6 +236,37 @@ async def test_handle_connection_no_device_auth_failure_and_handler_cleanup(monk
 
 
 @pytest.mark.asyncio
+async def test_handle_connection_invalidates_lesson_sd_online_index_on_disconnect(monkeypatch):
+    server = _build_server(monkeypatch)
+    invalidated = []
+    server.lesson_sd_online_index = types.SimpleNamespace(
+        invalidate_connection=lambda conn: invalidated.append(conn)
+    )
+
+    class Handler:
+        def __init__(self, *args):
+            self.device_id = None
+
+        async def handle_connection(self, websocket):
+            return None
+
+    connection_module = types.ModuleType("core.connection")
+    connection_module.ConnectionHandler = Handler
+    monkeypatch.setitem(sys.modules, "core.connection", connection_module)
+
+    async def auth_ok(websocket):
+        return None
+
+    monkeypatch.setattr(server, "_handle_auth", auth_ok)
+
+    ws = _WebSocket(headers={"device-id": "robot", "client-id": "client"}, closed=True)
+    await server._handle_connection(ws)
+
+    assert len(invalidated) == 1
+    assert invalidated[0].device_id == "robot"
+
+
+@pytest.mark.asyncio
 async def test_auth_enabled_missing_invalid_whitelist_and_accept_reject(monkeypatch):
     server = _build_server(monkeypatch, _config(auth={"enabled": True, "allowed_devices": ["safe"]}))
     server.auth_enable = True

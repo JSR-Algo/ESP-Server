@@ -7,13 +7,15 @@ import os
 
 from aiohttp import web
 
-from core.lesson.sd_pack_fanout import fanout_sd_pack_sync, pending_snapshot
+from core.lesson.sd_pack_fanout import fanout_sd_pack_sync, get_pending_store, pending_snapshot
 
 
 class LessonSdFanoutHandler:
-    def __init__(self, config: dict, connections):
+    def __init__(self, config: dict, connections, *, pending_store=None, online_index=None):
         self.config = config if isinstance(config, dict) else {}
         self.connections = connections if connections is not None else {}
+        self.pending_store = pending_store or get_pending_store()
+        self.online_index = online_index
 
     def _authorize(self, request: web.Request):
         expected = os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
@@ -59,8 +61,9 @@ class LessonSdFanoutHandler:
             cache_key=str(cache_key).strip() if cache_key else None,
             device_ids=device_ids,
             queue_offline=bool(queue_offline),
+            store=self.pending_store,
+            online_index=self.online_index,
         )
-        # 202: accepted / partial (some offline queued); 200 if pure online success.
         status = 202 if result.get("queued") or result.get("failed") else 200
         if result.get("packs", 0) == 0:
             status = 404
@@ -73,11 +76,25 @@ class LessonSdFanoutHandler:
         return web.json_response(
             {
                 "data": {
-                    "pending": pending_snapshot(),
-                    "onlineDeviceIds": sorted(
-                        str(k) for k in (self.connections or {}).keys() if k
-                    ),
+                    "pending": await pending_snapshot(self.pending_store),
+                    "onlineDeviceIds": await self._online_backend_device_ids(),
                 }
             },
             status=200,
         )
+
+    async def _online_backend_device_ids(self) -> list[str]:
+        if self.online_index is None:
+            return []
+        resolve = getattr(self.online_index, "resolve_and_upsert", None)
+        if not callable(resolve):
+            return []
+        resolved = []
+        for conn in (self.connections or {}).values():
+            try:
+                backend_id = await resolve(conn)
+            except Exception:
+                continue
+            if backend_id:
+                resolved.append(str(backend_id))
+        return sorted(set(resolved))

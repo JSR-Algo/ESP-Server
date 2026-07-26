@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 import app
 
 
@@ -52,3 +54,48 @@ class AppAuthKeyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_build_servers_shares_one_lesson_sd_online_index(monkeypatch):
+    captures = {}
+
+    class WebSocketServer:
+        def __init__(self, config, *, lesson_sd_online_index=None):
+            self.config = config
+            self.lesson_sd_online_index = lesson_sd_online_index
+            self.lesson_connections = {}
+            captures["ws"] = self
+
+    class SimpleHttpServer:
+        def __init__(self, config, lesson_connections, *, lesson_sd_online_index=None):
+            self.config = config
+            self.lesson_connections = lesson_connections
+            self.lesson_sd_online_index = lesson_sd_online_index
+            captures["http"] = self
+
+    monkeypatch.setattr(app, "WebSocketServer", WebSocketServer)
+    monkeypatch.setattr(app, "SimpleHttpServer", SimpleHttpServer)
+
+    ws_server, http_server = app._build_servers(
+        {"server": {"api_url": "http://backend.test/v1"}}
+    )
+
+    assert captures["ws"] is ws_server
+    assert captures["http"] is http_server
+    assert ws_server.lesson_sd_online_index is http_server.lesson_sd_online_index
+    assert http_server.lesson_connections is ws_server.lesson_connections
+
+
+@pytest.mark.asyncio
+async def test_http_server_constructor_uses_injected_lesson_sd_online_index():
+    from core.http_server import SimpleHttpServer
+
+    shared_index = object()
+    server = SimpleHttpServer(
+        {"server": {"auth_key": "test-key"}},
+        lesson_connections={},
+        lesson_sd_online_index=shared_index,
+    )
+
+    assert server.lesson_sd_online_index is shared_index
+    assert server.lesson_sd_fanout_handler.online_index is shared_index
+    assert server.lesson_sd_retry_worker.online_index is shared_index

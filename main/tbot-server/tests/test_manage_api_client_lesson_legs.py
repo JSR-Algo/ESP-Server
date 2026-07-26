@@ -19,8 +19,12 @@ mirroring tests/test_lesson_forwarder.py.
 
 import importlib.util
 import os
+import re
 import unittest
 
+import httpx
+
+_BACKEND_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 def _load_real_manage_api_client():
     """Load a fresh, isolated copy of the real ``config.manage_api_client`` from
@@ -90,6 +94,9 @@ class _RecordingClient:
         if not self._responses:
             raise AssertionError("client.request called more times than queued responses")
         return self._responses.pop(0)
+
+    async def post(self, url, **kwargs):
+        return await self.request("POST", url, **kwargs)
 
     @property
     def last(self):
@@ -433,6 +440,124 @@ class PostPreloadStatusContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.last["json"],
             {"assignmentId": "a1", "assetId": "a2", "state": "FAILED"},
+        )
+
+class PostLessonSdSyncResultContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pins_internal_device_result_endpoint_mint_secret_and_counts(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": True}})])
+
+        data = await MAC.post_lesson_sd_sync_result(
+            client,
+            BASE,
+            {
+                "deviceId": "device-uuid-9",
+                "cacheKey": "lesson-a/v1-aaa",
+                "downloadedCount": 1,
+                "skippedCount": -3,
+                "failedCount": "0",
+                "criticalFailedCount": None,
+                "ready": True,
+                "errorCode": "bad code/token=secret",
+            },
+            mint_secret="mint-secret",
+        )
+
+        self.assertEqual(data, {"accepted": True})
+        self.assertEqual(client.last["method"], "POST")
+        self.assertEqual(
+            client.last["url"],
+            "http://backend.test/v1/internal/lesson-asset-sync/device-result",
+        )
+        self.assertEqual(client.last["headers"]["Accept"], "application/json")
+        self.assertEqual(client.last["headers"]["X-Mint-Secret"], "mint-secret")
+        self.assertEqual(
+            client.last["json"],
+            {
+                "deviceId": "device-uuid-9",
+                "cacheKey": "lesson-a/v1-aaa",
+                "downloadedCount": 1,
+                "skippedCount": 0,
+                "failedCount": 0,
+                "criticalFailedCount": 0,
+                "ready": True,
+                "errorCode": "bad_code_token_secret",
+            },
+        )
+
+    async def test_sync_result_error_code_matches_backend_safe_regex(self):
+        cases = [
+            ("OPTIONAL_THUMBNAIL_FAILED", "optional_thumbnail_failed"),
+            (" --Critical.Asset Failed/token ", "critical_asset_failed_token"),
+            ("___...9BAD", "9bad"),
+            ("___---...", None),
+            ("A" * 80, "a" * 64),
+        ]
+
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": True}})])
+
+                await MAC.post_lesson_sd_sync_result(
+                    client,
+                    BASE,
+                    {
+                        "deviceId": "device-uuid-9",
+                        "cacheKey": "lesson-a/v1-aaa",
+                        "ready": False,
+                        "criticalFailedCount": 1,
+                        "errorCode": raw,
+                    },
+                    mint_secret="mint-secret",
+                )
+
+                body = client.last["json"]
+                if expected is None:
+                    self.assertNotIn("errorCode", body)
+                else:
+                    self.assertEqual(body["errorCode"], expected)
+                    self.assertRegex(body["errorCode"], _BACKEND_ERROR_CODE_RE)
+
+    async def test_redirect_does_not_replay_mint_secret_to_location(self):
+        hits = []
+
+        async def handler(request):
+            hits.append((str(request.url), request.headers.get("X-Mint-Secret")))
+            if request.url.host == "backend.test":
+                return httpx.Response(
+                    307,
+                    headers={"Location": "https://evil.test/capture"},
+                    request=request,
+                )
+            return httpx.Response(200, json={"data": {"accepted": True}}, request=request)
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        )
+        try:
+            with self.assertRaises(httpx.HTTPStatusError):
+                await MAC.post_lesson_sd_sync_result(
+                    client,
+                    BASE,
+                    {
+                        "deviceId": "device-uuid-9",
+                        "cacheKey": "lesson-a/v1-aaa",
+                        "downloadedCount": 1,
+                        "ready": True,
+                    },
+                    mint_secret="mint-secret",
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(
+            hits,
+            [
+                (
+                    "http://backend.test/v1/internal/lesson-asset-sync/device-result",
+                    "mint-secret",
+                )
+            ],
         )
 
 if __name__ == "__main__":

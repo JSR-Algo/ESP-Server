@@ -1,5 +1,8 @@
 import asyncio
+import inspect
 import json
+import os
+from typing import Protocol, runtime_checkable
 
 from aiohttp import web
 
@@ -10,18 +13,55 @@ from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHa
 from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.vision_handler import VisionHandler
 from core.lesson.esp_build_identity import (
     approved_identities_from_config,
     esp_build_identity_metrics_fields,
 )
+from core.lesson.sd_pack_fanout import get_pending_store
+from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryWorker
 
 TAG = __name__
 
 
+class _GenerationPoller(Protocol):
+    def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+class _GenerationStatus(Protocol):
+    async def snapshot(self) -> dict[str, object]: ...
+
+
+@runtime_checkable
+class _RunnerCleanup(Protocol):
+    async def cleanup(self) -> None: ...
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
+async def _cleanup_runner(runner: object) -> None:
+    if isinstance(runner, _RunnerCleanup):
+        await runner.cleanup()
+
+
 class SimpleHttpServer:
-    def __init__(self, config: dict, lesson_connections=None):
+    def __init__(
+        self,
+        config: dict,
+        lesson_connections=None,
+        *,
+        lesson_sd_online_index=None,
+        generation_poller: _GenerationPoller | None = None,
+        generation_status: _GenerationStatus | None = None,
+        generation_redis=None,
+        owns_generation_redis=False,
+    ):
         self.config = config
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
@@ -32,6 +72,23 @@ class SimpleHttpServer:
             lesson_connections if lesson_connections is not None else {},
         )
         self.lesson_connections = lesson_connections if lesson_connections is not None else {}
+        self.lesson_sd_pending_store = get_pending_store()
+        lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
+        server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
+        if not isinstance(lesson_cfg, dict):
+            lesson_cfg = {}
+        if not isinstance(server_cfg, dict):
+            server_cfg = {}
+        self.lesson_sd_online_index = lesson_sd_online_index or LessonSdOnlineIndex(
+            api_base=str(
+                lesson_cfg.get("api_base") or server_cfg.get("api_url") or ""
+            ).rstrip("/")
+        )
+        self.lesson_sd_retry_worker = LessonSdRetryWorker(
+            self.lesson_sd_pending_store,
+            self.lesson_sd_online_index,
+            connections=self.lesson_connections,
+        )
         self.lesson_nudge_handler = LessonNudgeHandler(
             config,
             self.lesson_connections,
@@ -43,11 +100,29 @@ class SimpleHttpServer:
         self.lesson_sd_fanout_handler = LessonSdFanoutHandler(
             config,
             self.lesson_connections,
+            pending_store=self.lesson_sd_pending_store,
+            online_index=self.lesson_sd_online_index,
         )
         self.lesson_sd_evict_handler = LessonSdEvictHandler(
             config,
             self.lesson_connections,
         )
+        self.lesson_sd_materialize_handler = LessonSdMaterializeHandler(
+            config,
+            self.lesson_connections,
+        )
+        self.generation_poller = generation_poller
+        self.generation_status = generation_status
+        self.generation_redis = generation_redis
+        self.owns_generation_redis = bool(owns_generation_redis)
+        self._background_started = False
+        self._background_stopped = False
+        self._background_stop_lock = asyncio.Lock()
+        self._poller_started = False
+        self._poller_stopped = False
+        self._legacy_worker_started = False
+        self._legacy_worker_stopped = False
+        self._generation_redis_closed = False
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """GetwebsocketAddress
@@ -67,9 +142,9 @@ class SimpleHttpServer:
         return f"ws://{local_ip}:{port}/tbot/v1/"
 
     async def start(self):
+        runner = None
         try:
             server_config = self.config["server"]
-            read_config_from_api = self.config.get("read_config_from_api", False)
             host = server_config.get("ip", "0.0.0.0")
             port = int(server_config.get("http_port", 8003))
 
@@ -133,6 +208,10 @@ class SimpleHttpServer:
                             "/internal/lesson-assets/sd-fanout",
                             self.lesson_sd_fanout_handler.handle_post,
                         ),
+                        web.post(
+                            "/internal/lesson-assets/materialize",
+                            self.lesson_sd_materialize_handler.handle_post,
+                        ),
                         web.get(
                             "/internal/lesson-assets/sd-fanout/pending",
                             self.lesson_sd_fanout_handler.handle_get_pending,
@@ -159,26 +238,126 @@ class SimpleHttpServer:
                         ),
                     ]
                 )
+                if self.generation_status is not None:
+                    app.add_routes(
+                        [
+                            web.get(
+                                "/public/lesson-assets/generation",
+                                self.handle_generation_status,
+                            )
+                        ]
+                    )
 
                 # Run Service
                 runner = web.AppRunner(app)
                 await runner.setup()
                 site = web.TCPSite(runner, host, port)
                 await site.start()
+                self.start_background_services()
 
                 # Keep service running
-                while True:
-                    await asyncio.sleep(3600)  # Every 1 Check once per hour
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"HTTP server start failed: {e}")
-            import traceback
-
-            self.logger.bind(tag=TAG).error(f"Error stack: {traceback.format_exc()}")
+                try:
+                    while True:
+                        await asyncio.sleep(3600)  # Every 1 Check once per hour
+                finally:
+                    await self.stop_background_services()
+                    await _cleanup_runner(runner)
+                    runner = None
+        except asyncio.CancelledError:
+            if runner is not None:
+                await self.stop_background_services()
+                await _cleanup_runner(runner)
             raise
+        except Exception:
+            if runner is not None:
+                await self.stop_background_services()
+                await _cleanup_runner(runner)
+            self.logger.bind(tag=TAG).error("HTTP server start failed")
+            raise
+
+    def start_background_services(self) -> None:
+        if self._background_started:
+            return
+        self._background_started = True
+        poller = self.generation_poller
+        if poller is not None:
+            self._poller_started = True
+            poller.start()
+        if _env_enabled("TBOT_ENABLE_BACKGROUND_WORKERS") and _env_enabled(
+            "LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED"
+        ):
+            self.lesson_sd_retry_worker.start()
+            self._legacy_worker_started = True
+
+    async def stop_background_services(self) -> None:
+        async with self._background_stop_lock:
+            if self._background_stopped:
+                return
+            failed = False
+            poller = self.generation_poller
+            if poller is not None and not self._poller_stopped:
+                try:
+                    await poller.stop()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+                else:
+                    self._poller_stopped = True
+            if self._legacy_worker_started and not self._legacy_worker_stopped:
+                try:
+                    await self.lesson_sd_retry_worker.stop()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+                else:
+                    self._legacy_worker_stopped = True
+            if self.owns_generation_redis and not self._generation_redis_closed:
+                close = getattr(self.generation_redis, "aclose", None) or getattr(
+                    self.generation_redis, "close", None
+                )
+                try:
+                    if callable(close):
+                        result = close()
+                        if inspect.isawaitable(result):
+                            await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = True
+                else:
+                    self._generation_redis_closed = True
+            poller_done = poller is None or self._poller_stopped
+            legacy_done = not self._legacy_worker_started or self._legacy_worker_stopped
+            redis_done = not self.owns_generation_redis or self._generation_redis_closed
+            self._background_stopped = poller_done and legacy_done and redis_done
+            if failed:
+                raise RuntimeError("generation_background_stop_failed") from None
+
+    async def handle_generation_status(self, _request):
+        try:
+            status = self.generation_status
+            if status is None:
+                raise RuntimeError("generation status unavailable")
+            payload = await status.snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return web.json_response(
+                {"error": "generation_status_unavailable"},
+                status=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(
+            payload,
+            status=200,
+            headers={"Cache-Control": "public, max-age=5"},
+        )
 
     def _preload_voice_alarm_snapshots(self):
         devices = []
-        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections):
             connection = self.lesson_connections.get(device_id)
             alarm = getattr(connection, "lesson_voice_alarm", None)
             if alarm is None or not hasattr(alarm, "snapshot"):
@@ -235,7 +414,7 @@ class SimpleHttpServer:
         safety_forwarder_dropped_total = 0
         alarms = 0
 
-        for device_id in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+        for device_id in sorted(str(device_id) for device_id in self.lesson_connections):
             connection = self.lesson_connections.get(device_id)
             runtime = getattr(connection, "lesson_runtime", None)
             forwarder = getattr(runtime, "forwarder", None)
@@ -259,7 +438,7 @@ class SimpleHttpServer:
             safety_forwarder_dropped_total += safety_dropped
             client_id = getattr(connection, "client_id", None)
             headers = getattr(connection, "headers", None)
-            if not client_id and hasattr(headers, "get"):
+            if not client_id and headers is not None and hasattr(headers, "get"):
                 client_id = headers.get("client-id") or headers.get("Client-Id")
             device = {
                 "deviceId": device_id,

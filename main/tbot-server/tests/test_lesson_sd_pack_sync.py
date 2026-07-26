@@ -2,16 +2,23 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
 from core.lesson import sd_pack_sync
+from core.lesson.shared_asset_store import SharedAssetStore
 from core.providers.tools.device_mcp import mcp_handler
 
+_BACKEND_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def _rich_sd_path(cache_key: str, key: str) -> str:
+    return f"/sdcard/tbot/lesson-assets/{cache_key}/{quote(key, safe='')}"
 
 
 def test_cached_asset_packs_are_built_from_verified_lesson_cache(tmp_path):
@@ -52,6 +59,252 @@ def test_cached_asset_packs_are_built_from_verified_lesson_cache(tmp_path):
     )
     assert by_key["teachingObject.barn"]["sha256"] == _sha(pack_dir / "teachingObject.barn")
 
+def test_cached_asset_packs_preserve_ready_rich_pack_metadata(tmp_path):
+    checksum = "0123456789abcdef" * 4
+    cache_key = f"lesson-a/v3-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    poster = b"poster"
+    barn = b"barn"
+    poster_sha = hashlib.sha256(poster).hexdigest()
+    barn_sha = hashlib.sha256(barn).hexdigest()
+    store.put_bytes(poster, poster_sha)
+    store.put_bytes(barn, barn_sha)
+    manifest = {
+        "assignmentVersion": 9,
+        "lessonId": "lesson-a",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "ready": True,
+        "assets": [
+            {
+                "key": "teachingObject.barn",
+                "sha256": barn_sha,
+                "size": len(barn),
+                "mediaType": "image/png",
+                "critical": False,
+                "onlineUrl": "https://assets.example/barn.png?sig=keep-me",
+                "sdPath": _rich_sd_path(cache_key, "teachingObject.barn"),
+            },
+            {
+                "key": "backgroundScene.poster",
+                "sha256": poster_sha,
+                "size": len(poster),
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg?sig=secret&expires=1",
+                "sdPath": _rich_sd_path(cache_key, "backgroundScene.poster"),
+            },
+        ],
+    }
+    store.commit_pack(
+        cache_key,
+        {"backgroundScene.poster": poster_sha, "teachingObject.barn": barn_sha},
+        manifest=manifest,
+    )
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {
+                "lesson": {
+                    "asset_cache_root": str(pack_root),
+                    "asset_pack_mount_root": str(pack_root),
+                    "asset_public_base_url": "https://computed.example",
+                }
+            }
+        )
+    )
+
+    assert len(packs) == 1
+    pack = packs[0]
+    assert pack["manifestChecksum"] == checksum
+    assert pack["localRoot"] == f"/sdcard/tbot/lesson-assets/{cache_key}"
+    assert [asset["key"] for asset in pack["assets"]] == [
+        "backgroundScene.poster",
+        "teachingObject.barn",
+    ]
+    by_key = {asset["key"]: asset for asset in pack["assets"]}
+    poster_asset = by_key["backgroundScene.poster"]
+    assert poster_asset["sha256"] == poster_sha
+    assert len(poster_asset["sha256"]) == 64
+    assert poster_asset["sha256"] == poster_asset["sha256"].lower()
+    assert poster_asset["size"] == len(poster)
+    assert type(poster_asset["size"]) is int
+    assert poster_asset["mediaType"] == "image/jpeg"
+    assert poster_asset["critical"] is True
+    assert poster_asset["onlineUrl"] == "https://assets.example/poster.jpg?sig=secret&expires=1"
+    assert poster_asset["url"] == poster_asset["onlineUrl"]
+    assert poster_asset["sdPath"] == _rich_sd_path(cache_key, "backgroundScene.poster")
+    assert poster_asset["localPath"] == poster_asset["sdPath"]
+    assert by_key["teachingObject.barn"]["critical"] is False
+
+def test_cached_asset_packs_use_pack_mount_root_when_cache_root_is_absent(tmp_path):
+    checksum = "0123456789abcdef" * 4
+    cache_key = f"lesson-a/v3-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    poster = b"poster"
+    poster_sha = hashlib.sha256(poster).hexdigest()
+    store.put_bytes(poster, poster_sha)
+    manifest = {
+        "lessonId": "lesson-a",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "assets": [
+            {
+                "key": "backgroundScene.poster",
+                "sha256": poster_sha,
+                "size": len(poster),
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg",
+                "sdPath": _rich_sd_path(cache_key, "backgroundScene.poster"),
+            }
+        ],
+    }
+    store.commit_pack(cache_key, {"backgroundScene.poster": poster_sha}, manifest=manifest)
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {"lesson": {"asset_pack_mount_root": str(pack_root)}}
+        )
+    )
+
+    assert [pack["cacheKey"] for pack in packs] == [cache_key]
+    assert packs[0]["assets"][0]["sha256"] == poster_sha
+
+def test_cached_asset_packs_yield_ready_rich_pack_without_public_base_url(tmp_path):
+    checksum = "fedcba9876543210" * 4
+    cache_key = f"lesson-a/v3-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    poster = b"poster"
+    poster_sha = hashlib.sha256(poster).hexdigest()
+    store.put_bytes(poster, poster_sha)
+    manifest = {
+        "assignmentVersion": 9,
+        "lessonId": "lesson-a",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "ready": True,
+        "assets": [
+            {
+                "key": "backgroundScene.poster",
+                "sha256": poster_sha,
+                "size": len(poster),
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg?sig=secret&expires=1",
+                "sdPath": _rich_sd_path(cache_key, "backgroundScene.poster"),
+            }
+        ],
+    }
+    store.commit_pack(cache_key, {"backgroundScene.poster": poster_sha}, manifest=manifest)
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {
+                "lesson": {
+                    "asset_cache_root": str(pack_root),
+                    "asset_pack_mount_root": str(pack_root),
+                }
+            }
+        )
+    )
+
+    assert len(packs) == 1
+    asset = packs[0]["assets"][0]
+    assert asset["onlineUrl"] == "https://assets.example/poster.jpg?sig=secret&expires=1"
+    assert asset["url"] == asset["onlineUrl"]
+    assert asset["sdPath"] == _rich_sd_path(cache_key, "backgroundScene.poster")
+    assert asset["localPath"] == asset["sdPath"]
+    assert asset["sha256"] == poster_sha
+    assert len(asset["sha256"]) == 64
+    assert asset["sha256"] == asset["sha256"].lower()
+    assert asset["size"] == len(poster)
+    assert type(asset["size"]) is int
+    assert asset["mediaType"] == "image/jpeg"
+    assert asset["critical"] is True
+
+def test_cached_asset_packs_fail_closed_for_malformed_rich_pack(tmp_path):
+    checksum = "0123456789abcdef" * 4
+    cache_key = f"lesson-a/v3-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    poster = b"poster"
+    poster_sha = hashlib.sha256(poster).hexdigest()
+    store.put_bytes(poster, poster_sha)
+    manifest = {
+        "lessonId": "lesson-a",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "assets": [
+            {
+                "key": "backgroundScene.poster",
+                "sha256": poster_sha,
+                "size": len(poster),
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg?sig=secret",
+                "sdPath": _rich_sd_path(cache_key, "backgroundScene.poster"),
+            }
+        ],
+    }
+    store.commit_pack(cache_key, {"backgroundScene.poster": poster_sha}, manifest=manifest)
+    pack_json = pack_root / cache_key / "pack.json"
+    broken = json.loads(pack_json.read_text(encoding="utf-8"))
+    broken["assets"][0].pop("onlineUrl")
+    pack_json.write_text(json.dumps(broken, sort_keys=True), encoding="utf-8")
+    ready = {"packSha256": hashlib.sha256(pack_json.read_bytes()).hexdigest(), "assetCount": 1}
+    (pack_root / cache_key / "READY").write_text(json.dumps(ready), encoding="utf-8")
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {
+                "lesson": {
+                    "asset_cache_root": str(pack_root),
+                    "asset_pack_mount_root": str(pack_root),
+                    "asset_public_base_url": "https://computed.example",
+                }
+            }
+        )
+    )
+
+    assert packs == []
+
+def test_cached_asset_packs_normalize_historical_aliases_without_canonical_short_checksum(tmp_path):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v3-abc123"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "poster").write_bytes(b"poster")
+
+    packs = list(
+        sd_pack_sync.cached_asset_packs(
+            {
+                "lesson": {
+                    "asset_cache_root": str(cache_root),
+                    "asset_public_base_url": "https://esp.example",
+                }
+            }
+        )
+    )
+
+    assert len(packs) == 1
+    pack = packs[0]
+    assert pack.get("manifestChecksum") in (None, "")
+    assert pack.get("historicalManifestChecksum") == "abc123"
+    asset = pack["assets"][0]
+    assert asset["url"].startswith("https://esp.example/")
+    assert asset["onlineUrl"] == asset["url"]
+    assert asset["localPath"] == "sd://tbot/lesson-assets/lesson-a/v3-abc123/poster"
+    assert asset["sdPath"] == asset["localPath"]
+    assert asset["mediaType"] == "application/octet-stream"
+    assert asset["critical"] is True
+
 
 @pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(monkeypatch, tmp_path):
@@ -89,10 +342,168 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
     assert result["packs"] == 2
     assert result["synced"] == 2
     assert result["failed"] == 0
+    assert result["resultsByCacheKey"] == {
+        "lesson-a/v1-a": {
+            "cacheKey": "lesson-a/v1-a",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+        "lesson-b/v2-b": {
+            "cacheKey": "lesson-b/v2-b",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+    }
     assert calls == [
         ("self.lesson_assets.sync_to_sd", "lesson-a/v1-a"),
         ("self.lesson_assets.sync_to_sd", "lesson-b/v2-b"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_counts(
+    monkeypatch, tmp_path
+):
+    cache_root = tmp_path / "lesson_assets"
+    first = cache_root / "lesson-a" / "v1-a"
+    second = cache_root / "lesson-b" / "v2-b"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "backgroundScene.poster").write_bytes(b"a")
+    (second / "teachingObject.barn").write_bytes(b"b")
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, pack):
+        if pack["cacheKey"] == "lesson-a/v1-a":
+            return {
+                "ready": True,
+                "downloadedCount": 2,
+                "skippedCount": 1,
+                "failedCount": 0,
+                "criticalFailedCount": 0,
+            }
+        return {
+            "ready": False,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 2,
+            "criticalFailedCount": 1,
+            "errorCode": " SD failed/token=secret ",
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 1
+    assert result["resultsByCacheKey"] == {
+        "lesson-a/v1-a": {
+            "cacheKey": "lesson-a/v1-a",
+            "downloadedCount": 2,
+            "skippedCount": 1,
+            "failedCount": 0,
+            "criticalFailedCount": 0,
+            "ready": True,
+        },
+        "lesson-b/v2-b": {
+            "cacheKey": "lesson-b/v2-b",
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 2,
+            "criticalFailedCount": 1,
+            "ready": False,
+            "errorCode": "sd_failed_token_secret",
+        },
+    }
+
+def test_normalize_firmware_sync_result_error_code_matches_backend_regex():
+    cases = [
+        (" SD failed/token=secret ", "sd_failed_token_secret"),
+        ("___...OPTIONAL--THUMBNAIL FAILED!!!", "optional_thumbnail_failed_"),
+        ("9Already_OK", "9already_ok"),
+        ("A" * 80, "a" * 64),
+        ("___---...", ""),
+    ]
+
+    for raw, expected in cases:
+        result = sd_pack_sync.normalize_firmware_sync_result(
+            "lesson-a/v1-a",
+            {"ready": False, "criticalFailedCount": 1, "errorCode": raw},
+        )
+        if expected:
+            assert result["errorCode"] == expected
+            assert _BACKEND_ERROR_CODE_RE.fullmatch(result["errorCode"])
+        else:
+            assert "errorCode" not in result
+
+@pytest.mark.asyncio
+async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_ready(
+    monkeypatch, tmp_path
+):
+    cache_root = tmp_path / "lesson_assets"
+    pack_dir = cache_root / "lesson-a" / "v1-a"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "optional-art.png").write_bytes(b"a")
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_cache_root": str(cache_root),
+                "asset_public_base_url": "https://esp.example",
+            }
+        }
+        mcp_client = Client()
+
+    async def fake_call(_conn, _client, _pack):
+        return {
+            "ready": True,
+            "downloadedCount": 2,
+            "skippedCount": 0,
+            "failedCount": 1,
+            "criticalFailedCount": 0,
+            "errorCode": "OPTIONAL_THUMBNAIL_FAILED",
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert result["resultsByCacheKey"]["lesson-a/v1-a"] == {
+        "cacheKey": "lesson-a/v1-a",
+        "downloadedCount": 2,
+        "skippedCount": 0,
+        "failedCount": 1,
+        "criticalFailedCount": 0,
+        "ready": True,
+        "errorCode": "optional_thumbnail_failed",
+    }
 
 
 @pytest.mark.asyncio
@@ -108,7 +519,12 @@ async def test_raw_mcp_dispatch_uses_physical_copy_and_preserves_render_pack(mon
                 "key": "folder/poster one.png",
                 "path": "assets/poster one.png",
                 "url": "https://assets.example/poster.png",
+                "onlineUrl": "https://assets.example/poster.png",
                 "sha256": "b" * 64,
+                "size": 100,
+                "mediaType": "image/png",
+                "critical": True,
+                "sdPath": f"sd://tbot/lesson-assets/{cache_key}/folder%2Fposter%20one.png",
                 "localPath": f"sd://tbot/lesson-assets/{cache_key}/folder%2Fposter%20one.png",
             }
         ],

@@ -18,6 +18,147 @@ import {
  */
 
 const RENDERER_VERSION = 'teebot-lesson-renderer.v1';
+const BUILD_STATES = new Set(['idle', 'pending', 'building', 'failed']);
+const MATERIALIZATION_STATES = new Set(['empty', 'polling', 'materializing', 'retry_wait', 'ready']);
+const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
+const ERROR_CODE_PATTERN = /^[a-z0-9][a-z0-9_]{0,63}$/;
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
+
+function validSafeCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validPositiveSafeInteger(value) {
+  return validSafeCount(value) && value > 0;
+}
+
+function validNullableTimestamp(value) {
+  if (value === null) return true;
+  if (typeof value !== 'string') return false;
+  const match = TIMESTAMP_PATTERN.exec(value);
+  const parsed = Date.parse(value);
+  if (!match || Number.isNaN(parsed)) return false;
+  const date = new Date(parsed);
+  return Number(match[1]) > 0
+    && date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() + 1 === Number(match[2])
+    && date.getUTCDate() === Number(match[3])
+    && date.getUTCHours() === Number(match[4])
+    && date.getUTCMinutes() === Number(match[5])
+    && date.getUTCSeconds() === Number(match[6]);
+}
+
+function validNullableErrorCode(value) {
+  return value === null || (typeof value === 'string' && ERROR_CODE_PATTERN.test(value));
+}
+
+function validNullableChecksum(value) {
+  return value === null || (typeof value === 'string' && CHECKSUM_PATTERN.test(value));
+}
+
+export function normalizeLessonAssetGenerationStatus(buildPayload, cmsPayload, espPayload) {
+  const build = buildPayload && buildPayload.data ? buildPayload.data : buildPayload;
+  const cms = cmsPayload && cmsPayload.data ? cmsPayload.data : cmsPayload;
+  const esp = espPayload;
+  if (![build, cms, esp].every((value) => value && !Array.isArray(value) && typeof value === 'object')) return null;
+
+  const buildState = build.state;
+  const pendingCount = build.pendingCount;
+  const lastBuildAt = build.updatedAt;
+  const buildErrorCode = build.lastErrorCode;
+  if (!BUILD_STATES.has(buildState) || !validSafeCount(pendingCount)
+    || !validNullableTimestamp(lastBuildAt) || !validNullableErrorCode(buildErrorCode)) return null;
+
+  const generation = cms.generation;
+  const curriculumLessonCount = cms.curriculumLessonCount;
+  const packCount = cms.packCount;
+  const indexChecksum = cms.indexChecksum;
+  if (!validPositiveSafeInteger(generation) || !validSafeCount(curriculumLessonCount)
+    || !validSafeCount(packCount) || typeof indexChecksum !== 'string'
+    || !CHECKSUM_PATTERN.test(indexChecksum) || !validNullableTimestamp(cms.publishedAt)) return null;
+  if (cms.publishedAt === null) return null;
+  if (cms.index !== undefined) {
+    if (!Array.isArray(cms.index) || cms.index.length !== packCount) return null;
+    const curriculumFromIndex = cms.index.reduce((count, pack) => (
+      pack && !Array.isArray(pack) && typeof pack === 'object' && pack.classification === 'curriculum'
+        ? count + 1
+        : count
+    ), 0);
+    if (cms.index.some((pack) => !pack || Array.isArray(pack) || typeof pack !== 'object'
+      || !['curriculum', 'demo'].includes(pack.classification))
+      || curriculumFromIndex !== curriculumLessonCount) return null;
+  }
+
+  const acceptedGeneration = esp.acceptedGeneration;
+  const acceptedChecksum = esp.indexChecksum;
+  const materializationState = esp.materializationState;
+  const connections = esp.connections;
+  const lastPollAt = esp.lastPollAt;
+  const lastMaterializedAt = esp.lastMaterializedAt;
+  const espErrorCode = esp.lastErrorCode;
+  if (!(acceptedGeneration === null || validPositiveSafeInteger(acceptedGeneration))
+    || !validNullableChecksum(acceptedChecksum) || !MATERIALIZATION_STATES.has(materializationState)
+    || !connections || Array.isArray(connections) || typeof connections !== 'object'
+    || !validNullableTimestamp(lastPollAt) || !validNullableTimestamp(lastMaterializedAt)
+    || !validNullableErrorCode(espErrorCode)) return null;
+  const { connected, current, retrying, failed } = connections;
+  if (![connected, current, retrying, failed].every(validSafeCount)
+    || current + retrying + failed !== connected) return null;
+
+  return {
+    generation,
+    curriculumLessonCount,
+    packCount,
+    buildState,
+    pendingCount,
+    materializationState,
+    connected,
+    current,
+    retrying,
+    failed,
+    allConnectedCurrent: generation === acceptedGeneration
+      && indexChecksum === acceptedChecksum
+      && materializationState === 'ready'
+      && connected > 0
+      && current === connected
+      && retrying === 0
+      && failed === 0
+      && buildState === 'idle',
+    lastBuildAt,
+    lastPollAt,
+    lastMaterializedAt,
+    lastErrorCode: buildErrorCode || espErrorCode || null,
+  };
+}
+
+function generationStatusError(code, status) {
+  return {
+    code,
+    ...(Number.isSafeInteger(status) ? { status } : {}),
+  };
+}
+
+function fetchPublicGenerationJson(url) {
+  let request;
+  try {
+    request = fetch(url, {
+      method: 'GET',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (error) {
+    return Promise.reject(generationStatusError('GENERATION_STATUS_NETWORK_ERROR'));
+  }
+  return Promise.resolve(request)
+    .then((response) => {
+      if (!response || response.status !== 200) {
+        throw generationStatusError('GENERATION_STATUS_HTTP_ERROR', response && response.status);
+      }
+      return Promise.resolve(response.json()).catch(() => {
+        throw generationStatusError('GENERATION_STATUS_INVALID_JSON');
+      });
+    });
+}
 
 export function validateAssetListResponse(payload) {
   if (!payload || Array.isArray(payload) || typeof payload !== 'object'
@@ -290,6 +431,37 @@ export default {
       },
       onError,
     });
+  },
+
+  getLessonAssetGenerationStatus(onSuccess, onError) {
+    let settled = false;
+    const buildRequest = new Promise((resolve, reject) => {
+      nestRequest({
+        url: `${getNestUrl()}/lesson-assets/generation-status`,
+        method: 'GET',
+        onSuccess: resolve,
+        onError: () => reject(generationStatusError('GENERATION_STATUS_ADMIN_ERROR')),
+      });
+    });
+    const cmsRequest = fetchPublicGenerationJson('/v1/public/lesson-assets/latest');
+    const espRequest = fetchPublicGenerationJson('/public/lesson-assets/generation');
+
+    Promise.all([buildRequest, cmsRequest, espRequest])
+      .then(([buildPayload, cmsPayload, espPayload]) => {
+        if (settled) return;
+        const normalized = normalizeLessonAssetGenerationStatus(buildPayload, cmsPayload, espPayload);
+        if (!normalized) throw generationStatusError('INVALID_LESSON_ASSET_GENERATION_STATUS', 200);
+        settled = true;
+        if (onSuccess) onSuccess(normalized);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        const metadata = error && typeof error === 'object' && typeof error.code === 'string'
+          ? generationStatusError(error.code, error.status)
+          : generationStatusError('GENERATION_STATUS_UNAVAILABLE');
+        if (onError) onError('Lesson generation rollout status is unavailable.', metadata);
+      });
   },
 
   // GET /v1/admin/assets/:assetId/impact -> authoritative shared usage details

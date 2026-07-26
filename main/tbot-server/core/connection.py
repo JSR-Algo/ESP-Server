@@ -2486,18 +2486,37 @@ class ConnectionHandler:
 
     async def _sync_cached_lesson_assets_to_sd(self):
         try:
-            from core.lesson.sd_pack_fanout import drain_pending_for_connection
+            sessions = getattr(self.server, "global_generation_sessions", None)
+            if sessions is not None:
+                task = sessions.notify_mcp_ready(self)
+                result = await task if task is not None else None
+                return {"global": result}
+
+            pending_result = None
+            background_workers = (
+                os.getenv("TBOT_ENABLE_BACKGROUND_WORKERS", "").strip().lower()
+                == "true"
+            )
+            legacy_worker = (
+                os.getenv("LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED", "")
+                .strip()
+                .lower()
+                == "true"
+            )
+            if background_workers and legacy_worker:
+                from core.lesson.sd_pack_fanout import drain_pending_for_connection
+
+                pending_result = await drain_pending_for_connection(self)
+
             from core.lesson.sd_pack_sync import sync_cached_lesson_assets_to_sd
 
-            # Drain admin fan-out markers first (offline queue), then full cache sync.
-            pending_result = await drain_pending_for_connection(self)
             full_result = await sync_cached_lesson_assets_to_sd(self)
             return {"pending": pending_result, "full": full_result}
         except Exception as exc:  # pragma: no cover - background sync must not break voice
             self.logger.bind(tag=TAG).warning(
-                f"cached lesson SD sync failed: {type(exc).__name__}: {exc}"
+                f"cached lesson SD sync failed errorType={type(exc).__name__}"
             )
-            return None
+            return {"state": "failed", "errorCode": "cached_sd_sync_failed"}
 
     async def _close_voice_provider_for_teardown(self):
         if self.voice_provider is None:

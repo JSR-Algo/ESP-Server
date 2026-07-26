@@ -41,6 +41,11 @@
         <div class="kv"><span class="muted">{{ $t('lesson.checksum') }}</span><span class="mono">{{ preview.checksum }}</span></div>
         <div class="kv"><span class="muted">etag</span><span class="mono">{{ preview.etag }}</span></div>
       </el-card>
+      <LessonSdSyncStatus
+        v-if="lesson && lesson.status === 'published' && lessonAssetGenerationStatus"
+        :status="lessonAssetGenerationStatus"
+        :loading="lessonAssetGenerationLoading"
+      />
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
         <div class="canonical-demo__copy">
           <span class="eyebrow">SOURCE / ADMIN DEMO</span>
@@ -476,6 +481,7 @@ import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
 import LessonPublishReviewDialog from '@/components/lesson/LessonPublishReviewDialog.vue';
+import LessonSdSyncStatus from '@/components/lesson/LessonSdSyncStatus.vue';
 import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue';
 import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
@@ -522,6 +528,7 @@ export default {
     LessonInteractionPanel,
     LessonPublishReadiness,
     LessonPublishReviewDialog,
+    LessonSdSyncStatus,
     LessonSimulationPanel,
     LessonStepPromptEditor,
     LessonStepNavigator,
@@ -629,6 +636,11 @@ export default {
       sharedImpactRebindError: '',
       sharedImpactUncertainCloneKey: '',
       sharedImpactReconciling: false,
+      lessonLoadRequestId: 0,
+      lessonAssetGenerationStatus: null,
+      lessonAssetGenerationLoading: false,
+      lessonAssetGenerationRequestId: 0,
+      lessonAssetGenerationPollTimer: null,
     };
   },
   computed: {
@@ -816,6 +828,15 @@ export default {
       // Show the fly-in intro when the preview first appears (assets are loaded by now).
       if (next && !prev) this.$nextTick(() => setTimeout(() => this.replayCinematicFlyIn(), 900));
     },
+    '$route.query.lessonId'(value, previous) {
+      if (value === previous) return;
+      if (!value) {
+        this.$router.replace('/course-management');
+        return;
+      }
+      this.resetLessonAssetGenerationStatus();
+      this.fetchAll();
+    },
     hasPendingAuthoringChanges: {
       immediate: true,
       handler(value) {
@@ -859,6 +880,8 @@ export default {
     this.publishRequestId += 1;
     this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
+    this.lessonAssetGenerationRequestId += 1;
+    this.clearLessonAssetGenerationPoll();
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
@@ -1208,15 +1231,22 @@ export default {
       this.stepForm.scene.activeWindows.splice(i, 1);
     },
     fetchAll() {
+      const requestId = this.lessonLoadRequestId + 1;
+      const lessonId = this.lessonId;
+      this.lessonLoadRequestId = requestId;
+      this.resetLessonAssetGenerationStatus();
       this.loading = true;
       Api.lesson.getLesson(
-        this.lessonId,
+        lessonId,
         (l) => {
+          if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lesson = l;
           this.loading = false;
+          this.loadLessonAssetGenerationStatus();
           this.fetchSteps();
         },
         (msg) => {
+          if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.loading = false;
           this.$message.error(msg);
         },
@@ -1238,7 +1268,9 @@ export default {
       );
     },
     fetchSteps(options = {}) {
-      Api.lesson.listSteps(this.lessonId, (rows) => {
+      const lessonId = this.lessonId;
+      Api.lesson.listSteps(lessonId, (rows) => {
+        if (this.editorDestroying || lessonId !== this.lessonId) return;
         const selectedKey = this.selectedStepKey;
         this.steps = rows;
         const matchingIndex = rows.findIndex((step) => step.stepKey === selectedKey);
@@ -1262,9 +1294,63 @@ export default {
           this.$nextTick(() => this.doPreview());
         }
       }, (msg) => {
+        if (this.editorDestroying || lessonId !== this.lessonId) return;
         this.$message.error(msg);
         if (options.onError) options.onError(msg);
       });
+    },
+    resetLessonAssetGenerationStatus() {
+      this.clearLessonAssetGenerationPoll();
+      this.lessonAssetGenerationStatus = null;
+      this.lessonAssetGenerationLoading = false;
+      this.lessonAssetGenerationRequestId += 1;
+    },
+    clearLessonAssetGenerationPoll() {
+      if (this.lessonAssetGenerationPollTimer) {
+        clearTimeout(this.lessonAssetGenerationPollTimer);
+        this.lessonAssetGenerationPollTimer = null;
+      }
+    },
+    lessonAssetGenerationIsIncomplete(status) {
+      return !status || !status.allConnectedCurrent;
+    },
+    scheduleLessonAssetGenerationPoll(status = this.lessonAssetGenerationStatus) {
+      this.clearLessonAssetGenerationPoll();
+      if (this.editorDestroying || !this.lesson || this.lesson.status !== 'published'
+        || !this.lessonAssetGenerationIsIncomplete(status)) return false;
+      const lessonId = this.lessonId;
+      this.lessonAssetGenerationPollTimer = setTimeout(() => {
+        this.lessonAssetGenerationPollTimer = null;
+        if (!this.editorDestroying && lessonId === this.lessonId) this.loadLessonAssetGenerationStatus({ silent: true });
+      }, 12000);
+      return true;
+    },
+    loadLessonAssetGenerationStatus(options = {}) {
+      if (this.editorDestroying || !this.lesson || this.lesson.status !== 'published') {
+        this.resetLessonAssetGenerationStatus();
+        return false;
+      }
+      const requestId = this.lessonAssetGenerationRequestId + 1;
+      const lessonId = this.lessonId;
+      this.lessonAssetGenerationRequestId = requestId;
+      this.clearLessonAssetGenerationPoll();
+      if (!options.silent) this.lessonAssetGenerationLoading = true;
+      Api.lesson.getLessonAssetGenerationStatus(
+        (status) => {
+          if (this.editorDestroying || requestId !== this.lessonAssetGenerationRequestId || lessonId !== this.lessonId) return;
+          this.lessonAssetGenerationLoading = false;
+          this.lessonAssetGenerationStatus = status;
+          this.scheduleLessonAssetGenerationPoll(status);
+        },
+        (msg) => {
+          if (this.editorDestroying || requestId !== this.lessonAssetGenerationRequestId || lessonId !== this.lessonId) return;
+          this.lessonAssetGenerationLoading = false;
+          if (!options.silent) this.lessonAssetGenerationStatus = null;
+          this.scheduleLessonAssetGenerationPoll(this.lessonAssetGenerationStatus);
+          if (!options.silent) this.$message.error(msg);
+        },
+      );
+      return true;
     },
     resetPromptDraft(step) {
       this.promptStepKey = step ? step.stepKey : '';
@@ -2248,8 +2334,10 @@ export default {
           targetComparison,
           targetEvidence,
         };
-        this.publishMessage = this.$t('lesson.publishedMsg', { v: result.lessonVersion, checksum: result.checksum });
-        this.fetchAll();
+        if (verified) {
+          this.publishMessage = this.$t('lesson.publishedOfflineSyncContinues', { v: result.lessonVersion, checksum: result.checksum });
+          this.fetchAll();
+        }
       };
       this.collectRefetchedLessonEvidence(snapshot.originalLessonId, (evidence) => { originalAfter = evidence; finish(); }, (message) => { originalError = message; finish(); });
       this.collectPublishedTargetEvidence(snapshot, result, (evidence) => { targetAfter = evidence; finish(); }, (message) => { targetError = message; finish(); });

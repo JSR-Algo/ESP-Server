@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from config import device_token_client
 
 
@@ -26,8 +28,15 @@ class _Client:
         self.calls = []
         self.response = response or _Response()
 
-    async def post(self, url, *, json, headers):
-        self.calls.append({"url": url, "json": json, "headers": headers})
+    async def post(self, url, *, json, headers, follow_redirects=False):
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "follow_redirects": follow_redirects,
+            }
+        )
         return self.response
 
 
@@ -35,8 +44,15 @@ class _RaisingClient:
     def __init__(self):
         self.calls = []
 
-    async def post(self, url, *, json, headers):
-        self.calls.append({"url": url, "json": json, "headers": headers})
+    async def post(self, url, *, json, headers, follow_redirects=False):
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "follow_redirects": follow_redirects,
+            }
+        )
         raise OSError("offline")
 
 
@@ -144,6 +160,37 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("missing fields" in message for message in warning_messages))
         self.assertTrue(any("RuntimeError" in message for message in warning_messages))
         self.assertTrue(any("OSError" in message for message in warning_messages))
+
+    async def test_redirect_does_not_replay_mint_secret_to_location(self):
+        hits = []
+
+        async def handler(request):
+            hits.append((str(request.url), request.headers.get("X-Mint-Secret")))
+            if request.url.host == "backend.example":
+                return httpx.Response(
+                    307,
+                    headers={"Location": "https://evil.example/capture"},
+                    request=request,
+                )
+            return httpx.Response(200, json={"data": {"deviceUuid": "bad", "token": "bad"}}, request=request)
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        )
+        device_token_client._cache.clear()
+        try:
+            with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}):
+                result = await device_token_client.resolve_device_identity(
+                    client,
+                    "https://backend.example/v1",
+                    "14:c1:9f:d1:a8:48",
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result, (None, None))
+        self.assertEqual(hits, [("https://backend.example/v1/internal/devices/mint-token", "mint-secret")])
 
 
 if __name__ == "__main__":

@@ -144,40 +144,10 @@ johnny.ns.cloudflare.com
 reza.ns.cloudflare.com
 ```
 
-Tunnel details on the VPS:
-
-```text
-name: tjbot-prod
-id:   389630b4-fc56-4d7a-97e2-cd5430641b89
-config: /etc/cloudflared/config.yml
-service: cloudflared.service
-```
-
-Expected tunnel ingress config:
-
-```yaml
-tunnel: 389630b4-fc56-4d7a-97e2-cd5430641b89
-credentials-file: /root/.cloudflared/389630b4-fc56-4d7a-97e2-cd5430641b89.json
-
-ingress:
-  - hostname: admin.tjbot.vn
-    service: http://127.0.0.1:8002
-  - hostname: esp.tjbot.vn
-    path: /tbot/ota/*
-    service: http://127.0.0.1:8003
-  - hostname: esp.tjbot.vn
-    path: /internal/*
-    service: http://127.0.0.1:8003
-  - hostname: esp.tjbot.vn
-    path: /mcp/vision/*
-    service: http://127.0.0.1:8003
-  - hostname: esp.tjbot.vn
-    path: /tbot/v1/*
-    service: http://127.0.0.1:8000
-  - hostname: esp.tjbot.vn
-    service: http://127.0.0.1:8003
-  - service: http_status:404
-```
+The service reads `/etc/cloudflared/config.yml` on the VPS. The repo-owned,
+placeholder-only ingress template and safe validation/apply/rollback procedure
+are in [`cloudflared/README.md`](cloudflared/README.md). Keep the exact public
+lesson generation routes ahead of hostname catch-alls so they reach host Nginx.
 
 Cloudflare security must not serve a browser challenge to robots or WebSocket
 clients. Keep an active custom security rule:
