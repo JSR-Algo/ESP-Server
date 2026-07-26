@@ -151,7 +151,9 @@ class GlobalGenerationPoller:
             if response["status"] == 304:
                 if self._payload is None:
                     raise _PollRejected("cms_cold_304")
-                return {"state": "not_modified"}
+                if await self._durable_acceptance_matches(self._payload):
+                    return {"state": "not_modified"}
+                return await self._apply_generation(self._payload, self._etag)
             payload = _parse_json(response["body"])
             data = _validate_payload(payload, self.allowed_origins)
             expected_etag = (
@@ -159,34 +161,7 @@ class GlobalGenerationPoller:
             )
             if response["etag"] != expected_etag:
                 raise _PollRejected("cms_etag_mismatch")
-            try:
-                await self.store.set_desired(
-                    data["generation"], data["indexChecksum"], expected_etag
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                raise _PollRejected("generation_store_failed") from None
-            callback_retry = False
-            try:
-                callback_result = self.on_generation(data)
-                if inspect.isawaitable(callback_result):
-                    callback_result = await callback_result
-                callback_retry = (
-                    isinstance(callback_result, Mapping)
-                    and "state" in callback_result
-                    and callback_result.get("state") != "ready"
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                raise _PollRejected("generation_callback_failed") from None
-            if callback_retry:
-                raise _PollRejected("generation_callback_retry")
-            self._etag = expected_etag
-            self._payload = data
-            self._log("info", "accepted")
-            return {"state": "accepted"}
+            return await self._apply_generation(data, expected_etag)
         except asyncio.CancelledError:
             raise
         except _PollRejected as exc:
@@ -200,6 +175,55 @@ class GlobalGenerationPoller:
                 await self.store.mark_polled(_utc_timestamp(self.clock()))
             except Exception:
                 self._log("warning", "cms_poll_timestamp_failed")
+
+    async def _durable_acceptance_matches(self, data: Mapping[str, Any]) -> bool:
+        try:
+            snapshot = await self.store.snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise _PollRejected("generation_store_failed") from None
+        return (
+            isinstance(snapshot, Mapping)
+            and type(snapshot.get("acceptedGeneration")) is int
+            and snapshot.get("acceptedGeneration") == data["generation"]
+            and snapshot.get("acceptedIndexChecksum") == data["indexChecksum"]
+            and snapshot.get("materializationState") == "ready"
+        )
+
+    async def _apply_generation(
+        self, data: dict[str, Any], expected_etag: str | None
+    ) -> dict[str, str]:
+        if expected_etag is None:
+            raise _PollRejected("cms_etag_mismatch")
+        try:
+            await self.store.set_desired(
+                data["generation"], data["indexChecksum"], expected_etag
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise _PollRejected("generation_store_failed") from None
+        callback_retry = False
+        try:
+            callback_result = self.on_generation(data)
+            if inspect.isawaitable(callback_result):
+                callback_result = await callback_result
+            callback_retry = (
+                isinstance(callback_result, Mapping)
+                and "state" in callback_result
+                and callback_result.get("state") != "ready"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise _PollRejected("generation_callback_failed") from None
+        if callback_retry:
+            raise _PollRejected("generation_callback_retry")
+        self._etag = expected_etag
+        self._payload = data
+        self._log("info", "accepted")
+        return {"state": "accepted"}
 
     async def _run_loop(self) -> None:
         attempt = 0

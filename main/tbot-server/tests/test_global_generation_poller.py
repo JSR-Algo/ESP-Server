@@ -92,6 +92,25 @@ class FakeStore:
         self.polled.append(polled_at)
 
 
+class DurableFakeStore(FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.state: dict = {}
+        self.snapshot_error: Exception | None = None
+
+    async def snapshot(self) -> dict:
+        if self.snapshot_error is not None:
+            raise self.snapshot_error
+        return deepcopy(self.state)
+
+    def mark_accepted(self, data: dict) -> None:
+        self.state = {
+            "acceptedGeneration": data["generation"],
+            "acceptedIndexChecksum": data["indexChecksum"],
+            "materializationState": "ready",
+        }
+
+
 def _client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -129,12 +148,13 @@ async def test_valid_200_stores_desired_before_callback_and_then_uses_etag() -> 
             return _response(payload, etag=etag)
         return httpx.Response(304)
 
-    store = FakeStore()
+    store = DurableFakeStore()
     events: list[tuple[str, object]] = []
 
     async def callback(data: dict) -> None:
         events.append(("callback", deepcopy(data)))
         assert store.desired == [(8, checksum, etag)]
+        store.mark_accepted(data)
 
     poller = GlobalGenerationPoller(
         _config(), store, callback, http=_client(handler), clock=lambda: NOW
@@ -164,11 +184,15 @@ async def test_retry_wait_callback_does_not_cache_etag_and_retries_fresh_200() -
             super().__init__()
             self.retry_attempt = 0
             self.accepted_generation = 7
+            self.accepted_checksum = HASH_A
+            self.materialization_state = "ready"
 
         async def snapshot(self) -> dict:
             return {
                 "etag": self.restored_etag,
                 "acceptedGeneration": self.accepted_generation,
+                "acceptedIndexChecksum": self.accepted_checksum,
+                "materializationState": self.materialization_state,
                 "retryAttempt": self.retry_attempt,
             }
 
@@ -179,6 +203,8 @@ async def test_retry_wait_callback_does_not_cache_etag_and_retries_fresh_200() -
             self, generation: int, index_checksum: str, accepted_at: str
         ) -> None:
             self.accepted_generation = generation
+            self.accepted_checksum = index_checksum
+            self.materialization_state = "ready"
             self.retry_attempt = 0
 
         async def mark_retry(
@@ -237,6 +263,137 @@ async def test_cold_start_does_not_send_restored_etag_and_rejects_304() -> None:
     assert result == {"state": "rejected", "errorCode": "cms_cold_304"}
     assert "if-none-match" not in requests[0].headers
     assert store.desired == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "durable_state",
+    [
+        {},
+        {
+            "acceptedGeneration": 9,
+            "acceptedIndexChecksum": HASH_A,
+            "materializationState": "ready",
+        },
+        {
+            "acceptedGeneration": 8,
+            "acceptedIndexChecksum": HASH_A,
+            "materializationState": "ready",
+        },
+        {
+            "acceptedGeneration": 8,
+            "acceptedIndexChecksum": None,
+            "materializationState": "ready",
+        },
+        {
+            "acceptedGeneration": 8,
+            "acceptedIndexChecksum": HASH_A,
+            "materializationState": "materializing",
+        },
+    ],
+)
+async def test_cached_304_reapplies_generation_when_durable_acceptance_loses_parity(
+    durable_state: dict,
+) -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _response(payload, etag=etag)
+        return httpx.Response(304)
+
+    store = DurableFakeStore()
+    callback_calls: list[dict] = []
+
+    async def callback(data: dict) -> None:
+        callback_calls.append(deepcopy(data))
+        store.mark_accepted(data)
+
+    poller = GlobalGenerationPoller(
+        _config(), store, callback, http=_client(handler), clock=lambda: NOW
+    )
+    assert await poller.run_once() == {"state": "accepted"}
+    store.state = durable_state
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert requests[1].headers["if-none-match"] == etag
+    assert store.desired == [(8, checksum, etag), (8, checksum, etag)]
+    assert len(callback_calls) == 2
+    assert store.state == {
+        "acceptedGeneration": 8,
+        "acceptedIndexChecksum": checksum,
+        "materializationState": "ready",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cached_304_with_healthy_durable_acceptance_remains_not_modified() -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _response(payload, etag=etag)
+        return httpx.Response(304)
+
+    store = DurableFakeStore()
+    callback_calls: list[dict] = []
+
+    async def callback(data: dict) -> None:
+        callback_calls.append(deepcopy(data))
+        store.mark_accepted(data)
+
+    poller = GlobalGenerationPoller(
+        _config(), store, callback, http=_client(handler), clock=lambda: NOW
+    )
+    assert await poller.run_once() == {"state": "accepted"}
+
+    assert await poller.run_once() == {"state": "not_modified"}
+    assert requests[1].headers["if-none-match"] == etag
+    assert store.desired == [(8, checksum, etag)]
+    assert len(callback_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_304_rejects_safely_when_durable_snapshot_fails() -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _response(payload, etag=etag)
+        return httpx.Response(304)
+
+    store = DurableFakeStore()
+    callback_calls: list[dict] = []
+
+    async def callback(data: dict) -> None:
+        callback_calls.append(deepcopy(data))
+        store.mark_accepted(data)
+
+    poller = GlobalGenerationPoller(
+        _config(), store, callback, http=_client(handler), clock=lambda: NOW
+    )
+    assert await poller.run_once() == {"state": "accepted"}
+    store.snapshot_error = RuntimeError("redis://secret-host/private-data")
+
+    assert await poller.run_once() == {
+        "state": "rejected",
+        "errorCode": "generation_store_failed",
+    }
+    assert requests[1].headers["if-none-match"] == etag
+    assert store.desired == [(8, checksum, etag)]
+    assert len(callback_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -642,11 +799,12 @@ async def test_concurrent_cold_polls_serialize_and_second_uses_new_etag() -> Non
             return _response(payload, etag=etag)
         return httpx.Response(304)
 
-    store = FakeStore()
+    store = DurableFakeStore()
     callback_calls: list[dict] = []
 
     async def callback(data: dict) -> None:
         callback_calls.append(data)
+        store.mark_accepted(data)
         await asyncio.sleep(0)
 
     poller = GlobalGenerationPoller(
