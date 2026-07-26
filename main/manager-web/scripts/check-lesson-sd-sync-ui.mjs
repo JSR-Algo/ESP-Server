@@ -250,13 +250,38 @@ for (const requirement of ['Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Asser
   assert.ok(adminServer.includes(requirement), `admin public proxies missing ${requirement}`);
 }
 assert.doesNotMatch(nginx, /zone=lesson_public_read\b/, 'obsolete shared cloudflared origin bucket must be removed');
+assert.match(
+  nginx,
+  /limit_req_zone\s+"\$host\|\$uri"\s+zone=lesson_public_egress:1m\s+rate=100r\/s;/,
+  'public egress must use a high bounded host+URI bucket instead of client IP behind cloudflared',
+);
+assert.match(
+  nginx,
+  /proxy_cache_path\s+\/var\/cache\/nginx\/lesson-generation[^;]*keys_zone=lesson_generation:1m[^;]*;/,
+  'CMS latest reads must have a dedicated shared cache zone',
+);
 const publicGenerationLocations = [
   ...extractNginxBlocks(nginx, 'location = /public/lesson-assets/generation'),
   ...extractNginxBlocks(nginx, 'location = /v1/public/lesson-assets/latest'),
 ];
 assert.equal(publicGenerationLocations.length, 4, 'both public generation routes must exist on admin and ESP hosts');
 for (const location of publicGenerationLocations) {
-  assert.doesNotMatch(location, /limit_req\s/, 'public generation reads must not use a shared origin rate limit');
+  assert.match(location, /limit_req\s+zone=lesson_public_egress\s+burst=180\s+nodelay;/, 'public generation reads must use the bounded egress bucket');
+  assert.match(location, /limit_req_status\s+429;/, 'public generation egress overflow must return 429');
+}
+const latestLocations = extractNginxBlocks(nginx, 'location = /v1/public/lesson-assets/latest');
+assert.equal(latestLocations.length, 2, 'CMS latest route must exist on both public hostnames');
+for (const location of latestLocations) {
+  for (const requirement of [
+    'proxy_cache lesson_generation',
+    'proxy_cache_key "lesson-assets-latest"',
+    'proxy_cache_valid 200 15s',
+    'proxy_cache_lock on',
+    'proxy_cache_background_update on',
+    'proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504',
+    'proxy_set_header If-None-Match ""',
+    'proxy_set_header Accept-Encoding "identity"',
+  ]) assert.ok(location.includes(requirement), `CMS latest proxy missing ${requirement}`);
 }
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
