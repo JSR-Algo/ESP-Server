@@ -608,6 +608,20 @@ class _FakeAssetCache:
     async def aclose(self):
         self.closed = True
 
+
+class _FirmwareSyncAssetCache(_FakeAssetCache):
+    """Fake cache that matches the strict firmware MCP sync contract."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.asset_pack_local_root = "sd://tbot/lesson-assets"
+
+    def asset_pack_manifest(self, **kwargs):
+        pack = super().asset_pack_manifest(**kwargs)
+        for asset in pack["assets"]:
+            asset["size"] = 1024
+        return pack
+
 class _ReadyLessonAssetMcpClient:
     def __init__(self):
         self.ready = True
@@ -2729,7 +2743,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.state, "COMPLETED")
 
     async def test_sd_asset_pack_prepare_compacts_verbose_live_pack_under_frame_limit(self):
-        class _VerboseLiveAssetPackCache(_FakeAssetCache):
+        class _VerboseLiveAssetPackCache(_FirmwareSyncAssetCache):
             def asset_pack_manifest(
                 self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
             ):
@@ -2758,8 +2772,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         "state": "READY",
                         "checksumOk": True,
                         "localPath": (
-                            "sd://tbot/lesson-assets/pip-farm-3m/"
-                            "v1-521760af6bb2cecd244932cab52c3ca5badeaf3d67561da1e4323af3cb404a28/"
+                            f"{pack['localRoot']}/"
                             f"robotOverlay.lesson-asset-{index:02d}%40v1"
                         ),
                     }
@@ -2790,7 +2803,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
         self.assertEqual(
             set(sent[0]["body"]["assetPack"]["assets"][0]),
-            {"key", "state", "checksumOk", "localPath", "size"},
+            {"key", "state", "checksumOk", "size"},
         )
 
     async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):
@@ -2962,7 +2975,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
 
         with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
             await rt.start()
@@ -3014,7 +3027,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "failedCount": 0,
             }
 
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
         with patch("core.lesson.runtime.call_mcp_tool", new=cold_sync):
             self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
 
@@ -3181,7 +3194,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
         with patch("core.lesson.runtime.call_mcp_tool", new=warm_sync):
             self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
 
@@ -3303,7 +3316,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "failedCount": 0,
             }
 
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
         with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
             await rt.start()
 
@@ -3337,7 +3350,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             }
 
         conn.request_lesson_preload_reset = request_lesson_preload_reset
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
 
         with patch("core.lesson.runtime.call_mcp_tool", new=sync_after_reset):
             await rt.start()
@@ -3371,7 +3384,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             }
 
         conn.is_realtime_busy = is_realtime_busy
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
 
         with patch("core.lesson.runtime.call_mcp_tool", new=voice_preemptible_sync):
             sync_task = asyncio.create_task(rt._sync_sd_asset_pack_to_robot())
@@ -3410,7 +3423,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=True))
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
 
         with patch("core.api.device_mcp_admin_handler._call_raw_mcp_tool", new=capture_raw):
             await rt.start()

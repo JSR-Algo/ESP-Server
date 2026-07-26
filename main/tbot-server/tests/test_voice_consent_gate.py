@@ -122,7 +122,7 @@ class VoiceConsentGateTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.calls = []
 
-            async def post(self, url, *, json, headers):
+            async def post(self, url, *, json, headers, follow_redirects=False):
                 self.calls.append(("POST", url, json, headers))
                 return _Response({"data": {"deviceUuid": "device-uuid-1", "token": "jwt-1"}})
 
