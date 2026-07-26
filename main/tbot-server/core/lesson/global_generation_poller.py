@@ -246,7 +246,10 @@ class GlobalGenerationPoller:
     async def _request_with_redirects(self) -> dict[str, Any]:
         url = self.cms_url
         for hop in range(MAX_REDIRECTS + 1):
-            headers = {"Accept": "application/json"}
+            headers = {
+                "Accept": "application/json",
+                "Accept-Encoding": "identity",
+            }
             if self._payload is not None and self._etag is not None:
                 headers["If-None-Match"] = self._etag
             try:

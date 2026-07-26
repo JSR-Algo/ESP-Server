@@ -161,7 +161,9 @@ async def test_valid_200_stores_desired_before_callback_and_then_uses_etag() -> 
     )
     assert (await poller.run_once())["state"] == "accepted"
     assert (await poller.run_once())["state"] == "not_modified"
+    assert requests[0].headers["accept-encoding"] == "identity"
     assert "if-none-match" not in requests[0].headers
+    assert requests[1].headers["accept-encoding"] == "identity"
     assert requests[1].headers["if-none-match"] == etag
     assert len(events) == 1
 
@@ -398,15 +400,15 @@ async def test_cached_304_rejects_safely_when_durable_snapshot_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_valid_redirects_are_manual_and_limited_to_two_same_origin_hops() -> None:
-    urls: list[str] = []
+    requests: list[httpx.Request] = []
     payload = _payload()
     checksum = payload["data"]["indexChecksum"]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        urls.append(str(request.url))
-        if len(urls) == 1:
+        requests.append(request)
+        if len(requests) == 1:
             return httpx.Response(302, headers={"location": "/hop-one"})
-        if len(urls) == 2:
+        if len(requests) == 2:
             return httpx.Response(307, headers={"location": "https://cms.example/hop-two"})
         return _response(payload, etag=f'"lesson-assets-g8-{checksum}"')
 
@@ -415,7 +417,12 @@ async def test_valid_redirects_are_manual_and_limited_to_two_same_origin_hops() 
         _config(), store, lambda data: None, http=_client(handler), clock=lambda: NOW
     )
     assert (await poller.run_once())["state"] == "accepted"
-    assert urls == [CMS_URL, "https://cms.example/hop-one", "https://cms.example/hop-two"]
+    assert [str(request.url) for request in requests] == [
+        CMS_URL,
+        "https://cms.example/hop-one",
+        "https://cms.example/hop-two",
+    ]
+    assert all(request.headers["accept-encoding"] == "identity" for request in requests)
 
 
 @pytest.mark.asyncio
