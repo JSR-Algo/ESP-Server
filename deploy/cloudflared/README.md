@@ -7,8 +7,9 @@ configuration or any tunnel credential file.
 Cloudflare Tunnel evaluates ingress rules from top to bottom. The exact public
 lesson generation reads therefore go to host Nginx before the admin and ESP
 catch-alls. Nginx then applies the public-read policy and sends the latest index
-to CMS or the generation status to ESP. Existing OTA, internal HTTP, MCP vision,
-WebSocket, ESP catch-all, and terminal 404 behavior remains unchanged.
+to CMS or the generation status to ESP. Sample lesson assets also stay on the
+host Nginx path. Existing OTA, internal HTTP, MCP vision, WebSocket, ESP
+catch-all, and terminal 404 behavior remains unchanged.
 
 ## Prepare a candidate on the VPS
 
@@ -30,6 +31,7 @@ sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress r
 sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://admin.tjbot.vn/public/lesson-assets/generation
 sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://esp.tjbot.vn/v1/public/lesson-assets/latest
 sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://esp.tjbot.vn/public/lesson-assets/generation
+sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://esp.tjbot.vn/lesson-sample-assets/probe
 sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://esp.tjbot.vn/tbot/ota/
 sudo cloudflared --config /etc/cloudflared/config.yml.candidate tunnel ingress rule https://esp.tjbot.vn/tbot/v1/
 ```
@@ -42,6 +44,7 @@ Expected services are:
 | Admin generation status | `http://127.0.0.1` |
 | ESP latest index | `http://127.0.0.1` |
 | ESP generation status | `http://127.0.0.1:8003` (ESP catch-all) |
+| ESP sample lesson assets | `http://127.0.0.1` |
 | ESP OTA | `http://127.0.0.1:8003` |
 | ESP WebSocket | `http://127.0.0.1:8000` |
 

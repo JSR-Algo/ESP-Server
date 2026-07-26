@@ -18,6 +18,9 @@ ingress:
     path: "^/v1/public/lesson-assets/latest$"
     service: http://127.0.0.1
   - hostname: esp.tjbot.vn
+    path: "^/lesson-sample-assets/.*"
+    service: http://127.0.0.1
+  - hostname: esp.tjbot.vn
     path: "^/tbot/ota/.*"
     service: http://127.0.0.1:8003
   - hostname: esp.tjbot.vn

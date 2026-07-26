@@ -58,6 +58,7 @@ def test_public_generation_reads_reach_host_nginx_before_hostname_catch_alls():
 def test_existing_esp_routes_and_terminal_404_are_preserved():
     rules = _ingress_rules()
     expected_routes = (
+        ("^/lesson-sample-assets/.*", "http://127.0.0.1"),
         ("^/tbot/ota/.*", "http://127.0.0.1:8003"),
         ("^/internal/.*", "http://127.0.0.1:8003"),
         ("^/mcp/vision/.*", "http://127.0.0.1:8003"),
