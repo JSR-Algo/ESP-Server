@@ -68,68 +68,6 @@
           <div class="lesson-studio__toolbar">
             <div>
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
-              <h3>{{ selectedStep ? selectedStep.prompt : 'Choose or add a lesson step' }}</h3>
-            </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingSelectedStep" :disabled="!selectedStepDirty" @click="saveSelectedStepStudio">
-              Save step
-            </el-button>
-          </div>
-          <div v-if="selectedStep" class="lesson-studio__workbench">
-            <div>
-              <el-card shadow="never" class="step-content-panel">
-                <div slot="header"><strong>Step content</strong></div>
-                <el-form label-position="top" size="small">
-                  <el-form-item :label="$t('lesson.prompt')" required>
-                    <el-input :value="selectedContent.prompt" data-testid="lesson-step-prompt" type="textarea" :rows="2" :disabled="!isDraft" @input="updateSelectedContent('prompt', $event)" />
-                  </el-form-item>
-                  <div class="grid-2">
-                    <el-form-item :label="$t('lesson.subjectLabel')" required>
-                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft" @input="updateSelectedContent('subject', $event)" />
-                    </el-form-item>
-                    <el-form-item :label="$t('lesson.helperText')">
-                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft" @input="updateSelectedContent('helperText', $event)" />
-                    </el-form-item>
-                  </div>
-                  <el-form-item :label="$t('lesson.l1TransferHint')">
-                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft" @input="updateSelectedContent('l1TransferHint', $event)" />
-                  </el-form-item>
-                </el-form>
-              </el-card>
-              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft" />
-              <SharedAssetPicker
-                v-if="lessonCapabilities.sharedVisualAuthoring"
-                :assets="sharedVisualAssets"
-                :selected-key="selectedObjectKey"
-                category="teachingObject"
-                @select="selectSharedAsset"
-                @inspect="inspectSharedAsset"
-                @clone="cloneSharedAsset"
-              />
-            </div>
-            <RobotLessonPreview
-              v-if="lessonCapabilities.exactEspTftPreview && previewManifest"
-              :manifest="previewManifest"
-              :step-index="selectedStepIndex"
-              initial-path="correct"
-              @path-change="onPreviewPathChange"
-            />
-            <div v-else-if="lessonCapabilities.exactEspTftPreview" class="preview-empty">
-              <strong>Robot preview</strong>
-              <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
-              <el-button size="small" @click="doPreview">Generate preview</el-button>
-            </div>
-          </div>
-          <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
-          <LessonPublishReadiness :steps="studioSteps" :assets="sharedVisualAssets" :manifest="previewManifest || {}" :validation="validationResult" />
-        </main>
-      </section>
-
-      <section v-if="lesson" class="lesson-studio">
-        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
-        <main class="lesson-studio__canvas">
-          <div class="lesson-studio__toolbar">
-            <div>
-              <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
             <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
@@ -168,15 +106,75 @@
                 @select-intent="reviewSharedAssetSelection"
               />
             </div>
-            <RobotLessonPreview
-              v-if="previewManifest"
-              :manifest-preview="previewManifest"
-              :step-index="selectedStepIndex"
-            />
-            <div v-else class="preview-empty">
-              <strong>Robot preview</strong>
-              <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
-              <el-button size="small" :disabled="proofActionsDisabled" @click="doPreview">Generate preview</el-button>
+            <div class="preview-stack">
+              <div v-if="backgroundLibrary.length" class="bg-picker" data-testid="background-picker">
+                <div class="preview-heading">
+                  <span class="eyebrow">CHỌN BACKGROUND</span>
+                  <span class="preview-heading__hint">{{ backgroundLibrary.length }} bối cảnh — chọn 1 để áp dụng cho bài học</span>
+                </div>
+                <div class="bg-picker__grid">
+                  <button
+                    v-for="bg in backgroundLibrary"
+                    :key="bg.assetKey"
+                    type="button"
+                    :class="['bg-chip', { selected: bg.assetKey === selectedBackgroundKey }]"
+                    :title="bg.assetKey"
+                    @click="selectBackground(bg)"
+                  >
+                    <img :src="bg.posterUrl" :alt="bg.title" loading="lazy" />
+                    <span>{{ bg.title }}</span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="objectLibrary.length" class="bg-picker" data-testid="object-picker">
+                <div class="preview-heading">
+                  <span class="eyebrow">CHỌN VẬT THỂ (TEACHING OBJECT)</span>
+                  <span class="preview-heading__hint">{{ objectLibrary.length }} vật thể — chọn 1 để áp dụng cho bài học</span>
+                </div>
+                <div class="bg-picker__grid">
+                  <button
+                    v-for="obj in objectLibrary"
+                    :key="obj.assetKey"
+                    type="button"
+                    :class="['bg-chip', 'obj-chip', { selected: obj.assetKey === pickedObjectKey }]"
+                    :title="obj.assetKey"
+                    @click="selectTeachObject(obj)"
+                  >
+                    <img :src="obj.posterUrl" :alt="obj.title" loading="lazy" />
+                    <span>{{ obj.title }}</span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="cinematicDemoUrl" class="cinematic-effect" data-testid="cinematic-effect">
+                <div class="preview-heading">
+                  <span class="eyebrow">HIỆU ỨNG BÀI HỌC (BẢN THIẾT KẾ)</span>
+                  <span class="preview-heading__hint">Hiệu ứng gốc của bài — background video + robot bay vào / đi tới / chào</span>
+                  <button type="button" class="replay-btn" @click="replayCinematicFlyIn">↺ Xem lại bay vào</button>
+                </div>
+                <div class="cinematic-frame">
+                  <iframe ref="cinematicFrame" :src="cinematicDemoUrl" title="Hiệu ứng bài học (bản thiết kế)" loading="lazy" allow="autoplay" @load="pushCinematicStep" />
+                </div>
+                <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
+              </div>
+              <template v-if="cinematicDemoUrl">
+                <div class="preview-heading">
+                  <span class="eyebrow">TRÊN ROBOT (THIẾT BỊ)</span>
+                  <span class="preview-heading__hint">Khung 420×320 — robot bay vào / đi / chào ở độ phân giải thiết bị</span>
+                </div>
+                <div class="device-frame">
+                  <iframe ref="cinematicFrameDevice" :src="cinematicDemoUrl" title="Trên robot (thiết bị)" loading="lazy" allow="autoplay" @load="pushCinematicStep" />
+                </div>
+              </template>
+              <RobotLessonPreview
+                v-else-if="previewManifest"
+                :manifest-preview="previewManifest"
+                :step-index="selectedStepIndex"
+              />
+              <div v-else class="preview-empty">
+                <strong>Robot preview</strong>
+                <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
+                <el-button size="small" :disabled="proofActionsDisabled" @click="doPreview">Generate preview</el-button>
+              </div>
             </div>
           </div>
           <LessonSimulationPanel
@@ -568,6 +566,14 @@ export default {
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
       sharedBackgrounds: [],
+      // Cinematic background library: published `scene` assets merged with the
+      // /backgrounds manifest that carries each scene's 6s mp4 for the preview.
+      backgroundLibrary: [],
+      selectedBackgroundKey: '',
+      // Teaching-object library: published `teachingObject` assets merged with the
+      // /teachobjects manifest (static poster + optional animated mp4).
+      objectLibrary: [],
+      pickedObjectKey: '',
       sharedVisualAssets: [],
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
@@ -649,6 +655,13 @@ export default {
     reordering: {
       get() { return this.stepEditor.reordering; },
       set(value) { this.stepEditor.reordering = value; },
+    },
+    cinematicDemoUrl() {
+      // EVERY lesson uses the same cinematic template (background video + robot
+      // fly-in / walk / greet). It is fully parameterised, so each lesson drives it
+      // with its own background, teaching object, word and per-step motion.
+      // embed=1 hides the demo's marketing panel — show only the tablet cinematic.
+      return this.lesson ? '/tvideo-demo/index.html?embed=1' : '';
     },
     selectedStepDrafts() { return this.stepEditor.authoringDrafts; },
     selectedContentDrafts() { return this.stepEditor.contentDrafts; },
@@ -795,6 +808,14 @@ export default {
     '$route.query.demoSource'() {
       this.loadCanonicalDemo();
     },
+    selectedStepIndex() {
+      this.pushCinematicStep(true);
+    },
+    previewManifest(next, prev) {
+      this.syncCinematicSoon();
+      // Show the fly-in intro when the preview first appears (assets are loaded by now).
+      if (next && !prev) this.$nextTick(() => setTimeout(() => this.replayCinematicFlyIn(), 900));
+    },
     hasPendingAuthoringChanges: {
       immediate: true,
       handler(value) {
@@ -817,10 +838,19 @@ export default {
     }
     this.loadLessonCapabilities();
     this.loadCanonicalDemo();
+    this.loadBackgroundLibrary();
+    this.loadObjectLibrary();
     this.fetchAll();
+    // A cinematic iframe announces 'tvideo-ready' once its message listener is
+    // attached; push the current step then so the sync never loses the load race.
+    this._tvideoReadyHandler = (ev) => {
+      if (ev && ev.data && ev.data.type === 'tvideo-ready') this.syncCinematicSoon();
+    };
+    window.addEventListener('message', this._tvideoReadyHandler);
   },
   beforeDestroy() {
     this.editorDestroying = true;
+    if (this._tvideoReadyHandler) window.removeEventListener('message', this._tvideoReadyHandler);
     this.publishReviewVisible = false;
     this.proofVersion += 1;
     this.previewRequestId += 1;
@@ -1225,6 +1255,12 @@ export default {
           this.resetPromptDraft(rows[this.selectedStepIndex] || null);
         }
         if (options.onSuccess) options.onSuccess(rows, promptStateApplied);
+        // Auto-generate the espTft preview for the canonical cinematic lesson so the
+        // fly-in + step→video sync work without the author clicking "Preview" first.
+        if (this.cinematicDemoUrl && this.lessonCapabilities.exactEspTftPreview
+          && !this.previewManifest && !this.previewing) {
+          this.$nextTick(() => this.doPreview());
+        }
       }, (msg) => {
         this.$message.error(msg);
         if (options.onError) options.onError(msg);
@@ -1594,6 +1630,160 @@ export default {
     },
     onPreviewPathChange(payload) {
       this.previewPath = payload;
+    },
+    // Push the selected step's data into the cinematic template iframe so the
+    // "as-designed" video reflects the word / prompt / teaching object of the
+    // step currently being edited (layout + robot effects stay untouched).
+    // Build the selectable background list: the /backgrounds manifest supplies the
+    // cinematic mp4 + poster, the scene asset API supplies the version id used to
+    // bind the background onto a draft lesson step.
+    loadBackgroundLibrary() {
+      const withVersions = (versions) => {
+        fetch('/backgrounds/backgrounds-manifest.json', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : { backgrounds: [] }))
+          .then((manifest) => {
+            const rows = Array.isArray(manifest && manifest.backgrounds) ? manifest.backgrounds : [];
+            this.backgroundLibrary = rows.map((row) => ({
+              assetKey: row.assetKey,
+              title: row.title || row.assetKey,
+              video: row.video,
+              posterUrl: row.posterUrl,
+              versionId: versions[row.assetKey] || '',
+            }));
+          })
+          .catch(() => { this.backgroundLibrary = []; });
+      };
+      Api.lesson.listSharedBackgrounds(
+        (rows) => {
+          const versions = {};
+          (Array.isArray(rows) ? rows : []).forEach((row) => {
+            if (row && row.asset_key && row.publication_state === 'published') versions[row.asset_key] = row.version_id;
+          });
+          withVersions(versions);
+        },
+        () => withVersions({}),
+      );
+    },
+    // Selectable teaching objects: manifest supplies poster + animated mp4, the
+    // teachingObject asset API supplies the version id used to bind onto a draft.
+    loadObjectLibrary() {
+      const withVersions = (versions) => {
+        fetch('/teachobjects/teachobjects-manifest.json', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : { objects: [] }))
+          .then((manifest) => {
+            const rows = Array.isArray(manifest && manifest.objects) ? manifest.objects : [];
+            this.objectLibrary = rows.map((row) => ({
+              assetKey: row.assetKey,
+              title: row.title || row.assetKey,
+              posterUrl: row.posterUrl,
+              anim: row.anim || '',
+              versionId: versions[row.assetKey] || '',
+            }));
+          })
+          .catch(() => { this.objectLibrary = []; });
+      };
+      Api.lesson.listVisualAssets(
+        { category: 'teachingObject', profile: 'espTft' },
+        (rows) => {
+          const versions = {};
+          (Array.isArray(rows) ? rows : []).forEach((row) => {
+            const key = row && (row.assetKey || row.asset_key);
+            const vid = row && (row.versionId || row.version_id);
+            if (key && vid) versions[key] = vid;
+          });
+          withVersions(versions);
+        },
+        () => withVersions({}),
+      );
+    },
+    // Choose a teaching object: refresh the cinematic; bind onto the step when draft.
+    selectTeachObject(obj) {
+      if (!obj) return;
+      this.pickedObjectKey = obj.assetKey;
+      this.pushCinematicStep();
+      if (this.isDraft && this.selectedStep && obj.versionId) {
+        Api.lesson.setVisualRef(
+          this.lessonId, this.selectedStep.stepKey, 'teachingObject', obj.versionId,
+          () => { this.$message.success(`Vật thể: ${obj.title}`); this.previewManifest = null; this.doPreview(); },
+          (msg) => this.$message.error(msg),
+        );
+      }
+    },
+    // Choose a background: always refresh the cinematic preview; bind it onto the
+    // step only while the lesson is still a draft (published lessons are frozen).
+    selectBackground(bg) {
+      if (!bg) return;
+      this.selectedBackgroundKey = bg.assetKey;
+      this.pushCinematicStep();
+      if (this.isDraft && this.selectedStep && bg.versionId) {
+        Api.lesson.setVisualRef(
+          this.lessonId, this.selectedStep.stepKey, 'backgroundScene', bg.versionId,
+          () => { this.$message.success(`Background: ${bg.title}`); this.previewManifest = null; this.doPreview(); },
+          (msg) => this.$message.error(msg),
+        );
+      }
+    },
+    // Push the current step to the cinematic iframes now and again shortly after,
+    // so the sync lands regardless of the iframe-load / manifest-fetch race order.
+    syncCinematicSoon() {
+      this.pushCinematicStep();
+      [250, 800].forEach((ms) => setTimeout(() => this.pushCinematicStep(), ms));
+    },
+    // Replay the robot fly-in → walk → greet in both cinematic previews on demand
+    // (embed mode hides the demo's own replay button).
+    replayCinematicFlyIn() {
+      if (!this.cinematicDemoUrl) return;
+      [this.$refs.cinematicFrame, this.$refs.cinematicFrameDevice]
+        .map((fr) => fr && fr.contentWindow)
+        .filter(Boolean)
+        .forEach((win) => {
+          try {
+            win.postMessage({ type: 'tvideo-params', payload: { replay: true } }, window.location.origin);
+          } catch (e) { /* iframe not ready */ }
+        });
+    },
+    pushCinematicStep(replayIntro = false) {
+      if (!this.cinematicDemoUrl) return;
+      const wins = [this.$refs.cinematicFrame, this.$refs.cinematicFrameDevice]
+        .map((fr) => fr && fr.contentWindow)
+        .filter(Boolean);
+      if (!wins.length) return;
+      const manifest = this.previewManifest && this.previewManifest.manifest;
+      const steps = manifest && Array.isArray(manifest.steps) ? manifest.steps : [];
+      if (!steps.length) return;
+      const idx = Math.max(0, Math.min(Number(this.selectedStepIndex) || 0, steps.length - 1));
+      const step = steps[idx] || {};
+      const scene = step.scene || {};
+      const teachingObject = scene.teachingObject || step.teachingObject || {};
+      const teachingWord = step.teachingWord || {};
+      const assetUrl = (a) => (a && (a.url || a.src || (typeof a === 'string' ? a : ''))) || '';
+      // An explicit pick wins; otherwise fall back to whatever the lesson itself has
+      // bound, so every lesson plays the template with its OWN scene/object.
+      const sceneKey = (((scene.backgroundScene || {}).poster) || {}).assetKey;
+      const selectedBg = this.backgroundLibrary.find((b) => b.assetKey === this.selectedBackgroundKey)
+        || this.backgroundLibrary.find((b) => b.assetKey === sceneKey);
+      const pickedObj = this.objectLibrary.find((o) => o.assetKey === this.pickedObjectKey);
+      const stepMotion = (step.motion && step.motion.present) || '';
+      const payload = {
+        word: teachingWord.displayText || teachingWord.text || teachingObject.primaryWord || step.subject || '',
+        prompt: step.prompt || '',
+        stepId: `S${idx + 1}`,
+        stepText: step.type || '',
+        obj: pickedObj ? pickedObj.posterUrl : assetUrl(teachingObject.asset),
+        active: idx + 1,
+        total: steps.length,
+        // Keep the author's chosen background applied across step changes.
+        ...(selectedBg ? { bg: selectedBg.video, bgPoster: selectedBg.posterUrl } : {}),
+        // Step 1 is the intro — replay the robot fly-in when it's (re)selected.
+        replay: replayIntro && idx === 0,
+        // Drives the robot's up-close clip (celebrate vs greet-loop).
+        motion: stepMotion,
+      };
+      wins.forEach((win) => {
+        try {
+          win.postMessage({ type: 'tvideo-params', payload }, window.location.origin);
+        } catch (e) { /* iframe not ready — the next @load / watcher will retry */ }
+      });
     },
     saveSelectedStepStudio() {
       const step = this.selectedStep;
@@ -2285,6 +2475,27 @@ export default {
 .lesson-studio__toolbar h3 { color:#17312d; font-family:Georgia,serif; font-size:24px; margin:3px 0 0; }
 .eyebrow { color:#9a6820; font-size:10px; font-weight:800; letter-spacing:.16em; }
 .lesson-studio__workbench { display:grid; gap:14px; grid-template-columns:minmax(330px,1fr) minmax(360px,1fr); }
+.preview-heading { align-items:baseline; display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 8px; }
+.preview-heading .eyebrow { font-weight:800; letter-spacing:.08em; }
+.preview-heading__hint { color:#7c8a7f; font-size:12px; }
+.replay-btn { margin-left:auto; padding:5px 12px; border:1px solid #16251c; border-radius:999px; background:#b9ec45; color:#16251c; cursor:pointer; font:inherit; font-size:12px; font-weight:700; }
+.replay-btn:active { transform:translateY(1px); }
+.bg-picker { margin-bottom:16px; }
+.bg-picker__grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); gap:8px; max-height:236px; overflow-y:auto; padding:4px; }
+.bg-chip { display:flex; flex-direction:column; gap:4px; padding:4px; border:2px solid transparent; border-radius:10px; background:#fff; cursor:pointer; font:inherit; text-align:left; }
+.bg-chip img { width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:6px; display:block; background:#dce8c2; }
+.bg-chip span { font-size:11.5px; color:#3a4a3c; line-height:1.2; }
+.bg-chip:hover { border-color:#cbd9bb; }
+.bg-chip.selected { border-color:#16251c; background:#eef7d9; box-shadow:0 2px 0 #16251c; }
+.bg-chip.selected span { font-weight:800; }
+/* Objects are transparent PNGs — show them on a light plate, not cropped. */
+.obj-chip img { aspect-ratio:1/1; object-fit:contain; background:#f4f7ec; padding:4px; }
+.cinematic-effect { margin-bottom:18px; }
+.cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; overflow:hidden; width:100%; }
+.cinematic-frame iframe { border:0; display:block; height:100%; width:100%; }
+.device-frame { width:420px; height:320px; max-width:100%; background:#0c1c19; border:3px solid #0c1c19; border-radius:14px; box-shadow:0 8px 22px rgba(0,0,0,.25); margin:0 auto; overflow:hidden; }
+.device-frame iframe { border:0; display:block; height:100%; width:100%; }
+.cinematic-note { color:#5f6f63; font-size:12.5px; line-height:1.45; margin:8px 2px 0; }
 .preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }
 @media (max-width:1100px) { .lesson-studio__workbench { grid-template-columns:1fr; } }

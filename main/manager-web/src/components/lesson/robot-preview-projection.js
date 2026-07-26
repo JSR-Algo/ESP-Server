@@ -95,7 +95,11 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     profile: served.profile || null,
     lessonId: served.lessonId || null,
     durationMinutes: Number(served.durationMinutes) || null,
-    step: { index: safeIndex, count: steps.length, id: step.id || null },
+    step: { index: safeIndex, count: steps.length, id: step.id || null, type: step.type || null },
+    // Surfaced for the animated "play the lesson" preview: the step's entrance
+    // transition and the motion preset the robot performs when it presents the step.
+    entrance: String(step.entrance || ''),
+    presentMotion: String(motion.present || step.motionPreset || robot.pose || ''),
     path,
     stage: ESP_TFT_GEOMETRY.stage,
     safeZones: ESP_TFT_GEOMETRY.safeZones,

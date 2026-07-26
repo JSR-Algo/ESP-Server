@@ -539,6 +539,28 @@ async def test_manager_api_websocket_ping_preserves_local_boolean_and_defaults_s
 
 
 @pytest.mark.asyncio
+async def test_manager_api_websocket_ping_local_true_overrides_remote_false(monkeypatch):
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+
+    async def server_config():
+        return {
+            "enable_websocket_ping": False,
+            "server": {"auth": {"enabled": False}},
+        }
+
+    monkeypatch.setattr(config_loader, "get_server_config", server_config)
+
+    result = await config_loader.get_config_from_api_async(
+        {
+            "manager-api": {"url": "http://m", "secret": "s"},
+            "enable_websocket_ping": True,
+        }
+    )
+
+    assert result["enable_websocket_ping"] is True
+
+
+@pytest.mark.asyncio
 async def test_manager_config_preserves_local_storage_hil_allowlist(monkeypatch):
     monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
 

@@ -91,6 +91,11 @@ services:
     volumes:
       # 配置文件目录
       - ./uploadfile:/uploadfile
+      # Cinematic background library (6s mp4 per scene) served at /backgrounds/*.mp4
+      # for the authoring preview only — the robot renders the uploaded static poster.
+      - ../../background:/usr/share/nginx/html/backgrounds:ro
+      # Teaching-object library (static png + animated mp4 per object).
+      - ../../teachobjects:/usr/share/nginx/html/teachobjects:ro
   # 数据库模块
   tbot-esp32-server-db:
     image: mysql:latest

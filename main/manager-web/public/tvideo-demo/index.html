@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Farm Lesson Scene — Live Demo · TeeBot</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,600&display=swap" rel="stylesheet">
+<style>
+  /* tokens mirrored from blueprint.html so the demo reads as the same system */
+  :root{
+    --sky:#8fd3f4; --sky-deep:#5bb8e6;
+    --cream:#fff8ec; --paper:#ffffff;
+    --coral:#ff8a6b; --coral-deep:#f9694a;
+    --mint:#79d8bd; --sun:#ffd166; --grape:#b39ddb;
+    --ink:#38394b; --ink-soft:#6b6c82; --line:#efe6d6;
+    --r-lg:28px; --r-md:20px; --r-sm:14px;
+    --sh-soft:0 10px 30px -12px rgba(58,58,74,.28);
+    --sh-lift:0 22px 48px -18px rgba(58,58,74,.42);
+    --flight-dur:3.2s; /* JS keeps this in sync with the trimmed flight-in clip length */
+    --walk-dur:5s;     /* JS keeps this in sync with the walk-away clip length */
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Nunito',system-ui,sans-serif;color:var(--ink);
+    background:
+      radial-gradient(1100px 620px at 82% -8%, #d8f1ff 0%, transparent 55%),
+      radial-gradient(900px 560px at -6% 12%, #ffe9dd 0%, transparent 50%),
+      var(--cream);
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:26px;
+    padding:30px 16px 50px;-webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3{font-family:'Fredoka',sans-serif;font-weight:600;line-height:1.1}
+
+  /* ---------- landscape tablet stage (AGENTS.md §5b: landscape, FULL background) ---------- */
+  .tablet{
+    position:relative;width:min(960px,96vw);
+    background:#0e2230;border-radius:34px;padding:12px;box-shadow:var(--sh-lift);
+    border:1px solid rgba(255,255,255,.08);flex:none;
+  }
+  /* stage aspect = video aspect (16:9) so the ENTIRE background frame is visible — never cropped */
+  .stage{position:relative;width:100%;aspect-ratio:16/9;border-radius:24px;overflow:hidden;background:#bfe8fb}
+
+  /* L1 — background scene VIDEO, playing (zIndex 1) */
+  .bg{position:absolute;inset:0;z-index:1}
+  .bg video{width:100%;height:100%;object-fit:contain;display:block;background:#bfe8fb}
+
+  /* L2 — teaching object (zIndex 2): the word card is PRESENTED AT TEEBOT'S SIDE
+     when he arrives up close (screen-left of the robot, chest height) — never floating
+     high in the sky. Robot body spans ~x40–53 on arrival; card sits at x26–37.5. */
+  .object{position:absolute;left:26%;top:63%;z-index:2;width:11.5%;
+    opacity:0;transition:opacity .8s ease;text-align:center}
+  .object.in{opacity:1}
+  .object img{width:100%;display:block;filter:drop-shadow(0 10px 12px rgba(58,58,74,.32));animation:bob 2.6s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(4px)}50%{transform:translateY(-6px)}}
+  .object .tagword{display:inline-block;margin-top:2px;
+    background:#fff;border:1.5px solid var(--line);border-radius:999px;padding:3px 12px;
+    font-family:'Fredoka';font-weight:600;font-size:14px;box-shadow:var(--sh-soft);white-space:nowrap}
+
+  /* L3 — robot sprite (zIndex 3): the ROAD is mapped from the background frame
+     (10%-grid pass, 2026-07-04): barn apron → along the white fence to the bend at
+     (52%,63%) → widening down the middle to the foreground apron (46.5%,96.5%).
+     Wagons park on its left edge (x40–45,y72–78), hay bales pinch from the right
+     (x48+,y68+), so the walk corridor threads (52,63)→(46.5,72)→(44.5,82)→(46.5,96.5).
+     Wrapper base = the NEAR foreground spot; FAR/walk positions are transforms of it
+     (feet x = 46.5 + 0.17·tx, feet y = 96.5 + 0.302·ty, in stage %).
+     Realism model: the CLIP carries the body acting (lean into flight, stride, blink/
+     talk) — the wrapper only travels the road and scales for depth. No wrapper
+     rotation: that would fight the baked-in lean. */
+  .robot{position:absolute;left:38%;bottom:3.5%;z-index:3;width:17%;transform-origin:50% 100%;opacity:0}
+  .robot .flyer{width:100%;will-change:transform}
+  .robot video,.robot img.sprite{width:100%;display:block}
+  .robot img.sprite{filter:drop-shadow(0 10px 12px rgba(58,58,74,.25))}
+  .robot .shadow{position:absolute;left:50%;bottom:-2.5%;width:64%;aspect-ratio:5/1;transform:translateX(-50%) scaleX(.5);
+    background:radial-gradient(closest-side,rgba(28,44,54,.34),transparent 70%);border-radius:50%;
+    opacity:0;transition:opacity .35s ease,transform .35s ease}
+  .stage.landed .robot .shadow{opacity:1;transform:translateX(-50%) scaleX(1);animation:shadowPulse 3.2s ease-in-out .4s infinite}
+  @keyframes shadowPulse{0%,100%{transform:translateX(-50%) scaleX(1)}50%{transform:translateX(-50%) scaleX(.9)}}
+
+  /* flight: enters from the top-right sky and lands FAR AWAY on the road at the
+     fence bend (feet 52%,63% · scale .35) — deep in the scene, on dirt */
+  .stage.play .robot{animation:flyswoop var(--flight-dur) cubic-bezier(.3,.62,.22,1) .15s forwards}
+  @keyframes flyswoop{
+    0%{opacity:0;transform:translate(340%,-270%) scale(.45)}
+    10%{opacity:1}
+    50%{transform:translate(150%,-190%) scale(.4)}
+    100%{opacity:1;transform:translate(32%,-111%) scale(.35)}
+  }
+  /* touchdown: one quick squash-and-settle on the inner flyer (scale-relative, so it
+     works at the far landing size). INTENTIONAL that it overlaps the clip swap —
+     landing-impact squash masks the pose cut. */
+  .stage.landed .robot{opacity:1;animation:holdfar 1ms linear forwards}
+  @keyframes holdfar{to{transform:translate(32%,-111%) scale(.35)}}
+  .stage.landed .robot .flyer{animation:settle .5s cubic-bezier(.3,1.5,.4,1) forwards}
+  @keyframes settle{
+    0%{transform:translateY(0) scale(1,1)}
+    35%{transform:translateY(1.5%) scale(1.04,.94)}
+    100%{transform:translateY(0) scale(1,1)}
+  }
+  /* the walk UP THE ROAD toward the camera: far fence-bend → corridor between the
+     wagon (left) and hay bales (right) → foreground apron, growing with perspective */
+  .stage.walking .robot{opacity:1;animation:walkto var(--walk-dur) cubic-bezier(.42,.12,.58,.88) forwards}
+  @keyframes walkto{
+    0%{transform:translate(32%,-111%) scale(.35)}
+    36%{transform:translate(0%,-81%) scale(.55)}
+    68%{transform:translate(-12%,-48%) scale(.75)}
+    100%{transform:translate(0,0) scale(1)}
+  }
+  .stage.arrived .robot{opacity:1;animation:holdnear 1ms linear forwards}
+  @keyframes holdnear{to{transform:translate(0,0) scale(1)}}
+  @media (prefers-reduced-motion: reduce){
+    .robot{opacity:1;animation:none !important}
+    .stage.play .robot .flyer,.stage.landed .robot .flyer{animation:none}
+    .object{transition:none}
+    .object img{animation:none}
+    .robot .shadow{opacity:1;transform:translateX(-50%) scaleX(1);animation:none;transition:none}
+  }
+
+  /* sparkle puff on arrival (at the robot's feet) */
+  .puff{position:absolute;left:50%;bottom:4%;z-index:3;pointer-events:none}
+  .puff i{position:absolute;width:9px;height:9px;border-radius:50%;background:var(--sun);opacity:0}
+  .stage.landed .puff i{animation:puff .8s ease-out forwards}
+  .puff i:nth-child(2){background:var(--mint)} .puff i:nth-child(3){background:var(--coral)}
+  .puff i:nth-child(4){background:#fff} .puff i:nth-child(5){background:var(--grape)}
+  .puff i:nth-child(1){--dx:-34px;--dy:-26px} .puff i:nth-child(2){--dx:28px;--dy:-34px;animation-delay:.05s!important}
+  .puff i:nth-child(3){--dx:-16px;--dy:-46px;animation-delay:.08s!important}
+  .puff i:nth-child(4){--dx:40px;--dy:-14px;animation-delay:.12s!important}
+  .puff i:nth-child(5){--dx:6px;--dy:-54px;animation-delay:.16s!important}
+  @keyframes puff{0%{opacity:0;transform:translate(0,0) scale(.4)}25%{opacity:1}100%{opacity:0;transform:translate(var(--dx),var(--dy)) scale(1)}}
+
+  /* L4 — lesson UI (zIndex 4): safe margins, never covering robot or icon anchor */
+  .ui{position:absolute;inset:0;z-index:4;pointer-events:none}
+  .dots{position:absolute;top:16px;left:18px;display:flex;gap:6px}
+  .dots i{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.7);border:1px solid rgba(14,34,48,.18)}
+  .dots i.on{background:var(--sun);border-color:#d8a800}
+  .stepcard{position:absolute;right:2.5%;bottom:5%;width:min(34%,330px);pointer-events:auto;
+    background:rgba(255,255,255,.94);border:1.5px solid var(--line);border-radius:var(--r-md);
+    padding:13px 16px;box-shadow:var(--sh-soft);opacity:0;transform:translateY(14px);transition:.5s cubic-bezier(.2,.8,.2,1)}
+  .stage.arrived .stepcard{opacity:1;transform:none;transition-delay:.35s}
+  @media (prefers-reduced-motion: reduce){.stage.arrived .stepcard{transition:none}}
+  .stepcard .k{display:inline-flex;align-items:center;gap:7px;font-size:10.5px;font-weight:900;letter-spacing:.09em;color:var(--coral-deep);text-transform:uppercase}
+  .stepcard .k b{background:var(--sun);color:#5a4000;border-radius:8px;padding:2px 7px;font-size:10.5px}
+  .stepcard p{font-family:'Fredoka';font-weight:500;font-size:15.5px;margin-top:5px;line-height:1.3}
+  .stepcard p em{font-style:normal;color:var(--coral-deep);font-weight:600}
+
+  /* ---------- info panel below the stage ---------- */
+  .panel{max-width:960px;width:min(960px,96vw);display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+  .panel .col{flex:1 1 300px;display:flex;flex-direction:column;gap:14px}
+  .kicker{display:inline-flex;align-items:center;gap:9px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;font-size:11.5px;color:var(--coral-deep);
+    background:#fff;padding:7px 14px;border-radius:999px;box-shadow:var(--sh-soft);border:1px solid var(--line);align-self:flex-start}
+  .panel h1{font-size:clamp(26px,3.5vw,36px)}
+  .panel h1 .u{background:linear-gradient(120deg,var(--coral),var(--sun));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .panel p.lede{color:var(--ink-soft);font-weight:600;font-size:14.5px}
+  .recipe{background:var(--paper);border:1.5px solid var(--line);border-radius:var(--r-md);box-shadow:var(--sh-soft);padding:15px 17px}
+  .recipe b.t{font-family:'Fredoka';font-weight:600;font-size:14.5px;display:block;margin-bottom:8px}
+  .recipe ol{margin-left:18px;display:flex;flex-direction:column;gap:5px;font-weight:600;font-size:13px;color:var(--ink-soft)}
+  .recipe ol em{font-style:normal;color:var(--ink);font-weight:700}
+  .btns{display:flex;gap:10px;flex-wrap:wrap}
+  button.cta,a.cta{font-family:'Fredoka';font-weight:600;font-size:15px;border:0;cursor:pointer;border-radius:999px;padding:12px 22px;
+    background:linear-gradient(135deg,var(--coral),var(--coral-deep));color:#fff;box-shadow:var(--sh-soft);transition:.2s}
+  button.cta:hover,a.cta:hover{transform:translateY(-2px);box-shadow:var(--sh-lift)}
+  a.cta.raw{background:linear-gradient(135deg,var(--mint),#3fbc9d);text-decoration:none;display:inline-flex;align-items:center}
+  a.back{font-weight:800;font-size:13px;color:var(--ink-soft);text-decoration:none;padding:12px 16px;border-radius:999px;background:#fff;border:1.5px solid var(--line);box-shadow:var(--sh-soft)}
+  a.back:hover{border-color:var(--sky-deep)}
+  .status{font-size:12px;font-weight:800;color:var(--ink-soft);background:#fff;border:1px dashed var(--grape);border-radius:var(--r-sm);padding:9px 13px}
+</style>
+</head>
+<body>
+
+<div class="tablet">
+  <div class="stage" id="stage">
+    <!-- L1 · background scene video — FULL frame, playing -->
+    <div class="bg">
+      <video id="bgv" muted loop playsinline autoplay preload="auto"
+        poster="assets/scenes/scene-07-farm.png"
+        src="assets/scenes/deep-barn-farm-background-6s.mp4"></video>
+    </div>
+
+    <!-- L2 · teaching object — anchored above the REAL barn -->
+    <div class="object" id="obj">
+      <img src="assets/objects/barn.png" alt="clay barn icon">
+      <span class="tagword">barn</span>
+    </div>
+
+    <!-- L3 · robot sprite — two-clip performance: flight (lean, straighten) then
+         greeting loop (blinks, looks around, talks, flappy arms); sprite = fallback -->
+    <div class="robot" id="robot">
+      <div class="flyer" id="flyer">
+        <video id="flightv" muted playsinline preload="auto" style="display:none"></video>
+        <video id="greetv" muted loop playsinline preload="auto" style="display:none"></video>
+        <video id="walkv" muted playsinline preload="auto" style="display:none"></video>
+        <img class="sprite" id="robotimg" src="assets/robot-alive/robots-bright-alive-k3-glowface.png" alt="TeeBot flying in">
+      </div>
+      <div class="shadow"></div>
+      <div class="puff"><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+
+    <!-- L4 · lesson UI -->
+    <div class="ui">
+      <div class="dots"><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="stepcard">
+        <span class="k"><b>S1</b> say hello · pose: wave</span>
+        <p>Hello! I’m TeeBot. Welcome to the farm — <em>this is a barn!</em></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="col">
+    <span class="kicker">◆ Scene 07 · Week 1 · landscape · full background (AGENTS.md §5b)</span>
+    <h1>The farm lesson, <span class="u">assembled live.</span></h1>
+    <p class="lede">All four layers of <b>render-contract.v1</b> in landscape: the <b>entire</b> barn background clip playing edge-to-edge, the clay <b>barn</b> icon anchored above the real barn, and TeeBot <b>flying deep into the scene</b>, landing far away <b>on the road</b>, then <b>walking up the road toward you</b> — arriving up close to <b>blink, look around, talk and flap his arms</b> in a warm hello. The road route is mapped from the background itself, so his feet stay on dirt the whole way.</p>
+    <div class="btns">
+      <button class="cta" id="replay">↺ Replay the fly-in</button>
+      <a class="cta raw" id="rawcode" href="tvideo-raw-code.zip" download>⤓ RAW CODE</a>
+      <a class="back" href="blueprint.html">← Back to blueprint</a>
+    </div>
+  </div>
+  <div class="col">
+    <div class="recipe">
+      <b class="t">The four layers on stage</b>
+      <ol>
+        <li><em>Background</em> — deep-barn-farm 6s premium clip · playing · full 16:9 frame, no crop</li>
+        <li><em>Object</em> — barn.png · presented at TeeBot’s side when he arrives · gentle bob</li>
+        <li><em>Robot</em> — flies to the back of the scene, lands ON the road at the fence bend → walks up the road toward you (threading the wagon & hay bales) → greets up close (blinks · looks around · talks · flappy arms)</li>
+        <li><em>Lesson UI</em> — step S1 card bottom-right + progress dots, clear of robot & icon</li>
+      </ol>
+    </div>
+    <div class="status" id="robostatus">Robot layer: loading clips…</div>
+  </div>
+</div>
+
+<script>
+const stage=document.getElementById('stage');
+const obj=document.getElementById('obj');
+const flightv=document.getElementById('flightv');
+const greetv=document.getElementById('greetv');
+const walkv=document.getElementById('walkv');
+const robotimg=document.getElementById('robotimg');
+const robostatus=document.getElementById('robostatus');
+const stepK=document.querySelector('.stepcard .k');
+const stepP=document.querySelector('.stepcard p');
+const dots=document.querySelectorAll('.dots i');
+
+/* Must match the packaged clip lengths (see FARM-SCENE-PLAN.md packaging step) */
+const FLIGHT_DUR=3.2;
+const WALK_DUR=5.0;
+const FAR_BEAT=800; /* ms standing at the far landing spot before walking toward us */
+document.documentElement.style.setProperty('--flight-dur',FLIGHT_DUR+'s');
+document.documentElement.style.setProperty('--walk-dur',WALK_DUR+'s');
+
+/* Alpha clips: Safari needs HEVC-alpha .mov; Chrome/Edge/Firefox need VP9-alpha .webm.
+   (Chrome would PLAY the .mov but drop the alpha layer → black box, so we pick by engine,
+   not by <source> order. file:// safe — no fetch, just video load events.) */
+const isSafari=/^((?!chrome|chromium|android|crios|edg).)*safari/i.test(navigator.userAgent);
+const EXT=isSafari?'mov':'webm';
+function loadClip(el,name){
+  return new Promise(res=>{
+    /* Alpha clips + the 6MB background clip load concurrently inside the authoring
+       iframe; 5s was too short on a cold cache and fell back to the opaque sprite. */
+    const giveUp=setTimeout(()=>res(false),20000);
+    el.addEventListener('loadeddata',()=>{clearTimeout(giveUp);res(true)},{once:true});
+    el.addEventListener('error',()=>{clearTimeout(giveUp);res(false)},{once:true});
+    el.src='assets/robot-alive/flight/'+name+'.'+EXT;
+    el.load();
+  });
+}
+function show(which){
+  flightv.style.display=which===flightv?'block':'none';
+  greetv.style.display=which===greetv?'block':'none';
+  walkv.style.display=which===walkv?'block':'none';
+  robotimg.style.display=which===robotimg?'block':'none';
+}
+function setStep(n,label,pose,html){
+  /* When the Lesson editor has pushed an authored step, it stays authoritative —
+     the choreography's arrive()/play() must not overwrite it with demo defaults. */
+  var o=window.__lessonStepOverride;
+  if(o){
+    stepK.innerHTML='<b>'+(o.stepId||('S'+n))+'</b> '+(o.stepText||label);
+    stepP.textContent=(o.prompt!=null?o.prompt:'');
+    var a=(o.active!=null?Number(o.active):n);
+    dots.forEach((d,i)=>d.classList.toggle('on',i<a));
+    return;
+  }
+  stepK.innerHTML='<b>S'+n+'</b> '+label+' · pose: '+pose;
+  stepP.innerHTML=html;
+  dots.forEach((d,i)=>d.classList.toggle('on',i<n));
+}
+
+let flightOk=false,greetOk=false,walkOk=false;
+let landTimer=null,walkBeatTimer=null,arriveTimer=null;
+
+/* journey: fly in from the sky → land FAR AWAY on the road at the fence bend →
+   beat → walk UP THE ROAD toward the camera → arrive up close → greet + card */
+function land(){
+  if(stage.classList.contains('landed'))return;
+  clearTimeout(landTimer);
+  flightv.onended=null;
+  stage.classList.add('landed');
+  if(flightOk) flightv.pause();       /* frozen upright, facing us, far away */
+  walkBeatTimer=setTimeout(startWalk,FAR_BEAT);
+}
+
+function startWalk(){
+  if(stage.classList.contains('walking'))return;
+  if(walkOk){
+    show(walkv);
+    walkv.currentTime=0;
+    const p=walkv.play(); if(p)p.catch(()=>{});
+    walkv.onended=arrive;
+  } /* else: keep the frozen flight frame / sprite — the road transit still runs */
+  stage.classList.add('walking');
+  arriveTimer=setTimeout(arrive,WALK_DUR*1000+400); /* fallback if 'ended' misfires */
+}
+
+function arrive(){
+  if(stage.classList.contains('arrived'))return;
+  clearTimeout(arriveTimer);
+  walkv.onended=null;
+  stage.classList.add('arrived');
+  if(greetOk){
+    show(greetv); /* up close now: blinks, looks around, talks, flappy arms */
+    greetv.currentTime=0;
+    const p=greetv.play(); if(p)p.catch(()=>{});
+  }else if(walkOk){
+    walkv.pause(); /* frozen facing camera */
+  }
+  obj.classList.add('in');
+  setStep(1,'say hello','wave','Hello! I’m TeeBot. Welcome to the farm — <em>this is a barn!</em>');
+}
+
+function play(){
+  stage.classList.remove('play','landed','walking','arrived');
+  obj.classList.remove('in');
+  clearTimeout(landTimer);clearTimeout(walkBeatTimer);clearTimeout(arriveTimer);
+  flightv.pause(); greetv.pause(); walkv.pause();
+  flightv.onended=null; walkv.onended=null;
+  setStep(1,'say hello','wave','Hello! I’m TeeBot. Welcome to the farm — <em>this is a barn!</em>');
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(reduced){
+    /* no flight, no walk: appear up close; the greeting clip is content, not decoration */
+    if(greetOk){show(greetv);greetv.currentTime=0;const p=greetv.play();if(p)p.catch(()=>{});}
+    else show(robotimg);
+    stage.classList.add('play','landed','arrived');
+    obj.classList.add('in');
+    return;
+  }
+  if(flightOk){show(flightv);flightv.currentTime=0;}
+  else show(robotimg);
+  void stage.offsetWidth;             /* restart CSS animations */
+  stage.classList.add('play');
+  if(flightOk){
+    flightv.onended=land;
+    setTimeout(()=>{const p=flightv.play();if(p)p.catch(()=>{});},150); /* sync clip with transit delay */
+  }
+  /* fallback (sprite mode, or 'ended' never firing): land when the transit ends */
+  landTimer=setTimeout(land,(0.15+FLIGHT_DUR)*1000+300);
+}
+
+Promise.all([loadClip(flightv,'flight-in'),loadClip(greetv,'greet-loop'),loadClip(walkv,'walk-toward')]).then(([f,g,w])=>{
+  flightOk=f;greetOk=g;walkOk=w;
+  const live=[f&&'flight',g&&'greeting',w&&'walk-toward'].filter(Boolean);
+  robostatus.textContent=
+    live.length===3 ? 'Robot layer: LIVE — flies to the back of the road, lands at the fence bend, walks up the road to the camera, then greets (blinks · looks around · talks · flappy arms), alpha over the scene ('+EXT+').'
+    : live.length ? 'Robot layer: partial — '+live.join(' + ')+' clip(s) loaded ('+EXT+'); the rest fell back.'
+    : 'Robot layer: static sprite (clips not found — run the flight pipeline in FARM-SCENE-PLAN.md).';
+  play();
+});
+document.getElementById('replay').addEventListener('click',play);
+
+/* RAW CODE — hand the whole animation to a teammate.
+   Preferred: tvideo-raw-code.zip (this page + every video/image asset). The zip
+   must be rebuilt whenever the deployed page or assets change:
+     cd /var/www/tjbot-tvideo && zip -qr /tmp/t.zip index.html README.txt assets \
+       && mv /tmp/t.zip tvideo-raw-code.zip
+   If the zip isn't there (repo copy over file://, or pre-zip deploy), fall back
+   to downloading this page's own source — all CSS keyframes + JS choreography
+   are inline anyway. */
+document.getElementById('rawcode').addEventListener('click',async e=>{
+  e.preventDefault();
+  const zip='tvideo-raw-code.zip';
+  try{
+    const r=await fetch(zip,{method:'HEAD'});
+    if(r.ok){location.href=zip;return}
+  }catch(_){/* file:// or offline — fall through to raw HTML */}
+  let src;
+  try{
+    const r=await fetch(location.href);
+    if(!r.ok)throw 0;
+    src=await r.text();
+  }catch(_){src='<!DOCTYPE html>\n'+document.documentElement.outerHTML}
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([src],{type:'text/html'}));
+  a.download='tvideo-raw-code.html';
+  document.body.appendChild(a);a.click();a.remove();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+
+<!-- ============================================================
+     TEMPLATE MODE — lesson authoring embed.
+     Keeps the exact layout + robot fly-in / walk / greet effects,
+     but makes the background, teaching object, word, prompt and
+     progress dots swappable. The Lesson editor iframes this with
+     ?embed=1 and posts per-step {tvideo-params} messages.
+     ============================================================ -->
+<style>
+  html.tv-embed, html.tv-embed body { background: transparent; margin: 0; padding: 0; }
+  html.tv-embed .panel { display: none !important; }
+  html.tv-embed body > *:not(.tablet) { display: none !important; }
+  html.tv-embed .tablet { margin: 0 auto; max-width: 100%; }
+</style>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  if (params.get('embed') === '1') document.documentElement.classList.add('tv-embed');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  // The robot's "up close" clip: greet-loop normally, celebrate on a celebrate
+  // step. Swapping greetv's src keeps the existing choreography in charge —
+  // arrive() still shows greetv, it just plays a different performance.
+  var CLIP_EXT = (/^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent)) ? 'mov' : 'webm';
+  function setGreetClip(kind) {
+    var g = document.getElementById('greetv');
+    if (!g) return;
+    var want = 'assets/robot-alive/flight/' + (kind === 'celebrate' ? 'celebrate' : 'greet-loop') + '.' + CLIP_EXT;
+    if (g.getAttribute('src') === want) return;
+    g.setAttribute('src', want);
+    try { g.load(); } catch (e) {}
+    if (getComputedStyle(g).display !== 'none') {
+      g.currentTime = 0;
+      var pl = g.play(); if (pl && pl.catch) pl.catch(function () {});
+    }
+  }
+
+  function apply(p) {
+    if (!p) return;
+    try {
+      if (p.motion !== undefined) setGreetClip(String(p.motion) === 'celebrate' ? 'celebrate' : 'greet');
+      // Remember the authored step so the choreography (arrive/play) keeps showing it.
+      if (p.stepId !== undefined || p.stepText !== undefined || p.prompt !== undefined || p.word !== undefined) {
+        var prev = window.__lessonStepOverride || {};
+        window.__lessonStepOverride = {
+          stepId: p.stepId !== undefined ? p.stepId : prev.stepId,
+          stepText: p.stepText !== undefined ? p.stepText : prev.stepText,
+          prompt: p.prompt !== undefined ? p.prompt : prev.prompt,
+          active: p.active !== undefined ? p.active : prev.active,
+          total: p.total !== undefined ? p.total : prev.total,
+        };
+      }
+      if (p.bg) { var v = document.getElementById('bgv'); if (v) { if (p.bgPoster) v.poster = p.bgPoster; v.src = p.bg; try { v.load(); } catch (e) {} var pl = v.play && v.play(); if (pl && pl.catch) pl.catch(function () {}); } }
+      if (p.obj) { var oi = document.querySelector('#obj img'); if (oi) oi.src = p.obj; }
+      if (p.word !== undefined) { var tw = document.querySelector('#obj .tagword'); if (tw) tw.textContent = p.word; var im = document.querySelector('#obj img'); if (im) im.alt = p.word; }
+      if (p.stepId !== undefined || p.stepText !== undefined) { var k = document.querySelector('.stepcard .k'); if (k) k.innerHTML = '<b>' + esc(p.stepId || '') + '</b> ' + esc(p.stepText || ''); }
+      if (p.prompt !== undefined) { var pp = document.querySelector('.stepcard p'); if (pp) pp.textContent = p.prompt || ''; }
+      if (p.active !== undefined && p.total !== undefined) {
+        var dots = document.querySelectorAll('.dots i');
+        for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i < Number(p.active));
+      }
+      // The intro step replays the robot fly-in → walk → greet choreography.
+      if (p.replay && typeof window.play === 'function') window.play();
+    } catch (e) { /* never break the effect */ }
+  }
+
+  // Initial params from the query string.
+  var init = {};
+  ['bg', 'bgPoster', 'obj', 'word', 'prompt', 'stepId', 'stepText', 'active', 'total'].forEach(function (k) {
+    if (params.has(k)) init[k] = params.get(k);
+  });
+  function applyInit() { if (Object.keys(init).length) apply(init); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyInit); else applyInit();
+
+  // Live per-step updates from the Lesson editor.
+  window.addEventListener('message', function (ev) {
+    var d = ev && ev.data;
+    if (!d || d.type !== 'tvideo-params') return;
+    apply(d.payload || {});
+  });
+  // Announce readiness so the editor pushes the current step without a load race.
+  try { if (window.parent && window.parent !== window) window.parent.postMessage({ type: 'tvideo-ready' }, '*'); } catch (e) {}
+})();
+</script>
+</body>
+</html>

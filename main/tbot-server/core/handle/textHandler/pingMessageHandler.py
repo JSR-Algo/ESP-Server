@@ -24,7 +24,7 @@ class PingMessageHandler(TextMessageHandler):
             msg_json: JSON data of PING message
         """
         # CheckEnabledcompletedWebSocketHeartbeat Feature
-        enable_websocket_ping = conn.config.get("enable_websocket_ping", False)
+        enable_websocket_ping = conn.config.get("enable_websocket_ping", True)
         if not enable_websocket_ping:
             conn.logger.debug(f"WebSocket heartbeat not enabled, ignoring PING message")
             return

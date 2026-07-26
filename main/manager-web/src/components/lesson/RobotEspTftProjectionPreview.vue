@@ -10,8 +10,8 @@
         <template v-for="layer in projection.layers">
           <img
             v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id)"
-            :key="layer.id"
-            :class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? motionClass : '']"
+            :key="layer.id === 'robotOverlay' ? `robotOverlay-${activeIndex}-${motionNonce}` : layer.id"
+            :class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :style="layerStyle(layer)"
             :src="layer.src"
             :alt="layer.id === 'teachingObject' ? word : ''"
@@ -56,6 +56,16 @@
       </div>
     </div>
 
+    <div class="play-bar">
+      <button type="button" class="play-btn" :aria-pressed="playing ? 'true' : 'false'" @click="togglePlay">
+        {{ playing ? '❚❚ Pause' : '► Play lesson' }}
+      </button>
+      <span class="play-step">Step {{ projection.step.index + 1 }} / {{ projection.step.count }}<template v-if="projection.step.type"> · {{ projection.step.type }}</template></span>
+      <span v-if="projection.presentMotion" class="play-tag">motion: {{ projection.presentMotion }}</span>
+      <span v-if="projection.entrance" class="play-tag">entrance: {{ projection.entrance }}</span>
+      <span class="play-note">preview tempo (compressed)</span>
+    </div>
+
     <div class="preview-toolbar">
       <button
         v-for="path in responsePaths"
@@ -91,6 +101,13 @@ export default {
       selectedPath: RESPONSE_PATHS.includes(this.initialPath) ? this.initialPath : 'correct',
       showSafeZones: false,
       motionNonce: 0,
+      // Animated "play the lesson" preview. Steps the robot through every manifest
+      // step, applying each step's entrance + present motion so the author sees the
+      // lesson's effect (using the exact espTft assets the device renders).
+      playing: false,
+      playStep: 0,
+      playTimer: null,
+      previewStepMs: 1700,
       responsePaths: RESPONSE_PATHS,
       pathLabels: {
         correct: 'Correct',
@@ -107,20 +124,45 @@ export default {
     };
   },
   computed: {
+    activeIndex() {
+      return this.playing ? this.playStep : this.stepIndex;
+    },
     projection() {
-      return projectEspTftPreview(this.manifest, this.stepIndex, this.selectedPath);
+      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath);
     },
     word() {
       const pill = this.projection.layers.find((layer) => layer.id === 'wordPill');
       return pill ? pill.text : '';
     },
     motionClass() {
-      const command = this.projection.timeline.find((item) => item.label.startsWith('Slave command:'));
-      const preset = command ? command.label.slice('Slave command:'.length).trim() : 'neutral';
+      // While playing, the robot performs the step's own "present" motion; otherwise
+      // it reflects the response path the author is inspecting.
+      const preset = this.playing && this.projection.presentMotion
+        ? this.projection.presentMotion
+        : (() => {
+          const command = this.projection.timeline.find((item) => item.label.startsWith('Slave command:'));
+          return command ? command.label.slice('Slave command:'.length).trim() : 'neutral';
+        })();
       if (/nod|celebrate|encourage/i.test(preset)) return `motion-nod motion-${this.motionNonce % 2}`;
-      if (/shake/i.test(preset)) return `motion-shake motion-${this.motionNonce % 2}`;
-      if (/lean|tilt|teach/i.test(preset)) return `motion-tilt motion-${this.motionNonce % 2}`;
+      if (/shake|tryagain/i.test(preset)) return `motion-shake motion-${this.motionNonce % 2}`;
+      if (/lean|tilt|teach|present|listen|thinking/i.test(preset)) return `motion-tilt motion-${this.motionNonce % 2}`;
       return `motion-breathe motion-${this.motionNonce % 2}`;
+    },
+    entranceClass() {
+      // During playback: a step with a scripted entrance (e.g. flyIn) plays that
+      // arrival; a step without one performs its present motion instead, so every
+      // step animates the way the lesson intends.
+      if (!this.playing) return '';
+      const entrance = String(this.projection.entrance || '').toLowerCase();
+      if (entrance && entrance !== 'none') {
+        const kind = /fly/.test(entrance) ? 'fly'
+          : /walk/.test(entrance) ? 'walk'
+            : /slide/.test(entrance) ? 'slide'
+              : /pop|bounce/.test(entrance) ? 'pop'
+                : 'fade';
+        return `entrance-${kind}`;
+      }
+      return this.motionClass;
     }
   },
   watch: {
@@ -128,7 +170,38 @@ export default {
       if (RESPONSE_PATHS.includes(path)) this.selectPath(path);
     }
   },
+  beforeDestroy() {
+    this.clearPlayTimer();
+  },
   methods: {
+    clearPlayTimer() {
+      if (this.playTimer) { clearTimeout(this.playTimer); this.playTimer = null; }
+    },
+    togglePlay() {
+      if (this.playing) { this.stopPlay(); } else { this.startPlay(); }
+    },
+    startPlay() {
+      const count = this.projection.step.count;
+      if (count <= 0) return;
+      this.playing = true;
+      this.selectedPath = 'correct';
+      this.playStep = 0;
+      this.motionNonce += 1;
+      this.scheduleAdvance();
+    },
+    stopPlay() {
+      this.clearPlayTimer();
+      this.playing = false;
+    },
+    scheduleAdvance() {
+      this.clearPlayTimer();
+      this.playTimer = setTimeout(() => {
+        const count = this.projection.step.count || 1;
+        this.playStep = (this.playStep + 1) % count;
+        this.motionNonce += 1;
+        if (this.playing) this.scheduleAdvance();
+      }, this.previewStepMs);
+    },
     layerStyle(layer) {
       const { x, y, width, height, fit } = layer.bounds;
       return {
@@ -137,9 +210,10 @@ export default {
       };
     },
     selectPath(path) {
+      if (this.playing) this.stopPlay();
       this.selectedPath = path;
       this.motionNonce += 1;
-      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.stepIndex, path) });
+      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path) });
     }
   }
 };
@@ -162,6 +236,12 @@ export default {
 .missing-visual span { font-size: 50px; font-weight: 900; }
 .safe-zone { position: absolute; z-index: 90; pointer-events: none; background: rgba(255, 80, 40, .15); outline: 1px dashed rgba(255, 45, 20, .85); }
 .safe-top { top: 0; left: 0; width: 100%; height: 24px; }.safe-bottom { bottom: 0; left: 0; width: 100%; height: 82px; }.safe-left { top: 0; left: 0; width: 12px; height: 100%; }.safe-right { top: 0; right: 0; width: 12px; height: 100%; }
+.play-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.play-btn { padding: 8px 16px; border: 2px solid #16251c; border-radius: 999px; background: var(--lime); color: #16251c; cursor: pointer; font: inherit; font-weight: 800; box-shadow: 0 3px 0 #16251c; }
+.play-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #16251c; }
+.play-step { font-weight: 700; color: #26342b; font-variant-numeric: tabular-nums; }
+.play-tag { padding: 3px 9px; border-radius: 999px; background: #eef4e2; border: 1px solid #cbd9bb; font-size: 12px; color: #3a4a3c; }
+.play-note { margin-left: auto; font-size: 12px; color: #7c8a7f; font-style: italic; }
 .preview-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
 .preview-toolbar button { padding: 7px 11px; border: 1px solid #9ba89f; border-radius: 999px; background: white; color: #26342b; cursor: pointer; font: inherit; }
 .preview-toolbar button.selected { border-color: #17211b; background: var(--lime); box-shadow: inset 0 -2px rgba(0, 0, 0, .18); font-weight: 800; }
@@ -175,6 +255,17 @@ export default {
 @keyframes shake { 25% { transform: translateX(-8px); } 70% { transform: translateX(8px); } }
 @keyframes tilt { 45% { transform: rotate(-7deg); } }
 @keyframes breathe { 50% { transform: translateY(-3px) scale(1.015); } }
+/* Step entrance transitions played while the lesson auto-advances. */
+.entrance-fly { animation: entranceFly .6s cubic-bezier(.2,.8,.2,1); }
+.entrance-walk { animation: entranceWalk .6s ease-out; }
+.entrance-slide { animation: entranceSlide .5s ease-out; }
+.entrance-pop { animation: entrancePop .5s cubic-bezier(.2,1.4,.4,1); }
+.entrance-fade { animation: entranceFade .45s ease-out; }
+@keyframes entranceFly { 0% { transform: translateY(-120px) scale(.6); opacity: 0; } 70% { transform: translateY(6px) scale(1.02); opacity: 1; } 100% { transform: translateY(0) scale(1); } }
+@keyframes entranceWalk { 0% { transform: translateX(-90px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+@keyframes entranceSlide { 0% { transform: translateX(60px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+@keyframes entrancePop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+@keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @media (max-width: 560px) { .stage-shell { padding: 8px; }.stage { transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }
 </style>
