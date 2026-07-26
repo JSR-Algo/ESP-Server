@@ -147,6 +147,9 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
+        "LESSON_GENERATION_CMS_URL",
+        "LESSON_GENERATION_POLL_INTERVAL_SEC",
+        "LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED",
     }
     for name in ("docker-compose.yml", "docker-compose_all.yml"):
         compose = yaml.safe_load((root / name).read_text(encoding="utf-8"))
