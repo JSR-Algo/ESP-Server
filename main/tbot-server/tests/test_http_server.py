@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import types
 from pathlib import Path
 
@@ -623,6 +624,73 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
         assert nginx.count(f'proxy_set_header {header} "";') >= 2
     assert "proxy_hide_header ETag" not in nginx
     assert "proxy_hide_header Cache-Control" not in nginx
+
+
+def _nginx_server_block(nginx: str, server_name: str) -> str:
+    marker = f"server_name {server_name};"
+    marker_index = nginx.index(marker)
+    block_start = nginx.rfind("server {", 0, marker_index)
+    depth = 0
+    for index in range(block_start, len(nginx)):
+        if nginx[index] == "{":
+            depth += 1
+        elif nginx[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return nginx[block_start : index + 1]
+    raise AssertionError(f"unterminated nginx server block for {server_name}")
+
+
+def test_nginx_sample_assets_are_exposed_only_on_esp_hostname():
+    nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
+    admin_server = _nginx_server_block(nginx, "admin.tjbot.vn")
+    esp_server = _nginx_server_block(nginx, "esp.tjbot.vn")
+
+    assert "/lesson-sample-assets" not in admin_server
+    assert "location ~ ^/lesson-sample-assets/" in esp_server
+
+
+def test_nginx_sample_asset_location_flattens_safe_authored_paths_to_fixed_directory():
+    nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
+    esp_server = _nginx_server_block(nginx, "esp.tjbot.vn")
+
+    assert "location = /lesson-sample-assets" in esp_server
+    location_pattern = (
+        r"^/lesson-sample-assets/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*"
+        r"(?<sample_asset_basename>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    )
+    assert f"location ~ {location_pattern}" in esp_server
+    assert "alias /var/www/tbot-sample-assets/$sample_asset_basename;" in esp_server
+    assert "autoindex off;" in esp_server
+    assert "location /lesson-sample-assets/" not in esp_server
+
+    python_pattern = re.compile(location_pattern.replace("(?<", "(?P<"))
+    expected_paths = {
+        "/lesson-sample-assets/assets/background/barn-round-field-poster.jpg": "barn-round-field-poster.jpg",
+        "/lesson-sample-assets/assets/robot/poses/bright-teach.png": "bright-teach.png",
+        "/lesson-sample-assets/barn.png": "barn.png",
+    }
+    for path, basename in expected_paths.items():
+        match = python_pattern.fullmatch(path)
+        assert match is not None
+        assert match.group("sample_asset_basename") == basename
+    for unsafe_path in (
+        "/lesson-sample-assets/",
+        "/lesson-sample-assets/assets//barn.png",
+        "/lesson-sample-assets/../barn.png",
+        "/lesson-sample-assets/assets/%2Fetc%2Fpasswd",
+    ):
+        assert python_pattern.fullmatch(unsafe_path) is None
+
+
+def test_nginx_sample_asset_location_is_read_only_and_immutable():
+    nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
+    esp_server = _nginx_server_block(nginx, "esp.tjbot.vn")
+    location_start = esp_server.index("location ~ ^/lesson-sample-assets/")
+    location = esp_server[location_start : esp_server.index("\n    }", location_start)]
+
+    assert 'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' in location
+    assert 'add_header Cache-Control "public, max-age=31536000, immutable";' in location
 
 
 @pytest.mark.asyncio
