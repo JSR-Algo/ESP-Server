@@ -628,7 +628,7 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
 def test_nginx_public_generation_reads_do_not_share_cloudflared_origin_rate_limit():
     nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
 
-    assert "limit_req_zone" not in nginx
+    assert "zone=lesson_public_read" not in nginx
     locations = []
     for path in (
         "/public/lesson-assets/generation",

@@ -22,6 +22,29 @@ function expectRegex(file, regex, reason) {
   assert.match(read(file), regex, `${file}: ${reason}`);
 }
 
+function extractNginxBlocks(source, marker) {
+  const blocks = [];
+  let cursor = 0;
+  while ((cursor = source.indexOf(marker, cursor)) !== -1) {
+    const blockStart = source.indexOf('{', cursor);
+    assert.notEqual(blockStart, -1, `nginx block missing opening brace: ${marker}`);
+    let depth = 0;
+    let closed = false;
+    for (let index = blockStart; index < source.length; index += 1) {
+      if (source[index] === '{') depth += 1;
+      if (source[index] === '}') depth -= 1;
+      if (depth === 0) {
+        blocks.push(source.slice(cursor, index + 1));
+        cursor = index + 1;
+        closed = true;
+        break;
+      }
+    }
+    assert.ok(closed, `unterminated nginx block: ${marker}`);
+  }
+  return blocks;
+}
+
 function loadLessonApi(context = {}) {
   const source = read('src/apis/module/lesson.js')
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];\n/g, '')
@@ -226,7 +249,15 @@ for (const location of ['location = /public/lesson-assets/generation', 'location
 for (const requirement of ['Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Assertion ""']) {
   assert.ok(adminServer.includes(requirement), `admin public proxies missing ${requirement}`);
 }
-assert.doesNotMatch(nginx, /limit_req(?:_zone)?\s/, 'public reads must not share the cloudflared origin rate-limit bucket');
+assert.doesNotMatch(nginx, /zone=lesson_public_read\b/, 'obsolete shared cloudflared origin bucket must be removed');
+const publicGenerationLocations = [
+  ...extractNginxBlocks(nginx, 'location = /public/lesson-assets/generation'),
+  ...extractNginxBlocks(nginx, 'location = /v1/public/lesson-assets/latest'),
+];
+assert.equal(publicGenerationLocations.length, 4, 'both public generation routes must exist on admin and ESP hosts');
+for (const location of publicGenerationLocations) {
+  assert.doesNotMatch(location, /limit_req\s/, 'public generation reads must not use a shared origin rate limit');
+}
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
 assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
