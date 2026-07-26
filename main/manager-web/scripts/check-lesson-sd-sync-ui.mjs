@@ -227,7 +227,8 @@ for (const requirement of ['limit_req zone=lesson_public_read', 'Authorization "
   assert.ok(adminServer.includes(requirement), `admin public proxies missing ${requirement}`);
 }
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
-assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
+assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
+assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
 assert.equal((adminServer.match(/if \(\$request_method !~ \^\(GET\|HEAD\)\$\) \{ return 405; \}/g) || []).length, 2, 'admin public proxies must reject mutations');
 assert.ok(!/auth_basic|auth_request/.test(adminServer), 'admin public proxies must bypass interactive and subrequest auth');
 
