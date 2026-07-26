@@ -21,6 +21,7 @@ BODY = b'{"generation":2,"indexChecksum":"test"}'
 class _CountingUpstream(ThreadingHTTPServer):
     request_count: int
     accept_encodings: list[str | None]
+    origins: list[str | None]
     lock: threading.Lock
 
 
@@ -31,6 +32,7 @@ class _GenerationHandler(BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.request_count += 1
             self.server.accept_encodings.append(self.headers.get("Accept-Encoding"))
+            self.server.origins.append(self.headers.get("Origin"))
         time.sleep(0.2)
         if self.headers.get("If-None-Match") == ETAG:
             self.send_response(304)
@@ -41,6 +43,12 @@ class _GenerationHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(BODY)))
         self.send_header("ETag", ETAG)
+        self.send_header("Vary", "Origin")
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            self.headers.get("Origin", "https://upstream.invalid"),
+        )
+        self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
         self.wfile.write(BODY)
 
@@ -86,6 +94,7 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
     upstream = _CountingUpstream(("0.0.0.0", upstream_port), _GenerationHandler)
     upstream.request_count = 0
     upstream.accept_encodings = []
+    upstream.origins = []
     upstream.lock = threading.Lock()
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
@@ -133,17 +142,29 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         with upstream.lock:
             upstream.request_count = 0
             upstream.accept_encodings.clear()
+            upstream.origins.clear()
         cold_status, cold_headers, cold_body = _request(
             nginx_port,
             "/v1/public/lesson-assets/latest?cold-conditional=1",
             host="admin.tjbot.vn",
-            headers={"If-None-Match": ETAG},
+            headers={
+                "If-None-Match": ETAG,
+                "Origin": "https://cold-attacker.invalid",
+            },
         )
         assert cold_status == 304
         assert cold_headers["etag"] == ETAG
+        assert cold_headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in cold_headers
+        assert "vary" not in cold_headers
         assert cold_body == b""
         requests = [
-            (f"rotated-{index}.invalid", f"?variant={index}") for index in range(96)
+            (
+                f"rotated-{index}.invalid",
+                f"?variant={index}",
+                f"https://origin-{index}.invalid",
+            )
+            for index in range(96)
         ]
         with ThreadPoolExecutor(max_workers=96) as executor:
             responses = list(
@@ -152,14 +173,34 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
                         nginx_port,
                         f"/v1/public/lesson-assets/latest{item[1]}",
                         host=item[0],
+                        headers={"Origin": item[2]},
                     ),
                     requests,
                 )
             )
 
         assert all(status == 200 and body == BODY for status, _headers, body in responses)
+        assert all(headers["access-control-allow-origin"] == "*" for _status, headers, _body in responses)
+        assert all("access-control-allow-credentials" not in headers for _status, headers, _body in responses)
+        assert all("vary" not in headers for _status, headers, _body in responses)
         assert upstream.request_count == 1
         assert upstream.accept_encodings == ["identity"]
+        assert upstream.origins == [None]
+        cache_files = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "find",
+                "/var/cache/nginx/lesson-generation",
+                "-type",
+                "f",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert len(cache_files) == 1
 
         head_status, head_headers, head_body = _request(
             nginx_port, "/v1/public/lesson-assets/latest?head=1", method="HEAD", host="admin.tjbot.vn"

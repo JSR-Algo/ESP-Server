@@ -282,6 +282,12 @@ for (const location of latestLocations) {
     'proxy_cache_lock on',
     'proxy_cache_background_update on',
     'proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504',
+    'proxy_ignore_headers Vary',
+    'proxy_hide_header Vary',
+    'proxy_hide_header Access-Control-Allow-Origin',
+    'proxy_hide_header Access-Control-Allow-Credentials',
+    'proxy_set_header Origin ""',
+    'add_header Access-Control-Allow-Origin "*" always',
     'proxy_set_header If-None-Match ""',
     'proxy_set_header Accept-Encoding "identity"',
   ]) assert.ok(location.includes(requirement), `CMS latest proxy missing ${requirement}`);

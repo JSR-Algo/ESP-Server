@@ -690,6 +690,12 @@ def test_nginx_public_generation_reads_use_bounded_uri_egress_and_cache_only_lat
     for location in latest_locations:
         assert "proxy_cache lesson_generation;" in location
         assert 'proxy_cache_key "lesson-assets-latest";' in location
+        assert "proxy_ignore_headers Vary;" in location
+        assert "proxy_hide_header Vary;" in location
+        assert "proxy_hide_header Access-Control-Allow-Origin;" in location
+        assert "proxy_hide_header Access-Control-Allow-Credentials;" in location
+        assert 'proxy_set_header Origin "";' in location
+        assert 'add_header Access-Control-Allow-Origin "*" always;' in location
     for location in status_locations:
         assert "proxy_cache " not in location
         assert "proxy_cache_key " not in location
