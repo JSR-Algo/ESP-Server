@@ -9,7 +9,8 @@ lesson generation reads therefore go to host Nginx before the admin and ESP
 catch-alls. Nginx then applies the public-read policy and sends the latest index
 to CMS or the generation status to ESP. Sample lesson assets also stay on the
 host Nginx path. Existing OTA, internal HTTP, MCP vision, WebSocket, ESP
-catch-all, and terminal 404 behavior remains unchanged.
+catch-all, and terminal 404 behavior remains unchanged. Prefix rules match both
+the bare path and descendants, but not near-prefixes such as `/tbot/v10`.
 
 ## Prepare a candidate on the VPS
 
@@ -55,15 +56,27 @@ restart the tunnel, and confirm it remains active:
 
 ```sh
 sudo cp -p /etc/cloudflared/config.yml /etc/cloudflared/config.yml.rollback
-sudo install -m 600 /etc/cloudflared/config.yml.candidate /etc/cloudflared/config.yml
+sudo install -m 600 /etc/cloudflared/config.yml.candidate /etc/cloudflared/config.yml.new
+sudo cloudflared --config /etc/cloudflared/config.yml.new tunnel ingress validate
+sudo mv -f /etc/cloudflared/config.yml.new /etc/cloudflared/config.yml
 sudo systemctl restart cloudflared
 sudo systemctl is-active cloudflared
 sudo cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate
 ```
 
 Then run the public generation verifier and existing deployment smoke checks.
-If validation, restart, or smoke fails, restore `config.yml.rollback`, restart
-`cloudflared`, and repeat the active/service checks before investigating.
+If validation, restart, or smoke fails, validate and atomically restore the
+rollback before investigating:
+
+```sh
+sudo cloudflared --config /etc/cloudflared/config.yml.rollback tunnel ingress validate
+sudo install -m 600 /etc/cloudflared/config.yml.rollback /etc/cloudflared/config.yml.new
+sudo cloudflared --config /etc/cloudflared/config.yml.new tunnel ingress validate
+sudo mv -f /etc/cloudflared/config.yml.new /etc/cloudflared/config.yml
+sudo systemctl restart cloudflared
+sudo systemctl is-active cloudflared
+sudo cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate
+```
 
 The repository contract test is:
 

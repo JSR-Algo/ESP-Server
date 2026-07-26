@@ -1,7 +1,12 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_TEMPLATE = REPO_ROOT / "deploy/cloudflared/config.yml.example"
+CLOUDFLARED = shutil.which("cloudflared")
 
 
 def _ingress_rules() -> list[dict[str, str]]:
@@ -58,11 +63,11 @@ def test_public_generation_reads_reach_host_nginx_before_hostname_catch_alls():
 def test_existing_esp_routes_and_terminal_404_are_preserved():
     rules = _ingress_rules()
     expected_routes = (
-        ("^/lesson-sample-assets/.*", "http://127.0.0.1"),
-        ("^/tbot/ota/.*", "http://127.0.0.1:8003"),
-        ("^/internal/.*", "http://127.0.0.1:8003"),
-        ("^/mcp/vision/.*", "http://127.0.0.1:8003"),
-        ("^/tbot/v1/.*", "http://127.0.0.1:8000"),
+        ("^/lesson-sample-assets(?:/.*)?$", "http://127.0.0.1"),
+        ("^/tbot/ota(?:/.*)?$", "http://127.0.0.1:8003"),
+        ("^/internal(?:/.*)?$", "http://127.0.0.1:8003"),
+        ("^/mcp/vision(?:/.*)?$", "http://127.0.0.1:8003"),
+        ("^/tbot/v1(?:/.*)?$", "http://127.0.0.1:8000"),
     )
 
     esp_catch_all_index = _rule_index(rules, "esp.tjbot.vn")
@@ -73,6 +78,49 @@ def test_existing_esp_routes_and_terminal_404_are_preserved():
 
     assert rules[esp_catch_all_index]["service"] == "http://127.0.0.1:8003"
     assert rules[-1] == {"service": "http_status:404"}
+
+
+def _match_with_cloudflared(path: str) -> str:
+    if CLOUDFLARED is None:
+        pytest.skip("cloudflared is required for executable ingress rule coverage")
+    result = subprocess.run(
+        [
+            CLOUDFLARED,
+            "--config",
+            str(CONFIG_TEMPLATE),
+            "tunnel",
+            "ingress",
+            "rule",
+            f"https://esp.tjbot.vn{path}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("prefix", "matcher", "service", "near_miss"),
+    (
+        ("/lesson-sample-assets", "^/lesson-sample-assets(?:/.*)?$", "http://127.0.0.1", "/lesson-sample-assets-old"),
+        ("/tbot/ota", "^/tbot/ota(?:/.*)?$", "http://127.0.0.1:8003", "/tbot/otaku"),
+        ("/internal", "^/internal(?:/.*)?$", "http://127.0.0.1:8003", "/internalized"),
+        ("/mcp/vision", "^/mcp/vision(?:/.*)?$", "http://127.0.0.1:8003", "/mcp/visions"),
+        ("/tbot/v1", "^/tbot/v1(?:/.*)?$", "http://127.0.0.1:8000", "/tbot/v10"),
+    ),
+)
+def test_cloudflared_matches_bare_and_child_paths_without_near_prefix_overmatch(
+    prefix: str, matcher: str, service: str, near_miss: str
+):
+    for path in (prefix, f"{prefix}/child"):
+        output = _match_with_cloudflared(path)
+        assert f"path: {matcher}" in output
+        assert f"service: {service}" in output
+
+    near_miss_output = _match_with_cloudflared(near_miss)
+    assert f"path: {matcher}" not in near_miss_output
+    assert "service: http://127.0.0.1:8003" in near_miss_output
 
 
 def test_template_contains_placeholders_instead_of_tunnel_credentials():
