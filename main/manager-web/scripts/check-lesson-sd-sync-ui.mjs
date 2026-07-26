@@ -223,9 +223,10 @@ const adminServer = nginx.slice(nginx.indexOf('server_name admin.tjbot.vn'), ngi
 for (const location of ['location = /public/lesson-assets/generation', 'location = /v1/public/lesson-assets/latest']) {
   assert.ok(adminServer.includes(location), `admin.tjbot.vn missing ${location}`);
 }
-for (const requirement of ['limit_req zone=lesson_public_read', 'Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Assertion ""']) {
+for (const requirement of ['Authorization ""', 'Cookie ""', 'Cf-Access-Jwt-Assertion ""']) {
   assert.ok(adminServer.includes(requirement), `admin public proxies missing ${requirement}`);
 }
+assert.doesNotMatch(nginx, /limit_req(?:_zone)?\s/, 'public reads must not share the cloudflared origin rate-limit bucket');
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
 assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);

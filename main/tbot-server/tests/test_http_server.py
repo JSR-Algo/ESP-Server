@@ -613,7 +613,6 @@ async def test_start_cancellation_during_setup_cleans_runner_and_owned_redis(mon
 def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
     nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
 
-    assert "limit_req_zone $binary_remote_addr" in nginx
     assert "location = /public/lesson-assets/generation" in nginx
     assert "proxy_pass http://127.0.0.1:8003" in nginx
     assert "location = /v1/public/lesson-assets/latest" in nginx
@@ -624,6 +623,49 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
         assert nginx.count(f'proxy_set_header {header} "";') >= 2
     assert "proxy_hide_header ETag" not in nginx
     assert "proxy_hide_header Cache-Control" not in nginx
+
+
+def test_nginx_public_generation_reads_do_not_share_cloudflared_origin_rate_limit():
+    nginx = (Path(__file__).parents[3] / "deploy/nginx/tjbot.vn.conf").read_text()
+
+    assert "limit_req_zone" not in nginx
+    locations = []
+    for path in (
+        "/public/lesson-assets/generation",
+        "/v1/public/lesson-assets/latest",
+    ):
+        marker = f"location = {path}"
+        cursor = 0
+        while (location_start := nginx.find(marker, cursor)) != -1:
+            block_start = nginx.index("{", location_start)
+            depth = 0
+            for index in range(block_start, len(nginx)):
+                if nginx[index] == "{":
+                    depth += 1
+                elif nginx[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        locations.append(nginx[location_start : index + 1])
+                        cursor = index + 1
+                        break
+            else:
+                raise AssertionError(f"unterminated nginx location for {path}")
+
+    assert len(locations) == 4
+    for location in locations:
+        assert "limit_req " not in location
+        assert 'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' in location
+        for header in (
+            "Authorization",
+            "Cookie",
+            "X-Admin-Key",
+            "X-Admin-Proxy-Key",
+            "X-Api-Key",
+            "Cf-Access-Jwt-Assertion",
+            "Cf-Access-Client-Id",
+            "Cf-Access-Client-Secret",
+        ):
+            assert f'proxy_set_header {header} "";' in location
 
 
 def _nginx_server_block(nginx: str, server_name: str) -> str:
