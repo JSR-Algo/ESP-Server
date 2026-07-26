@@ -23,15 +23,22 @@ def _free_port() -> int:
         return listener.getsockname()[1]
 
 
-def _request(port: int, path: str, *, method: str = "GET", host: str = "esp.tjbot.vn") -> tuple[int, dict[str, str]]:
+def _request_with_body(
+    port: int, path: str, *, method: str = "GET", host: str = "esp.tjbot.vn"
+) -> tuple[int, dict[str, str], bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         connection.request(method, path, headers={"Host": host})
         response = connection.getresponse()
-        response.read()
-        return response.status, {key.lower(): value for key, value in response.getheaders()}
+        body = response.read()
+        return response.status, {key.lower(): value for key, value in response.getheaders()}, body
     finally:
         connection.close()
+
+
+def _request(port: int, path: str, *, method: str = "GET", host: str = "esp.tjbot.vn") -> tuple[int, dict[str, str]]:
+    status, headers, _body = _request_with_body(port, path, method=method, host=host)
+    return status, headers
 
 
 @pytest.mark.skipif(not _docker_ready(), reason="Docker daemon is required for executable nginx coverage")
@@ -40,6 +47,7 @@ def test_nginx_sample_asset_runtime_contract(tmp_path):
     assets.mkdir()
     for filename in ("barn-round-field-poster.jpg", "bright-teach.png", "barn.png"):
         (assets / filename).write_bytes(b"sample")
+    (assets / "leak.txt").symlink_to("/etc/passwd")
 
     port = _free_port()
     container_name = f"tbot-nginx-sample-assets-{port}"
@@ -90,6 +98,11 @@ def test_nginx_sample_asset_runtime_contract(tmp_path):
         assert _request(port, "/lesson-sample-assets/assets%5C..%5Cbright-teach.png")[0] == 404
         assert _request(port, "/lesson-sample-assets/barn.png?next=assets%2Fsafe")[0] == 200
         assert _request(port, "/lesson-sample-assets/barn.png?next=%2e%2e%2Fsafe")[0] == 200
+        symlink_status, _symlink_headers, symlink_body = _request_with_body(
+            port, "/lesson-sample-assets/leak.txt"
+        )
+        assert symlink_status in {403, 404}
+        assert b"root:" not in symlink_body
         assert _request(port, "/lesson-sample-assets/barn.png", host="admin.tjbot.vn")[0] != 200
     finally:
         subprocess.run(["docker", "stop", container_name], check=False, capture_output=True)

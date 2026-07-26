@@ -692,6 +692,7 @@ def test_nginx_sample_asset_location_is_read_only_and_immutable():
     assert 'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' in location
     assert r'if ($request_uri ~* "^/lesson-sample-assets/[^?]*(?:%2f|%5c|%2e|\\\\)") { return 404; }' in location
     assert r'if ($request_uri ~ "^/lesson-sample-assets/(?:[^/?]+/)*\.\.(?:/|\?|$)") { return 404; }' in location
+    assert "disable_symlinks on from=/var/www/tbot-sample-assets;" in location
     assert 'add_header Cache-Control "public, max-age=31536000, immutable";' in location
 
 
