@@ -53,6 +53,8 @@ services:
         sync: false
       - key: LESSON_ASSET_ORIGIN_BASE
         sync: false
+      - key: LESSON_ASSET_ALLOWED_ORIGINS
+        sync: false
       - key: LESSON_ASSET_PUBLIC_BASE_URL
         sync: false
       - key: GOOGLE_API_KEY

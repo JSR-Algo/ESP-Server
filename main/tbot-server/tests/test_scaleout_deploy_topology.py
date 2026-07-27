@@ -66,7 +66,9 @@ def test_public_ws_frontend_routes_ota_and_internal_http_paths_to_http_backend()
 
 def test_prod_compose_forwards_production_boot_guard_env_to_server():
     compose = (REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    local_compose = (REPO_ROOT / "main" / "tbot-server" / "docker-compose.yml").read_text(encoding="utf-8")
     env_example = (REPO_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
+    deploy_script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(encoding="utf-8")
 
     assert "NODE_ENV: ${NODE_ENV:-production}" in compose
     assert "TBOT_SERVER_AUTH_KEY: ${TBOT_SERVER_AUTH_KEY:?set TBOT_SERVER_AUTH_KEY}" in compose
@@ -74,12 +76,16 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?set TBOT_DEVICE_MINT_SECRET}" in compose
     assert "JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?set JWT_PUBLIC_KEY}" in compose
     assert "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE}" in compose
+    assert "LESSON_ASSET_ALLOWED_ORIGINS: ${LESSON_ASSET_ALLOWED_ORIGINS:?set LESSON_ASSET_ALLOWED_ORIGINS}" in compose
+    assert "LESSON_ASSET_ALLOWED_ORIGINS=${LESSON_ASSET_ALLOWED_ORIGINS:-}" in local_compose
     assert "LESSON_VOICE_RT_P95_DISABLE_MS: ${LESSON_VOICE_RT_P95_DISABLE_MS:-}" in compose
     assert "NODE_ENV=production" in env_example
     assert "TBOT_SERVER_AUTH_KEY=REPLACE_WITH_SHARED_WS_HMAC_SECRET" in env_example
     assert "TBOT_REQUIRE_DEVICE_TOKEN=true" in env_example
     assert "TBOT_DEVICE_MINT_SECRET=REPLACE_WITH_SHARED_DEVICE_MINT_SECRET" in env_example
     assert "JWT_PUBLIC_KEY=REPLACE_WITH_BACKEND_JWT_PUBLIC_KEY" in env_example
+    assert "LESSON_ASSET_ALLOWED_ORIGINS=https://res.cloudinary.com" in env_example
+    assert "TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS" in deploy_script
     assert "LESSON_VOICE_RT_P95_DISABLE_MS=1500" in env_example
     assert "LESSON_ASSET_PACK_LOCAL_ROOT=sd://tbot/lesson-assets" in env_example
     assert "LESSON_ASSET_PACK_MOUNT_ROOT=/opt/tbot-esp32-server/data/lesson-packs" in env_example
@@ -164,6 +170,7 @@ def test_managed_render_blueprint_declares_lesson_runtime_production_posture():
         "JWT_PUBLIC_KEY",
         "TBOT_DEVICE_MINT_SECRET",
         "LESSON_ASSET_ORIGIN_BASE",
+        "LESSON_ASSET_ALLOWED_ORIGINS",
         "TBOT_PUBLIC_WEBSOCKET_URL",
     ):
         assert env[key]["sync"] is False

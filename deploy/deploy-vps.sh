@@ -171,7 +171,7 @@ validate_production_boot_env() {
   local failed key value
   failed=0
 
-  for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE; do
+  for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS; do
     value="$(env_value "${key}" "")"
     if is_placeholder_value "${value}"; then
       printf 'error: %s is required in env file for production boot\n' "${key}" >&2
