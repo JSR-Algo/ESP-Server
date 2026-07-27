@@ -30,6 +30,17 @@ def test_ci_security_scan_uses_the_locally_built_base():
     assert "--build-arg TBOT_SERVER_BASE_IMAGE=tbot-server-base:test" in scan_job
 
 
+def test_ci_security_scan_has_job_scoped_sarif_upload_permission():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    jobs_start = workflow.index("jobs:")
+    global_config = workflow[:jobs_start]
+    scan_start = workflow.index("  security-scan:")
+    scan_job = workflow[scan_start:]
+
+    assert "security-events: write" not in global_config
+    assert "    permissions:\n      contents: read\n      security-events: write" in scan_job
+
+
 def test_server_base_image_installs_torch_pins_from_requirements():
     dockerfile = (ROOT / "Dockerfile-server-base").read_text(encoding="utf-8")
 
