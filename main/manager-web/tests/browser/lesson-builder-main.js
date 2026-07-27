@@ -20,6 +20,8 @@ let steps = [
 const sharedAssets = [{ assetId: '00000000-0000-4000-8000-000000000001', assetKey: 'object.barn', category: 'teachingObject', layer: 'teachingObject', versionId: '00000000-0000-4000-8000-000000000002', version: 2, path: 'sd://shared/barn.png', storagePath: 'sd://shared/barn.png', sha256: 'abc123', bytes: 60000, width: 160, height: 120, usageCount: 4 }];
 const validation = { valid: true, profiles: ['espTft'], budgets: { espTft: { errors: [], warnings: [], metrics: { assetCount: 9, uniqueAssetCount: 7, sharedAssetCount: 2, packBytes: 222000, estimatedVisualPeakBytes: 640000, offlineReady: true, allPathsTerminate: true } } } };
 const visualStates = ['teach', 'listen', 'thinking', 'correct', 'nearMiss', 'incorrect', 'retry', 'celebrate', 'completion'];
+const stateMotions = { teach: 'presentLeft', listen: 'listen', thinking: 'thinking', correct: 'celebrate', nearMiss: 'encourage', incorrect: 'gentle-shake', retry: 'tryAgain', celebrate: 'celebrate', completion: 'celebrate' };
+const robotAsset = { src: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=' };
 const manifest = {
   manifestVersion: 'teebot-lesson-renderer.v2',
   profile: 'espTft',
@@ -28,8 +30,8 @@ const manifest = {
   openingEntrance: { template: 'tvideoFlyWalk', preset: 'flyLandWalkGreet', policy: 'oncePerLessonSession', phases: ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'], fallback: 'staticGreet' },
   pathsTerminate: true,
   steps: [
-    { stepKey: 's1', prompt: 'Meet Pip', scene: {}, teachingWord: { text: 'PET' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: state, overlayKey: state }])) },
-    { stepKey: 's2', prompt: 'Say barn', scene: {}, teachingWord: { text: 'BARN' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: state, overlayKey: state }])) },
+    { stepKey: 's1', prompt: 'Meet Pip', scene: { robotOverlay: { asset: robotAsset } }, teachingWord: { text: 'PET' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: stateMotions[state], overlayKey: state }])) },
+    { stepKey: 's2', prompt: 'Say barn', scene: { robotOverlay: { asset: robotAsset } }, teachingWord: { text: 'BARN' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: stateMotions[state], overlayKey: state }])) },
   ]
 };
 

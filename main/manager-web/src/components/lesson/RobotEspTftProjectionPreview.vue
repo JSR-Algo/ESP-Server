@@ -203,8 +203,9 @@ export default {
       const preset = this.playing && this.projection.presentMotion
         ? this.projection.presentMotion
         : (() => {
-          const command = this.projection.timeline.find((item) => item.label.startsWith('Slave command:'));
-          return command ? command.label.slice('Slave command:'.length).trim() : 'neutral';
+          if (this.projection.motionPreset) return this.projection.motionPreset;
+          const command = this.projection.timeline.find((item) => /^(?:Server motion|Slave command):/.test(item.label));
+          return command ? command.label.replace(/^(?:Server motion|Slave command):\s*/, '') : 'neutral';
         })();
       if (/nod|celebrate|encourage/i.test(preset)) return `motion-nod motion-${this.motionNonce % 2}`;
       if (/shake|tryagain/i.test(preset)) return `motion-shake motion-${this.motionNonce % 2}`;

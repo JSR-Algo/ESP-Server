@@ -96,6 +96,7 @@ rendererV2.steps.push({ ...structuredClone(rendererV2.steps[0]), id: 'second-ste
 for (const state of projection.VISUAL_STATES) {
   const rendered = projection.projectEspTftPreview(rendererV2, 0, state);
   assert.equal(rendered.visualState, state);
+  assert.equal(rendered.motionPreset, `${state} motion`);
   assert.equal(rendered.timeline[1].label, `Server motion: ${state} motion`);
   assert.equal(rendered.layers.find((layer) => layer.id === 'prompt').text, `${state} prompt`);
 }

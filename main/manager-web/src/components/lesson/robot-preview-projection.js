@@ -205,6 +205,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
       ? (safeIndex === 0 && openingCount === 1 ? String(opening.preset || 'opening') : 'none')
       : String(step.entrance || ''),
     presentMotion: String(motion.present || step.motionPreset || robot.pose || ''),
+    motionPreset,
     path,
     visualState,
     stage: ESP_TFT_GEOMETRY.stage,
