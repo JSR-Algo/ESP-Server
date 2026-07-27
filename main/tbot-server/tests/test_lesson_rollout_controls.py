@@ -15,6 +15,7 @@ def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
     for name in (
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
+        "LESSON_RENDERER_V2_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -22,6 +23,7 @@ def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
     config = _apply_lesson_env_overrides({"lesson": {}})
     assert config["lesson"]["motion_presets_enabled"] is False
     assert config["lesson"]["playful_interactions_enabled"] is False
+    assert config["lesson"]["renderer_v2_enabled"] is False
     assert config["lesson"]["rollout_device_allowlist"] == []
 
     monkeypatch.setenv("LESSON_MOTION_PRESETS_ENABLED", "true")
@@ -137,6 +139,26 @@ def test_enabled_rollout_control_requires_exactly_one_device(monkeypatch):
     with pytest.raises(ValueError, match="exactly one device"):
         _apply_lesson_env_overrides({"lesson": {}})
 
+
+def test_renderer_v2_runtime_gate_requires_flag_capability_and_exact_device():
+    enabled = _runtime(
+        lesson={"renderer_v2_enabled": True, "rollout_device_allowlist": ["robot-01"]}
+    )
+    enabled.renderer_capabilities = [
+        "teebot-lesson-renderer.v1",
+        "teebot-lesson-renderer.v2",
+    ]
+    enabled.negotiated_version = "teebot-lesson-renderer.v2"
+    assert enabled._renderer_v2_enabled() is True
+
+    enabled.conn.device_id = "robot-02"
+    assert enabled._renderer_v2_enabled() is False
+    enabled.conn.device_id = "robot-01"
+    enabled.conn.config["lesson"]["renderer_v2_enabled"] = False
+    assert enabled._renderer_v2_enabled() is False
+    enabled.conn.config["lesson"]["renderer_v2_enabled"] = True
+    enabled.renderer_capabilities = ["teebot-lesson-renderer.v1"]
+    assert enabled._renderer_v2_enabled() is False
 
 def test_compose_variants_forward_documented_lesson_rollout_environment():
     root = Path(__file__).resolve().parents[1]

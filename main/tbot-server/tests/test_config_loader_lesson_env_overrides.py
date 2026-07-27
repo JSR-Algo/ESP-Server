@@ -32,6 +32,7 @@ from config.config_loader import (
 
 _LESSON_ENV = (
     "LESSON_RUNTIME_ENABLED",
+    "LESSON_RENDERER_V2_ENABLED",
     "COURSE_BACKEND_URL",
     "LESSON_ASSET_ORIGIN_BASE",
     "LESSON_ASSET_PUBLIC_BASE_URL",
@@ -158,6 +159,28 @@ def test_empty_boolean_env_is_absent_not_false(monkeypatch):
     monkeypatch.setenv("LESSON_SAMPLE_ENABLED", "")
 
     assert _parse_bool_env("LESSON_SAMPLE_ENABLED") is None
+
+
+def test_renderer_v2_defaults_false_and_env_requires_one_normalized_device(monkeypatch):
+    config = _apply_lesson_env_overrides({"lesson": {}})
+    assert config["lesson"]["renderer_v2_enabled"] is False
+
+    monkeypatch.setenv("LESSON_RENDERER_V2_ENABLED", "true")
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", " Robot-01,robot-01 ")
+    config = _apply_lesson_env_overrides({"lesson": {}})
+    assert config["lesson"]["renderer_v2_enabled"] is True
+    assert config["lesson"]["rollout_device_allowlist"] == ["robot-01"]
+
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", "robot-01,robot-02")
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {}})
+
+
+def test_renderer_v2_file_flag_must_be_boolean_and_allowlisted():
+    with pytest.raises(ValueError, match="renderer_v2_enabled"):
+        _apply_lesson_env_overrides({"lesson": {"renderer_v2_enabled": "true"}})
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {"renderer_v2_enabled": True}})
 
 
 def test_all_compose_defaults_disable_sample_lesson():

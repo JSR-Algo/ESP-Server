@@ -511,6 +511,7 @@ async def get_lesson_manifest(
     *,
     token: Optional[str] = None,
     renderer_capabilities: Optional[list] = None,
+    renderer_v2_enabled: bool = False,
     lesson_version: Optional[int] = None,
 ):
     """S6 — GET /v1/lessons/:lessonId/manifest?profile=... Returns ``(manifest, etag)``.
@@ -538,7 +539,14 @@ async def get_lesson_manifest(
         params["version"] = str(int(lesson_version))
     headers = _lesson_auth_headers(token)
     if renderer_capabilities:
-        joined = ",".join(renderer_capabilities)
+        capabilities = [
+            capability
+            for capability in renderer_capabilities
+            if capability != "teebot-lesson-renderer.v2" or renderer_v2_enabled is True
+        ]
+        if not capabilities:
+            capabilities = ["teebot-lesson-renderer.v1"]
+        joined = ",".join(dict.fromkeys(capabilities))
         params["rendererCapabilities"] = joined
         headers["X-Renderer-Capabilities"] = joined
     # Route through the shared retry helper (transient 5xx/network blips no longer

@@ -6227,14 +6227,56 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "renderer": ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"],
             }
         )
+        conn.device_id = "robot-01"
+        conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
         manifest = _build_manifest()
         manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+        manifest["openingEntrance"] = {
+            "preset": "flyLandWalkGreet",
+            "policy": "oncePerLessonSession",
+            "layoutPreset": "centerRoad",
+            "backgroundAssetKey": "scene.farm",
+            "robotAssetKey": "robotOverlay.teach",
+            "fallback": "staticGreet",
+        }
         rt = self._runtime(conn=conn, manifest=manifest)
         await rt.start()
         self.assertEqual(rt.negotiated_version, "teebot-lesson-renderer.v2")
         prepare = self._sent_frames(conn)[0]
         self.assertEqual(prepare["type"], "lesson_prepare")
         self.assertEqual(prepare["protocolVersion"], "teebot-lesson-renderer.v2")
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        start = self._sent_frames(conn)[-1]
+        self.assertEqual(start["type"], "lesson_start")
+        self.assertEqual(start["body"]["openingEntrance"], manifest["openingEntrance"])
+        self.assertEqual(
+            start["body"]["runtimeControls"],
+            {
+                "openingEntranceEnabled": True,
+                "visualStateEventsEnabled": True,
+                "physicalMotionOwner": "server",
+            },
+        )
+
+    async def test_v2_manifest_is_rejected_when_server_rollout_gate_is_off(self):
+        conn = _FakeConn(
+            features={
+                "lesson": True,
+                "renderer": ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"],
+            }
+        )
+        manifest = _build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+        rt = self._runtime(conn=conn, manifest=manifest)
+        with self.assertRaises(LessonError):
+            await rt.start()
+        self.assertEqual(conn.websocket.sent, [])
 
 
 # ── L3 P3 manifest-fetch capability forwarding ───────────────────────────────────
@@ -6316,12 +6358,33 @@ class LessonManifestCapabilityFetchTest(unittest.IsolatedAsyncioTestCase):
         client = _CapRecordingClient(self.manifest)
         caps = ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"]
         await self.mac.get_lesson_manifest(
-            client, "http://backend.test/v1", "L", "espTft", renderer_capabilities=caps
+            client,
+            "http://backend.test/v1",
+            "L",
+            "espTft",
+            renderer_capabilities=caps,
+            renderer_v2_enabled=True,
         )
         call = client.calls[0]
         joined = "teebot-lesson-renderer.v1,teebot-lesson-renderer.v2"
         self.assertEqual(call["params"].get("rendererCapabilities"), joined)
         self.assertEqual(call["headers"].get("X-Renderer-Capabilities"), joined)
+
+    async def test_v2_capability_is_filtered_when_rollout_gate_is_off(self):
+        client = _CapRecordingClient(self.manifest)
+        await self.mac.get_lesson_manifest(
+            client,
+            "http://backend.test/v1",
+            "L",
+            "espTft",
+            renderer_capabilities=[
+                "teebot-lesson-renderer.v1",
+                "teebot-lesson-renderer.v2",
+            ],
+        )
+        call = client.calls[0]
+        self.assertEqual(call["params"]["rendererCapabilities"], "teebot-lesson-renderer.v1")
+        self.assertEqual(call["headers"]["X-Renderer-Capabilities"], "teebot-lesson-renderer.v1")
 
     async def test_assignment_lesson_version_is_forwarded_as_manifest_version_query_param(self):
         client = _CapRecordingClient(self.manifest)

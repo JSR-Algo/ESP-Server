@@ -32,6 +32,8 @@ manifest / fakes) by importing its helpers, so every assertion runs against the 
 import os
 import sys
 import unittest
+import asyncio
+import json
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -72,6 +74,31 @@ class RuntimeCloseBranchTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(asset_cache.closed)
         self.assertTrue(rt._closed)
 
+    async def test_close_rejects_all_visual_waiters_and_increments_generation(self):
+        rt = _runtime()
+        rt.negotiated_version = "teebot-lesson-renderer.v2"
+        rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        rt.conn.device_id = "robot-01"
+        rt.conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        task = asyncio.create_task(rt.send_visual_state("thinking", overlay_key="thinking"))
+        await asyncio.sleep(0)
+        generation = rt._visual_generation
+        self.assertEqual(len(rt._visual_ack_waiters), 1)
+
+        await rt.close()
+        result = await task
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(rt._visual_generation, generation + 1)
+        self.assertEqual(rt._visual_ack_waiters, {})
+        self.assertEqual(rt._visual_ack_timeout_tasks, {})
+
     # ── 346->exit: close with no asset cache is a clean no-op tail ────────────────
     async def test_close_without_asset_cache_is_clean(self):
         forwarder = T._FakeForwarder()
@@ -83,6 +110,149 @@ class RuntimeCloseBranchTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(forwarder.closed)
         self.assertTrue(rt._closed)
 
+
+class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.rt = _runtime()
+        self.rt.negotiated_version = "teebot-lesson-renderer.v2"
+        self.rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        self.rt.conn.device_id = "robot-01"
+        self.rt.conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        self.rt.state = S_RUNNING
+        self.rt._step_id = "s4"
+
+    def _ack(self, server_sequence, inbound_sequence, *, generation, **body):
+        return {
+            "type": "lesson_ack",
+            "protocolVersion": "teebot-lesson-renderer.v2",
+            "assignmentId": self.rt.assignment_id,
+            "sessionId": self.rt.session_id,
+            "stepId": "s4",
+            "sequence": inbound_sequence,
+            "body": {
+                "acks": server_sequence,
+                "accepted": True,
+                "degraded": False,
+                "degradedReason": None,
+                "visualGeneration": generation,
+                **body,
+            },
+        }
+
+    async def test_independent_sequences_resolve_only_the_correlated_waiter(self):
+        first = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        second = asyncio.create_task(self.rt.send_visual_state("listen"))
+        await asyncio.sleep(0)
+        frames = [json.loads(item) for item in self.rt.conn.websocket.sent]
+        visual = [frame for frame in frames if frame["type"] == "lesson_visual_state"]
+        first_seq, second_seq = visual[-2]["sequence"], visual[-1]["sequence"]
+        generation = visual[-1]["body"]["visualGeneration"]
+
+        await self.rt.on_lesson_ack(self._ack(second_seq, 1, generation=generation))
+        await asyncio.sleep(0)
+        self.assertTrue(second.done())
+        self.assertFalse(first.done())
+        await self.rt.on_lesson_ack(self._ack(first_seq, 2, generation=generation))
+
+        self.assertTrue((await first).accepted)
+        self.assertTrue((await second).accepted)
+
+    async def test_wrong_generation_and_negative_ack_are_no_motion_noops(self):
+        task = asyncio.create_task(
+            self.rt.send_visual_state("incorrect", motion_preset="tryAgain")
+        )
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+        seq = frame["sequence"]
+        generation = frame["body"]["visualGeneration"]
+
+        await self.rt.on_lesson_ack(self._ack(seq, 1, generation=generation + 1))
+        self.assertFalse(task.done())
+        await self.rt.on_lesson_ack(
+            self._ack(
+                seq,
+                2,
+                generation=generation,
+                accepted=False,
+                degraded=False,
+                degradedReason="unsupportedContract",
+            )
+        )
+        result = await task
+        self.assertFalse(result.accepted)
+        self.assertIsNone(self.rt._motion_task)
+
+    async def test_timeout_retries_once_with_new_sequence_same_generation(self):
+        sleeps = []
+
+        async def immediate_sleep(delay):
+            sleeps.append(delay)
+
+        self.rt._sleep = immediate_sleep
+        self.rt.conn.config["lesson"]["frame_ack_timeout_sec"] = 0.01
+        result = await self.rt.send_visual_state("thinking")
+        frames = [
+            json.loads(item)
+            for item in self.rt.conn.websocket.sent
+            if json.loads(item)["type"] == "lesson_visual_state"
+        ]
+        self.assertEqual(len(frames), 2)
+        self.assertNotEqual(frames[0]["sequence"], frames[1]["sequence"])
+        self.assertEqual(
+            frames[0]["body"]["visualGeneration"],
+            frames[1]["body"]["visualGeneration"],
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(len(sleeps), 2)
+
+    async def test_pause_cancels_waiter_without_completing_step_and_resume_resends(self):
+        self.rt._step_completed = False
+        task = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        await asyncio.sleep(0)
+        old_generation = self.rt._visual_generation
+
+        await self.rt.pause()
+        paused = await task
+        self.assertFalse(paused.accepted)
+        self.assertFalse(self.rt._step_completed)
+        self.assertEqual(self.rt._visual_generation, old_generation)
+
+        resume = asyncio.create_task(self.rt.resume())
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+        self.assertEqual(frame["type"], "lesson_visual_state")
+        self.assertEqual(frame["body"]["visualGeneration"], old_generation + 1)
+        await self.rt.on_lesson_ack(
+            self._ack(frame["sequence"], 1, generation=old_generation + 1)
+        )
+        self.assertTrue((await resume).accepted)
+
+    async def test_pause_after_ack_resolution_prevents_stale_motion_dispatch(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+        task = asyncio.create_task(
+            self.rt.send_visual_state("correct", motion_preset="celebrate")
+        )
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+
+        await self.rt.on_lesson_ack(
+            self._ack(
+                frame["sequence"],
+                1,
+                generation=frame["body"]["visualGeneration"],
+            )
+        )
+        await self.rt.pause()
+        result = await task
+
+        self.assertTrue(result.accepted)
+        self.assertIsNone(self.rt._motion_task)
 
 class ProgressNonCompletionBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 408->exit: a non-step_completed progress event is forwarded but not latched ─

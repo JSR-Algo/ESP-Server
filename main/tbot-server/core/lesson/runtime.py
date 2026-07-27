@@ -24,6 +24,7 @@ import math
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
@@ -61,6 +62,28 @@ SD_ASSET_SYNC_TIMEOUT_SEC = 120
 MAX_LESSON_FRAME_BYTES = 16 * 1024
 
 NO_CURRENT_ASSIGNMENT_MESSAGE = "Robot chưa có bài học nào được giao."
+RENDERER_V2 = "teebot-lesson-renderer.v2"
+VISUAL_DEGRADED_REASONS = frozenset(
+    {
+        "missingOverlay",
+        "animationStartFailed",
+        "phaseTimeout",
+        "reducedMotion",
+        "unsupportedContract",
+        "assetIdentityMismatch",
+        "insufficientHeap",
+    }
+)
+
+
+@dataclass(frozen=True)
+class VisualAckResult:
+    accepted: bool
+    degraded: bool
+    degraded_reason: Optional[str]
+    sequence: Optional[int]
+    visual_generation: int
+    timed_out: bool = False
 
 
 def _set_lesson_start_status(conn: Any, code: str, message: str = "", *, reason: str = "") -> None:
@@ -784,6 +807,19 @@ def lesson_asset_public_base_url(config: Dict[str, Any]) -> str:
     return ""
 
 
+def _renderer_v2_request_enabled(conn: Any, renderer_capabilities: List[str]) -> bool:
+    config = getattr(conn, "config", {}) or {}
+    lesson_cfg = _lesson_config(config)
+    allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+    device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
+    return (
+        lesson_cfg.get("renderer_v2_enabled") is True
+        and RENDERER_V2 in renderer_capabilities
+        and len(allowlist) == 1
+        and device_id == str(allowlist[0]).strip().lower()
+    )
+
+
 class LessonRuntime:
     """Per-device lesson session state, held on ``ConnectionHandler.lesson_runtime``.
 
@@ -865,6 +901,10 @@ class LessonRuntime:
         self._preload_task: Optional[asyncio.Task] = None
         self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
+        self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
+        self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
+        self._visual_generation = 1
+        self._current_visual_request: Optional[Dict[str, Any]] = None
         self._step_timeout_task: Optional[asyncio.Task] = None
         self._passive_dwell_task: Optional[asyncio.Task] = None
         self._child_response_timeout_task: Optional[asyncio.Task] = None
@@ -919,7 +959,9 @@ class LessonRuntime:
         # no crash) — the structural guard that survives a future v2 renderer. Net
         # effect today is identical to the old ``!= PROTOCOL_VERSION`` check.
         manifest_version = self.manifest.get("manifestVersion")
-        if manifest_version not in self.renderer_capabilities:
+        if manifest_version not in self.renderer_capabilities or (
+            manifest_version == RENDERER_V2 and not self._renderer_v2_rollout_enabled()
+        ):
             self.last_error = LessonError(
                 LESSON_VERSION_UNSUPPORTED, f"unsupported manifestVersion {manifest_version!r}"
             )
@@ -962,6 +1004,7 @@ class LessonRuntime:
 
     async def close(self) -> None:
         self._closed = True
+        self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
         self._cancel_frame_ack_timeout()
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
@@ -999,6 +1042,24 @@ class LessonRuntime:
         candidate = getattr(self.conn, "lesson_runtime_candidate", None)
         return candidate is self and current is not None and current is not self
 
+    def _renderer_v2_rollout_enabled(self) -> bool:
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = _lesson_config(config)
+        if lesson_cfg.get("renderer_v2_enabled") is not True:
+            return False
+        allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+        if len(allowlist) != 1:
+            return False
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
+        return bool(device_id and device_id == str(allowlist[0]).strip().lower())
+
+    def _renderer_v2_enabled(self) -> bool:
+        return (
+            self._renderer_v2_rollout_enabled()
+            and RENDERER_V2 in self.renderer_capabilities
+            and self.negotiated_version == RENDERER_V2
+        )
+
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
         if not callable(replay):
@@ -1019,6 +1080,8 @@ class LessonRuntime:
 
     async def on_lesson_ack(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
+            return
+        if await self._resolve_visual_ack(msg_json):
             return
         if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
             return  # terminal is absorbing — no late frame can resurrect/override it
@@ -1047,6 +1110,51 @@ class LessonRuntime:
         self._cancel_frame_ack_timeout()
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
+
+    async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
+        body = msg_json.get("body")
+        if not isinstance(body, dict):
+            return False
+        acked = _coerce_ack_seq(body.get("acks"))
+        waiter = self._visual_ack_waiters.get(acked) if acked is not None else None
+        if waiter is None:
+            return False
+        if (
+            msg_json.get("type") != "lesson_ack"
+            or msg_json.get("protocolVersion") != RENDERER_V2
+            or msg_json.get("assignmentId") != self.assignment_id
+            or msg_json.get("sessionId") != self.session_id
+            or msg_json.get("stepId") != self._step_id
+        ):
+            return True
+        if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+            return True
+        expected_generation = getattr(waiter, "visual_generation", None)
+        generation = body.get("visualGeneration")
+        if type(generation) is not int or generation != expected_generation:
+            return True
+        accepted = body.get("accepted")
+        degraded = body.get("degraded")
+        reason = body.get("degradedReason")
+        if type(accepted) is not bool or type(degraded) is not bool:
+            return True
+        valid_reason = isinstance(reason, str) and reason in VISUAL_DEGRADED_REASONS
+        if accepted:
+            if degraded != valid_reason or (not degraded and reason is not None):
+                return True
+        elif degraded or not valid_reason:
+            return True
+        if not waiter.done():
+            waiter.set_result(
+                VisualAckResult(
+                    accepted=accepted,
+                    degraded=degraded,
+                    degraded_reason=reason,
+                    sequence=acked,
+                    visual_generation=generation,
+                )
+            )
+        return True
 
     def _forward_lesson_step_ack_telemetry(
         self,
@@ -1436,6 +1544,7 @@ class LessonRuntime:
         # A firmware-reported error on the active step fails the run (slice scope).
         if self.state in (S_RUNNING, S_PRELOADING):
             self.state = S_FAILED
+            self._cancel_visual_waiters(increment_generation=True, reason="lessonError")
             self._cancel_step_timeout()
             self._cancel_child_response_timeout()
             await self._notify_lesson_terminal("lesson_error")
@@ -1460,7 +1569,7 @@ class LessonRuntime:
             if self._use_sd_asset_pack():
                 self.state = S_READY
                 self._forward({"type": "preload_ready"})
-                await self._emit("lesson_start", body={})
+                await self._emit("lesson_start", body=self._start_body())
                 return
             # Prepare delivered -> begin the download+verify (D-PRELOAD-OWNER).
             self._preload_task = asyncio.create_task(self._run_preload())
@@ -1516,6 +1625,7 @@ class LessonRuntime:
             await self._maybe_finish_step()
         elif ftype == "lesson_stop":
             self.state = S_COMPLETED
+            self._cancel_visual_waiters(increment_generation=True, reason="lessonStopped")
             self._log("info", f"lesson_completed stepsCompleted={self._steps_completed}")
             self._forward(
                 {
@@ -1542,6 +1652,10 @@ class LessonRuntime:
                 f"ignoring non-terminal lesson notify reason={reason} state={self.state}",
             )
             return
+        if self.state == S_PAUSED:
+            self._cancel_visual_waiters(increment_generation=False, reason="paused")
+        elif self._visual_ack_waiters:
+            self._cancel_visual_waiters(increment_generation=True, reason=reason)
         # Every S_FAILED path routes through here. Forward ONE durable terminal
         # lesson_failed (the forwarder classifies it terminal -> stored + reconnect
         # -replayed) so the backend assignment leaves its single-active slot and
@@ -1667,7 +1781,7 @@ class LessonRuntime:
         self.state = S_READY
         self._forward({"type": "preload_ready"})
         # Start gate satisfied -> now (and only now) emit lesson_start (seq 2).
-        await self._emit("lesson_start", body={})
+        await self._emit("lesson_start", body=self._start_body())
 
     async def _preload_sd_asset_pack_before_prepare(self) -> bool:
         """Materialize verified SD-pack files before asking firmware to attest them."""
@@ -2253,6 +2367,155 @@ class LessonRuntime:
         self._seq += 1
         return self._seq
 
+    async def send_visual_state(
+        self,
+        state: str,
+        *,
+        overlay_key: Optional[str] = None,
+        motion_preset: Optional[str] = None,
+    ) -> VisualAckResult:
+        generation = self._visual_generation
+        request = {
+            "state": state,
+            "overlay_key": overlay_key,
+            "motion_preset": motion_preset,
+        }
+        self._current_visual_request = request
+        if not self._renderer_v2_enabled() or self._closed:
+            return VisualAckResult(False, False, "unsupportedContract", None, generation)
+
+        result = await self._send_visual_state_attempt(request, generation)
+        if result.timed_out and generation == self._visual_generation and not self._closed:
+            result = await self._send_visual_state_attempt(request, generation)
+        if (
+            result.accepted
+            and motion_preset
+            and generation == self._visual_generation
+            and self._is_active_runtime()
+            and self.state == S_RUNNING
+        ):
+            self._dispatch_visual_motion(motion_preset, generation)
+        return result
+
+    async def _send_visual_state_attempt(
+        self, request: Dict[str, Any], generation: int
+    ) -> VisualAckResult:
+        seq = self._next_seq()
+        body = {
+            "state": request["state"],
+            "overlayKey": request.get("overlay_key"),
+            "motionPreset": request.get("motion_preset"),
+            "visualGeneration": generation,
+        }
+        frame = self._envelope(
+            "lesson_visual_state", step_id=self._step_id, sequence=seq, body=body
+        )
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        waiter.visual_generation = generation
+        self._visual_ack_waiters[seq] = waiter
+
+        async def timeout() -> None:
+            try:
+                await self._sleep(self._frame_ack_timeout_sec())
+            except asyncio.CancelledError:
+                return
+            if not waiter.done():
+                waiter.set_result(
+                    VisualAckResult(
+                        False,
+                        False,
+                        "phaseTimeout",
+                        seq,
+                        generation,
+                        timed_out=True,
+                    )
+                )
+
+        timeout_task = asyncio.create_task(timeout())
+        self._visual_ack_timeout_tasks[seq] = timeout_task
+        try:
+            await self._send(json.dumps(frame, ensure_ascii=False))
+            return await waiter
+        finally:
+            self._visual_ack_waiters.pop(seq, None)
+            task = self._visual_ack_timeout_tasks.pop(seq, None)
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+
+    def _cancel_visual_waiters(self, *, increment_generation: bool, reason: str) -> None:
+        if increment_generation:
+            self._visual_generation += 1
+        for seq, waiter in list(self._visual_ack_waiters.items()):
+            if not waiter.done():
+                waiter.set_result(
+                    VisualAckResult(
+                        False,
+                        False,
+                        "unsupportedContract",
+                        seq,
+                        getattr(waiter, "visual_generation", self._visual_generation),
+                    )
+                )
+        for task in list(self._visual_ack_timeout_tasks.values()):
+            if not task.done():
+                task.cancel()
+
+    async def pause(self) -> None:
+        self.state = S_PAUSED
+        self._cancel_visual_waiters(increment_generation=False, reason="paused")
+
+    async def resume(self) -> VisualAckResult:
+        self.state = S_RUNNING
+        self._visual_generation += 1
+        request = self._current_visual_request
+        if request is None:
+            return VisualAckResult(
+                False, False, "unsupportedContract", None, self._visual_generation
+            )
+        return await self.send_visual_state(**request)
+
+    async def stop(self) -> None:
+        self._cancel_visual_waiters(increment_generation=True, reason="stopped")
+        if self.state not in (S_FAILED, S_COMPLETED):
+            await self._emit("lesson_stop", body={"reason": "STOPPED"})
+
+    async def on_disconnect(self) -> None:
+        self._cancel_visual_waiters(increment_generation=True, reason="disconnected")
+
+    async def on_replaced(self) -> None:
+        self._cancel_visual_waiters(increment_generation=True, reason="replaced")
+
+    def _dispatch_visual_motion(self, preset: str, visual_generation: int) -> None:
+        if not self._lesson_rollout_control_enabled("motion_presets_enabled"):
+            return
+        self._motion_generation += 1
+        motion_generation = self._motion_generation
+        previous = self._motion_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def run() -> None:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            if (
+                self._closed
+                or visual_generation != self._visual_generation
+                or motion_generation != self._motion_generation
+            ):
+                return
+            try:
+                await dispatch_motion_preset(self.conn, preset)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    f"lesson_motion_dispatch outcome=failed preset={preset} error={type(exc).__name__}",
+                )
+
+        self._motion_task = asyncio.create_task(run())
+
     def _envelope(self, frame_type: str, *, step_id: Optional[str], sequence: int, body: Dict[str, Any]) -> Dict[str, Any]:
         # The frozen §5.2 envelope, key order matching the S2 fixture. The
         # protocolVersion is the NEGOTIATED renderer version (the served
@@ -2433,6 +2696,21 @@ class LessonRuntime:
                         manifest_checksum=self.manifest_checksum,
                     )
                 )
+        return body
+
+    def _start_body(self) -> Dict[str, Any]:
+        if not self._renderer_v2_enabled():
+            return {}
+        opening = self.manifest.get("openingEntrance")
+        body: Dict[str, Any] = {
+            "runtimeControls": {
+                "openingEntranceEnabled": isinstance(opening, dict),
+                "visualStateEventsEnabled": True,
+                "physicalMotionOwner": "server",
+            }
+        }
+        if isinstance(opening, dict):
+            body["openingEntrance"] = copy.deepcopy(opening)
         return body
 
     @staticmethod
@@ -3004,6 +3282,12 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # manifest this device can render. The runtime re-derives the same set from
     # conn.features for its start() gate; computing it here keeps the fetch honest.
     renderer_capabilities = _device_caps(getattr(conn, "features", None))
+    renderer_v2_enabled = _renderer_v2_request_enabled(conn, renderer_capabilities)
+    requested_renderer_capabilities = (
+        renderer_capabilities
+        if renderer_v2_enabled
+        else [PROTOCOL_VERSION]
+    )
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(15.0),
@@ -3177,15 +3461,30 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 return None
         profile = assignment.get("profile", "espTft")
         try:
-            manifest, etag = await backend_api.get_lesson_manifest(
-                client,
-                base_url,
-                assignment.get("lessonId"),
-                profile,
-                token=token,
-                renderer_capabilities=renderer_capabilities,
-                lesson_version=assignment.get("lessonVersion"),
-            )
+            manifest_kwargs = {
+                "token": token,
+                "renderer_capabilities": requested_renderer_capabilities,
+                "lesson_version": assignment.get("lessonVersion"),
+            }
+            try:
+                manifest, etag = await backend_api.get_lesson_manifest(
+                    client,
+                    base_url,
+                    assignment.get("lessonId"),
+                    profile,
+                    renderer_v2_enabled=renderer_v2_enabled,
+                    **manifest_kwargs,
+                )
+            except TypeError as exc:
+                if "renderer_v2_enabled" not in str(exc):
+                    raise
+                manifest, etag = await backend_api.get_lesson_manifest(
+                    client,
+                    base_url,
+                    assignment.get("lessonId"),
+                    profile,
+                    **manifest_kwargs,
+                )
         except Exception as exc:
             _backend_unavailable("manifest", exc)
             return None
