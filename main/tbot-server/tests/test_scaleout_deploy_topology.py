@@ -85,6 +85,18 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "LESSON_ASSET_PACK_MOUNT_ROOT=/opt/tbot-esp32-server/data/lesson-packs" in env_example
 
 
+def test_prod_deploy_wires_renderer_v2_flag_defaulting_disabled():
+    compose = yaml.safe_load((REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8"))
+    env_example = (REPO_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
+    script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(encoding="utf-8")
+
+    environment = compose["services"]["tbot-esp32-server"]["environment"]
+
+    assert environment["LESSON_RENDERER_V2_ENABLED"] == "${LESSON_RENDERER_V2_ENABLED:-false}"
+    assert "LESSON_RENDERER_V2_ENABLED=false" in env_example
+    assert "LESSON_RENDERER_V2_ENABLED" in script
+
+
 def test_server_healthcheck_proves_both_http_and_websocket_listeners():
     compose = yaml.safe_load((REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text())
     command = compose["services"]["tbot-esp32-server"]["healthcheck"]["test"][-1]
@@ -103,6 +115,7 @@ def test_deploy_waits_for_every_server_replica_to_be_healthy():
 def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
     readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
     assert '-e "REDIS_URL=$REDIS_URL"' in readme
+    assert '-e "LESSON_RENDERER_V2_ENABLED=$LESSON_RENDERER_V2_ENABLED"' in readme
     assert '-e "LESSON_ASSET_PACK_LOCAL_ROOT=$LESSON_ASSET_PACK_LOCAL_ROOT"' in readme
     assert '-e "LESSON_ASSET_PACK_MOUNT_ROOT=$LESSON_ASSET_PACK_MOUNT_ROOT"' in readme
     assert '-v "$TBOT_REMOTE_ROOT/data/lesson-packs:$LESSON_ASSET_PACK_MOUNT_ROOT"' in readme
@@ -246,6 +259,31 @@ def test_deploy_vps_preflight_rejects_missing_production_boot_env(tmp_path):
         (
             {
                 "LESSON_RUNTIME_ENABLED": "false",
+                "LESSON_RENDERER_V2_ENABLED": "true",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
+            },
+            "renderer v2 cannot be true while LESSON_RUNTIME_ENABLED is false",
+        ),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "true",
+                "LESSON_RENDERER_V2_ENABLED": "true",
+                "LESSON_ASSET_DELIVERY_MODE": "sd_pack",
+                "LESSON_ASSET_PACK_LOCAL_ROOT": "sd://tbot/lesson-assets",
+                "LESSON_ASSET_PACK_MOUNT_ROOT": "/opt/tbot-esp32-server/data/lesson-packs",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01,robot-02",
+            },
+            "LESSON_ROLLOUT_DEVICE_ALLOWLIST must contain exactly one",
+        ),
+        (
+            {
+                "LESSON_RENDERER_V2_ENABLED": "sometimes",
+            },
+            "LESSON_RENDERER_V2_ENABLED must be exactly true or false",
+        ),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "false",
                 "LESSON_MOTION_PRESETS_ENABLED": "true",
                 "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
             },
@@ -274,6 +312,7 @@ def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides,
         "LESSON_ASSET_ORIGIN_BASE": "https://assets.example.com",
         "LESSON_SAMPLE_ENABLED": "false",
         "LESSON_RUNTIME_ENABLED": "false",
+        "LESSON_RENDERER_V2_ENABLED": "false",
         "LESSON_MOTION_PRESETS_ENABLED": "false",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED": "false",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "",

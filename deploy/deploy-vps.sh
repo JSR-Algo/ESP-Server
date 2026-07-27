@@ -188,14 +188,15 @@ validate_production_boot_env() {
     failed=1
   fi
 
-  local lesson_runtime lesson_sample lesson_motion lesson_playful rollout_allowlist rollout_count
+  local lesson_runtime lesson_sample lesson_renderer_v2 lesson_motion lesson_playful rollout_allowlist rollout_count
   lesson_runtime="$(env_value LESSON_RUNTIME_ENABLED "false")"
   lesson_sample="$(env_value LESSON_SAMPLE_ENABLED "false")"
+  lesson_renderer_v2="$(env_value LESSON_RENDERER_V2_ENABLED "false")"
   lesson_motion="$(env_value LESSON_MOTION_PRESETS_ENABLED "false")"
   lesson_playful="$(env_value LESSON_PLAYFUL_INTERACTIONS_ENABLED "false")"
   rollout_allowlist="$(env_value LESSON_ROLLOUT_DEVICE_ALLOWLIST "")"
 
-  for key in LESSON_RUNTIME_ENABLED LESSON_SAMPLE_ENABLED LESSON_MOTION_PRESETS_ENABLED LESSON_PLAYFUL_INTERACTIONS_ENABLED; do
+  for key in LESSON_RUNTIME_ENABLED LESSON_SAMPLE_ENABLED LESSON_RENDERER_V2_ENABLED LESSON_MOTION_PRESETS_ENABLED LESSON_PLAYFUL_INTERACTIONS_ENABLED; do
     value="$(env_value "${key}" "false")"
     if [[ "${value}" != "true" && "${value}" != "false" ]]; then
       printf 'error: %s must be exactly true or false\n' "${key}" >&2
@@ -208,6 +209,10 @@ validate_production_boot_env() {
   fi
   if [[ "${lesson_runtime}" == "false" && ( "${lesson_motion}" == "true" || "${lesson_playful}" == "true" ) ]]; then
     printf 'error: lesson motion/playful controls cannot be true while LESSON_RUNTIME_ENABLED is false\n' >&2
+    failed=1
+  fi
+  if [[ "${lesson_runtime}" == "false" && "${lesson_renderer_v2}" == "true" ]]; then
+    printf 'error: renderer v2 cannot be true while LESSON_RUNTIME_ENABLED is false\n' >&2
     failed=1
   fi
   if [[ "${lesson_runtime}" == "true" ]]; then

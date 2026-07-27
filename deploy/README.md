@@ -237,9 +237,10 @@ Knobs that MUST be passed by any manual run so it matches compose:
 - `SPRING_DATA_REDIS_HOST` / `SPRING_DATA_REDIS_PORT` / **`SPRING_DATA_REDIS_PASSWORD`**
   (must equal `REDIS_PASSWORD`; Redis must run `--requirepass "$REDIS_PASSWORD"`)
 - `NESTJS_UPSTREAM_HOST` / `NESTJS_TOKEN` (the `/nestjs` course-CMS proxy upstream)
-- `LESSON_RUNTIME_ENABLED`, `LESSON_SAMPLE_ENABLED`, `LESSON_ASSET_DELIVERY_MODE`,
-  `LESSON_MOTION_PRESETS_ENABLED`, `LESSON_PLAYFUL_INTERACTIONS_ENABLED`, and
-  `LESSON_ROLLOUT_DEVICE_ALLOWLIST`. Production defaults are dark; the initial
+- `LESSON_RUNTIME_ENABLED`, `LESSON_SAMPLE_ENABLED`, `LESSON_RENDERER_V2_ENABLED`,
+  `LESSON_ASSET_DELIVERY_MODE`, `LESSON_MOTION_PRESETS_ENABLED`,
+  `LESSON_PLAYFUL_INTERACTIONS_ENABLED`, and `LESSON_ROLLOUT_DEVICE_ALLOWLIST`.
+  Production defaults are dark; the initial
   enabled rollout requires `sd_pack` and exactly one device.
 
 > Prefer compose. Reach for the manual fallback only when Compose v1 cannot
@@ -291,6 +292,7 @@ NESTJS_TOKEN="${NESTJS_TOKEN:-}"
 REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
 LESSON_RUNTIME_ENABLED="${LESSON_RUNTIME_ENABLED:-false}"
 LESSON_SAMPLE_ENABLED="${LESSON_SAMPLE_ENABLED:-false}"
+LESSON_RENDERER_V2_ENABLED="${LESSON_RENDERER_V2_ENABLED:-false}"
 LESSON_ASSET_DELIVERY_MODE="${LESSON_ASSET_DELIVERY_MODE:-}"
 LESSON_MOTION_PRESETS_ENABLED="${LESSON_MOTION_PRESETS_ENABLED:-false}"
 LESSON_PLAYFUL_INTERACTIONS_ENABLED="${LESSON_PLAYFUL_INTERACTIONS_ENABLED:-false}"
@@ -299,6 +301,10 @@ LESSON_ASSET_PACK_LOCAL_ROOT="${LESSON_ASSET_PACK_LOCAL_ROOT:-sd://tbot/lesson-a
 LESSON_ASSET_PACK_MOUNT_ROOT="${LESSON_ASSET_PACK_MOUNT_ROOT:-/opt/tbot-esp32-server/data/lesson-packs}"
 
 [ "$LESSON_SAMPLE_ENABLED" = false ] || { echo "LESSON_SAMPLE_ENABLED must be false in production" >&2; exit 1; }
+if [ "$LESSON_RENDERER_V2_ENABLED" = true ] && [ "$LESSON_RUNTIME_ENABLED" != true ]; then
+  echo "renderer v2 requires LESSON_RUNTIME_ENABLED=true" >&2
+  exit 1
+fi
 if [ "$LESSON_RUNTIME_ENABLED" = true ]; then
   [ "$LESSON_ASSET_DELIVERY_MODE" = sd_pack ] || { echo "enabled lessons require sd_pack" >&2; exit 1; }
   [ "$(printf '%s' "$LESSON_ROLLOUT_DEVICE_ALLOWLIST" | awk -F, '{c=0; for(i=1;i<=NF;i++) if($i~/[^[:space:]]/) c++; print c}')" -eq 1 ] || { echo "enabled lessons require exactly one rollout device" >&2; exit 1; }
@@ -328,6 +334,7 @@ docker run -d --name tbot-esp32-server --restart unless-stopped \
   -e "LESSON_ASSET_ORIGIN_BASE=$LESSON_ASSET_ORIGIN_BASE" \
   -e "LESSON_RUNTIME_ENABLED=$LESSON_RUNTIME_ENABLED" \
   -e "LESSON_SAMPLE_ENABLED=$LESSON_SAMPLE_ENABLED" \
+  -e "LESSON_RENDERER_V2_ENABLED=$LESSON_RENDERER_V2_ENABLED" \
   -e "LESSON_ASSET_DELIVERY_MODE=$LESSON_ASSET_DELIVERY_MODE" \
   -e "LESSON_MOTION_PRESETS_ENABLED=$LESSON_MOTION_PRESETS_ENABLED" \
   -e "LESSON_PLAYFUL_INTERACTIONS_ENABLED=$LESSON_PLAYFUL_INTERACTIONS_ENABLED" \
