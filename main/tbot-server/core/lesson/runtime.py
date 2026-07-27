@@ -1437,7 +1437,11 @@ class LessonRuntime:
 
     async def on_child_response_failure(self, reason: str = "stt_failure") -> bool:
         """Typed no-transcript hook for voice providers and timeout integrations."""
-        if not self._uses_safe_speaking() or not self._child_response_window_still_current(
+        if not self._uses_safe_speaking():
+            return False
+        if self._renderer_v2_enabled() and not self._step_visuals_ready:
+            return False
+        if not self._child_response_window_open or not self._child_response_window_still_current(
             self._step_id, self._step_seq
         ):
             return False
@@ -2548,7 +2552,12 @@ class LessonRuntime:
             return False
         if preset:
             await self._dispatch_motion_once(preset, generation, step_id)
-        return True
+        return self._visual_transition_is_current(
+            generation,
+            assignment_id=assignment_id,
+            session_id=session_id,
+            step_id=step_id,
+        )
 
     async def _apply_authored_visual_then_motion(
         self, state: str, motion_slot: Optional[str]
@@ -2785,6 +2794,40 @@ class LessonRuntime:
         session_id = self.session_id
         step_id = self._step_id
         result = await self.send_visual_state(**request)
+        if (
+            self._step_acked
+            and not self._step_completed
+            and result.accepted
+            and result.visual_generation == generation
+            and self._visual_transition_is_current(
+                generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            )
+        ):
+            preset = request.get("motion_preset")
+            if isinstance(preset, str) and preset:
+                await self._dispatch_motion_once(preset, generation, step_id)
+            if not self._visual_transition_is_current(
+                generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            ):
+                return result
+            if not self._step_passive and request.get("state") != "listen":
+                if not await self._apply_authored_visual_then_motion("listen", "listen"):
+                    return result
+                generation = self._visual_generation
+            await self._continue_after_step_visuals(
+                step_id,
+                self._step_seq,
+                visual_generation=generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+            )
+            return result
         if (
             self._step_acked
             and self._step_completed

@@ -324,6 +324,31 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ("correct", "robotOverlay.thinking", "celebrate"),
         )
 
+    async def test_v2_stt_failure_requires_ready_open_current_response_window(self):
+        rt, conn, _forwarder = self._runtime()
+        rt.negotiated_version = "teebot-lesson-renderer.v2"
+        rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        conn.features["renderer"] = ["teebot-lesson-renderer.v2"]
+        conn.config["lesson"]["renderer_v2_enabled"] = True
+        transitions = []
+
+        async def apply(state, overlay_key, preset):
+            transitions.append((state, overlay_key, preset))
+            return True
+
+        rt._apply_visual_then_motion = apply
+        rt._step_visuals_ready = False
+        rt._child_response_window_open = False
+
+        self.assertFalse(await rt.on_child_response_failure("stt_failure"))
+        self.assertIsNone(rt._safe_speaking_session)
+        self.assertEqual(transitions, [])
+
+        rt._step_visuals_ready = True
+        self.assertFalse(await rt.on_child_response_failure("timeout"))
+        self.assertIsNone(rt._safe_speaking_session)
+        self.assertEqual(transitions, [])
+
     async def test_v1_keeps_motion_in_lesson_step_and_emits_no_visual_frame(self):
         rt, conn, _forwarder = self._runtime()
         body = rt._step_body(rt._step)

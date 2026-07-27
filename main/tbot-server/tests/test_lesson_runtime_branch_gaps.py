@@ -821,6 +821,99 @@ class StepVisualContinuationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.rt.conn.voice_provider.prompts), 1)
         self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [True])
 
+    async def test_pause_during_teach_motion_resumes_listen_then_continuation(self):
+        motion_started = asyncio.Event()
+        release_motion = asyncio.Event()
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            if len(dispatched) == 1:
+                motion_started.set()
+                await release_motion.wait()
+            return True
+
+        with mock.patch(
+            "core.lesson.runtime.dispatch_motion_preset", side_effect=motion
+        ):
+            await self.rt._on_frame_acked({"type": "lesson_step"}, {})
+            await asyncio.sleep(0)
+            teach = self._visual_frames()[-1]
+            await self.rt.on_lesson_ack(self._ack(teach, 1))
+            await motion_started.wait()
+
+            await self.rt.pause()
+            release_motion.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(self.rt._visual_transition_task.done())
+            self.assertFalse(self.rt._step_visuals_ready)
+            self.assertEqual(self.rt.conn.voice_provider.prompts, [])
+
+            resume = asyncio.create_task(self.rt.resume())
+            await asyncio.sleep(0)
+            resumed_teach = self._visual_frames()[-1]
+            await self.rt.on_lesson_ack(self._ack(resumed_teach, 2))
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if self._visual_frames()[-1]["body"]["state"] == "listen":
+                    break
+            listen = self._visual_frames()[-1]
+            self.assertEqual(listen["body"]["state"], "listen")
+            await self.rt.on_lesson_ack(self._ack(listen, 3))
+            self.assertTrue((await resume).accepted)
+
+        self.assertEqual(dispatched, ["teach", "teach", "listen"])
+        self.assertTrue(self.rt._step_visuals_ready)
+        self.assertEqual(len(self.rt.conn.voice_provider.prompts), 1)
+        self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [True])
+
+    async def test_pause_during_listen_motion_resumes_current_continuation(self):
+        listen_motion_started = asyncio.Event()
+        release_listen_motion = asyncio.Event()
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            if preset == "listen" and dispatched.count("listen") == 1:
+                listen_motion_started.set()
+                await release_listen_motion.wait()
+            return True
+
+        with mock.patch(
+            "core.lesson.runtime.dispatch_motion_preset", side_effect=motion
+        ):
+            await self.rt._on_frame_acked({"type": "lesson_step"}, {})
+            await asyncio.sleep(0)
+            teach = self._visual_frames()[-1]
+            await self.rt.on_lesson_ack(self._ack(teach, 1))
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if self._visual_frames()[-1]["body"]["state"] == "listen":
+                    break
+            listen = self._visual_frames()[-1]
+            await self.rt.on_lesson_ack(self._ack(listen, 2))
+            await listen_motion_started.wait()
+
+            await self.rt.pause()
+            release_listen_motion.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(self.rt._visual_transition_task.done())
+            self.assertFalse(self.rt._step_visuals_ready)
+
+            resume = asyncio.create_task(self.rt.resume())
+            await asyncio.sleep(0)
+            resumed_listen = self._visual_frames()[-1]
+            self.assertEqual(resumed_listen["body"]["state"], "listen")
+            await self.rt.on_lesson_ack(self._ack(resumed_listen, 3))
+            self.assertTrue((await resume).accepted)
+
+        self.assertEqual(dispatched, ["teach", "listen", "listen"])
+        self.assertTrue(self.rt._step_visuals_ready)
+        self.assertEqual(len(self.rt.conn.voice_provider.prompts), 1)
+        self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [True])
+
 class ProgressNonCompletionBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 408->exit: a non-step_completed progress event is forwarded but not latched ─
     async def test_non_completion_progress_event_is_forwarded_without_latch(self):
