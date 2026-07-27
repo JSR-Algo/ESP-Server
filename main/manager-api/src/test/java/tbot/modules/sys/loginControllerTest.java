@@ -9,19 +9,27 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Locale;
 import java.util.Map;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.MessageSource;
+import org.springframework.context.MessageSourceResolvable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import tbot.common.constant.Constant;
 import tbot.common.exception.ErrorCode;
 import tbot.common.exception.RenException;
-import tbot.common.utils.SM2Utils;
+import tbot.common.utils.MessageUtils;
 import tbot.common.utils.Result;
+import tbot.common.utils.SM2Utils;
+import tbot.common.utils.SpringContextUtils;
 import tbot.modules.security.controller.LoginController;
 import tbot.modules.security.dto.LoginDTO;
 import tbot.modules.security.dto.SmsVerificationDTO;
@@ -44,12 +52,43 @@ class loginControllerTest {
     private CaptchaService captchaService;
     private SysParamsService sysParamsService;
     private SysUserTokenService sysUserTokenService;
+    private ApplicationContext previousApplicationContext;
+    private MessageSource previousMessageSource;
 
     private String privateKey;
     private String encryptedPassword;
 
     @BeforeEach
     void setUp() {
+        previousApplicationContext = SpringContextUtils.applicationContext;
+        previousMessageSource = (MessageSource) ReflectionTestUtils.getField(MessageUtils.class, "messageSource");
+
+        MessageSource messageSource = new MessageSource() {
+            @Override
+            public String getMessage(String code, Object[] args, String defaultMessage, Locale locale) {
+                return defaultMessage != null ? defaultMessage : code;
+            }
+
+            @Override
+            public String getMessage(String code, Object[] args, Locale locale) {
+                return code;
+            }
+
+            @Override
+            public String getMessage(MessageSourceResolvable resolvable, Locale locale) {
+                String defaultMessage = resolvable.getDefaultMessage();
+                if (defaultMessage != null) {
+                    return defaultMessage;
+                }
+                String[] codes = resolvable.getCodes();
+                return codes != null && codes.length > 0 ? codes[0] : "";
+            }
+        };
+        ApplicationContext applicationContext = mock(ApplicationContext.class);
+        when(applicationContext.getBean("messageSource")).thenReturn(messageSource);
+        SpringContextUtils.applicationContext = applicationContext;
+        ReflectionTestUtils.setField(MessageUtils.class, "messageSource", null);
+
         sysUserService = mock(SysUserService.class);
         sysUserTokenService = mock(SysUserTokenService.class);
         captchaService = mock(CaptchaService.class);
@@ -69,6 +108,12 @@ class loginControllerTest {
 
         when(sysParamsService.getValue(Constant.SM2_PRIVATE_KEY, true)).thenReturn(privateKey);
         when(captchaService.validate(eq(CAPTCHA_ID), eq(CAPTCHA), eq(true))).thenReturn(true);
+    }
+
+    @AfterEach
+    void tearDown() {
+        SpringContextUtils.applicationContext = previousApplicationContext;
+        ReflectionTestUtils.setField(MessageUtils.class, "messageSource", previousMessageSource);
     }
 
     @Test

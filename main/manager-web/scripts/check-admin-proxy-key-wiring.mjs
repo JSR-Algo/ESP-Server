@@ -33,6 +33,21 @@ function expectNotContains(relativePath, needle) {
   }
 }
 
+function extractNginxLocation(config, marker) {
+  const start = config.indexOf(marker);
+  if (start === -1) throw new Error(`docs/docker/nginx.conf missing ${marker}`);
+
+  const openingBrace = config.indexOf('{', start);
+  let depth = 0;
+  for (let index = openingBrace; index < config.length; index += 1) {
+    if (config[index] === '{') depth += 1;
+    if (config[index] === '}') depth -= 1;
+    if (depth === 0) return config.slice(start, index + 1);
+  }
+
+  throw new Error(`docs/docker/nginx.conf has unterminated ${marker}`);
+}
+
 expectContains('docs/docker/start.sh', ': "${NESTJS_ADMIN_PROXY_KEY:=}"');
 expectContains('docs/docker/start.sh', 'NESTJS_ADMIN_PROXY_KEY_ESCAPED=');
 expectContains('docs/docker/start.sh', '__NESTJS_ADMIN_PROXY_KEY__');
@@ -51,6 +66,20 @@ expectContains(
   'proxy_set_header Authorization $http_authorization;',
 );
 expectContains('docs/docker/nginx.conf', 'auth_request /_nestjs_manager_auth;');
+const nestjsLocation = extractNginxLocation(read('docs/docker/nginx.conf'), 'location /nestjs/');
+if (/\bauth_basic\b/.test(nestjsLocation)) {
+  throw new Error(
+    'docs/docker/nginx.conf /nestjs/ must not consume the manager Bearer Authorization header with auth_basic',
+  );
+}
+if (!nestjsLocation.includes('auth_request_set $manager_auth_status $upstream_status;')) {
+  throw new Error('docs/docker/nginx.conf /nestjs/ must capture the manager auth subrequest status');
+}
+if (!nestjsLocation.includes('add_header X-TBOT-Manager-Auth-Status $manager_auth_status always;')) {
+  throw new Error('docs/docker/nginx.conf /nestjs/ must expose the manager auth status on every response');
+}
+expectNotContains('docs/docker/start.sh', 'NESTJS_BASIC_HTPASSWD');
+expectNotContains('deploy/docker-compose.prod.yml', 'NESTJS_BASIC_HTPASSWD');
 expectContains(
   'deploy/docker-compose.prod.yml',
   'NESTJS_ADMIN_PROXY_KEY: ${NESTJS_ADMIN_PROXY_KEY:-}',

@@ -2,8 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
+import {
+  getManagerAuthStatus,
+  shouldHandleAuthFailure,
+} from '../src/utils/nestAuthModeCore.mjs';
 
 const root = process.cwd();
+const require = createRequire(import.meta.url);
 
 function read(rel) {
   return fs.readFileSync(path.join(root, rel), 'utf8');
@@ -53,7 +59,11 @@ function extractObjectMethod(source, name) {
 function loadSettle() {
   const source = read('src/apis/nestHttp.js');
   const fnSource = extractFunction(source, 'settle');
-  const context = { clearNestSessionCalled: false };
+  const context = {
+    clearNestSessionCalled: false,
+    getManagerAuthStatus,
+    shouldHandleAuthFailure,
+  };
   context.clearNestSession = () => {
     context.clearNestSessionCalled = true;
   };
@@ -61,8 +71,34 @@ function loadSettle() {
 }
 
 function loadBuildScene() {
-  const source = read('src/views/LessonEditor.vue');
-  return vm.runInNewContext(`(${extractObjectMethod(source, 'buildScene')})`);
+  const { buildCreateStepPayload } = require('../src/components/lesson/lesson-step-editor-state.js');
+  return function buildScene(subject) {
+    const form = {
+      ...this.stepForm,
+      prompt: this.stepForm.prompt || subject,
+      subject: this.stepForm.subject || subject,
+      vocab: this.stepForm.vocab || {
+        word: '',
+        ipa: '',
+        partOfSpeech: '',
+        translationVi: '',
+        definition: '',
+        examples: [],
+      },
+    };
+    const candidateKeys = [
+      form.scene.backgroundKey,
+      form.scene.objectKey,
+      'robotOverlay.teach',
+      'robotOverlay.listening',
+      'robotOverlay.thinking',
+      'robotOverlay.celebrate',
+    ];
+    const assets = candidateKeys.map((key) => this.assetByKey(key)).filter(Boolean);
+    const result = buildCreateStepPayload({ form, correctChoiceId: '', assets });
+    assert.equal(result.ok, true);
+    return result.payload.stepBody;
+  };
 }
 
 {
@@ -219,9 +255,13 @@ function loadBuildScene() {
 
 {
   const preview = read('src/components/lesson/RobotLessonPreview.vue');
-  assert.match(preview, /width:\s*480px/, 'robot preview must retain the exact espTft width');
-  assert.match(preview, /height:\s*320px/, 'robot preview must retain the exact espTft height');
-  assert.match(preview, /manifestPreview\.manifest/, 'robot preview must render the authoritative server manifest');
+  const projection = read('src/components/lesson/RobotEspTftProjectionPreview.vue');
+  const serverPreview = read('src/components/lesson/RobotManifestServerPreview.vue');
+  assert.match(preview, /RobotEspTftProjectionPreview/, 'robot preview must route exact espTft manifests');
+  assert.match(preview, /RobotManifestServerPreview/, 'robot preview must route server manifests');
+  assert.match(projection, /width:\s*480px/, 'robot preview must retain the exact espTft width');
+  assert.match(projection, /height:\s*320px/, 'robot preview must retain the exact espTft height');
+  assert.match(serverPreview, /manifestPreview\.manifest/, 'robot preview must render the authoritative server manifest');
   assert.doesNotMatch(preview, /props:\s*\{[\s\S]*?draft/i, 'robot preview must not accept local draft truth');
 
   const simulation = read('src/components/lesson/LessonSimulationPanel.vue');

@@ -1,8 +1,10 @@
 import { getNestUrl } from './api';
 import RequestService from './httpRequest';
 import {
+  getManagerAuthStatus,
   isNestAuthDisabled,
   shouldClearManagerAuth,
+  shouldHandleAuthFailure,
   shouldPromptForNestAuth,
   shouldSendNestSessionToken,
 } from '../utils/nestAuthModeCore.mjs';
@@ -88,18 +90,18 @@ export function normalizeStepType(raw) {
   };
 }
 
-// A 401 means different things by deployment mode. Legacy mode asks for a
-// NestJS author session; server-key mode is gated by the manager bearer, so a
-// 401 means the manager session is stale and must return to manager login.
+// nginx exposes its auth_request result separately from the final HTTP status.
+// A 401 with manager-auth status 204 came from NestJS; a 401/403 matching the
+// manager-auth marker came from the manager gate and returns to manager login.
 // NOTE: we clear localStorage directly (not nestAuth.setNestToken) to avoid a
 // circular import — nestAuth.js already imports from this module.
-export function clearNestSession(status = 401) {
+export function clearNestSession(status = 401, managerAuthStatus = null) {
   try {
     localStorage.removeItem(NEST_TOKEN_KEY);
   } catch (e) {
     /* ignore */
   }
-  if (shouldClearManagerAuth({ disabled: nestAuthDisabled, status })) {
+  if (shouldClearManagerAuth({ disabled: nestAuthDisabled, status, managerAuthStatus })) {
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('userInfo');
@@ -112,7 +114,7 @@ export function clearNestSession(status = 401) {
     return;
   }
   if (
-    shouldPromptForNestAuth({ disabled: nestAuthDisabled, status })
+    shouldPromptForNestAuth({ disabled: nestAuthDisabled, status, managerAuthStatus })
     && typeof window !== 'undefined'
     && typeof window.dispatchEvent === 'function'
   ) {
@@ -126,6 +128,7 @@ export function clearNestSession(status = 401) {
 // as a normal form error instead of logging the user out / looping the redirect.
 export function settle(res, onSuccess, onError, handle401 = true) {
   const status = res && res.status;
+  const managerAuthStatus = getManagerAuthStatus(res);
   if (status >= 200 && status < 300) {
     const body = res.data;
     const payload =
@@ -138,8 +141,8 @@ export function settle(res, onSuccess, onError, handle401 = true) {
       body.msg ||
       (body.error && body.error.message) ||
       `Request failed (${status || 'network'})`;
-    if (status === 401 && handle401) {
-      clearNestSession();
+    if (shouldHandleAuthFailure({ status, managerAuthStatus, handle401 })) {
+      clearNestSession(status, managerAuthStatus);
       if (onError) onError(msg, res);
       return;
     }
@@ -243,15 +246,17 @@ export function nestUpload(path, file, fields, onSuccess, onError) {
     .then((result) => {
       if (!result) return;
       const { response: r, body } = result;
+      const managerAuthStatus = getManagerAuthStatus(r);
       if (r.ok) {
         const payload = body && 'data' in body ? body.data : body;
         if (onSuccess) onSuccess(payload);
-      } else if (r.status === 401) {
-        // Expired/invalid nestjs_session_token rejected by the proxy guard:
-        // clear it and bounce to login, matching settle()'s data-fetch behavior.
-        clearNestSession();
+      } else if (shouldHandleAuthFailure({
+        status: r.status,
+        managerAuthStatus,
+      })) {
+        clearNestSession(r.status, managerAuthStatus);
         const msg = (body && (body.message || (body.error && body.error.message))) || 'Admin session expired';
-        if (onError) onError(msg, { status: 401, response: r, transport: false });
+        if (onError) onError(msg, { status: r.status, response: r, transport: false });
       } else {
         const msg =
           (body && (body.message || (body.error && body.error.message))) ||
