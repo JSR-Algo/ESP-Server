@@ -77,7 +77,11 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?set JWT_PUBLIC_KEY}" in compose
     assert "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE}" in compose
     assert "LESSON_ASSET_ALLOWED_ORIGINS: ${LESSON_ASSET_ALLOWED_ORIGINS:?set LESSON_ASSET_ALLOWED_ORIGINS}" in compose
+    assert "LESSON_SD_MAX_FILE_BYTES: ${LESSON_SD_MAX_FILE_BYTES:?set LESSON_SD_MAX_FILE_BYTES}" in compose
+    assert "LESSON_SD_MAX_PACK_BYTES: ${LESSON_SD_MAX_PACK_BYTES:?set LESSON_SD_MAX_PACK_BYTES}" in compose
     assert "LESSON_ASSET_ALLOWED_ORIGINS=${LESSON_ASSET_ALLOWED_ORIGINS:-}" in local_compose
+    assert "LESSON_SD_MAX_FILE_BYTES=${LESSON_SD_MAX_FILE_BYTES:-}" in local_compose
+    assert "LESSON_SD_MAX_PACK_BYTES=${LESSON_SD_MAX_PACK_BYTES:-}" in local_compose
     assert "LESSON_VOICE_RT_P95_DISABLE_MS: ${LESSON_VOICE_RT_P95_DISABLE_MS:-}" in compose
     assert "NODE_ENV=production" in env_example
     assert "TBOT_SERVER_AUTH_KEY=REPLACE_WITH_SHARED_WS_HMAC_SECRET" in env_example
@@ -85,6 +89,8 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "TBOT_DEVICE_MINT_SECRET=REPLACE_WITH_SHARED_DEVICE_MINT_SECRET" in env_example
     assert "JWT_PUBLIC_KEY=REPLACE_WITH_BACKEND_JWT_PUBLIC_KEY" in env_example
     assert "LESSON_ASSET_ALLOWED_ORIGINS=https://res.cloudinary.com" in env_example
+    assert "LESSON_SD_MAX_FILE_BYTES=1048576" in env_example
+    assert "LESSON_SD_MAX_PACK_BYTES=8388608" in env_example
     assert "TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS" in deploy_script
     assert "LESSON_VOICE_RT_P95_DISABLE_MS=1500" in env_example
     assert "LESSON_ASSET_PACK_LOCAL_ROOT=sd://tbot/lesson-assets" in env_example
@@ -171,6 +177,8 @@ def test_managed_render_blueprint_declares_lesson_runtime_production_posture():
         "TBOT_DEVICE_MINT_SECRET",
         "LESSON_ASSET_ORIGIN_BASE",
         "LESSON_ASSET_ALLOWED_ORIGINS",
+        "LESSON_SD_MAX_FILE_BYTES",
+        "LESSON_SD_MAX_PACK_BYTES",
         "TBOT_PUBLIC_WEBSOCKET_URL",
     ):
         assert env[key]["sync"] is False
