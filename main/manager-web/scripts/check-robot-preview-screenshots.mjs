@@ -107,7 +107,7 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
       ['Correct', 'Slave command: celebrate', 'motion-nod'],
       ['Near miss', 'Slave command: encourage', 'motion-nod'],
       ['Incorrect', 'Slave command: gentle-shake', 'motion-shake'],
-      ['Retry', 'Slave command: tryAgain', 'motion-breathe'],
+      ['Retry', 'Slave command: tryAgain', 'motion-shake'],
       ['Timeout', 'Slave command: encourage', 'motion-nod'],
       ['Brave try', 'Slave command: encourage', 'motion-nod'],
       ['Completion', 'Slave command: celebrate', 'motion-nod'],

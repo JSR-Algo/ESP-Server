@@ -311,6 +311,7 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transitions,
             [
+                ("thinking", "robotOverlay.thinking", None),
                 ("incorrect", "robotOverlay.thinking", "tryAgain"),
                 ("retry", "robotOverlay.thinking", None),
             ],
@@ -320,8 +321,11 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await rt.on_child_response("barn"))
         self.assertEqual(rt._safe_speaking().attempts, 1)
         self.assertEqual(
-            transitions[-1],
-            ("correct", "robotOverlay.thinking", "celebrate"),
+            transitions[-2:],
+            [
+                ("thinking", "robotOverlay.thinking", None),
+                ("correct", "robotOverlay.thinking", "celebrate"),
+            ],
         )
 
     async def test_v2_stt_failure_requires_ready_open_current_response_window(self):
