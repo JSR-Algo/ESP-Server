@@ -77,4 +77,18 @@ class ShiroConfigSecurityTest {
         assertTrue(catchAllChain.contains("oauth2"),
                 "Catch-all must require oauth2 authentication, found: " + catchAllChain);
     }
+
+    @Test
+    @DisplayName("nginx proxy-auth endpoint performs its own token validation")
+    void proxyAuthEndpointIsReachableForManualValidation() throws Exception {
+        ShiroConfig config = new ShiroConfig();
+        SecurityManager securityManager = mock(SecurityManager.class);
+        SysParamsService sysParamsService = mock(SysParamsService.class);
+
+        Map<String, String> filterChain = config
+                .shirFilter(securityManager, sysParamsService)
+                .getFilterChainDefinitionMap();
+
+        assertEquals("anon", filterChain.get("/user/proxy-auth"));
+    }
 }

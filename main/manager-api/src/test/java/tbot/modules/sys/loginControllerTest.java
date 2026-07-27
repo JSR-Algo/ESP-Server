@@ -14,6 +14,8 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 
 import tbot.common.constant.Constant;
 import tbot.common.exception.ErrorCode;
@@ -41,6 +43,7 @@ class loginControllerTest {
     private SysUserService sysUserService;
     private CaptchaService captchaService;
     private SysParamsService sysParamsService;
+    private SysUserTokenService sysUserTokenService;
 
     private String privateKey;
     private String encryptedPassword;
@@ -48,7 +51,7 @@ class loginControllerTest {
     @BeforeEach
     void setUp() {
         sysUserService = mock(SysUserService.class);
-        SysUserTokenService sysUserTokenService = mock(SysUserTokenService.class);
+        sysUserTokenService = mock(SysUserTokenService.class);
         captchaService = mock(CaptchaService.class);
         sysParamsService = mock(SysParamsService.class);
         SysDictDataService sysDictDataService = mock(SysDictDataService.class);
@@ -66,6 +69,45 @@ class loginControllerTest {
 
         when(sysParamsService.getValue(Constant.SM2_PRIVATE_KEY, true)).thenReturn(privateKey);
         when(captchaService.validate(eq(CAPTCHA_ID), eq(CAPTCHA), eq(true))).thenReturn(true);
+    }
+
+    @Test
+    @DisplayName("proxy auth accepts only an active super admin manager token")
+    void proxyAuthAcceptsSuperAdmin() {
+        SysUserDTO user = new SysUserDTO();
+        user.setStatus(1);
+        user.setSuperAdmin(1);
+        when(sysUserTokenService.getUserByToken("manager-token")).thenReturn(user);
+
+        ResponseEntity<Void> response = loginController.proxyAuth("Bearer manager-token");
+
+        assertEquals(HttpStatus.NO_CONTENT, response.getStatusCode());
+    }
+
+    @Test
+    @DisplayName("proxy auth rejects a valid non-super-admin manager token")
+    void proxyAuthRejectsNonSuperAdmin() {
+        SysUserDTO user = new SysUserDTO();
+        user.setStatus(1);
+        user.setSuperAdmin(0);
+        when(sysUserTokenService.getUserByToken("manager-token")).thenReturn(user);
+
+        ResponseEntity<Void> response = loginController.proxyAuth("Bearer manager-token");
+
+        assertEquals(HttpStatus.FORBIDDEN, response.getStatusCode());
+    }
+
+    @Test
+    @DisplayName("proxy auth rejects missing, malformed, and invalid manager tokens")
+    void proxyAuthRejectsInvalidTokens() {
+        when(sysUserTokenService.getUserByToken("invalid"))
+                .thenThrow(mock(RenException.class));
+
+        assertEquals(HttpStatus.UNAUTHORIZED, loginController.proxyAuth(null).getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, loginController.proxyAuth("invalid").getStatusCode());
+        assertEquals(
+                HttpStatus.UNAUTHORIZED,
+                loginController.proxyAuth("Bearer invalid").getStatusCode());
     }
 
     @Test

@@ -6,6 +6,10 @@ export function shouldPromptForNestAuth({ disabled, status }) {
   return !disabled && Number(status) === 401;
 }
 
+export function shouldClearManagerAuth({ disabled, status }) {
+  return disabled && Number(status) === 401;
+}
+
 export function shouldSendNestSessionToken({ disabled, token }) {
   return !disabled && typeof token === 'string' && token.length > 0;
 }

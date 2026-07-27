@@ -14,13 +14,16 @@ rollout, and visual-library surfaces. It does not bypass the parent JWT guard,
 device guards, factory guards, internal RPC authentication, or public endpoint
 rules.
 
-The existing manager-web login remains unchanged.
+The existing manager-web login remains unchanged and is the public HTTP gate.
+nginx validates its bearer with an internal manager-api subrequest before it
+injects the proxy key. Only active manager super-admin accounts pass.
 
 ## Request Flow
 
 ```text
 Safari
   -> https://admin.tjbot.vn/nestjs/v1/admin/*
+  -> nginx validates the existing manager super-admin bearer via manager-api
   -> manager-web nginx adds X-TBOT-Admin-Key
   -> NestJS AdminSessionGuard validates the key
   -> request receives a super_admin authoring principal
@@ -82,6 +85,11 @@ proxy_set_header X-TBOT-Admin-Key "<server-rendered value>";
 
 This prevents clients from choosing or forwarding their own key. The key is
 escaped before template substitution and must not appear in startup logs.
+
+Before that header is injected, `auth_request` calls the internal
+`/tbot/user/proxy-auth` endpoint with the browser's manager bearer. Missing,
+expired, inactive, or non-super-admin manager credentials return 401/403 and
+the NestJS request is not proxied.
 
 The previous `NESTJS_TOKEN` session-token injection remains available for
 backward compatibility but is empty for this deployment. Per-user

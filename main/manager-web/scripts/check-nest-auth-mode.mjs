@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   isNestAuthDisabled,
+  shouldClearManagerAuth,
   shouldPromptForNestAuth,
   shouldSendNestSessionToken,
 } from '../src/utils/nestAuthModeCore.mjs';
@@ -12,6 +13,9 @@ assert.equal(isNestAuthDisabled('false'), false);
 assert.equal(isNestAuthDisabled(undefined), false);
 assert.equal(shouldPromptForNestAuth({ disabled: false, status: 401 }), true);
 assert.equal(shouldPromptForNestAuth({ disabled: true, status: 401 }), false);
+assert.equal(shouldClearManagerAuth({ disabled: true, status: 401 }), true);
+assert.equal(shouldClearManagerAuth({ disabled: false, status: 401 }), false);
+assert.equal(shouldClearManagerAuth({ disabled: true, status: 403 }), false);
 assert.equal(shouldSendNestSessionToken({ disabled: true, token: 'secret' }), false);
 assert.equal(shouldSendNestSessionToken({ disabled: false, token: 'secret' }), true);
 
@@ -21,6 +25,15 @@ const http = fs.readFileSync(path.join(root, 'src/apis/nestHttp.js'), 'utf8');
 assert.match(app, /v-if="!nestAuthDisabled"/);
 assert.match(app, /if \(!this\.nestAuthDisabled\).*addEventListener/s);
 assert.match(http, /shouldPromptForNestAuth/);
+assert.match(http, /shouldClearManagerAuth/);
+assert.match(http, /localStorage\.removeItem\('token'\)/);
+assert.match(http, /localStorage\.removeItem\('userInfo'\)/);
+assert.match(http, /window\.location\.hash = '#\/login'/);
 assert.match(http, /shouldSendNestSessionToken/);
+assert.match(http, /function managerTokenHeader\(\)/);
+assert.match(
+  http,
+  /fetch\([\s\S]*headers:\s*\{\s*\.\.\.managerTokenHeader\(\),\s*\.\.\.nestTokenHeader\(\)\s*\}/,
+);
 
 console.log('Nest auth mode contracts PASS');
