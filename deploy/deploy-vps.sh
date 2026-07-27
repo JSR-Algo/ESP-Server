@@ -420,7 +420,7 @@ else
   run_ssh "test -f ${REMOTE_Q}/.env || cp ${REMOTE_RELEASE_Q}/.env.example ${REMOTE_Q}/.env"
 fi
 
-run_ssh "cd ${REMOTE_RELEASE_Q} && sha256sum -c checksums.sha256 && for f in *.tar.gz; do gunzip -c \"\$f\" | docker load; done && ln -sfn ${REMOTE_RELEASE_Q} ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; fi"
+run_ssh "cd ${REMOTE_RELEASE_Q} && sha256sum -c checksums.sha256 && for f in *.tar.gz; do gunzip -c \"\$f\" | docker load; done && if [ -e ${REMOTE_Q}/current ] && [ ! -L ${REMOTE_Q}/current ]; then echo 'error: refusing to replace non-symlink current directory; migrate it manually' >&2; exit 1; fi && switch_tmp=${REMOTE_Q}/.current.\$\$.tmp && rm -f \"\$switch_tmp\" && ln -s ${REMOTE_RELEASE_Q} \"\$switch_tmp\" && mv -Tf \"\$switch_tmp\" ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d && docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml ps; fi"
 wait_for_remote_stack
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then

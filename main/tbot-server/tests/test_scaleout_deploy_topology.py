@@ -112,6 +112,15 @@ def test_deploy_waits_for_every_server_replica_to_be_healthy():
     assert "healthy server replicas" in script
 
 
+def test_deploy_and_rollback_refuse_real_current_directory_before_atomic_switch():
+    for script_name in ("deploy-vps.sh", "rollback-vps.sh"):
+        script = (REPO_ROOT / "deploy" / script_name).read_text(encoding="utf-8")
+        assert "ln -sfn ${REMOTE_RELEASE_Q} ${REMOTE_Q}/current" not in script
+        assert "refusing to replace non-symlink current directory" in script
+        assert "ln -s ${REMOTE_RELEASE_Q}" in script
+        assert "mv -Tf" in script
+
+
 def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
     readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
     assert '-e "REDIS_URL=$REDIS_URL"' in readme

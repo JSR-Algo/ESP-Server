@@ -53,6 +53,9 @@ Keep `GOOGLE_API_KEY` empty in `.env` for this manager-driven setup. The Python 
    ```sh
    esp32-server/deploy/deploy-vps.sh --host <ip> --user <ssh-user> --tag <tag>
    ```
+   Deploy and rollback expect `/opt/tbot/current` to be a symlink. If an older
+   VPS has a real `current` directory, the scripts refuse to replace it; migrate
+   that directory separately before running them.
 5. Smoke check:
    ```sh
    esp32-server/deploy/smoke-vps.sh --host <ip>
