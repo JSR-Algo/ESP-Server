@@ -121,6 +121,12 @@ def test_deploy_and_rollback_refuse_real_current_directory_before_atomic_switch(
         assert "mv -Tf" in script
 
 
+def test_release_package_includes_haproxy_config_required_by_compose():
+    script = (REPO_ROOT / "deploy" / "package-release.sh").read_text(encoding="utf-8")
+
+    assert 'cp "${SCRIPT_DIR}/haproxy.cfg" "${RELEASE_DIR}/haproxy.cfg"' in script
+
+
 def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
     readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
     assert '-e "REDIS_URL=$REDIS_URL"' in readme

@@ -173,6 +173,9 @@ EOF
 }
 
 copy_support_artifacts() {
+  if [[ -f "${SCRIPT_DIR}/haproxy.cfg" ]]; then
+    cp "${SCRIPT_DIR}/haproxy.cfg" "${RELEASE_DIR}/haproxy.cfg"
+  fi
   local nginx_confs=("${SCRIPT_DIR}/nginx/"*.conf)
   if [[ -e "${nginx_confs[0]}" ]]; then
     mkdir -p "${RELEASE_DIR}/nginx"
