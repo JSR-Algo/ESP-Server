@@ -946,7 +946,9 @@ class LessonRuntime:
     async def preload_only(self) -> bool:
         """Validate and materialize assets without sending ``lesson_prepare``."""
         features = getattr(self.conn, "features", None)
-        if not lesson_capability_ok(features):
+        if not lesson_capability_ok(
+            features, renderer_v2_enabled=self._renderer_v2_rollout_enabled()
+        ):
             # D-CAP-FLAG: absence = no support; MUST NOT send lesson_prepare.
             self.last_error = LessonError(
                 LESSON_VERSION_UNSUPPORTED, "device did not advertise lesson capability"
@@ -1114,20 +1116,41 @@ class LessonRuntime:
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
         body = msg_json.get("body")
         if not isinstance(body, dict):
-            return False
-        acked = _coerce_ack_seq(body.get("acks"))
+            return bool(
+                self._visual_ack_waiters
+                and msg_json.get("protocolVersion") == RENDERER_V2
+            )
+        raw_acked = body.get("acks")
+        acked = raw_acked if type(raw_acked) is int else None
         waiter = self._visual_ack_waiters.get(acked) if acked is not None else None
         if waiter is None:
             return False
+        expected_envelope_fields = {
+            "type",
+            "protocolVersion",
+            "assignmentId",
+            "sessionId",
+            "stepId",
+            "sequence",
+            "body",
+        }
+        expected_body_fields = {
+            "acks",
+            "accepted",
+            "degraded",
+            "degradedReason",
+            "visualGeneration",
+        }
         if (
-            msg_json.get("type") != "lesson_ack"
+            set(msg_json) != expected_envelope_fields
+            or set(body) != expected_body_fields
+            or msg_json.get("type") != "lesson_ack"
             or msg_json.get("protocolVersion") != RENDERER_V2
             or msg_json.get("assignmentId") != self.assignment_id
             or msg_json.get("sessionId") != self.session_id
             or msg_json.get("stepId") != self._step_id
+            or type(msg_json.get("sequence")) is not int
         ):
-            return True
-        if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return True
         expected_generation = getattr(waiter, "visual_generation", None)
         generation = body.get("visualGeneration")
@@ -1143,6 +1166,8 @@ class LessonRuntime:
             if degraded != valid_reason or (not degraded and reason is not None):
                 return True
         elif degraded or not valid_reason:
+            return True
+        if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return True
         if not waiter.done():
             waiter.set_result(
@@ -3272,7 +3297,11 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         if getattr(conn, "features", None) is not None:
             break
         await asyncio.sleep(0.1)
-    if not _cap_ok(getattr(conn, "features", None)):
+    renderer_capabilities = _device_caps(getattr(conn, "features", None))
+    renderer_v2_enabled = _renderer_v2_request_enabled(conn, renderer_capabilities)
+    if not _cap_ok(
+        getattr(conn, "features", None), renderer_v2_enabled=renderer_v2_enabled
+    ):
         _set_lesson_start_status(conn, "LESSON_CAPABILITY_MISSING", "Robot chưa sẵn sàng hiển thị bài học.")
         _log("info", "device lacks lesson capability; pull-on-connect no-op")
         return None
@@ -3281,8 +3310,6 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # current firmware). Forwarded to the manifest fetch so the backend serves a
     # manifest this device can render. The runtime re-derives the same set from
     # conn.features for its start() gate; computing it here keeps the fetch honest.
-    renderer_capabilities = _device_caps(getattr(conn, "features", None))
-    renderer_v2_enabled = _renderer_v2_request_enabled(conn, renderer_capabilities)
     requested_renderer_capabilities = (
         renderer_capabilities
         if renderer_v2_enabled
@@ -3466,25 +3493,14 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 "renderer_capabilities": requested_renderer_capabilities,
                 "lesson_version": assignment.get("lessonVersion"),
             }
-            try:
-                manifest, etag = await backend_api.get_lesson_manifest(
-                    client,
-                    base_url,
-                    assignment.get("lessonId"),
-                    profile,
-                    renderer_v2_enabled=renderer_v2_enabled,
-                    **manifest_kwargs,
-                )
-            except TypeError as exc:
-                if "renderer_v2_enabled" not in str(exc):
-                    raise
-                manifest, etag = await backend_api.get_lesson_manifest(
-                    client,
-                    base_url,
-                    assignment.get("lessonId"),
-                    profile,
-                    **manifest_kwargs,
-                )
+            manifest, etag = await backend_api.get_lesson_manifest(
+                client,
+                base_url,
+                assignment.get("lessonId"),
+                profile,
+                renderer_v2_enabled=renderer_v2_enabled,
+                **manifest_kwargs,
+            )
         except Exception as exc:
             _backend_unavailable("manifest", exc)
             return None

@@ -6264,6 +6264,48 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_v2_only_string_capability_starts_when_rollout_gate_matches(self):
+        from core.lesson.errors import lesson_capability_ok
+
+        conn = _FakeConn(
+            features={"lesson": True, "renderer": "teebot-lesson-renderer.v2"}
+        )
+        conn.device_id = "robot-01"
+        conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
+        manifest = _build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+
+        self.assertTrue(lesson_capability_ok(conn.features, renderer_v2_enabled=True))
+        rt = self._runtime(conn=conn, manifest=manifest)
+        await rt.start()
+        self.assertEqual(self._sent_frames(conn)[0]["protocolVersion"], "teebot-lesson-renderer.v2")
+
+    async def test_v2_only_list_capability_starts_when_rollout_gate_matches(self):
+        from core.lesson.errors import lesson_capability_ok
+
+        conn = _FakeConn(
+            features={"lesson": True, "renderer": ["teebot-lesson-renderer.v2"]}
+        )
+        conn.device_id = "robot-01"
+        conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+            }
+        }
+        manifest = _build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+
+        self.assertTrue(lesson_capability_ok(conn.features, renderer_v2_enabled=True))
+        rt = self._runtime(conn=conn, manifest=manifest)
+        await rt.start()
+        self.assertEqual(self._sent_frames(conn)[0]["protocolVersion"], "teebot-lesson-renderer.v2")
+
     async def test_v2_manifest_is_rejected_when_server_rollout_gate_is_off(self):
         conn = _FakeConn(
             features={
@@ -6520,6 +6562,7 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             *,
             token=None,
             renderer_capabilities=None,
+            renderer_v2_enabled=False,
             lesson_version=None,
         ):
             self.manifest_calls.append(
@@ -6931,6 +6974,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
             *,
             token=None,
             renderer_capabilities=None,
+            renderer_v2_enabled=False,
             lesson_version=None,
         ):
             self.assertEqual(token, "device-token")
@@ -7432,6 +7476,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             *,
             token=None,
             renderer_capabilities=None,
+            renderer_v2_enabled=False,
             lesson_version=None,
         ):
             self.manifest_calls.append(
@@ -9047,6 +9092,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
             *,
             token=None,
             renderer_capabilities=None,
+            renderer_v2_enabled=False,
             lesson_version=None,
         ):
             calls.append(("manifest", base_url, lesson_id, profile, token, lesson_version))

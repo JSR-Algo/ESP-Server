@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 PROTOCOL_VERSION = "teebot-lesson-renderer.v1"
 # hello.features.renderer capability value (D-CAP-FLAG, ADR 0013 §I).
 RENDERER_CAPABILITY = "teebot-lesson-renderer.v1"
+RENDERER_V2_CAPABILITY = "teebot-lesson-renderer.v2"
 
 # Lesson error codes (subset raised by the ESP runtime).
 LESSON_VERSION_UNSUPPORTED = "LESSON_VERSION_UNSUPPORTED"
@@ -110,7 +111,9 @@ class ProtocolSequenceError(LessonError):
         super().__init__(PROTOCOL_SEQUENCE_ERROR, message, retryable=retryable, context=context)
 
 
-def lesson_capability_ok(features: Optional[Dict[str, Any]]) -> bool:
+def lesson_capability_ok(
+    features: Optional[Dict[str, Any]], *, renderer_v2_enabled: bool = False
+) -> bool:
     """D-CAP-FLAG (ADR 0013 §I): a device supports lessons ONLY if it advertised
     ``hello.features.lesson == True`` AND ``features.renderer == PROTOCOL_VERSION``.
 
@@ -122,13 +125,13 @@ def lesson_capability_ok(features: Optional[Dict[str, Any]]) -> bool:
     if features.get("lesson") is not True:
         return False
     renderer = features.get("renderer")
-    # A device may advertise renderer as a single string (today: v1) OR, once a v2
-    # renderer ships, as a LIST of supported renderer versions. Accept either shape,
-    # treating membership of the v1 capability as "lesson-capable".
+    accepted = {RENDERER_CAPABILITY}
+    if renderer_v2_enabled is True:
+        accepted.add(RENDERER_V2_CAPABILITY)
     if isinstance(renderer, str):
-        return renderer == RENDERER_CAPABILITY
+        return renderer in accepted
     if isinstance(renderer, (list, tuple)):
-        return RENDERER_CAPABILITY in renderer
+        return any(capability in accepted for capability in renderer)
     return False
 
 

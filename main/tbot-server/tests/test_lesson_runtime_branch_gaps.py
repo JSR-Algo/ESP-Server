@@ -177,7 +177,7 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         await self.rt.on_lesson_ack(
             self._ack(
                 seq,
-                2,
+                1,
                 generation=generation,
                 accepted=False,
                 degraded=False,
@@ -187,6 +187,33 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         result = await task
         self.assertFalse(result.accepted)
         self.assertIsNone(self.rt._motion_task)
+
+    async def test_visual_ack_rejects_extra_or_wrong_typed_frozen_fields(self):
+        task = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+        seq = frame["sequence"]
+        generation = frame["body"]["visualGeneration"]
+
+        wrong_body = self._ack(seq, 1, generation=generation)
+        wrong_body["body"] = []
+        await self.rt.on_lesson_ack(wrong_body)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        extra = self._ack(seq, 1, generation=generation)
+        extra["body"]["unexpected"] = True
+        await self.rt.on_lesson_ack(extra)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        wrong_sequence = self._ack(seq, True, generation=generation)
+        await self.rt.on_lesson_ack(wrong_sequence)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        await self.rt.on_lesson_ack(self._ack(seq, 1, generation=generation))
+        self.assertTrue((await task).accepted)
 
     async def test_timeout_retries_once_with_new_sequence_same_generation(self):
         sleeps = []
