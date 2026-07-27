@@ -494,6 +494,182 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
             await cancelled
         self.assertIsNone(self.rt._motion_task)
 
+
+class CompletionVisualFlowTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.rt = _runtime()
+        self.rt.negotiated_version = "teebot-lesson-renderer.v2"
+        self.rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        self.rt.conn.device_id = "robot-01"
+        self.rt.conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "motion_presets_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        self.rt.conn.lesson_runtime = self.rt
+        self.rt.state = S_RUNNING
+        self.rt._step_index = len(self.rt._steps) - 1
+        self.rt._step = self.rt._steps[-1]
+        self.rt._step["motion"] = {"completion": "goodbye"}
+        self.rt._step["scene"] = {
+            "robotOverlay": {"asset": {"key": "robotOverlay.celebrate"}}
+        }
+        self.rt._step_id = self.rt._step["id"]
+        self.rt._step_seq = 3
+        self.rt._step_acked = True
+        self.rt._step_completed = True
+
+    def _frames(self, frame_type):
+        return [
+            json.loads(payload)
+            for payload in self.rt.conn.websocket.sent
+            if json.loads(payload)["type"] == frame_type
+        ]
+
+    def _ack(self, frame, inbound_sequence, **body):
+        return {
+            "type": "lesson_ack",
+            "protocolVersion": "teebot-lesson-renderer.v2",
+            "assignmentId": self.rt.assignment_id,
+            "sessionId": self.rt.session_id,
+            "stepId": self.rt._step_id if frame["type"] == "lesson_visual_state" else None,
+            "sequence": inbound_sequence,
+            "body": {
+                "acks": frame["sequence"],
+                "accepted": True,
+                "degraded": False,
+                "degradedReason": None,
+                "visualGeneration": frame["body"].get(
+                    "visualGeneration", self.rt._visual_generation
+                ),
+                **body,
+            },
+        }
+
+    async def _begin_completion(self):
+        await self.rt._maybe_finish_step()
+        await asyncio.sleep(0)
+        return self._frames("lesson_visual_state")[-1]
+
+    async def _ack_stop(self, inbound_sequence):
+        stop = self._frames("lesson_stop")[-1]
+        await self.rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "protocolVersion": "teebot-lesson-renderer.v2",
+                "assignmentId": self.rt.assignment_id,
+                "sessionId": self.rt.session_id,
+                "stepId": None,
+                "sequence": inbound_sequence,
+                "body": {
+                    "acks": stop["sequence"],
+                    "rendered": True,
+                    "degraded": False,
+                },
+            }
+        )
+        self.assertEqual(self.rt.state, "COMPLETED")
+
+    async def test_accepted_and_degraded_completion_dispatch_motion_then_stop(self):
+        for degraded, reason in ((False, None), (True, "reducedMotion")):
+            with self.subTest(degraded=degraded):
+                if degraded:
+                    self.setUp()
+                dispatched = []
+
+                async def motion(_conn, preset):
+                    dispatched.append(preset)
+                    return True
+
+                with mock.patch(
+                    "core.lesson.runtime.dispatch_motion_preset", side_effect=motion
+                ):
+                    visual = await self._begin_completion()
+                    await self.rt.on_lesson_ack(
+                        self._ack(
+                            visual,
+                            1,
+                            degraded=degraded,
+                            degradedReason=reason,
+                        )
+                    )
+                    await self.rt._visual_transition_task
+
+                self.assertEqual(dispatched, ["goodbye"])
+                self.assertEqual(len(self._frames("lesson_stop")), 1)
+                await self._ack_stop(2)
+
+    async def test_rejected_completion_skips_motion_but_still_stops(self):
+        visual = await self._begin_completion()
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset") as motion:
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    visual,
+                    1,
+                    accepted=False,
+                    degraded=False,
+                    degradedReason="unsupportedContract",
+                )
+            )
+            await self.rt._visual_transition_task
+
+        motion.assert_not_called()
+        self.assertEqual(len(self._frames("lesson_stop")), 1)
+        await self._ack_stop(2)
+
+    async def test_timed_out_completion_skips_motion_but_still_stops(self):
+        stop_timeout = asyncio.Event()
+        sleep_calls = 0
+
+        async def immediate_sleep(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls <= 2:
+                return None
+            await stop_timeout.wait()
+
+        self.rt._sleep = immediate_sleep
+        self.rt.conn.config["lesson"]["frame_ack_timeout_sec"] = 0.01
+        try:
+            with mock.patch("core.lesson.runtime.dispatch_motion_preset") as motion:
+                await self.rt._maybe_finish_step()
+                await self.rt._visual_transition_task
+
+            motion.assert_not_called()
+            self.assertEqual(len(self._frames("lesson_visual_state")), 2)
+            self.assertEqual(len(self._frames("lesson_stop")), 1)
+            await self._ack_stop(1)
+        finally:
+            stop_timeout.set()
+
+    async def test_pause_stop_replacement_and_cancellation_suppress_completed_stop(self):
+        async def cancel_task(rt):
+            rt._visual_transition_task.cancel()
+            await asyncio.gather(rt._visual_transition_task, return_exceptions=True)
+
+        for action_name in ("pause", "stop", "on_replaced", "cancel"):
+            with self.subTest(action=action_name):
+                self.setUp()
+                await self._begin_completion()
+                if action_name == "cancel":
+                    await cancel_task(self.rt)
+                else:
+                    await getattr(self.rt, action_name)()
+                    await asyncio.gather(
+                        self.rt._visual_transition_task, return_exceptions=True
+                    )
+
+                completed_stops = [
+                    frame
+                    for frame in self._frames("lesson_stop")
+                    if frame["body"].get("reason") == "COMPLETED"
+                ]
+                self.assertEqual(completed_stops, [])
+                self.assertFalse(self.rt._completion_stop_sent)
+
 class ProgressNonCompletionBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 408->exit: a non-step_completed progress event is forwarded but not latched ─
     async def test_non_completion_progress_event_is_forwarded_without_latch(self):

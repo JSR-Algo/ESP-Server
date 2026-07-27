@@ -936,6 +936,7 @@ class LessonRuntime:
         # enqueue a second terminal event for the same run.
         self._failure_forwarded = False
         self._completion_stop_sent = False
+        self._completion_visual_pending = False
         self._sd_asset_pack_online_fallback = False
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
@@ -2025,26 +2026,21 @@ class LessonRuntime:
         if not (self.state == S_RUNNING and self._step_acked and self._step_completed):
             return
         last_step = self._step_index + 1 >= len(self._steps)
-        if last_step and self._completion_stop_sent:
+        if last_step and (self._completion_stop_sent or self._completion_visual_pending):
             return
         self._cancel_child_response_timeout()
         # A step is done once it is acked AND its step_completed progress arrived
         # (plan §5.1). Count it, then either advance to the next manifest step or,
         # if this was the last one, stop with the real stepsCompleted count.
-        self._steps_completed += 1
-        if isinstance(self._step_id, str):
+        if isinstance(self._step_id, str) and self._step_id not in self._completed_step_ids:
+            self._steps_completed += 1
             self._completed_step_ids.add(self._step_id)
+        elif not isinstance(self._step_id, str):
+            self._steps_completed += 1
         if not last_step:
             await self._emit_step()  # next step in manifest order
         elif self._renderer_v2_enabled():
-            self._completion_stop_sent = True
-
-            async def emit_completed_stop() -> None:
-                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
-
-            self._queue_authored_visual_sequence(
-                [("completion", "completion")], after=emit_completed_stop
-            )
+            self._queue_completion_visual_then_stop()
         else:
             self._completion_stop_sent = True
             await self._emit("lesson_stop", body={"reason": "COMPLETED"})
@@ -2504,12 +2500,12 @@ class LessonRuntime:
         if not (
             result.accepted
             and result.visual_generation == generation
-            and generation == self._visual_generation
-            and assignment_id == self.assignment_id
-            and session_id == self.session_id
-            and step_id == self._step_id
-            and self._is_active_runtime()
-            and self.state == S_RUNNING
+            and self._visual_transition_is_current(
+                generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            )
         ):
             return False
         if preset:
@@ -2561,6 +2557,53 @@ class LessonRuntime:
                 await after()
 
         self._visual_transition_task = asyncio.create_task(run())
+
+    def _queue_completion_visual_then_stop(self) -> None:
+        previous = self._visual_transition_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        expected_generation = self._visual_generation + 1
+        assignment_id = self.assignment_id
+        session_id = self.session_id
+        step_id = self._step_id
+        self._completion_visual_pending = True
+
+        async def run() -> None:
+            try:
+                await self._apply_authored_visual_then_motion(
+                    "completion", "completion"
+                )
+                if not self._visual_transition_is_current(
+                    expected_generation,
+                    assignment_id=assignment_id,
+                    session_id=session_id,
+                    step_id=step_id,
+                ):
+                    return
+                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+                self._completion_stop_sent = True
+            finally:
+                self._completion_visual_pending = False
+
+        self._visual_transition_task = asyncio.create_task(run())
+
+    def _visual_transition_is_current(
+        self,
+        generation: int,
+        *,
+        assignment_id: Any,
+        session_id: str,
+        step_id: Optional[str],
+    ) -> bool:
+        return (
+            not self._closed
+            and generation == self._visual_generation
+            and assignment_id == self.assignment_id
+            and session_id == self.session_id
+            and step_id == self._step_id
+            and self._is_active_runtime()
+            and self.state == S_RUNNING
+        )
 
     async def _dispatch_motion_once(
         self, preset: str, visual_generation: int, step_id: Optional[str]
