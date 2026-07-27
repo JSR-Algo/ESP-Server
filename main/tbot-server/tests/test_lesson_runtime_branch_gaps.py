@@ -336,6 +336,164 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.accepted)
         self.assertIsNone(self.rt._motion_task)
 
+    async def test_orchestrator_dispatches_authored_motion_once_after_matching_ack(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+        self.rt._step = {
+            "motion": {"correct": "celebrate"},
+            "scene": {
+                "robotOverlay": {"asset": {"key": "robotOverlay.celebrate"}}
+            },
+        }
+        events = []
+
+        async def motion(_conn, preset):
+            events.append(("motion", preset))
+            return True
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            task = asyncio.create_task(
+                self.rt._apply_authored_visual_then_motion("correct", "correct")
+            )
+            await asyncio.sleep(0)
+            frame = json.loads(self.rt.conn.websocket.sent[-1])
+            events.append(("visual", frame["body"]["state"]))
+            self.assertEqual(events, [("visual", "correct")])
+
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    frame["sequence"],
+                    1,
+                    generation=frame["body"]["visualGeneration"],
+                    degraded=True,
+                    degradedReason="reducedMotion",
+                )
+            )
+            self.assertTrue(await task)
+            self.assertEqual(events, [("visual", "correct"), ("motion", "celebrate")])
+            self.assertFalse(
+                await self.rt._dispatch_motion_once(
+                    "celebrate", frame["body"]["visualGeneration"], self.rt._step_id
+                )
+            )
+
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    frame["sequence"],
+                    1,
+                    generation=frame["body"]["visualGeneration"],
+                    degraded=True,
+                    degradedReason="reducedMotion",
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(events, [("visual", "correct"), ("motion", "celebrate")])
+
+    async def test_orchestrator_assigns_new_generation_and_replacement_blocks_stale_motion(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            return True
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            first = asyncio.create_task(
+                self.rt._apply_visual_then_motion(
+                    "incorrect", "robotOverlay.thinking", "tryAgain"
+                )
+            )
+            await asyncio.sleep(0)
+            first_frame = json.loads(self.rt.conn.websocket.sent[-1])
+            second = asyncio.create_task(
+                self.rt._apply_visual_then_motion(
+                    "retry", "robotOverlay.thinking", "tryAgain"
+                )
+            )
+            await asyncio.sleep(0)
+            second_frame = json.loads(self.rt.conn.websocket.sent[-1])
+
+            self.assertGreater(
+                second_frame["body"]["visualGeneration"],
+                first_frame["body"]["visualGeneration"],
+            )
+            self.assertFalse(await first)
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    second_frame["sequence"],
+                    1,
+                    generation=second_frame["body"]["visualGeneration"],
+                )
+            )
+            self.assertTrue(await second)
+            self.assertEqual(dispatched, ["tryAgain"])
+
+    async def test_rejected_timeout_pause_stop_disconnect_and_replacement_dispatch_no_motion(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+
+        async def assert_cancelled(action):
+            task = asyncio.create_task(
+                self.rt._apply_visual_then_motion(
+                    "thinking", "robotOverlay.thinking", "thinking"
+                )
+            )
+            await asyncio.sleep(0)
+            await action()
+            self.assertFalse(await task)
+            self.assertIsNone(self.rt._motion_task)
+
+        await assert_cancelled(self.rt.pause)
+        self.rt.state = S_RUNNING
+        await assert_cancelled(self.rt.stop)
+        self.rt.state = S_RUNNING
+        await assert_cancelled(self.rt.on_disconnect)
+        self.rt.state = S_RUNNING
+        await assert_cancelled(self.rt.on_replaced)
+
+        self.rt.state = S_RUNNING
+        rejected = asyncio.create_task(
+            self.rt._apply_visual_then_motion(
+                "incorrect", "robotOverlay.thinking", "tryAgain"
+            )
+        )
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+        await self.rt.on_lesson_ack(
+            self._ack(
+                frame["sequence"],
+                1,
+                generation=frame["body"]["visualGeneration"],
+                accepted=False,
+                degraded=False,
+                degradedReason="unsupportedContract",
+            )
+        )
+        self.assertFalse(await rejected)
+        self.assertIsNone(self.rt._motion_task)
+
+        async def immediate_sleep(_delay):
+            return None
+
+        self.rt._sleep = immediate_sleep
+        self.rt.conn.config["lesson"]["frame_ack_timeout_sec"] = 0.01
+        timed_out = await self.rt._apply_visual_then_motion(
+            "thinking", "robotOverlay.thinking", "thinking"
+        )
+        self.assertFalse(timed_out)
+        self.assertIsNone(self.rt._motion_task)
+
+        self.rt._sleep = asyncio.sleep
+        self.rt.conn.config["lesson"]["frame_ack_timeout_sec"] = 60
+        cancelled = asyncio.create_task(
+            self.rt._apply_visual_then_motion(
+                "thinking", "robotOverlay.thinking", "thinking"
+            )
+        )
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await cancelled
+        self.assertIsNone(self.rt._motion_task)
+
 class ProgressNonCompletionBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 408->exit: a non-step_completed progress event is forwarded but not latched ─
     async def test_non_completion_progress_event_is_forwarded_without_latch(self):

@@ -149,6 +149,94 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
     def _sent(self, conn):
         return [json.loads(p) for p in conn.websocket.sent]
 
+    async def test_renderer_v2_supports_all_runtime_visual_states_with_authored_values(self):
+        from core.lesson.runtime import LessonRuntime, RENDERER_V2_VISUAL_STATES, S_RUNNING
+
+        prep = FIX["frames"]["lesson_prepare"]
+        conn = L._FakeConn(session_id=prep["sessionId"])
+        conn.device_id = "renderer-v2-e2e"
+        conn.features = {
+            "lesson": True,
+            "renderer": ["teebot-lesson-renderer.v2"],
+        }
+        conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "motion_presets_enabled": True,
+                "rollout_device_allowlist": [conn.device_id],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        manifest = L._build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+        step = manifest["steps"][0]
+        step["scene"]["robotOverlay"]["asset"]["key"] = "robotOverlay.authored"
+        step["motion"] = {
+            "present": "teach",
+            "listen": "listen",
+            "correct": "celebrate",
+            "nearMiss": "encourage",
+            "incorrect": "tryAgain",
+            "completion": "goodbye",
+        }
+        with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=prep["sessionId"]):
+            rt = LessonRuntime(
+                conn,
+                assignment=L._build_assignment(),
+                manifest=manifest,
+                asset_cache=L._FakeAssetCache(ready=True),
+                forwarder=L._FakeForwarder(),
+                manifest_checksum=L._manifest_checksum(),
+            )
+        conn.lesson_runtime = rt
+        rt.state = S_RUNNING
+        rt._step = step
+        rt._step_id = step["id"]
+        rt._step_seq = 3
+        self.assertNotIn("present", rt._step_body(step)["motion"])
+
+        self.assertEqual(
+            RENDERER_V2_VISUAL_STATES,
+            {
+                "teach", "listen", "thinking", "correct", "nearMiss",
+                "incorrect", "retry", "celebrate", "completion",
+            },
+        )
+        sent = []
+
+        async def send_and_ack(state, preset):
+            task = asyncio.create_task(
+                rt._apply_visual_then_motion(state, "robotOverlay.authored", preset)
+            )
+            await asyncio.sleep(0)
+            frame = self._sent(conn)[-1]
+            sent.append(frame["body"])
+            await rt.on_lesson_ack(
+                {
+                    "type": "lesson_ack",
+                    "protocolVersion": "teebot-lesson-renderer.v2",
+                    "assignmentId": rt.assignment_id,
+                    "sessionId": rt.session_id,
+                    "stepId": rt._step_id,
+                    "sequence": len(sent),
+                    "body": {
+                        "acks": frame["sequence"],
+                        "accepted": True,
+                        "degraded": False,
+                        "degradedReason": None,
+                        "visualGeneration": frame["body"]["visualGeneration"],
+                    },
+                }
+            )
+            self.assertTrue(await task)
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", return_value=True):
+            for state in RENDERER_V2_VISUAL_STATES:
+                await send_and_ack(state, step["motion"].get("completion") if state == "completion" else None)
+
+        self.assertEqual({body["state"] for body in sent}, RENDERER_V2_VISUAL_STATES)
+        self.assertTrue(all(body["overlayKey"] == "robotOverlay.authored" for body in sent))
+
     # ── 1) ordering oracle: every frame is ACKed before its prompt, full story ───
 
     async def test_each_step_frame_is_acked_by_firmware_before_prompt_across_full_story(self):
@@ -353,7 +441,8 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             return assignment
 
         async def _get_manifest(client, base_url, lesson_id, profile, *, token=None,
-                                 renderer_capabilities=None, lesson_version=None):
+                                 renderer_capabilities=None, renderer_v2_enabled=False,
+                                 lesson_version=None):
             seen["manifest_token"] = token
             return manifest, f'"lesson-3-espTft-{L._manifest_checksum()}"'
 
@@ -443,7 +532,8 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             return assignment
 
         async def _get_manifest(client, base_url, lesson_id, profile, *, token=None,
-                                 renderer_capabilities=None, lesson_version=None):
+                                 renderer_capabilities=None, renderer_v2_enabled=False,
+                                 lesson_version=None):
             seen["manifest"] = (lesson_id, profile, token, renderer_capabilities, lesson_version)
             return manifest, f'"lesson-3-espTft-{L._manifest_checksum()}"'
 

@@ -24,6 +24,11 @@ _PRESET_TOOLS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def motion_preset_tools(preset: str) -> Tuple[str, ...]:
+    """Return the fixed server-side MCP tool sequence for an authored preset."""
+    return _PRESET_TOOLS.get(preset, ())
+
+
 async def dispatch_motion_preset(conn, preset: str) -> bool:
     """Dispatch a named preset best-effort; unavailable motion is a normal degrade."""
     if preset not in ALLOWED_MOTION_PRESETS:
@@ -36,7 +41,7 @@ async def dispatch_motion_preset(conn, preset: str) -> bool:
         if callable(ready) and not await ready():
             return False
         sent = False
-        for tool in _PRESET_TOOLS[preset]:
+        for tool in motion_preset_tools(preset):
             has_tool = getattr(client, "has_tool", None)
             if callable(has_tool) and not has_tool(tool):
                 continue

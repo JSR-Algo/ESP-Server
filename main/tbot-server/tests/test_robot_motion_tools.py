@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from plugins_func.functions import robot_arm_actions, turn_head
 from plugins_func.register import Action
+from core.lesson.motion_presets import dispatch_motion_preset, motion_preset_tools
 
 
 class _FakeMCPClient:
@@ -21,6 +22,27 @@ class _FakeMCPClient:
 class _FakeConn:
     def __init__(self, mcp_client=None):
         self.mcp_client = mcp_client
+
+
+class LessonMotionPresetToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_named_preset_uses_only_server_mcp_tools_in_authored_order(self):
+        tools = motion_preset_tools("teach")
+        self.assertEqual(
+            tools,
+            ("self_robot_right_arm_raise", "self_robot_head_center"),
+        )
+        conn = _FakeConn(_FakeMCPClient(tools=tools))
+        recorder = _CallRecorder()
+        with patch("core.lesson.motion_presets.call_mcp_tool", new=recorder):
+            self.assertTrue(await dispatch_motion_preset(conn, "teach"))
+        self.assertEqual(
+            [call["tool"] for call in recorder.calls],
+            list(tools),
+        )
+
+    def test_unknown_preset_exposes_no_firmware_or_raw_servo_command(self):
+        self.assertEqual(motion_preset_tools("body.motion.present"), ())
+        self.assertEqual(motion_preset_tools("rawServo"), ())
 
 
 class _CallRecorder:

@@ -287,6 +287,55 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await rt.on_child_response("cat"))
         self.assertFalse(rt._step_completed)
 
+    async def test_v2_safe_speaking_uses_authored_overlay_and_motion_without_changing_attempts(self):
+        rt, conn, _forwarder = self._runtime()
+        rt.negotiated_version = "teebot-lesson-renderer.v2"
+        rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        conn.features["renderer"] = ["teebot-lesson-renderer.v2"]
+        conn.config["lesson"]["renderer_v2_enabled"] = True
+        rt._step["scene"] = {
+            "robotOverlay": {"asset": {"key": "robotOverlay.thinking"}}
+        }
+        transitions = []
+
+        async def apply(state, overlay_key, preset):
+            transitions.append((state, overlay_key, preset))
+            return True
+
+        rt._apply_visual_then_motion = apply
+        rt._maybe_finish_step = lambda: asyncio.sleep(0)
+
+        self.assertTrue(await rt.on_child_response("cat"))
+        self.assertEqual(rt._safe_speaking().attempts, 1)
+        self.assertEqual(
+            transitions,
+            [
+                ("incorrect", "robotOverlay.thinking", "tryAgain"),
+                ("retry", "robotOverlay.thinking", None),
+            ],
+        )
+
+        rt._child_response_window_open = True
+        self.assertTrue(await rt.on_child_response("barn"))
+        self.assertEqual(rt._safe_speaking().attempts, 1)
+        self.assertEqual(
+            transitions[-1],
+            ("correct", "robotOverlay.thinking", "celebrate"),
+        )
+
+    async def test_v1_keeps_motion_in_lesson_step_and_emits_no_visual_frame(self):
+        rt, conn, _forwarder = self._runtime()
+        body = rt._step_body(rt._step)
+        self.assertEqual(body["motion"]["present"], "teach")
+
+        rt._dispatch_step_motion("present")
+        await asyncio.sleep(0)
+        frames = [
+            payload for payload in getattr(conn, "websocket", type("W", (), {"sent": []})()).sent
+            if "lesson_visual_state" in payload
+        ]
+        self.assertEqual(frames, [])
+
 
 class MotionPresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_named_presets_are_accepted_and_failure_is_nonfatal(self):

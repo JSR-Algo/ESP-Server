@@ -63,6 +63,12 @@ MAX_LESSON_FRAME_BYTES = 16 * 1024
 
 NO_CURRENT_ASSIGNMENT_MESSAGE = "Robot chưa có bài học nào được giao."
 RENDERER_V2 = "teebot-lesson-renderer.v2"
+RENDERER_V2_VISUAL_STATES = frozenset(
+    {
+        "teach", "listen", "thinking", "correct", "nearMiss",
+        "incorrect", "retry", "celebrate", "completion",
+    }
+)
 VISUAL_DEGRADED_REASONS = frozenset(
     {
         "missingOverlay",
@@ -907,6 +913,8 @@ class LessonRuntime:
         self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
         self._visual_generation = 1
         self._current_visual_request: Optional[Dict[str, Any]] = None
+        self._visual_transition_task: Optional[asyncio.Task] = None
+        self._dispatched_visual_motions: set[tuple[Any, ...]] = set()
         self._step_timeout_task: Optional[asyncio.Task] = None
         self._passive_dwell_task: Optional[asyncio.Task] = None
         self._child_response_timeout_task: Optional[asyncio.Task] = None
@@ -1009,6 +1017,10 @@ class LessonRuntime:
     async def close(self) -> None:
         self._closed = True
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
+        visual_transition_task = self._visual_transition_task
+        self._visual_transition_task = None
+        if visual_transition_task is not None and not visual_transition_task.done():
+            visual_transition_task.cancel()
         self._cancel_frame_ack_timeout()
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
@@ -1028,6 +1040,8 @@ class LessonRuntime:
             self._preload_status_report_tasks.clear()
         if motion_task is not None:
             await asyncio.gather(motion_task, return_exceptions=True)
+        if visual_transition_task is not None:
+            await asyncio.gather(visual_transition_task, return_exceptions=True)
         if self.forwarder is not None:
             await self.forwarder.aclose()
         if self.asset_cache is not None:
@@ -1357,6 +1371,8 @@ class LessonRuntime:
         if response_intent != CHILD_RESPONSE_INTENT_CORRECT:
             self._cancel_child_response_timeout()
             self._close_child_response_window()
+            if self._renderer_v2_enabled():
+                await self._apply_authored_visual_then_motion("incorrect", "incorrect")
             retry_prompt = _child_response_coaching_prompt(
                 self._step, expected_responses, response, response_intent
             )
@@ -1372,6 +1388,8 @@ class LessonRuntime:
                 step_id=self._step_id,
                 continue_listening=True,
             )
+            if self._renderer_v2_enabled():
+                await self._apply_authored_visual_then_motion("retry", None)
             await self._open_child_response_window()
             if self._child_response_window_still_current(self._step_id, self._step_seq):
                 self._start_child_response_timeout()
@@ -1399,6 +1417,8 @@ class LessonRuntime:
         self._log("info", f"interactive child response accepted stepId={self._step_id}")
         self._close_child_response_window()
         self._step_completed = True
+        if self._renderer_v2_enabled():
+            await self._apply_authored_visual_then_motion("correct", "correct")
         success_prompt = _child_response_success_prompt(self._step, expected_responses)
         if success_prompt is not None:
             await self._speak_lesson_prompt_text(
@@ -1453,13 +1473,26 @@ class LessonRuntime:
         self._cancel_child_response_timeout()
         self._close_child_response_window()
         decision = self._safe_speaking().decide(branch)
-        self._dispatch_step_motion(decision.motion_slot)
+        visual_state = {
+            "correct": "correct",
+            "brave_try": "nearMiss",
+            "supported": "correct",
+            "modeled": "retry",
+        }.get(decision.outcome, "incorrect")
+        if self._renderer_v2_enabled():
+            await self._apply_authored_visual_then_motion(
+                visual_state, decision.motion_slot
+            )
+        else:
+            self._dispatch_step_motion(decision.motion_slot)
         await self._speak_lesson_prompt_text(
             decision.prompt,
             step_id=self._step_id,
             continue_listening=not decision.advance,
         )
         if not decision.advance:
+            if self._renderer_v2_enabled():
+                await self._apply_authored_visual_then_motion("retry", None)
             await self._open_child_response_window()
             if self._child_response_window_still_current(self._step_id, self._step_seq):
                 self._start_child_response_timeout()
@@ -1629,7 +1662,13 @@ class LessonRuntime:
             # TeeBot starts teaching or listening for the child's reply.
             prompt_handed_off = False
             if self._step is not None:
-                self._dispatch_step_motion("present")
+                if self._renderer_v2_enabled():
+                    transitions = [(self._authored_step_visual_state(), "present")]
+                    if not self._step_passive:
+                        transitions.append(("listen", "listen"))
+                    self._queue_authored_visual_sequence(transitions)
+                else:
+                    self._dispatch_step_motion("present")
                 prompt_handed_off = await self._speak_step_prompt(self._step)
             if not self._is_active_runtime():
                 return
@@ -1660,7 +1699,8 @@ class LessonRuntime:
                     return
                 self._step_completed = True
             else:
-                self._dispatch_step_motion("listen")
+                if not self._renderer_v2_enabled():
+                    self._dispatch_step_motion("listen")
                 await self._open_child_response_window()
                 if self._child_response_window_still_current(self._step_id, self._step_seq):
                     self._start_child_response_timeout()
@@ -1883,6 +1923,12 @@ class LessonRuntime:
             self.state = S_FAILED
             self._log("error", "no renderable model step found in manifest")
             return
+        if self._renderer_v2_enabled() and self._step is not None:
+            transition = self._visual_transition_task
+            if transition is not None and not transition.done():
+                transition.cancel()
+            self._visual_transition_task = None
+            self._cancel_visual_waiters(increment_generation=True, reason="stepReplaced")
         self._step_index += 1
         self._cancel_child_response_timeout()
         self._cancel_passive_dwell()
@@ -1990,6 +2036,15 @@ class LessonRuntime:
             self._completed_step_ids.add(self._step_id)
         if not last_step:
             await self._emit_step()  # next step in manifest order
+        elif self._renderer_v2_enabled():
+            self._completion_stop_sent = True
+
+            async def emit_completed_stop() -> None:
+                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+
+            self._queue_authored_visual_sequence(
+                [("completion", "completion")], after=emit_completed_stop
+            )
         else:
             self._completion_stop_sent = True
             await self._emit("lesson_stop", body={"reason": "COMPLETED"})
@@ -2429,15 +2484,122 @@ class LessonRuntime:
         result = await self._send_visual_state_attempt(request, generation)
         if result.timed_out and generation == self._visual_generation and not self._closed:
             result = await self._send_visual_state_attempt(request, generation)
-        if (
+        return result
+
+    async def _apply_visual_then_motion(
+        self, state: str, overlay_key: Optional[str], preset: Optional[str]
+    ) -> bool:
+        if state not in RENDERER_V2_VISUAL_STATES or not self._renderer_v2_enabled():
+            return False
+        self._cancel_visual_waiters(increment_generation=True, reason="visualReplaced")
+        generation = self._visual_generation
+        assignment_id = self.assignment_id
+        session_id = self.session_id
+        step_id = self._step_id
+        result = await self.send_visual_state(
+            state,
+            overlay_key=overlay_key,
+            motion_preset=preset,
+        )
+        if not (
             result.accepted
-            and motion_preset
+            and result.visual_generation == generation
             and generation == self._visual_generation
+            and assignment_id == self.assignment_id
+            and session_id == self.session_id
+            and step_id == self._step_id
             and self._is_active_runtime()
             and self.state == S_RUNNING
         ):
-            self._dispatch_visual_motion(motion_preset, generation)
-        return result
+            return False
+        if preset:
+            await self._dispatch_motion_once(preset, generation, step_id)
+        return True
+
+    async def _apply_authored_visual_then_motion(
+        self, state: str, motion_slot: Optional[str]
+    ) -> bool:
+        motion = (self._step or {}).get("motion")
+        preset = motion.get(motion_slot) if isinstance(motion, dict) and motion_slot else None
+        if not isinstance(preset, str):
+            preset = None
+        return await self._apply_visual_then_motion(
+            state,
+            self._authored_overlay_key(),
+            preset,
+        )
+
+    def _authored_overlay_key(self) -> Optional[str]:
+        scene = (self._step or {}).get("scene")
+        overlay = scene.get("robotOverlay") if isinstance(scene, dict) else None
+        asset = overlay.get("asset") if isinstance(overlay, dict) else None
+        key = asset.get("key") if isinstance(asset, dict) else None
+        return key if isinstance(key, str) and key else None
+
+    def _authored_step_visual_state(self) -> str:
+        return {
+            "listening": "listen",
+            "thinking": "thinking",
+            "celebrating": "celebrate",
+        }.get((self._step or {}).get("robotState"), "teach")
+
+    def _queue_authored_visual_sequence(
+        self,
+        transitions: List[tuple[str, Optional[str]]],
+        *,
+        after: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
+        previous = self._visual_transition_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def run() -> None:
+            for state, motion_slot in transitions:
+                if not await self._apply_authored_visual_then_motion(state, motion_slot):
+                    return
+            if after is not None:
+                await after()
+
+        self._visual_transition_task = asyncio.create_task(run())
+
+    async def _dispatch_motion_once(
+        self, preset: str, visual_generation: int, step_id: Optional[str]
+    ) -> bool:
+        if not self._lesson_rollout_control_enabled("motion_presets_enabled"):
+            return False
+        key = (
+            self.assignment_id,
+            self.session_id,
+            step_id,
+            visual_generation,
+            preset,
+        )
+        if key in self._dispatched_visual_motions:
+            return False
+        if (
+            self._closed
+            or visual_generation != self._visual_generation
+            or step_id != self._step_id
+            or not self._is_active_runtime()
+            or self.state != S_RUNNING
+        ):
+            return False
+        self._dispatched_visual_motions.add(key)
+        try:
+            dispatched = await dispatch_motion_preset(self.conn, preset)
+            self._log(
+                "info" if dispatched else "warning",
+                f"lesson_motion_dispatch outcome={'applied' if dispatched else 'failed'} preset={preset}",
+            )
+            return dispatched
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log(
+                "warning",
+                f"lesson_motion_dispatch outcome=failed preset={preset} error={type(exc).__name__}",
+            )
+            return False
 
     async def _send_visual_state_attempt(
         self, request: Dict[str, Any], generation: int
@@ -2543,36 +2705,6 @@ class LessonRuntime:
 
     async def on_replaced(self) -> None:
         self._cancel_visual_waiters(increment_generation=True, reason="replaced")
-
-    def _dispatch_visual_motion(self, preset: str, visual_generation: int) -> None:
-        if not self._lesson_rollout_control_enabled("motion_presets_enabled"):
-            return
-        self._motion_generation += 1
-        motion_generation = self._motion_generation
-        previous = self._motion_task
-        if previous is not None and not previous.done():
-            previous.cancel()
-
-        async def run() -> None:
-            if previous is not None:
-                await asyncio.gather(previous, return_exceptions=True)
-            if (
-                self._closed
-                or visual_generation != self._visual_generation
-                or motion_generation != self._motion_generation
-            ):
-                return
-            try:
-                await dispatch_motion_preset(self.conn, preset)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._log(
-                    "warning",
-                    f"lesson_motion_dispatch outcome=failed preset={preset} error={type(exc).__name__}",
-                )
-
-        self._motion_task = asyncio.create_task(run())
 
     def _envelope(self, frame_type: str, *, step_id: Optional[str], sequence: int, body: Dict[str, Any]) -> Dict[str, Any]:
         # The frozen §5.2 envelope, key order matching the S2 fixture. The
@@ -2870,7 +3002,12 @@ class LessonRuntime:
         ):
             value = step.get(key)
             if value is not None:
-                body[key] = value
+                if key == "motion" and self._renderer_v2_enabled() and isinstance(value, dict):
+                    # V2 motion is server-owned; legacy firmware must never see the
+                    # only slot it historically executes locally.
+                    body[key] = {slot: preset for slot, preset in value.items() if slot != "present"}
+                else:
+                    body[key] = value
         template_projection = _safe_tvideo_projection(step.get("templateProjection"))
         if template_projection is not None:
             body["templateProjection"] = template_projection
