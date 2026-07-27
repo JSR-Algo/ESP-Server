@@ -5,6 +5,10 @@ const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/robot-preview-projection.js', root), 'utf8');
 const projection = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
+assert.equal(projection.RENDERER_V2_MANIFEST_VERSION, 'teebot-lesson-renderer.v2');
+assert.deepEqual(projection.VISUAL_STATES, ['teach', 'listen', 'thinking', 'correct', 'nearMiss', 'incorrect', 'retry', 'celebrate', 'completion']);
+assert.deepEqual(projection.DEGRADED_REASONS, ['missingOverlay', 'animationStartFailed', 'phaseTimeout', 'reducedMotion', 'unsupportedContract', 'assetIdentityMismatch', 'insufficientHeap']);
+
 for (const minutes of [3, 5, 8]) {
   const fixture = JSON.parse(await readFile(new URL(`tests/fixtures/robot-preview-${minutes}m.json`, root), 'utf8'));
   const golden = JSON.parse(await readFile(new URL(`tests/golden/robot-preview-${minutes}m.json`, root), 'utf8'));
@@ -54,6 +58,8 @@ assert.equal(servedCorrect.layers.find((layer) => layer.id === 'wordPill').text,
 assert.ok(servedCorrect.timeline.some((item) => item.label === 'Slave command: goodbye'));
 assert.ok(projection.projectEspTftPreview(servedManifest, 0, 'nearMiss').timeline.some((item) => item.label === 'Slave command: thinking'));
 assert.ok(projection.projectEspTftPreview(servedManifest, 0, 'incorrect').timeline.some((item) => item.label === 'Slave command: presentRight'));
+servedManifest.steps[0].entrance = 'flyIn';
+assert.equal(projection.projectEspTftPreview(servedManifest, 0, 'correct').entrance, 'flyIn', 'renderer-v1 step entrances must remain compatible');
 
 const hostile = structuredClone(fixture.manifest);
 hostile.steps[0].scene.backgroundScene.video = { src: 'https://bad.test/movie.mp4' };
@@ -71,4 +77,56 @@ assert.equal(malformed.stage.height, 320);
 assert.ok(malformed.warnings.some((warning) => warning.includes('Unsupported profile')));
 assert.equal(projection.projectEspTftPreview({}, -4, 'silence').layers.length, 6);
 
-console.log('robot lesson preview projection: golden 3/5/8 layouts and ten response paths PASS');
+const rendererV2 = structuredClone(fixture.manifest);
+rendererV2.manifestVersion = 'teebot-lesson-renderer.v2';
+rendererV2.physicalMotionOwner = 'server';
+rendererV2.rendererCapabilities = ['teebot-lesson-renderer.v2'];
+rendererV2.openingEntrance = {
+  template: 'tvideoFlyWalk',
+  preset: 'flyLandWalkGreet',
+  policy: 'oncePerLessonSession',
+  layoutPreset: 'centerRoad',
+  phases: ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'],
+  fallback: 'staticGreet'
+};
+rendererV2.steps.forEach((step) => { step.entrance = 'none'; });
+rendererV2.steps[0].visualStates = Object.fromEntries(projection.VISUAL_STATES.map((state) => [state, { prompt: `${state} prompt`, motionPreset: `${state} motion`, overlayKey: `${state} overlay` }]));
+rendererV2.steps.push({ ...structuredClone(rendererV2.steps[0]), id: 'second-step', entrance: 'none' });
+
+for (const state of projection.VISUAL_STATES) {
+  const rendered = projection.projectEspTftPreview(rendererV2, 0, state);
+  assert.equal(rendered.visualState, state);
+  assert.equal(rendered.timeline[1].label, `Server motion: ${state} motion`);
+  assert.equal(rendered.layers.find((layer) => layer.id === 'prompt').text, `${state} prompt`);
+}
+
+const exactV2 = projection.projectEspTftPreview(rendererV2, 0, 'teach');
+assert.equal(exactV2.manifestVersion, 'teebot-lesson-renderer.v2');
+assert.equal(exactV2.rendererLabel, 'Renderer v2');
+assert.equal(exactV2.physicalMotionOwner, 'server');
+assert.equal(exactV2.openingEntranceCount, 1);
+assert.equal(exactV2.openingEntrance.policy, 'oncePerLessonSession');
+assert.equal(exactV2.capability.supported, true);
+assert.equal(exactV2.warnings.length, 0);
+assert.equal(projection.projectEspTftPreview(rendererV2, 1, 'teach').entrance, 'none', 'renderer-v2 entrance must not replay after step zero');
+
+for (const reason of projection.DEGRADED_REASONS) {
+  const degraded = projection.projectEspTftPreview(rendererV2, 0, 'teach', reason);
+  assert.equal(degraded.degraded.reason, reason);
+  assert.ok(degraded.degraded.fallback);
+  assert.equal(degraded.layers.find((layer) => layer.id === 'prompt').visible, true);
+  assert.equal(degraded.layers.find((layer) => layer.id === 'background').visible, true);
+}
+assert.equal(projection.projectEspTftPreview(rendererV2, 0, 'teach', 'missingOverlay').layers.find((layer) => layer.id === 'robotOverlay').visible, false);
+assert.equal(projection.projectEspTftPreview(rendererV2, 0, 'teach', 'insufficientHeap').layers.find((layer) => layer.id === 'robotOverlay').visible, false);
+assert.equal(projection.projectEspTftPreview(rendererV2, 0, 'teach', 'animationStartFailed').layers.find((layer) => layer.id === 'robotOverlay').visible, true);
+
+const v1Only = structuredClone(rendererV2);
+v1Only.rendererCapabilities = ['teebot-lesson-renderer.v1'];
+assert.ok(projection.projectEspTftPreview(v1Only).warnings.some((warning) => warning.includes('renderer-v1')));
+
+const duplicateOpening = structuredClone(rendererV2);
+duplicateOpening.steps.push({ ...structuredClone(duplicateOpening.steps[0]), id: 'second-step', entrance: 'flyIn' });
+assert.ok(projection.projectEspTftPreview(duplicateOpening).warnings.some((warning) => warning.includes('exactly one opening entrance')));
+
+console.log('robot lesson preview projection: golden layouts, renderer-v2 states, capability, and degraded fallbacks PASS');

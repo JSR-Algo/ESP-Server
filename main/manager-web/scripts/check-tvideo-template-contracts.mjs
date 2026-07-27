@@ -169,9 +169,9 @@ for (const marker of ['templateVisualRefTransition', 'restoreTemplateVisualRef',
   assert.ok(editorSource.includes(marker), `lesson editor visual-ref compensation missing ${marker}`);
 }
 
-const robotPreviewSource = fs.readFileSync(new URL('../src/components/lesson/RobotLessonPreview.vue', import.meta.url), 'utf8');
+const robotPreviewSource = fs.readFileSync(new URL('../src/components/lesson/RobotManifestServerPreview.vue', import.meta.url), 'utf8');
 const primaryWordMatch = /primaryWord\(\)\s*\{\s*return\s+([\s\S]*?);\s*\},/.exec(robotPreviewSource);
-assert.ok(primaryWordMatch, 'RobotLessonPreview primaryWord computed expression is missing');
+assert.ok(primaryWordMatch, 'RobotManifestServerPreview primaryWord computed expression is missing');
 const resolvePrimaryWord = Function(`return function primaryWord() { return (${primaryWordMatch[1]}); }`)();
 const primaryWordCases = [
   {

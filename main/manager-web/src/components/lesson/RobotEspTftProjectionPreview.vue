@@ -1,5 +1,23 @@
 <template>
   <section class="robot-preview" aria-label="Exact ESP TFT lesson preview">
+    <div class="contract-head">
+      <div>
+        <span class="contract-kicker">Exact 480x320 TFT projection</span>
+        <strong>{{ projection.rendererLabel }}</strong>
+        <code>{{ projection.manifestVersion || 'manifest identity unavailable' }}</code>
+      </div>
+      <span :class="['capability-badge', { supported: projection.capability.supported }]">
+        {{ projection.capability.supported ? 'Renderer v2 supported' : 'Renderer v2 unsupported' }}
+      </span>
+    </div>
+
+    <dl class="contract-grid">
+      <div><dt>Opening entrance</dt><dd>{{ openingPolicy }}</dd></div>
+      <div><dt>Visual state</dt><dd>{{ projection.visualState }}</dd></div>
+      <div><dt>Motion owner</dt><dd>{{ projection.physicalMotionOwner || 'not declared' }}</dd></div>
+      <div><dt>Fallback</dt><dd>{{ projection.degraded.fallback || 'none' }}</dd></div>
+    </dl>
+
     <div v-if="projection.warnings.length" class="firmware-warning" role="alert" aria-live="assertive">
       <strong>Firmware-incompatible preview</strong>
       <span v-for="warning in projection.warnings" :key="warning">{{ warning }}</span>
@@ -55,6 +73,7 @@
         <div v-if="showSafeZones" class="safe-zone safe-right" />
       </div>
     </div>
+    <p class="truth-note">The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.</p>
 
     <div class="play-bar">
       <button type="button" class="play-btn" :aria-pressed="playing ? 'true' : 'false'" @click="togglePlay">
@@ -78,6 +97,33 @@
       <label><input v-model="showSafeZones" type="checkbox" /> Safe zones</label>
     </div>
 
+    <div class="state-controls" aria-label="Renderer v2 visual states">
+      <span>Runtime visual state</span>
+      <button
+        v-for="state in visualStates"
+        :key="state"
+        type="button"
+        data-testid="visual-state-control"
+        :data-state="state"
+        :class="{ selected: projection.visualState === state }"
+        @click="selectVisualState(state)"
+      >{{ stateLabels[state] }}</button>
+    </div>
+
+    <div class="degraded-controls" aria-label="Deterministic degraded fallbacks">
+      <span>Inspect degraded fallback</span>
+      <button type="button" :class="{ selected: !degradedReason }" @click="selectDegradedReason(null)">Normal</button>
+      <button
+        v-for="reason in degradedReasons"
+        :key="reason"
+        type="button"
+        data-testid="degraded-reason-control"
+        :data-reason="reason"
+        :class="{ selected: degradedReason === reason }"
+        @click="selectDegradedReason(reason)"
+      >{{ reason }}</button>
+    </div>
+
     <ol class="motion-timeline" aria-label="Robot command timeline">
       <li v-for="item in projection.timeline" :key="`${item.atMs}-${item.label}`">
         <time>{{ item.atMs }}ms</time><span>{{ item.label }}</span>
@@ -87,7 +133,12 @@
 </template>
 
 <script>
-import { projectEspTftPreview, RESPONSE_PATHS } from './robot-preview-projection';
+import {
+  projectEspTftPreview,
+  RESPONSE_PATHS,
+  VISUAL_STATES,
+  DEGRADED_REASONS
+} from './robot-preview-projection';
 
 export default {
   name: 'RobotEspTftProjectionPreview',
@@ -99,6 +150,7 @@ export default {
   data() {
     return {
       selectedPath: RESPONSE_PATHS.includes(this.initialPath) ? this.initialPath : 'correct',
+      degradedReason: null,
       showSafeZones: false,
       motionNonce: 0,
       // Animated "play the lesson" preview. Steps the robot through every manifest
@@ -109,6 +161,12 @@ export default {
       playTimer: null,
       previewStepMs: 1700,
       responsePaths: RESPONSE_PATHS,
+      visualStates: VISUAL_STATES,
+      degradedReasons: DEGRADED_REASONS,
+      stateLabels: {
+        teach: 'Teach', listen: 'Listen', thinking: 'Thinking', correct: 'Correct', nearMiss: 'Near miss',
+        incorrect: 'Incorrect', retry: 'Retry', celebrate: 'Celebrate', completion: 'Completion'
+      },
       pathLabels: {
         correct: 'Correct',
         nearMiss: 'Near miss',
@@ -128,7 +186,12 @@ export default {
       return this.playing ? this.playStep : this.stepIndex;
     },
     projection() {
-      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath);
+      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason);
+    },
+    openingPolicy() {
+      const opening = this.projection.openingEntrance;
+      if (!opening || !Object.keys(opening).length) return 'not declared';
+      return `${opening.policy || 'policy unavailable'} · ${opening.preset || 'preset unavailable'}`;
     },
     word() {
       const pill = this.projection.layers.find((layer) => layer.id === 'wordPill');
@@ -197,7 +260,11 @@ export default {
       this.clearPlayTimer();
       this.playTimer = setTimeout(() => {
         const count = this.projection.step.count || 1;
-        this.playStep = (this.playStep + 1) % count;
+        if (this.playStep >= count - 1) {
+          this.stopPlay();
+          return;
+        }
+        this.playStep += 1;
         this.motionNonce += 1;
         if (this.playing) this.scheduleAdvance();
       }, this.previewStepMs);
@@ -213,7 +280,16 @@ export default {
       if (this.playing) this.stopPlay();
       this.selectedPath = path;
       this.motionNonce += 1;
-      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path) });
+      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path, this.degradedReason) });
+    },
+    selectVisualState(state) {
+      if (!VISUAL_STATES.includes(state)) return;
+      this.selectPath(state);
+    },
+    selectDegradedReason(reason) {
+      if (reason !== null && !DEGRADED_REASONS.includes(reason)) return;
+      this.degradedReason = reason;
+      this.motionNonce += 1;
     }
   }
 };
@@ -221,9 +297,21 @@ export default {
 
 <style scoped>
 .robot-preview { --ink: #17211b; --cream: #fff8e7; --lime: #b9ec45; color: var(--ink); }
+.contract-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.contract-head > div { display:grid; gap:3px; }
+.contract-kicker { color:#607064; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+.contract-head strong { font-size:22px; }
+.contract-head code { color:#445349; font-size:12px; overflow-wrap:anywhere; }
+.capability-badge { padding:6px 10px; border:1px solid #a42c20; border-radius:999px; background:#fff0ea; color:#78140d; font-size:12px; font-weight:800; white-space:nowrap; }
+.capability-badge.supported { border-color:#648c22; background:#edf7d8; color:#34520d; }
+.contract-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:0 0 12px; }
+.contract-grid div { min-width:0; padding:9px 10px; border:1px solid #d7e1d4; border-radius:10px; background:#f7faef; }
+.contract-grid dt { color:#6c796f; font-size:11px; text-transform:uppercase; }
+.contract-grid dd { margin:3px 0 0; font-size:13px; font-weight:800; overflow-wrap:anywhere; }
 .firmware-warning { display: grid; gap: 3px; margin-bottom: 12px; padding: 12px 14px; border: 2px solid #9c2218; border-radius: 10px; background: #fff0ea; color: #78140d; }
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
+.truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }
 .stage-layer { position: absolute; box-sizing: border-box; }
 .layer-background { object-fit: cover; }
 .layer-teachingObject, .layer-robotOverlay { object-fit: contain; }
@@ -246,6 +334,10 @@ export default {
 .preview-toolbar button { padding: 7px 11px; border: 1px solid #9ba89f; border-radius: 999px; background: white; color: #26342b; cursor: pointer; font: inherit; }
 .preview-toolbar button.selected { border-color: #17211b; background: var(--lime); box-shadow: inset 0 -2px rgba(0, 0, 0, .18); font-weight: 800; }
 .preview-toolbar label { margin-left: auto; font-size: 13px; }
+.state-controls, .degraded-controls { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-top:12px; padding-top:12px; border-top:1px solid #dfe7dc; }
+.state-controls > span, .degraded-controls > span { width:100%; color:#5e6e62; font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }
+.state-controls button, .degraded-controls button { padding:6px 9px; border:1px solid #aab5ad; border-radius:8px; background:#fff; color:#26342b; cursor:pointer; font:inherit; font-size:12px; }
+.state-controls button.selected, .degraded-controls button.selected { border-color:#17211b; background:#17211b; color:#fff; }
 .motion-timeline { display: grid; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
 .motion-timeline li { display: grid; grid-template-columns: 62px 1fr; gap: 8px; padding: 7px 10px; border-left: 3px solid #648c22; background: #f1f6e8; }
 .motion-timeline time { color: #607064; font-variant-numeric: tabular-nums; }
@@ -266,6 +358,7 @@ export default {
 @keyframes entranceSlide { 0% { transform: translateX(60px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
 @keyframes entrancePop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
-@media (max-width: 560px) { .stage-shell { padding: 8px; }.stage { transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
+@media (max-width: 720px) { .contract-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { padding: 8px; }.stage { transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }
 </style>

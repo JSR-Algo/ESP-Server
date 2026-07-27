@@ -102,8 +102,25 @@
                 :disabled="!isDraft || savingStep || rebindingSharedVisual"
                 @input="onPromptInput"
               />
+              <el-card class="content-card" shadow="never">
+                <div slot="header"><strong>Step details</strong></div>
+                <el-form label-position="top" size="small">
+                  <div class="grid-2">
+                    <el-form-item :label="$t('lesson.subjectLabel')" required>
+                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('subject', $event)" />
+                    </el-form-item>
+                    <el-form-item :label="$t('lesson.helperText')">
+                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('helperText', $event)" />
+                    </el-form-item>
+                  </div>
+                  <el-form-item :label="$t('lesson.l1TransferHint')">
+                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('l1TransferHint', $event)" />
+                  </el-form-item>
+                </el-form>
+              </el-card>
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || rebindingSharedVisual" />
               <SharedAssetPicker
+                v-if="lessonCapabilities.sharedVisualAuthoring"
                 :assets="bundleAssets"
                 :selected-key="selectedObjectKey"
                 category="teachingObject"
@@ -150,9 +167,9 @@
                   </button>
                 </div>
               </div>
-              <div v-if="cinematicDemoUrl" class="cinematic-effect" data-testid="cinematic-effect">
+              <section v-if="cinematicDemoUrl" class="cinematic-effect preview-surface" data-testid="cinematic-design-reference">
                 <div class="preview-heading">
-                  <span class="eyebrow">HIỆU ỨNG BÀI HỌC (BẢN THIẾT KẾ)</span>
+                  <span class="eyebrow">CINEMATIC DESIGN REFERENCE</span>
                   <span class="preview-heading__hint">Hiệu ứng gốc của bài — background video + robot bay vào / đi tới / chào</span>
                   <button type="button" class="replay-btn" @click="replayCinematicFlyIn">↺ Xem lại bay vào</button>
                 </div>
@@ -160,21 +177,18 @@
                   <iframe ref="cinematicFrame" :src="cinematicDemoUrl" title="Hiệu ứng bài học (bản thiết kế)" loading="lazy" allow="autoplay" @load="pushCinematicStep" />
                 </div>
                 <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
-              </div>
-              <template v-if="cinematicDemoUrl">
+              </section>
+              <section v-if="previewManifest" class="preview-surface exact-renderer-surface" data-testid="exact-robot-renderer">
                 <div class="preview-heading">
-                  <span class="eyebrow">TRÊN ROBOT (THIẾT BỊ)</span>
-                  <span class="preview-heading__hint">Khung 420×320 — robot bay vào / đi / chào ở độ phân giải thiết bị</span>
+                  <span class="eyebrow">EXACT ROBOT RENDERER</span>
+                  <span class="preview-heading__hint">TFT 480×320 — lớp ảnh tĩnh, visual state và fallback theo manifest đã chuẩn hóa</span>
                 </div>
-                <div class="device-frame">
-                  <iframe ref="cinematicFrameDevice" :src="cinematicDemoUrl" title="Trên robot (thiết bị)" loading="lazy" allow="autoplay" @load="pushCinematicStep" />
-                </div>
-              </template>
-              <RobotLessonPreview
-                v-else-if="previewManifest"
-                :manifest-preview="previewManifest"
-                :step-index="selectedStepIndex"
-              />
+                <RobotLessonPreview
+                  :manifest="previewManifest.manifest"
+                  :step-index="selectedStepIndex"
+                  @path-change="previewPath = $event"
+                />
+              </section>
               <div v-else class="preview-empty">
                 <strong>Robot preview</strong>
                 <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
@@ -197,6 +211,7 @@
             :steps="studioSteps"
             :assets="bundleAssets"
             :manifest="previewManifest ? previewManifest.manifest : {}"
+            :validation="validationResult"
             :validation-result="validationResult"
             :validation-current="validationProofVersion === proofVersion"
             @ready-change="readinessReady = $event"
@@ -860,7 +875,6 @@ export default {
     this.loadLessonCapabilities();
     this.loadCanonicalDemo();
     this.loadBackgroundLibrary();
-    this.loadObjectLibrary();
     this.fetchAll();
     // A cinematic iframe announces 'tvideo-ready' once its message listener is
     // attached; push the current step then so the sync never loses the load race.
@@ -900,6 +914,7 @@ export default {
     async loadLessonCapabilities() {
       this.lessonCapabilities = await loadLessonRolloutCapabilities();
       if (this.lessonCapabilities.sharedVisualAuthoring) this.fetchSharedVisualAssets();
+      if (this.lessonCapabilities.sharedVisualAuthoring || this.lessonCapabilities.exactEspTftPreview) this.loadObjectLibrary();
     },
     statusType(status) {
       if (status === 'published') return 'success';
@@ -1371,6 +1386,7 @@ export default {
       if (!guard || guard.requestId !== this.promptSaveRequestId
         || guard.stepRevision !== (this.stepEditRevisions[guard.stepKey] || 0)) return false;
       this.$delete(this.selectedStepDrafts, guard.stepKey);
+      this.$delete(this.selectedContentDrafts, guard.stepKey);
       this.$delete(this.selectedAssetDrafts, guard.stepKey);
       this.$delete(this.dirtyStepKeys, guard.stepKey);
       this.$delete(this.stepEditRevisions, guard.stepKey);
@@ -1638,7 +1654,7 @@ export default {
       const persistStep = () => Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
-        { ...step, prompt: this.promptDraft, stepBody },
+        { ...step, ...this.selectedContent, prompt: this.promptDraft, stepBody },
         () => {
           if (saveGuard.requestId !== this.promptSaveRequestId) return;
           this.fetchSteps({
@@ -1819,7 +1835,7 @@ export default {
     // (embed mode hides the demo's own replay button).
     replayCinematicFlyIn() {
       if (!this.cinematicDemoUrl) return;
-      [this.$refs.cinematicFrame, this.$refs.cinematicFrameDevice]
+      [this.$refs.cinematicFrame]
         .map((fr) => fr && fr.contentWindow)
         .filter(Boolean)
         .forEach((win) => {
@@ -1830,7 +1846,7 @@ export default {
     },
     pushCinematicStep(replayIntro = false) {
       if (!this.cinematicDemoUrl) return;
-      const wins = [this.$refs.cinematicFrame, this.$refs.cinematicFrameDevice]
+      const wins = [this.$refs.cinematicFrame]
         .map((fr) => fr && fr.contentWindow)
         .filter(Boolean);
       if (!wins.length) return;
@@ -2077,7 +2093,7 @@ export default {
       );
     },
     doPreview(onSuccess, onError, options = {}) {
-      if (this.editorDestroying) return false;
+      if (this.editorDestroying || !this.lessonCapabilities.exactEspTftPreview) return false;
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
       const requestId = this.previewRequestId + 1;
       const previousProofVersion = this.proofVersion;
@@ -2579,10 +2595,10 @@ export default {
 /* Objects are transparent PNGs — show them on a light plate, not cropped. */
 .obj-chip img { aspect-ratio:1/1; object-fit:contain; background:#f4f7ec; padding:4px; }
 .cinematic-effect { margin-bottom:18px; }
+.preview-surface { border:1px solid #d8e2dd; border-radius:18px; background:#fff; padding:14px; }
+.exact-renderer-surface { margin-top:18px; }
 .cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; overflow:hidden; width:100%; }
 .cinematic-frame iframe { border:0; display:block; height:100%; width:100%; }
-.device-frame { width:420px; height:320px; max-width:100%; background:#0c1c19; border:3px solid #0c1c19; border-radius:14px; box-shadow:0 8px 22px rgba(0,0,0,.25); margin:0 auto; overflow:hidden; }
-.device-frame iframe { border:0; display:block; height:100%; width:100%; }
 .cinematic-note { color:#5f6f63; font-size:12.5px; line-height:1.45; margin:8px 2px 0; }
 .preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }

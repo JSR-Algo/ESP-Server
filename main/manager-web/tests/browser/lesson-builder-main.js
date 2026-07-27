@@ -17,15 +17,28 @@ let steps = [
   { stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 } },
   { stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12 } },
 ];
-const sharedAssets = [{ assetKey: 'object.barn', category: 'teachingObject', versionId: '00000000-0000-4000-8000-000000000002', version: 2, storagePath: 'sd://shared/barn.png', sha256: 'abc123', bytes: 60000, width: 160, height: 120, usageCount: 4 }];
+const sharedAssets = [{ assetId: '00000000-0000-4000-8000-000000000001', assetKey: 'object.barn', category: 'teachingObject', layer: 'teachingObject', versionId: '00000000-0000-4000-8000-000000000002', version: 2, path: 'sd://shared/barn.png', storagePath: 'sd://shared/barn.png', sha256: 'abc123', bytes: 60000, width: 160, height: 120, usageCount: 4 }];
 const validation = { valid: true, profiles: ['espTft'], budgets: { espTft: { errors: [], warnings: [], metrics: { assetCount: 9, uniqueAssetCount: 7, sharedAssetCount: 2, packBytes: 222000, estimatedVisualPeakBytes: 640000, offlineReady: true, allPathsTerminate: true } } } };
-const manifest = { profile: 'espTft', pathsTerminate: true, steps: [{ stepKey: 's1', prompt: 'Meet Pip', scene: {}, teachingWord: { text: 'PET' } }, { stepKey: 's2', prompt: 'Say barn', scene: {}, teachingWord: { text: 'BARN' } }] };
+const visualStates = ['teach', 'listen', 'thinking', 'correct', 'nearMiss', 'incorrect', 'retry', 'celebrate', 'completion'];
+const manifest = {
+  manifestVersion: 'teebot-lesson-renderer.v2',
+  profile: 'espTft',
+  physicalMotionOwner: 'server',
+  rendererCapabilities: ['teebot-lesson-renderer.v2'],
+  openingEntrance: { template: 'tvideoFlyWalk', preset: 'flyLandWalkGreet', policy: 'oncePerLessonSession', phases: ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'], fallback: 'staticGreet' },
+  pathsTerminate: true,
+  steps: [
+    { stepKey: 's1', prompt: 'Meet Pip', scene: {}, teachingWord: { text: 'PET' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: state, overlayKey: state }])) },
+    { stepKey: 's2', prompt: 'Say barn', scene: {}, teachingWord: { text: 'BARN' }, entrance: 'none', visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: state, overlayKey: state }])) },
+  ]
+};
 
 Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi' }); },
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
+  listSharedBackgrounds(ok) { ok([]); },
   listVisualAssets(filters, ok) { calls.visualFilters.push(filters); ok(sharedAssets); },
   updateStep(lessonId, stepKey, payload, ok, fail) {
     calls.update.push({ lessonId, stepKey, payload: JSON.parse(JSON.stringify(payload)) });
@@ -41,10 +54,10 @@ Object.assign(Api.lesson, {
 });
 
 LessonEditor.components.HeaderBar = { name: 'HeaderBar', render: (h) => h('header') };
-LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], render: (h) => h('div') };
+LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], mounted() { this.$emit('assets-loaded', sharedAssets); }, render: (h) => h('div') };
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
-router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
+await router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
 Vue.prototype.$t = (key) => key;
 Vue.prototype.$message = { success() {}, error(message) { calls.errors.push(message); }, warning() {} };
 Vue.prototype.$confirm = () => Promise.resolve();
@@ -55,6 +68,7 @@ window.__LESSON_BUILDER_TEST__ = { editor, calls, sharedAssets, validation, mani
 window.__MOUNT_DISABLED_LESSON_EDITOR__ = async () => {
   vm.$destroy();
   vm.$el.remove();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const root = document.createElement('div');
   root.id = 'disabled-app';
   document.body.appendChild(root);
