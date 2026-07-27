@@ -139,6 +139,20 @@ def test_release_package_includes_haproxy_config_required_by_compose():
     assert 'cp "${SCRIPT_DIR}/haproxy.cfg" "${RELEASE_DIR}/haproxy.cfg"' in script
 
 
+def test_release_package_fallback_preserves_asset_materialization_limits():
+    script = (REPO_ROOT / "deploy" / "package-release.sh").read_text(encoding="utf-8")
+
+    for expected in (
+        "LESSON_ASSET_ALLOWED_ORIGINS: ${LESSON_ASSET_ALLOWED_ORIGINS:?set LESSON_ASSET_ALLOWED_ORIGINS}",
+        "LESSON_SD_MAX_FILE_BYTES: ${LESSON_SD_MAX_FILE_BYTES:?set LESSON_SD_MAX_FILE_BYTES}",
+        "LESSON_SD_MAX_PACK_BYTES: ${LESSON_SD_MAX_PACK_BYTES:?set LESSON_SD_MAX_PACK_BYTES}",
+        "LESSON_ASSET_ALLOWED_ORIGINS=https://res.cloudinary.com",
+        "LESSON_SD_MAX_FILE_BYTES=1048576",
+        "LESSON_SD_MAX_PACK_BYTES=8388608",
+    ):
+        assert expected in script
+
+
 def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
     readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
     assert '-e "REDIS_URL=$REDIS_URL"' in readme
