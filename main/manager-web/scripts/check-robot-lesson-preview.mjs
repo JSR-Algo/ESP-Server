@@ -90,8 +90,32 @@ rendererV2.openingEntrance = {
   fallback: 'staticGreet'
 };
 rendererV2.steps.forEach((step) => { step.entrance = 'none'; });
+rendererV2.steps[0].templateProjection = {
+  templateId: 'tvideoFlyWalk',
+  templateVersion: 1,
+  layoutPreset: 'centerRoad',
+  geometryVersion: 1,
+  phases: [
+    { name: 'hidden', durationMs: 100 }, { name: 'flyIn', durationMs: 1200 },
+    { name: 'landFar', durationMs: 700 }, { name: 'settle', durationMs: 350 },
+    { name: 'walkToward', durationMs: 1800 }, { name: 'arriveNear', durationMs: 250 },
+    { name: 'greetIdle', durationMs: 650 }, { name: 'revealTeachingContent', durationMs: 100 }
+  ]
+};
 rendererV2.steps[0].visualStates = Object.fromEntries(projection.VISUAL_STATES.map((state) => [state, { prompt: `${state} prompt`, motionPreset: `${state} motion`, overlayKey: `${state} overlay` }]));
 rendererV2.steps.push({ ...structuredClone(rendererV2.steps[0]), id: 'second-step', entrance: 'none' });
+
+const openingTrace = projection.projectRendererV2OpeningTrace(rendererV2.steps[0].templateProjection, [
+  { name: 'hidden', advanceMs: 0 },
+  { name: 'flyIn', advanceMs: 100 },
+  { name: 'walkTowardMidpoint', advanceMs: 3150 }
+]);
+assert.deepEqual(openingTrace.map(({ boundary, phase }) => ({ boundary, phase })), [
+  { boundary: 'hidden', phase: 'hidden' },
+  { boundary: 'flyIn', phase: 'flyIn' },
+  { boundary: 'walkTowardMidpoint', phase: 'walkToward' }
+]);
+assert.deepEqual(openingTrace[2].bounds, { x: 234, y: 150, width: 104, height: 70 });
 
 for (const state of projection.VISUAL_STATES) {
   const rendered = projection.projectEspTftPreview(rendererV2, 0, state);

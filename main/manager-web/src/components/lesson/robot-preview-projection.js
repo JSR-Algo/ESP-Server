@@ -23,6 +23,26 @@ export const RESPONSE_PATHS = Object.freeze([
 ]);
 
 export const RENDERER_V2_MANIFEST_VERSION = 'teebot-lesson-renderer.v2';
+export const RENDERER_V2_OPENING_PHASES = Object.freeze([
+  'hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'
+]);
+export const RENDERER_V2_OPENING_GEOMETRY = Object.freeze({
+  centerRoad: Object.freeze({
+    entry: Object.freeze({ x: 400, y: 22, width: 96, height: 84 }),
+    land: Object.freeze({ x: 284, y: 116, width: 96, height: 84 }),
+    arrived: Object.freeze({ x: 184, y: 184, width: 112, height: 56 })
+  }),
+  leftApproach: Object.freeze({
+    entry: Object.freeze({ x: 24, y: 22, width: 96, height: 84 }),
+    land: Object.freeze({ x: 104, y: 116, width: 96, height: 84 }),
+    arrived: Object.freeze({ x: 42, y: 148, width: 108, height: 92 })
+  }),
+  rightApproach: Object.freeze({
+    entry: Object.freeze({ x: 410, y: 22, width: 96, height: 84 }),
+    land: Object.freeze({ x: 326, y: 116, width: 96, height: 84 }),
+    arrived: Object.freeze({ x: 330, y: 148, width: 108, height: 92 })
+  })
+});
 export const VISUAL_STATES = Object.freeze([
   'teach',
   'listen',
@@ -87,6 +107,71 @@ const DEGRADED_FALLBACKS = Object.freeze({
   assetIdentityMismatch: { fallback: 'staticSafeScene', hideOverlay: true },
   insufficientHeap: { fallback: 'verifiedStaticLayers', hideOverlay: true }
 });
+
+function interpolateOpeningValue(from, to, elapsed, duration) {
+  return from + Math.trunc(((to - from) * elapsed) / duration);
+}
+
+function interpolateOpeningRect(from, to, elapsed, duration) {
+  return {
+    x: interpolateOpeningValue(from.x, to.x, elapsed, duration),
+    y: interpolateOpeningValue(from.y, to.y, elapsed, duration),
+    width: interpolateOpeningValue(from.width, to.width, elapsed, duration),
+    height: interpolateOpeningValue(from.height, to.height, elapsed, duration)
+  };
+}
+
+function defaultOpeningBoundaries(phases) {
+  const duration = Object.fromEntries(phases.map((phase) => [phase.name, phase.durationMs]));
+  const firstWalkHalf = Math.trunc(duration.walkToward / 2);
+  return [
+    { name: 'hidden', advanceMs: 0 },
+    { name: 'flyIn', advanceMs: duration.hidden },
+    { name: 'landFar', advanceMs: duration.flyIn },
+    { name: 'settle', advanceMs: duration.landFar },
+    { name: 'walkToward', advanceMs: duration.settle },
+    { name: 'walkTowardMidpoint', advanceMs: firstWalkHalf },
+    { name: 'arriveNear', advanceMs: duration.walkToward - firstWalkHalf },
+    { name: 'greetIdle', advanceMs: duration.arriveNear },
+    { name: 'revealTeachingContent', advanceMs: duration.greetIdle }
+  ];
+}
+
+export function projectRendererV2OpeningTrace(templateProjection, requestedBoundaries = null) {
+  const contract = asObject(templateProjection);
+  const phases = Array.isArray(contract.phases) ? contract.phases : [];
+  const phaseNames = phases.map((phase) => phase && phase.name);
+  const geometry = RENDERER_V2_OPENING_GEOMETRY[contract.layoutPreset];
+  if (contract.templateId !== 'tvideoFlyWalk' || contract.templateVersion !== 1 ||
+      contract.geometryVersion !== 1 || !geometry ||
+      phaseNames.length !== RENDERER_V2_OPENING_PHASES.length ||
+      phaseNames.some((name, index) => name !== RENDERER_V2_OPENING_PHASES[index]) ||
+      phases.some((phase) => !Number.isInteger(phase.durationMs) || phase.durationMs <= 0)) return [];
+
+  const boundaries = Array.isArray(requestedBoundaries) ? requestedBoundaries : defaultOpeningBoundaries(phases);
+  let phaseIndex = 0;
+  let elapsed = 0;
+  return boundaries.map((boundary) => {
+    elapsed += Number.isInteger(boundary.advanceMs) ? boundary.advanceMs : 0;
+    while (phaseIndex < RENDERER_V2_OPENING_PHASES.length - 1 && elapsed >= phases[phaseIndex].durationMs) {
+      elapsed -= phases[phaseIndex].durationMs;
+      phaseIndex += 1;
+    }
+    if (phaseIndex === RENDERER_V2_OPENING_PHASES.length - 1) elapsed = 0;
+    const phase = RENDERER_V2_OPENING_PHASES[phaseIndex];
+    let bounds = geometry.arrived;
+    if (phase === 'hidden') bounds = geometry.entry;
+    if (phase === 'flyIn') bounds = interpolateOpeningRect(geometry.entry, geometry.land, elapsed, phases[1].durationMs);
+    if (phase === 'landFar' || phase === 'settle') bounds = geometry.land;
+    if (phase === 'walkToward') bounds = interpolateOpeningRect(geometry.land, geometry.arrived, elapsed, phases[4].durationMs);
+    return {
+      boundary: String(boundary.name || phase),
+      phase,
+      bounds: { ...bounds },
+      contentVisible: phase === 'revealTeachingContent'
+    };
+  });
+}
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -204,6 +289,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const capability = rendererCapability(served, metadata);
   const motionOwner = physicalMotionOwner(served, metadata);
   const opening = asObject(served.openingEntrance);
+  const openingPhaseTrace = v2 ? projectRendererV2OpeningTrace(step.templateProjection) : [];
   const openingCount = openingEntranceCount(served, steps);
   const warnings = new Set(findForbiddenFirmwareCapabilities(served));
   if (v2 && openingCount !== 1) warnings.add('Renderer v2 requires exactly one opening entrance.');
@@ -218,6 +304,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     rendererLabel: rendererLabel(manifestVersion),
     physicalMotionOwner: motionOwner,
     openingEntrance: opening,
+    openingPhaseTrace,
     openingEntranceCount: openingCount,
     capability,
     degraded: { active: Boolean(degradedReason), reason: degradedReason, fallback: degradedFallback ? degradedFallback.fallback : null },
@@ -244,7 +331,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     layers: [
       { id: 'background', z: 0, bounds: ESP_TFT_GEOMETRY.background, src: mediaSource(background.poster), visible: Boolean(mediaSource(background.poster)) },
       { id: 'teachingObject', z: 10, bounds: ESP_TFT_GEOMETRY.teachingObject, src: optionalVisualMissing ? '' : mediaSource(object.asset), visible: !optionalVisualMissing && Boolean(mediaSource(object.asset)) },
-      { id: 'robotOverlay', z: 20, bounds: ESP_TFT_GEOMETRY.robotOverlay, src: robotSrc, visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
+      { id: 'robotOverlay', z: 20, bounds: openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay, src: robotSrc, visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
       { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: String(teachingWord.text || object.primaryWord || ''), visible: Boolean(teachingWord.text || object.primaryWord) },
       { id: 'progress', z: 40, bounds: ESP_TFT_GEOMETRY.progress, active: safeIndex + 1, total: steps.length, visible: steps.length > 0 },
       { id: 'prompt', z: 50, bounds: ESP_TFT_GEOMETRY.prompt, text: String(response.prompt || step.prompt || ''), visible: Boolean(response.prompt || step.prompt) }

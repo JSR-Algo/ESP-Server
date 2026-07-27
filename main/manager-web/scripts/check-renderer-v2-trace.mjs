@@ -13,75 +13,18 @@ if (!firmwareRoot) {
   process.exit(2);
 }
 
-const projectionSource = await readFile(path.join(managerRoot, 'src/components/lesson/robot-preview-projection.js'), 'utf8');
+let projectionSource = await readFile(path.join(managerRoot, 'src/components/lesson/robot-preview-projection.js'), 'utf8');
+if (process.env.RENDERER_V2_TRACE_MUTATE_GEOMETRY === '1') {
+  const mutated = projectionSource.replace('entry: Object.freeze({ x: 400, y: 22', 'entry: Object.freeze({ x: 401, y: 22');
+  if (mutated === projectionSource) {
+    console.error('renderer v2 mutation sentinel could not locate production centerRoad entry geometry');
+    process.exit(2);
+  }
+  projectionSource = mutated;
+}
 const projection = await import(`data:text/javascript;base64,${Buffer.from(projectionSource).toString('base64')}`);
 const fixture = JSON.parse(await readFile(fixturePath, 'utf8'));
 const firmwareFixture = process.env.FIRMWARE_TRACE_FIXTURE || fixturePath;
-
-const PHASES = ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'];
-const PRESETS = Object.freeze({
-  centerRoad: Object.freeze({
-    entry: Object.freeze({ x: 400, y: 22, width: 96, height: 84 }),
-    land: Object.freeze({ x: 284, y: 116, width: 96, height: 84 }),
-    arrived: Object.freeze({ x: 184, y: 184, width: 112, height: 56 })
-  }),
-  leftApproach: Object.freeze({
-    entry: Object.freeze({ x: 24, y: 22, width: 96, height: 84 }),
-    land: Object.freeze({ x: 104, y: 116, width: 96, height: 84 }),
-    arrived: Object.freeze({ x: 42, y: 148, width: 108, height: 92 })
-  }),
-  rightApproach: Object.freeze({
-    entry: Object.freeze({ x: 410, y: 22, width: 96, height: 84 }),
-    land: Object.freeze({ x: 326, y: 116, width: 96, height: 84 }),
-    arrived: Object.freeze({ x: 330, y: 148, width: 108, height: 92 })
-  })
-});
-
-function interpolate(from, to, elapsed, duration) {
-  return from + Math.trunc(((to - from) * elapsed) / duration);
-}
-
-function interpolateRect(from, to, elapsed, duration) {
-  return {
-    x: interpolate(from.x, to.x, elapsed, duration),
-    y: interpolate(from.y, to.y, elapsed, duration),
-    width: interpolate(from.width, to.width, elapsed, duration),
-    height: interpolate(from.height, to.height, elapsed, duration)
-  };
-}
-
-function createAnimation(projectionContract) {
-  assert.equal(projectionContract.templateId, 'tvideoFlyWalk');
-  assert.equal(projectionContract.templateVersion, 1);
-  assert.equal(projectionContract.geometryVersion, 1);
-  assert.deepEqual(projectionContract.phases.map(({ name }) => name), PHASES);
-  const preset = PRESETS[projectionContract.layoutPreset];
-  assert.ok(preset, `unsupported admin trace layout preset ${projectionContract.layoutPreset}`);
-  let phaseIndex = 0;
-  let elapsed = 0;
-  return {
-    advance(delta) {
-      elapsed += delta;
-      while (phaseIndex < PHASES.length - 1 && elapsed >= projectionContract.phases[phaseIndex].durationMs) {
-        elapsed -= projectionContract.phases[phaseIndex].durationMs;
-        phaseIndex += 1;
-      }
-      if (phaseIndex === PHASES.length - 1) elapsed = 0;
-    },
-    snapshot() {
-      const phase = PHASES[phaseIndex];
-      let bounds = preset.arrived;
-      if (phase === 'hidden') bounds = preset.entry;
-      if (phase === 'flyIn') bounds = interpolateRect(preset.entry, preset.land, elapsed, projectionContract.phases[1].durationMs);
-      if (phase === 'landFar' || phase === 'settle') bounds = preset.land;
-      if (phase === 'walkToward') bounds = interpolateRect(preset.land, preset.arrived, elapsed, projectionContract.phases[4].durationMs);
-      return { phase, bounds: { ...bounds }, contentVisible: phase === 'revealTeachingContent' };
-    },
-    arrived() {
-      return { phase: 'revealTeachingContent', bounds: { ...preset.arrived }, contentVisible: true };
-    }
-  };
-}
 
 function row(boundary, snapshot, overlay, generation, state, motion, accepted, degraded, reason) {
   return {
@@ -109,16 +52,17 @@ function adminTrace(manifest) {
   assert.equal(rendered.motionPreset, traceConfig.motion);
   assert.equal(overlay, traceConfig.overlay);
 
-  const animation = createAnimation(step.templateProjection);
-  const trace = traceConfig.boundaries.map((boundary) => {
-    animation.advance(boundary.advanceMs);
-    return row(boundary.name, animation.snapshot(), overlay, traceConfig.visualGeneration,
+  const openingTrace = projection.projectRendererV2OpeningTrace(step.templateProjection, traceConfig.boundaries);
+  assert.equal(openingTrace.length, traceConfig.boundaries.length, 'production opening projection rejected trace fixture');
+  const trace = openingTrace.map((snapshot) => {
+    return row(snapshot.boundary, snapshot, overlay, traceConfig.visualGeneration,
       rendered.visualState, rendered.motionPreset, true, false, null);
   });
+  const arrived = openingTrace[openingTrace.length - 1];
 
   for (const fallback of traceConfig.fallbacks) {
     const unsupported = fallback.mode === 'unsupportedContract';
-    trace.push(row(fallback.name, animation.arrived(),
+    trace.push(row(fallback.name, arrived,
       fallback.mode === 'missingOverlay' || unsupported ? null : overlay,
       traceConfig.visualGeneration, rendered.visualState, rendered.motionPreset,
       !unsupported, !unsupported, fallback.mode));
@@ -167,6 +111,18 @@ if (differences.length > 0) {
   console.error(`renderer v2 trace parity failed with ${differences.length} difference(s):`);
   differences.slice(0, 40).forEach((difference) => console.error(`- ${difference}`));
   process.exit(1);
+}
+
+if (process.env.RENDERER_V2_TRACE_MUTATE_GEOMETRY !== '1') {
+  const mutation = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    encoding: 'utf8',
+    env: { ...process.env, RENDERER_V2_TRACE_MUTATE_GEOMETRY: '1' }
+  });
+  if (mutation.status !== 1 || !mutation.stderr.includes('$.trace.0.bounds.x: admin=401 firmware=400')) {
+    console.error('renderer v2 non-tautology sentinel failed: production geometry mutation was not detected');
+    process.stderr.write(mutation.stderr || mutation.stdout);
+    process.exit(1);
+  }
 }
 
 process.stdout.write(`${JSON.stringify(expected)}\n`);

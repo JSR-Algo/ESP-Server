@@ -74,6 +74,14 @@
       </div>
     </div>
     <p class="truth-note">The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.</p>
+    <ol v-if="projection.openingPhaseTrace.length" class="opening-phase-trace" aria-label="Renderer v2 opening phase geometry">
+      <li v-for="sample in projection.openingPhaseTrace" :key="sample.boundary">
+        <strong>{{ sample.boundary }}</strong>
+        <span>{{ sample.phase }}</span>
+        <code>{{ sample.bounds.x }},{{ sample.bounds.y }} · {{ sample.bounds.width }}×{{ sample.bounds.height }}</code>
+        <em>{{ sample.contentVisible ? 'content visible' : 'content hidden' }}</em>
+      </li>
+    </ol>
 
     <div class="play-bar">
       <button type="button" class="play-btn" :aria-pressed="playing ? 'true' : 'false'" @click="togglePlay">
@@ -320,6 +328,10 @@ export default {
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
 .truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }
+.opening-phase-trace { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:6px; margin:10px 0 0; padding:0; list-style:none; }
+.opening-phase-trace li { display:grid; gap:2px; padding:7px 9px; border:1px solid #cbd8cf; border-radius:8px; background:#f5f8f4; font-size:11px; }
+.opening-phase-trace strong { color:#18382c; }
+.opening-phase-trace span,.opening-phase-trace em { color:#617269; font-style:normal; }
 .stage-layer { position: absolute; box-sizing: border-box; }
 .layer-background { object-fit: cover; }
 .layer-teachingObject, .layer-robotOverlay { object-fit: contain; }
