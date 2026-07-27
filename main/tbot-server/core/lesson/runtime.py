@@ -81,6 +81,32 @@ VISUAL_DEGRADED_REASONS = frozenset(
     }
 )
 MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
+PARENT_RUNTIME_PHASES = frozenset(
+    {
+        "preparing",
+        "entrance",
+        "teaching",
+        "listening",
+        "thinking",
+        "feedback",
+        "paused",
+        "resumed",
+        "completed",
+        "failed",
+        "abandoned",
+    }
+)
+VISUAL_STATE_PARENT_PHASE = {
+    "teach": "teaching",
+    "listen": "listening",
+    "thinking": "thinking",
+    "correct": "feedback",
+    "nearMiss": "feedback",
+    "incorrect": "feedback",
+    "retry": "feedback",
+    "celebrate": "feedback",
+    "completion": "feedback",
+}
 
 
 @dataclass(frozen=True)
@@ -947,6 +973,8 @@ class LessonRuntime:
         self._steps: List[Dict[str, Any]] = self._select_steps()
         self._step_index = -1  # bumped to 0 by the first _emit_step()
         self._steps_completed = 0  # real count for lesson_completed.summary
+        self._parent_phase_sequence = -2_000_000
+        self._preparing_phase_forwarded = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -1005,6 +1033,9 @@ class LessonRuntime:
             raise self.last_error
 
         self.state = S_PRELOADING
+        if not self._preparing_phase_forwarded:
+            self._preparing_phase_forwarded = True
+            self._forward_phase("preparing")
         if self._use_sd_asset_pack():
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
@@ -1361,6 +1392,10 @@ class LessonRuntime:
         internal_probe = str(source or "") == "internal_dev_endpoint"
         if not self._child_response_window_open and not internal_probe:
             return False
+        if self._renderer_v2_enabled():
+            await self._apply_authored_visual_then_motion("thinking", None)
+            if not self._is_active_runtime() or self.state != S_RUNNING:
+                return False
 
         expected_responses = _coerce_expected_child_responses(self._step)
         response_intent = _classify_child_response_intent(response, expected_responses)
@@ -1531,6 +1566,7 @@ class LessonRuntime:
                     "attempts": self._safe_speaking().attempts,
                     "funPattern": pattern,
                 },
+                "totalAttempts": self._safe_speaking().attempts,
             }
         )
 
@@ -1652,6 +1688,8 @@ class LessonRuntime:
             if self._use_sd_asset_pack():
                 self.state = S_READY
                 self._forward({"type": "preload_ready"})
+                if isinstance(self.manifest.get("openingEntrance"), dict):
+                    self._forward_phase("entrance")
                 await self._emit("lesson_start", body=self._start_body())
                 return
             # Prepare delivered -> begin the download+verify (D-PRELOAD-OWNER).
@@ -1691,11 +1729,29 @@ class LessonRuntime:
                 return
             self._dispatch_step_motion("present")
             self._step_visuals_ready = True
+            self._forward_phase("teaching")
             await self._continue_after_step_visuals(step_id, step_seq)
         elif ftype == "lesson_stop":
+            reason = (frame.get("body") or {}).get("reason")
+            if reason != "COMPLETED":
+                self.state = S_COMPLETED
+                self._cancel_visual_waiters(increment_generation=True, reason="lessonAbandoned")
+                self._forward_phase("abandoned")
+                self._forward(
+                    {
+                        "type": "lesson_abandoned",
+                        "stepId": self._step_id,
+                        "stepType": (self._step or {}).get("type"),
+                        "reason": str(reason or "stopped").lower(),
+                        "abandonedAt": _wire_timestamp(),
+                    }
+                )
+                await self._notify_lesson_terminal("lesson_abandoned")
+                return
             self.state = S_COMPLETED
             self._cancel_visual_waiters(increment_generation=True, reason="lessonStopped")
             self._log("info", f"lesson_completed stepsCompleted={self._steps_completed}")
+            self._forward_phase("completed")
             self._forward(
                 {
                     "type": "lesson_completed",
@@ -1755,6 +1811,7 @@ class LessonRuntime:
         else:
             if not self._renderer_v2_enabled():
                 self._dispatch_step_motion("listen")
+                self._forward_phase("listening")
             await self._open_child_response_window()
             if self._child_response_window_still_current(step_id, step_seq):
                 self._start_child_response_timeout()
@@ -1789,6 +1846,7 @@ class LessonRuntime:
         # reports the failure.
         if self.state == S_FAILED and not self._failure_forwarded:
             self._failure_forwarded = True
+            self._forward_phase("failed")
             self._forward(
                 {
                     "type": "lesson_failed",
@@ -1904,6 +1962,8 @@ class LessonRuntime:
 
         self.state = S_READY
         self._forward({"type": "preload_ready"})
+        if isinstance(self.manifest.get("openingEntrance"), dict):
+            self._forward_phase("entrance")
         # Start gate satisfied -> now (and only now) emit lesson_start (seq 2).
         await self._emit("lesson_start", body=self._start_body())
 
@@ -2368,6 +2428,7 @@ class LessonRuntime:
                 "abandonedAt": _wire_timestamp(),
             }
         )
+        self._forward_phase("paused")
         await self._notify_lesson_terminal("child_inactive")
 
     async def _graceful_advance_on_inactivity(self, step_id: Optional[str]) -> None:
@@ -2552,12 +2613,17 @@ class LessonRuntime:
             return False
         if preset:
             await self._dispatch_motion_once(preset, generation, step_id)
-        return self._visual_transition_is_current(
+        current = self._visual_transition_is_current(
             generation,
             assignment_id=assignment_id,
             session_id=session_id,
             step_id=step_id,
         )
+        if current:
+            phase = VISUAL_STATE_PARENT_PHASE.get(state)
+            if phase is not None:
+                self._forward_phase(phase)
+        return current
 
     async def _apply_authored_visual_then_motion(
         self, state: str, motion_slot: Optional[str]
@@ -2778,11 +2844,19 @@ class LessonRuntime:
                 task.cancel()
 
     async def pause(self) -> None:
+        if self.state != S_RUNNING:
+            return
         self.state = S_PAUSED
         self._cancel_visual_waiters(increment_generation=False, reason="paused")
+        self._forward_phase("paused")
 
     async def resume(self) -> VisualAckResult:
+        if self.state != S_PAUSED:
+            return VisualAckResult(
+                False, False, "unsupportedContract", None, self._visual_generation
+            )
         self.state = S_RUNNING
+        self._forward_phase("resumed")
         self._visual_generation += 1
         request = self._current_visual_request
         if request is None:
@@ -3511,6 +3585,31 @@ class LessonRuntime:
         }
         batch.update(self._trace_context)
         self.forwarder.enqueue(batch)
+
+    def _forward_phase(self, phase: str) -> None:
+        if (
+            phase not in PARENT_RUNTIME_PHASES
+            or self._is_pre_activation_fallback_candidate()
+        ):
+            return
+        self._parent_phase_sequence -= 1
+        event: Dict[str, Any] = {
+            "type": "runtime_phase_changed",
+            "sequence": self._parent_phase_sequence,
+            "phase": phase,
+            "occurredAt": _wire_timestamp(),
+        }
+        step_id = self._step_id
+        if isinstance(step_id, str):
+            step_id = step_id.strip()
+            if 0 < len(step_id) <= 128:
+                event["stepId"] = step_id
+        step_type = (self._step or {}).get("type")
+        if isinstance(step_type, str):
+            step_type = step_type.strip()
+            if 0 < len(step_type) <= 64:
+                event["stepType"] = step_type
+        self._forward(event)
 
     def _log(self, level: str, message: str) -> None:
         if self.logger is None:

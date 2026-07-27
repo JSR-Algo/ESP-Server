@@ -236,6 +236,88 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual({body["state"] for body in sent}, RENDERER_V2_VISUAL_STATES)
         self.assertTrue(all(body["overlayKey"] == "robotOverlay.authored" for body in sent))
+        phase_events = [
+            event
+            for batch in rt.forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "runtime_phase_changed"
+        ]
+        expected_phase = {
+            "teach": "teaching",
+            "listen": "listening",
+            "thinking": "thinking",
+            "correct": "feedback",
+            "nearMiss": "feedback",
+            "incorrect": "feedback",
+            "retry": "feedback",
+            "celebrate": "feedback",
+            "completion": "feedback",
+        }
+        self.assertEqual(
+            [event["phase"] for event in phase_events],
+            [expected_phase[body["state"]] for body in sent],
+        )
+
+    async def test_renderer_v2_does_not_forward_phase_for_rejected_or_stale_visual_ack(self):
+        from core.lesson.runtime import LessonRuntime, S_RUNNING
+
+        prep = FIX["frames"]["lesson_prepare"]
+        conn = L._FakeConn(session_id=prep["sessionId"])
+        conn.device_id = "renderer-v2-e2e"
+        conn.features = {"lesson": True, "renderer": ["teebot-lesson-renderer.v2"]}
+        conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "rollout_device_allowlist": [conn.device_id],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        manifest = L._build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+        forwarder = L._FakeForwarder()
+        rt = LessonRuntime(
+            conn,
+            assignment=L._build_assignment(),
+            manifest=manifest,
+            asset_cache=L._FakeAssetCache(ready=True),
+            forwarder=forwarder,
+            manifest_checksum=L._manifest_checksum(),
+        )
+        conn.lesson_runtime = rt
+        rt.state = S_RUNNING
+        rt._step = manifest["steps"][0]
+        rt._step_id = rt._step["id"]
+
+        task = asyncio.create_task(rt._apply_visual_then_motion("thinking", None, None))
+        await asyncio.sleep(0)
+        frame = self._sent(conn)[-1]
+        await rt.on_lesson_ack(
+            {
+                "type": "lesson_ack",
+                "protocolVersion": "teebot-lesson-renderer.v2",
+                "assignmentId": rt.assignment_id,
+                "sessionId": rt.session_id,
+                "stepId": rt._step_id,
+                "sequence": 1,
+                "body": {
+                    "acks": frame["sequence"],
+                    "accepted": False,
+                    "degraded": False,
+                    "degradedReason": "missingOverlay",
+                    "visualGeneration": frame["body"]["visualGeneration"],
+                },
+            }
+        )
+        self.assertFalse(await task)
+        self.assertEqual(
+            [
+                event
+                for batch in forwarder.batches
+                for event in batch.get("events", [])
+                if event.get("type") == "runtime_phase_changed"
+            ],
+            [],
+        )
 
     # ── 1) ordering oracle: every frame is ACKed before its prompt, full story ───
 
@@ -293,6 +375,19 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [f["stepId"] for f in self._sent(conn) if f["type"] == "lesson_step"],
             expected_steps,
+        )
+        forwarded_events = [
+            event for batch in forwarder.batches for event in batch.get("events", [])
+        ]
+        completed = [event for event in forwarded_events if event.get("type") == "lesson_completed"]
+        self.assertEqual(completed[-1]["summary"]["stepsCompleted"], 9)
+        self.assertIn(
+            "completed",
+            [
+                event.get("phase")
+                for event in forwarded_events
+                if event.get("type") == "runtime_phase_changed"
+            ],
         )
 
         # ORDERING ORACLE: walk the single interleaved transcript. For every step,

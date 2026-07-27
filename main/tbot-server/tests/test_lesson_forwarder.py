@@ -1,7 +1,13 @@
+import os
+import sys
 import unittest
 from unittest import mock
 
 import httpx
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+import test_lesson_runtime as L
 
 from core.lesson import forwarder as forwarder_module
 from core.lesson.forwarder import (
@@ -430,6 +436,79 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.cancelled)
         self.assertTrue(client.closed)
         self.assertIsNone(forwarder._client)
+
+    def _phase_events(self, forwarder):
+        return [
+            event
+            for batch in forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "runtime_phase_changed"
+        ]
+
+    async def test_pause_resume_failure_and_abandonment_forward_parent_safe_phases(self):
+        from core.lesson.errors import LessonError
+        from core.lesson.runtime import LessonRuntime, S_FAILED, S_RUNNING
+
+        forwarder = L._FakeForwarder()
+        runtime = LessonRuntime(
+            L._FakeConn(),
+            assignment=L._build_assignment(),
+            manifest=L._build_manifest(),
+            asset_cache=L._FakeAssetCache(ready=True),
+            forwarder=forwarder,
+            manifest_checksum=L._manifest_checksum(),
+        )
+        runtime.state = S_RUNNING
+        runtime._step = runtime._steps[0]
+        runtime._step_id = runtime._step["id"]
+
+        await runtime.pause()
+        await runtime.resume()
+        runtime.last_error = LessonError("RENDER_FAILED", "private debug detail")
+        runtime.state = S_FAILED
+        await runtime._notify_lesson_terminal("render_failed")
+
+        phases = self._phase_events(forwarder)
+        self.assertEqual([event["phase"] for event in phases], ["paused", "resumed", "failed"])
+        allowed_phase_keys = {
+            "type", "sequence", "phase", "stepId", "stepType", "occurredAt",
+        }
+        self.assertTrue(all(set(event) <= allowed_phase_keys for event in phases))
+        failed = [
+            event
+            for batch in forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "lesson_failed"
+        ]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["code"], "RENDER_FAILED")
+
+        abandoned_forwarder = L._FakeForwarder()
+        abandoned_runtime = LessonRuntime(
+            L._FakeConn(),
+            assignment=L._build_assignment(),
+            manifest=L._build_manifest(),
+            asset_cache=L._FakeAssetCache(ready=True),
+            forwarder=abandoned_forwarder,
+            manifest_checksum=L._manifest_checksum(),
+        )
+        abandoned_runtime.state = S_RUNNING
+        abandoned_runtime._step = abandoned_runtime._steps[0]
+        abandoned_runtime._step_id = abandoned_runtime._step["id"]
+        await abandoned_runtime._on_frame_acked(
+            {"type": "lesson_stop", "body": {"reason": "STOPPED"}}, {}
+        )
+        self.assertEqual(
+            [event["phase"] for event in self._phase_events(abandoned_forwarder)],
+            ["abandoned"],
+        )
+        abandoned = [
+            event
+            for batch in abandoned_forwarder.batches
+            for event in batch.get("events", [])
+            if event.get("type") == "lesson_abandoned"
+        ]
+        self.assertEqual(abandoned[0]["reason"], "stopped")
 
     def test_logger_failures_are_swallowed(self):
         LessonEventForwarder(
