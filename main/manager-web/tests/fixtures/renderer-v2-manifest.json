@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "renderer-v2-trace.v1",
+  "manifestVersion": "teebot-lesson-renderer.v2",
+  "protocolVersion": "teebot-lesson-renderer.v2",
+  "profile": "espTft",
+  "lessonId": "renderer-v2-trace-fixture",
+  "physicalMotionOwner": "server",
+  "rendererCapabilities": ["teebot-lesson-renderer.v2"],
+  "openingEntrance": {
+    "template": "tvideoFlyWalk",
+    "preset": "flyLandWalkGreet",
+    "policy": "oncePerLessonSession",
+    "layoutPreset": "centerRoad",
+    "phases": ["hidden", "flyIn", "landFar", "settle", "walkToward", "arriveNear", "greetIdle", "revealTeachingContent"],
+    "fallback": "staticGreet"
+  },
+  "steps": [
+    {
+      "id": "trace-step",
+      "type": "model",
+      "entrance": "none",
+      "prompt": "Meet the barn helper.",
+      "teachingWord": {"text": "BARN", "style": "wordPill"},
+      "scene": {
+        "backgroundScene": {"mode": "poster", "poster": {"src": "fixture://scene.farm"}},
+        "teachingObject": {"asset": {"src": "fixture://teaching.barn"}, "primaryWord": "BARN"},
+        "robotOverlay": {"asset": {"src": "fixture://robot.arrived"}, "assetKey": "robotOverlay.teach", "pose": "teach"}
+      },
+      "motion": {"present": "presentLeft", "teach": "presentLeft"},
+      "visualStates": {
+        "teach": {"prompt": "Meet the barn helper.", "motionPreset": "presentLeft", "overlayKey": "robotOverlay.teach"}
+      },
+      "templateProjection": {
+        "templateId": "tvideoFlyWalk",
+        "templateVersion": 1,
+        "layoutPreset": "centerRoad",
+        "geometryVersion": 1,
+        "phases": [
+          {"name": "hidden", "durationMs": 100},
+          {"name": "flyIn", "durationMs": 1200},
+          {"name": "landFar", "durationMs": 700},
+          {"name": "settle", "durationMs": 350},
+          {"name": "walkToward", "durationMs": 1800},
+          {"name": "arriveNear", "durationMs": 250},
+          {"name": "greetIdle", "durationMs": 650},
+          {"name": "revealTeachingContent", "durationMs": 100}
+        ],
+        "revealPhase": "revealTeachingContent",
+        "fallbackPolicy": "snapToArriveNearAndReveal",
+        "background": {"versionId": "scene.farm", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bytes": 1200, "mediaType": "image/jpeg"},
+        "arrivedPose": {"versionId": "robotOverlay.teach", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 800, "mediaType": "image/png"},
+        "atlas": {"versionId": "robotOverlay.walk", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bytes": 2400, "mediaType": "image/png"}
+      }
+    }
+  ],
+  "trace": {
+    "visualGeneration": 7,
+    "state": "teach",
+    "motion": "presentLeft",
+    "overlay": "robotOverlay.teach",
+    "boundaries": [
+      {"name": "hidden", "advanceMs": 0},
+      {"name": "flyIn", "advanceMs": 100},
+      {"name": "landFar", "advanceMs": 1200},
+      {"name": "settle", "advanceMs": 700},
+      {"name": "walkToward", "advanceMs": 350},
+      {"name": "walkTowardMidpoint", "advanceMs": 900},
+      {"name": "arriveNear", "advanceMs": 900},
+      {"name": "greetIdle", "advanceMs": 250},
+      {"name": "revealTeachingContent", "advanceMs": 650}
+    ],
+    "fallbacks": [
+      {"name": "missingOverlay", "mode": "missingOverlay"},
+      {"name": "reducedMotion", "mode": "reducedMotion"},
+      {"name": "phaseTimeout", "mode": "phaseTimeout"},
+      {"name": "unsupportedContract", "mode": "unsupportedContract"}
+    ]
+  }
+}
