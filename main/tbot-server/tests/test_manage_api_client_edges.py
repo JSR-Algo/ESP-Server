@@ -313,6 +313,7 @@ def test_lesson_helpers_normalize_auth_and_transient_edges(monkeypatch):
     }
     assert mac._normalize_lesson_event(
         {
+            "type": "step_completed",
             "result": "success",
             "detail": {
                 "recognizedText": "con nói barn",
@@ -326,21 +327,28 @@ def test_lesson_helpers_normalize_auth_and_transient_edges(monkeypatch):
             },
         }
     ) == {
+        "type": "step_completed",
         "outcome": "success",
-        "detail": {"source": "voice_transcript", "nested": {"keep": 1}, "attempts": [{"kept": "metadata"}]},
+        "detail": {"source": "voice_transcript", "attempts": [{"kept": "metadata"}]},
     }
     assert mac._normalize_lesson_event(
-        {"result": "success", "detail": {"nested": {"recognizedText": "nested only", "keep": True}}}
-    ) == {"outcome": "success", "detail": {"nested": {"keep": True}}}
+        {
+            "type": "step_completed",
+            "result": "success",
+            "detail": {"nested": {"recognizedText": "nested only", "keep": True}},
+        }
+    ) == {"type": "step_completed", "outcome": "success"}
     assert mac._normalize_lesson_event(
         {
+            "type": "step_completed",
             "result": "success",
             "recognizedText": "top-level raw",
             "attempts": [{"transcript": "nested raw", "kept": "metadata"}],
         }
-    ) == {"outcome": "success", "attempts": [{"kept": "metadata"}]}
+    ) == {"type": "step_completed", "outcome": "success"}
     assert mac._normalize_lesson_event(
         {
+            "type": "step_completed",
             "result": "success",
             "recognized_text": "top-level snake raw",
             "child_response": "snake child raw",
@@ -359,11 +367,11 @@ def test_lesson_helpers_normalize_auth_and_transient_edges(monkeypatch):
                 }
             ],
         }
-    ) == {"outcome": "success", "detail": {"source": "voice_transcript"}, "attempts": [{"kept": "metadata"}]}
+    ) == {"type": "step_completed", "outcome": "success", "detail": {"source": "voice_transcript"}}
     assert mac._normalize_lesson_event({"result": "old", "outcome": "kept", "detail": {"utterance": "secret"}}) == {
         "outcome": "kept"
     }
-    assert mac._normalize_lesson_event({"detail": "text"}) == {"detail": "text"}
+    assert mac._normalize_lesson_event({"detail": "text"}) == {}
 
 
 @pytest.mark.asyncio
