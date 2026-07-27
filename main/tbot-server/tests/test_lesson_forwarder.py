@@ -308,8 +308,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "type": "step_completed",
                     "stepId": "listen-1",
-                    "detail": {"source": "voice_transcript", "nested": {"keep": 1}},
-                    "attempts": [{"kept": True}],
+                    "detail": {"source": "voice_transcript"},
                     "outcome": "success",
                 }
             ],

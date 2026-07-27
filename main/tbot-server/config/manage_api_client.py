@@ -1,6 +1,7 @@
 # ruff: noqa: B904, N818, SIM105, SIM108, UP006, UP035, UP045
 import base64
 import os
+import re
 from typing import Dict, Optional
 
 import httpx
@@ -350,10 +351,31 @@ LESSON_EVENT_SENSITIVE_DETAIL_KEYS = {
     "assessment",
     "evaluation",
     "confidence",
+    "audio",
+    "audiobase64",
+    "audiodata",
+    "debug",
+    "debuginfo",
+    "debugdata",
 }
 
 def _lesson_sensitive_key(key: str) -> str:
-    return str(key).replace("_", "").replace("-", "").lower()
+    return re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower()
+
+def _is_lesson_sensitive_key(key: str) -> bool:
+    normalized = _lesson_sensitive_key(key)
+    return (
+        normalized in LESSON_EVENT_SENSITIVE_DETAIL_KEYS
+        or "transcript" in normalized
+        or "utterance" in normalized
+        or "audio" in normalized
+        or "confidence" in normalized
+        or "debug" in normalized
+        or "score" in normalized
+        or "pronunciation" in normalized
+        or "phoneme" in normalized
+        or "assessment" in normalized
+    )
 
 def _strip_lesson_sensitive_fields(value):
     if isinstance(value, list):
@@ -362,9 +384,39 @@ def _strip_lesson_sensitive_fields(value):
         return {
             k: _strip_lesson_sensitive_fields(v)
             for k, v in value.items()
-            if _lesson_sensitive_key(k) not in LESSON_EVENT_SENSITIVE_DETAIL_KEYS
+            if not _is_lesson_sensitive_key(k)
         }
     return value
+
+_LESSON_EVENT_DETAIL_FIELDS = (
+    "choiceId",
+    "source",
+    "responseClass",
+    "interactionTemplate",
+    "funPattern",
+    "reason",
+    "tapTargetHit",
+    "accepted",
+    "handled",
+    "recognized",
+    "attempts",
+)
+
+def _allowlisted_lesson_detail(value) -> Optional[Dict]:
+    if not isinstance(value, dict):
+        return None
+    sanitized = _strip_lesson_sensitive_fields(value)
+    detail = {
+        key: sanitized[key]
+        for key in _LESSON_EVENT_DETAIL_FIELDS
+        if key in sanitized and sanitized[key] is not None
+    }
+    return detail or None
+
+def _copy_lesson_event_fields(out: Dict, event: Dict, fields) -> None:
+    for key in fields:
+        if key in event and event[key] is not None:
+            out[key] = event[key]
 
 def _normalize_lesson_event(event: Dict) -> Dict:
     """Single ``result -> outcome`` translation point (plan §5.7/§6.4.1).
@@ -372,18 +424,49 @@ def _normalize_lesson_event(event: Dict) -> Dict:
     Strip child speech text and immediate assessment fields before the event body
     leaves ESP; backend repeats the same boundary check before persistence.
     """
-    out = dict(event)
-    if "result" in out and "outcome" not in out:
-        out["outcome"] = out.pop("result")
-    else:
-        out.pop("result", None)
-    out = _strip_lesson_sensitive_fields(out)
-    detail = out.get("detail")
-    if isinstance(detail, dict):
-        if detail:
+    if not isinstance(event, dict):
+        return {}
+    sanitized = _strip_lesson_sensitive_fields(event)
+    event_type = sanitized.get("type")
+    out: Dict = {}
+    _copy_lesson_event_fields(
+        out,
+        sanitized,
+        (
+            "type", "sequence", "stepId", "occurredAt", "startedAt",
+            "completedAt", "abandonedAt", "failedAt",
+        ),
+    )
+    outcome = sanitized.get("outcome", sanitized.get("result"))
+    if outcome is not None:
+        out["outcome"] = outcome
+
+    if event_type in {"step_started", "step_completed", "answer_recorded", "lesson_abandoned", "lesson_failed", "runtime_phase_changed"}:
+        _copy_lesson_event_fields(out, sanitized, ("stepType",))
+    if event_type in {"step_completed", "answer_recorded"}:
+        detail = _allowlisted_lesson_detail(sanitized.get("detail"))
+        if detail is not None:
             out["detail"] = detail
-        else:
-            out.pop("detail", None)
+    if event_type in {"step_started", "step_completed"}:
+        _copy_lesson_event_fields(
+            out,
+            sanitized,
+            ("retryCount", "renderDegraded", "sramFreeBytes", "psramFreeBytes", "motionDispatch"),
+        )
+    if event_type == "runtime_phase_changed":
+        _copy_lesson_event_fields(out, sanitized, ("phase",))
+    if event_type == "story_progress":
+        _copy_lesson_event_fields(out, sanitized, ("petReaction", "unitGrowth", "nextTease"))
+    if event_type in {"lesson_abandoned", "lesson_failed", "protocol_error"}:
+        _copy_lesson_event_fields(out, sanitized, ("reason", "code"))
+    if event_type == "protocol_error":
+        _copy_lesson_event_fields(out, sanitized, ("retryable",))
+    if event_type == "lesson_completed" and isinstance(sanitized.get("summary"), dict):
+        steps_completed = sanitized["summary"].get("stepsCompleted")
+        if steps_completed is not None:
+            out["summary"] = {"stepsCompleted": steps_completed}
+    if event_type in {"step_completed", "lesson_completed", "lesson_failed", "lesson_abandoned"}:
+        _copy_lesson_event_fields(out, sanitized, ("totalAttempts",))
     return out
 
 
@@ -568,8 +651,19 @@ async def post_lesson_event(
     chat-history report queue). Owns the single wire ``result -> outcome`` rename and
     the COPPA child-speech strip before the body leaves the ESP (plan §6.4)."""
     url = f"{_lesson_base(base_url)}/devices/{device_id}/lesson-events"
-    body = dict(batch)
-    body["events"] = [_normalize_lesson_event(e) for e in batch.get("events", [])]
+    body = {
+        key: batch[key]
+        for key in (
+            "assignmentId", "lessonId", "lessonVersion", "sessionId",
+            "traceparent", "tracestate",
+        )
+        if key in batch and batch[key] is not None
+    }
+    body["events"] = [
+        _normalize_lesson_event(event)
+        for event in batch.get("events", [])
+        if isinstance(event, dict)
+    ]
     headers = _lesson_auth_headers(token)
     headers.update(_lesson_trace_headers(batch))
     payload = await _lesson_request_with_retry(

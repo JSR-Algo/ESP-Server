@@ -237,6 +237,7 @@ class GetLessonManifestContractTest(unittest.IsolatedAsyncioTestCase):
             "espTft",
             token=TOKEN,
             renderer_capabilities=["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"],
+            renderer_v2_enabled=True,
             lesson_version=9,
         )
 
@@ -297,6 +298,10 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
                         "userUtterance": "child user utterance",
                         "source": "voice_transcript",  # non-speech field kept
                         "nested": {"recognized_text": "nested raw", "keep": 1},
+                        "Tr.an-script": "punctuation raw",
+                        "A_u-dio": "encoded child audio",
+                        "Con.fi-dence": 0.98,
+                        "D-e_b.u.g": {"trace": "private"},
                     },
                     "attempts": [
                         {
@@ -306,8 +311,10 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
                             "kept": True,
                         }
                     ],
+                    "futureRuntimeBlob": {"must": "drop"},
                 }
             ],
+            "futureBatchDebug": {"must": "drop"},
         }
 
         data = await MAC.post_lesson_event(client, BASE, "device-uuid-9", batch, token=TOKEN)
@@ -331,9 +338,11 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
         # including underscore/case variants, while non-speech fields survive.
         self.assertEqual(
             sent_event["detail"],
-            {"source": "voice_transcript", "nested": {"keep": 1}},
+            {"source": "voice_transcript"},
         )
-        self.assertEqual(sent_event["attempts"], [{"kept": True}])
+        self.assertNotIn("attempts", sent_event)
+        self.assertNotIn("futureRuntimeBlob", sent_event)
+        self.assertNotIn("futureBatchDebug", call["json"])
         # Envelope metadata around the events is preserved verbatim.
         self.assertEqual(call["json"]["assignmentId"], "a1")
         self.assertEqual(call["json"]["sessionId"], "s1")
