@@ -128,11 +128,41 @@ function rendererLabel(manifestVersion) {
   return match ? `Renderer v${match[1]}` : 'Renderer unknown';
 }
 
-function rendererCapabilities(served) {
-  const value = served.rendererCapabilities;
+function stringList(value) {
   if (Array.isArray(value)) return value.map(String);
   if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean);
-  return [];
+  return null;
+}
+
+function rendererCapability(served, metadata) {
+  const responseFeatures = asObject(metadata.features);
+  const manifestFeatures = asObject(served.features);
+  const advertised = stringList(responseFeatures.renderer)
+    || stringList(manifestFeatures.renderer)
+    || stringList(metadata.rendererCapabilities)
+    || stringList(served.rendererCapabilities);
+  const feature = asObject(responseFeatures.lessonRendererV2);
+  const manifestFeature = asObject(manifestFeatures.lessonRendererV2);
+  const featureReported = Object.keys(feature).length > 0 || Object.keys(manifestFeature).length > 0;
+  return {
+    supported: advertised ? advertised.includes(RENDERER_V2_MANIFEST_VERSION) : (featureReported ? true : null),
+    advertised: advertised || []
+  };
+}
+
+function physicalMotionOwner(served, metadata) {
+  const responseFeatures = asObject(metadata.features);
+  const manifestFeatures = asObject(served.features);
+  const candidates = [
+    asObject(responseFeatures.lessonRendererV2).physicalMotionOwner,
+    asObject(metadata.runtimeControls).physicalMotionOwner,
+    asObject(asObject(metadata.body).runtimeControls).physicalMotionOwner,
+    asObject(manifestFeatures.lessonRendererV2).physicalMotionOwner,
+    asObject(served.runtimeControls).physicalMotionOwner,
+    served.physicalMotionOwner
+  ];
+  const owner = candidates.find((value) => typeof value === 'string' && value.trim());
+  return owner ? owner.trim() : null;
 }
 
 function openingEntranceCount(served, steps) {
@@ -143,8 +173,9 @@ function openingEntranceCount(served, steps) {
   }).length;
 }
 
-export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'correct', requestedDegradedReason = null) {
+export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'correct', requestedDegradedReason = null, rendererMetadata = null) {
   const served = asObject(manifest);
+  const metadata = asObject(rendererMetadata);
   const steps = Array.isArray(served.steps) ? served.steps : [];
   const safeIndex = Math.max(0, Math.min(Number.isInteger(stepIndex) ? stepIndex : 0, Math.max(steps.length - 1, 0)));
   const step = asObject(steps[safeIndex]);
@@ -170,14 +201,14 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const degradedFallback = degradedReason ? DEGRADED_FALLBACKS[degradedReason] : null;
   const manifestVersion = String(served.manifestVersion || '');
   const v2 = manifestVersion === RENDERER_V2_MANIFEST_VERSION;
-  const capabilities = rendererCapabilities(served);
-  const capabilitySupported = capabilities.includes(RENDERER_V2_MANIFEST_VERSION);
+  const capability = rendererCapability(served, metadata);
+  const motionOwner = physicalMotionOwner(served, metadata);
   const opening = asObject(served.openingEntrance);
   const openingCount = openingEntranceCount(served, steps);
   const warnings = new Set(findForbiddenFirmwareCapabilities(served));
   if (v2 && openingCount !== 1) warnings.add('Renderer v2 requires exactly one opening entrance.');
-  if (v2 && served.physicalMotionOwner !== 'server') warnings.add('Renderer v2 requires physicalMotionOwner=server.');
-  if (v2 && !capabilitySupported) warnings.add('Selected firmware is renderer-v1 only; the authored renderer-v2 entrance and visual states are unsupported.');
+  if (v2 && motionOwner && motionOwner !== 'server') warnings.add('Renderer v2 requires physicalMotionOwner=server.');
+  if (v2 && capability.supported === false) warnings.add('Selected firmware is renderer-v1 only; the authored renderer-v2 entrance and visual states are unsupported.');
   if (degradedReason) warnings.add(`Deterministic degraded fallback: ${degradedReason} -> ${degradedFallback.fallback}.`);
   const robotSrc = mediaSource(robot.asset) || mediaSource(robot.atlas);
   const hideRobotOverlay = Boolean(degradedFallback && degradedFallback.hideOverlay);
@@ -185,10 +216,10 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   return {
     manifestVersion,
     rendererLabel: rendererLabel(manifestVersion),
-    physicalMotionOwner: served.physicalMotionOwner || null,
+    physicalMotionOwner: motionOwner,
     openingEntrance: opening,
     openingEntranceCount: openingCount,
-    capability: { supported: capabilitySupported, advertised: capabilities },
+    capability,
     degraded: { active: Boolean(degradedReason), reason: degradedReason, fallback: degradedFallback ? degradedFallback.fallback : null },
     profile: served.profile || null,
     lessonId: served.lessonId || null,

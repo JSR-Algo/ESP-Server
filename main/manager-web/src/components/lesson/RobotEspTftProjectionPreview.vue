@@ -6,15 +6,15 @@
         <strong>{{ projection.rendererLabel }}</strong>
         <code>{{ projection.manifestVersion || 'manifest identity unavailable' }}</code>
       </div>
-      <span :class="['capability-badge', { supported: projection.capability.supported }]">
-        {{ projection.capability.supported ? 'Renderer v2 supported' : 'Renderer v2 unsupported' }}
+      <span :class="['capability-badge', { supported: projection.capability.supported === true, unknown: projection.capability.supported === null }]">
+        {{ capabilityLabel }}
       </span>
     </div>
 
     <dl class="contract-grid">
       <div><dt>Opening entrance</dt><dd>{{ openingPolicy }}</dd></div>
       <div><dt>Visual state</dt><dd>{{ projection.visualState }}</dd></div>
-      <div><dt>Motion owner</dt><dd>{{ projection.physicalMotionOwner || 'not declared' }}</dd></div>
+      <div><dt>Motion owner</dt><dd>{{ projection.physicalMotionOwner || 'unknown' }}</dd></div>
       <div><dt>Fallback</dt><dd>{{ projection.degraded.fallback || 'none' }}</dd></div>
     </dl>
 
@@ -144,6 +144,7 @@ export default {
   name: 'RobotEspTftProjectionPreview',
   props: {
     manifest: { type: Object, required: true },
+    rendererMetadata: { type: Object, default: null },
     stepIndex: { type: Number, default: 0 },
     initialPath: { type: String, default: 'correct' }
   },
@@ -186,7 +187,12 @@ export default {
       return this.playing ? this.playStep : this.stepIndex;
     },
     projection() {
-      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason);
+      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason, this.rendererMetadata);
+    },
+    capabilityLabel() {
+      if (this.projection.capability.supported === true) return 'Renderer v2 supported';
+      if (this.projection.capability.supported === false) return 'Renderer v2 unsupported';
+      return 'Renderer capability not reported';
     },
     openingPolicy() {
       const opening = this.projection.openingEntrance;
@@ -281,7 +287,7 @@ export default {
       if (this.playing) this.stopPlay();
       this.selectedPath = path;
       this.motionNonce += 1;
-      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path, this.degradedReason) });
+      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path, this.degradedReason, this.rendererMetadata) });
     },
     selectVisualState(state) {
       if (!VISUAL_STATES.includes(state)) return;
@@ -305,6 +311,7 @@ export default {
 .contract-head code { color:#445349; font-size:12px; overflow-wrap:anywhere; }
 .capability-badge { padding:6px 10px; border:1px solid #a42c20; border-radius:999px; background:#fff0ea; color:#78140d; font-size:12px; font-weight:800; white-space:nowrap; }
 .capability-badge.supported { border-color:#648c22; background:#edf7d8; color:#34520d; }
+.capability-badge.unknown { border-color:#8d978f; background:#f1f3f1; color:#536058; }
 .contract-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:0 0 12px; }
 .contract-grid div { min-width:0; padding:9px 10px; border:1px solid #d7e1d4; border-radius:10px; background:#f7faef; }
 .contract-grid dt { color:#6c796f; font-size:11px; text-transform:uppercase; }

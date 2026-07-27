@@ -2,6 +2,7 @@
   <RobotEspTftProjectionPreview
     v-if="manifest"
     :manifest="manifest"
+    :renderer-metadata="rendererMetadata"
     :step-index="stepIndex"
     :initial-path="initialPath"
     @path-change="$emit('path-change', $event)"
@@ -25,6 +26,7 @@ export default {
   components: { RobotEspTftProjectionPreview, RobotManifestServerPreview },
   props: {
     manifest: { type: Object, default: null },
+    rendererMetadata: { type: Object, default: null },
     manifestPreview: { type: Object, default: null },
     stepIndex: { type: Number, default: 0 },
     initialPath: { type: String, default: 'correct' },

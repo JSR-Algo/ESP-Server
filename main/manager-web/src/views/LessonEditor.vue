@@ -185,6 +185,7 @@
                 </div>
                 <RobotLessonPreview
                   :manifest="previewManifest.manifest"
+                  :renderer-metadata="previewManifest"
                   :step-index="selectedStepIndex"
                   @path-change="previewPath = $event"
                 />

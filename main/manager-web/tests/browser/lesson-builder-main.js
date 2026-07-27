@@ -25,8 +25,6 @@ const robotAsset = { src: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAA
 const manifest = {
   manifestVersion: 'teebot-lesson-renderer.v2',
   profile: 'espTft',
-  physicalMotionOwner: 'server',
-  rendererCapabilities: ['teebot-lesson-renderer.v2'],
   openingEntrance: { template: 'tvideoFlyWalk', preset: 'flyLandWalkGreet', policy: 'oncePerLessonSession', phases: ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'], fallback: 'staticGreet' },
   pathsTerminate: true,
   steps: [
@@ -51,7 +49,7 @@ Object.assign(Api.lesson, {
     ok({ ...payload, stepKey, visualRefs });
   },
   validate(id, ok, fail) { calls.validate += 1; if (calls.deferNextValidate) { calls.deferNextValidate = false; calls.pendingValidations.push({ ok, fail }); return; } ok(validation); },
-  manifestPreview(id, profile, ok) { calls.preview += 1; ok({ manifest, checksum: 'checksum-1', etag: 'etag-1' }); },
+  manifestPreview(id, profile, ok) { calls.preview += 1; ok({ manifest, checksum: 'checksum-1', etag: 'etag-1', features: { renderer: ['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2'], lessonRendererV2: { openingEntrance: true, visualStateEvents: true, physicalMotionOwner: 'server', singleSpriteEntrance: true } } }); },
   reorderSteps() {}, deleteStep() {}, publish() {}, updateLesson() {}, createStep() {},
 });
 

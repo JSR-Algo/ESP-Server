@@ -111,6 +111,35 @@ assert.equal(exactV2.capability.supported, true);
 assert.equal(exactV2.warnings.length, 0);
 assert.equal(projection.projectEspTftPreview(rendererV2, 1, 'teach').entrance, 'none', 'renderer-v2 entrance must not replay after step zero');
 
+const realShapeManifest = structuredClone(rendererV2);
+delete realShapeManifest.physicalMotionOwner;
+delete realShapeManifest.rendererCapabilities;
+const realShapeMetadata = {
+  checksum: 'server-checksum',
+  etag: 'server-etag',
+  features: {
+    renderer: ['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2'],
+    lessonRendererV2: { openingEntrance: true, visualStateEvents: true, physicalMotionOwner: 'server', singleSpriteEntrance: true }
+  }
+};
+const realShapeProjection = projection.projectEspTftPreview(realShapeManifest, 0, 'teach', null, realShapeMetadata);
+assert.equal(realShapeProjection.capability.supported, true);
+assert.equal(realShapeProjection.physicalMotionOwner, 'server');
+assert.equal(realShapeProjection.warnings.length, 0);
+
+const runtimeControlProjection = projection.projectEspTftPreview(realShapeManifest, 0, 'teach', null, {
+  features: { renderer: ['teebot-lesson-renderer.v2'] },
+  body: { runtimeControls: { physicalMotionOwner: 'server' } }
+});
+assert.equal(runtimeControlProjection.capability.supported, true);
+assert.equal(runtimeControlProjection.physicalMotionOwner, 'server');
+
+const unreportedProjection = projection.projectEspTftPreview(realShapeManifest, 0, 'teach');
+assert.equal(unreportedProjection.capability.supported, null);
+assert.equal(unreportedProjection.physicalMotionOwner, null);
+assert.equal(unreportedProjection.warnings.some((warning) => warning.includes('renderer-v1')), false);
+assert.equal(unreportedProjection.warnings.some((warning) => warning.includes('physicalMotionOwner')), false);
+
 for (const reason of projection.DEGRADED_REASONS) {
   const degraded = projection.projectEspTftPreview(rendererV2, 0, 'teach', reason);
   assert.equal(degraded.degraded.reason, reason);
