@@ -927,6 +927,7 @@ class LessonRuntime:
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
         self._step_passive = False  # cached _is_passive_step(self._step)
         self._step_acked = False
+        self._step_visuals_ready = False
         self._step_completed = False
         self._completed_step_ids: set[str] = set()
         self._child_response_window_open = False
@@ -1353,6 +1354,8 @@ class LessonRuntime:
             return False
         if not self._step_acked:
             return False
+        if self._renderer_v2_enabled() and not self._step_visuals_ready:
+            return False
         if self._step_completed:
             return False
         internal_probe = str(source or "") == "internal_dev_endpoint"
@@ -1657,55 +1660,34 @@ class LessonRuntime:
             # Step delivery is confirmed ONLY by its ack (plan §5.8) -> clear timeout.
             self._cancel_step_timeout()
             self._step_acked = True
-            # The child-facing narration/question must wait until firmware has
-            # acknowledged the rendered lesson_step. This keeps the visual scene
-            # (backgroundScene + teachingObject + robotOverlay) on screen before
-            # TeeBot starts teaching or listening for the child's reply.
-            prompt_handed_off = False
-            if self._step is not None:
-                if self._renderer_v2_enabled():
-                    transitions = [(self._authored_step_visual_state(), "present")]
-                    if not self._step_passive:
-                        transitions.append(("listen", "listen"))
-                    self._queue_authored_visual_sequence(transitions)
-                else:
-                    self._dispatch_step_motion("present")
-                prompt_handed_off = await self._speak_step_prompt(self._step)
-            if not self._is_active_runtime():
+            if self._step is None:
                 return
-            if self._step_passive:
-                # PASSIVE narration (greeting/review/focus/feedback/celebrate): the
-                # firmware NEVER sends step_completed, so the ack IS the completion
-                # signal — auto-advance. Without this the run would hang forever in
-                # S_RUNNING (the per-step timeout is cancelled on ack, so it can no
-                # longer fire either). Interactive steps still wait for step_completed.
-                #
-                # DWELL (step.dwellSec / lesson.passive_step_dwell_sec): keep the rendered
-                # scene on screen for N seconds BEFORE auto-advancing, so the child can
-                # actually see/hear a passive step instead of it flashing past on its ack.
-                # Default 0 -> advance immediately on ack (byte-for-byte the prior behavior;
-                # real lessons that set no dwell are unchanged). The dwell runs as a guarded
-                # task so it never blocks the inbound receive loop.
-                if prompt_handed_off:
-                    await self._wait_lesson_prompt_idle()
-                    if (
-                        not self._is_active_runtime()
-                        or self.state != S_RUNNING
-                        or not self._step_passive
-                    ):
-                        return
-                dwell = self._passive_dwell_sec()
-                if dwell > 0:
-                    self._start_passive_dwell(self._step_seq, self._step_id, dwell)
-                    return
-                self._step_completed = True
-            else:
-                if not self._renderer_v2_enabled():
-                    self._dispatch_step_motion("listen")
-                await self._open_child_response_window()
-                if self._child_response_window_still_current(self._step_id, self._step_seq):
-                    self._start_child_response_timeout()
-            await self._maybe_finish_step()
+            step_id = self._step_id
+            step_seq = self._step_seq
+            if self._renderer_v2_enabled():
+                transitions = [(self._authored_step_visual_state(), "present")]
+                if not self._step_passive:
+                    transitions.append(("listen", "listen"))
+                visual_generation = self._visual_generation + len(transitions)
+                assignment_id = self.assignment_id
+                session_id = self.session_id
+
+                async def continue_after_visuals() -> None:
+                    await self._continue_after_step_visuals(
+                        step_id,
+                        step_seq,
+                        visual_generation=visual_generation,
+                        assignment_id=assignment_id,
+                        session_id=session_id,
+                    )
+
+                self._queue_authored_visual_sequence(
+                    transitions, after=continue_after_visuals
+                )
+                return
+            self._dispatch_step_motion("present")
+            self._step_visuals_ready = True
+            await self._continue_after_step_visuals(step_id, step_seq)
         elif ftype == "lesson_stop":
             self.state = S_COMPLETED
             self._cancel_visual_waiters(increment_generation=True, reason="lessonStopped")
@@ -1718,6 +1700,61 @@ class LessonRuntime:
                 }
             )
             await self._notify_lesson_terminal("lesson_completed")
+
+    async def _continue_after_step_visuals(
+        self,
+        step_id: Optional[str],
+        step_seq: Optional[int],
+        *,
+        visual_generation: Optional[int] = None,
+        assignment_id: Any = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        def continuation_is_current() -> bool:
+            if (
+                not self._is_active_runtime()
+                or self.state != S_RUNNING
+                or step_id != self._step_id
+                or step_seq != self._step_seq
+                or not self._step_acked
+                or self._step is None
+            ):
+                return False
+            if visual_generation is None:
+                return True
+            return self._visual_transition_is_current(
+                visual_generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            )
+
+        if not continuation_is_current():
+            return
+        self._step_visuals_ready = True
+        prompt_handed_off = await self._speak_step_prompt(self._step)
+        if not continuation_is_current():
+            return
+        if self._step_passive:
+            if prompt_handed_off:
+                await self._wait_lesson_prompt_idle()
+                if (
+                    not continuation_is_current()
+                    or not self._step_passive
+                ):
+                    return
+            dwell = self._passive_dwell_sec()
+            if dwell > 0:
+                self._start_passive_dwell(step_seq, step_id, dwell)
+                return
+            self._step_completed = True
+        else:
+            if not self._renderer_v2_enabled():
+                self._dispatch_step_motion("listen")
+            await self._open_child_response_window()
+            if self._child_response_window_still_current(step_id, step_seq):
+                self._start_child_response_timeout()
+        await self._maybe_finish_step()
 
     async def _notify_lesson_terminal(self, reason: str) -> None:
         if self._is_pre_activation_fallback_candidate():
@@ -1938,6 +1975,7 @@ class LessonRuntime:
         self._step_passive = _is_passive_step(step)
         self._step_id = step.get("id")
         self._step_acked = False
+        self._step_visuals_ready = False
         self._step_completed = False
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
@@ -2660,6 +2698,7 @@ class LessonRuntime:
         loop = asyncio.get_running_loop()
         waiter = loop.create_future()
         waiter.visual_generation = generation
+        waiter.step_id = self._step_id
         self._visual_ack_waiters[seq] = waiter
 
         async def timeout() -> None:
@@ -2708,8 +2747,13 @@ class LessonRuntime:
     def _cancel_visual_waiters(self, *, increment_generation: bool, reason: str) -> None:
         if increment_generation:
             self._visual_generation += 1
-        self._retired_visual_ack_sequences.clear()
+            self._retired_visual_ack_sequences.clear()
         for seq, waiter in list(self._visual_ack_waiters.items()):
+            self._retire_visual_ack_sequence(
+                seq,
+                getattr(waiter, "visual_generation", self._visual_generation),
+                getattr(waiter, "step_id", self._step_id),
+            )
             if not waiter.done():
                 waiter.set_result(
                     VisualAckResult(
@@ -2736,7 +2780,36 @@ class LessonRuntime:
             return VisualAckResult(
                 False, False, "unsupportedContract", None, self._visual_generation
             )
-        return await self.send_visual_state(**request)
+        generation = self._visual_generation
+        assignment_id = self.assignment_id
+        session_id = self.session_id
+        step_id = self._step_id
+        result = await self.send_visual_state(**request)
+        if (
+            self._step_acked
+            and self._step_completed
+            and self._step_index + 1 >= len(self._steps)
+            and not self._completion_stop_sent
+            and result.visual_generation == generation
+            and self._visual_transition_is_current(
+                generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            )
+        ):
+            preset = request.get("motion_preset")
+            if result.accepted and isinstance(preset, str) and preset:
+                await self._dispatch_motion_once(preset, generation, step_id)
+            if self._visual_transition_is_current(
+                generation,
+                assignment_id=assignment_id,
+                session_id=session_id,
+                step_id=step_id,
+            ):
+                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+                self._completion_stop_sent = True
+        return result
 
     async def stop(self) -> None:
         self._cancel_visual_waiters(increment_generation=True, reason="stopped")

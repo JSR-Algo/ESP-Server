@@ -42,7 +42,6 @@ import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
 from core.lesson.runtime import (  # noqa: E402
     LessonRuntime,
     S_FAILED,
-    S_PRELOADING,
     S_READY,
     S_RUNNING,
 )
@@ -315,6 +314,42 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue((await resume).accepted)
 
+    async def test_late_pause_ack_is_retired_before_resume_ack_sequence(self):
+        task = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        await asyncio.sleep(0)
+        paused_frame = json.loads(self.rt.conn.websocket.sent[-1])
+
+        await self.rt.pause()
+        self.assertFalse((await task).accepted)
+        self.assertEqual(self.rt._visual_ack_waiters, {})
+        self.assertIn(paused_frame["sequence"], self.rt._retired_visual_ack_sequences)
+
+        await self.rt.on_lesson_ack(
+            self._ack(
+                paused_frame["sequence"],
+                1,
+                generation=paused_frame["body"]["visualGeneration"],
+            )
+        )
+        self.assertEqual(self.rt._last_inbound_sequence, 1)
+
+        resume = asyncio.create_task(self.rt.resume())
+        await asyncio.sleep(0)
+        resumed_frame = json.loads(self.rt.conn.websocket.sent[-1])
+        await self.rt.on_lesson_ack(
+            self._ack(
+                resumed_frame["sequence"],
+                2,
+                generation=resumed_frame["body"]["visualGeneration"],
+            )
+        )
+
+        self.assertTrue((await resume).accepted)
+        self.assertNotIn(
+            "lesson_error",
+            [json.loads(payload)["type"] for payload in self.rt.conn.websocket.sent],
+        )
+
     async def test_pause_after_ack_resolution_prevents_stale_motion_dispatch(self):
         self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
         task = asyncio.create_task(
@@ -580,8 +615,8 @@ class CompletionVisualFlowTest(unittest.IsolatedAsyncioTestCase):
                     self.setUp()
                 dispatched = []
 
-                async def motion(_conn, preset):
-                    dispatched.append(preset)
+                async def motion(_conn, preset, calls=dispatched):
+                    calls.append(preset)
                     return True
 
                 with mock.patch(
@@ -669,6 +704,122 @@ class CompletionVisualFlowTest(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(completed_stops, [])
                 self.assertFalse(self.rt._completion_stop_sent)
+
+    async def test_pause_then_resume_completion_ack_finishes_lesson(self):
+        visual = await self._begin_completion()
+        await self.rt.pause()
+        await self.rt._visual_transition_task
+        self.assertFalse(self.rt._completion_stop_sent)
+
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            return True
+
+        with mock.patch(
+            "core.lesson.runtime.dispatch_motion_preset", side_effect=motion
+        ):
+            resume = asyncio.create_task(self.rt.resume())
+            await asyncio.sleep(0)
+            resumed_visual = self._frames("lesson_visual_state")[-1]
+            self.assertNotEqual(resumed_visual["sequence"], visual["sequence"])
+            await self.rt.on_lesson_ack(self._ack(resumed_visual, 1))
+            self.assertTrue((await resume).accepted)
+
+        self.assertEqual(dispatched, ["goodbye"])
+        self.assertEqual(len(self._frames("lesson_stop")), 1)
+        await self._ack_stop(2)
+
+
+class StepVisualContinuationTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.rt = _runtime()
+        self.rt.negotiated_version = "teebot-lesson-renderer.v2"
+        self.rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
+        self.rt.conn.device_id = "robot-01"
+        self.rt.conn.config = {
+            "lesson": {
+                "renderer_v2_enabled": True,
+                "motion_presets_enabled": True,
+                "rollout_device_allowlist": ["robot-01"],
+                "frame_ack_timeout_sec": 60,
+            }
+        }
+        self.rt.conn.voice_provider = T._RecordingLessonVoiceProvider()
+        self.rt.conn.lesson_runtime = self.rt
+        self.rt.state = S_RUNNING
+        self.rt._step_index = 0
+        self.rt._step = self.rt._steps[0]
+        self.rt._step.update(
+            {
+                "completionClass": "interactive",
+                "robotState": "modeling",
+                "motion": {"present": "teach", "listen": "listen"},
+                "scene": {
+                    "robotOverlay": {"asset": {"key": "robotOverlay.teach"}}
+                },
+            }
+        )
+        self.rt._step_id = self.rt._step["id"]
+        self.rt._step_seq = 3
+        self.rt._step_passive = False
+
+    def _visual_frames(self):
+        return [
+            json.loads(payload)
+            for payload in self.rt.conn.websocket.sent
+            if json.loads(payload)["type"] == "lesson_visual_state"
+        ]
+
+    def _ack(self, frame, inbound_sequence):
+        return {
+            "type": "lesson_ack",
+            "protocolVersion": "teebot-lesson-renderer.v2",
+            "assignmentId": self.rt.assignment_id,
+            "sessionId": self.rt.session_id,
+            "stepId": self.rt._step_id,
+            "sequence": inbound_sequence,
+            "body": {
+                "acks": frame["sequence"],
+                "accepted": True,
+                "degraded": False,
+                "degradedReason": None,
+                "visualGeneration": frame["body"]["visualGeneration"],
+            },
+        }
+
+    async def test_prompt_and_input_wait_for_teach_then_listen_visuals(self):
+        await self.rt._on_frame_acked({"type": "lesson_step"}, {})
+        await asyncio.sleep(0)
+        teach = self._visual_frames()[-1]
+        self.assertEqual(teach["body"]["state"], "teach")
+        self.assertEqual(self.rt.conn.voice_provider.prompts, [])
+        self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [])
+
+        early = asyncio.create_task(
+            self.rt.on_child_response("barn", source="internal_dev_endpoint")
+        )
+        try:
+            await asyncio.sleep(0)
+            self.assertTrue(early.done())
+            self.assertFalse(await early)
+        finally:
+            if not early.done():
+                early.cancel()
+                await asyncio.gather(early, return_exceptions=True)
+
+        await self.rt.on_lesson_ack(self._ack(teach, 1))
+        await asyncio.sleep(0)
+        listen = self._visual_frames()[-1]
+        self.assertEqual(listen["body"]["state"], "listen")
+        self.assertEqual(self.rt.conn.voice_provider.prompts, [])
+        self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [])
+
+        await self.rt.on_lesson_ack(self._ack(listen, 2))
+        await self.rt._visual_transition_task
+        self.assertEqual(len(self.rt.conn.voice_provider.prompts), 1)
+        self.assertEqual(self.rt.conn.voice_provider.child_response_windows, [True])
 
 class ProgressNonCompletionBranchTest(unittest.IsolatedAsyncioTestCase):
     # ── 408->exit: a non-step_completed progress event is forwarded but not latched ─

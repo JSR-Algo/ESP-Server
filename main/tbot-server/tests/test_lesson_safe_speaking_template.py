@@ -293,6 +293,7 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         rt.renderer_capabilities = ["teebot-lesson-renderer.v2"]
         conn.features["renderer"] = ["teebot-lesson-renderer.v2"]
         conn.config["lesson"]["renderer_v2_enabled"] = True
+        rt._step_visuals_ready = True
         rt._step["scene"] = {
             "robotOverlay": {"asset": {"key": "robotOverlay.thinking"}}
         }
