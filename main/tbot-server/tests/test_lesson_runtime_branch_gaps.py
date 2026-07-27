@@ -44,6 +44,8 @@ from core.lesson.runtime import (  # noqa: E402
     S_FAILED,
     S_READY,
     S_RUNNING,
+    VISUAL_DEGRADED_REASONS,
+    VISUAL_REJECTED_REASONS,
 )
 
 
@@ -144,6 +146,14 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    def test_superseded_is_rejection_only_not_a_degraded_fallback(self):
+        self.assertEqual(len(VISUAL_DEGRADED_REASONS), 7)
+        self.assertNotIn("superseded", VISUAL_DEGRADED_REASONS)
+        self.assertEqual(
+            VISUAL_REJECTED_REASONS - VISUAL_DEGRADED_REASONS,
+            {"superseded"},
+        )
+
     async def test_independent_sequences_resolve_only_the_correlated_waiter(self):
         first = asyncio.create_task(self.rt.send_visual_state("thinking"))
         second = asyncio.create_task(self.rt.send_visual_state("listen"))
@@ -186,6 +196,106 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         result = await task
         self.assertFalse(result.accepted)
         self.assertIsNone(self.rt._motion_task)
+
+    async def test_current_superseded_ack_resolves_rejected_without_timeout_or_motion(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            return True
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            task = asyncio.create_task(
+                self.rt._apply_visual_then_motion(
+                    "incorrect", "robotOverlay.thinking", "tryAgain"
+                )
+            )
+            await asyncio.sleep(0)
+            frame = json.loads(self.rt.conn.websocket.sent[-1])
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    frame["sequence"],
+                    1,
+                    generation=frame["body"]["visualGeneration"],
+                    accepted=True,
+                    degraded=True,
+                    degradedReason="superseded",
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(task.done(), "superseded is not an accepted fallback")
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    frame["sequence"],
+                    1,
+                    generation=frame["body"]["visualGeneration"],
+                    accepted=False,
+                    degraded=False,
+                    degradedReason="superseded",
+                )
+            )
+            await asyncio.sleep(0)
+            try:
+                self.assertTrue(task.done())
+            finally:
+                if not task.done():
+                    await self.rt.close()
+            self.assertFalse(await task)
+
+        self.assertEqual(dispatched, [])
+        self.assertEqual(
+            sum(
+                json.loads(payload)["type"] == "lesson_visual_state"
+                for payload in self.rt.conn.websocket.sent
+            ),
+            1,
+        )
+        self.assertEqual(self.rt._visual_ack_waiters, {})
+        self.assertEqual(self.rt._visual_ack_timeout_tasks, {})
+
+    async def test_retired_superseded_ack_is_consumed_without_timeout_or_motion(self):
+        self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
+        dispatched = []
+
+        async def motion(_conn, preset):
+            dispatched.append(preset)
+            return True
+
+        with mock.patch("core.lesson.runtime.dispatch_motion_preset", side_effect=motion):
+            task = asyncio.create_task(
+                self.rt._apply_visual_then_motion(
+                    "thinking", "robotOverlay.thinking", "thinking"
+                )
+            )
+            await asyncio.sleep(0)
+            frame = json.loads(self.rt.conn.websocket.sent[-1])
+            await self.rt.pause()
+            self.assertFalse(await task)
+            self.assertIn(frame["sequence"], self.rt._retired_visual_ack_sequences)
+
+            await self.rt.on_lesson_ack(
+                self._ack(
+                    frame["sequence"],
+                    1,
+                    generation=frame["body"]["visualGeneration"],
+                    accepted=False,
+                    degraded=False,
+                    degradedReason="superseded",
+                )
+            )
+
+        self.assertNotIn(frame["sequence"], self.rt._retired_visual_ack_sequences)
+        self.assertEqual(self.rt._last_inbound_sequence, 1)
+        self.assertEqual(
+            sum(
+                json.loads(payload)["type"] == "lesson_visual_state"
+                for payload in self.rt.conn.websocket.sent
+            ),
+            1,
+        )
+        self.assertEqual(self.rt._visual_ack_timeout_tasks, {})
+        self.assertEqual(dispatched, [])
 
     async def test_visual_ack_rejects_extra_or_wrong_typed_frozen_fields(self):
         task = asyncio.create_task(self.rt.send_visual_state("thinking"))

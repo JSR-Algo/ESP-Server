@@ -80,6 +80,7 @@ VISUAL_DEGRADED_REASONS = frozenset(
         "insufficientHeap",
     }
 )
+VISUAL_REJECTED_REASONS = VISUAL_DEGRADED_REASONS | frozenset({"superseded"})
 MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
 PARENT_RUNTIME_PHASES = frozenset(
     {
@@ -1222,11 +1223,18 @@ class LessonRuntime:
         reason = body.get("degradedReason")
         if type(accepted) is not bool or type(degraded) is not bool:
             return True
-        valid_reason = isinstance(reason, str) and reason in VISUAL_DEGRADED_REASONS
+        valid_degraded_reason = (
+            isinstance(reason, str) and reason in VISUAL_DEGRADED_REASONS
+        )
+        valid_rejected_reason = (
+            isinstance(reason, str) and reason in VISUAL_REJECTED_REASONS
+        )
         if accepted:
-            if degraded != valid_reason or (not degraded and reason is not None):
+            if degraded != valid_degraded_reason or (
+                not degraded and reason is not None
+            ):
                 return True
-        elif degraded or not valid_reason:
+        elif degraded or not valid_rejected_reason:
             return True
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return True
