@@ -238,6 +238,61 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(len(sleeps), 2)
 
+    async def test_late_ack_for_timed_out_attempt_advances_inbound_before_retry_ack(self):
+        second_timeout = asyncio.Event()
+        sleep_calls = 0
+
+        async def controlled_sleep(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 1:
+                return
+            await second_timeout.wait()
+
+        self.rt._sleep = controlled_sleep
+        task = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        try:
+            for _ in range(10):
+                await asyncio.sleep(0)
+                frames = [
+                    json.loads(item)
+                    for item in self.rt.conn.websocket.sent
+                    if json.loads(item)["type"] == "lesson_visual_state"
+                ]
+                if len(frames) == 2:
+                    break
+            self.assertEqual(len(frames), 2)
+            first, retry = frames
+            generation = retry["body"]["visualGeneration"]
+
+            await self.rt.on_lesson_ack(
+                self._ack(first["sequence"], 1, generation=generation)
+            )
+            await self.rt.on_lesson_ack(
+                self._ack(retry["sequence"], 2, generation=generation)
+            )
+            await asyncio.sleep(0)
+
+            self.assertTrue(task.done())
+            self.assertTrue((await task).accepted)
+            sent_types = [json.loads(item)["type"] for item in self.rt.conn.websocket.sent]
+            self.assertNotIn("lesson_error", sent_types)
+        finally:
+            second_timeout.set()
+            if not task.done():
+                await self.rt.close()
+                await task
+
+    def test_retired_visual_sequences_are_bounded_and_pruned_on_generation_change(self):
+        for sequence in range(140):
+            self.rt._retire_visual_ack_sequence(sequence, self.rt._visual_generation, "s4")
+
+        self.assertEqual(len(self.rt._retired_visual_ack_sequences), 128)
+        self.assertNotIn(0, self.rt._retired_visual_ack_sequences)
+
+        self.rt._cancel_visual_waiters(increment_generation=True, reason="replaced")
+        self.assertEqual(self.rt._retired_visual_ack_sequences, {})
+
     async def test_pause_cancels_waiter_without_completing_step_and_resume_resends(self):
         self.rt._step_completed = False
         task = asyncio.create_task(self.rt.send_visual_state("thinking"))

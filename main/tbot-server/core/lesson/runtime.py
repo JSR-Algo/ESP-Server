@@ -74,6 +74,7 @@ VISUAL_DEGRADED_REASONS = frozenset(
         "insufficientHeap",
     }
 )
+MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
 
 
 @dataclass(frozen=True)
@@ -903,6 +904,7 @@ class LessonRuntime:
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
         self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
         self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
+        self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
         self._visual_generation = 1
         self._current_visual_request: Optional[Dict[str, Any]] = None
         self._step_timeout_task: Optional[asyncio.Task] = None
@@ -1117,13 +1119,20 @@ class LessonRuntime:
         body = msg_json.get("body")
         if not isinstance(body, dict):
             return bool(
-                self._visual_ack_waiters
+                (self._visual_ack_waiters or self._retired_visual_ack_sequences)
                 and msg_json.get("protocolVersion") == RENDERER_V2
             )
         raw_acked = body.get("acks")
         acked = raw_acked if type(raw_acked) is int else None
-        waiter = self._visual_ack_waiters.get(acked) if acked is not None else None
-        if waiter is None:
+        if acked is None:
+            return bool(
+                (self._visual_ack_waiters or self._retired_visual_ack_sequences)
+                and msg_json.get("protocolVersion") == RENDERER_V2
+                and ("accepted" in body or "visualGeneration" in body)
+            )
+        waiter = self._visual_ack_waiters.get(acked)
+        retired = self._retired_visual_ack_sequences.get(acked)
+        if waiter is None and retired is None:
             return False
         expected_envelope_fields = {
             "type",
@@ -1148,11 +1157,16 @@ class LessonRuntime:
             or msg_json.get("protocolVersion") != RENDERER_V2
             or msg_json.get("assignmentId") != self.assignment_id
             or msg_json.get("sessionId") != self.session_id
-            or msg_json.get("stepId") != self._step_id
+            or msg_json.get("stepId")
+            != (self._step_id if waiter is not None else retired.get("stepId"))
             or type(msg_json.get("sequence")) is not int
         ):
             return True
-        expected_generation = getattr(waiter, "visual_generation", None)
+        expected_generation = (
+            getattr(waiter, "visual_generation", None)
+            if waiter is not None
+            else retired.get("visualGeneration")
+        )
         generation = body.get("visualGeneration")
         if type(generation) is not int or generation != expected_generation:
             return True
@@ -1168,6 +1182,9 @@ class LessonRuntime:
         elif degraded or not valid_reason:
             return True
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+            return True
+        if retired is not None:
+            self._retired_visual_ack_sequences.pop(acked, None)
             return True
         if not waiter.done():
             waiter.set_result(
@@ -2459,18 +2476,34 @@ class LessonRuntime:
 
         timeout_task = asyncio.create_task(timeout())
         self._visual_ack_timeout_tasks[seq] = timeout_task
+        result: Optional[VisualAckResult] = None
         try:
             await self._send(json.dumps(frame, ensure_ascii=False))
-            return await waiter
+            result = await waiter
+            return result
         finally:
             self._visual_ack_waiters.pop(seq, None)
             task = self._visual_ack_timeout_tasks.pop(seq, None)
             if task is not None and task is not asyncio.current_task() and not task.done():
                 task.cancel()
+            if result is not None and result.timed_out:
+                self._retire_visual_ack_sequence(seq, generation, self._step_id)
+
+    def _retire_visual_ack_sequence(
+        self, sequence: int, generation: int, step_id: Optional[str]
+    ) -> None:
+        self._retired_visual_ack_sequences[sequence] = {
+            "visualGeneration": generation,
+            "stepId": step_id,
+        }
+        while len(self._retired_visual_ack_sequences) > MAX_RETIRED_VISUAL_ACK_SEQUENCES:
+            oldest = next(iter(self._retired_visual_ack_sequences))
+            self._retired_visual_ack_sequences.pop(oldest, None)
 
     def _cancel_visual_waiters(self, *, increment_generation: bool, reason: str) -> None:
         if increment_generation:
             self._visual_generation += 1
+        self._retired_visual_ack_sequences.clear()
         for seq, waiter in list(self._visual_ack_waiters.items()):
             if not waiter.done():
                 waiter.set_result(
