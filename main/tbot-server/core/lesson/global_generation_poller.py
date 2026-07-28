@@ -159,7 +159,7 @@ class GlobalGenerationPoller:
             expected_etag = (
                 f'"lesson-assets-g{data["generation"]}-{data["indexChecksum"]}"'
             )
-            if response["etag"] != expected_etag:
+            if response["etag"] not in {expected_etag, f"W/{expected_etag}"}:
                 raise _PollRejected("cms_etag_mismatch")
             return await self._apply_generation(data, expected_etag)
         except asyncio.CancelledError:

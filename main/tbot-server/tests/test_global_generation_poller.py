@@ -169,6 +169,87 @@ async def test_valid_200_stores_desired_before_callback_and_then_uses_etag() -> 
 
 
 @pytest.mark.asyncio
+async def test_exact_weak_etag_is_accepted_as_canonical_generation_identity() -> None:
+    requests: list[httpx.Request] = []
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    etag = f'"lesson-assets-g8-{checksum}"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _response(payload, etag=f"W/{etag}")
+        return httpx.Response(304)
+
+    store = DurableFakeStore()
+
+    async def callback(data: dict) -> None:
+        store.mark_accepted(data)
+
+    poller = GlobalGenerationPoller(
+        _config(), store, callback, http=_client(handler), clock=lambda: NOW
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert store.desired == [(8, checksum, etag)]
+    assert await poller.run_once() == {"state": "not_modified"}
+    assert requests[1].headers["if-none-match"] == etag
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "etag_template",
+    [
+        'w/"lesson-assets-g8-{checksum}"',
+        'W/W/"lesson-assets-g8-{checksum}"',
+        'W/ "lesson-assets-g8-{checksum}"',
+        ' W/"lesson-assets-g8-{checksum}"',
+        'W/"lesson-assets-g7-{checksum}"',
+        'W/"lesson-assets-g8-{checksum}-extra"',
+        'W/"lesson-assets-g8-{checksum}", "other"',
+    ],
+)
+async def test_weak_etag_must_be_one_exact_legal_prefix_of_expected_identity(
+    etag_template: str,
+) -> None:
+    payload = _payload()
+    checksum = payload["data"]["indexChecksum"]
+    client = _client(
+        lambda request: _response(payload, etag=etag_template.format(checksum=checksum))
+    )
+    store = FakeStore()
+
+    result = await GlobalGenerationPoller(
+        _config(), store, lambda data: None, http=client, clock=lambda: NOW
+    ).run_once()
+
+    assert result == {"state": "rejected", "errorCode": "cms_etag_mismatch"}
+    assert store.desired == []
+
+
+@pytest.mark.asyncio
+async def test_exact_weak_etag_does_not_bypass_body_index_checksum_verification() -> None:
+    payload = _payload()
+    payload["data"]["indexChecksum"] = "0" * 64
+    etag = f'W/"lesson-assets-g8-{"0" * 64}"'
+    store = FakeStore()
+
+    result = await GlobalGenerationPoller(
+        _config(),
+        store,
+        lambda data: None,
+        http=_client(lambda request: _response(payload, etag=etag)),
+        clock=lambda: NOW,
+    ).run_once()
+
+    assert result == {
+        "state": "rejected",
+        "errorCode": "cms_index_checksum_mismatch",
+    }
+    assert store.desired == []
+
+
+@pytest.mark.asyncio
 async def test_retry_wait_callback_does_not_cache_etag_and_retries_fresh_200() -> None:
     requests: list[httpx.Request] = []
     payload = _payload()
