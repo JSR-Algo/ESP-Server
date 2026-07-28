@@ -9,9 +9,9 @@ The ESP Server is the authoritative sha256 verifier and READY gate. It:
 * reports READY **only** when every manifest-declared asset exists locally AND every
   sha256 passes (binary rule); a checksum mismatch blocks READY permanently (no
   auto-retry), and
-* PAUSES all ESP-side asset downloads during any realtime voice turn (the realtime
-  path always wins) — resuming on the next IDLE boundary, with ``PRELOAD_TIMEOUT``
-  bounding starvation, and
+* PAUSES all ESP-side asset downloads during actual realtime voice activity (the
+  voice path always wins) while allowing bounded progress if a live provider leaves
+  its interaction state busy after transient speech has ended, and
 * materializes a verified SD asset pack when configured, so firmware can read local
   ``sd://`` bytes during render without owning checksum verification.
 
@@ -55,6 +55,7 @@ EVICTED = "EVICTED"
 
 _DEFAULT_CHUNK = 64 * 1024
 _DEFAULT_POLL_INTERVAL = 0.2
+_SOFT_BUSY_PROGRESS_GRACE_SEC = 0.1
 _DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_TOTAL_ASSET_BYTES = 64 * 1024 * 1024
 _ESPTFT_BACKGROUND_MAX_SIZE = (320, 240)
@@ -201,6 +202,7 @@ class AssetCache:
         self._max_total_asset_bytes = int(max_total_asset_bytes or _DEFAULT_MAX_TOTAL_ASSET_BYTES)
         self._downloaded_total_bytes = 0
         self._deadline: Optional[float] = None
+        self._soft_busy_since: Optional[float] = None
 
         # Skip manifest assets with a falsy key (no id/assetId): they would crash
         # _final_path (None.replace) and collide in _by_key (every None overwrites
@@ -691,11 +693,52 @@ class AssetCache:
 
     async def _wait_while_busy(self) -> None:
         while self._busy_check():
-            if self._deadline is not None and self._now() >= self._deadline:
+            now = self._now()
+            if self._deadline is not None and now >= self._deadline:
                 raise PreloadTimeout()
+            voice_activity = self._user_streaming_voice_activity()
+            if voice_activity is not None and not voice_activity[0]:
+                last_audio_at = voice_activity[1]
+                if self._soft_busy_since is None:
+                    self._soft_busy_since = max(now, last_audio_at)
+                else:
+                    self._soft_busy_since = max(self._soft_busy_since, last_audio_at)
+                if now - self._soft_busy_since >= _SOFT_BUSY_PROGRESS_GRACE_SEC:
+                    return
+            else:
+                # Actual child/robot speech always wins and restarts the quiet grace.
+                self._soft_busy_since = None
             await self._sleep(self._poll_interval)
+        self._soft_busy_since = None
         if self._deadline is not None and self._now() >= self._deadline:
             raise PreloadTimeout()
+
+    def _user_streaming_voice_activity(self) -> Optional[tuple[bool, float]]:
+        """Read voice state and last ingress time for a stuck USER_STREAMING owner."""
+        owner = getattr(self._busy_check, "__self__", None)
+        if owner is None:
+            return None
+        signal_names = (
+            "client_is_speaking",
+            "client_have_voice",
+            "_lesson_asset_audio_inflight",
+            "_lesson_asset_last_audio_at",
+        )
+        try:
+            state_reader = getattr(owner, "_realtime_interaction_state", None)
+            if not callable(state_reader):
+                return None
+            state = state_reader()
+            state = getattr(state, "value", state)
+            if state != "USER_STREAMING" or not all(
+                hasattr(owner, name) for name in signal_names
+            ):
+                return None
+            active = any(bool(getattr(owner, name, False)) for name in signal_names[:3])
+            last_audio_at = max(0.0, float(owner._lesson_asset_last_audio_at))
+            return active, last_audio_at
+        except Exception:
+            return None
 
     def _resolve_url(self, asset: AssetState) -> str:
         # assetOriginBase (one config value, D-ASSET-HOST) joined to the relative

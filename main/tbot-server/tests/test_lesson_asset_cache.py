@@ -1567,6 +1567,115 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ready)
         self.assertTrue(cache.is_ready())
 
+    async def test_stuck_user_streaming_allows_bounded_progress_only_after_speech_stops(self):
+        class StuckUserStreamingConnection:
+            def __init__(self):
+                self.client_is_speaking = False
+                self.client_have_voice = True
+                self._lesson_asset_audio_inflight = 0
+                self._lesson_asset_last_audio_at = 0.0
+
+            def is_realtime_busy(self):
+                # Google Live can remain USER_STREAMING after meaningful speech ends.
+                return True
+
+            def _realtime_interaction_state(self):
+                return "USER_STREAMING"
+
+        assets = [_critical_assets()[1]]
+        conn = StuckUserStreamingConnection()
+        client = _client_for(assets)
+        cache = self._cache(
+            assets,
+            client=client,
+            busy_check=conn.is_realtime_busy,
+            poll_interval=0.01,
+        )
+
+        task = asyncio.create_task(cache.preload())
+        await asyncio.sleep(0.05)
+        self.assertEqual(client.requested, [])
+        self.assertFalse(task.done())
+
+        # The persistent interaction state is still busy, but meaningful speech is
+        # gone. Foreground lesson preload must make progress within a bounded grace.
+        conn.client_have_voice = False
+        ready = await asyncio.wait_for(task, timeout=0.5)
+
+        self.assertTrue(ready)
+        self.assertEqual(len(client.requested), len(assets))
+
+    async def test_short_audio_pulses_restart_user_streaming_quiet_grace(self):
+        class PulsedUserStreamingConnection:
+            def __init__(self):
+                self.client_is_speaking = False
+                self.client_have_voice = False
+                self._lesson_asset_audio_inflight = 0
+                self._lesson_asset_last_audio_at = 0.0
+
+            def is_realtime_busy(self):
+                return True
+
+            def _realtime_interaction_state(self):
+                return "USER_STREAMING"
+
+        assets = [_critical_assets()[1]]
+        conn = PulsedUserStreamingConnection()
+        client = _client_for(assets)
+        now = {"value": 0.0}
+        last_pulse = {"value": 0.0}
+
+        async def sleep(delay):
+            now["value"] += delay
+            if now["value"] <= 0.3:
+                # The inflight pulse begins and ends between AssetCache polls.
+                conn._lesson_asset_audio_inflight = 1
+                conn._lesson_asset_last_audio_at = now["value"]
+                last_pulse["value"] = now["value"]
+                conn._lesson_asset_audio_inflight = 0
+            await asyncio.sleep(0)
+
+        cache = self._cache(
+            assets,
+            client=client,
+            busy_check=conn.is_realtime_busy,
+            clock=lambda: now["value"],
+            sleep=sleep,
+            poll_interval=0.05,
+        )
+
+        self.assertTrue(await cache.preload())
+        self.assertGreaterEqual(
+            now["value"] - last_pulse["value"],
+            asset_cache_module._SOFT_BUSY_PROGRESS_GRACE_SEC,
+        )
+
+    async def test_soft_busy_grace_never_overrides_expired_preload_deadline(self):
+        class QuietUserStreamingConnection:
+            client_is_speaking = False
+            client_have_voice = False
+            _lesson_asset_audio_inflight = 0
+            _lesson_asset_last_audio_at = 0.0
+
+            def is_realtime_busy(self):
+                return True
+
+            def _realtime_interaction_state(self):
+                return "USER_STREAMING"
+
+        conn = QuietUserStreamingConnection()
+        cache = self._cache(
+            [_critical_assets()[1]],
+            client=_client_for([_critical_assets()[1]]),
+            busy_check=conn.is_realtime_busy,
+            clock=lambda: 0.2,
+        )
+        cache._soft_busy_since = 0.0
+        cache._deadline = 0.1
+
+        with self.assertRaises(PreloadTimeout):
+            await cache._wait_while_busy()
+
     async def test_preload_timeout_when_busy_never_releases(self):
         assets = _critical_assets()
         cache = self._cache(

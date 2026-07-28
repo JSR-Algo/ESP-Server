@@ -82,6 +82,7 @@ class _Conn:
         self.google_live_session_started_at = None
         self.google_live_turn_started_at = None
         self.google_live_session_resumption_handle = None
+        self._lesson_asset_last_audio_at = 0.0
         self.voice_consent_client = _Consent(True)
         self.voice_provider = None
         self.clear_queue_calls = 0
@@ -1941,12 +1942,32 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(provider._user_stream_started_at)
         self.assertEqual(provider._bridge.forwarded, [])
+        self.assertEqual(conn._lesson_asset_last_audio_at, 0.0)
 
         forwarded_before_waiting_drop = len(provider._bridge.forwarded)
         self.assertTrue(await provider.handle_audio_bytes(b"background"))
         self.assertTrue(await provider.handle_audio_bytes(b"background-again"))
         self.assertEqual(provider._client.end_calls, 0)
         self.assertEqual(len(provider._bridge.forwarded), forwarded_before_waiting_drop)
+        self.assertEqual(conn._lesson_asset_last_audio_at, 0.0)
+
+    async def test_forwarded_user_audio_marks_lesson_asset_activity(self):
+        conn = _Conn()
+        conn.config["google_live"].update(
+            {
+                "input_min_capture_ms": 0,
+                "input_speech_rms_threshold": 50,
+            }
+        )
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.rms = 1000
+
+        self.assertTrue(await provider.handle_audio_bytes(b"speech"))
+
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:speech"])
+        self.assertGreater(conn._lesson_asset_last_audio_at, 0.0)
 
     def test_conversation_input_timing_is_faster_than_lesson_timing(self):
         conn = _Conn()
@@ -2625,6 +2646,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             provider._bridge.forwarded,
             [b"pcm:barn"],
         )
+        self.assertGreater(conn._lesson_asset_last_audio_at, 0.0)
         self.assertEqual(provider._client.end_calls, 1)
         self.assertEqual(
             provider._interaction.state,

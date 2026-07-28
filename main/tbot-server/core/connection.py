@@ -193,6 +193,7 @@ class ConnectionHandler:
         self.google_live_turn_started_at = None
         self.voice_metric_samples = deque(maxlen=100)
         self._lesson_asset_audio_inflight = 0
+        self._lesson_asset_last_audio_at = 0.0
 
         # Thread task related
         self.loop = None  # in handle_connection Get running fromEventLoop

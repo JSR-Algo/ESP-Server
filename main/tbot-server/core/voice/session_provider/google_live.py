@@ -103,6 +103,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _conn_float(self, name, default=0.0):
         return self._as_float(getattr(self.conn, name, default), default)
 
+    def _mark_lesson_asset_audio_activity(self):
+        self.conn._lesson_asset_last_audio_at = time.monotonic()
+
     def __init__(
         self,
         conn,
@@ -598,6 +601,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._bridge.forward_decoded_input_audio(decoded_audio)
             else:
                 await self._bridge.forward_input_audio(audio_bytes)
+            self._mark_lesson_asset_audio_activity()
             self._log_audio_decision("forward_input", "accepted", decoded_audio)
             if aec_live_vad_only and not interrupted:
                 return True
@@ -679,6 +683,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return True
             for frame in frames_to_forward:
                 await bridge.forward_decoded_input_audio(frame)
+                self._mark_lesson_asset_audio_activity()
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live lesson_child_audio_forwarded bytes={} rms={}",
                     len(frame),

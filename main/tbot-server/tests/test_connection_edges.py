@@ -2362,6 +2362,7 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_realtime_busy_covers_audio_decode_while_state_is_listening(self):
         handler = _build_handler()
+        self.assertEqual(handler._lesson_asset_last_audio_at, 0.0)
         handler.session_mode = connection_module.SessionMode.CONVERSATION
         started = asyncio.Event()
         release = asyncio.Event()
@@ -2378,10 +2379,12 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         route_task = asyncio.create_task(handler._route_audio_message(b"opus-frame"))
         await started.wait()
+        self.assertEqual(handler._lesson_asset_last_audio_at, 0.0)
         self.assertTrue(handler.is_realtime_busy())
         release.set()
         self.assertTrue(await route_task)
         self.assertFalse(handler.is_realtime_busy())
+        self.assertEqual(handler._lesson_asset_last_audio_at, 0.0)
 
     async def test_lesson_preload_reset_waits_for_matching_firmware_ack(self):
         handler = _build_handler()
