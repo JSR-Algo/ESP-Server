@@ -2008,16 +2008,27 @@ class LessonRuntime:
         if self._preload_status_report_tasks:
             await asyncio.sleep(0)
         if not ready or not status.get("ready"):
-            # Online fallback continues the lesson with HTTP asset URLs. This is
-            # NOT a terminal outcome — never call _notify_lesson_terminal here or
-            # finish_lesson_mode will kick the child out of LESSON mode mid-start
-            # ("văng không vào được bài học").
-            self._sd_asset_pack_online_fallback = True
-            self._log("warning", "sd asset pack not ready; falling back to online URLs")
-            return True
+            self.last_error = LessonError(
+                ASSET_PACK_NOT_READY,
+                "verified SD asset pack is not ready for this lesson",
+                retryable=True,
+            )
+            self.state = S_FAILED
+            self._log("warning", "sd asset pack not ready; refusing online fallback")
+            await self._emit_error(self.last_error)
+            await self._notify_lesson_terminal("sd_asset_pack_not_ready")
+            return False
         if not await self._sync_sd_asset_pack_to_robot():
-            self._sd_asset_pack_online_fallback = True
-            self._log("warning", "robot SD sync unavailable; falling back to online URLs")
+            self.last_error = LessonError(
+                ASSET_PACK_NOT_READY,
+                "robot did not attest the exact SD asset pack for this lesson",
+                retryable=True,
+            )
+            self.state = S_FAILED
+            self._log("warning", "robot SD sync not attested; refusing online fallback")
+            await self._emit_error(self.last_error)
+            await self._notify_lesson_terminal("sd_asset_pack_sync_failed")
+            return False
         return True
 
     async def _emit_step(self) -> None:

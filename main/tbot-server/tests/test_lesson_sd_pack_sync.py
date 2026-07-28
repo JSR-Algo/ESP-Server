@@ -309,8 +309,12 @@ def test_cached_asset_packs_normalize_historical_aliases_without_canonical_short
 @pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(monkeypatch, tmp_path):
     cache_root = tmp_path / "lesson_assets"
-    first = cache_root / "lesson-a" / "v1-a"
-    second = cache_root / "lesson-b" / "v2-b"
+    first_checksum = "a" * 64
+    second_checksum = "b" * 64
+    first_key = f"lesson-a/v1-{first_checksum}"
+    second_key = f"lesson-b/v2-{second_checksum}"
+    first = cache_root / first_key
+    second = cache_root / second_key
     first.mkdir(parents=True)
     second.mkdir(parents=True)
     (first / "backgroundScene.poster").write_bytes(b"a")
@@ -333,7 +337,16 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
 
     async def fake_call(conn, client, pack):
         calls.append((sd_pack_sync.SD_PACK_SYNC_TOOL, pack["cacheKey"]))
-        return json.dumps({"ready": True, "failedCount": 0})
+        return json.dumps(
+            {
+                "ready": True,
+                "cacheKey": pack["cacheKey"],
+                "manifestChecksum": pack["manifestChecksum"],
+                "downloadedCount": len(pack["assets"]),
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+        )
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
 
@@ -343,16 +356,16 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
     assert result["synced"] == 2
     assert result["failed"] == 0
     assert result["resultsByCacheKey"] == {
-        "lesson-a/v1-a": {
-            "cacheKey": "lesson-a/v1-a",
+        first_key: {
+            "cacheKey": first_key,
             "downloadedCount": 1,
             "skippedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "ready": True,
         },
-        "lesson-b/v2-b": {
-            "cacheKey": "lesson-b/v2-b",
+        second_key: {
+            "cacheKey": second_key,
             "downloadedCount": 1,
             "skippedCount": 0,
             "failedCount": 0,
@@ -361,8 +374,8 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
         },
     }
     assert calls == [
-        ("self.lesson_assets.sync_to_sd", "lesson-a/v1-a"),
-        ("self.lesson_assets.sync_to_sd", "lesson-b/v2-b"),
+        ("self.lesson_assets.sync_to_sd", first_key),
+        ("self.lesson_assets.sync_to_sd", second_key),
     ]
 
 
@@ -371,11 +384,17 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
     monkeypatch, tmp_path
 ):
     cache_root = tmp_path / "lesson_assets"
-    first = cache_root / "lesson-a" / "v1-a"
-    second = cache_root / "lesson-b" / "v2-b"
+    first_checksum = "c" * 64
+    second_checksum = "d" * 64
+    first_key = f"lesson-a/v1-{first_checksum}"
+    second_key = f"lesson-b/v2-{second_checksum}"
+    first = cache_root / first_key
+    second = cache_root / second_key
     first.mkdir(parents=True)
     second.mkdir(parents=True)
     (first / "backgroundScene.poster").write_bytes(b"a")
+    (first / "teachingObject.barn").write_bytes(b"b")
+    (first / "intro.mp3").write_bytes(b"c")
     (second / "teachingObject.barn").write_bytes(b"b")
 
     class Client:
@@ -393,9 +412,11 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
         mcp_client = Client()
 
     async def fake_call(_conn, _client, pack):
-        if pack["cacheKey"] == "lesson-a/v1-a":
+        if pack["cacheKey"] == first_key:
             return {
                 "ready": True,
+                "cacheKey": first_key,
+                "manifestChecksum": first_checksum,
                 "downloadedCount": 2,
                 "skippedCount": 1,
                 "failedCount": 0,
@@ -403,6 +424,8 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             }
         return {
             "ready": False,
+            "cacheKey": second_key,
+            "manifestChecksum": second_checksum,
             "downloadedCount": 1,
             "skippedCount": 0,
             "failedCount": 2,
@@ -417,16 +440,16 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
     assert result["synced"] == 1
     assert result["failed"] == 1
     assert result["resultsByCacheKey"] == {
-        "lesson-a/v1-a": {
-            "cacheKey": "lesson-a/v1-a",
+        first_key: {
+            "cacheKey": first_key,
             "downloadedCount": 2,
             "skippedCount": 1,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "ready": True,
         },
-        "lesson-b/v2-b": {
-            "cacheKey": "lesson-b/v2-b",
+        second_key: {
+            "cacheKey": second_key,
             "downloadedCount": 1,
             "skippedCount": 0,
             "failedCount": 2,
@@ -457,11 +480,13 @@ def test_normalize_firmware_sync_result_error_code_matches_backend_regex():
             assert "errorCode" not in result
 
 @pytest.mark.asyncio
-async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_ready(
+async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
     monkeypatch, tmp_path
 ):
     cache_root = tmp_path / "lesson_assets"
-    pack_dir = cache_root / "lesson-a" / "v1-a"
+    checksum = "e" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack_dir = cache_root / cache_key
     pack_dir.mkdir(parents=True)
     (pack_dir / "optional-art.png").write_bytes(b"a")
 
@@ -482,7 +507,9 @@ async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_r
     async def fake_call(_conn, _client, _pack):
         return {
             "ready": True,
-            "downloadedCount": 2,
+            "cacheKey": cache_key,
+            "manifestChecksum": checksum,
+            "downloadedCount": 0,
             "skippedCount": 0,
             "failedCount": 1,
             "criticalFailedCount": 0,
@@ -493,17 +520,157 @@ async def test_sync_cached_lesson_assets_to_sd_treats_optional_only_failure_as_r
 
     result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
 
-    assert result["synced"] == 1
-    assert result["failed"] == 0
-    assert result["resultsByCacheKey"]["lesson-a/v1-a"] == {
-        "cacheKey": "lesson-a/v1-a",
-        "downloadedCount": 2,
+    assert result["synced"] == 0
+    assert result["failed"] == 1
+    assert result["resultsByCacheKey"][cache_key] == {
+        "cacheKey": cache_key,
+        "downloadedCount": 0,
         "skippedCount": 0,
         "failedCount": 1,
         "criticalFailedCount": 0,
-        "ready": True,
+        "ready": False,
         "errorCode": "optional_thumbnail_failed",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "firmware_result",
+    [
+        {
+            "ready": True,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+        {
+            "ready": True,
+            "cacheKey": "lesson-b/v1-" + "a" * 64,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+        {
+            "ready": True,
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+        {
+            "ready": True,
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "manifestChecksum": "b" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+        {
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+        {
+            "ready": True,
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 1,
+        },
+        {
+            "ready": True,
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 0,
+            "skippedCount": 0,
+            "failedCount": 0,
+        },
+    ],
+    ids=[
+        "missing-cache-key",
+        "wrong-cache-key",
+        "missing-checksum",
+        "wrong-checksum",
+        "missing-ready",
+        "failed-assets",
+        "count-mismatch",
+    ],
+)
+async def test_background_sync_rejects_inexact_firmware_attestation(
+    monkeypatch, firmware_result
+):
+    checksum = "a" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack = {
+        "cacheKey": cache_key,
+        "manifestChecksum": checksum,
+        "assets": [{"key": "poster"}],
+    }
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        mcp_client = Client()
+
+    monkeypatch.setattr(sd_pack_sync, "cached_asset_packs", lambda _config: [pack])
+
+    async def fake_call(_conn, _client, _pack):
+        return firmware_result
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 0
+    assert result["failed"] == 1
+    assert result["resultsByCacheKey"][cache_key]["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_background_sync_accepts_exact_firmware_attestation(monkeypatch):
+    checksum = "a" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack = {
+        "cacheKey": cache_key,
+        "manifestChecksum": checksum,
+        "assets": [{"key": "poster"}, {"key": "barn"}],
+    }
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        mcp_client = Client()
+
+    monkeypatch.setattr(sd_pack_sync, "cached_asset_packs", lambda _config: [pack])
+
+    async def fake_call(_conn, _client, _pack):
+        return {
+            "ready": True,
+            "cacheKey": cache_key,
+            "manifestChecksum": checksum,
+            "downloadedCount": 1,
+            "skippedCount": 1,
+            "failedCount": 0,
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert result["resultsByCacheKey"][cache_key]["ready"] is True
 
 
 @pytest.mark.asyncio
@@ -570,7 +737,9 @@ async def test_sync_cached_lesson_assets_to_sd_skips_when_sd_pack_disabled(tmp_p
 @pytest.mark.asyncio
 async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path):
     cache_root = tmp_path / "lesson_assets"
-    pack_dir = cache_root / "lesson-a" / "v1-a"
+    checksum = "f" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack_dir = cache_root / cache_key
     pack_dir.mkdir(parents=True)
     (pack_dir / "poster").write_bytes(b"a")
     busy = [True, False]
@@ -593,7 +762,14 @@ async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path)
 
     async def fake_call(_conn, _client, pack):
         calls.append(pack["cacheKey"])
-        return {"ready": True}
+        return {
+            "ready": True,
+            "cacheKey": cache_key,
+            "manifestChecksum": checksum,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        }
 
     async def fake_sleep(_delay):
         sleeps.append("paused")
@@ -608,7 +784,7 @@ async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path)
 
     assert result["synced"] == 1
     assert sleeps == ["paused"]
-    assert calls == ["lesson-a/v1-a"]
+    assert calls == [cache_key]
 
 
 @pytest.mark.asyncio
@@ -616,7 +792,9 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     monkeypatch, tmp_path
 ):
     cache_root = tmp_path / "lesson_assets"
-    pack_dir = cache_root / "lesson-a" / "v1-a"
+    checksum = "f" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack_dir = cache_root / cache_key
     pack_dir.mkdir(parents=True)
     (pack_dir / "poster").write_bytes(b"a")
     transfer_started = asyncio.Event()
@@ -647,7 +825,14 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
             except asyncio.CancelledError:
                 first_cancelled.set()
                 raise
-        return {"ready": True}
+        return {
+            "ready": True,
+            "cacheKey": cache_key,
+            "manifestChecksum": checksum,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "failedCount": 0,
+        }
 
     async def flip_busy():
         await transfer_started.wait()
@@ -663,7 +848,7 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     await flipper
 
     assert result["synced"] == 1
-    assert attempts == ["lesson-a/v1-a", "lesson-a/v1-a"]
+    assert attempts == [cache_key, cache_key]
 
 
 @pytest.mark.asyncio

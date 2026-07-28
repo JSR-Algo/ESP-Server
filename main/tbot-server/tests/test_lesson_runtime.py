@@ -2807,7 +2807,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):
-        class _MaximumAssetPackCache(_FakeAssetCache):
+        class _MaximumAssetPackCache(_FirmwareSyncAssetCache):
             def asset_pack_manifest(
                 self, *, assignment_version, lesson_id, lesson_version, manifest_checksum
             ):
@@ -2817,16 +2817,25 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     lesson_version=lesson_version,
                     manifest_checksum=manifest_checksum,
                 )
-                pack["assets"] = [
-                    {
-                        "key": f"asset-{index:02d}-" + ("k" * 48),
-                        "size": 1024,
-                        "state": "READY",
-                        "checksumOk": True,
-                        "localPath": f"{pack['localRoot']}/asset-{index:02d}-" + ("k" * 48),
-                    }
-                    for index in range(64)
-                ]
+                assets = []
+                for index in range(64):
+                    key = f"asset-{index:02d}-" + ("k" * 48)
+                    local_path = f"{pack['localRoot']}/{quote(key, safe='')}"
+                    assets.append(
+                        {
+                            "key": key,
+                            "path": key,
+                            "url": f"https://assets.example/{quote(key, safe='')}",
+                            "sha256": f"{index:064x}",
+                            "size": 1024,
+                            "mediaType": "image/png",
+                            "critical": True,
+                            "state": "READY",
+                            "checksumOk": True,
+                            "localPath": local_path,
+                        }
+                    )
+                pack["assets"] = assets
                 return pack
 
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
@@ -3441,47 +3450,50 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["args"]["assetPack"]["cacheKey"], "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3")
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
 
-    async def test_sd_asset_pack_mcp_sync_failure_falls_back_to_online_urls(self):
-        manifest = _build_manifest()
-        scene = manifest["steps"][0]["scene"]
-        poster_source = scene["backgroundScene"]["poster"]["src"]
-        object_source = scene["teachingObject"]["asset"]["src"]
-        overlay_source = scene["robotOverlay"]["atlas"]["image"]
+    async def test_sd_asset_pack_inexact_sync_attestation_fails_closed_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         conn.mcp_client = _ReadyLessonAssetMcpClient()
-        rt = self._runtime(conn=conn, manifest=manifest, asset_cache=_FakeAssetCache(ready=True))
+        forwarder = _FakeForwarder()
+        rt = self._runtime(
+            conn=conn,
+            asset_cache=_FakeAssetCache(ready=True),
+            forwarder=forwarder,
+        )
 
-        async def failing_call(*_args, **_kwargs):
-            raise TimeoutError("robot sd sync timed out")
+        async def inexact_attestation(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "different-pack/v1-" + ("b" * 64),
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
 
-        with patch("core.lesson.runtime.call_mcp_tool", new=failing_call):
+        with patch("core.lesson.runtime.call_mcp_tool", new=inexact_attestation):
             await rt.start()
 
-        prepare = self._sent_frames(conn)[-1]
-        self.assertEqual(prepare["type"], "lesson_prepare")
-        self.assertNotIn("assetPack", prepare["body"])
+        sent = self._sent_frames(conn)
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
+        self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
+        self.assertTrue(sent[0]["body"]["retryable"])
+        self.assertEqual(rt.state, "FAILED")
+        self.assertFalse(rt._sd_asset_pack_online_fallback)
+        terminal = [
+            batch["events"][0]
+            for batch in forwarder.batches
+            if batch["events"][0]["type"] == "lesson_failed"
+        ]
+        self.assertEqual(terminal[0]["code"], "ASSET_PACK_NOT_READY")
 
-        await rt.on_lesson_ack(_ack(1, 1))
-        await rt._preload_task
-        await rt.on_lesson_ack(_ack(2, 2))
-        step = self._sent_frames(conn)[-1]
-
-        self.assertEqual(step["type"], "lesson_step")
-        self.assertEqual(step["body"]["scene"]["backgroundScene"]["poster"]["src"], poster_source)
-        self.assertEqual(step["body"]["scene"]["teachingObject"]["asset"]["src"], object_source)
-        self.assertEqual(step["body"]["scene"]["robotOverlay"]["asset"]["src"], overlay_source)
-
-    async def test_sd_asset_pack_mcp_unavailable_falls_back_to_online_urls(self):
+    async def test_sd_asset_pack_mcp_unavailable_fails_closed_before_prepare(self):
         for mcp_client in (
             None,
             _NotReadyLessonAssetMcpClient(),
             _MissingLessonAssetToolMcpClient(),
         ):
             with self.subTest(mcp_client=type(mcp_client).__name__ if mcp_client else None):
-                manifest = _build_manifest()
-                scene = manifest["steps"][0]["scene"]
-                poster_source = scene["backgroundScene"]["poster"]["src"]
                 features = None
                 if mcp_client is None:
                     features = {
@@ -3502,26 +3514,19 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 conn.mcp_client = mcp_client
                 rt = self._runtime(
                     conn=conn,
-                    manifest=manifest,
                     asset_cache=_FakeAssetCache(ready=True),
                 )
 
                 await rt.start()
 
-                prepare = self._sent_frames(conn)[-1]
-                self.assertEqual(prepare["type"], "lesson_prepare")
-                self.assertNotIn("assetPack", prepare["body"])
+                sent = self._sent_frames(conn)
+                self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
+                self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
+                self.assertTrue(sent[0]["body"]["retryable"])
+                self.assertEqual(rt.state, "FAILED")
+                self.assertFalse(rt._sd_asset_pack_online_fallback)
 
-                await rt.on_lesson_ack(_ack(1, 1))
-                await rt._preload_task
-                await rt.on_lesson_ack(_ack(2, 2))
-                step = self._sent_frames(conn)[-1]
-                self.assertEqual(
-                    step["body"]["scene"]["backgroundScene"]["poster"]["src"],
-                    poster_source,
-                )
-
-    async def test_sd_asset_pack_not_ready_falls_back_to_online_prepare(self):
+    async def test_sd_asset_pack_not_ready_fails_closed_and_reports_retryable_terminal(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
         finished = []
@@ -3531,28 +3536,36 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         conn.finish_lesson_mode = finish_lesson_mode
         conn.session_mode = "lesson"
-        rt = self._runtime(conn=conn, asset_cache=_FakeAssetCache(ready=False))
+        forwarder = _FakeForwarder()
+        rt = self._runtime(
+            conn=conn,
+            asset_cache=_FakeAssetCache(ready=False),
+            forwarder=forwarder,
+        )
 
         await rt.start()
 
         sent = self._sent_frames(conn)
-        self.assertEqual([frame["type"] for frame in sent], ["lesson_prepare"])
-        self.assertNotIn("assetPack", sent[0]["body"])
-        self.assertEqual(rt.state, "PRELOADING")
-        # Online fallback is NOT a terminal outcome — must keep LESSON mode so the
-        # child is not kicked out ("văng") right as the lesson begins.
-        self.assertEqual(finished, [])
-        self.assertTrue(rt._sd_asset_pack_online_fallback)
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
+        self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
+        self.assertTrue(sent[0]["body"]["retryable"])
+        self.assertEqual(rt.state, "FAILED")
+        self.assertEqual(rt.last_error.code, "ASSET_PACK_NOT_READY")
+        self.assertTrue(rt.last_error.retryable)
+        self.assertEqual(finished, ["sd_asset_pack_not_ready"])
+        self.assertFalse(rt._sd_asset_pack_online_fallback)
+        event_types = [batch["events"][0]["type"] for batch in forwarder.batches]
+        self.assertIn("lesson_failed", event_types)
 
-    async def test_sd_asset_pack_robot_sync_fail_keeps_lesson_mode_on_online_fallback(self):
-        """When MCP SD sync is unavailable, lesson continues online without finish()."""
+    async def test_sd_asset_pack_robot_sync_attestation_failure_notifies_terminal_safely(self):
+        """A missing robot attestation fails the run without preparing online assets."""
         conn = _FakeConn(
             session_id=FIX["frames"]["lesson_prepare"]["sessionId"],
             # Device claims MCP so a missing client is a real sync failure.
             features={"lesson": True, "renderer": "teebot-lesson-renderer.v1", "mcp": True},
         )
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
-        conn.mcp_client = None  # sync cannot run → online fallback
+        conn.mcp_client = None
         finished = []
 
         async def finish_lesson_mode(*, reason):
@@ -3564,12 +3577,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await rt.start()
 
-        self.assertEqual(rt.state, "PRELOADING")
-        self.assertTrue(rt._sd_asset_pack_online_fallback)
-        self.assertEqual(finished, [])
-        prepare = self._sent_frames(conn)[-1]
-        self.assertEqual(prepare["type"], "lesson_prepare")
-        self.assertNotIn("assetPack", prepare["body"])
+        self.assertEqual(rt.state, "FAILED")
+        self.assertFalse(rt._sd_asset_pack_online_fallback)
+        self.assertEqual(finished, ["sd_asset_pack_sync_failed"])
+        sent = self._sent_frames(conn)
+        self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
+        self.assertEqual(sent[0]["body"]["code"], "ASSET_PACK_NOT_READY")
+        self.assertTrue(sent[0]["body"]["retryable"])
 
     async def test_sd_asset_pack_preload_error_fails_before_prepare(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])

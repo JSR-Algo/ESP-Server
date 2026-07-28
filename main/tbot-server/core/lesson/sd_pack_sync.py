@@ -140,13 +140,12 @@ async def sync_cached_lesson_assets_to_sd(
                 poll_interval=poll_interval,
             )
             cache_key = str(pack.get("cacheKey") or "")
-            if _sync_result_ready(result):
+            normalized = normalize_firmware_sync_result(cache_key, result, pack)
+            if normalized["ready"]:
                 synced += 1
             else:
                 failed += 1
-            results_by_cache_key[cache_key] = normalize_firmware_sync_result(
-                cache_key, result
-            )
+            results_by_cache_key[cache_key] = normalized
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -406,7 +405,7 @@ def _manifest_checksum_from_cache_key(cache_key: str) -> str:
     return leaf.split("-", 1)[1]
 
 
-def _sync_result_ready(result: Any) -> bool:
+def _sync_result_ready(result: Any, requested_pack: dict[str, Any]) -> bool:
     if isinstance(result, str):
         try:
             result = json.loads(result)
@@ -414,12 +413,42 @@ def _sync_result_ready(result: Any) -> bool:
             return False
     if not isinstance(result, dict):
         return False
-    if result.get("ready") is False:
+    assets = requested_pack.get("assets")
+    expected_cache_key = requested_pack.get("cacheKey")
+    expected_checksum = requested_pack.get("manifestChecksum")
+    if (
+        not isinstance(assets, list)
+        or not isinstance(expected_cache_key, str)
+        or not expected_cache_key
+        or not isinstance(expected_checksum, str)
+        or not expected_checksum
+    ):
         return False
-    return _bounded_count(result.get("criticalFailedCount")) == 0
+    if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+        return False
+    response_checksums = [
+        result[key]
+        for key in ("manifestChecksum", "packChecksum")
+        if key in result
+    ]
+    if not response_checksums or any(
+        value != expected_checksum for value in response_checksums
+    ):
+        return False
+    counts = []
+    for key in ("downloadedCount", "skippedCount", "failedCount"):
+        value = result.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+        counts.append(value)
+    return counts[2] == 0 and sum(counts) == len(assets)
 
 
-def normalize_firmware_sync_result(cache_key: str, result: Any) -> dict[str, Any]:
+def normalize_firmware_sync_result(
+    cache_key: str,
+    result: Any,
+    requested_pack: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if isinstance(result, str):
         try:
             result = json.loads(result)
@@ -429,7 +458,11 @@ def normalize_firmware_sync_result(cache_key: str, result: Any) -> dict[str, Any
         result = {"ready": False, "failedCount": 1, "criticalFailedCount": 1}
     critical_failed = _bounded_count(result.get("criticalFailedCount"))
     failed = _bounded_count(result.get("failedCount"))
-    ready = bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+    ready = (
+        _sync_result_ready(result, requested_pack)
+        if requested_pack is not None
+        else bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+    )
     body = {
         "cacheKey": str(cache_key or "").strip(),
         "downloadedCount": _bounded_count(

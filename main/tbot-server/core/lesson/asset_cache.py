@@ -26,6 +26,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
 import os
 import shutil
 import time
@@ -203,6 +204,7 @@ class AssetCache:
         self._downloaded_total_bytes = 0
         self._deadline: Optional[float] = None
         self._soft_busy_since: Optional[float] = None
+        self._pack_only_assets: Dict[str, tuple[str, int]] = {}
 
         # Skip manifest assets with a falsy key (no id/assetId): they would crash
         # _final_path (None.replace) and collide in _by_key (every None overwrites
@@ -277,7 +279,10 @@ class AssetCache:
         return all(
             a.state == READY
             and a.checksum_ok
-            and self._asset_cache_materialized(a)
+            and (
+                self._asset_cache_materialized(a)
+                or self._pack_only_asset_ready(a)
+            )
             and self._asset_pack_materialized(a)
             for a in required
         ) and (
@@ -316,7 +321,10 @@ class AssetCache:
         asset = self._asset_for_source(source)
         if asset is None or asset.state != READY or not asset.checksum_ok:
             return None
-        if not self._asset_cache_materialized(asset):
+        if not (
+            self._asset_cache_materialized(asset)
+            or self._pack_only_asset_ready(asset)
+        ):
             return None
         if not self._asset_pack_materialized(asset):
             return None
@@ -343,7 +351,10 @@ class AssetCache:
                 for asset in self.assets
                 if asset.state == READY
                 and asset.checksum_ok
-                and self._asset_cache_materialized(asset)
+                and (
+                    self._asset_cache_materialized(asset)
+                    or self._pack_only_asset_ready(asset)
+                )
                 and self._asset_pack_materialized(asset)
             ],
         }
@@ -388,6 +399,8 @@ class AssetCache:
     def _asset_pack_materialized(self, asset: AssetState) -> bool:
         if not self.asset_pack_mount_root:
             return True
+        if self._pack_only_asset_ready(asset):
+            return True
         try:
             path = self._asset_pack_path(asset)
             source = self._asset_pack_source_path(asset)
@@ -397,6 +410,21 @@ class AssetCache:
                 and self._hash_file(path) == self._hash_file(source)
             )
             return materialized
+        except (OSError, ValueError):
+            return False
+
+    def _pack_only_asset_ready(self, asset: AssetState) -> bool:
+        attestation = self._pack_only_assets.get(asset.key)
+        if attestation is None:
+            return False
+        digest, size = attestation
+        try:
+            path = self._asset_pack_path(asset)
+            return (
+                os.path.isfile(path)
+                and os.path.getsize(path) == size
+                and self._hash_file(path) == digest
+            )
         except (OSError, ValueError):
             return False
 
@@ -412,6 +440,8 @@ class AssetCache:
                 path = self._final_path(asset)
                 if os.path.exists(path):
                     total += os.path.getsize(path)
+                elif self._pack_only_asset_ready(asset):
+                    total += os.path.getsize(self._asset_pack_path(asset))
             except (OSError, ValueError):
                 return self._max_total_asset_bytes + 1
         return total
@@ -538,12 +568,18 @@ class AssetCache:
     async def reattest(self) -> bool:
         """Restart re-attest (plan §6.3.5 / ADR 0013 §C): re-run sha256 over cached
         assets BEFORE re-reporting READY. Presence on disk is never trusted."""
+        await asyncio.to_thread(self._hydrate_from_ready_shared_pack)
         total_bytes = 0
         for asset in self.required_assets:
             final_path = self._final_path(asset)
             if not os.path.exists(final_path):
-                asset.state = PENDING
-                asset.checksum_ok = False
+                if self._pack_only_asset_ready(asset):
+                    asset.state = READY
+                    asset.checksum_ok = True
+                    total_bytes += os.path.getsize(self._asset_pack_path(asset))
+                else:
+                    asset.state = PENDING
+                    asset.checksum_ok = False
                 continue
             digest = await asyncio.to_thread(self._hash_file, final_path)
             if digest == asset.sha256:
@@ -558,10 +594,15 @@ class AssetCache:
                     asset.reason = "render_derivative_failed"
             else:
                 # Cached bytes are stale/corrupt — discard, do NOT serve unverified.
-                asset.state = FAILED
-                asset.checksum_ok = False
-                asset.reason = "checksum_mismatch"
                 self._safe_remove(final_path)
+                if self._pack_only_asset_ready(asset):
+                    asset.state = READY
+                    asset.checksum_ok = True
+                    total_bytes += os.path.getsize(self._asset_pack_path(asset))
+                else:
+                    asset.state = FAILED
+                    asset.checksum_ok = False
+                    asset.reason = "checksum_mismatch"
         if total_bytes > self._max_total_asset_bytes:
             for asset in self.required_assets:
                 if asset.state == READY:
@@ -570,6 +611,108 @@ class AssetCache:
                     asset.reason = "lesson_assets_too_large"
         self._commit_asset_pack_if_complete()
         return self.is_ready()
+
+    def _hydrate_from_ready_shared_pack(self) -> bool:
+        """Restore an exact rich READY pack into the separate server cache."""
+        self._pack_only_assets = {}
+        if self._shared_asset_store is None or not self.asset_pack_mount_root:
+            return False
+        try:
+            if not self._shared_asset_store.is_pack_ready(self.cache_key):
+                return False
+            pack_dir = self._asset_pack_dir()
+            with open(os.path.join(pack_dir, "pack.json"), encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            checksum = manifest.get("manifestChecksum")
+            if (
+                manifest.get("cacheKey") != self.cache_key
+                or manifest.get("lessonId") != self.lesson_key
+                or type(manifest.get("lessonVersion")) is not int
+                or manifest.get("lessonVersion") != self.lesson_version
+                or checksum != self.manifest_checksum
+                or not isinstance(checksum, str)
+                or len(checksum) != 64
+                or any(ch not in "0123456789abcdef" for ch in checksum)
+            ):
+                return False
+            records = manifest.get("assets")
+            if not isinstance(records, list):
+                return False
+            by_key = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    return False
+                key = record.get("key")
+                if not isinstance(key, str) or not key or key in by_key:
+                    return False
+                by_key[key] = record
+            if set(by_key) != {asset.key for asset in self.required_assets}:
+                return False
+
+            sources = {}
+            pack_only_assets = {}
+            total_bytes = 0
+            for asset in self.required_assets:
+                record = by_key[asset.key]
+                digest = record.get("sha256")
+                source_digest = record.get("sourceSha256")
+                size = record.get("size")
+                source = self._asset_pack_path(asset)
+                if (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(ch not in "0123456789abcdef" for ch in digest)
+                    or (
+                        source_digest is not None
+                        and (
+                            not isinstance(source_digest, str)
+                            or len(source_digest) != 64
+                            or any(
+                                ch not in "0123456789abcdef"
+                                for ch in source_digest
+                            )
+                            or source_digest != asset.sha256
+                        )
+                    )
+                    or type(size) is not int
+                    or size < 0
+                    or size > self._max_asset_bytes
+                    or not os.path.isfile(source)
+                    or os.path.getsize(source) != size
+                    or self._hash_file(source) != digest
+                ):
+                    return False
+                total_bytes += size
+                if total_bytes > self._max_total_asset_bytes:
+                    return False
+                if digest == asset.sha256:
+                    sources[asset.key] = source
+                elif (
+                    self._requires_render_safe_derivative(asset)
+                    and source_digest == asset.sha256
+                ):
+                    pack_only_assets[asset.key] = (digest, size)
+                else:
+                    return False
+
+            os.makedirs(self.cache_dir, exist_ok=True)
+            for key, source in sources.items():
+                asset = self._by_key[key]
+                final_path = self._final_path(asset)
+                tmp_path = f"{final_path}.{os.getpid()}.{id(self):x}.hydrate.part"
+                self._safe_remove(tmp_path)
+                try:
+                    with open(source, "rb") as source_file, open(tmp_path, "xb") as target:
+                        shutil.copyfileobj(source_file, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+                    os.replace(tmp_path, final_path)
+                finally:
+                    self._safe_remove(tmp_path)
+            self._pack_only_assets = pack_only_assets
+            return True
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     async def aclose(self) -> None:
         await self._maybe_close_client(force=True)

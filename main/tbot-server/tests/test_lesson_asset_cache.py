@@ -19,6 +19,7 @@ from pathlib import Path
 from core.lesson import asset_cache as asset_cache_module
 from core.lesson.asset_cache import AssetCache, AssetState, DOWNLOADING, EVICTED, FAILED, READY
 from core.lesson.errors import AssetChecksumMismatch, AssetProfileUnavailable, PreloadTimeout
+from core.lesson.shared_asset_store import SharedAssetStore
 
 
 def _sha(content: bytes) -> str:
@@ -1148,6 +1149,192 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
                 by_key[asset.key]["localPath"],
                 f"sd://sdcard/tbot/lesson-assets/{cache.cache_key}/{asset.key}",
             )
+
+    async def test_preload_hydrates_exact_ready_rich_pack_without_origin_request(self):
+        source_contents = {
+            "backgroundScene.poster": b"source-jpeg",
+            "teachingObject.barn": b"barn-png",
+            "robotOverlay.thinking": b"thinking-png",
+        }
+        pack_contents = {
+            **source_contents,
+            "backgroundScene.poster": b"render-safe-jpeg",
+        }
+        assets = [
+            {
+                "key": key,
+                "path": f"{key}.{'jpg' if key == 'backgroundScene.poster' else 'png'}",
+                "sha256": _sha(content),
+                "critical": key != "robotOverlay.thinking",
+                "layer": key.split(".", 1)[0],
+                "role": (
+                    "poster"
+                    if key == "backgroundScene.poster"
+                    else "pose" if key == "robotOverlay.thinking" else "image"
+                ),
+                "mediaType": (
+                    "image/jpeg" if key == "backgroundScene.poster" else "image/png"
+                ),
+            }
+            for key, content in source_contents.items()
+        ]
+        checksum = "0123456789abcdef" * 4
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        cache_key = f"w01-d01-barn-say-it/v3-{checksum}"
+        for key, content in pack_contents.items():
+            store.put_bytes(content, _sha(content))
+        store.commit_pack(
+            cache_key,
+            {key: _sha(content) for key, content in pack_contents.items()},
+            manifest={
+                "lessonId": "w01-d01-barn-say-it",
+                "lessonVersion": 3,
+                "profile": "espTft",
+                "manifestChecksum": checksum,
+                "cacheKey": cache_key,
+                "ready": True,
+                "assets": [
+                    {
+                        "key": key,
+                        "sha256": _sha(content),
+                        "size": len(content),
+                        "mediaType": (
+                            "image/jpeg" if key == "backgroundScene.poster" else "image/png"
+                        ),
+                        "critical": key != "robotOverlay.thinking",
+                        "onlineUrl": f"{BASE}/{key}.png",
+                        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/{key}",
+                        **(
+                            {"sourceSha256": _sha(source_contents[key])}
+                            if key == "backgroundScene.poster"
+                            else {}
+                        ),
+                    }
+                    for key, content in pack_contents.items()
+                ],
+            },
+        )
+        failing_origin = _FakeClient({}, status=500)
+
+        def fail_normalizer(_content):
+            raise AssertionError("pack-only derivative must not be normalized as source")
+
+        cache = self._cache(
+            assets,
+            client=failing_origin,
+            public_base_url="https://ota.test",
+            lesson_version=3,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+            image_normalizer=fail_normalizer,
+        )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(failing_origin.requested, [])
+        self.assertEqual(
+            {asset.key for asset in cache.assets if asset.state == READY},
+            set(source_contents),
+        )
+        poster = cache._by_key["backgroundScene.poster"]
+        self.assertFalse(os.path.exists(cache._final_path(poster)))
+        self.assertIsNone(cache.public_url_for_source("backgroundScene.poster.jpg"))
+        self.assertEqual(
+            cache.local_pack_url_for_source("backgroundScene.poster.jpg"),
+            f"sd://tbot/lesson-assets/{cache.cache_key}/backgroundScene.poster",
+        )
+        advertised_pack = cache.asset_pack_manifest(
+            assignment_version=7,
+            lesson_id="w01-d01-barn-say-it",
+            lesson_version=3,
+            manifest_checksum=checksum,
+        )
+        advertised_poster = next(
+            asset
+            for asset in advertised_pack["assets"]
+            if asset["key"] == "backgroundScene.poster"
+        )
+        self.assertTrue(advertised_pack["ready"])
+        self.assertEqual(advertised_poster["sha256"], _sha(pack_contents[poster.key]))
+        self.assertEqual(
+            advertised_poster["sourceSha256"],
+            _sha(source_contents[poster.key]),
+        )
+        for asset in cache.assets:
+            if asset is poster:
+                continue
+            with open(cache._final_path(asset), "rb") as fh:
+                self.assertEqual(fh.read(), source_contents[asset.key])
+        poster_pack_path = cache._asset_pack_path(poster)
+        with open(poster_pack_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"render-safe-jpeg")
+        with open(poster_pack_path, "wb") as fh:
+            fh.write(b"corrupt-derivative")
+        self.assertFalse(cache.is_ready())
+        self.assertIsNone(cache.local_pack_url_for_source("backgroundScene.poster.jpg"))
+
+    async def test_preload_rejects_ready_rich_pack_with_mismatched_checksum(self):
+        content = b"thinking-png"
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v3-{checksum}"
+        assets = [
+            {
+                "key": "robotOverlay.thinking",
+                "path": "thinking.png",
+                "sha256": _sha(content),
+                "critical": False,
+                "layer": "robotOverlay",
+                "role": "pose",
+                "mediaType": "image/png",
+            }
+        ]
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        digest = _sha(content)
+        store.put_bytes(content, digest)
+        store.commit_pack(
+            cache_key,
+            {"robotOverlay.thinking": digest},
+            manifest={
+                "lessonId": "w01-d01-barn-say-it",
+                "lessonVersion": 3,
+                "profile": "espTft",
+                "manifestChecksum": "f" * 64,
+                "cacheKey": cache_key,
+                "ready": True,
+                "assets": [
+                    {
+                        "key": "robotOverlay.thinking",
+                        "sha256": digest,
+                        "size": len(content),
+                        "mediaType": "image/png",
+                        "critical": False,
+                        "onlineUrl": f"{BASE}/thinking.png",
+                        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/robotOverlay.thinking",
+                    }
+                ],
+            },
+        )
+        self.assertTrue(store.is_pack_ready(cache_key))
+        origin = _FakeClient({f"{BASE}/thinking.png": [content]})
+        cache = self._cache(
+            assets,
+            client=origin,
+            lesson_version=3,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+        )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(origin.requested, [f"{BASE}/thinking.png"])
 
     async def test_missing_materialized_sd_file_is_not_advertised_as_ready(self):
         assets = _critical_assets()
