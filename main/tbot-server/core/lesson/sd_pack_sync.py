@@ -24,6 +24,7 @@ DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _ERROR_CODE_MAX_LEN = 64
+_MAX_VOICE_PREEMPTIONS_PER_PACK = 1
 
 
 def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -191,8 +192,9 @@ async def _call_sd_pack_sync_with_voice_guard(
     sleep: Callable[[float], Awaitable[None]],
     poll_interval: float,
 ) -> Any:
-    """Cancel an idempotent pack sync when voice wins, then retry from READY state."""
+    """Let voice preempt once, then guarantee the deferred retry can finish."""
     interval = max(0.001, float(poll_interval))
+    voice_preemptions = 0
     while True:
         while busy_check():
             await sleep(poll_interval)
@@ -200,7 +202,11 @@ async def _call_sd_pack_sync_with_voice_guard(
         try:
             while not transfer.done():
                 await asyncio.sleep(0)
-                if busy_check():
+                if (
+                    busy_check()
+                    and voice_preemptions < _MAX_VOICE_PREEMPTIONS_PER_PACK
+                ):
+                    voice_preemptions += 1
                     transfer.cancel()
                     await asyncio.gather(transfer, return_exceptions=True)
                     break

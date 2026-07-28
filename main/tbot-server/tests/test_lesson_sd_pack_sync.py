@@ -666,6 +666,41 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     assert attempts == ["lesson-a/v1-a", "lesson-a/v1-a"]
 
 
+@pytest.mark.asyncio
+async def test_voice_reopening_cannot_starve_an_sd_pack_sync(monkeypatch):
+    busy = {"value": False}
+    attempts = 0
+
+    async def fake_call(_conn, _client, _pack):
+        nonlocal attempts
+        attempts += 1
+        busy["value"] = True
+        try:
+            await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            busy["value"] = False
+            raise
+        busy["value"] = False
+        return {"ready": True}
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await asyncio.wait_for(
+        sd_pack_sync._call_sd_pack_sync_with_voice_guard(
+            object(),
+            object(),
+            {"cacheKey": "lesson-a/v1-a"},
+            busy_check=lambda: busy["value"],
+            sleep=asyncio.sleep,
+            poll_interval=0,
+        ),
+        timeout=0.1,
+    )
+
+    assert result == {"ready": True}
+    assert attempts == 2
+
+
 def test_cached_asset_packs_ignore_configured_sd_pack_without_valid_ready(tmp_path):
     cache_root = tmp_path / "cache"
     cached = cache_root / "lesson-a" / "v1-a"
