@@ -13,6 +13,7 @@ on:
 jobs:
   release:
     name: Release Docker images
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -32,9 +33,13 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Normalize image repository
-        run: echo "IMAGE_REPOSITORY=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          echo "IMAGE_REPOSITORY=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -68,12 +73,14 @@ jobs:
           file: Dockerfile-server
           push: true
           tags: |
+            ghcr.io/${{ env.IMAGE_REPOSITORY }}:server_${{ env.RELEASE_SHA }}
             ${{ env.IS_VERSION == 'true' && format('ghcr.io/{0}:server_{1},ghcr.io/{0}:server_latest', env.IMAGE_REPOSITORY, env.VERSION) || format('ghcr.io/{0}:server_latest', env.IMAGE_REPOSITORY) }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_PROGRESS=plain
+            TBOT_SERVER_BASE_IMAGE=ghcr.io/${{ env.IMAGE_REPOSITORY }}:server-base
 
       # 构建 manager-api 镜像
       - name: Build and push manager-web
