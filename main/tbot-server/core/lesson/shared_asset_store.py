@@ -374,7 +374,6 @@ class SharedAssetStore:
                         "size": asset.get("size"),
                         "mediaType": asset.get("mediaType"),
                         "critical": asset.get("critical"),
-                        "onlineUrl": asset.get("onlineUrl"),
                         "sdPath": asset.get("sdPath"),
                     }
                     for asset in assets

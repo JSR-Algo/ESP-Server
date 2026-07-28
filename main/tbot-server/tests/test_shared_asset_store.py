@@ -4,15 +4,93 @@ import multiprocessing
 import os
 import errno
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.shared_asset_store import (
+    PACK_COMMIT_REPLAYED,
+    PackReplayMismatchError,
+    SharedAssetStore,
+)
 
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _rich_manifest(cache_key: str, digest: str, size: int) -> dict:
+    return {
+        "cacheKey": cache_key,
+        "lessonId": "lesson-a",
+        "lessonVersion": 1,
+        "profile": "espTft",
+        "manifestChecksum": "a" * 64,
+        "assets": [
+            {
+                "key": "poster",
+                "sha256": digest,
+                "size": size,
+                "mediaType": "image/jpeg",
+                "critical": True,
+                "onlineUrl": "https://assets.example/poster.jpg?sig=first",
+                "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/poster",
+            }
+        ],
+    }
+
+
+def test_ready_rich_pack_replay_accepts_rotated_online_url(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"poster"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v1-{'a' * 64}"
+    store.put_bytes(content, digest)
+    manifest = _rich_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {"poster": digest}, manifest=manifest)
+    rotated = deepcopy(manifest)
+    rotated["assets"][0]["onlineUrl"] = "https://assets.example/poster.jpg?sig=rotated"
+
+    _pack, status = store.commit_pack(
+        cache_key,
+        {"poster": digest},
+        manifest=rotated,
+        return_status=True,
+    )
+
+    assert status == PACK_COMMIT_REPLAYED
+
+
+@pytest.mark.parametrize("changed_field", ["sha256", "size", "sdPath"])
+def test_ready_rich_pack_replay_rejects_asset_identity_changes(tmp_path, changed_field):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"poster"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v1-{'a' * 64}"
+    store.put_bytes(content, digest)
+    manifest = _rich_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {"poster": digest}, manifest=manifest)
+    changed = deepcopy(manifest)
+    staged_assets = {"poster": digest}
+    if changed_field == "sha256":
+        changed_content = b"change"
+        changed_digest = _sha(changed_content)
+        store.put_bytes(changed_content, changed_digest)
+        changed["assets"][0]["sha256"] = changed_digest
+        staged_assets["poster"] = changed_digest
+    elif changed_field == "size":
+        changed_content = b"poster-long"
+        changed_digest = _sha(changed_content)
+        store.put_bytes(changed_content, changed_digest)
+        changed["assets"][0]["sha256"] = changed_digest
+        changed["assets"][0]["size"] = len(changed_content)
+        staged_assets["poster"] = changed_digest
+    else:
+        changed["assets"][0]["sdPath"] += "-changed"
+
+    with pytest.raises(PackReplayMismatchError):
+        store.commit_pack(cache_key, staged_assets, manifest=changed)
 
 
 def _hold_atomic_write(root, started, release):

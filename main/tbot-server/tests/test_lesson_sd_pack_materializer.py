@@ -256,6 +256,38 @@ async def test_ready_replay_without_redownload(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ready_replay_accepts_rotated_online_url_without_redownload(tmp_path):
+    client = _Client(
+        {
+            "https://assets.example/poster.jpg?sig=secret": [POSTER],
+            "https://assets.example/barn.png": [BARN],
+        }
+    )
+    await materialize_lesson_sd_pack(
+        _manifest(),
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
+    rotated = deepcopy(_manifest())
+    rotated["assets"][0]["onlineUrl"] = "https://assets.example/poster.jpg?sig=rotated"
+
+    replay = await materialize_lesson_sd_pack(
+        rotated,
+        config=_config(tmp_path),
+        client=client,
+        resolver=_public_resolver,
+    )
+
+    assert replay["downloadedCount"] == 0
+    assert replay["skippedCount"] == 2
+    assert client.requests == [
+        "https://assets.example/poster.jpg?sig=secret",
+        "https://assets.example/barn.png",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_checksum_mismatch_is_terminal_and_sanitized(tmp_path):
     client = _Client(
         {
@@ -765,7 +797,6 @@ async def test_encoded_asset_basename_length_boundary(tmp_path):
     [
         lambda manifest: manifest["assets"][0].update({"size": len(POSTER) + 1}),
         lambda manifest: manifest["assets"][0].update({"sha256": "b" * 64}),
-        lambda manifest: manifest["assets"][0].update({"onlineUrl": "https://assets.example/changed.jpg"}),
         lambda manifest: manifest["assets"][0].update({"mediaType": "image/webp"}),
         lambda manifest: manifest["assets"][0].update({"critical": False}),
         lambda manifest: manifest["assets"][0].update({"key": "backgroundScene.changed"}),

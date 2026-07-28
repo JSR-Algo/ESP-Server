@@ -773,7 +773,6 @@ def _replay_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
                     "size": asset.get("size"),
                     "mediaType": asset.get("mediaType"),
                     "critical": asset.get("critical"),
-                    "onlineUrl": asset.get("onlineUrl"),
                     "sdPath": asset.get("sdPath"),
                 }
                 for asset in manifest.get("assets", [])
