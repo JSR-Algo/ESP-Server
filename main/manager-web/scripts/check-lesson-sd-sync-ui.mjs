@@ -106,23 +106,38 @@ const espFixture = {
 expectContains('src/apis/module/lesson.js', 'normalizeLessonAssetGenerationStatus', 'aggregate status must be strictly normalized');
 expectContains('src/apis/module/lesson.js', 'getLessonAssetGenerationStatus', 'lesson API must load the three aggregate sources');
 expectAbsent('src/apis/module/lesson.js', 'getSdSyncStatus', 'per-lesson device status API is obsolete');
-expectAbsent('src/apis/module/lesson.js', 'retrySdSync', 'rollout status is read-only');
-expectAbsent('src/apis/module/lesson.js', '/sd-sync/retry', 'the obsolete retry POST endpoint must be removed');
+expectContains('src/apis/module/lesson.js', 'retrySdSync', 'published lessons need an explicit SD retry command');
+expectContains('src/apis/module/lesson.js', '/sd-sync/retry', 'the retry command must use the existing compatibility endpoint');
 expectContains('src/views/LessonEditor.vue', 'LessonSdSyncStatus', 'published lesson editor must render rollout status');
 expectContains('src/views/LessonEditor.vue', 'loadLessonAssetGenerationStatus', 'editor must load rollout status');
 expectContains('src/views/LessonEditor.vue', 'scheduleLessonAssetGenerationPoll', 'editor must poll incomplete rollouts');
 expectContains('src/views/LessonEditor.vue', 'clearLessonAssetGenerationPoll', 'editor must clear polling during teardown');
-expectAbsent('src/views/LessonEditor.vue', '@retry=', 'editor must not render a retry action');
-expectAbsent('src/views/LessonEditor.vue', 'sdSyncRetrying', 'editor must not retain retry state');
+expectContains('src/views/LessonEditor.vue', '@retry="retryLessonSdSync"', 'editor must handle the rollout retry event');
+expectContains('src/views/LessonEditor.vue', 'Api.lesson.retrySdSync(', 'editor retry must call the lesson API');
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /retryLessonSdSync\(\)[\s\S]*?lessonAssetGenerationLoading[\s\S]*?const lessonId = this\.lessonId;[\s\S]*?const lessonLoadRequestId = this\.lessonLoadRequestId;[\s\S]*?Api\.lesson\.retrySdSync/m,
+  'retry must reject duplicates and capture route identity before starting',
+);
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /Api\.lesson\.retrySdSync\([\s\S]*?editorDestroying[\s\S]*?lessonLoadRequestId !== this\.lessonLoadRequestId[\s\S]*?lessonId !== this\.lessonId[\s\S]*?loadLessonAssetGenerationStatus\(\{ silent: true \}\)/m,
+  'retry callbacks must be route-safe and silently reconcile status',
+);
 expectRegex('src/views/LessonEditor.vue', /beforeDestroy\(\)[\s\S]*?clearLessonAssetGenerationPoll/, 'editor teardown must clear rollout polling');
 
 const component = 'src/components/lesson/LessonSdSyncStatus.vue';
 for (const needle of ['generation', 'curriculumLessonCount', 'packCount', 'connected', 'current', 'retrying', 'failed', 'allConnectedCurrent']) {
   expectContains(component, needle, `aggregate component must render ${needle}`);
 }
-for (const forbidden of ['el-table', 'el-collapse', 'el-button', 'deviceId', "$emit('retry'", 'sdSyncChecksum']) {
-  expectAbsent(component, forbidden, 'aggregate UI must not expose per-device details or retry controls');
+for (const forbidden of ['el-table', 'el-collapse', 'deviceId', 'sdSyncChecksum']) {
+  expectAbsent(component, forbidden, 'aggregate UI must not expose per-device details');
 }
+expectContains(component, '<el-button', 'retryable rollout states need an Element retry button');
+expectContains(component, "$emit('retry')", 'retry button must emit a retry event');
+expectContains(component, "lesson.sdSyncRetryAction", 'retry button must use localized accessible text');
+expectRegex(component, /\['Failed', 'Retrying', 'GenerationMismatch', 'RollingOut'\]\.includes\(this\.stateKey\)/, 'only retryable rollout states may expose retry');
+expectRegex(component, /<el-button[\s\S]*?:loading="loading"[\s\S]*?:disabled="loading"[\s\S]*?@click="\$emit\('retry'\)"/m, 'retry action must follow loading and duplicate-submit protections');
 expectContains(component, 'lesson.sdSyncOfflineDisclaimer', 'offline/never-seen robots require a permanent disclaimer');
 expectContains(component, 'lesson.sdSyncAllConnectedCurrent', 'success wording must be conditional');
 
@@ -135,6 +150,13 @@ for (const locale of ['en', 'zh_CN', 'zh_TW', 'vi']) {
     'lesson.sdSyncMaterializationState', 'lesson.sdSyncLastBuild', 'lesson.sdSyncLastPoll',
     'lesson.sdSyncLastMaterialized',
   ]) expectContains(`src/i18n/${locale}.js`, `'${key}'`, `${locale} locale must translate ${key}`);
+}
+for (const [locale, action, queued] of [
+  ['en', 'Retry synchronization', 'SD synchronization retry queued.'],
+  ['vi', 'Thử đồng bộ lại', 'Đã đưa yêu cầu đồng bộ SD vào hàng đợi.'],
+]) {
+  expectContains(`src/i18n/${locale}.js`, `'lesson.sdSyncRetryAction': '${action}'`, `${locale} locale must translate retry action exactly`);
+  expectContains(`src/i18n/${locale}.js`, `'lesson.sdSyncRetryQueued': '${queued}'`, `${locale} locale must translate queued confirmation exactly`);
 }
 expectContains('src/i18n/vi.js', 'Tất cả robot đang kết nối đã nhận thế hệ mới nhất.', 'Vietnamese success wording is product-approved');
 expectContains('src/i18n/vi.js', 'Robot đang tắt hoặc chưa từng kết nối sẽ tự đồng bộ khi kết nối lại; trạng thái này không xác nhận các robot đó đã cập nhật.', 'Vietnamese disclaimer is product-approved');

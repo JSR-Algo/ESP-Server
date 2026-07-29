@@ -295,6 +295,8 @@ export default {
   'lesson.sdSyncCurrent': 'Đã cập nhật',
   'lesson.sdSyncRetrying': 'Đang thử lại',
   'lesson.sdSyncFailed': 'Lỗi',
+  'lesson.sdSyncRetryAction': 'Thử đồng bộ lại',
+  'lesson.sdSyncRetryQueued': 'Đã đưa yêu cầu đồng bộ SD vào hàng đợi.',
   'lesson.sdSyncAllConnectedCurrent': 'Tất cả robot đang kết nối đã nhận thế hệ mới nhất.',
   'lesson.sdSyncOfflineDisclaimer': 'Robot đang tắt hoặc chưa từng kết nối sẽ tự đồng bộ khi kết nối lại; trạng thái này không xác nhận các robot đó đã cập nhật.',
   'lesson.sdSyncBuildState': 'Bản dựng CMS',

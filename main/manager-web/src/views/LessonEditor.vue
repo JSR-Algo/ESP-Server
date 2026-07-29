@@ -14,7 +14,6 @@
           <el-tag :type="statusType(lesson.status)" size="small" style="margin-left: 8px">
             {{ lesson.status }}
           </el-tag>
-          <span class="muted">v{{ lesson.lessonVersion }}</span>
         </h2>
       </div>
       <div class="right-operations" v-if="lesson">
@@ -45,6 +44,7 @@
         v-if="lesson && lesson.status === 'published' && lessonAssetGenerationStatus"
         :status="lessonAssetGenerationStatus"
         :loading="lessonAssetGenerationLoading"
+        @retry="retryLessonSdSync"
       />
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
         <div class="canonical-demo__copy">
@@ -1428,6 +1428,29 @@ export default {
           if (!options.silent) this.lessonAssetGenerationStatus = null;
           this.scheduleLessonAssetGenerationPoll(this.lessonAssetGenerationStatus);
           if (!options.silent) this.$message.error(msg);
+        },
+      );
+      return true;
+    },
+    retryLessonSdSync() {
+      if (this.editorDestroying || this.lessonAssetGenerationLoading
+        || !this.lesson || this.lesson.status !== 'published') return false;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
+      this.clearLessonAssetGenerationPoll();
+      this.lessonAssetGenerationLoading = true;
+      Api.lesson.retrySdSync(
+        lessonId,
+        () => {
+          if (this.editorDestroying || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
+          this.$message.success(this.$t('lesson.sdSyncRetryQueued'));
+          this.loadLessonAssetGenerationStatus({ silent: true });
+        },
+        (message) => {
+          if (this.editorDestroying || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
+          this.lessonAssetGenerationLoading = false;
+          this.scheduleLessonAssetGenerationPoll(this.lessonAssetGenerationStatus);
+          this.$message.error(message);
         },
       );
       return true;

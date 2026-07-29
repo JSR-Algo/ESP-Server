@@ -114,6 +114,9 @@ expectRegex(
 
 expectContains('src/views/LessonEditor.vue', 'data-testid="lesson-background-selector"', 'background selection must be lesson-wide');
 expectContains('src/views/LessonEditor.vue', 'data-testid="lesson-object-selector"', 'object selection must be lesson-wide');
+expectNotContains('src/views/LessonEditor.vue', 'v{{ lesson.lessonVersion }}', 'normal lesson editing must not present a version badge');
+expectNotContains('src/views/CourseLessons.vue', 'prop="lessonVersion"', 'normal lesson lists must not present a version column');
+expectNotContains('src/views/CourseLessons.vue', 'createNextVersion', 'normal lesson lists must not expose the compatibility version action');
 expectContains(
   'src/views/LessonEditor.vue',
   "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",

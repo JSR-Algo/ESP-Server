@@ -295,6 +295,8 @@ export default {
   'lesson.sdSyncCurrent': 'Current',
   'lesson.sdSyncRetrying': 'Retrying',
   'lesson.sdSyncFailed': 'Failed',
+  'lesson.sdSyncRetryAction': 'Retry synchronization',
+  'lesson.sdSyncRetryQueued': 'SD synchronization retry queued.',
   'lesson.sdSyncAllConnectedCurrent': 'All currently connected robots have received the latest generation.',
   'lesson.sdSyncOfflineDisclaimer': 'Robots that are powered off or have never connected will sync automatically when they reconnect; this status does not confirm that those robots have updated.',
   'lesson.sdSyncBuildState': 'CMS build',
