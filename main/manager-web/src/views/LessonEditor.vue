@@ -1870,7 +1870,7 @@ export default {
             .forEach((row) => {
               const key = row && (row.assetKey || row.asset_key);
               const vid = row && (row.versionId || row.version_id);
-              if (key && vid) versions[key] = vid;
+              if (key && vid && !versions[key]) versions[key] = vid;
             });
           withVersions(versions);
         },

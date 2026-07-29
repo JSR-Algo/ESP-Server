@@ -378,9 +378,10 @@ assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':",
 async function verifyPublishedObjectLibraryContract() {
   const loadObjectLibrarySource = extractObjectMethod(editorSource, 'loadObjectLibrary');
   const objectRows = [
-    { assetKey: 'object.apple', versionId: 'apple-draft-v3', publicationState: 'draft' },
-    { assetKey: 'object.apple', versionId: 'apple-retired-v2', publicationState: 'retired' },
-    { assetKey: 'object.apple', versionId: 'apple-published-v1', publicationState: 'published' },
+    { assetKey: 'object.apple', versionId: 'apple-draft-v5', publicationState: 'draft' },
+    { assetKey: 'object.apple', versionId: 'apple-published-v4', publicationState: 'published' },
+    { assetKey: 'object.apple', versionId: 'apple-retired-v3', publicationState: 'retired' },
+    { assetKey: 'object.apple', versionId: 'apple-published-v2', publicationState: 'published' },
     { assetKey: 'object.unpublished', versionId: 'unpublished-draft-v2', publicationState: 'draft' },
     { assetKey: 'object.unpublished', versionId: 'unpublished-retired-v1', publicationState: 'retired' },
   ];
@@ -412,14 +413,14 @@ async function verifyPublishedObjectLibraryContract() {
     title: 'Apple',
     posterUrl: '/apple.png',
     anim: '/apple.mp4',
-    versionId: 'apple-published-v1',
-  }], 'the visible object library must use published versions and omit assets without one');
+    versionId: 'apple-published-v4',
+  }], 'the visible object library must use the newest published version and omit assets without one');
 
   const selectedRequest = buildLessonVisualRequest(current, {
     objectAssetVersionId: context.objectLibrary[0].versionId,
     objectAssetKey: context.objectLibrary[0].assetKey,
   });
-  assert.equal(selectedRequest.objectAssetVersionId, 'apple-published-v1', 'selector requests must never contain an unpublished object version');
+  assert.equal(selectedRequest.objectAssetVersionId, 'apple-published-v4', 'selector requests must use the newest published object version');
 }
 
 verifyPublishedObjectLibraryContract()
