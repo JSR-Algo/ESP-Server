@@ -216,6 +216,87 @@ assert.match(saveSelectedStepSource.slice(0, saveSelectedStepSource.indexOf('con
 const saveSelectedStepStudioSource = extractObjectMethod(editorSource, 'saveSelectedStepStudio');
 assert.match(saveSelectedStepStudioSource.slice(0, saveSelectedStepStudioSource.indexOf('const savedRevision')), /this\.lessonVisualStepMutationBlocked/, 'studio step saves must wait for lesson visual state reconciliation');
 assertSourceIncludes(saveSelectedStepStudioSource, 'this.stepPayloadWithoutVisualRefs(', 'studio step saves must also strip stale lesson visual refs');
+assertSourceIncludes(saveSelectedStepStudioSource, 'const lessonId = this.lessonId;', 'studio step saves must capture the lesson identity');
+assertSourceIncludes(saveSelectedStepStudioSource, 'const lessonLoadRequestId = this.lessonLoadRequestId;', 'studio step saves must capture the lesson navigation epoch');
+assert.ok(
+  (saveSelectedStepStudioSource.match(/this\.editorDestroying\s*\|\|\s*lessonId\s*!==\s*this\.lessonId/g) || []).length >= 2,
+  'studio step save success and error callbacks must reject stale lesson responses',
+);
+assert.ok(
+  (saveSelectedStepStudioSource.match(/lessonLoadRequestId\s*!==\s*this\.lessonLoadRequestId/g) || []).length >= 2,
+  'studio step save callbacks must reject leave-and-return responses for the same lesson id',
+);
+const studioSaveCalls = [];
+const guardedStudioSave = vm.runInNewContext(`(${saveSelectedStepStudioSource.replace(/^saveSelectedStepStudio/, 'function saveSelectedStepStudio')})`, {
+  Api: { lesson: { updateStep: (...args) => studioSaveCalls.push(args) } },
+  buildSaveStepRequest: ({ step, savedRevision }) => ({ stepKey: step.stepKey, savedRevision, payload: { prompt: 'saved' } }),
+  resolveSaveSuccess: () => { throw new Error('stale studio save callback reached draft reconciliation'); },
+});
+const staleStudioContext = {
+  selectedStep: { stepKey: 'shared-step' },
+  isDraft: true,
+  savingStep: false,
+  lessonVisualStepMutationBlocked: false,
+  rebindingSharedVisual: false,
+  savingSelectedStep: false,
+  stepDraftRevisions: { 'shared-step': 3 },
+  selectedAuthoring: {},
+  selectedContent: {},
+  selectedAssetDrafts: { 'shared-step': { assetKey: 'old-asset' } },
+  selectedStepDrafts: { 'shared-step': { prompt: 'old draft' } },
+  selectedContentDrafts: { 'shared-step': { prompt: 'old content' } },
+  dirtyStepKeys: { 'shared-step': true },
+  savingStepKeys: {},
+  lessonId: 'lesson-1',
+  lessonLoadRequestId: 11,
+  editorDestroying: false,
+  studioRevision: 0,
+  validationResult: { valid: true },
+  previewManifest: { manifest: true },
+  stepPayloadWithoutVisualRefs: (payload) => payload,
+  $set(target, key, value) { target[key] = value; },
+  $delete(target, key) { delete target[key]; },
+  fetchCount: 0,
+  fetchSteps() { this.fetchCount += 1; },
+  messages: [],
+  $message: {
+    success(message) { staleStudioContext.messages.push(['success', message]); },
+    error(message) { staleStudioContext.messages.push(['error', message]); },
+  },
+};
+guardedStudioSave.call(staleStudioContext);
+assert.equal(studioSaveCalls.length, 1, 'studio save must dispatch exactly once');
+assert.equal(studioSaveCalls[0][0], 'lesson-1', 'studio save must dispatch against the captured lesson id');
+staleStudioContext.lessonLoadRequestId = 12;
+staleStudioContext.savingStepKeys = { 'shared-step': 'new-save-token' };
+staleStudioContext.selectedStepDrafts = { 'shared-step': { prompt: 'new draft' } };
+staleStudioContext.selectedContentDrafts = { 'shared-step': { prompt: 'new content' } };
+staleStudioContext.selectedAssetDrafts = { 'shared-step': { assetKey: 'new-asset' } };
+staleStudioContext.dirtyStepKeys = { 'shared-step': 'new-dirty-token' };
+staleStudioContext.validationResult = { valid: 'new lesson' };
+staleStudioContext.previewManifest = { manifest: 'new lesson' };
+const staleStudioSnapshot = JSON.stringify({
+  savingStepKeys: staleStudioContext.savingStepKeys,
+  selectedStepDrafts: staleStudioContext.selectedStepDrafts,
+  selectedContentDrafts: staleStudioContext.selectedContentDrafts,
+  selectedAssetDrafts: staleStudioContext.selectedAssetDrafts,
+  dirtyStepKeys: staleStudioContext.dirtyStepKeys,
+  validationResult: staleStudioContext.validationResult,
+  previewManifest: staleStudioContext.previewManifest,
+});
+studioSaveCalls[0][3]({});
+studioSaveCalls[0][4]('old save failed');
+assert.equal(JSON.stringify({
+  savingStepKeys: staleStudioContext.savingStepKeys,
+  selectedStepDrafts: staleStudioContext.selectedStepDrafts,
+  selectedContentDrafts: staleStudioContext.selectedContentDrafts,
+  selectedAssetDrafts: staleStudioContext.selectedAssetDrafts,
+  dirtyStepKeys: staleStudioContext.dirtyStepKeys,
+  validationResult: staleStudioContext.validationResult,
+  previewManifest: staleStudioContext.previewManifest,
+}), staleStudioSnapshot, 'stale studio save callbacks must not mutate the newly loaded lesson state');
+assert.equal(staleStudioContext.fetchCount, 0, 'stale studio save success must not fetch the newly loaded lesson');
+assert.deepEqual(staleStudioContext.messages, [], 'stale studio save callbacks must not show messages from the old request');
 const updateStepSources = [rebindClonedVisualSource, saveSelectedStepSource, saveSelectedStepStudioSource];
 assert.equal((editorSource.match(/Api\.lesson\.updateStep\(/g) || []).length, updateStepSources.length, 'every updateStep call must be covered by the visual-ref sanitizer contract');
 updateStepSources.forEach((methodSource) => {
@@ -232,6 +313,11 @@ assertSourceIncludes(
   editorSource,
   ':disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual"',
   'step authoring controls must lock during lesson visual saves',
+);
+assert.match(
+  editorSource,
+  /<LessonAssetManager\b[\s\S]*?:disabled="(?=[^"]*\bsavingStep\b)(?=[^"]*\blessonVisualStepMutationBlocked\b)(?=[^"]*\brebindingSharedVisual\b)(?=[^"]*\bassetMutating\b)[^"]*"/m,
+  'asset manager must lock during step saves, lesson visual reconciliation, clone rebinds, and asset mutations',
 );
 assert.ok(!applyLessonVisualSelectionSource.includes('this.doPreview('), 'authoritative fetch must remain the only automatic preview trigger');
 

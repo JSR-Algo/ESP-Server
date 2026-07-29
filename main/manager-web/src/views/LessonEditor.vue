@@ -1984,6 +1984,8 @@ export default {
         savedRevision,
       });
       const requestPayload = this.stepPayloadWithoutVisualRefs(request.payload);
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       this.$set(this.savingStepKeys, step.stepKey, true);
       // A commit changes persisted lesson truth even when it clears the last dirty
       // draft, so every validation/preview launched before this point is stale.
@@ -1991,8 +1993,10 @@ export default {
       this.validationResult = null;
       this.previewManifest = null;
       Api.lesson.updateStep(
-        this.lessonId, request.stepKey, requestPayload,
+        lessonId, request.stepKey, requestPayload,
         (updated) => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.$delete(this.savingStepKeys, step.stepKey);
           if (resolveSaveSuccess({
             currentRevision: this.stepDraftRevisions[step.stepKey],
@@ -2008,7 +2012,14 @@ export default {
           this.fetchSteps();
           this.$message.success('Step saved to the lesson draft.');
         },
-        (msg) => { this.$delete(this.savingStepKeys, step.stepKey); this.validationResult = null; this.previewManifest = null; this.$message.error(msg); },
+        (msg) => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          this.$delete(this.savingStepKeys, step.stepKey);
+          this.validationResult = null;
+          this.previewManifest = null;
+          this.$message.error(msg);
+        },
       );
     },
     moveStep(index, delta) {

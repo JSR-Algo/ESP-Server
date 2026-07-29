@@ -940,7 +940,11 @@ expectContains('src/views/LessonEditor.vue', '@asset-mutated="onAssetMutated"', 
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-uncertain="onAssetMutationUncertain"', 'the editor must subscribe to ambiguous asset mutations');
 expectContains('src/views/LessonEditor.vue', '@asset-mutation-detached="onAssetMutationDetached"', 'the editor must reconcile active mutations detached during unmount');
 expectContains('src/views/LessonEditor.vue', ':mutation-settler="settleAssetMutation"', 'asset request settlement must remain parent-owned after child teardown');
-expectContains('src/views/LessonEditor.vue', ':disabled="savingStep || rebindingSharedVisual || assetMutating"', 'asset manager must lock while any asset mutation token is active');
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /<LessonAssetManager\b[\s\S]*?:disabled="(?=[^"]*\bsavingStep\b)(?=[^"]*\blessonVisualStepMutationBlocked\b)(?=[^"]*\brebindingSharedVisual\b)(?=[^"]*\bassetMutating\b)[^"]*"/m,
+  'asset manager must lock while step, lesson visual, rebind, or asset mutations are active',
+);
 expectRegex(
   'src/views/LessonEditor.vue',
   /intent\.intent\s*===\s*'select'[\s\S]*?bindClonedAssetToStep\(sourceBody/m,
