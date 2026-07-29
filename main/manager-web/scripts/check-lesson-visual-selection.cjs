@@ -375,4 +375,56 @@ assertSourceIncludes(editorSource, 'this.reordering = false;', 'lesson navigatio
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
 
-console.log('lesson visual selection contract: OK');
+async function verifyPublishedObjectLibraryContract() {
+  const loadObjectLibrarySource = extractObjectMethod(editorSource, 'loadObjectLibrary');
+  const objectRows = [
+    { assetKey: 'object.apple', versionId: 'apple-draft-v3', publicationState: 'draft' },
+    { assetKey: 'object.apple', versionId: 'apple-retired-v2', publicationState: 'retired' },
+    { assetKey: 'object.apple', versionId: 'apple-published-v1', publicationState: 'published' },
+    { assetKey: 'object.unpublished', versionId: 'unpublished-draft-v2', publicationState: 'draft' },
+    { assetKey: 'object.unpublished', versionId: 'unpublished-retired-v1', publicationState: 'retired' },
+  ];
+  const manifest = {
+    objects: [
+      { assetKey: 'object.apple', title: 'Apple', posterUrl: '/apple.png', anim: '/apple.mp4' },
+      { assetKey: 'object.unpublished', title: 'Hidden', posterUrl: '/hidden.png' },
+    ],
+  };
+  const context = { objectLibrary: [] };
+  const loadObjectLibrary = vm.runInNewContext(`(${loadObjectLibrarySource.replace(
+    /^loadObjectLibrary/,
+    'function loadObjectLibrary',
+  )})`, {
+    Api: {
+      lesson: {
+        listVisualAssets: (_filters, onSuccess) => onSuccess(objectRows),
+      },
+    },
+    Array,
+    fetch: async () => ({ ok: true, json: async () => manifest }),
+  });
+
+  loadObjectLibrary.call(context);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(JSON.parse(JSON.stringify(context.objectLibrary)), [{
+    assetKey: 'object.apple',
+    title: 'Apple',
+    posterUrl: '/apple.png',
+    anim: '/apple.mp4',
+    versionId: 'apple-published-v1',
+  }], 'the visible object library must use published versions and omit assets without one');
+
+  const selectedRequest = buildLessonVisualRequest(current, {
+    objectAssetVersionId: context.objectLibrary[0].versionId,
+    objectAssetKey: context.objectLibrary[0].assetKey,
+  });
+  assert.equal(selectedRequest.objectAssetVersionId, 'apple-published-v1', 'selector requests must never contain an unpublished object version');
+}
+
+verifyPublishedObjectLibraryContract()
+  .then(() => console.log('lesson visual selection contract: OK'))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

@@ -1851,7 +1851,7 @@ export default {
           .then((r) => (r.ok ? r.json() : { objects: [] }))
           .then((manifest) => {
             const rows = Array.isArray(manifest && manifest.objects) ? manifest.objects : [];
-            this.objectLibrary = rows.map((row) => ({
+            this.objectLibrary = rows.filter((row) => versions[row.assetKey]).map((row) => ({
               assetKey: row.assetKey,
               title: row.title || row.assetKey,
               posterUrl: row.posterUrl,
@@ -1865,11 +1865,13 @@ export default {
         { category: 'teachingObject', profile: 'espTft' },
         (rows) => {
           const versions = {};
-          (Array.isArray(rows) ? rows : []).forEach((row) => {
-            const key = row && (row.assetKey || row.asset_key);
-            const vid = row && (row.versionId || row.version_id);
-            if (key && vid) versions[key] = vid;
-          });
+          (Array.isArray(rows) ? rows : [])
+            .filter((row) => row && row.publicationState === 'published')
+            .forEach((row) => {
+              const key = row && (row.assetKey || row.asset_key);
+              const vid = row && (row.versionId || row.version_id);
+              if (key && vid) versions[key] = vid;
+            });
           withVersions(versions);
         },
         () => withVersions({}),
