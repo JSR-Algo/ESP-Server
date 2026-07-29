@@ -1,50 +1,54 @@
-# Three-Layer MP4 Cinematic Renderer Design
+# Direct Three-Layer MP4 Lesson Renderer Design
 
 ## Status
 
-Approved design. This document is the implementation-planning baseline for making the physical robot render the admin `CINEMATIC DESIGN REFERENCE` through three independent MP4 layers.
+Approved simplified architecture. Asset encryption/decryption and per-device download authorization are removed. Firmware still decodes MP4 because compressed video must be decoded before it can be displayed.
 
 ## Goal
 
-Every lesson visual phase uses three synchronized MP4 assets:
+An administrator uploads or selects three public MP4 files for each cinematic lesson phase:
 
 1. `background`
 2. `teachingObject`
 3. `robotOverlay`
 
-The admin preview, published manifest, SD asset pack, and physical 480x320 TFT must derive from one cinematic timeline. Fly-in, landing, walking, greeting, teaching, listening, thinking, feedback, retry, celebration, and completion must render as video phases rather than static overlays during the normal path.
+The admin preview and the physical robot use the exact same MP4 bytes. The robot downloads the files directly from the Internet to SD and renders the effects represented by the admin `CINEMATIC DESIGN REFERENCE`.
 
-## Current Production Gaps
+## Simple Architecture
 
-- The production lesson editor requests `/backgrounds/backgrounds-manifest.json` and `/teachobjects/teachobjects-manifest.json`, but both URLs currently fall through to the admin SPA `index.html`.
-- The production web image does not package or mount the background and teaching-object libraries.
-- The affected lesson `4053bc28-da88-4a1c-a4cb-a461c8cf1ca0` is an editable `draft` at version 3, but the background and object pickers remain hidden because both client libraries normalize to empty arrays.
-- The admin cinematic reference uses MP4 media and browser animation, while renderer v2 on firmware rejects authored video motion and renders static poster/overlay assets.
-- Admin and firmware currently use different phase timings and geometry implementations, so visual parity cannot be claimed.
+```text
+Admin selects/uploads three robot-ready MP4 files
+-> NestJS stores versioned asset rows and one phase manifest
+-> public URLs are served directly from the configured TBOT asset host
+-> ESP server forwards the manifest without media conversion
+-> robot downloads the exact MP4 files to SD
+-> firmware decodes and composites the three layers
+```
 
-## Decisions
+There is no export worker, derivative-generation pipeline, signed URL, device claim, bearer token, cookie, or application-level encryption for cinematic files.
 
-- All three authored visual layers are MP4.
-- Robot derivatives also remain MP4 files.
-- Robot MP4 files use Motion JPEG so the ESP32-S3 can decode independent frames without a software H.264 pipeline.
-- `teachingObject` and `robotOverlay` use a fixed chroma-key background. Chroma-key parameters are versioned manifest data.
-- Video is segmented by interactive phase rather than stored as one fixed full-lesson movie.
-- Audio is not embedded in these visual MP4 files. Lesson speech and sound remain runtime-owned so interactive branches can change without seeking or resynchronizing embedded audio.
-- The current `CINEMATIC DESIGN REFERENCE` timeline becomes the timing source of truth.
-- Static posters are explicit fallback assets only. They are not used in the normal cinematic path.
+## Required MP4 Format
 
-## Non-Goals
+The uploaded file is already robot-ready:
 
-- Decoding three simultaneous H.264 streams in software on ESP32-S3.
-- Flattening the three authored layers into one robot video.
-- Embedding lesson narration into visual MP4 files.
-- Letting firmware infer lesson outcomes or choose branches.
-- Allowing a missing video to be silently replaced by an unrelated or stale cached asset.
-- Replacing the existing lesson assignment, completion, or parent-progress domains.
+| Property | Requirement |
+| --- | --- |
+| Container | MP4 |
+| Video codec | Motion JPEG |
+| Audio | none |
+| Default FPS | 15 |
+| Allowed fallback FPS | 10 |
+| Background dimensions | 480x320 |
+| Foreground dimensions | at most 240x240 |
+| Frame dependency | every frame independently decodable |
 
-## Cinematic Phase Model
+The backend validates metadata when the asset is registered. It does not transcode or rewrite the file. Unsupported MP4 files are rejected with a clear admin error.
 
-The initial supported phase set is:
+`teachingObject` and `robotOverlay` use a fixed chroma-key background. Their metadata includes key color, tolerance, feather radius, and destination rectangle.
+
+## Phase Model
+
+The initial phase set is:
 
 ```text
 flyIn -> landFar -> settle -> walkToward -> greet
@@ -53,268 +57,157 @@ correct | nearMiss | incorrect | retry
 celebrate -> completion
 ```
 
-Each phase is a bundle containing exactly three synchronized files:
-
-```text
-phase: flyIn
-|- background.mp4
-|- teachingObject.mp4
-`- robotOverlay.mp4
-```
-
-All three files in a bundle must have identical:
-
-- `durationMs`
-- `fps`
-- `frameCount`
-- `timelineEpoch`
-- phase identity and version
-
-The renderer changes phase only at a frame boundary. Interactive outcome selection remains owned by the ESP lesson runtime; firmware renders the phase requested by the server.
-
-## Video Profiles
-
-### Authoring Profile
-
-The admin may use high-quality H.264 MP4 sources for review and editing. Authoring sources are immutable, versioned assets.
-
-### ESP TFT Profile
-
-The robot derivative contract is:
-
-| Property | Requirement |
-| --- | --- |
-| Container | MP4 |
-| Codec | Motion JPEG |
-| Default FPS | 15 |
-| Degraded derivative | 10 FPS |
-| Background frame | 480x320 |
-| Object frame | at most 240x240 |
-| Robot overlay frame | at most 240x240 |
-| Audio tracks | forbidden |
-| Frame dependency | every frame independently decodable |
-
-Object and robot-overlay videos are encoded over a fixed chroma-key color. The manifest pins `keyColor`, `tolerance`, and feather radius. Export validation rejects content whose foreground colors collide materially with the selected key color.
-
-The initial cinematic timings are sourced from the reference timeline: 3.2 seconds for fly-in, a 0.8-second far beat, and 5 seconds for walking. The exporter records exact frame-derived durations; admin, backend, ESP server, and firmware must not redefine them independently.
-
-## Asset and Manifest Contract
-
-Each phase layer has both online and SD identities:
+Every phase contains exactly three MP4 assets with equal `durationMs`, `fps`, and `frameCount`.
 
 ```json
 {
   "phaseId": "flyIn",
-  "phaseVersion": 1,
-  "timelineEpoch": "tvideoFlyWalk.v2",
   "durationMs": 3200,
   "fps": 15,
   "frameCount": 48,
   "layers": {
     "background": {
-      "assetKey": "scene.playground-park.flyIn@v3",
-      "mediaType": "video/mp4",
-      "codec": "mjpeg",
-      "onlineUrl": "https://cdn.example/lesson-visuals/scene.playground-park/flyIn-v3.mp4",
-      "sdPath": "sd://lessons/shared/scene.playground-park/flyIn-v3.mp4",
+      "assetVersionId": "...",
+      "url": "https://esp.tjbot.vn/lessons/.../background.mp4",
+      "sdPath": "sd://tbot/lessons/.../background.mp4",
       "sha256": "...",
       "bytes": 123456
     },
     "teachingObject": {
-      "assetKey": "object.robot.flyIn@v2",
-      "mediaType": "video/mp4",
-      "codec": "mjpeg",
-      "onlineUrl": "https://cdn.example/lesson-visuals/object.robot/flyIn-v2.mp4",
-      "sdPath": "sd://lessons/shared/object.robot/flyIn-v2.mp4",
+      "assetVersionId": "...",
+      "url": "https://esp.tjbot.vn/lessons/.../object.mp4",
+      "sdPath": "sd://tbot/lessons/.../object.mp4",
       "sha256": "...",
       "bytes": 45678,
-      "rect": { "x": 150, "y": 92, "width": 180, "height": 180 },
+      "rect": { "x": 130, "y": 90, "width": 200, "height": 200 },
       "chromaKey": { "keyColor": "#00ff00", "tolerance": 20, "featherPx": 1 }
     },
     "robotOverlay": {
-      "assetKey": "robotOverlay.alive.flyIn@v4",
-      "mediaType": "video/mp4",
-      "codec": "mjpeg",
-      "onlineUrl": "https://cdn.example/lesson-visuals/robotOverlay.alive/flyIn-v4.mp4",
-      "sdPath": "sd://lessons/shared/robotOverlay.alive/flyIn-v4.mp4",
+      "assetVersionId": "...",
+      "url": "https://esp.tjbot.vn/lessons/.../robot.mp4",
+      "sdPath": "sd://tbot/lessons/.../robot.mp4",
       "sha256": "...",
       "bytes": 56789,
-      "rect": { "x": 170, "y": 80, "width": 200, "height": 200 },
+      "rect": { "x": 160, "y": 70, "width": 220, "height": 220 },
       "chromaKey": { "keyColor": "#00ff00", "tolerance": 20, "featherPx": 1 }
     }
   }
 }
 ```
 
-The backend rejects publish when:
-
-- a required phase is absent;
-- a phase does not contain exactly the three required layers;
-- the three assets disagree on FPS, duration, frame count, phase version, or timeline epoch;
-- a robot derivative is not MP4/Motion JPEG;
-- an audio track is present;
-- online URL, SD path, SHA-256, byte size, geometry, or chroma-key metadata is missing or invalid;
-- the selected asset version is not published;
-- the reference timeline and exported timing differ by more than one frame.
+SHA-256 and byte size remain mandatory. They ensure the file downloaded to SD is exactly the registered file and not a partial transfer. They are not access-control or encryption mechanisms.
 
 ## Admin Website
 
-The asset pickers must use the backend versioned visual library as their source of truth. They must not depend on manually deployed static JSON manifests.
+The lesson editor loads all three picker libraries from the existing NestJS versioned visual-asset API. It no longer fetches:
 
-For each layer the editor provides:
+- `/backgrounds/backgrounds-manifest.json`
+- `/teachobjects/teachobjects-manifest.json`
 
-- video thumbnail/hover preview;
-- title, asset key, version, profile, codec, FPS, dimensions, and publication state;
-- compatibility and chroma-key warnings;
-- persisted selection through `assetVersionId` on the lesson draft;
-- an explicit loading, empty, or API-error state rather than silently hiding the picker.
+Each picker displays MP4 preview, title, key, version, FPS, dimensions, and status. Loading, empty, and error states remain visible instead of hiding the complete picker section.
 
-The `CINEMATIC DESIGN REFERENCE` player uses the same phase manifest that will be published. It displays all three video layers, the active phase, frame number, timing, and selected asset identities. Reloading the editor must reproduce the persisted selection.
+Selection is persisted by `assetVersionId` through the existing step visual-reference endpoint. Reloading the lesson must restore all three selections.
 
-The current production picker bug is fixed as part of this work by removing the unavailable `/backgrounds/backgrounds-manifest.json` and `/teachobjects/teachobjects-manifest.json` dependency. The production image must still serve any preview media referenced by backend storage URLs.
+The current production draft lesson `4053bc28-da88-4a1c-a4cb-a461c8cf1ca0` is an explicit acceptance case.
 
-## Backend and Export Pipeline
+## Backend
 
-The backend owns immutable asset identity and the normalized cinematic timeline. A generation/export worker:
+The existing shared visual asset version remains the source of identity. MP4 technical metadata is stored in existing JSON compatibility metadata, avoiding a new media subsystem:
 
-1. accepts the three approved authoring MP4 sources for a phase;
-2. validates duration, geometry, foreground/key-color collision, and allowed content;
-3. transcodes the ESP derivatives to MP4/Motion JPEG at 15 FPS and 10 FPS;
-4. validates exact frame counts and the absence of audio tracks;
-5. calculates SHA-256 and byte size;
-6. stores immutable files under versioned keys;
-7. publishes the derivative metadata atomically only after all three layers pass;
-8. invalidates affected lesson generation so robots receive a new manifest/checksum.
-
-Partial phase publication is forbidden. A failed layer leaves the previous published phase version active.
-
-## SD Synchronization
-
-The existing SD-first asset flow is extended to accept versioned MP4/Motion JPEG assets.
-
-- Firmware or the ESP server downloads every required layer before lesson start.
-- Downloads use staging files, size limits, SHA-256 verification, and atomic rename.
-- A cached asset is reused only when its pinned identity and SHA-256 match.
-- A manifest/checksum change automatically schedules new assets regardless of claim state, while transport authentication follows the separately approved simple-security policy.
-- The lesson does not enter `READY` until all critical cinematic video assets are attested.
-- Online URLs remain available as recovery sources, but normal playback reads from SD.
-
-## Firmware Renderer
-
-Firmware owns decoding, chroma-key compositing, and TFT presentation. For each render tick it:
-
-1. decodes the current background frame into the 480x320 framebuffer;
-2. decodes the current teaching-object frame into a bounded scratch buffer;
-3. removes chroma-key pixels and composites the object into its manifest rectangle;
-4. reuses the scratch buffer for the robot-overlay frame;
-5. removes chroma-key pixels and composites the robot overlay;
-6. presents the completed framebuffer to TFT;
-7. advances the shared frame clock.
-
-The implementation must not retain three full decoded frames simultaneously. Decoder and scratch-buffer allocation occurs during lesson prepare, not in the frame loop. The main watchdog is fed during decode and SD reads.
-
-The renderer advertises capabilities including MP4/Motion JPEG support, maximum layer dimensions, supported FPS values, chroma-key support, and maximum concurrent cinematic layers. The ESP server sends this contract only to devices that explicitly advertise all required capabilities.
-
-## Runtime Synchronization
-
-The ESP server remains the owner of interaction and phase selection. Runtime commands identify:
-
-- lesson session and generation;
-- step and visual sequence;
-- `phaseId` and phase version;
-- common starting frame and monotonic start time;
-- the three pinned layer identities.
-
-Firmware ACKs phase installation only after all files are open, headers are validated, decoder buffers are ready, and frame zero can be decoded. Duplicate commands for the same generation and visual sequence are idempotent.
-
-The three layers share one integer frame counter. There are no independent video clocks, which prevents cumulative drift.
-
-## Error Handling and Degradation
-
-- Missing or corrupt critical video triggers online retry and SHA-256 verification.
-- While assets are being repaired, the robot remains on a friendly preparation screen and does not start an incomplete cinematic phase.
-- Decoder overload first selects the published 10 FPS derivative for all three layers together.
-- A single layer may not independently drop frames or change FPS.
-- If no compatible derivative is available, the renderer stops the phase safely and reports a typed failure; it must not crash, reset, or continue with mismatched layers.
-- Static fallback is used only when the manifest explicitly sets `allowStaticFallback: true` and pins the fallback identities.
-- Runtime diagnostics expose safe counters and error codes without logging tokens, device identifiers, Wi-Fi data, or private lesson content.
-
-## Security and Resource Limits
-
-- Only HTTPS online URLs from the configured lesson asset origins are accepted.
-- Redirects are revalidated against the origin allowlist.
-- Every file has per-asset and per-pack byte limits.
-- MP4 metadata is bounded before allocation; invalid dimensions, frame count, codec, or atom sizes are rejected.
-- SD paths are normalized and contained within the lesson asset root.
-- Credentials are never stored in lesson manifests or asset URLs.
-
-## Testing
-
-### Admin
-
-- Changing background, teaching object, and robot overlay persists after reload.
-- Loading, empty, and error states remain visible and actionable.
-- The affected production draft lesson displays usable pickers.
-- The cinematic preview consumes the normalized three-layer phase manifest.
-
-### Backend and Export
-
-- Contract tests require exactly three synchronized MP4 layers per phase.
-- Publish tests reject timing, codec, checksum, identity, geometry, audio-track, or chroma-key violations.
-- Export tests prove the 15 FPS and 10 FPS derivatives have exact frame counts.
-- Regeneration tests prove a new asset version changes lesson checksum and SD pack identity.
-
-### ESP Server
-
-- Runtime tests verify capability negotiation, phase command projection, retries, idempotency, typed failures, and completion recording.
-- SD tests verify staging, limits, SHA-256, atomic commit, reuse, and updated-asset fanout.
-
-### Firmware
-
-- Native tests cover MP4 parsing, JPEG frame decode, chroma-key tolerance, clipping, compositing order, shared frame clock, phase transitions, downgrade, cancellation, and watchdog feeding.
-- Host fixtures include malformed and adversarial MP4 metadata.
-- Hardware tests run a complete lesson repeatedly with heap, PSRAM, frame-time, SD latency, and watchdog monitoring.
-
-### Visual Parity
-
-Golden frames are captured from the normalized cinematic timeline and the physical TFT at fixed phase/frame markers.
-
-- position tolerance: at most 2 pixels;
-- timing tolerance: at most one frame;
-- layer order and clipping: exact;
-- normal path: no static replacement;
-- no cumulative phase drift.
-
-### End to End
-
-The release gate is:
-
-```text
-admin selects and publishes three-layer MP4 visuals
--> backend exports and publishes robot derivatives
--> latest manifest and checksum fan out
--> robot syncs all assets to SD
--> firmware plays the complete interactive cinematic lesson
--> lesson completion reaches the backend
--> backend records lesson_completed
+```json
+{
+  "codec": "mjpeg",
+  "fps": 15,
+  "durationMs": 3200,
+  "frameCount": 48,
+  "hasAudio": false,
+  "rect": { "x": 0, "y": 0, "width": 480, "height": 320 },
+  "chromaKey": null
+}
 ```
 
-## Rollout
+Foreground versions include `chromaKey`. The backend returns resolved public URLs and metadata to the admin.
 
-1. Land the backend asset and manifest contract behind a renderer capability/version gate.
-2. Fix the admin picker data source and add three-layer authoring/preview support.
-3. Add exporter derivatives and validation without advertising them to current firmware.
-4. Add firmware MP4/Motion JPEG decode and compositing behind a disabled capability flag.
-5. Enable one hardware allowlisted robot and run repeated visual-parity and endurance tests.
-6. Enable new lessons only after the release gate passes.
-7. Keep renderer v1/static manifests available for older firmware until explicitly retired.
+Publish validation requires:
+
+- exactly three slots for each required phase;
+- `video/mp4` and `codec=mjpeg`;
+- no audio;
+- supported dimensions and FPS;
+- equal duration, FPS, and frame count across the phase;
+- published version IDs, URL, byte size, and SHA-256;
+- chroma-key metadata for foreground layers.
+
+The manifest checksum includes all phase and file identity fields. Changing an asset version changes the lesson checksum and triggers the existing global generation/SD synchronization workflow.
+
+## Public Direct Download
+
+- Asset URLs are public HTTP or HTTPS URLs.
+- Robot sends no bearer token, device token, claim, cookie, signed query string, or decryption key.
+- The same URL can be downloaded using a plain browser or `curl`.
+- Firmware writes incoming bytes unchanged to a staging file.
+- Firmware verifies byte count and SHA-256, then atomically renames the file into the lesson SD directory.
+- Failed or incomplete downloads never replace the last verified file.
+
+## ESP Server
+
+The ESP server keeps its current responsibilities:
+
+- fetch the published manifest;
+- materialize/cache public MP4 bytes unchanged;
+- construct the SD pack;
+- wait for robot SD attestation;
+- send phase commands only when firmware advertises the new renderer capability;
+- own interactive branch selection and `lesson_completed` reporting.
+
+The SD attestation accepts `downloadedCount`, `skippedCount`, optional `reusedCount`, and `failedCount` so verified duplicate bytes do not block readiness.
+
+## Firmware
+
+Firmware implements a deliberately constrained MP4 player:
+
+- one MJPEG video track;
+- no audio, fragments, edit lists, or multiple tracks;
+- bounded MP4 metadata and sample tables;
+- streamed reads from verified SD files;
+- reusable JPEG workspace and PSRAM buffers;
+- one master frame index shared by all three videos.
+
+For each frame, firmware decodes background, teaching object, and robot overlay; chroma-keys the two foregrounds; composites into one RGB565 framebuffer; and presents once to TFT.
+
+The three layers always advance together. If a frame misses its deadline, firmware repeats or drops the entire triplet rather than letting layers drift independently.
+
+Pause freezes the shared clock. Resume rebases it. Stop/error closes all video files before releasing the lesson SD lease.
+
+## Performance Gate
+
+Fifteen FPS is the desired profile, not an unconditional promise. The current TFT bus and software rotation may limit full-screen throughput. Hardware tests measure sustained SD read, three JPEG decodes, composition, panel flush, heap, PSRAM, watchdog, tearing, and dropped triplets.
+
+If 15 FPS cannot remain stable, the lesson must use uploaded 10 FPS MP4 files for all three layers. Firmware does not transcode or automatically create them.
+
+## Fallback
+
+- Missing or corrupt MP4: retry the public URL.
+- Still unavailable: remain on a friendly preparation/error screen.
+- Unsupported codec or insufficient memory: report a typed renderer failure and do not start the phase.
+- Static fallback is allowed only when explicitly enabled and pinned in the manifest.
+- No failure path may crash or watchdog-reset the robot.
+
+## Testing and Release Gate
+
+- Admin test: all three MP4 pickers load from NestJS and persist selection after reload.
+- Backend test: reject invalid codec, audio, dimensions, timing mismatch, missing layer, or unpublished version.
+- Direct-download test: plain unauthenticated GET returns exact bytes and matching SHA-256.
+- SD test: all required files are verified and attested before lesson start.
+- Firmware host tests: MP4 parser bounds, reusable JPEG decode, chroma-key pixels, shared clock, pause/resume/cancel, and safe errors.
+- Hardware test: complete lesson with cinematic phases, no layer drift, crash, or watchdog reset.
+- E2E: admin publish -> manifest checksum changes -> robot syncs SD -> firmware plays effects -> backend records `lesson_completed`.
 
 ## Acceptance Criteria
 
-- Background, object, and robot-overlay pickers work on production for editable drafts.
-- Every normal cinematic phase uses exactly three synchronized MP4 assets.
-- The physical output uses effects equivalent to the admin `CINEMATIC DESIGN REFERENCE`.
-- Admin and firmware consume one timing and geometry source of truth.
-- New admin asset versions automatically produce a new manifest/checksum and new SD synchronization.
-- A complete physical lesson runs without crash, watchdog reset, layer drift, or stale assets.
-- The backend records `lesson_completed` after the physical session finishes.
+- The supplied production lesson displays usable background, teaching-object, and robot-overlay pickers.
+- Admin and robot use the exact same MP4 bytes.
+- Cinematic asset downloads are public and require no authentication or application decryption.
+- The robot verifies and loads every required MP4 from SD before playback.
+- The physical lesson shows the approved phase effects with three synchronized layers.
+- The backend records lesson completion after the physical lesson ends.
