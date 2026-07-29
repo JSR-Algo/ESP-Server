@@ -160,7 +160,7 @@ def validate_renderer_v3_shared_mp4(asset: Any) -> dict[str, Any]:
         _refuse()
     online_url = _matching_alias(asset, "onlineUrl", "url")
     parsed = urlsplit(online_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
         _refuse()
     return {
         "sharedAssetKey": shared_key,

@@ -205,6 +205,33 @@ def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_withou
     assert "cookie" not in {key.lower() for key in sent}
 
 
+@pytest.mark.parametrize("suffix", ["", "?variant=robot&expires=2000000000#opening"])
+def test_renderer_v3_mp4_preserves_exact_public_url_with_optional_query_and_fragment(suffix):
+    render_pack = _pack("scene.opening@v3")
+    asset = render_pack["assets"][0]
+    url = "https://assets.example/visuals/scene.opening/v3.mp4" + suffix
+    asset.update({
+        "url": url,
+        "onlineUrl": url,
+        "mediaType": "video/mp4",
+        "sharedAssetKey": "scene.opening",
+        "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+        "sdPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/scene.opening%40v3",
+        "localPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/scene.opening%40v3",
+    })
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["onlineUrl"] == url
+    assert sent["url"] == url
+
+
 def test_rejects_arbitrary_video_that_lacks_validated_renderer_v3_shared_identity():
     render_pack = _pack("authored-video")
     render_pack["assets"][0]["mediaType"] = "video/mp4"

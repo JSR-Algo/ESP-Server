@@ -255,6 +255,33 @@ async def test_renderer_v3_public_mp4_preserves_exact_bytes_and_metadata_without
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", "?variant=robot&expires=2000000000#opening"])
+async def test_renderer_v3_mp4_preserves_exact_public_url_with_optional_query_and_fragment(tmp_path, suffix):
+    content = b"renderer-v3-public-url"
+    key = "scene.opening@v3"
+    url = "https://assets.example/visuals/scene.opening/v3.mp4" + suffix
+    asset = {
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key),
+        "localPath": _sd_path(key), "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+    }
+
+    await materialize_lesson_sd_pack(
+        _manifest(assets=[asset]), config=_config(tmp_path), client=_Client({url: [content]}), resolver=_public_resolver,
+    )
+
+    pack = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY
+    stored = json.loads((pack / "pack.json").read_text(encoding="utf-8"))
+    assert stored["assets"][0]["onlineUrl"] == url
+
+
+@pytest.mark.asyncio
 async def test_renderer_v3_mp4_truncation_cleans_staging_and_allows_retry(tmp_path):
     content = b"renderer-v3-complete-mp4"
     key = "scene.opening@v3"

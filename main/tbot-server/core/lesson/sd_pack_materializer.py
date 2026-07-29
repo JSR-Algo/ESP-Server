@@ -470,7 +470,12 @@ def _validate_asset(
         raise _bad("INVALID_CRITICAL", "Invalid asset critical flag")
     online_url = _alias(item, "onlineUrl", "url")
     sd_path = _alias(item, "sdPath", "localPath")
-    _validate_url(online_url, allowed, production)
+    _validate_url(
+        online_url,
+        allowed,
+        production,
+        allow_fragment=media_type == "video/mp4",
+    )
     expected_sd_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
@@ -531,11 +536,11 @@ def _alias(item: Mapping[str, Any], primary: str, alias: str) -> str:
     return value
 
 
-def _validate_url(url: str, allowed: set[str], production: bool) -> None:
+def _validate_url(url: str, allowed: set[str], production: bool, *, allow_fragment: bool = False) -> None:
     parts = urlsplit(url)
     if not parts.scheme or not parts.netloc or parts.username or parts.password:
         raise _bad("INVALID_URL", "Invalid asset URL")
-    if parts.fragment:
+    if parts.fragment and not allow_fragment:
         raise _bad("URL_FRAGMENT", "Asset URL fragments are not allowed")
     if production and parts.scheme != "https":
         raise _bad("NON_HTTPS_URL", "Production asset URLs must use HTTPS")

@@ -210,13 +210,33 @@ async def test_validated_renderer_v3_shared_mp4_metadata_passes_through_unchange
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", "?variant=robot&expires=2000000000#opening"])
+async def test_renderer_v3_mp4_public_url_query_and_fragment_are_preserved_exactly(suffix) -> None:
+    pack = _pack()
+    asset = _renderer_v3_mp4_asset(cache_key=pack["cacheKey"])
+    asset["onlineUrl"] += suffix
+    asset["url"] += suffix
+    pack["assets"] = [asset]
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"][0]["onlineUrl"] == asset["onlineUrl"]
+    assert received[0]["index"][0]["assets"][0]["url"] == asset["url"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", [
     lambda asset: asset.pop("sharedAssetKey"),
     lambda asset: asset["compatibilityMetadata"].update(codec="h264"),
     lambda asset: asset.update(visualRefs=[]),
-    lambda asset: asset.update(onlineUrl=asset["onlineUrl"] + "?sig=secret", url=asset["url"] + "?sig=secret"),
 ])
-async def test_rejects_unvalidated_or_credential_bearing_renderer_v3_video(mutation) -> None:
+async def test_rejects_unvalidated_renderer_v3_video(mutation) -> None:
     pack = _pack()
     asset = _renderer_v3_mp4_asset(cache_key=pack["cacheKey"])
     mutation(asset)

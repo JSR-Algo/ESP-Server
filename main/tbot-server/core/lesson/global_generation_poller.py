@@ -451,7 +451,11 @@ def _validate_asset(
         raise _PollRejected("cms_sd_path_mismatch")
     if value.get("onlineUrl") != value.get("url"):
         raise _PollRejected("cms_asset_alias_mismatch")
-    _validate_asset_url(value.get("onlineUrl"), allowed_origins)
+    _validate_asset_url(
+        value.get("onlineUrl"),
+        allowed_origins,
+        allow_query_fragment=value.get("mediaType") == "video/mp4",
+    )
     _checksum(value.get("sha256"), "cms_invalid_asset_checksum")
     _safe_integer(value.get("size"), positive=False, code="cms_invalid_asset_size")
     if not isinstance(value.get("mediaType"), str) or not value["mediaType"]:
@@ -480,15 +484,24 @@ def _validate_asset(
     return {**value, "encodedKey": encoded}
 
 
-def _validate_asset_url(value: Any, allowed_origins: set[tuple[str, str, int]]) -> None:
+def _validate_asset_url(
+    value: Any,
+    allowed_origins: set[tuple[str, str, int]],
+    *,
+    allow_query_fragment: bool = False,
+) -> None:
     if not isinstance(value, str):
         raise _PollRejected("cms_asset_url_rejected")
     try:
         parts = urlsplit(value)
-        origin = _origin(value, allowed_schemes={"https"})
+        origin = _origin(
+            value,
+            allowed_schemes={"https"},
+            allow_fragment=allow_query_fragment,
+        )
     except _PollRejected:
         raise _PollRejected("cms_asset_url_rejected") from None
-    if parts.username or parts.password or parts.fragment or parts.query:
+    if parts.username or parts.password or (not allow_query_fragment and (parts.fragment or parts.query)):
         raise _PollRejected("cms_asset_url_rejected")
     if origin not in allowed_origins:
         raise _PollRejected("cms_asset_origin_rejected")
@@ -516,7 +529,12 @@ def _js_sort_key(value: str) -> bytes:
     return value.encode("utf-16-be", errors="surrogatepass")
 
 
-def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
+def _origin(
+    url: str,
+    *,
+    allowed_schemes: set[str],
+    allow_fragment: bool = False,
+) -> tuple[str, str, int]:
     try:
         if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
             raise ValueError
@@ -532,7 +550,7 @@ def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
         or not parts.netloc
         or parts.username
         or parts.password
-        or parts.fragment
+        or (parts.fragment and not allow_fragment)
     ):
         raise _PollRejected("cms_invalid_url")
     return scheme, hostname, port or (443 if scheme == "https" else 80)
