@@ -44,6 +44,7 @@
         v-if="lesson && lesson.status === 'published' && lessonAssetGenerationStatus"
         :status="lessonAssetGenerationStatus"
         :loading="lessonAssetGenerationLoading"
+        :retrying="lessonAssetGenerationRetrying"
         @retry="retryLessonSdSync"
       />
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
@@ -678,6 +679,8 @@ export default {
       lessonAssetGenerationStatus: null,
       lessonAssetGenerationLoading: false,
       lessonAssetGenerationRequestId: 0,
+      lessonAssetGenerationRetrying: false,
+      lessonAssetGenerationRetryRequestId: 0,
       lessonAssetGenerationPollTimer: null,
     };
   },
@@ -953,6 +956,8 @@ export default {
     this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
     this.lessonAssetGenerationRequestId += 1;
+    this.lessonAssetGenerationRetryRequestId += 1;
+    this.lessonAssetGenerationRetrying = false;
     this.clearLessonAssetGenerationPoll();
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
@@ -1384,6 +1389,8 @@ export default {
       this.lessonAssetGenerationStatus = null;
       this.lessonAssetGenerationLoading = false;
       this.lessonAssetGenerationRequestId += 1;
+      this.lessonAssetGenerationRetrying = false;
+      this.lessonAssetGenerationRetryRequestId += 1;
     },
     clearLessonAssetGenerationPoll() {
       if (this.lessonAssetGenerationPollTimer) {
@@ -1433,22 +1440,36 @@ export default {
       return true;
     },
     retryLessonSdSync() {
-      if (this.editorDestroying || this.lessonAssetGenerationLoading
+      if (this.editorDestroying || this.lessonAssetGenerationRetrying
         || !this.lesson || this.lesson.status !== 'published') return false;
       const lessonId = this.lessonId;
       const lessonLoadRequestId = this.lessonLoadRequestId;
+      const retryRequestId = this.lessonAssetGenerationRetryRequestId + 1;
+      this.lessonAssetGenerationRetryRequestId = retryRequestId;
       this.clearLessonAssetGenerationPoll();
-      this.lessonAssetGenerationLoading = true;
+      this.lessonAssetGenerationRetrying = true;
       Api.lesson.retrySdSync(
         lessonId,
-        () => {
-          if (this.editorDestroying || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
-          this.$message.success(this.$t('lesson.sdSyncRetryQueued'));
+        (result) => {
+          if (this.editorDestroying || retryRequestId !== this.lessonAssetGenerationRetryRequestId
+            || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
+          this.lessonAssetGenerationRetrying = false;
+          if (Number(result && result.retried) > 0 && !(result && result.refused)) {
+            this.$message.success(this.$t('lesson.sdSyncRetryQueued'));
+          } else {
+            const refusalKey = {
+              no_job: 'lesson.sdSyncRetryRefusedNoJob',
+              terminal_job: 'lesson.sdSyncRetryRefusedTerminalJob',
+              no_eligible: 'lesson.sdSyncRetryRefusedNoEligible',
+            }[result && result.refused] || 'lesson.sdSyncRetryRefused';
+            this.$message.warning(this.$t(refusalKey));
+          }
           this.loadLessonAssetGenerationStatus({ silent: true });
         },
         (message) => {
-          if (this.editorDestroying || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
-          this.lessonAssetGenerationLoading = false;
+          if (this.editorDestroying || retryRequestId !== this.lessonAssetGenerationRetryRequestId
+            || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
+          this.lessonAssetGenerationRetrying = false;
           this.scheduleLessonAssetGenerationPoll(this.lessonAssetGenerationStatus);
           this.$message.error(message);
         },

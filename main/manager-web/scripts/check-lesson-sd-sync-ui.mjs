@@ -22,6 +22,24 @@ function expectRegex(file, regex, reason) {
   assert.match(read(file), regex, `${file}: ${reason}`);
 }
 
+function extractObjectMethod(source, name) {
+  const methodPattern = new RegExp(`\\n\\s{2,4}${name}\\(`);
+  const match = methodPattern.exec(source);
+  assert.ok(match, `${name} method not found`);
+  const start = match.index + match[0].lastIndexOf(name);
+  const paramsStart = source.indexOf('(', start);
+  const paramsEnd = source.indexOf(')', paramsStart);
+  const braceStart = source.indexOf('{', paramsEnd);
+  let depth = 0;
+  for (let index = braceStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}' && --depth === 0) {
+      return `function ${name}(${source.slice(paramsStart + 1, paramsEnd)}) {${source.slice(braceStart + 1, index)}}`;
+    }
+  }
+  throw new Error(`${name} method body not closed`);
+}
+
 function extractNginxBlocks(source, marker) {
   const blocks = [];
   let cursor = 0;
@@ -113,11 +131,12 @@ expectContains('src/views/LessonEditor.vue', 'loadLessonAssetGenerationStatus', 
 expectContains('src/views/LessonEditor.vue', 'scheduleLessonAssetGenerationPoll', 'editor must poll incomplete rollouts');
 expectContains('src/views/LessonEditor.vue', 'clearLessonAssetGenerationPoll', 'editor must clear polling during teardown');
 expectContains('src/views/LessonEditor.vue', '@retry="retryLessonSdSync"', 'editor must handle the rollout retry event');
+expectContains('src/views/LessonEditor.vue', ':retrying="lessonAssetGenerationRetrying"', 'editor must bind dedicated retry progress to the component');
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.retrySdSync(', 'editor retry must call the lesson API');
 expectRegex(
   'src/views/LessonEditor.vue',
-  /retryLessonSdSync\(\)[\s\S]*?lessonAssetGenerationLoading[\s\S]*?const lessonId = this\.lessonId;[\s\S]*?const lessonLoadRequestId = this\.lessonLoadRequestId;[\s\S]*?Api\.lesson\.retrySdSync/m,
-  'retry must reject duplicates and capture route identity before starting',
+  /retryLessonSdSync\(\)[\s\S]*?lessonAssetGenerationRetrying[\s\S]*?const lessonId = this\.lessonId;[\s\S]*?const lessonLoadRequestId = this\.lessonLoadRequestId;[\s\S]*?lessonAssetGenerationRetryRequestId[\s\S]*?Api\.lesson\.retrySdSync/m,
+  'retry must use dedicated duplicate protection and capture route and request identity before starting',
 );
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -137,7 +156,7 @@ expectContains(component, '<el-button', 'retryable rollout states need an Elemen
 expectContains(component, "$emit('retry')", 'retry button must emit a retry event');
 expectContains(component, "lesson.sdSyncRetryAction", 'retry button must use localized accessible text');
 expectRegex(component, /\['Failed', 'Retrying', 'GenerationMismatch', 'RollingOut'\]\.includes\(this\.stateKey\)/, 'only retryable rollout states may expose retry');
-expectRegex(component, /<el-button[\s\S]*?:loading="loading"[\s\S]*?:disabled="loading"[\s\S]*?@click="\$emit\('retry'\)"/m, 'retry action must follow loading and duplicate-submit protections');
+expectRegex(component, /<el-button[\s\S]*?:loading="retrying"[\s\S]*?:disabled="retrying"[\s\S]*?@click="\$emit\('retry'\)"/m, 'retry action must use dedicated duplicate-submit protection');
 expectContains(component, 'lesson.sdSyncOfflineDisclaimer', 'offline/never-seen robots require a permanent disclaimer');
 expectContains(component, 'lesson.sdSyncAllConnectedCurrent', 'success wording must be conditional');
 
@@ -157,9 +176,104 @@ for (const [locale, action, queued] of [
 ]) {
   expectContains(`src/i18n/${locale}.js`, `'lesson.sdSyncRetryAction': '${action}'`, `${locale} locale must translate retry action exactly`);
   expectContains(`src/i18n/${locale}.js`, `'lesson.sdSyncRetryQueued': '${queued}'`, `${locale} locale must translate queued confirmation exactly`);
+  expectContains(`src/i18n/${locale}.js`, "'lesson.sdSyncRetryRefusedNoJob'", `${locale} locale must explain missing retry jobs`);
+  expectContains(`src/i18n/${locale}.js`, "'lesson.sdSyncRetryRefusedTerminalJob'", `${locale} locale must explain terminal retry jobs`);
+  expectContains(`src/i18n/${locale}.js`, "'lesson.sdSyncRetryRefusedNoEligible'", `${locale} locale must explain missing eligible devices`);
+  expectContains(`src/i18n/${locale}.js`, "'lesson.sdSyncRetryRefused'", `${locale} locale must cover unexpected zero-retry responses`);
 }
 expectContains('src/i18n/vi.js', 'Tất cả robot đang kết nối đã nhận thế hệ mới nhất.', 'Vietnamese success wording is product-approved');
 expectContains('src/i18n/vi.js', 'Robot đang tắt hoặc chưa từng kết nối sẽ tự đồng bộ khi kết nối lại; trạng thái này không xác nhận các robot đó đã cập nhật.', 'Vietnamese disclaimer is product-approved');
+
+const editorSource = read('src/views/LessonEditor.vue');
+const retryCalls = [];
+const statusCalls = [];
+const retryLessonSdSync = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'retryLessonSdSync')})`, {
+  Api: { lesson: { retrySdSync: (...args) => retryCalls.push(args) } },
+  Number,
+});
+const loadLessonAssetGenerationStatus = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'loadLessonAssetGenerationStatus')})`, {
+  Api: { lesson: { getLessonAssetGenerationStatus: (...args) => statusCalls.push(args) } },
+});
+const resetLessonAssetGenerationStatus = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'resetLessonAssetGenerationStatus')})`);
+function retryContext(overrides = {}) {
+  const messages = { success: [], warning: [], error: [] };
+  const context = {
+    editorDestroying: false,
+    lesson: { status: 'published' },
+    lessonId: 'lesson-a',
+    lessonLoadRequestId: 1,
+    lessonAssetGenerationLoading: false,
+    lessonAssetGenerationRetrying: false,
+    lessonAssetGenerationRetryRequestId: 0,
+    lessonAssetGenerationRequestId: 0,
+    lessonAssetGenerationStatus: { allConnectedCurrent: false },
+    clearLessonAssetGenerationPoll() {},
+    loadLessonAssetGenerationStatus() { this.statusReloads = (this.statusReloads || 0) + 1; },
+    scheduleLessonAssetGenerationPoll() {},
+    $t: (key) => key,
+    $message: {
+      success: (message) => messages.success.push(message),
+      warning: (message) => messages.warning.push(message),
+      error: (message) => messages.error.push(message),
+    },
+    ...overrides,
+  };
+  return { context, messages };
+}
+
+{
+  retryCalls.length = 0;
+  statusCalls.length = 0;
+  const { context, messages } = retryContext();
+  assert.equal(retryLessonSdSync.call(context), true);
+  assert.equal(context.lessonAssetGenerationRetrying, true);
+  assert.equal(retryCalls.length, 1);
+  assert.equal(loadLessonAssetGenerationStatus.call(context, { silent: true }), true);
+  statusCalls[0][0]({ allConnectedCurrent: false });
+  assert.equal(context.lessonAssetGenerationLoading, false, 'the overlapping silent poll must settle independently');
+  assert.equal(context.lessonAssetGenerationRetrying, true, 'the overlapping silent poll must not settle the retry POST');
+  assert.equal(retryLessonSdSync.call(context), false, 'a settled status poll must not re-enable an in-flight retry');
+  assert.equal(retryCalls.length, 1, 'duplicate retry clicks must send only one POST');
+  retryCalls[0][1]({ retried: 2, refused: null });
+  assert.equal(context.lessonAssetGenerationRetrying, false);
+  assert.deepEqual(messages.success, ['lesson.sdSyncRetryQueued']);
+  assert.equal(context.statusReloads, 1, 'a queued retry must silently reconcile aggregate status');
+}
+
+for (const [refused, expectedKey] of [
+  ['no_job', 'lesson.sdSyncRetryRefusedNoJob'],
+  ['terminal_job', 'lesson.sdSyncRetryRefusedTerminalJob'],
+  ['no_eligible', 'lesson.sdSyncRetryRefusedNoEligible'],
+  [null, 'lesson.sdSyncRetryRefused'],
+]) {
+  retryCalls.length = 0;
+  const { context, messages } = retryContext();
+  retryLessonSdSync.call(context);
+  retryCalls[0][1]({ retried: 0, refused });
+  assert.deepEqual(messages.success, [], `HTTP 200 refusal ${refused || 'unknown'} must not claim retry queued`);
+  assert.deepEqual(messages.warning, [expectedKey]);
+  assert.equal(context.statusReloads, 1, 'refusal must still reconcile aggregate status');
+}
+
+{
+  retryCalls.length = 0;
+  const first = retryContext();
+  retryLessonSdSync.call(first.context);
+  const staleSuccess = retryCalls[0][1];
+  const staleError = retryCalls[0][2];
+  resetLessonAssetGenerationStatus.call(first.context);
+  assert.equal(first.context.lessonAssetGenerationRetrying, false, 'route reset must clear retry loading');
+  first.context.lessonId = 'lesson-b';
+  first.context.lessonLoadRequestId = 2;
+  retryLessonSdSync.call(first.context);
+  assert.equal(first.context.lessonAssetGenerationRetrying, true);
+  staleSuccess({ retried: 1, refused: null });
+  staleError('stale failure');
+  assert.equal(first.context.lessonAssetGenerationRetrying, true, 'stale navigation callback must not clear the new lesson retry');
+  assert.deepEqual(first.messages.success, [], 'stale navigation callback must not show feedback');
+  assert.deepEqual(first.messages.error, [], 'stale navigation error must not show feedback');
+  assert.equal(first.context.statusReloads || 0, 0, 'stale navigation callback must not reload status');
+}
 
 const forbiddenClaims = /all robots (?:are )?updated|all robots have (?:been )?updated|tất cả robot đã (?:được )?cập nhật|所有机器人(?:均|都)?已更新|所有機器人(?:均|都)?已更新/i;
 for (const file of [component, 'src/i18n/en.js', 'src/i18n/vi.js', 'src/i18n/zh_CN.js', 'src/i18n/zh_TW.js']) {

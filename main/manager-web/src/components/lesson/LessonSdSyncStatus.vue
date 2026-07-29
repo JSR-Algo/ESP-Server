@@ -20,8 +20,8 @@
           v-if="retryAvailable"
           type="primary"
           size="small"
-          :loading="loading"
-          :disabled="loading"
+          :loading="retrying"
+          :disabled="retrying"
           :aria-label="$t('lesson.sdSyncRetryAction')"
           @click="$emit('retry')"
         >
@@ -86,6 +86,7 @@ export default {
   props: {
     status: { type: Object, default: null },
     loading: { type: Boolean, default: false },
+    retrying: { type: Boolean, default: false },
   },
   computed: {
     counters() {
