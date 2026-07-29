@@ -261,6 +261,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
         "state": "COMPLETE",
         "downloadedCount": 3,
         "skippedCount": 1,
+        "reusedCount": 0,
         "failedCount": 1,
         "criticalFailedCount": 0,
         "errorCode": "optional_thumbnail_failed_",
@@ -271,6 +272,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
         "state": "PENDING_OFFLINE",
         "downloadedCount": 0,
         "skippedCount": 0,
+        "reusedCount": 0,
         "failedCount": 0,
         "criticalFailedCount": 0,
         "retryable": True,
@@ -280,6 +282,7 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
         "state": "RETRY_WAIT",
         "downloadedCount": 1,
         "skippedCount": 0,
+        "reusedCount": 0,
         "failedCount": 2,
         "criticalFailedCount": 1,
         "errorCode": "critical_asset_failed_",
@@ -288,6 +291,68 @@ async def test_fanout_returns_one_contract_device_row_per_requested_device(
     for device in result["devices"]:
         if "errorCode" in device:
             assert _BACKEND_ERROR_CODE_RE.fullmatch(device["errorCode"])
+
+
+@pytest.mark.asyncio
+async def test_fanout_preserves_and_aggregates_reused_counts(monkeypatch, tmp_path):
+    _write_pack(tmp_path, CACHE_KEY_A)
+    _write_pack(tmp_path, CACHE_KEY_B)
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+
+    class Conn:
+        def __init__(self):
+            self.device_id = "dev-1"
+            self.config = config
+
+    async def fake_sync(_conn, *_args, **_kwargs):
+        return {
+            "packs": 2,
+            "synced": 2,
+            "failed": 0,
+            "resultsByCacheKey": {
+                CACHE_KEY_A: {
+                    "ready": True,
+                    "downloadedCount": 0,
+                    "skippedCount": 0,
+                    "reusedCount": 2,
+                    "failedCount": 0,
+                    "criticalFailedCount": 0,
+                },
+                CACHE_KEY_B: {
+                    "ready": True,
+                    "downloadedCount": 1,
+                    "skippedCount": 0,
+                    "failedCount": 0,
+                    "criticalFailedCount": 0,
+                },
+            },
+        }
+
+    callbacks = []
+
+    async def capture_callback(*_args, **kwargs):
+        callbacks.append(kwargs["result"])
+
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", fake_sync)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", capture_callback)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-1": Conn()},
+        device_ids=["dev-1"],
+        lesson_id="lesson",
+    )
+
+    callbacks_by_key = {item["cacheKey"]: item for item in callbacks}
+    assert callbacks_by_key[CACHE_KEY_A]["reusedCount"] == 2
+    assert callbacks_by_key[CACHE_KEY_B]["reusedCount"] == 0
+    assert result["devices"][0]["reusedCount"] == 2
 
 
 @pytest.mark.asyncio
@@ -337,6 +402,7 @@ async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
             "state": "RETRY_WAIT",
             "downloadedCount": 2,
             "skippedCount": 0,
+            "reusedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "errorCode": "callback_error",

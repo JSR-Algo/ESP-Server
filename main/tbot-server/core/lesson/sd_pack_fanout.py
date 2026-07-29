@@ -606,6 +606,7 @@ def _device_row(
     retryable: bool,
     downloaded: int = 0,
     skipped: int = 0,
+    reused: int = 0,
     failed: int = 0,
     critical_failed: int = 0,
     error_code: str = "",
@@ -615,6 +616,7 @@ def _device_row(
         "state": state,
         "downloadedCount": _bounded_count(downloaded),
         "skippedCount": _bounded_count(skipped),
+        "reusedCount": _bounded_count(reused),
         "failedCount": _bounded_count(failed),
         "criticalFailedCount": _bounded_count(critical_failed),
     }
@@ -631,7 +633,7 @@ def _device_row_from_sync_result(
     *,
     retained_keys: list[str],
 ) -> dict[str, Any]:
-    downloaded = skipped = failed = critical_failed = 0
+    downloaded = skipped = reused = failed = critical_failed = 0
     all_ready = bool(cache_keys)
     error_code = ""
     per_cache = _results_by_cache_key(sync_result, cache_keys)
@@ -640,6 +642,7 @@ def _device_row_from_sync_result(
         dto = _dto_from_cache_result(device_id, cache_key, result)
         downloaded += dto["downloadedCount"]
         skipped += dto["skippedCount"]
+        reused += dto["reusedCount"]
         failed += dto["failedCount"]
         critical_failed += dto["criticalFailedCount"]
         all_ready = all_ready and dto["ready"] and dto["criticalFailedCount"] == 0
@@ -662,6 +665,7 @@ def _device_row_from_sync_result(
         retryable=retryable,
         downloaded=downloaded,
         skipped=skipped,
+        reused=reused,
         failed=failed,
         critical_failed=critical_failed,
         error_code=error_code,
@@ -700,6 +704,7 @@ def _dto_from_cache_result(
         "cacheKey": str(cache_key or "").strip(),
         "downloadedCount": _bounded_count(result.get("downloadedCount")),
         "skippedCount": _bounded_count(result.get("skippedCount")),
+        "reusedCount": _bounded_count(result.get("reusedCount")),
         "failedCount": failed,
         "criticalFailedCount": critical_failed,
         "ready": ready,
