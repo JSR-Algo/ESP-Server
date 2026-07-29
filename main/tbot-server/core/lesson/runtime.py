@@ -1182,7 +1182,7 @@ class LessonRuntime:
         retired = self._retired_visual_ack_sequences.get(acked)
         if waiter is None and retired is None:
             return False
-        expected_envelope_fields = {
+        required_envelope_fields = {
             "type",
             "protocolVersion",
             "assignmentId",
@@ -1191,6 +1191,8 @@ class LessonRuntime:
             "sequence",
             "body",
         }
+        optional_envelope_fields = {"lessonId", "lessonVersion", "timestamp"}
+        envelope_fields = set(msg_json)
         expected_body_fields = {
             "acks",
             "accepted",
@@ -1199,12 +1201,32 @@ class LessonRuntime:
             "visualGeneration",
         }
         if (
-            set(msg_json) != expected_envelope_fields
+            not required_envelope_fields.issubset(envelope_fields)
+            or not envelope_fields.issubset(
+                required_envelope_fields | optional_envelope_fields
+            )
             or set(body) != expected_body_fields
             or msg_json.get("type") != "lesson_ack"
             or msg_json.get("protocolVersion") != RENDERER_V2
             or msg_json.get("assignmentId") != self.assignment_id
             or msg_json.get("sessionId") != self.session_id
+            or (
+                "lessonId" in msg_json
+                and msg_json.get("lessonId") != self.lesson_id
+            )
+            or (
+                "lessonVersion" in msg_json
+                and msg_json.get("lessonVersion") != self.lesson_version
+            )
+            or (
+                "timestamp" in msg_json
+                and (
+                    isinstance(msg_json.get("timestamp"), bool)
+                    or not isinstance(msg_json.get("timestamp"), (int, float))
+                    or not math.isfinite(float(msg_json.get("timestamp")))
+                    or float(msg_json.get("timestamp")) < 0
+                )
+            )
             or msg_json.get("stepId")
             != (self._step_id if waiter is not None else retired.get("stepId"))
             or type(msg_json.get("sequence")) is not int

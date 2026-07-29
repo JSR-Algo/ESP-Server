@@ -154,6 +154,29 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
             {"superseded"},
         )
 
+    async def test_accepts_firmware_visual_ack_identity_metadata(self):
+        task = asyncio.create_task(self.rt.send_visual_state("thinking"))
+        await asyncio.sleep(0)
+        frame = json.loads(self.rt.conn.websocket.sent[-1])
+        ack = self._ack(
+            frame["sequence"],
+            1,
+            generation=frame["body"]["visualGeneration"],
+        )
+        ack.update(
+            {
+                "lessonId": self.rt.lesson_id,
+                "lessonVersion": self.rt.lesson_version,
+                "timestamp": 1_700_000_000_000,
+            }
+        )
+
+        await self.rt.on_lesson_ack(ack)
+        await asyncio.sleep(0)
+
+        self.assertTrue(task.done())
+        self.assertTrue((await task).accepted)
+
     async def test_independent_sequences_resolve_only_the_correlated_waiter(self):
         first = asyncio.create_task(self.rt.send_visual_state("thinking"))
         second = asyncio.create_task(self.rt.send_visual_state("listen"))
