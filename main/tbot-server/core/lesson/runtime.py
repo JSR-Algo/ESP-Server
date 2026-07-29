@@ -993,6 +993,7 @@ class LessonRuntime:
         self._cinematic_phase: Optional[Dict[str, Any]] = None
         self._cinematic_stop_sent = False
         self._cinematic_cancel_sent = False
+        self._cinematic_pending_command: Optional[Dict[str, Any]] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1215,7 +1216,9 @@ class LessonRuntime:
             return
         if await self._resolve_visual_ack(msg_json):
             return
-        if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
+        if self.state in (S_FAILED, S_COMPLETED) or (
+            self.state == S_PAUSED and not self._renderer_v3_enabled()
+        ):
             return  # terminal is absorbing — no late frame can resurrect/override it
         body = msg_json.get("body") or {}
         legacy_acked = self._legacy_empty_ack_outstanding_seq(msg_json, body)
@@ -1236,29 +1239,84 @@ class LessonRuntime:
                 await self._accept_inbound(msg_json.get("sequence"))
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).
             return
-        if not self._cinematic_ready_ack_matches(frame, body):
+        pending = self._cinematic_pending_command
+        frame_command = self._cinematic_frame_command(frame)
+        if self.state == S_PAUSED and (
+            frame_command is None or frame_command.get("command") != "resume"
+        ):
+            return
+        if isinstance(pending, dict) and pending.get("command") in {
+            "pause", "resume", "stop", "cancel"
+        }:
+            if (
+                frame_command is None
+                or frame_command.get("command") != pending.get("command")
+                or frame_command.get("commandSequenceId") != pending.get("commandSequenceId")
+            ):
+                return
+        if not self._cinematic_ack_matches(frame, body):
             return
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return
         self._outstanding.pop(acked, None)
+        command = self._cinematic_frame_command(frame)
+        if command is not None:
+            self._cinematic_pending_command = None
         self._cancel_frame_ack_timeout()
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
 
-    def _cinematic_ready_ack_matches(
+    def _cinematic_frame_command(self, frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        body = frame.get("body")
+        if not isinstance(body, dict):
+            return None
+        nested = body.get("cinematicPhase")
+        command = nested if isinstance(nested, dict) else body
+        if not isinstance(command.get("command"), str):
+            return None
+        return command
+
+    def _cinematic_ack_matches(
         self, frame: Dict[str, Any], ack_body: Dict[str, Any]
     ) -> bool:
-        if not self._renderer_v3_enabled() or frame.get("type") != "lesson_prepare":
+        if not self._renderer_v3_enabled():
             return True
-        command = (frame.get("body") or {}).get("cinematicPhase")
+        command = self._cinematic_frame_command(frame)
+        if command is None:
+            return True
         ack = ack_body.get("cinematicPhase")
+        if not isinstance(ack, dict):
+            return False
+        kind = command.get("command")
+        common = {
+            "event", "command", "phaseId", "commandSequenceId", "accepted"
+        }
+        expected_event = "commandApplied"
+        expected_keys = common
+        if kind == "prepare":
+            expected_event = "frameZeroReady"
+            expected_keys = common | {"frameZeroReady"}
+        elif kind == "start":
+            expected_event = "phaseReady"
+            expected_keys = common | {"phaseReady"}
+        if (
+            set(ack) != expected_keys
+            or ack.get("event") != expected_event
+            or ack.get("command") != kind
+            or ack.get("phaseId") != command.get("phaseId")
+            or ack.get("commandSequenceId") != command.get("commandSequenceId")
+            or ack.get("accepted") is not True
+        ):
+            return False
+        if kind == "prepare" and ack.get("frameZeroReady") is not True:
+            return False
+        if kind == "start" and ack.get("phaseReady") is not True:
+            return False
+        pending = self._cinematic_pending_command
         return bool(
-            isinstance(command, dict)
-            and isinstance(ack, dict)
-            and ack.get("event") == "phaseReady"
-            and ack.get("phaseId") == command.get("phaseId")
-            and ack.get("commandSequenceId") == command.get("commandSequenceId")
-            and ack.get("frameZeroReady") is True
+            isinstance(pending, dict)
+            and pending.get("command") == kind
+            and pending.get("commandSequenceId") == command.get("commandSequenceId")
         )
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
@@ -1826,6 +1884,21 @@ class LessonRuntime:
             self.state = S_RUNNING
             self._forward({"type": "lesson_started", "startedAt": _wire_timestamp()})
             await self._emit_step()
+        elif ftype == "lesson_cinematic_control":
+            command = (frame.get("body") or {}).get("command")
+            if command == "pause":
+                self.state = S_PAUSED
+                self._cancel_visual_waiters(increment_generation=False, reason="paused")
+                self._forward_phase("paused")
+            elif command == "resume":
+                self.state = S_RUNNING
+                self._forward_phase("resumed")
+            elif command == "cancel":
+                self.state = S_COMPLETED
+                self._cancel_visual_waiters(increment_generation=True, reason="cancelled")
+                self._cancel_step_timeout()
+                self._cancel_child_response_timeout()
+                self._clear_cinematic_state()
         elif ftype == "lesson_step":
             # Step delivery is confirmed ONLY by its ack (plan §5.8) -> clear timeout.
             self._cancel_step_timeout()
@@ -1864,6 +1937,8 @@ class LessonRuntime:
             if reason != "COMPLETED":
                 self.state = S_COMPLETED
                 self._cancel_visual_waiters(increment_generation=True, reason="lessonAbandoned")
+                if self._renderer_v3_enabled():
+                    self._clear_cinematic_state()
                 self._forward_phase("abandoned")
                 self._forward(
                     {
@@ -2985,31 +3060,37 @@ class LessonRuntime:
     async def pause(self) -> None:
         if self.state != S_RUNNING:
             return
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            if self._cinematic_pending_command is None:
+                await self._emit(
+                    "lesson_cinematic_control",
+                    body={"command": "pause", "phaseId": self._cinematic_phase["phaseId"]},
+                )
+            return
         self.state = S_PAUSED
         self._cancel_visual_waiters(increment_generation=False, reason="paused")
         self._forward_phase("paused")
-        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
-            await self._emit(
-                "lesson_cinematic_control",
-                body={"command": "pause", "phaseId": self._cinematic_phase["phaseId"]},
-            )
 
     async def resume(self) -> VisualAckResult:
         if self.state != S_PAUSED:
             return VisualAckResult(
                 False, False, "unsupportedContract", None, self._visual_generation
             )
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            if self._cinematic_pending_command is None:
+                await self._emit(
+                    "lesson_cinematic_control",
+                    body={
+                        "command": "resume",
+                        "phaseId": self._cinematic_phase["phaseId"],
+                        "clockRebaseSequenceId": self._seq + 1,
+                    },
+                )
+            return VisualAckResult(
+                False, False, "unsupportedContract", None, self._visual_generation
+            )
         self.state = S_RUNNING
         self._forward_phase("resumed")
-        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
-            await self._emit(
-                "lesson_cinematic_control",
-                body={
-                    "command": "resume",
-                    "phaseId": self._cinematic_phase["phaseId"],
-                    "clockRebaseSequenceId": self._seq + 1,
-                },
-            )
         self._visual_generation += 1
         request = self._current_visual_request
         if request is None:
@@ -3082,9 +3163,11 @@ class LessonRuntime:
         return result
 
     async def stop(self) -> None:
-        self._cancel_visual_waiters(increment_generation=True, reason="stopped")
-        if self._renderer_v3_enabled() and self._cinematic_stop_sent:
-            return
+        if self._renderer_v3_enabled():
+            if self._cinematic_stop_sent or self._cinematic_pending_command is not None:
+                return
+        else:
+            self._cancel_visual_waiters(increment_generation=True, reason="stopped")
         if self.state not in (S_FAILED, S_COMPLETED):
             body: Dict[str, Any] = {"reason": "STOPPED"}
             if self._renderer_v3_enabled() and self._cinematic_phase is not None:
@@ -3096,12 +3179,13 @@ class LessonRuntime:
             await self._emit("lesson_stop", body=body)
 
     async def cancel(self, reason: str = "cancelled") -> None:
-        if not self._renderer_v3_enabled() or self._cinematic_cancel_sent:
+        if (
+            not self._renderer_v3_enabled()
+            or self._cinematic_cancel_sent
+            or self._cinematic_pending_command is not None
+        ):
             return
         self._cinematic_cancel_sent = True
-        self._cancel_visual_waiters(increment_generation=True, reason="cancelled")
-        self._cancel_step_timeout()
-        self._cancel_child_response_timeout()
         await self._emit(
             "lesson_cinematic_control",
             body={
@@ -3110,6 +3194,13 @@ class LessonRuntime:
                 "reason": str(reason or "cancelled")[:64],
             },
         )
+
+    def _clear_cinematic_state(self) -> None:
+        self._cinematic_pending_command = None
+        self._cinematic_phase = None
+        for sequence, frame in list(self._outstanding.items()):
+            if self._cinematic_frame_command(frame) is not None:
+                self._outstanding.pop(sequence, None)
 
     async def on_disconnect(self) -> None:
         self._cancel_visual_waiters(increment_generation=True, reason="disconnected")
@@ -3154,6 +3245,21 @@ class LessonRuntime:
                 frame_body.setdefault("commandSequenceId", seq)
                 if frame_body.get("command") == "resume":
                     frame_body["clockRebaseSequenceId"] = seq
+            command = self._cinematic_frame_command({"body": frame_body})
+            if command is not None:
+                command_sequence_id = command.get("commandSequenceId", frame_body.get("commandSequenceId"))
+                command["commandSequenceId"] = command_sequence_id
+                self._cinematic_pending_command = {
+                    "command": command.get("command"),
+                    "phaseId": command.get("phaseId"),
+                    "commandSequenceId": command_sequence_id,
+                    "targetState": {
+                        "pause": S_PAUSED,
+                        "resume": S_RUNNING,
+                        "stop": S_COMPLETED,
+                        "cancel": S_COMPLETED,
+                    }.get(command.get("command")),
+                }
         frame = self._envelope(frame_type, step_id=step_id, sequence=seq, body=frame_body)
         if frame_type == "lesson_step":
             scene = frame["body"].get("scene") or {}
@@ -3183,7 +3289,9 @@ class LessonRuntime:
             "body": copy.deepcopy(frame_body),
             "retryCount": max(0, int(frame_ack_retry_count or 0)),
         }
-        if frame_type in {"lesson_prepare", "lesson_start", "lesson_stop"}:
+        if frame_type in {
+            "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
+        }:
             self._start_frame_ack_timeout(frame_type, seq, step_id)
         await self._send(payload)
         return seq

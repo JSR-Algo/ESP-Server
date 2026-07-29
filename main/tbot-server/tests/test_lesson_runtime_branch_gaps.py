@@ -44,7 +44,9 @@ import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
 from core.lesson.errors import LessonError  # noqa: E402
 from core.lesson.runtime import (  # noqa: E402
     LessonRuntime,
+    S_COMPLETED,
     S_FAILED,
+    S_PAUSED,
     S_READY,
     S_RUNNING,
     VISUAL_DEGRADED_REASONS,
@@ -1428,6 +1430,9 @@ class CinematicContractTest(unittest.TestCase):
             ("pack not ready", lambda p, _phase: p.update(ready=False), "CINEMATIC_PACK_NOT_READY"),
             ("missing path", lambda p, _phase: (p["assets"][0].pop("localPath"), p["assets"][0].pop("sdPath")), "CINEMATIC_SD_PATH_MISSING"),
             ("online path", lambda p, _phase: p["assets"][0].update(localPath="https://cdn.test/a.mp4"), "CINEMATIC_SD_PATH_MISSING"),
+            ("query path", lambda p, _phase: p["assets"][0].update(localPath=p["assets"][0]["localPath"] + "?token=x", sdPath=p["assets"][0]["sdPath"] + "?token=x"), "CINEMATIC_SD_PATH_MISSING"),
+            ("fragment path", lambda p, _phase: p["assets"][0].update(localPath=p["assets"][0]["localPath"] + "#secret", sdPath=p["assets"][0]["sdPath"] + "#secret"), "CINEMATIC_SD_PATH_MISSING"),
+            ("userinfo path", lambda p, _phase: p["assets"][0].update(localPath=p["assets"][0]["localPath"] + "@user:pass", sdPath=p["assets"][0]["sdPath"] + "@user:pass"), "CINEMATIC_SD_PATH_MISSING"),
             ("metadata mismatch", lambda _p, ph: ph["layers"][0]["metadata"].update(frameCount=89), "CINEMATIC_METADATA_MISMATCH"),
         )
         for label, mutate, code in mutations:
@@ -1446,7 +1451,38 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         return [json.loads(payload) for payload in rt.conn.websocket.sent]
 
     @staticmethod
-    def _ack(rt, frame, inbound_sequence, *, ready=True, phase_id=None):
+    def _ack(
+        rt,
+        frame,
+        inbound_sequence,
+        *,
+        event=None,
+        phase_id=None,
+        command_sequence_id=None,
+        accepted=True,
+    ):
+        body = frame["body"]
+        command = body.get("cinematicPhase") if isinstance(body.get("cinematicPhase"), dict) else body
+        command_kind = command.get("command")
+        ack = {
+            "event": event or (
+                "frameZeroReady" if command_kind == "prepare"
+                else "phaseReady" if command_kind == "start"
+                else "commandApplied"
+            ),
+            "command": command_kind,
+            "phaseId": phase_id or command.get("phaseId"),
+            "commandSequenceId": (
+                command_sequence_id
+                if command_sequence_id is not None
+                else command.get("commandSequenceId", body.get("commandSequenceId"))
+            ),
+            "accepted": accepted,
+        }
+        if command_kind == "prepare":
+            ack["frameZeroReady"] = accepted
+        elif command_kind == "start":
+            ack["phaseReady"] = accepted
         return {
             "type": "lesson_ack",
             "protocolVersion": RENDERER_V3,
@@ -1463,14 +1499,20 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "ready": True,
                     "cacheKey": rt.asset_cache.cache_key,
                 },
-                "cinematicPhase": {
-                    "event": "phaseReady",
-                    "phaseId": phase_id or frame["body"]["cinematicPhase"]["phaseId"],
-                    "commandSequenceId": frame["body"]["cinematicPhase"]["commandSequenceId"],
-                    "frameZeroReady": ready,
-                },
+                "cinematicPhase": ack,
             },
         }
+
+    async def _advance_to_running(self, rt):
+        await rt.start()
+        prepare = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, prepare, 1))
+        self.assertEqual(rt.state, S_READY)
+        start = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, start, 2))
+        self.assertEqual(rt.state, S_RUNNING)
+        self.assertEqual(self._frames(rt)[-1]["type"], "lesson_step")
+        return 3
 
     async def test_exact_v3_direct_mp4_capability_gates_prepare(self):
         for renderer in ("teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"):
@@ -1489,7 +1531,7 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "CINEMATIC_CAPABILITY_UNSUPPORTED")
         self.assertEqual(conn.websocket.sent, [])
 
-    async def test_prepare_projects_only_current_ordered_phase_and_waits_for_typed_ready_ack(self):
+    async def test_prepare_and_start_each_require_their_own_typed_ready_ack(self):
         rt = _cinematic_runtime()
         await rt.start()
         frames = self._frames(rt)
@@ -1507,11 +1549,16 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("branches", command)
         self.assertNotIn("cinematicPhases", prepare["body"])
 
-        wrong = self._ack(rt, prepare, 1, phase_id="greet")
+        generic = self._ack(rt, prepare, 1)
+        generic["body"].pop("cinematicPhase")
+        await rt.on_lesson_ack(generic)
+        self.assertEqual([f["type"] for f in self._frames(rt)], ["lesson_prepare"])
+
+        wrong = self._ack(rt, prepare, 1, event="phaseReady")
+        wrong["body"]["cinematicPhase"]["phaseReady"] = True
         await rt.on_lesson_ack(wrong)
         self.assertEqual([f["type"] for f in self._frames(rt)], ["lesson_prepare"])
-        wrong["body"]["cinematicPhase"]["phaseId"] = "opening"
-        wrong["body"]["cinematicPhase"]["frameZeroReady"] = False
+        wrong = self._ack(rt, prepare, 1, phase_id="greet")
         await rt.on_lesson_ack(wrong)
         self.assertEqual([f["type"] for f in self._frames(rt)], ["lesson_prepare"])
 
@@ -1520,6 +1567,7 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         frames = self._frames(rt)
         self.assertEqual([frame["type"] for frame in frames], ["lesson_prepare", "lesson_start"])
         start = frames[-1]
+        self.assertEqual(rt.state, S_READY)
         self.assertEqual(start["body"]["cinematicPhase"], {
             "command": "start",
             "phaseId": "opening",
@@ -1528,6 +1576,27 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await rt.on_lesson_ack(ready)
         self.assertEqual(len(self._frames(rt)), 2)
+
+        generic_start = self._ack(rt, start, 2)
+        generic_start["body"].pop("cinematicPhase")
+        await rt.on_lesson_ack(generic_start)
+        self.assertEqual(rt.state, S_READY)
+        self.assertEqual(len(self._frames(rt)), 2)
+
+        wrong_start = self._ack(rt, start, 2, event="frameZeroReady")
+        wrong_start["body"]["cinematicPhase"]["frameZeroReady"] = True
+        await rt.on_lesson_ack(wrong_start)
+        self.assertEqual(rt.state, S_READY)
+        self.assertEqual(len(self._frames(rt)), 2)
+
+        phase_ready = self._ack(rt, start, 2)
+        await rt.on_lesson_ack(phase_ready)
+        self.assertEqual(rt.state, S_RUNNING)
+        self.assertEqual([f["type"] for f in self._frames(rt)], [
+            "lesson_prepare", "lesson_start", "lesson_step",
+        ])
+        await rt.on_lesson_ack(phase_ready)
+        self.assertEqual(len(self._frames(rt)), 3)
 
     async def test_prepare_retry_reuses_command_identity_and_lifecycle_commands_are_idempotent(self):
         sleep = T._GatedSleep()
@@ -1547,30 +1616,51 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await rt.on_lesson_ack(self._ack(rt, retry, 1))
         start = self._frames(rt)[-1]
-        await rt.on_lesson_ack({
-            **self._ack(rt, start, 2),
-            "body": {"acks": start["sequence"], "rendered": True, "degraded": False},
-        })
+        await rt.on_lesson_ack(self._ack(rt, start, 2))
         self.assertEqual(self._frames(rt)[-1]["type"], "lesson_step")
 
         await rt.pause()
         await rt.pause()
         pause_frames = [f for f in self._frames(rt) if f["type"] == "lesson_cinematic_control" and f["body"]["command"] == "pause"]
         self.assertEqual(len(pause_frames), 1)
+        self.assertEqual(rt.state, S_RUNNING)
+        generic_pause = self._ack(rt, pause_frames[0], 3)
+        generic_pause["body"].pop("cinematicPhase")
+        await rt.on_lesson_ack(generic_pause)
+        self.assertEqual(rt.state, S_RUNNING)
+        await rt.on_lesson_ack(self._ack(rt, pause_frames[0], 3))
+        self.assertEqual(rt.state, S_PAUSED)
+        step = [f for f in self._frames(rt) if f["type"] == "lesson_step"][-1]
+        stale_step_ack = T._ack(step["sequence"], 4, step_id=step["stepId"])
+        stale_step_ack["protocolVersion"] = RENDERER_V3
+        await rt.on_lesson_ack(stale_step_ack)
+        self.assertFalse(rt._step_acked)
+
         await rt.resume()
         await rt.resume()
         resume_frames = [f for f in self._frames(rt) if f["type"] == "lesson_cinematic_control" and f["body"]["command"] == "resume"]
         self.assertEqual(len(resume_frames), 1)
+        self.assertEqual(rt.state, S_PAUSED)
         self.assertGreater(resume_frames[0]["body"]["clockRebaseSequenceId"], pause_frames[0]["body"]["commandSequenceId"])
+        await rt.on_lesson_ack(self._ack(rt, resume_frames[0], 4))
+        self.assertEqual(rt.state, S_RUNNING)
+
         await rt.stop()
         await rt.stop()
         stop_frames = [f for f in self._frames(rt) if f["type"] == "lesson_stop"]
         self.assertEqual(len(stop_frames), 1)
+        self.assertEqual(rt.state, S_RUNNING)
         self.assertEqual(stop_frames[0]["body"]["cinematicPhase"]["command"], "stop")
+        await rt.on_lesson_ack(self._ack(rt, stop_frames[0], 5))
+        self.assertEqual(rt.state, S_COMPLETED)
+        self.assertIsNone(rt._cinematic_phase)
 
     async def test_cancel_is_typed_idempotent_and_does_not_offer_firmware_branch_selection(self):
         rt = _cinematic_runtime()
         rt.state = S_RUNNING
+        rt._cinematic_phase = {
+            "phaseId": "opening",
+        }
         await rt.cancel("assignmentReplaced")
         await rt.cancel("assignmentReplaced")
         frames = self._frames(rt)
@@ -1578,6 +1668,14 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(frames[0]["type"], "lesson_cinematic_control")
         self.assertEqual(frames[0]["body"]["command"], "cancel")
         self.assertEqual(frames[0]["body"]["reason"], "assignmentReplaced")
+        self.assertEqual(rt.state, S_RUNNING)
+        generic = self._ack(rt, frames[0], 1)
+        generic["body"].pop("cinematicPhase")
+        await rt.on_lesson_ack(generic)
+        self.assertEqual(rt.state, S_RUNNING)
+        await rt.on_lesson_ack(self._ack(rt, frames[0], 1))
+        self.assertEqual(rt.state, S_COMPLETED)
+        self.assertIsNone(rt._cinematic_phase)
         wire = json.dumps(frames[0])
         self.assertNotRegex(wire, r"nextPhase|nextStep|branch|choice")
 

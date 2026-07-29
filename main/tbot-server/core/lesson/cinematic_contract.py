@@ -52,6 +52,9 @@ def _local_sd_path(asset: Dict[str, Any], local_root: str) -> str:
         _fail("CINEMATIC_SD_PATH_MISSING", "cinematic pack root is not a lesson SD root")
     if not value.startswith(normalized_root + "/") or value.startswith(("http://", "https://")):
         _fail("CINEMATIC_SD_PATH_MISSING", "cinematic layer is outside the lesson SD pack")
+    relative = value[len(normalized_root) + 1 :]
+    if any(marker in relative for marker in ("?", "#", "@", "\\")) or "://" in relative:
+        _fail("CINEMATIC_SD_PATH_MISSING", "cinematic SD path contains URL or credential syntax")
     return value
 
 
