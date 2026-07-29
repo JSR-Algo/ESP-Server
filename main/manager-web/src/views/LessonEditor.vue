@@ -1870,7 +1870,10 @@ export default {
               });
             },
             onError: () => {
-              if (lessonId === this.lessonId) this.savingLessonVisuals = false;
+              if (lessonId !== this.lessonId) return;
+              this.pendingLessonVisualPair = null;
+              this.savingLessonVisuals = false;
+              this.syncCinematicSoon();
             },
           });
         },

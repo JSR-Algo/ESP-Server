@@ -175,4 +175,13 @@ const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachOb
 assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*objectAssetVersionId:\s*obj\.versionId[\s\S]*objectAssetKey:\s*obj\.assetKey/m);
 assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
 
+const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
+const authoritativeReloadFailure = applyLessonVisualSelectionSource.match(
+  /this\.fetchSteps\(\{[\s\S]*?onError:\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s{12}\},\n\s{10}\}\);/m,
+);
+assert.ok(authoritativeReloadFailure, 'lesson visual save must handle authoritative step reload failure');
+assert.match(authoritativeReloadFailure[1], /this\.pendingLessonVisualPair\s*=\s*null;/, 'reload failure must discard the optimistic lesson pair');
+assert.match(authoritativeReloadFailure[1], /this\.savingLessonVisuals\s*=\s*false;/, 'reload failure must stop the visual save state');
+assert.match(authoritativeReloadFailure[1], /this\.syncCinematicSoon\(\);/, 'reload failure must resynchronize the cinematic from loaded authoritative steps');
+
 console.log('lesson visual selection contract: OK');
