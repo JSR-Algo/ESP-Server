@@ -364,10 +364,14 @@ class AssetCache:
         materialized_path = pack_path if pack_path and os.path.exists(pack_path) else self._asset_pack_source_path(asset)
         size = os.path.getsize(materialized_path) if os.path.exists(materialized_path) else None
         sha256 = self._hash_file(materialized_path) if os.path.exists(materialized_path) else asset.sha256
+        download_url = self._resolve_url(asset)
+        if self.public_base_url and self._asset_cache_materialized(asset):
+            token = base64.urlsafe_b64encode(self.cache_key.encode("utf-8")).decode("ascii").rstrip("=")
+            download_url = f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='')}"
         record = {
             "key": asset.key,
             "path": asset.path,
-            "url": self._resolve_url(asset),
+            "url": download_url,
             "sha256": sha256,
             "sourceSha256": asset.sha256 if sha256 != asset.sha256 else None,
             "size": size,

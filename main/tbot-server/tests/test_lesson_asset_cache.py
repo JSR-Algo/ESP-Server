@@ -957,6 +957,32 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             poster["localPath"],
         )
 
+    async def test_asset_pack_manifest_uses_verified_local_http_cache_for_firmware_downloads(self):
+        assets = _critical_assets()
+        cache = self._cache(
+            assets,
+            client=_client_for(assets),
+            lesson_version=3,
+            manifest_checksum="abcdef1234567890",
+            public_base_url="https://esp.example",
+            asset_pack_local_root="sd://sdcard/tbot/lesson-assets",
+        )
+
+        await cache.preload()
+        pack = cache.asset_pack_manifest(
+            assignment_version=7,
+            lesson_id="w01-d01-barn-say-it",
+            lesson_version=3,
+            manifest_checksum="abcdef1234567890",
+        )
+
+        token = base64.urlsafe_b64encode(pack["cacheKey"].encode("utf-8")).decode("ascii").rstrip("=")
+        by_key = {asset["key"]: asset for asset in pack["assets"]}
+        self.assertEqual(
+            by_key["backgroundScene.poster"]["url"],
+            f"https://esp.example/tbot/lesson-assets/{token}/backgroundScene.poster",
+        )
+
     async def test_same_lesson_version_republish_checksum_downloads_to_new_sd_cache_key(self):
         old_poster = POSTER
         new_poster = POSTER_REPUBLISHED
