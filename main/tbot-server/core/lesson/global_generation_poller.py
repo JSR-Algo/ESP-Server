@@ -18,6 +18,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 
 from config.logger import setup_logging
+from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
 
 POLL_INTERVAL_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -62,6 +63,9 @@ _ASSET_FIELDS = frozenset(
         "critical",
     }
 )
+_SHARED_IDENTITY_FIELDS = frozenset({"sharedAssetKey", "sharedAssetVersion"})
+_RENDERER_V3_MP4_FIELDS = frozenset({"compatibilityMetadata", "visualRefs"})
+_ALL_ASSET_FIELDS = _ASSET_FIELDS | _SHARED_IDENTITY_FIELDS | _RENDERER_V3_MP4_FIELDS
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _LESSON_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -407,7 +411,7 @@ def _validate_pack(value: Any, allowed_origins: set[tuple[str, str, int]]) -> di
         "manifestChecksum": manifest_checksum,
         "cacheKey": expected_cache_key,
         "classification": classification,
-        "assets": [{key: asset[key] for key in _ASSET_FIELDS} for asset in assets],
+        "assets": [{key: asset[key] for key in asset if key != "encodedKey"} for asset in assets],
     }
 
 
@@ -418,7 +422,9 @@ def _validate_asset(
 ) -> dict[str, Any]:
     if type(value) is not dict:
         raise _PollRejected("cms_invalid_asset")
-    _exact_fields(value, _ASSET_FIELDS)
+    fields = set(value)
+    if not _ASSET_FIELDS.issubset(fields) or fields - _ALL_ASSET_FIELDS:
+        raise _PollRejected("cms_unknown_field")
     key = value.get("key")
     if not isinstance(key, str) or not key or _CONTROL_RE.search(key):
         raise _PollRejected("cms_invalid_asset_key")
@@ -452,6 +458,25 @@ def _validate_asset(
         raise _PollRejected("cms_invalid_media_type")
     if type(value.get("critical")) is not bool:
         raise _PollRejected("cms_invalid_critical")
+    media_type = value["mediaType"]
+    if media_type.lower().startswith("video/"):
+        try:
+            validate_renderer_v3_shared_mp4(value)
+        except FirmwareSyncPackError:
+            raise _PollRejected("cms_invalid_renderer_v3_mp4") from None
+        if fields != _ALL_ASSET_FIELDS:
+            raise _PollRejected("cms_invalid_renderer_v3_mp4")
+    elif fields & _RENDERER_V3_MP4_FIELDS:
+        raise _PollRejected("cms_invalid_renderer_v3_mp4")
+    elif fields & _SHARED_IDENTITY_FIELDS:
+        if not _SHARED_IDENTITY_FIELDS.issubset(fields):
+            raise _PollRejected("cms_invalid_shared_asset_identity")
+        shared_key = value.get("sharedAssetKey")
+        shared_version = value.get("sharedAssetVersion")
+        if not isinstance(shared_key, str) or not shared_key or type(shared_version) is not int or shared_version < 1:
+            raise _PollRejected("cms_invalid_shared_asset_identity")
+        if value.get("key") != f"{shared_key}@v{shared_version}":
+            raise _PollRejected("cms_invalid_shared_asset_identity")
     return {**value, "encodedKey": encoded}
 
 

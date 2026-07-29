@@ -168,6 +168,50 @@ def test_normalizes_legacy_only_aliases_without_mutating_input():
     assert sent["sdPath"] == sent["localPath"]
     assert render_pack == before
 
+
+def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_without_credentials():
+    render_pack = _pack("scene.opening@v3")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "path": "visuals/scene.opening/v3.mp4",
+        "url": "https://assets.example/visuals/scene.opening/v3.mp4",
+        "onlineUrl": "https://assets.example/visuals/scene.opening/v3.mp4",
+        "mediaType": "video/mp4",
+        "sharedAssetKey": "scene.opening",
+        "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [
+            {"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"},
+            {"stepKey": "s1", "phase": "greet", "slot": "backgroundScene.greet"},
+        ],
+    })
+    asset["sdPath"] = f"sd://tbot/lesson-assets/{CACHE_KEY}/scene.opening%40v3"
+    asset["localPath"] = asset["sdPath"]
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["mediaType"] == "video/mp4"
+    assert sent["sharedAssetKey"] == "scene.opening"
+    assert sent["sharedAssetVersion"] == 3
+    assert sent["compatibilityMetadata"] == asset["compatibilityMetadata"]
+    assert sent["visualRefs"] == asset["visualRefs"]
+    assert sent["localPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/scene.opening%40v3"
+    assert sent["sdPath"] == sent["localPath"]
+    assert "authorization" not in {key.lower() for key in sent}
+    assert "cookie" not in {key.lower() for key in sent}
+
+
+def test_rejects_arbitrary_video_that_lacks_validated_renderer_v3_shared_identity():
+    render_pack = _pack("authored-video")
+    render_pack["assets"][0]["mediaType"] = "video/mp4"
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
 @pytest.mark.parametrize(
     ("mutate", "secret"),
     [

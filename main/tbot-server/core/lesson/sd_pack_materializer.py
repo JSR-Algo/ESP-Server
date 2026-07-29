@@ -28,6 +28,7 @@ from core.lesson.shared_asset_store import (
     PackReplayMismatchError,
     SharedAssetStore,
 )
+from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
 
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
@@ -49,6 +50,10 @@ _ASSET_FIELDS = frozenset(
         "url",
         "sdPath",
         "localPath",
+        "sharedAssetKey",
+        "sharedAssetVersion",
+        "compatibilityMetadata",
+        "visualRefs",
     }
 )
 _METRICS = {
@@ -469,6 +474,25 @@ def _validate_asset(
     expected_sd_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
+    renderer_v3_fields: dict[str, Any] = {}
+    if media_type.lower().startswith("video/"):
+        try:
+            renderer_v3_fields = validate_renderer_v3_shared_mp4(dict(item))
+        except FirmwareSyncPackError:
+            raise _bad("INVALID_RENDERER_V3_MP4", "Invalid renderer-v3 shared MP4") from None
+    elif any(field in item for field in ("sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs")):
+        if "compatibilityMetadata" in item or "visualRefs" in item:
+            raise _bad("INVALID_RENDERER_V3_MP4", "Renderer-v3 metadata is only valid for shared MP4")
+        shared_key = item.get("sharedAssetKey")
+        shared_version = item.get("sharedAssetVersion")
+        if not isinstance(shared_key, str) or not shared_key or type(shared_version) is not int or shared_version < 1:
+            raise _bad("INVALID_SHARED_ASSET_IDENTITY", "Invalid shared asset identity")
+        if key != f"{shared_key}@v{shared_version}":
+            raise _bad("INVALID_SHARED_ASSET_IDENTITY", "Invalid shared asset identity")
+        renderer_v3_fields = {
+            "sharedAssetKey": shared_key,
+            "sharedAssetVersion": shared_version,
+        }
     return {
         "key": key,
         "sha256": digest,
@@ -477,6 +501,7 @@ def _validate_asset(
         "critical": item["critical"],
         "onlineUrl": online_url,
         "sdPath": sd_path,
+        **renderer_v3_fields,
     }
 
 

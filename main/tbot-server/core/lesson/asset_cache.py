@@ -44,6 +44,7 @@ from core.lesson.errors import (
     PreloadTimeout,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
 
 TAG = "LessonAssetCache"
 
@@ -83,7 +84,11 @@ def _normalize_esptft_background_jpeg(content: bytes) -> bytes:
 class AssetState:
     """Mutable per-asset record. All manifest assets gate READY for SD-safe lessons."""
 
-    __slots__ = ("key", "path", "sha256", "critical", "layer", "role", "media_type", "url", "state", "checksum_ok", "reason")
+    __slots__ = (
+        "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
+        "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
+        "renderer_v3_mp4", "state", "checksum_ok", "reason",
+    )
 
     def __init__(self, asset: Dict[str, Any]) -> None:
         # ``key`` is projected upstream as ``a.get("id") or a.get("assetId")``
@@ -103,12 +108,22 @@ class AssetState:
         self.key: str = key
         self.path: str = asset.get("path") or ""
         self.sha256: str = (asset.get("sha256") or "").lower()
+        self.size: Optional[int] = asset.get("size") if type(asset.get("size")) is int else None
         self.critical: bool = bool(asset.get("critical"))
         self.layer: Optional[str] = asset.get("layer")
         self.role: Optional[str] = asset.get("role")
         self.media_type: Optional[str] = asset.get("mediaType") or asset.get("media_type")
         # Absolute url is optional; when assetOriginBase is set we join path to it.
-        self.url: Optional[str] = asset.get("url")
+        self.url: Optional[str] = asset.get("onlineUrl") or asset.get("url")
+        self.shared_asset_key: Optional[str] = asset.get("sharedAssetKey")
+        self.shared_asset_version: Optional[int] = asset.get("sharedAssetVersion")
+        self.compatibility_metadata: Any = asset.get("compatibilityMetadata")
+        self.visual_refs: Any = asset.get("visualRefs")
+        try:
+            validate_renderer_v3_shared_mp4(asset)
+            self.renderer_v3_mp4 = True
+        except FirmwareSyncPackError:
+            self.renderer_v3_mp4 = False
         self.state: str = PENDING
         self.checksum_ok: bool = False
         self.reason: Optional[str] = None
@@ -384,6 +399,10 @@ class AssetCache:
             "state": asset.state,
             "checksumOk": asset.checksum_ok,
             "localPath": self._local_pack_path(asset),
+            "sharedAssetKey": asset.shared_asset_key,
+            "sharedAssetVersion": asset.shared_asset_version,
+            "compatibilityMetadata": asset.compatibility_metadata,
+            "visualRefs": asset.visual_refs,
         }
         return {k: v for k, v in record.items() if v is not None}
 
@@ -481,9 +500,9 @@ class AssetCache:
             return
         for a in self.critical_assets:
             is_video = a.role == "video" or (a.media_type or "").lower().startswith("video/")
-            if a.layer == "backgroundScene" and is_video:
+            if is_video and not a.renderer_v3_mp4:
                 raise AssetProfileUnavailable(
-                    "espTft cannot render a critical full-video backgroundScene",
+                    "espTft only accepts validated renderer-v3 shared MP4 assets",
                     context={"assetKey": a.key, "mediaType": a.media_type, "role": a.role},
                 )
 
@@ -793,12 +812,16 @@ class AssetCache:
                         self._downloaded_total_bytes += len(chunk)
                         hasher.update(chunk)
                         fh.write(chunk)
+                    fh.flush()
+                    os.fsync(fh.fileno())
         except PreloadTimeout:
+            self._downloaded_total_bytes = max(0, self._downloaded_total_bytes - downloaded)
             self._safe_remove(tmp_path)
             asset.state = FAILED
             asset.reason = "preload_timeout"
             raise
         except Exception as exc:  # network / HTTP failure (NOT a checksum fault)
+            self._downloaded_total_bytes = max(0, self._downloaded_total_bytes - downloaded)
             self._safe_remove(tmp_path)
             asset.state = FAILED
             asset.checksum_ok = False
@@ -808,8 +831,18 @@ class AssetCache:
             # we do NOT raise a checksum mismatch for a transport error.
             return
 
+        if asset.size is not None and downloaded != asset.size:
+            self._downloaded_total_bytes = max(0, self._downloaded_total_bytes - downloaded)
+            self._safe_remove(tmp_path)
+            asset.state = FAILED
+            asset.checksum_ok = False
+            asset.reason = "declared_size_mismatch"
+            self._log("warning", f"asset {asset.key} size mismatch want={asset.size} got={downloaded}")
+            return
+
         digest = hasher.hexdigest()
         if digest != asset.sha256:
+            self._downloaded_total_bytes = max(0, self._downloaded_total_bytes - downloaded)
             self._safe_remove(tmp_path)
             asset.state = FAILED
             asset.checksum_ok = False
@@ -892,6 +925,8 @@ class AssetCache:
     def _resolve_url(self, asset: AssetState) -> str:
         # assetOriginBase (one config value, D-ASSET-HOST) joined to the relative
         # path; fall back to a manifest-provided absolute url when no base is set.
+        if asset.renderer_v3_mp4 and asset.url:
+            return asset.url
         if self.asset_origin_base and asset.path:
             return f"{self.asset_origin_base}/{asset.path.lstrip('/')}"
         if asset.url:

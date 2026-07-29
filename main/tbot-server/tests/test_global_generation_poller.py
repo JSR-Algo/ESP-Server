@@ -46,6 +46,27 @@ def _asset(
     }
 
 
+def _renderer_v3_mp4_asset(*, cache_key: str = f"lesson-a/v3-{HASH_B}") -> dict:
+    asset = _asset("scene.opening@v3", size=900000, cache_key=cache_key)
+    asset.update({
+        "onlineUrl": "https://cdn.example/visuals/scene.opening/v3.mp4",
+        "url": "https://cdn.example/visuals/scene.opening/v3.mp4",
+        "mediaType": "video/mp4",
+        "sharedAssetKey": "scene.opening",
+        "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 9000, "frameCount": 90,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [
+            {"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"},
+            {"stepKey": "s1", "phase": "greet", "slot": "backgroundScene.greet"},
+        ],
+    })
+    return asset
+
+
 def _pack(*, lesson_id: str = "lesson-a", classification: str = "curriculum") -> dict:
     checksum = HASH_B
     cache_key = f"{lesson_id}/v3-{checksum}"
@@ -166,6 +187,66 @@ async def test_valid_200_stores_desired_before_callback_and_then_uses_etag() -> 
     assert requests[1].headers["accept-encoding"] == "identity"
     assert requests[1].headers["if-none-match"] == etag
     assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_validated_renderer_v3_shared_mp4_metadata_passes_through_unchanged() -> None:
+    pack = _pack()
+    pack["assets"] = [_renderer_v3_mp4_asset(cache_key=pack["cacheKey"])]
+    payload = _payload(index=[pack])
+    received = []
+
+    async def callback(data: dict) -> None:
+        received.append(data)
+
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), callback,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", [
+    lambda asset: asset.pop("sharedAssetKey"),
+    lambda asset: asset["compatibilityMetadata"].update(codec="h264"),
+    lambda asset: asset.update(visualRefs=[]),
+    lambda asset: asset.update(onlineUrl=asset["onlineUrl"] + "?sig=secret", url=asset["url"] + "?sig=secret"),
+])
+async def test_rejects_unvalidated_or_credential_bearing_renderer_v3_video(mutation) -> None:
+    pack = _pack()
+    asset = _renderer_v3_mp4_asset(cache_key=pack["cacheKey"])
+    mutation(asset)
+    pack["assets"] = [asset]
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    result = await poller.run_once()
+
+    assert result["state"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_rejects_legacy_or_arbitrary_video_without_renderer_v3_shared_contract() -> None:
+    pack = _pack()
+    pack["assets"][0].update(mediaType="video/mp4")
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    result = await poller.run_once()
+
+    assert result["state"] == "rejected"
 
 
 @pytest.mark.asyncio

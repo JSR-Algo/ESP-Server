@@ -62,11 +62,13 @@ class _Client:
     def __init__(self, mapping, *, on_chunk=None):
         self.mapping = mapping
         self.requests = []
+        self.request_headers = []
         self._on_chunk = on_chunk
 
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
         assert method == "GET"
         self.requests.append(url)
+        self.request_headers.append(dict(kwargs.get("headers") or {}))
         value = self.mapping[url]
         if isinstance(value, _StreamResponse):
             return value
@@ -216,6 +218,77 @@ async def test_valid_bounded_stream_materializes_atomic_ready_pack(tmp_path):
     }
     assert _sha((pack / "backgroundScene.poster").read_bytes()) == POSTER_SHA
     assert "sig=secret" in manifest["assets"][0]["onlineUrl"]
+
+
+@pytest.mark.asyncio
+async def test_renderer_v3_public_mp4_preserves_exact_bytes_and_metadata_without_credentials(tmp_path):
+    content = b"\x00\x00\x00\x18ftypmp42renderer-v3-mjpeg"
+    key = "scene.opening@v3"
+    url = "https://assets.example/visuals/scene.opening/v3.mp4"
+    metadata = {
+        "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+        "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+        "chromaKey": None,
+    }
+    manifest = _manifest(assets=[{
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key),
+        "localPath": _sd_path(key), "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+        "compatibilityMetadata": metadata,
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+    }])
+    client = _Client({url: [content[:8], content[8:]]})
+
+    result = await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=client, resolver=_public_resolver,
+    )
+
+    assert result["ready"] is True
+    assert client.requests == [url]
+    assert client.request_headers == [{}]
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=tmp_path / "sd" / "tbot" / "lesson-assets")
+    pack = store.pack_root / CACHE_KEY
+    assert (pack / quote(key, safe="")).read_bytes() == content
+    stored = json.loads((pack / "pack.json").read_text(encoding="utf-8"))
+    assert stored["assets"][0]["compatibilityMetadata"] == metadata
+    assert stored["assets"][0]["visualRefs"] == manifest["assets"][0]["visualRefs"]
+
+
+@pytest.mark.asyncio
+async def test_renderer_v3_mp4_truncation_cleans_staging_and_allows_retry(tmp_path):
+    content = b"renderer-v3-complete-mp4"
+    key = "scene.opening@v3"
+    url = "https://assets.example/visuals/scene.opening/v3.mp4"
+    asset = {
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key),
+        "localPath": _sd_path(key), "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+    }
+    manifest = _manifest(assets=[asset])
+
+    with pytest.raises(MaterializationError) as truncated:
+        await materialize_lesson_sd_pack(
+            manifest, config=_config(tmp_path), client=_Client({url: [content[:-2]]}), resolver=_public_resolver,
+        )
+
+    assert truncated.value.code == "DECLARED_SIZE_MISMATCH"
+    root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    encoded = quote(key, safe="")
+    assert not (root / CACHE_KEY / encoded).exists()
+    assert not list(root.rglob("*.part"))
+    assert not list(root.rglob(".materialize-*"))
+
+    result = await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=_Client({url: [content]}), resolver=_public_resolver,
+    )
+    assert result["ready"] is True
+    assert (root / CACHE_KEY / encoded).read_bytes() == content
 
 
 @pytest.mark.asyncio
