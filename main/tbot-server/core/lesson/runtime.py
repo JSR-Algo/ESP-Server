@@ -3508,7 +3508,19 @@ class LessonRuntime:
             return True
         attestation = self._sd_asset_sync_attestation(result, pack)
         if attestation is None:
-            self._log("warning", "robot SD sync returned invalid attestation")
+            diagnostic = self._sd_asset_sync_diagnostic(result, pack)
+            self._log(
+                "warning",
+                "robot SD sync returned invalid attestation "
+                f"ready={diagnostic['ready']} "
+                f"assetCount={diagnostic['assetCount']} "
+                f"downloadedCount={diagnostic['downloadedCount']} "
+                f"skippedCount={diagnostic['skippedCount']} "
+                f"failedCount={diagnostic['failedCount']} "
+                f"criticalFailedCount={diagnostic['criticalFailedCount']} "
+                f"cacheKeyMatch={diagnostic['cacheKeyMatch']} "
+                f"checksumMatch={diagnostic['checksumMatch']}",
+            )
             return False
         marker_fields = (
             f"cacheKey={attestation['cacheKey']} "
@@ -3575,6 +3587,39 @@ class LessonRuntime:
             "cacheKey": expected_cache_key,
             "assetCount": len(assets),
             **counts,
+        }
+
+    def _sd_asset_sync_diagnostic(
+        self, result: Any, requested_pack: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                result = {}
+        if not isinstance(result, dict):
+            result = {}
+        assets = requested_pack.get("assets")
+        expected_cache_key = requested_pack.get("cacheKey")
+        expected_checksum = requested_pack.get("manifestChecksum")
+
+        def count(name: str) -> int:
+            value = result.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else -1
+
+        checksums = [result[key] for key in ("manifestChecksum", "packChecksum") if key in result]
+        return {
+            "ready": result.get("ready") is True,
+            "assetCount": len(assets) if isinstance(assets, list) else -1,
+            "downloadedCount": count("downloadedCount"),
+            "skippedCount": count("skippedCount"),
+            "failedCount": count("failedCount"),
+            "criticalFailedCount": count("criticalFailedCount"),
+            "cacheKeyMatch": isinstance(expected_cache_key, str)
+            and result.get("cacheKey") == expected_cache_key,
+            "checksumMatch": isinstance(expected_checksum, str)
+            and bool(checksums)
+            and all(value == expected_checksum for value in checksums),
         }
 
     def _ack_reports_asset_pack_ready(self, ack_body: Dict[str, Any]) -> bool:
