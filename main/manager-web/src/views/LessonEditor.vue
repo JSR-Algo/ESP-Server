@@ -68,14 +68,14 @@
       </section>
 
       <section v-if="lesson" class="lesson-studio">
-        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft && !savingLessonVisuals && !addingStep && !reordering && !deletingStepKey" @add="openStepDialog" />
+        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft && !lessonVisualStepMutationBlocked && !addingStep && !reordering && !deletingStepKey" @add="openStepDialog" />
         <main class="lesson-studio__canvas">
           <div class="lesson-studio__toolbar">
             <div>
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || savingLessonVisuals || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
               Save step
             </el-button>
           </div>
@@ -167,7 +167,7 @@
               />
               <lesson-step-prompt-editor
                 v-model="promptDraft"
-                :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual"
+                :disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual"
                 @input="onPromptInput"
               />
               <el-card class="content-card" shadow="never">
@@ -175,18 +175,18 @@
                 <el-form label-position="top" size="small">
                   <div class="grid-2">
                     <el-form-item :label="$t('lesson.subjectLabel')" required>
-                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('subject', $event)" />
+                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual" @input="updateSelectedContent('subject', $event)" />
                     </el-form-item>
                     <el-form-item :label="$t('lesson.helperText')">
-                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('helperText', $event)" />
+                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual" @input="updateSelectedContent('helperText', $event)" />
                     </el-form-item>
                   </div>
                   <el-form-item :label="$t('lesson.l1TransferHint')">
-                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('l1TransferHint', $event)" />
+                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual" @input="updateSelectedContent('l1TransferHint', $event)" />
                   </el-form-item>
                 </el-form>
               </el-card>
-              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" />
+              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual" />
             </div>
             <div class="preview-stack">
               <section v-if="cinematicDemoUrl" class="cinematic-effect preview-surface" data-testid="cinematic-design-reference">
@@ -277,9 +277,9 @@
           </el-table-column>
           <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
             <template slot-scope="scope">
-              <el-button type="text" size="small" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
-              <el-button type="text" size="small" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
-              <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
+              <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
+              <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
+              <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
             </template>
           </el-table-column>
           <template slot="empty"><span class="muted">{{ $t('lesson.noSteps') }}</span></template>
@@ -287,7 +287,7 @@
 
         <!-- Add step (draft only) -->
         <div v-if="isDraft" class="add-row">
-          <el-button type="primary" size="small" icon="el-icon-plus" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
+          <el-button type="primary" size="small" icon="el-icon-plus" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
         </div>
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
       </el-card>
@@ -299,7 +299,7 @@
         ref="assetManager"
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
-        :disabled="savingStep || savingLessonVisuals || rebindingSharedVisual || assetMutating"
+        :disabled="savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual || assetMutating"
         :mutation-settler="settleAssetMutation"
         :refresh-handler="retryFailedAssetReconciliation"
         @assets-loaded="onAssetsLoaded"
@@ -463,7 +463,7 @@
       </el-form>
       <span slot="footer">
         <el-button size="small" @click="stepDialogVisible = false">{{ $t('lesson.cancel') }}</el-button>
-        <el-button type="primary" size="small" :loading="addingStep" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="addStep">{{ $t('lesson.save') }}</el-button>
+        <el-button type="primary" size="small" :loading="addingStep" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="addStep">{{ $t('lesson.save') }}</el-button>
       </span>
     </el-dialog>
 
@@ -771,6 +771,11 @@ export default {
         || Boolean(this.deletingStepKey)
         || !this.steps.length;
     },
+    lessonVisualStepMutationBlocked() {
+      return this.savingLessonVisuals
+        || Boolean(this.pendingLessonVisualPair)
+        || this.lessonVisualReconciliationRequired;
+    },
     selectedStepKey() {
       return this.selectedStep ? this.selectedStep.stepKey : '';
     },
@@ -815,7 +820,7 @@ export default {
           || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
       },
       set(value) {
-        if (!this.selectedStep || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
+        if (!this.selectedStep || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.bumpStepEditRevision(this.selectedStep.stepKey);
@@ -828,7 +833,7 @@ export default {
         return this.selectedAuthoring.templateAuthoring || null;
       },
       set(value) {
-        if (!this.selectedStep || this.savingLessonVisuals) return;
+        if (!this.selectedStep || this.lessonVisualStepMutationBlocked) return;
         const next = { ...this.selectedAuthoring };
         if (value) next.templateAuthoring = value;
         else delete next.templateAuthoring;
@@ -846,7 +851,7 @@ export default {
         };
       },
       set(value) {
-        if (!this.selectedStep || this.savingLessonVisuals) return;
+        if (!this.selectedStep || this.lessonVisualStepMutationBlocked) return;
         this.$set(this.selectedContentDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.markStudioChanged(this.selectedStep.stepKey);
@@ -900,6 +905,8 @@ export default {
       this.pendingLessonVisualPair = null;
       this.lessonVisualReconciliationRequired = false;
       this.deletingStepKey = '';
+      this.addingStep = false;
+      this.reordering = false;
       this.resetLessonAssetGenerationStatus();
       this.fetchAll();
     },
@@ -1465,21 +1472,21 @@ export default {
     },
     onPromptInput(value) {
       const step = this.selectedStep;
-      if (!step || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual || this.promptStepKey !== step.stepKey) return;
+      if (!step || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual || this.promptStepKey !== step.stepKey) return;
       this.promptEditRevision += 1;
       this.bumpStepEditRevision(step.stepKey);
       this.promptDirty = value !== (step.prompt || '');
       this.invalidatePreview();
     },
     selectSharedAsset(asset) {
-      if (!this.selectedStep || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
+      if (!this.selectedStep || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
       this.bumpStepEditRevision(this.selectedStep.stepKey);
       this.invalidatePreview();
     },
     openSharedImpact(intent, asset) {
-      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
+      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
       this.sharedImpactIntent = {
         intent,
         asset,
@@ -1499,7 +1506,7 @@ export default {
     },
     keepSharedVisual() {
       const intent = this.sharedImpactIntent;
-      if (!this.savingStep && !this.savingLessonVisuals && !this.rebindingSharedVisual && intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
+      if (!this.savingStep && !this.lessonVisualStepMutationBlocked && !this.rebindingSharedVisual && intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
         this.selectSharedAsset(intent.asset);
       }
       this.closeSharedImpact();
@@ -1613,7 +1620,7 @@ export default {
     },
     rebindClonedVisual(clonedAsset) {
       if (this.editorDestroying) return;
-      if (this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
+      if (this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
       const intent = this.sharedImpactIntent;
       const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
       if (!intent || !step || !clonedAsset) return;
@@ -1676,9 +1683,14 @@ export default {
         },
       );
     },
+    stepPayloadWithoutVisualRefs(payload) {
+      const sanitized = { ...(payload || {}) };
+      delete sanitized.visualRefs;
+      return sanitized;
+    },
     saveSelectedStep() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
+      if (!step || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
       const authored = this.selectedAuthoring;
       const stepBody = mergeStepBodyForSave(step.stepBody || {}, authored);
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
@@ -1704,10 +1716,16 @@ export default {
       this.promptSaveRequestId = saveGuard.requestId;
       this.invalidatePreview();
       this.savingStep = true;
+      const stepPayload = this.stepPayloadWithoutVisualRefs({
+        ...step,
+        ...this.selectedContent,
+        prompt: this.promptDraft,
+        stepBody,
+      });
       Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
-        { ...step, ...this.selectedContent, prompt: this.promptDraft, stepBody },
+        stepPayload,
         () => {
           if (saveGuard.requestId !== this.promptSaveRequestId) return;
           this.fetchSteps({
@@ -1954,7 +1972,7 @@ export default {
     },
     saveSelectedStepStudio() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft || this.savingStep || this.savingLessonVisuals
+      if (!step || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked
         || this.rebindingSharedVisual || this.savingSelectedStep) return;
       const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
       const request = buildSaveStepRequest({
@@ -1964,6 +1982,7 @@ export default {
         selectedAsset: this.selectedAssetDrafts[step.stepKey],
         savedRevision,
       });
+      const requestPayload = this.stepPayloadWithoutVisualRefs(request.payload);
       this.$set(this.savingStepKeys, step.stepKey, true);
       // A commit changes persisted lesson truth even when it clears the last dirty
       // draft, so every validation/preview launched before this point is stale.
@@ -1971,7 +1990,7 @@ export default {
       this.validationResult = null;
       this.previewManifest = null;
       Api.lesson.updateStep(
-        this.lessonId, request.stepKey, request.payload,
+        this.lessonId, request.stepKey, requestPayload,
         (updated) => {
           this.$delete(this.savingStepKeys, step.stepKey);
           if (resolveSaveSuccess({
@@ -1992,19 +2011,30 @@ export default {
       );
     },
     moveStep(index, delta) {
-      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+      if (this.lessonVisualStepMutationBlocked || this.addingStep || this.reordering || this.deletingStepKey) return;
       const target = index + delta;
       if (target < 0 || target >= this.steps.length) return;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const order = this.steps.map((s) => s.stepKey);
       const tmp = order[index];
       order[index] = order[target];
       order[target] = tmp;
       this.reordering = true;
       Api.lesson.reorderSteps(
-        this.lessonId,
+        lessonId,
         order,
-        (rows) => { this.invalidatePreview(); this.markStudioChanged(); this.reordering = false; this.steps = rows; },
+        (rows) => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          this.invalidatePreview();
+          this.markStudioChanged();
+          this.reordering = false;
+          this.steps = rows;
+        },
         (msg, error) => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.reordering = false;
           this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
           this.$message.error(msg);
@@ -2012,21 +2042,29 @@ export default {
       );
     },
     deleteStep(row) {
-      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+      if (this.lessonVisualStepMutationBlocked || this.addingStep || this.reordering || this.deletingStepKey) return;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
-          if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId
+            || this.lessonVisualStepMutationBlocked || this.addingStep || this.reordering || this.deletingStepKey) return;
           this.deletingStepKey = row.stepKey;
           Api.lesson.deleteStep(
-            this.lessonId,
+            lessonId,
             row.stepKey,
             (rows) => {
+              if (this.editorDestroying || lessonId !== this.lessonId
+                || lessonLoadRequestId !== this.lessonLoadRequestId) return;
               this.deletingStepKey = '';
               this.invalidatePreview();
               this.markStudioChanged();
               this.steps = rows;
             },
             (msg, error) => {
+              if (this.editorDestroying || lessonId !== this.lessonId
+                || lessonLoadRequestId !== this.lessonLoadRequestId) return;
               this.deletingStepKey = '';
               this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
               this.$message.error(msg);
@@ -2036,7 +2074,7 @@ export default {
         .catch(() => {});
     },
     openStepDialog() {
-      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+      if (this.lessonVisualStepMutationBlocked || this.addingStep || this.reordering || this.deletingStepKey) return;
       const dialog = createStepDialogState({ stepTypes: this.stepTypes, lastSubject: this.lastSubject });
       this.stepForm = dialog.form;
       this.correctChoiceId = dialog.correctChoiceId;
@@ -2051,7 +2089,7 @@ export default {
       this.correctChoiceId = result.correctChoiceId;
     },
     addStep() {
-      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+      if (this.lessonVisualStepMutationBlocked || this.addingStep || this.reordering || this.deletingStepKey) return;
       const f = this.stepForm;
       const result = buildCreateStepPayload({
         form: f,
@@ -2063,11 +2101,15 @@ export default {
         this.$message.warning(this.$t(`lesson.${result.reason}`));
         return;
       }
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       this.addingStep = true;
       Api.lesson.createStep(
-        this.lessonId,
+        lessonId,
         result.payload,
         () => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.invalidatePreview();
           this.addingStep = false;
           this.stepDialogVisible = false;
@@ -2076,6 +2118,8 @@ export default {
           this.fetchSteps();
         },
         (msg, error) => {
+          if (this.editorDestroying || lessonId !== this.lessonId
+            || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.addingStep = false;
           this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
           this.$message.error(msg);

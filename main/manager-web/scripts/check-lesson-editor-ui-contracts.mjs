@@ -108,7 +108,7 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*savingLessonVisuals\s*\|\|\s*rebindingSharedVisual"/m,
+  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*lessonVisualStepMutationBlocked\s*\|\|\s*rebindingSharedVisual"/m,
   'prompt input must be disabled during step and lesson visual saves',
 );
 

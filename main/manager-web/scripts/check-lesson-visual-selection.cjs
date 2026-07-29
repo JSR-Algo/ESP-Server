@@ -178,8 +178,19 @@ assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector mu
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
 assert.ok(!saveSelectedStepSource.includes('setVisualRef'), 'step metadata save must not pin a background visual ref');
 assert.ok(!saveSelectedStepSource.includes('templateVisualRefTransition'), 'step metadata save must not derive a per-step background transition');
+assertSourceIncludes(saveSelectedStepSource, 'this.stepPayloadWithoutVisualRefs(', 'ordinary step saves must strip stale lesson visual refs');
 assert.ok(!editorSource.includes('restoreTemplateVisualRef('), 'obsolete per-step background rollback must be removed');
 assert.ok(!editorSource.includes('templateVisualRefTransition'), 'obsolete template background transition import must be removed');
+
+const stripVisualRefsMethod = extractObjectMethod(editorSource, 'stepPayloadWithoutVisualRefs');
+const stripVisualRefs = vm.runInNewContext(`(${stripVisualRefsMethod.replace(
+  /^stepPayloadWithoutVisualRefs/,
+  'function stepPayloadWithoutVisualRefs',
+)})`);
+const staleStepPayload = { prompt: 'hello', visualRefs: [{ slot: 'backgroundScene', assetVersionId: 'stale' }] };
+const staleStepPayloadSnapshot = JSON.stringify(staleStepPayload);
+assert.deepEqual(JSON.parse(JSON.stringify(stripVisualRefs(staleStepPayload))), { prompt: 'hello' });
+assert.equal(JSON.stringify(staleStepPayload), staleStepPayloadSnapshot, 'stripping visual refs must not mutate the loaded step');
 
 const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
 const visualSaveGuard = applyLessonVisualSelectionSource.slice(0, applyLessonVisualSelectionSource.indexOf('const nextPair'));
@@ -199,12 +210,19 @@ assertSourceIncludes(
   'this.pendingLessonVisualPair = confirmedPair;',
   'a failed reconciliation retry must restore the previously confirmed pair',
 );
-assert.match(saveSelectedStepSource.slice(0, saveSelectedStepSource.indexOf('const authored')), /this\.savingLessonVisuals/, 'step saves must wait for lesson visual saves');
+assert.match(saveSelectedStepSource.slice(0, saveSelectedStepSource.indexOf('const authored')), /this\.lessonVisualStepMutationBlocked/, 'step saves must wait for lesson visual state reconciliation');
 const saveSelectedStepStudioSource = extractObjectMethod(editorSource, 'saveSelectedStepStudio');
-assert.match(saveSelectedStepStudioSource.slice(0, saveSelectedStepStudioSource.indexOf('const savedRevision')), /this\.savingLessonVisuals/, 'studio step saves must wait for lesson visual saves');
+assert.match(saveSelectedStepStudioSource.slice(0, saveSelectedStepStudioSource.indexOf('const savedRevision')), /this\.lessonVisualStepMutationBlocked/, 'studio step saves must wait for lesson visual state reconciliation');
+assertSourceIncludes(saveSelectedStepStudioSource, 'this.stepPayloadWithoutVisualRefs(', 'studio step saves must also strip stale lesson visual refs');
+assertSourceIncludes(editorSource, 'lessonVisualStepMutationBlocked()', 'step mutation locking needs one consistent computed state');
+const lessonVisualStepMutationBlockedSource = extractObjectMethod(editorSource, 'lessonVisualStepMutationBlocked');
+assertSourceIncludes(lessonVisualStepMutationBlockedSource, 'this.pendingLessonVisualPair', 'pending lesson visual pairs must block step mutations');
+assertSourceIncludes(lessonVisualStepMutationBlockedSource, 'this.lessonVisualReconciliationRequired', 'visual reconciliation must block step mutations');
+assertSourceIncludes(saveSelectedStepSource, 'this.lessonVisualStepMutationBlocked', 'ordinary step saves must respect pending visual reconciliation');
+assertSourceIncludes(saveSelectedStepStudioSource, 'this.lessonVisualStepMutationBlocked', 'studio step saves must respect pending visual reconciliation');
 assertSourceIncludes(
   editorSource,
-  ':disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual"',
+  ':disabled="!isDraft || savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual"',
   'step authoring controls must lock during lesson visual saves',
 );
 assert.ok(!applyLessonVisualSelectionSource.includes('this.doPreview('), 'authoritative fetch must remain the only automatic preview trigger');
@@ -224,20 +242,42 @@ assertSourceIncludes(editorSource, 'v-loading="savingLessonVisuals"', 'lesson vi
 assertSourceIncludes(editorSource, ':aria-busy="savingLessonVisuals ? \'true\' : \'false\'"', 'lesson visual loading overlay must retain accessible busy state');
 
 const openStepDialogSource = extractObjectMethod(editorSource, 'openStepDialog');
-assert.match(openStepDialogSource, /this\.savingLessonVisuals/, 'add-step dialog must not open during lesson visual save');
+assert.match(openStepDialogSource, /this\.lessonVisualStepMutationBlocked/, 'add-step dialog must not open during pending lesson visual state');
 const addStepSource = extractObjectMethod(editorSource, 'addStep');
-assert.match(addStepSource.slice(0, addStepSource.indexOf('const f')), /this\.savingLessonVisuals/, 'step creation must not start during lesson visual save');
+assert.match(addStepSource.slice(0, addStepSource.indexOf('const f')), /this\.lessonVisualStepMutationBlocked/, 'step creation must not start during pending lesson visual state');
 const moveStepSource = extractObjectMethod(editorSource, 'moveStep');
-assert.match(moveStepSource.slice(0, moveStepSource.indexOf('const target')), /this\.savingLessonVisuals/, 'step reorder must not start during lesson visual save');
+assert.match(moveStepSource.slice(0, moveStepSource.indexOf('const target')), /this\.lessonVisualStepMutationBlocked/, 'step reorder must not start during pending lesson visual state');
 const deleteStepSource = extractObjectMethod(editorSource, 'deleteStep');
-assert.ok((deleteStepSource.match(/this\.savingLessonVisuals/g) || []).length >= 2, 'step deletion must guard both before and after confirmation');
+assert.ok((deleteStepSource.match(/this\.lessonVisualStepMutationBlocked/g) || []).length >= 2, 'step deletion must guard both before and after confirmation');
+assert.ok(
+  deleteStepSource.indexOf('const lessonId = this.lessonId;') < deleteStepSource.indexOf('this.$confirm'),
+  'step deletion must capture lesson identity before opening confirmation',
+);
+assert.ok(
+  (deleteStepSource.match(/this\.editorDestroying\s*\|\|\s*lessonId\s*!==\s*this\.lessonId/g) || []).length >= 3,
+  'step deletion must reject navigation after confirmation and in both API callbacks',
+);
 assert.ok((deleteStepSource.match(/this\.deletingStepKey\s*=\s*'';/g) || []).length >= 2, 'step deletion state must reset on success and error');
 assertSourceIncludes(editorSource, ':loading="deletingStepKey === scope.row.stepKey"', 'active step deletion needs a row loading state');
 assertSourceIncludes(
   editorSource,
-  ':disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey"',
+  ':disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey"',
   'add-step control must lock during conflicting mutations',
 );
+[addStepSource, moveStepSource, deleteStepSource].forEach((mutationSource) => {
+  assertSourceIncludes(mutationSource, 'const lessonId = this.lessonId;', 'step mutation must capture its lesson identity');
+  assertSourceIncludes(mutationSource, 'const lessonLoadRequestId = this.lessonLoadRequestId;', 'step mutation must capture the lesson navigation epoch');
+  assert.ok(
+    (mutationSource.match(/this\.editorDestroying\s*\|\|\s*lessonId\s*!==\s*this\.lessonId/g) || []).length >= 2,
+    'step mutation success and error callbacks must reject stale lesson responses',
+  );
+  assert.ok(
+    (mutationSource.match(/lessonLoadRequestId\s*!==\s*this\.lessonLoadRequestId/g) || []).length >= 2,
+    'step mutation callbacks must reject leave-and-return responses for the same lesson id',
+  );
+});
+assertSourceIncludes(editorSource, 'this.addingStep = false;', 'lesson navigation must reset add-step in-flight state');
+assertSourceIncludes(editorSource, 'this.reordering = false;', 'lesson navigation must reset reorder in-flight state');
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
 
