@@ -1640,12 +1640,13 @@ export default {
         this.failSharedVisualRebind(this.$t('lesson.sharedImpactNoRebindTarget'));
         return;
       }
+      const rebindPayload = this.stepPayloadWithoutVisualRefs({ ...step, stepBody });
       this.invalidatePreview();
       this.rebindingSharedVisual = true;
       Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
-        { ...step, stepBody },
+        rebindPayload,
         () => {
           if (this.editorDestroying) return;
           this.fetchSteps({

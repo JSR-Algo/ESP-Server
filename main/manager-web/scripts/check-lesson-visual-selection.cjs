@@ -176,9 +176,11 @@ assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*obje
 assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
 
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
+const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
 assert.ok(!saveSelectedStepSource.includes('setVisualRef'), 'step metadata save must not pin a background visual ref');
 assert.ok(!saveSelectedStepSource.includes('templateVisualRefTransition'), 'step metadata save must not derive a per-step background transition');
 assertSourceIncludes(saveSelectedStepSource, 'this.stepPayloadWithoutVisualRefs(', 'ordinary step saves must strip stale lesson visual refs');
+assertSourceIncludes(rebindClonedVisualSource, 'this.stepPayloadWithoutVisualRefs(', 'cloned visual rebinds must strip stale lesson visual refs');
 assert.ok(!editorSource.includes('restoreTemplateVisualRef('), 'obsolete per-step background rollback must be removed');
 assert.ok(!editorSource.includes('templateVisualRefTransition'), 'obsolete template background transition import must be removed');
 
@@ -214,6 +216,12 @@ assert.match(saveSelectedStepSource.slice(0, saveSelectedStepSource.indexOf('con
 const saveSelectedStepStudioSource = extractObjectMethod(editorSource, 'saveSelectedStepStudio');
 assert.match(saveSelectedStepStudioSource.slice(0, saveSelectedStepStudioSource.indexOf('const savedRevision')), /this\.lessonVisualStepMutationBlocked/, 'studio step saves must wait for lesson visual state reconciliation');
 assertSourceIncludes(saveSelectedStepStudioSource, 'this.stepPayloadWithoutVisualRefs(', 'studio step saves must also strip stale lesson visual refs');
+const updateStepSources = [rebindClonedVisualSource, saveSelectedStepSource, saveSelectedStepStudioSource];
+assert.equal((editorSource.match(/Api\.lesson\.updateStep\(/g) || []).length, updateStepSources.length, 'every updateStep call must be covered by the visual-ref sanitizer contract');
+updateStepSources.forEach((methodSource) => {
+  assertSourceIncludes(methodSource, 'this.stepPayloadWithoutVisualRefs(', 'every updateStep payload path must remove lesson visual refs');
+  assert.ok(!/Api\.lesson\.updateStep\([\s\S]*?\{\s*\.\.\.step[,}]/m.test(methodSource), 'updateStep must never receive a direct spread of the loaded step');
+});
 assertSourceIncludes(editorSource, 'lessonVisualStepMutationBlocked()', 'step mutation locking needs one consistent computed state');
 const lessonVisualStepMutationBlockedSource = extractObjectMethod(editorSource, 'lessonVisualStepMutationBlocked');
 assertSourceIncludes(lessonVisualStepMutationBlockedSource, 'this.pendingLessonVisualPair', 'pending lesson visual pairs must block step mutations');
