@@ -138,6 +138,24 @@ expectRegex(
   'prompt input must be disabled during its save request',
 );
 
+// Keep the direct-MP4 picker contract ahead of legacy preview assertions so it
+// remains independently executable while the preview wrapper contract evolves.
+expectNotContains('src/views/LessonEditor.vue', '/backgrounds/backgrounds-manifest.json', 'production cinematic scenes must come from the versioned backend library');
+expectNotContains('src/views/LessonEditor.vue', '/teachobjects/teachobjects-manifest.json', 'production teaching objects must come from the versioned backend library');
+expectContains('src/views/LessonEditor.vue', '<CinematicLayerPicker', 'the production editor must render the backend cinematic picker');
+expectContains('src/views/LessonEditor.vue', "layer-slot=\"robotOverlay\"", 'the production editor must expose the third robot MP4 layer');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "backgroundScene: 'scene'", 'backgroundScene must query the scene category');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "teachingObject: 'teachingObject'", 'teachingObject must keep its backend category');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "robotOverlay: 'robotPose'", 'robotOverlay must query robotPose assets');
+expectContains('src/components/lesson/SharedAssetPicker.vue', '<video', 'MP4 assets must use a video preview');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'preload="metadata"', 'MP4 previews must avoid eager full downloads');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'selectedVersionId', 'selection identity must use immutable version IDs');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__loading', 'loading must remain visible before assets arrive');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__error', 'backend failures must remain visible when assets are empty');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__empty', 'an empty backend library needs an explicit state');
+expectContains('src/views/LessonEditor.vue', 'immutable-version-message', 'published lesson versions must explain why cinematic refs are immutable');
+console.log('direct MP4 cinematic picker UI contracts PASS');
+
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.preview.profile', 'preview metadata must come from the server');
@@ -899,20 +917,6 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
 expectContains('src/components/lesson/SharedAssetPicker.vue', "this.$emit('select-intent'", 'selection must review impact first');
 expectContains('src/components/lesson/SharedAssetPicker.vue', ':disabled="disabled"', 'selection must lock during save or clone rebind');
 expectNotContains('src/components/lesson/SharedAssetPicker.vue', "$emit('select', asset)", 'shared selection must not mutate a draft before review');
-expectNotContains('src/views/LessonEditor.vue', '/backgrounds/backgrounds-manifest.json', 'production cinematic scenes must come from the versioned backend library');
-expectNotContains('src/views/LessonEditor.vue', '/teachobjects/teachobjects-manifest.json', 'production teaching objects must come from the versioned backend library');
-expectContains('src/views/LessonEditor.vue', '<CinematicLayerPicker', 'the production editor must render the backend cinematic picker');
-expectContains('src/views/LessonEditor.vue', "layer-slot=\"robotOverlay\"", 'the production editor must expose the third robot MP4 layer');
-expectContains('src/components/lesson/CinematicLayerPicker.vue', "backgroundScene: 'scene'", 'backgroundScene must query the scene category');
-expectContains('src/components/lesson/CinematicLayerPicker.vue', "teachingObject: 'teachingObject'", 'teachingObject must keep its backend category');
-expectContains('src/components/lesson/CinematicLayerPicker.vue', "robotOverlay: 'robotPose'", 'robotOverlay must query robotPose assets');
-expectContains('src/components/lesson/SharedAssetPicker.vue', '<video', 'MP4 assets must use a video preview');
-expectContains('src/components/lesson/SharedAssetPicker.vue', 'preload="metadata"', 'MP4 previews must avoid eager full downloads');
-expectContains('src/components/lesson/SharedAssetPicker.vue', 'selectedVersionId', 'selection identity must use immutable version IDs');
-expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__loading', 'loading must remain visible before assets arrive');
-expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__error', 'backend failures must remain visible when assets are empty');
-expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__empty', 'an empty backend library needs an explicit state');
-expectContains('src/views/LessonEditor.vue', 'immutable-version-message', 'published lesson versions must explain why cinematic refs are immutable');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'reviewSharedVisualImpact', 'dialog must load backend usage truth');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneSharedVisual', 'dialog must clone without mutating source pins');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', "profile: 'espTft'", 'clone payload must target the firmware profile');
