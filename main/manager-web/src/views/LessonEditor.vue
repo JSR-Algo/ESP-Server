@@ -79,6 +79,66 @@
               Save step
             </el-button>
           </div>
+          <section class="lesson-visual-pair" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
+            <div class="lesson-visual-pair__heading">
+              <div>
+                <h4>{{ $t('lesson.visualPairTitle') }}</h4>
+                <p>{{ $t('lesson.visualPairWholeLesson') }}</p>
+              </div>
+              <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
+            </div>
+            <p v-if="!steps.length" class="lesson-visual-pair__notice" role="status">{{ $t('lesson.visualPairNoSteps') }}</p>
+            <p
+              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
+              class="lesson-visual-pair__notice"
+              role="status"
+              aria-live="polite"
+            >
+              {{ $t('lesson.visualPairRequired') }}
+            </p>
+            <div v-if="backgroundLibrary.length" class="bg-picker" data-testid="lesson-background-selector">
+              <div class="preview-heading">
+                <span class="eyebrow">CHỌN BACKGROUND</span>
+                <span class="preview-heading__hint">{{ backgroundLibrary.length }} bối cảnh — {{ $t('lesson.visualPairWholeLesson') }}</span>
+              </div>
+              <div class="bg-picker__grid">
+                <button
+                  v-for="bg in backgroundLibrary"
+                  :key="bg.assetKey"
+                  type="button"
+                  :class="['bg-chip', { selected: bg.assetKey === selectedBackgroundKey }]"
+                  :title="bg.assetKey"
+                  :disabled="savingLessonVisuals || !steps.length || !bg.versionId"
+                  :aria-disabled="savingLessonVisuals || !steps.length || !bg.versionId ? 'true' : 'false'"
+                  @click="selectBackground(bg)"
+                >
+                  <img :src="bg.posterUrl" :alt="bg.title" loading="lazy" />
+                  <span>{{ bg.title }}</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="objectLibrary.length" class="bg-picker" data-testid="lesson-object-selector">
+              <div class="preview-heading">
+                <span class="eyebrow">CHỌN VẬT THỂ (TEACHING OBJECT)</span>
+                <span class="preview-heading__hint">{{ objectLibrary.length }} vật thể — {{ $t('lesson.visualPairWholeLesson') }}</span>
+              </div>
+              <div class="bg-picker__grid">
+                <button
+                  v-for="obj in objectLibrary"
+                  :key="obj.assetKey"
+                  type="button"
+                  :class="['bg-chip', 'obj-chip', { selected: obj.assetKey === pickedObjectKey }]"
+                  :title="obj.assetKey"
+                  :disabled="savingLessonVisuals || !steps.length || !obj.versionId"
+                  :aria-disabled="savingLessonVisuals || !steps.length || !obj.versionId ? 'true' : 'false'"
+                  @click="selectTeachObject(obj)"
+                >
+                  <img :src="obj.posterUrl" :alt="obj.title" loading="lazy" />
+                  <span>{{ obj.title }}</span>
+                </button>
+              </div>
+            </div>
+          </section>
           <div v-if="selectedStep" class="lesson-studio__workbench">
             <div>
               <TvideoTemplatePanel
@@ -119,54 +179,8 @@
                 </el-form>
               </el-card>
               <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || rebindingSharedVisual" />
-              <SharedAssetPicker
-                v-if="lessonCapabilities.sharedVisualAuthoring"
-                :assets="bundleAssets"
-                :selected-key="selectedObjectKey"
-                category="teachingObject"
-                :disabled="savingStep || rebindingSharedVisual"
-                @select-intent="reviewSharedAssetSelection"
-              />
             </div>
             <div class="preview-stack">
-              <div v-if="backgroundLibrary.length" class="bg-picker" data-testid="background-picker">
-                <div class="preview-heading">
-                  <span class="eyebrow">CHỌN BACKGROUND</span>
-                  <span class="preview-heading__hint">{{ backgroundLibrary.length }} bối cảnh — chọn 1 để áp dụng cho bài học</span>
-                </div>
-                <div class="bg-picker__grid">
-                  <button
-                    v-for="bg in backgroundLibrary"
-                    :key="bg.assetKey"
-                    type="button"
-                    :class="['bg-chip', { selected: bg.assetKey === selectedBackgroundKey }]"
-                    :title="bg.assetKey"
-                    @click="selectBackground(bg)"
-                  >
-                    <img :src="bg.posterUrl" :alt="bg.title" loading="lazy" />
-                    <span>{{ bg.title }}</span>
-                  </button>
-                </div>
-              </div>
-              <div v-if="objectLibrary.length" class="bg-picker" data-testid="object-picker">
-                <div class="preview-heading">
-                  <span class="eyebrow">CHỌN VẬT THỂ (TEACHING OBJECT)</span>
-                  <span class="preview-heading__hint">{{ objectLibrary.length }} vật thể — chọn 1 để áp dụng cho bài học</span>
-                </div>
-                <div class="bg-picker__grid">
-                  <button
-                    v-for="obj in objectLibrary"
-                    :key="obj.assetKey"
-                    type="button"
-                    :class="['bg-chip', 'obj-chip', { selected: obj.assetKey === pickedObjectKey }]"
-                    :title="obj.assetKey"
-                    @click="selectTeachObject(obj)"
-                  >
-                    <img :src="obj.posterUrl" :alt="obj.title" loading="lazy" />
-                    <span>{{ obj.title }}</span>
-                  </button>
-                </div>
-              </div>
               <section v-if="cinematicDemoUrl" class="cinematic-effect preview-surface" data-testid="cinematic-design-reference">
                 <div class="preview-heading">
                   <span class="eyebrow">CINEMATIC DESIGN REFERENCE</span>
@@ -502,11 +516,11 @@ import LessonSimulationPanel from '@/components/lesson/LessonSimulationPanel.vue
 import LessonStepPromptEditor from '@/components/lesson/LessonStepPromptEditor.vue';
 import LessonStepNavigator from '@/components/lesson/LessonStepNavigator.vue';
 import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
-import SharedAssetPicker from '@/components/lesson/SharedAssetPicker.vue';
 import SharedVisualImpactDialog from '@/components/lesson/SharedVisualImpactDialog.vue';
 import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
 import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
+import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';
 import {
   bindClonedAssetToStep,
   collectAssetReferences,
@@ -549,7 +563,6 @@ export default {
     LessonStepPromptEditor,
     LessonStepNavigator,
     RobotLessonPreview,
-    SharedAssetPicker,
     SharedVisualImpactDialog,
     TvideoTemplatePanel,
     TvideoVariantBatchPanel,
@@ -592,11 +605,11 @@ export default {
       // Cinematic background library: published `scene` assets merged with the
       // /backgrounds manifest that carries each scene's 6s mp4 for the preview.
       backgroundLibrary: [],
-      selectedBackgroundKey: '',
       // Teaching-object library: published `teachingObject` assets merged with the
       // /teachobjects manifest (static poster + optional animated mp4).
       objectLibrary: [],
-      pickedObjectKey: '',
+      savingLessonVisuals: false,
+      pendingLessonVisualPair: null,
       sharedVisualAssets: [],
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
@@ -728,6 +741,15 @@ export default {
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
     },
+    lessonVisualPair() {
+      return this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+    },
+    selectedBackgroundKey() {
+      return this.lessonVisualPair.backgroundAssetKey;
+    },
+    pickedObjectKey() {
+      return this.lessonVisualPair.objectAssetKey;
+    },
     selectedStepKey() {
       return this.selectedStep ? this.selectedStep.stepKey : '';
     },
@@ -754,12 +776,14 @@ export default {
     },
     hasPendingAuthoringChanges() {
       return this.hasUnsavedDrafts
+        || Boolean(this.pendingLessonVisualPair)
         || this.stepDialogVisible
         || this.renameVisible
         || this.addingStep
         || this.reordering
         || this.renaming
         || this.publishing
+        || this.savingLessonVisuals
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key]);
     },
     selectedAuthoring: {
@@ -850,6 +874,8 @@ export default {
         this.$router.replace('/course-management');
         return;
       }
+      this.savingLessonVisuals = false;
+      this.pendingLessonVisualPair = null;
       this.resetLessonAssetGenerationStatus();
       this.fetchAll();
     },
@@ -1112,6 +1138,8 @@ export default {
         || this.sharedImpactVisible
         || this.sharedImpactReconciling
         || this.savingStep
+        || this.savingLessonVisuals
+        || Boolean(this.pendingLessonVisualPair)
         || this.validating
         || this.previewing
         || this.rebindingSharedVisual
@@ -1435,9 +1463,6 @@ export default {
       this.sharedImpactUncertainCloneKey = '';
       this.sharedImpactReconciling = false;
       this.sharedImpactVisible = true;
-    },
-    reviewSharedAssetSelection(asset) {
-      this.openSharedImpact('select', asset);
     },
     reviewAssetReplacement(payload) {
       if (!payload || payload.intent !== 'replace') return;
@@ -1799,32 +1824,65 @@ export default {
         () => withVersions({}),
       );
     },
-    // Choose a teaching object: refresh the cinematic; bind onto the step when draft.
     selectTeachObject(obj) {
-      if (!obj) return;
-      this.pickedObjectKey = obj.assetKey;
-      this.pushCinematicStep();
-      if (this.isDraft && this.selectedStep && obj.versionId) {
-        Api.lesson.setVisualRef(
-          this.lessonId, this.selectedStep.stepKey, 'teachingObject', obj.versionId,
-          () => { this.$message.success(`Vật thể: ${obj.title}`); this.previewManifest = null; this.doPreview(); },
-          (msg) => this.$message.error(msg),
-        );
-      }
+      if (!obj) return false;
+      return this.applyLessonVisualSelection({
+        objectAssetVersionId: obj.versionId,
+        objectAssetKey: obj.assetKey,
+      });
     },
-    // Choose a background: always refresh the cinematic preview; bind it onto the
-    // step only while the lesson is still a draft (published lessons are frozen).
     selectBackground(bg) {
-      if (!bg) return;
-      this.selectedBackgroundKey = bg.assetKey;
-      this.pushCinematicStep();
-      if (this.isDraft && this.selectedStep && bg.versionId) {
-        Api.lesson.setVisualRef(
-          this.lessonId, this.selectedStep.stepKey, 'backgroundScene', bg.versionId,
-          () => { this.$message.success(`Background: ${bg.title}`); this.previewManifest = null; this.doPreview(); },
-          (msg) => this.$message.error(msg),
-        );
+      if (!bg) return false;
+      return this.applyLessonVisualSelection({
+        backgroundAssetVersionId: bg.versionId,
+        backgroundAssetKey: bg.assetKey,
+      });
+    },
+    applyLessonVisualSelection(patch) {
+      if (this.savingLessonVisuals || !this.steps.length) return false;
+      const nextPair = { ...this.lessonVisualPair, ...(patch || {}) };
+      this.pendingLessonVisualPair = nextPair;
+      this.$nextTick(() => this.pushCinematicStep());
+      if (!nextPair.backgroundAssetVersionId || !nextPair.objectAssetVersionId) {
+        this.$message.warning(this.$t('lesson.visualPairRequired'));
+        return false;
       }
+
+      const request = buildLessonVisualRequest(this.lessonVisualPair, patch);
+      const lessonId = this.lessonId;
+      this.savingLessonVisuals = true;
+      Api.lesson.applyLessonVisuals(
+        lessonId,
+        request,
+        () => {
+          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          this.invalidatePreview();
+          this.fetchSteps({
+            onSuccess: () => {
+              if (this.editorDestroying || lessonId !== this.lessonId) return;
+              this.pendingLessonVisualPair = null;
+              this.savingLessonVisuals = false;
+              this.loadLessonAssetGenerationStatus();
+              this.$message.success(this.$t('lesson.visualPairSaved'));
+              this.$nextTick(() => {
+                this.pushCinematicStep();
+                if (this.lessonCapabilities.exactEspTftPreview) this.doPreview();
+              });
+            },
+            onError: () => {
+              if (lessonId === this.lessonId) this.savingLessonVisuals = false;
+            },
+          });
+        },
+        (msg) => {
+          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          this.savingLessonVisuals = false;
+          this.pendingLessonVisualPair = null;
+          this.$nextTick(() => this.pushCinematicStep());
+          this.$message.error(msg);
+        },
+      );
+      return true;
     },
     // Push the current step to the cinematic iframes now and again shortly after,
     // so the sync lands regardless of the iframe-load / manifest-fetch race order.
@@ -1858,11 +1916,14 @@ export default {
       const step = steps[idx] || {};
       const scene = step.scene || {};
       const teachingObject = scene.teachingObject || step.teachingObject || {};
+      const canonicalStep = steps[0] || {};
+      const canonicalScene = canonicalStep.scene || {};
+      const canonicalTeachingObject = canonicalScene.teachingObject || canonicalStep.teachingObject || {};
       const teachingWord = step.teachingWord || {};
       const assetUrl = (a) => (a && (a.url || a.src || (typeof a === 'string' ? a : ''))) || '';
-      // An explicit pick wins; otherwise fall back to whatever the lesson itself has
-      // bound, so every lesson plays the template with its OWN scene/object.
-      const sceneKey = (((scene.backgroundScene || {}).poster) || {}).assetKey;
+      // Keep the canonical lesson pair stable while authors move between steps.
+      const sceneKey = this.lessonVisualPair.backgroundAssetKey
+        || (((canonicalScene.backgroundScene || {}).poster) || {}).assetKey;
       const selectedBg = this.backgroundLibrary.find((b) => b.assetKey === this.selectedBackgroundKey)
         || this.backgroundLibrary.find((b) => b.assetKey === sceneKey);
       const pickedObj = this.objectLibrary.find((o) => o.assetKey === this.pickedObjectKey);
@@ -1872,7 +1933,7 @@ export default {
         prompt: step.prompt || '',
         stepId: `S${idx + 1}`,
         stepText: step.type || '',
-        obj: pickedObj ? pickedObj.posterUrl : assetUrl(teachingObject.asset),
+        obj: pickedObj ? pickedObj.posterUrl : assetUrl(canonicalTeachingObject.asset || teachingObject.asset),
         active: idx + 1,
         total: steps.length,
         // Keep the author's chosen background applied across step changes.
@@ -2578,6 +2639,12 @@ export default {
 .lesson-studio__canvas { display:grid; gap:14px; min-width:0; }
 .lesson-studio__toolbar { align-items:center; display:flex; justify-content:space-between; }
 .lesson-studio__toolbar h3 { color:#17312d; font-family:Georgia,serif; font-size:24px; margin:3px 0 0; }
+.lesson-visual-pair { background:rgba(255,255,255,.72); border:1px solid #d8c9ac; border-radius:18px; padding:14px; }
+.lesson-visual-pair__heading { align-items:flex-start; display:flex; gap:16px; justify-content:space-between; }
+.lesson-visual-pair__heading h4 { color:#17312d; font-family:Georgia,serif; font-size:20px; margin:0 0 3px; }
+.lesson-visual-pair__heading p { color:#5f6f63; font-size:13px; margin:0; }
+.lesson-visual-pair__heading [role="status"] { color:#9a6820; font-size:12px; font-weight:800; }
+.lesson-visual-pair__notice { background:#fff4d6; border-radius:9px; color:#7a531c; font-size:12px; margin:10px 0 0; padding:8px 10px; }
 .eyebrow { color:#9a6820; font-size:10px; font-weight:800; letter-spacing:.16em; }
 .lesson-studio__workbench { display:grid; gap:14px; grid-template-columns:minmax(330px,1fr) minmax(360px,1fr); }
 .preview-heading { align-items:baseline; display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 8px; }
@@ -2593,6 +2660,8 @@ export default {
 .bg-chip:hover { border-color:#cbd9bb; }
 .bg-chip.selected { border-color:#16251c; background:#eef7d9; box-shadow:0 2px 0 #16251c; }
 .bg-chip.selected span { font-weight:800; }
+.bg-chip:disabled { cursor:not-allowed; opacity:.5; }
+.bg-chip:disabled:hover { border-color:transparent; }
 /* Objects are transparent PNGs — show them on a light plate, not cropped. */
 .obj-chip img { aspect-ratio:1/1; object-fit:contain; background:#f4f7ec; padding:4px; }
 .cinematic-effect { margin-bottom:18px; }

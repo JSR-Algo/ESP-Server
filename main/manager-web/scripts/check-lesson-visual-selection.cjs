@@ -9,6 +9,26 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+function assertSourceIncludes(source, needle, message) {
+  assert.ok(source.includes(needle), message);
+}
+
+function extractObjectMethod(source, name) {
+  const methodPattern = new RegExp(`\\n\\s{2,4}${name}\\(`);
+  const match = methodPattern.exec(source);
+  assert.ok(match, `${name} method must exist`);
+  const start = match.index + match[0].lastIndexOf(name);
+  const paramsStart = source.indexOf('(', start);
+  const paramsEnd = source.indexOf(')', paramsStart);
+  const braceStart = source.indexOf('{', paramsEnd);
+  let depth = 0;
+  for (let index = braceStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}' && --depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`${name} method body not closed`);
+}
+
 const {
   canonicalLessonVisualPair,
   buildLessonVisualRequest,
@@ -128,5 +148,31 @@ assert.equal(calls[1].url, '/nestjs/v1/admin/lessons/lesson-7/sd-sync/retry');
 assert.deepEqual(JSON.parse(JSON.stringify(calls[1].data)), {});
 assert.strictEqual(calls[1].onSuccess, onSuccess);
 assert.strictEqual(calls[1].onError, onError);
+
+const editorSource = read('src/views/LessonEditor.vue');
+assertSourceIncludes(
+  editorSource,
+  "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
+  'LessonEditor must import the lesson-wide visual helpers through named CommonJS interop',
+);
+assertSourceIncludes(editorSource, 'data-testid="lesson-background-selector"', 'background selector needs a stable lesson-level test id');
+assertSourceIncludes(editorSource, 'data-testid="lesson-object-selector"', 'object selector needs a stable lesson-level test id');
+assertSourceIncludes(editorSource, 'lessonVisualPair()', 'LessonEditor must derive one canonical pair for the lesson');
+assertSourceIncludes(editorSource, 'canonicalLessonVisualPair(this.steps)', 'the canonical pair must come from authoritative steps');
+assertSourceIncludes(editorSource, 'applyLessonVisualSelection(patch)', 'both selectors must share one lesson-level save path');
+assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPair, patch)', 'every save must merge and validate both visual ids');
+assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
+assertSourceIncludes(editorSource, 'savingLessonVisuals: false', 'visual selection needs an explicit saving state');
+assertSourceIncludes(editorSource, 'pendingLessonVisualPair: null', 'incomplete local pairs need explicit pending state');
+assert.ok(!editorSource.includes('selectedBackgroundKey: \'\''), 'selectedBackgroundKey must not be mutable component data');
+assert.ok(!editorSource.includes('pickedObjectKey: \'\''), 'pickedObjectKey must not be mutable component data');
+assert.ok(!editorSource.includes('<SharedAssetPicker'), 'the editor must not expose a conflicting per-step teaching-object picker');
+
+const selectBackgroundSource = extractObjectMethod(editorSource, 'selectBackground');
+assert.match(selectBackgroundSource, /applyLessonVisualSelection\(\{[\s\S]*backgroundAssetVersionId:\s*bg\.versionId[\s\S]*backgroundAssetKey:\s*bg\.assetKey/m);
+assert.ok(!selectBackgroundSource.includes('setVisualRef'), 'background selector must not save a per-step visual ref');
+const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachObject');
+assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*objectAssetVersionId:\s*obj\.versionId[\s\S]*objectAssetKey:\s*obj\.assetKey/m);
+assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
 
 console.log('lesson visual selection contract: OK');

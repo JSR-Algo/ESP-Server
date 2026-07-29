@@ -112,6 +112,23 @@ expectRegex(
   'prompt input must be disabled during its save request',
 );
 
+expectContains('src/views/LessonEditor.vue', 'data-testid="lesson-background-selector"', 'background selection must be lesson-wide');
+expectContains('src/views/LessonEditor.vue', 'data-testid="lesson-object-selector"', 'object selection must be lesson-wide');
+expectContains(
+  'src/views/LessonEditor.vue',
+  "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
+  'the editor must use the canonical lesson visual helper contract',
+);
+expectContains('src/views/LessonEditor.vue', 'lessonVisualPair()', 'visual selection must derive one pair independent of selected step');
+expectContains('src/views/LessonEditor.vue', 'applyLessonVisualSelection(patch)', 'both visual selectors need one save path');
+expectContains('src/views/LessonEditor.vue', 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
+expectNotContains('src/views/LessonEditor.vue', '<SharedAssetPicker', 'the primary editor must not expose a second per-step object selector');
+const lessonEditorSource = read('src/views/LessonEditor.vue');
+const backgroundSelectorSource = extractObjectMethod(lessonEditorSource, 'selectBackground');
+const objectSelectorSource = extractObjectMethod(lessonEditorSource, 'selectTeachObject');
+if (backgroundSelectorSource.includes('setVisualRef')) throw new Error('lesson background selection must not save a per-step visual ref');
+if (objectSelectorSource.includes('setVisualRef')) throw new Error('lesson object selection must not save a per-step visual ref');
+
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.preview.profile', 'preview metadata must come from the server');
