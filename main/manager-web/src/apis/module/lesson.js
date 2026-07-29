@@ -185,13 +185,21 @@ export function validateAssetListResponse(payload) {
   return payload;
 }
 
-function normalizeVisualAsset(raw) {
+export function normalizeVisualAsset(raw) {
   const r = raw || {};
+  const compatibilityMetadata = r.compatibility_metadata ?? r.compatibilityMetadata ?? null;
+  const metadata = compatibilityMetadata && typeof compatibilityMetadata === 'object'
+    ? compatibilityMetadata
+    : {};
+  const versionId = r.version_id ?? r.versionId ?? '';
   return {
     assetId: r.id ?? r.assetId ?? '', assetKey: r.asset_key ?? r.assetKey ?? '', category: r.category ?? '', title: r.title ?? '',
-    versionId: r.version_id ?? r.versionId ?? '', version: Number(r.version ?? 0), profile: r.profile ?? '', storagePath: r.storage_path ?? r.storagePath ?? '',
-    sha256: r.sha256 ?? '', mimeType: r.mime_type ?? r.mimeType ?? '', bytes: Number(r.bytes ?? 0), width: Number(r.width ?? 0), height: Number(r.height ?? 0),
+    versionId, versionIdentity: versionId, version: Number(r.version ?? 0), profile: r.profile ?? '', storagePath: r.storage_path ?? r.storagePath ?? '',
+    url: r.url ?? '', sha256: r.sha256 ?? '', mimeType: r.mime_type ?? r.mimeType ?? '', bytes: Number(r.bytes ?? 0), width: Number(r.width ?? 0), height: Number(r.height ?? 0),
     publicationState: r.publication_state ?? r.publicationState ?? 'draft', usageCount: Number(r.usage_count ?? r.usageCount ?? 0),
+    compatibilityMetadata,
+    codec: metadata.codec ?? '', fps: Number(metadata.fps ?? 0), durationMs: Number(metadata.durationMs ?? metadata.duration_ms ?? 0),
+    frameCount: Number(metadata.frameCount ?? metadata.frame_count ?? 0), rect: metadata.rect ?? null, chromaKey: metadata.chromaKey ?? metadata.chroma_key ?? null,
   };
 }
 
