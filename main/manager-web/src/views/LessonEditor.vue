@@ -68,7 +68,7 @@
       </section>
 
       <section v-if="lesson" class="lesson-studio">
-        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft" @add="openStepDialog" />
+        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft && !savingLessonVisuals && !addingStep && !reordering && !deletingStepKey" @add="openStepDialog" />
         <main class="lesson-studio__canvas">
           <div class="lesson-studio__toolbar">
             <div>
@@ -79,7 +79,7 @@
               Save step
             </el-button>
           </div>
-          <section class="lesson-visual-pair" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
+          <section class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
                 <h4>{{ $t('lesson.visualPairTitle') }}</h4>
@@ -277,9 +277,9 @@
           </el-table-column>
           <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
             <template slot-scope="scope">
-              <el-button type="text" size="small" :disabled="scope.$index === 0 || reordering" @click="moveStep(scope.$index, -1)">↑</el-button>
-              <el-button type="text" size="small" :disabled="scope.$index === steps.length - 1 || reordering" @click="moveStep(scope.$index, 1)">↓</el-button>
-              <el-button type="text" size="small" class="danger-text" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
+              <el-button type="text" size="small" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
+              <el-button type="text" size="small" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
+              <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
             </template>
           </el-table-column>
           <template slot="empty"><span class="muted">{{ $t('lesson.noSteps') }}</span></template>
@@ -287,7 +287,7 @@
 
         <!-- Add step (draft only) -->
         <div v-if="isDraft" class="add-row">
-          <el-button type="primary" size="small" icon="el-icon-plus" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
+          <el-button type="primary" size="small" icon="el-icon-plus" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
         </div>
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
       </el-card>
@@ -463,7 +463,7 @@
       </el-form>
       <span slot="footer">
         <el-button size="small" @click="stepDialogVisible = false">{{ $t('lesson.cancel') }}</el-button>
-        <el-button type="primary" size="small" :loading="addingStep" @click="addStep">{{ $t('lesson.save') }}</el-button>
+        <el-button type="primary" size="small" :loading="addingStep" :disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey" @click="addStep">{{ $t('lesson.save') }}</el-button>
       </span>
     </el-dialog>
 
@@ -645,6 +645,7 @@ export default {
       reordering: false,
       stepEditRevisions: {},
       savingStep: false,
+      deletingStepKey: '',
       previewManifest: null,
       simulationEvidence: null,
       simulationProofVersion: -1,
@@ -765,6 +766,9 @@ export default {
         || this.assetMutating
         || this.sharedImpactReconciling
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
+        || this.addingStep
+        || this.reordering
+        || Boolean(this.deletingStepKey)
         || !this.steps.length;
     },
     selectedStepKey() {
@@ -798,6 +802,7 @@ export default {
         || this.renameVisible
         || this.addingStep
         || this.reordering
+        || Boolean(this.deletingStepKey)
         || this.renaming
         || this.publishing
         || this.savingLessonVisuals
@@ -894,6 +899,7 @@ export default {
       this.savingLessonVisuals = false;
       this.pendingLessonVisualPair = null;
       this.lessonVisualReconciliationRequired = false;
+      this.deletingStepKey = '';
       this.resetLessonAssetGenerationStatus();
       this.fetchAll();
     },
@@ -1163,6 +1169,7 @@ export default {
         || this.rebindingSharedVisual
         || this.reordering
         || this.addingStep
+        || Boolean(this.deletingStepKey)
         || this.renaming
         || this.publishing
         || this.publishPreparing
@@ -1823,6 +1830,7 @@ export default {
       if (this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
         || this.assetMutating || this.sharedImpactReconciling
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
+        || this.addingStep || this.reordering || this.deletingStepKey
         || !this.steps.length) return false;
       const confirmedPair = this.lessonVisualReconciliationRequired ? this.pendingLessonVisualPair : null;
       const nextPair = { ...this.lessonVisualPair, ...(patch || {}) };
@@ -1984,6 +1992,7 @@ export default {
       );
     },
     moveStep(index, delta) {
+      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
       const target = index + delta;
       if (target < 0 || target >= this.steps.length) return;
       const order = this.steps.map((s) => s.stepKey);
@@ -2003,13 +2012,22 @@ export default {
       );
     },
     deleteStep(row) {
+      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
       this.$confirm(this.$t('lesson.deleteStepConfirm', { key: row.stepKey }), this.$t('lesson.deleteStep'), { type: 'warning' })
         .then(() => {
+          if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
+          this.deletingStepKey = row.stepKey;
           Api.lesson.deleteStep(
             this.lessonId,
             row.stepKey,
-            (rows) => { this.invalidatePreview(); this.markStudioChanged(); this.steps = rows; },
+            (rows) => {
+              this.deletingStepKey = '';
+              this.invalidatePreview();
+              this.markStudioChanged();
+              this.steps = rows;
+            },
             (msg, error) => {
+              this.deletingStepKey = '';
               this.handleUncertainMutationError(error, () => this.fetchSteps({ preservePrompt: true }));
               this.$message.error(msg);
             },
@@ -2018,6 +2036,7 @@ export default {
         .catch(() => {});
     },
     openStepDialog() {
+      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
       const dialog = createStepDialogState({ stepTypes: this.stepTypes, lastSubject: this.lastSubject });
       this.stepForm = dialog.form;
       this.correctChoiceId = dialog.correctChoiceId;
@@ -2032,6 +2051,7 @@ export default {
       this.correctChoiceId = result.correctChoiceId;
     },
     addStep() {
+      if (this.savingLessonVisuals || this.addingStep || this.reordering || this.deletingStepKey) return;
       const f = this.stepForm;
       const result = buildCreateStepPayload({
         form: f,

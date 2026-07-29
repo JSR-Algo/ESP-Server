@@ -186,6 +186,9 @@ const visualSaveGuard = applyLessonVisualSelectionSource.slice(0, applyLessonVis
 assertSourceIncludes(visualSaveGuard, 'this.savingStep', 'lesson visual saves must wait for step saves');
 assertSourceIncludes(visualSaveGuard, 'this.rebindingSharedVisual', 'lesson visual saves must wait for shared visual rebinds');
 assertSourceIncludes(visualSaveGuard, 'this.assetMutating', 'lesson visual saves must wait for active visual asset mutations');
+assertSourceIncludes(visualSaveGuard, 'this.addingStep', 'lesson visual saves must wait for step creation');
+assertSourceIncludes(visualSaveGuard, 'this.reordering', 'lesson visual saves must wait for step reorder');
+assertSourceIncludes(visualSaveGuard, 'this.deletingStepKey', 'lesson visual saves must wait for step deletion');
 assertSourceIncludes(
   applyLessonVisualSelectionSource,
   'const confirmedPair = this.lessonVisualReconciliationRequired ? this.pendingLessonVisualPair : null;',
@@ -216,6 +219,25 @@ assert.match(authoritativeReloadFailure[1], /this\.syncCinematicSoon\(\);/, 'rel
 assert.match(authoritativeReloadFailure[1], /this\.lessonVisualReconciliationRequired\s*=\s*true;/, 'reload failure must enter explicit reconciliation state');
 assert.match(authoritativeReloadFailure[1], /this\.\$message\.warning\(this\.\$t\('lesson\.visualPairReloadFailed'\)\);/, 'reload failure must explain that the save succeeded but refresh failed');
 assertSourceIncludes(editorSource, 'lessonVisualReconciliationRequired: false', 'reconciliation needs explicit component state');
+assertSourceIncludes(editorSource, 'deletingStepKey: \'\'', 'step deletion needs explicit in-flight state');
+assertSourceIncludes(editorSource, 'v-loading="savingLessonVisuals"', 'lesson visual panel needs an Element UI loading overlay');
+assertSourceIncludes(editorSource, ':aria-busy="savingLessonVisuals ? \'true\' : \'false\'"', 'lesson visual loading overlay must retain accessible busy state');
+
+const openStepDialogSource = extractObjectMethod(editorSource, 'openStepDialog');
+assert.match(openStepDialogSource, /this\.savingLessonVisuals/, 'add-step dialog must not open during lesson visual save');
+const addStepSource = extractObjectMethod(editorSource, 'addStep');
+assert.match(addStepSource.slice(0, addStepSource.indexOf('const f')), /this\.savingLessonVisuals/, 'step creation must not start during lesson visual save');
+const moveStepSource = extractObjectMethod(editorSource, 'moveStep');
+assert.match(moveStepSource.slice(0, moveStepSource.indexOf('const target')), /this\.savingLessonVisuals/, 'step reorder must not start during lesson visual save');
+const deleteStepSource = extractObjectMethod(editorSource, 'deleteStep');
+assert.ok((deleteStepSource.match(/this\.savingLessonVisuals/g) || []).length >= 2, 'step deletion must guard both before and after confirmation');
+assert.ok((deleteStepSource.match(/this\.deletingStepKey\s*=\s*'';/g) || []).length >= 2, 'step deletion state must reset on success and error');
+assertSourceIncludes(editorSource, ':loading="deletingStepKey === scope.row.stepKey"', 'active step deletion needs a row loading state');
+assertSourceIncludes(
+  editorSource,
+  ':disabled="savingLessonVisuals || addingStep || reordering || deletingStepKey"',
+  'add-step control must lock during conflicting mutations',
+);
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
 
