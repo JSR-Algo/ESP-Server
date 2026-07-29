@@ -259,6 +259,7 @@ export default {
   'lesson.visualPairWholeLesson': 'Tự động áp dụng cho tất cả step trong bài học.',
   'lesson.visualPairRequired': 'Cần chọn đủ background và object trước khi lưu.',
   'lesson.visualPairSaved': 'Đã lưu hình ảnh bài học và bắt đầu đồng bộ xuống SD.',
+  'lesson.visualPairReloadFailed': 'Đã lưu hình ảnh bài học nhưng chưa tải lại được các step mới nhất. Hãy thử lại để đồng bộ trạng thái.',
   'lesson.visualPairNoSteps': 'Hãy tạo step đầu tiên trước khi chọn hình ảnh bài học.',
   'lesson.subject': 'Chủ đề',
   'lesson.renderTriple': 'Render (server tự suy)',

@@ -175,13 +175,48 @@ const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachOb
 assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*objectAssetVersionId:\s*obj\.versionId[\s\S]*objectAssetKey:\s*obj\.assetKey/m);
 assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
 
+const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
+assert.ok(!saveSelectedStepSource.includes('setVisualRef'), 'step metadata save must not pin a background visual ref');
+assert.ok(!saveSelectedStepSource.includes('templateVisualRefTransition'), 'step metadata save must not derive a per-step background transition');
+assert.ok(!editorSource.includes('restoreTemplateVisualRef('), 'obsolete per-step background rollback must be removed');
+assert.ok(!editorSource.includes('templateVisualRefTransition'), 'obsolete template background transition import must be removed');
+
 const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
+const visualSaveGuard = applyLessonVisualSelectionSource.slice(0, applyLessonVisualSelectionSource.indexOf('const nextPair'));
+assertSourceIncludes(visualSaveGuard, 'this.savingStep', 'lesson visual saves must wait for step saves');
+assertSourceIncludes(visualSaveGuard, 'this.rebindingSharedVisual', 'lesson visual saves must wait for shared visual rebinds');
+assertSourceIncludes(visualSaveGuard, 'this.assetMutating', 'lesson visual saves must wait for active visual asset mutations');
+assertSourceIncludes(
+  applyLessonVisualSelectionSource,
+  'const confirmedPair = this.lessonVisualReconciliationRequired ? this.pendingLessonVisualPair : null;',
+  'a reconciliation retry must preserve the pair already confirmed by the backend',
+);
+assertSourceIncludes(
+  applyLessonVisualSelectionSource,
+  'this.pendingLessonVisualPair = confirmedPair;',
+  'a failed reconciliation retry must restore the previously confirmed pair',
+);
+assert.match(saveSelectedStepSource.slice(0, saveSelectedStepSource.indexOf('const authored')), /this\.savingLessonVisuals/, 'step saves must wait for lesson visual saves');
+const saveSelectedStepStudioSource = extractObjectMethod(editorSource, 'saveSelectedStepStudio');
+assert.match(saveSelectedStepStudioSource.slice(0, saveSelectedStepStudioSource.indexOf('const savedRevision')), /this\.savingLessonVisuals/, 'studio step saves must wait for lesson visual saves');
+assertSourceIncludes(
+  editorSource,
+  ':disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual"',
+  'step authoring controls must lock during lesson visual saves',
+);
+assert.ok(!applyLessonVisualSelectionSource.includes('this.doPreview('), 'authoritative fetch must remain the only automatic preview trigger');
+
 const authoritativeReloadFailure = applyLessonVisualSelectionSource.match(
   /this\.fetchSteps\(\{[\s\S]*?onError:\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s{12}\},\n\s{10}\}\);/m,
 );
 assert.ok(authoritativeReloadFailure, 'lesson visual save must handle authoritative step reload failure');
-assert.match(authoritativeReloadFailure[1], /this\.pendingLessonVisualPair\s*=\s*null;/, 'reload failure must discard the optimistic lesson pair');
+assert.doesNotMatch(authoritativeReloadFailure[1], /this\.pendingLessonVisualPair\s*=\s*null;/, 'reload failure must retain the backend-confirmed pair during reconciliation');
 assert.match(authoritativeReloadFailure[1], /this\.savingLessonVisuals\s*=\s*false;/, 'reload failure must stop the visual save state');
 assert.match(authoritativeReloadFailure[1], /this\.syncCinematicSoon\(\);/, 'reload failure must resynchronize the cinematic from loaded authoritative steps');
+assert.match(authoritativeReloadFailure[1], /this\.lessonVisualReconciliationRequired\s*=\s*true;/, 'reload failure must enter explicit reconciliation state');
+assert.match(authoritativeReloadFailure[1], /this\.\$message\.warning\(this\.\$t\('lesson\.visualPairReloadFailed'\)\);/, 'reload failure must explain that the save succeeded but refresh failed');
+assertSourceIncludes(editorSource, 'lessonVisualReconciliationRequired: false', 'reconciliation needs explicit component state');
+assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
 
 console.log('lesson visual selection contract: OK');

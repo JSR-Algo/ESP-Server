@@ -108,8 +108,8 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*rebindingSharedVisual"/m,
-  'prompt input must be disabled during its save request',
+  /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*savingLessonVisuals\s*\|\|\s*rebindingSharedVisual"/m,
+  'prompt input must be disabled during step and lesson visual saves',
 );
 
 expectContains('src/views/LessonEditor.vue', 'data-testid="lesson-background-selector"', 'background selection must be lesson-wide');
@@ -126,8 +126,12 @@ expectNotContains('src/views/LessonEditor.vue', '<SharedAssetPicker', 'the prima
 const lessonEditorSource = read('src/views/LessonEditor.vue');
 const backgroundSelectorSource = extractObjectMethod(lessonEditorSource, 'selectBackground');
 const objectSelectorSource = extractObjectMethod(lessonEditorSource, 'selectTeachObject');
+const stepSaveSource = extractObjectMethod(lessonEditorSource, 'saveSelectedStep');
 if (backgroundSelectorSource.includes('setVisualRef')) throw new Error('lesson background selection must not save a per-step visual ref');
 if (objectSelectorSource.includes('setVisualRef')) throw new Error('lesson object selection must not save a per-step visual ref');
+if (stepSaveSource.includes('setVisualRef') || stepSaveSource.includes('templateVisualRefTransition')) {
+  throw new Error('step metadata saves must not write per-step lesson visuals');
+}
 
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');

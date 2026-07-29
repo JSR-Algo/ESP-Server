@@ -75,7 +75,7 @@
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || savingLessonVisuals || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
               Save step
             </el-button>
           </div>
@@ -88,6 +88,14 @@
               <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
             </div>
             <p v-if="!steps.length" class="lesson-visual-pair__notice" role="status">{{ $t('lesson.visualPairNoSteps') }}</p>
+            <p
+              v-else-if="lessonVisualReconciliationRequired"
+              class="lesson-visual-pair__notice"
+              role="status"
+              aria-live="polite"
+            >
+              {{ $t('lesson.visualPairReloadFailed') }}
+            </p>
             <p
               v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
               class="lesson-visual-pair__notice"
@@ -108,8 +116,8 @@
                   type="button"
                   :class="['bg-chip', { selected: bg.assetKey === selectedBackgroundKey }]"
                   :title="bg.assetKey"
-                  :disabled="savingLessonVisuals || !steps.length || !bg.versionId"
-                  :aria-disabled="savingLessonVisuals || !steps.length || !bg.versionId ? 'true' : 'false'"
+                  :disabled="lessonVisualSelectionDisabled || !bg.versionId"
+                  :aria-disabled="lessonVisualSelectionDisabled || !bg.versionId ? 'true' : 'false'"
                   @click="selectBackground(bg)"
                 >
                   <img :src="bg.posterUrl" :alt="bg.title" loading="lazy" />
@@ -129,8 +137,8 @@
                   type="button"
                   :class="['bg-chip', 'obj-chip', { selected: obj.assetKey === pickedObjectKey }]"
                   :title="obj.assetKey"
-                  :disabled="savingLessonVisuals || !steps.length || !obj.versionId"
-                  :aria-disabled="savingLessonVisuals || !steps.length || !obj.versionId ? 'true' : 'false'"
+                  :disabled="lessonVisualSelectionDisabled || !obj.versionId"
+                  :aria-disabled="lessonVisualSelectionDisabled || !obj.versionId ? 'true' : 'false'"
                   @click="selectTeachObject(obj)"
                 >
                   <img :src="obj.posterUrl" :alt="obj.title" loading="lazy" />
@@ -159,7 +167,7 @@
               />
               <lesson-step-prompt-editor
                 v-model="promptDraft"
-                :disabled="!isDraft || savingStep || rebindingSharedVisual"
+                :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual"
                 @input="onPromptInput"
               />
               <el-card class="content-card" shadow="never">
@@ -167,18 +175,18 @@
                 <el-form label-position="top" size="small">
                   <div class="grid-2">
                     <el-form-item :label="$t('lesson.subjectLabel')" required>
-                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('subject', $event)" />
+                      <el-input :value="selectedContent.subject" data-testid="lesson-step-subject" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('subject', $event)" />
                     </el-form-item>
                     <el-form-item :label="$t('lesson.helperText')">
-                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('helperText', $event)" />
+                      <el-input :value="selectedContent.helperText" data-testid="lesson-step-helper" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('helperText', $event)" />
                     </el-form-item>
                   </div>
                   <el-form-item :label="$t('lesson.l1TransferHint')">
-                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft || savingStep || rebindingSharedVisual" @input="updateSelectedContent('l1TransferHint', $event)" />
+                    <el-input :value="selectedContent.l1TransferHint" data-testid="lesson-step-l1-hint" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" @input="updateSelectedContent('l1TransferHint', $event)" />
                   </el-form-item>
                 </el-form>
               </el-card>
-              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || rebindingSharedVisual" />
+              <LessonInteractionPanel v-model="selectedAuthoring" :disabled="!isDraft || savingStep || savingLessonVisuals || rebindingSharedVisual" />
             </div>
             <div class="preview-stack">
               <section v-if="cinematicDemoUrl" class="cinematic-effect preview-surface" data-testid="cinematic-design-reference">
@@ -291,7 +299,7 @@
         ref="assetManager"
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
-        :disabled="savingStep || rebindingSharedVisual || assetMutating"
+        :disabled="savingStep || savingLessonVisuals || rebindingSharedVisual || assetMutating"
         :mutation-settler="settleAssetMutation"
         :refresh-handler="retryFailedAssetReconciliation"
         @assets-loaded="onAssetsLoaded"
@@ -531,7 +539,6 @@ import {
 import {
   normalizeBatchReadiness,
   sharedBackgroundOption,
-  templateVisualRefTransition,
   mergeStepBodyForSave,
 } from '@/components/lesson/tvideo-template-logic';
 import {
@@ -610,6 +617,7 @@ export default {
       objectLibrary: [],
       savingLessonVisuals: false,
       pendingLessonVisualPair: null,
+      lessonVisualReconciliationRequired: false,
       sharedVisualAssets: [],
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
@@ -750,6 +758,15 @@ export default {
     pickedObjectKey() {
       return this.lessonVisualPair.objectAssetKey;
     },
+    lessonVisualSelectionDisabled() {
+      return this.savingLessonVisuals
+        || this.savingStep
+        || this.rebindingSharedVisual
+        || this.assetMutating
+        || this.sharedImpactReconciling
+        || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
+        || !this.steps.length;
+    },
     selectedStepKey() {
       return this.selectedStep ? this.selectedStep.stepKey : '';
     },
@@ -793,7 +810,7 @@ export default {
           || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
       },
       set(value) {
-        if (!this.selectedStep || this.savingStep || this.rebindingSharedVisual) return;
+        if (!this.selectedStep || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
         this.$set(this.selectedStepDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.bumpStepEditRevision(this.selectedStep.stepKey);
@@ -806,7 +823,7 @@ export default {
         return this.selectedAuthoring.templateAuthoring || null;
       },
       set(value) {
-        if (!this.selectedStep) return;
+        if (!this.selectedStep || this.savingLessonVisuals) return;
         const next = { ...this.selectedAuthoring };
         if (value) next.templateAuthoring = value;
         else delete next.templateAuthoring;
@@ -824,7 +841,7 @@ export default {
         };
       },
       set(value) {
-        if (!this.selectedStep) return;
+        if (!this.selectedStep || this.savingLessonVisuals) return;
         this.$set(this.selectedContentDrafts, this.selectedStep.stepKey, value);
         this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
         this.markStudioChanged(this.selectedStep.stepKey);
@@ -876,6 +893,7 @@ export default {
       }
       this.savingLessonVisuals = false;
       this.pendingLessonVisualPair = null;
+      this.lessonVisualReconciliationRequired = false;
       this.resetLessonAssetGenerationStatus();
       this.fetchAll();
     },
@@ -1317,6 +1335,10 @@ export default {
         if (this.editorDestroying || lessonId !== this.lessonId) return;
         const selectedKey = this.selectedStepKey;
         this.steps = rows;
+        if (this.lessonVisualReconciliationRequired) {
+          this.pendingLessonVisualPair = null;
+          this.lessonVisualReconciliationRequired = false;
+        }
         const matchingIndex = rows.findIndex((step) => step.stepKey === selectedKey);
         this.selectedStepIndex = matchingIndex >= 0
           ? matchingIndex
@@ -1436,21 +1458,21 @@ export default {
     },
     onPromptInput(value) {
       const step = this.selectedStep;
-      if (!step || this.savingStep || this.rebindingSharedVisual || this.promptStepKey !== step.stepKey) return;
+      if (!step || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual || this.promptStepKey !== step.stepKey) return;
       this.promptEditRevision += 1;
       this.bumpStepEditRevision(step.stepKey);
       this.promptDirty = value !== (step.prompt || '');
       this.invalidatePreview();
     },
     selectSharedAsset(asset) {
-      if (!this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
+      if (!this.selectedStep || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
       this.$set(this.selectedAssetDrafts, this.selectedStep.stepKey, asset);
       this.$set(this.dirtyStepKeys, this.selectedStep.stepKey, true);
       this.bumpStepEditRevision(this.selectedStep.stepKey);
       this.invalidatePreview();
     },
     openSharedImpact(intent, asset) {
-      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
+      if (!asset || !asset.assetId || !this.selectedStep || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
       this.sharedImpactIntent = {
         intent,
         asset,
@@ -1470,7 +1492,7 @@ export default {
     },
     keepSharedVisual() {
       const intent = this.sharedImpactIntent;
-      if (!this.savingStep && !this.rebindingSharedVisual && intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
+      if (!this.savingStep && !this.savingLessonVisuals && !this.rebindingSharedVisual && intent && intent.intent === 'select' && this.selectedStepKey === intent.stepKey) {
         this.selectSharedAsset(intent.asset);
       }
       this.closeSharedImpact();
@@ -1584,7 +1606,7 @@ export default {
     },
     rebindClonedVisual(clonedAsset) {
       if (this.editorDestroying) return;
-      if (this.savingStep || this.rebindingSharedVisual) return;
+      if (this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
       const intent = this.sharedImpactIntent;
       const step = intent && this.steps.find((row) => row.stepKey === intent.stepKey);
       if (!intent || !step || !clonedAsset) return;
@@ -1649,7 +1671,7 @@ export default {
     },
     saveSelectedStep() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft || this.savingStep || this.rebindingSharedVisual) return;
+      if (!step || !this.isDraft || this.savingStep || this.savingLessonVisuals || this.rebindingSharedVisual) return;
       const authored = this.selectedAuthoring;
       const stepBody = mergeStepBodyForSave(step.stepBody || {}, authored);
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
@@ -1675,9 +1697,7 @@ export default {
       this.promptSaveRequestId = saveGuard.requestId;
       this.invalidatePreview();
       this.savingStep = true;
-      const visualRefTransition = templateVisualRefTransition(step.stepBody || {}, stepBody);
-      const visualRefChanged = this.selectedStepIndex === 0 && visualRefTransition.shouldSync;
-      const persistStep = () => Api.lesson.updateStep(
+      Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
         { ...step, ...this.selectedContent, prompt: this.promptDraft, stepBody },
@@ -1697,49 +1717,10 @@ export default {
           });
         },
         (msg) => {
-          if (visualRefChanged) {
-            this.restoreTemplateVisualRef(step.stepKey, visualRefTransition.previousAssetVersionId, msg);
-            return;
-          }
           if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
           this.$message.error(msg);
         },
       );
-      if (visualRefChanged) {
-        Api.lesson.setVisualRef(
-          this.lessonId, step.stepKey, 'backgroundScene', visualRefTransition.nextAssetVersionId,
-          persistStep,
-          (msg) => { this.savingStep = false; this.$message.error(msg); },
-        );
-      } else {
-        persistStep();
-      }
-    },
-    restoreTemplateVisualRef(stepKey, assetVersionId, saveError) {
-      Api.lesson.setVisualRef(
-        this.lessonId,
-        stepKey,
-        'backgroundScene',
-        assetVersionId,
-        () => {
-          this.savingStep = false;
-          this.resetStepDraftAfterFailedSave(stepKey);
-          this.fetchSteps();
-          this.$message.error(`Step metadata save failed; the background pin was restored. ${saveError}`);
-        },
-        (rollbackError) => {
-          this.savingStep = false;
-          this.resetStepDraftAfterFailedSave(stepKey);
-          this.fetchSteps();
-          this.$message.error(`Partial save: step metadata failed and the background pin could not be restored. ${saveError}; ${rollbackError}`);
-        },
-      );
-    },
-    resetStepDraftAfterFailedSave(stepKey) {
-      this.$delete(this.selectedStepDrafts, stepKey);
-      this.$delete(this.selectedAssetDrafts, stepKey);
-      this.$delete(this.dirtyStepKeys, stepKey);
-      this.previewManifest = null;
     },
     fetchSharedVisualAssets() {
       Api.lesson.listVisualAssets(
@@ -1839,8 +1820,13 @@ export default {
       });
     },
     applyLessonVisualSelection(patch) {
-      if (this.savingLessonVisuals || !this.steps.length) return false;
+      if (this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
+        || this.assetMutating || this.sharedImpactReconciling
+        || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
+        || !this.steps.length) return false;
+      const confirmedPair = this.lessonVisualReconciliationRequired ? this.pendingLessonVisualPair : null;
       const nextPair = { ...this.lessonVisualPair, ...(patch || {}) };
+      this.lessonVisualReconciliationRequired = false;
       this.pendingLessonVisualPair = nextPair;
       this.$nextTick(() => this.pushCinematicStep());
       if (!nextPair.backgroundAssetVersionId || !nextPair.objectAssetVersionId) {
@@ -1862,26 +1848,32 @@ export default {
               if (this.editorDestroying || lessonId !== this.lessonId) return;
               this.pendingLessonVisualPair = null;
               this.savingLessonVisuals = false;
+              this.lessonVisualReconciliationRequired = false;
               this.loadLessonAssetGenerationStatus();
               this.$message.success(this.$t('lesson.visualPairSaved'));
-              this.$nextTick(() => {
-                this.pushCinematicStep();
-                if (this.lessonCapabilities.exactEspTftPreview) this.doPreview();
-              });
+              this.syncCinematicSoon();
             },
             onError: () => {
               if (lessonId !== this.lessonId) return;
-              this.pendingLessonVisualPair = null;
               this.savingLessonVisuals = false;
+              this.lessonVisualReconciliationRequired = true;
               this.syncCinematicSoon();
+              this.$message.warning(this.$t('lesson.visualPairReloadFailed'));
             },
           });
         },
         (msg) => {
           if (this.editorDestroying || lessonId !== this.lessonId) return;
           this.savingLessonVisuals = false;
-          this.pendingLessonVisualPair = null;
-          this.$nextTick(() => this.pushCinematicStep());
+          if (confirmedPair) {
+            this.pendingLessonVisualPair = confirmedPair;
+            this.lessonVisualReconciliationRequired = true;
+            this.syncCinematicSoon();
+          } else {
+            this.pendingLessonVisualPair = null;
+            this.lessonVisualReconciliationRequired = false;
+            this.$nextTick(() => this.pushCinematicStep());
+          }
           this.$message.error(msg);
         },
       );
@@ -1954,7 +1946,8 @@ export default {
     },
     saveSelectedStepStudio() {
       const step = this.selectedStep;
-      if (!step || !this.isDraft) return;
+      if (!step || !this.isDraft || this.savingStep || this.savingLessonVisuals
+        || this.rebindingSharedVisual || this.savingSelectedStep) return;
       const savedRevision = Number(this.stepDraftRevisions[step.stepKey] || 0);
       const request = buildSaveStepRequest({
         step,

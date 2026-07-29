@@ -259,6 +259,7 @@ export default {
   'lesson.visualPairWholeLesson': 'Applies automatically to every step in this lesson.',
   'lesson.visualPairRequired': 'Choose both a background and an object before saving.',
   'lesson.visualPairSaved': 'Lesson visuals saved. SD synchronization has started.',
+  'lesson.visualPairReloadFailed': 'Lesson visuals were saved, but the latest steps could not be reloaded. Retry to reconcile.',
   'lesson.visualPairNoSteps': 'Add the first step before choosing lesson visuals.',
   'lesson.subject': 'Subject',
   'lesson.renderTriple': 'Render (server-derived)',
