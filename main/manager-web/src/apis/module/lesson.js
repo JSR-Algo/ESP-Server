@@ -296,6 +296,26 @@ export default {
     });
   },
 
+  applyLessonVisuals(lessonId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/visuals`,
+      method: 'PUT',
+      data,
+      onSuccess,
+      onError,
+    });
+  },
+
+  retrySdSync(lessonId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync/retry`,
+      method: 'POST',
+      data: {},
+      onSuccess,
+      onError,
+    });
+  },
+
   // POST /v1/admin/lessons/:lessonId/new-version -> new DRAFT lesson at v+1
   // "Edit a published lesson": published lessons are immutable, so the edit path is
   // a fresh draft (same lesson_key + course_id, next lesson_version) with the steps
