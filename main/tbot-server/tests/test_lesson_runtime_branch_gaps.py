@@ -33,12 +33,15 @@ import os
 import sys
 import unittest
 import asyncio
+import copy
+import importlib.util
 import json
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
+from core.lesson.errors import LessonError  # noqa: E402
 from core.lesson.runtime import (  # noqa: E402
     LessonRuntime,
     S_FAILED,
@@ -47,6 +50,165 @@ from core.lesson.runtime import (  # noqa: E402
     VISUAL_DEGRADED_REASONS,
     VISUAL_REJECTED_REASONS,
 )
+
+
+RENDERER_V3 = "teebot-lesson-renderer.v3"
+
+
+def _cinematic_metadata(duration_ms, *, background=False):
+    return {
+        "codec": "mjpeg",
+        "fps": 10,
+        "durationMs": duration_ms,
+        "frameCount": duration_ms // 100,
+        "hasAudio": False,
+        "rect": (
+            {"x": 0, "y": 0, "width": 480, "height": 320}
+            if background
+            else {"x": 120, "y": 80, "width": 200, "height": 200}
+        ),
+        "chromaKey": (
+            None
+            if background
+            else {
+                "color": {"r": 0, "g": 255, "b": 0},
+                "tolerance": 20,
+                "feather": 4,
+            }
+        ),
+    }
+
+
+def _cinematic_phase(phase_id="opening", duration_ms=9000, suffix=""):
+    identities = (
+        ("background", "backgroundScene", f"scene.opening{suffix}", 3, "a", True),
+        ("teachingObject", "teachingObject", f"object.barn{suffix}", 2, "b", False),
+        ("robotOverlay", "robotOverlay", f"robot.walk{suffix}", 4, "c", False),
+    )
+    return {
+        "templateId": "directMp4Cinematic",
+        "templateVersion": 1,
+        "phaseId": phase_id,
+        "timing": (
+            {"flyInMs": 3200, "farBeatMs": 800, "walkingMs": 5000, "durationMs": 9000}
+            if phase_id == "opening"
+            else {"durationMs": duration_ms}
+        ),
+        "layers": [
+            {
+                "layer": layer,
+                "slot": slot,
+                "assetVersionId": f"{key}@v{version}",
+                "assetKey": key,
+                "version": version,
+                "path": f"visuals/{key}/v{version}.mp4",
+                "url": f"https://cdn.example.test/visuals/{key}/v{version}.mp4",
+                "sha256": sha * 64,
+                "bytes": 900000 - version,
+                "mediaType": "video/mp4",
+                "width": 480 if background else 200,
+                "height": 320 if background else 200,
+                "metadata": _cinematic_metadata(duration_ms, background=background),
+            }
+            for layer, slot, key, version, sha, background in identities
+        ],
+    }
+
+
+def _cinematic_manifest():
+    manifest = T._build_manifest()
+    manifest["manifestVersion"] = RENDERER_V3
+    manifest["features"] = {
+        "lessonRendererV3": {
+            "directMp4Cinematic": True,
+            "assetSource": "publishedVersionedVisualRefs",
+        }
+    }
+    manifest["cinematicPhases"] = [
+        _cinematic_phase(),
+        _cinematic_phase("greet", 1200, ".greet"),
+    ]
+    return manifest
+
+
+class _CinematicAssetCache(T._FakeAssetCache):
+    def __init__(self, *, ready=True):
+        super().__init__(ready=ready)
+        self.asset_pack_local_root = "sd://tbot/lesson-assets"
+
+    def asset_pack_manifest(self, **kwargs):
+        pack = super().asset_pack_manifest(**kwargs)
+        pack["assets"] = []
+        for phase in _cinematic_manifest()["cinematicPhases"]:
+            for layer in phase["layers"]:
+                metadata = copy.deepcopy(layer["metadata"])
+                basename = layer["assetVersionId"].replace("@", "%40")
+                pack["assets"].append(
+                    {
+                        "key": layer["assetVersionId"],
+                        "sharedAssetKey": layer["assetKey"],
+                        "sharedAssetVersion": layer["version"],
+                        "path": layer["path"],
+                        "onlineUrl": layer["url"],
+                        "url": layer["url"],
+                        "sha256": layer["sha256"],
+                        "size": layer["bytes"],
+                        "mediaType": "video/mp4",
+                        "critical": True,
+                        "layer": layer["slot"],
+                        "role": "video",
+                        "state": "READY" if self._ready else "PENDING",
+                        "checksumOk": self._ready,
+                        "localPath": f"{pack['localRoot']}/{basename}",
+                        "sdPath": f"{pack['localRoot']}/{basename}",
+                        "compatibilityMetadata": metadata,
+                        "visualRefs": [
+                            {
+                                "stepKey": "s4",
+                                "phase": phase["phaseId"],
+                                "slot": f"{layer['slot']}.{phase['phaseId']}",
+                            }
+                        ],
+                    }
+                )
+        return pack
+
+    def local_pack_url_for_source(self, source):
+        if isinstance(source, str) and source:
+            return f"{self.asset_pack_local_root}/{self.cache_key}/static/{os.path.basename(source)}"
+        return None
+
+
+def _cinematic_runtime(*, conn=None, manifest=None, cache=None, sleep=None):
+    conn = conn or T._FakeConn(
+        features={
+            "lesson": True,
+            "renderer": [RENDERER_V3],
+            "lessonRendererV3": {
+                "directMp4Cinematic": True,
+                "sdAssetPack": True,
+            },
+        }
+    )
+    conn.device_id = "robot-v3"
+    conn.config = {
+        "lesson": {
+            "renderer_v3_enabled": True,
+            "rollout_device_allowlist": ["robot-v3"],
+            "asset_delivery_mode": "sd_pack",
+            "frame_ack_timeout_sec": 60,
+        }
+    }
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn,
+            assignment=T._build_assignment(),
+            manifest=manifest or _cinematic_manifest(),
+            asset_cache=cache or _CinematicAssetCache(),
+            forwarder=T._FakeForwarder(),
+            manifest_checksum=T._manifest_checksum(),
+            sleep=sleep,
+        )
 
 
 def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
@@ -1210,6 +1372,214 @@ class RewriteRequiredLayerSourcesBranchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(scene["backgroundScene"]["poster"]["src"], str)
         self.assertNotIn("teachingObject", scene)
         self.assertNotIn("robotOverlay", scene)
+
+
+class CinematicContractTest(unittest.TestCase):
+    def test_projects_one_known_phase_from_ready_pack_without_online_data(self):
+        spec = importlib.util.find_spec("core.lesson.cinematic_contract")
+        self.assertIsNotNone(spec, "cinematic contract module must exist")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        phase = _cinematic_manifest()["cinematicPhases"][0]
+        pack = _CinematicAssetCache().asset_pack_manifest(
+            assignment_version=1,
+            lesson_id="lesson",
+            lesson_version=3,
+            manifest_checksum=T._manifest_checksum(),
+        )
+
+        projected = module.project_cinematic_phase(phase, pack)
+
+        self.assertEqual(projected["phaseId"], "opening")
+        self.assertEqual(projected["templateId"], "directMp4Cinematic")
+        self.assertEqual(projected["templateVersion"], 1)
+        self.assertEqual(projected["durationMs"], 9000)
+        self.assertEqual(projected["fps"], 10)
+        self.assertEqual(projected["frameCount"], 90)
+        self.assertEqual([layer["layer"] for layer in projected["layers"]], [
+            "background", "teachingObject", "robotOverlay",
+        ])
+        for source, layer in zip(phase["layers"], projected["layers"]):
+            self.assertTrue(layer["sdPath"].startswith("sd://tbot/lesson-assets/"))
+            self.assertEqual(layer["assetVersionId"], source["assetVersionId"])
+            self.assertEqual(layer["version"], source["version"])
+            self.assertEqual(layer["sha256"], source["sha256"])
+            self.assertEqual(layer["bytes"], source["bytes"])
+            self.assertEqual(layer["rect"], source["metadata"]["rect"])
+            self.assertEqual(layer["chromaKey"], source["metadata"]["chromaKey"])
+        wire = json.dumps(projected, sort_keys=True)
+        self.assertNotIn("http://", wire)
+        self.assertNotIn("https://", wire)
+        self.assertNotRegex(wire.lower(), r"token|credential|authorization|cookie|signed")
+
+    def test_rejects_not_ready_missing_paths_and_mismatched_phase_metadata(self):
+        spec = importlib.util.find_spec("core.lesson.cinematic_contract")
+        self.assertIsNotNone(spec, "cinematic contract module must exist")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        phase = _cinematic_manifest()["cinematicPhases"][0]
+        base_pack = _CinematicAssetCache().asset_pack_manifest(
+            assignment_version=1,
+            lesson_id="lesson",
+            lesson_version=3,
+            manifest_checksum=T._manifest_checksum(),
+        )
+        mutations = (
+            ("pack not ready", lambda p, _phase: p.update(ready=False), "CINEMATIC_PACK_NOT_READY"),
+            ("missing path", lambda p, _phase: (p["assets"][0].pop("localPath"), p["assets"][0].pop("sdPath")), "CINEMATIC_SD_PATH_MISSING"),
+            ("online path", lambda p, _phase: p["assets"][0].update(localPath="https://cdn.test/a.mp4"), "CINEMATIC_SD_PATH_MISSING"),
+            ("metadata mismatch", lambda _p, ph: ph["layers"][0]["metadata"].update(frameCount=89), "CINEMATIC_METADATA_MISMATCH"),
+        )
+        for label, mutate, code in mutations:
+            with self.subTest(label=label):
+                pack = copy.deepcopy(base_pack)
+                candidate = copy.deepcopy(phase)
+                mutate(pack, candidate)
+                with self.assertRaises(module.CinematicContractError) as ctx:
+                    module.project_cinematic_phase(candidate, pack)
+                self.assertEqual(ctx.exception.code, code)
+
+
+class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _frames(rt):
+        return [json.loads(payload) for payload in rt.conn.websocket.sent]
+
+    @staticmethod
+    def _ack(rt, frame, inbound_sequence, *, ready=True, phase_id=None):
+        return {
+            "type": "lesson_ack",
+            "protocolVersion": RENDERER_V3,
+            "assignmentId": rt.assignment_id,
+            "sessionId": rt.session_id,
+            "lessonId": rt.lesson_id,
+            "lessonVersion": rt.lesson_version,
+            "stepId": frame.get("stepId"),
+            "sequence": inbound_sequence,
+            "timestamp": 1,
+            "body": {
+                "acks": frame["sequence"],
+                "assetPack": {
+                    "ready": True,
+                    "cacheKey": rt.asset_cache.cache_key,
+                },
+                "cinematicPhase": {
+                    "event": "phaseReady",
+                    "phaseId": phase_id or frame["body"]["cinematicPhase"]["phaseId"],
+                    "commandSequenceId": frame["body"]["cinematicPhase"]["commandSequenceId"],
+                    "frameZeroReady": ready,
+                },
+            },
+        }
+
+    async def test_exact_v3_direct_mp4_capability_gates_prepare(self):
+        for renderer in ("teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"):
+            with self.subTest(renderer=renderer):
+                conn = T._FakeConn(features={"lesson": True, "renderer": [renderer]})
+                rt = _cinematic_runtime(conn=conn)
+                with self.assertRaises(LessonError) as ctx:
+                    await rt.start()
+                self.assertEqual(ctx.exception.code, "CINEMATIC_CAPABILITY_UNSUPPORTED")
+                self.assertEqual(conn.websocket.sent, [])
+
+        conn = T._FakeConn(features={"lesson": True, "renderer": [RENDERER_V3]})
+        rt = _cinematic_runtime(conn=conn)
+        with self.assertRaises(LessonError) as ctx:
+            await rt.start()
+        self.assertEqual(ctx.exception.code, "CINEMATIC_CAPABILITY_UNSUPPORTED")
+        self.assertEqual(conn.websocket.sent, [])
+
+    async def test_prepare_projects_only_current_ordered_phase_and_waits_for_typed_ready_ack(self):
+        rt = _cinematic_runtime()
+        await rt.start()
+        frames = self._frames(rt)
+        self.assertEqual([frame["type"] for frame in frames], ["lesson_prepare"])
+        prepare = frames[0]
+        command = prepare["body"]["cinematicPhase"]
+        self.assertEqual(command["command"], "prepare")
+        self.assertEqual(command["phaseId"], "opening")
+        self.assertEqual(command["commandSequenceId"], prepare["sequence"])
+        self.assertEqual(command["durationMs"], 9000)
+        self.assertEqual(command["fps"], 10)
+        self.assertEqual(command["frameCount"], 90)
+        self.assertEqual(len(command["layers"]), 3)
+        self.assertNotIn("nextPhase", command)
+        self.assertNotIn("branches", command)
+        self.assertNotIn("cinematicPhases", prepare["body"])
+
+        wrong = self._ack(rt, prepare, 1, phase_id="greet")
+        await rt.on_lesson_ack(wrong)
+        self.assertEqual([f["type"] for f in self._frames(rt)], ["lesson_prepare"])
+        wrong["body"]["cinematicPhase"]["phaseId"] = "opening"
+        wrong["body"]["cinematicPhase"]["frameZeroReady"] = False
+        await rt.on_lesson_ack(wrong)
+        self.assertEqual([f["type"] for f in self._frames(rt)], ["lesson_prepare"])
+
+        ready = self._ack(rt, prepare, 1)
+        await rt.on_lesson_ack(ready)
+        frames = self._frames(rt)
+        self.assertEqual([frame["type"] for frame in frames], ["lesson_prepare", "lesson_start"])
+        start = frames[-1]
+        self.assertEqual(start["body"]["cinematicPhase"], {
+            "command": "start",
+            "phaseId": "opening",
+            "commandSequenceId": start["sequence"],
+        })
+
+        await rt.on_lesson_ack(ready)
+        self.assertEqual(len(self._frames(rt)), 2)
+
+    async def test_prepare_retry_reuses_command_identity_and_lifecycle_commands_are_idempotent(self):
+        sleep = T._GatedSleep()
+        rt = _cinematic_runtime(sleep=sleep)
+        rt.conn.config["lesson"]["frame_ack_timeout_sec"] = 0.01
+        await rt.start()
+        await asyncio.sleep(0)
+        first = self._frames(rt)[0]
+        sleep.release_next()
+        await asyncio.sleep(0)
+        retry = self._frames(rt)[-1]
+        self.assertNotEqual(retry["sequence"], first["sequence"])
+        self.assertEqual(
+            retry["body"]["cinematicPhase"]["commandSequenceId"],
+            first["body"]["cinematicPhase"]["commandSequenceId"],
+        )
+
+        await rt.on_lesson_ack(self._ack(rt, retry, 1))
+        start = self._frames(rt)[-1]
+        await rt.on_lesson_ack({
+            **self._ack(rt, start, 2),
+            "body": {"acks": start["sequence"], "rendered": True, "degraded": False},
+        })
+        self.assertEqual(self._frames(rt)[-1]["type"], "lesson_step")
+
+        await rt.pause()
+        await rt.pause()
+        pause_frames = [f for f in self._frames(rt) if f["type"] == "lesson_cinematic_control" and f["body"]["command"] == "pause"]
+        self.assertEqual(len(pause_frames), 1)
+        await rt.resume()
+        await rt.resume()
+        resume_frames = [f for f in self._frames(rt) if f["type"] == "lesson_cinematic_control" and f["body"]["command"] == "resume"]
+        self.assertEqual(len(resume_frames), 1)
+        self.assertGreater(resume_frames[0]["body"]["clockRebaseSequenceId"], pause_frames[0]["body"]["commandSequenceId"])
+        await rt.stop()
+        await rt.stop()
+        stop_frames = [f for f in self._frames(rt) if f["type"] == "lesson_stop"]
+        self.assertEqual(len(stop_frames), 1)
+        self.assertEqual(stop_frames[0]["body"]["cinematicPhase"]["command"], "stop")
+
+    async def test_cancel_is_typed_idempotent_and_does_not_offer_firmware_branch_selection(self):
+        rt = _cinematic_runtime()
+        rt.state = S_RUNNING
+        await rt.cancel("assignmentReplaced")
+        await rt.cancel("assignmentReplaced")
+        frames = self._frames(rt)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "lesson_cinematic_control")
+        self.assertEqual(frames[0]["body"]["command"], "cancel")
+        self.assertEqual(frames[0]["body"]["reason"], "assignmentReplaced")
+        wire = json.dumps(frames[0])
+        self.assertNotRegex(wire, r"nextPhase|nextStep|branch|choice")
 
 
 if __name__ == "__main__":
