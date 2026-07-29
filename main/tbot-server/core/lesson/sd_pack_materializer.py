@@ -797,20 +797,36 @@ def _replay_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "manifestChecksum": manifest.get("manifestChecksum"),
         "assets": sorted(
             (
-                {
-                    "key": asset.get("key"),
-                    "sha256": asset.get("sha256"),
-                    "size": asset.get("size"),
-                    "mediaType": asset.get("mediaType"),
-                    "critical": asset.get("critical"),
-                    "sdPath": asset.get("sdPath"),
-                }
+                _replay_asset_projection(asset)
                 for asset in manifest.get("assets", [])
                 if isinstance(asset, Mapping)
             ),
             key=lambda asset: str(asset.get("key")),
         ),
     }
+
+
+def _replay_asset_projection(asset: Mapping[str, Any]) -> dict[str, Any]:
+    projection = {
+                    "key": asset.get("key"),
+                    "sha256": asset.get("sha256"),
+                    "size": asset.get("size"),
+                    "mediaType": asset.get("mediaType"),
+                    "critical": asset.get("critical"),
+                    "sdPath": asset.get("sdPath"),
+    }
+    if asset.get("mediaType") == "video/mp4":
+        projection.update({
+            "onlineUrl": asset.get("onlineUrl"),
+            "sharedAssetKey": asset.get("sharedAssetKey"),
+            "sharedAssetVersion": asset.get("sharedAssetVersion"),
+            "compatibilityMetadata": asset.get("compatibilityMetadata"),
+            "visualRefs": sorted(
+                (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
+                key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
+            ),
+        })
+    return projection
 
 def _log(
     logger: Any,

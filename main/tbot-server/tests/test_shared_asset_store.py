@@ -41,6 +41,22 @@ def _rich_manifest(cache_key: str, digest: str, size: int) -> dict:
     }
 
 
+def _rich_mp4_manifest(cache_key: str, digest: str, size: int) -> dict:
+    manifest = _rich_manifest(cache_key, digest, size)
+    manifest["assets"][0].update({
+        "key": "scene.opening@v3", "mediaType": "video/mp4",
+        "onlineUrl": "https://assets.example/scene.mp4?variant=1#opening",
+        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/scene.opening%40v3",
+        "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320}, "chromaKey": None,
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+    })
+    return manifest
+
+
 def test_ready_rich_pack_replay_accepts_rotated_online_url(tmp_path):
     store = SharedAssetStore(tmp_path / "tbot")
     content = b"poster"
@@ -91,6 +107,26 @@ def test_ready_rich_pack_replay_rejects_asset_identity_changes(tmp_path, changed
 
     with pytest.raises(PackReplayMismatchError):
         store.commit_pack(cache_key, staged_assets, manifest=changed)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda asset: asset.update(onlineUrl="https://assets.example/scene.mp4?variant=2#opening"),
+    lambda asset: asset["compatibilityMetadata"].update(durationMs=2000, frameCount=20),
+    lambda asset: asset.update(visualRefs=[{"stepKey": "s1", "phase": "greet", "slot": "backgroundScene.greet"}]),
+])
+def test_ready_renderer_v3_pack_rejects_changed_rich_identity(tmp_path, mutate):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"mp4"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v1-{'a' * 64}"
+    store.put_bytes(content, digest)
+    manifest = _rich_mp4_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {"scene.opening@v3": digest}, manifest=manifest)
+    changed = deepcopy(manifest)
+    mutate(changed["assets"][0])
+
+    with pytest.raises(PackReplayMismatchError):
+        store.commit_pack(cache_key, {"scene.opening@v3": digest}, manifest=changed)
 
 
 def _hold_atomic_write(root, started, release):

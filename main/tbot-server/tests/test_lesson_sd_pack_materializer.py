@@ -160,6 +160,22 @@ def _manifest(**overrides):
     return manifest
 
 
+def _mp4_manifest():
+    content = b"renderer-v3-replay"
+    key = "scene.opening@v3"
+    url = "https://assets.example/visuals/scene.opening/v3.mp4?variant=1#opening"
+    return content, _manifest(assets=[{
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key), "localPath": _sd_path(key),
+        "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320}, "chromaKey": None,
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+    }])
+
+
 def _config(tmp_path, **lesson):
     cfg = {
         "lesson": {
@@ -931,6 +947,26 @@ async def test_replay_rejects_rich_manifest_metadata_mismatch_without_download(t
 
     assert exc_info.value.code == "PACK_REPLAY_MISMATCH"
     assert client.requests == before_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutate", [
+    lambda asset: asset.update(onlineUrl=asset["onlineUrl"].replace("variant=1", "variant=2"), url=asset["url"].replace("variant=1", "variant=2")),
+    lambda asset: asset["compatibilityMetadata"].update(durationMs=2000, frameCount=20),
+    lambda asset: asset.update(visualRefs=[{"stepKey": "s1", "phase": "greet", "slot": "backgroundScene.greet"}]),
+])
+async def test_renderer_v3_replay_rejects_changed_rich_identity(tmp_path, mutate):
+    content, manifest = _mp4_manifest()
+    url = manifest["assets"][0]["onlineUrl"]
+    client = _Client({url: [content]})
+    await materialize_lesson_sd_pack(manifest, config=_config(tmp_path), client=client, resolver=_public_resolver)
+    changed = deepcopy(manifest)
+    mutate(changed["assets"][0])
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(changed, config=_config(tmp_path), client=client, resolver=_public_resolver)
+
+    assert exc_info.value.code == "PACK_REPLAY_MISMATCH"
 
 
 @pytest.mark.asyncio
