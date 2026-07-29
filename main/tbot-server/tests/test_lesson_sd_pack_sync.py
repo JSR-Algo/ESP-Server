@@ -360,6 +360,7 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
             "cacheKey": first_key,
             "downloadedCount": 1,
             "skippedCount": 0,
+            "reusedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "ready": True,
@@ -368,6 +369,7 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
             "cacheKey": second_key,
             "downloadedCount": 1,
             "skippedCount": 0,
+            "reusedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "ready": True,
@@ -444,6 +446,7 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             "cacheKey": first_key,
             "downloadedCount": 2,
             "skippedCount": 1,
+            "reusedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
             "ready": True,
@@ -452,6 +455,7 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             "cacheKey": second_key,
             "downloadedCount": 1,
             "skippedCount": 0,
+            "reusedCount": 0,
             "failedCount": 2,
             "criticalFailedCount": 1,
             "ready": False,
@@ -526,6 +530,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         "cacheKey": cache_key,
         "downloadedCount": 0,
         "skippedCount": 0,
+        "reusedCount": 0,
         "failedCount": 1,
         "criticalFailedCount": 0,
         "ready": False,
@@ -590,6 +595,15 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
             "skippedCount": 0,
             "failedCount": 0,
         },
+        {
+            "ready": True,
+            "cacheKey": "lesson-a/v1-" + "a" * 64,
+            "manifestChecksum": "a" * 64,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "reusedCount": -1,
+            "failedCount": 0,
+        },
     ],
     ids=[
         "missing-cache-key",
@@ -599,6 +613,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         "missing-ready",
         "failed-assets",
         "count-mismatch",
+        "negative-reused-count",
     ],
 )
 async def test_background_sync_rejects_inexact_firmware_attestation(
@@ -670,6 +685,47 @@ async def test_background_sync_accepts_exact_firmware_attestation(monkeypatch):
 
     assert result["synced"] == 1
     assert result["failed"] == 0
+    assert result["resultsByCacheKey"][cache_key]["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_background_sync_accepts_reused_firmware_attestation(monkeypatch):
+    checksum = "a" * 64
+    cache_key = f"lesson-a/v1-{checksum}"
+    pack = {
+        "cacheKey": cache_key,
+        "manifestChecksum": checksum,
+        "assets": [{"key": "poster"}, {"key": "barn"}],
+    }
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        mcp_client = Client()
+
+    monkeypatch.setattr(sd_pack_sync, "cached_asset_packs", lambda _config: [pack])
+
+    async def fake_call(_conn, _client, _pack):
+        return {
+            "ready": True,
+            "cacheKey": cache_key,
+            "manifestChecksum": checksum,
+            "downloadedCount": 1,
+            "skippedCount": 0,
+            "reusedCount": 1,
+            "failedCount": 0,
+        }
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(Conn())
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert result["resultsByCacheKey"][cache_key]["reusedCount"] == 1
     assert result["resultsByCacheKey"][cache_key]["ready"] is True
 
 

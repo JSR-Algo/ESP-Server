@@ -3548,6 +3548,7 @@ class LessonRuntime:
                 f"assetCount={diagnostic['assetCount']} "
                 f"downloadedCount={diagnostic['downloadedCount']} "
                 f"skippedCount={diagnostic['skippedCount']} "
+                f"reusedCount={diagnostic['reusedCount']} "
                 f"failedCount={diagnostic['failedCount']} "
                 f"criticalFailedCount={diagnostic['criticalFailedCount']} "
                 f"cacheKeyMatch={diagnostic['cacheKeyMatch']} "
@@ -3559,6 +3560,7 @@ class LessonRuntime:
             f"assetCount={attestation['assetCount']} "
             f"downloadedCount={attestation['downloadedCount']} "
             f"skippedCount={attestation['skippedCount']} "
+            f"reusedCount={attestation['reusedCount']} "
             f"failedCount={attestation['failedCount']} "
             f"durationMs={duration_ms}"
         )
@@ -3608,8 +3610,8 @@ class LessonRuntime:
         if not response_checksums or any(value != expected_checksum for value in response_checksums):
             return None
         counts = {}
-        for key in ("downloadedCount", "skippedCount", "failedCount"):
-            value = result.get(key)
+        for key in ("downloadedCount", "skippedCount", "reusedCount", "failedCount"):
+            value = result.get(key, 0) if key == "reusedCount" else result.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 return None
             counts[key] = value
@@ -3645,6 +3647,7 @@ class LessonRuntime:
             "assetCount": len(assets) if isinstance(assets, list) else -1,
             "downloadedCount": count("downloadedCount"),
             "skippedCount": count("skippedCount"),
+            "reusedCount": count("reusedCount") if "reusedCount" in result else 0,
             "failedCount": count("failedCount"),
             "criticalFailedCount": count("criticalFailedCount"),
             "cacheKeyMatch": isinstance(expected_cache_key, str)
