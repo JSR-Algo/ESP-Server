@@ -3152,7 +3152,17 @@ class LessonRuntime:
             }
         }
         if isinstance(opening, dict):
-            body["openingEntrance"] = copy.deepcopy(opening)
+            wire_keys = (
+                "preset",
+                "policy",
+                "layoutPreset",
+                "backgroundAssetKey",
+                "robotAssetKey",
+                "fallback",
+            )
+            body["openingEntrance"] = {
+                key: copy.deepcopy(opening.get(key)) for key in wire_keys
+            }
         return body
 
     @staticmethod

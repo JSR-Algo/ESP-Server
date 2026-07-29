@@ -6257,9 +6257,20 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         manifest = _build_manifest()
         manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
         manifest["openingEntrance"] = {
+            "template": "tvideoFlyWalk",
             "preset": "flyLandWalkGreet",
             "policy": "oncePerLessonSession",
             "layoutPreset": "centerRoad",
+            "phases": [
+                "hidden",
+                "flyIn",
+                "landFar",
+                "settle",
+                "walkToward",
+                "arriveNear",
+                "greetIdle",
+                "revealTeachingContent",
+            ],
             "backgroundAssetKey": "scene.farm",
             "robotAssetKey": "robotOverlay.teach",
             "fallback": "staticGreet",
@@ -6274,7 +6285,19 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt._preload_task
         start = self._sent_frames(conn)[-1]
         self.assertEqual(start["type"], "lesson_start")
-        self.assertEqual(start["body"]["openingEntrance"], manifest["openingEntrance"])
+        self.assertEqual(
+            start["body"]["openingEntrance"],
+            {
+                "preset": "flyLandWalkGreet",
+                "policy": "oncePerLessonSession",
+                "layoutPreset": "centerRoad",
+                "backgroundAssetKey": "scene.farm",
+                "robotAssetKey": "robotOverlay.teach",
+                "fallback": "staticGreet",
+            },
+        )
+        self.assertIn("template", manifest["openingEntrance"])
+        self.assertIn("phases", manifest["openingEntrance"])
         self.assertEqual(
             start["body"]["runtimeControls"],
             {
