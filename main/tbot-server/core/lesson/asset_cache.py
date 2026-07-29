@@ -367,7 +367,9 @@ class AssetCache:
         download_url = self._resolve_url(asset)
         if self.public_base_url and self._asset_cache_materialized(asset):
             token = base64.urlsafe_b64encode(self.cache_key.encode("utf-8")).decode("ascii").rstrip("=")
-            download_url = f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='')}"
+            # Keep '@' literal in the HTTP path. Some firmware HTTP stacks escape
+            # an existing "%40" again, while '@' is valid inside a path segment.
+            download_url = f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='@')}"
         record = {
             "key": asset.key,
             "path": asset.path,

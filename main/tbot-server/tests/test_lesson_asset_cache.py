@@ -959,6 +959,9 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_asset_pack_manifest_uses_verified_local_http_cache_for_firmware_downloads(self):
         assets = _critical_assets()
+        versioned = dict(assets[1])
+        versioned["key"] = "object.robot@v1"
+        assets.append(versioned)
         cache = self._cache(
             assets,
             client=_client_for(assets),
@@ -981,6 +984,10 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             by_key["backgroundScene.poster"]["url"],
             f"https://esp.example/tbot/lesson-assets/{token}/backgroundScene.poster",
+        )
+        self.assertEqual(
+            by_key["object.robot@v1"]["url"],
+            f"https://esp.example/tbot/lesson-assets/{token}/object.robot@v1",
         )
 
     async def test_same_lesson_version_republish_checksum_downloads_to_new_sd_cache_key(self):
