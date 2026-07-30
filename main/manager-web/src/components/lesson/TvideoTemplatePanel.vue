@@ -9,19 +9,8 @@
         <el-form-item label="Vocabulary set ID">
           <el-input v-model="draft.vocabularySetId" placeholder="e.g. animals-a1" />
         </el-form-item>
-        <el-form-item label="Background workflow">
-          <el-radio-group v-model="draft.backgroundMode" size="small">
-            <el-radio-button label="reuseShared">Reuse shared background</el-radio-button>
-            <el-radio-button label="cloneForLesson">Clone for this lesson</el-radio-button>
-            <el-radio-button label="newSharedVersion">Upload a new shared background version</el-radio-button>
-          </el-radio-group>
-          <p v-if="draft.backgroundMode === 'cloneForLesson'" class="workflow-note">The selected shared version is pinned now; use the lesson asset manager to upload the lesson-specific clone.</p>
-          <p v-if="draft.backgroundMode === 'newSharedVersion'" class="workflow-note">Publish and curate compatibility for the new shared version before selecting it here.</p>
-        </el-form-item>
-        <el-form-item label="Compatible background">
-          <el-select v-model="draft.backgroundVersionId" placeholder="Choose a versioned background" @change="syncBackground">
-            <el-option v-for="asset in backgrounds" :key="asset.assetKey" :label="asset.name || asset.assetKey" :value="asset.assetKey" />
-          </el-select>
+        <el-form-item label="Lesson background">
+          <p class="workflow-note">Derived from the lesson-wide background selector: <strong>{{ backgroundLabel }}</strong></p>
         </el-form-item>
         <el-form-item label="Named layout preset">
           <el-radio-group v-model="draft.layoutPreset" :disabled="!availableLayouts.length">
@@ -42,21 +31,23 @@
 import { buildTemplateAuthoring, compatibleLayouts } from './tvideo-template-logic';
 export default {
   name: 'TvideoTemplatePanel',
-  props: { value: { type: Object, default: null }, assets: { type: Array, default: () => [] } },
-  data() { return { enabled: Boolean(this.value), draft: { templateId: 'tvideoFlyWalk', vocabularySetId: '', backgroundMode: 'reuseShared', layoutPreset: 'centerRoad', backgroundVersionId: '', backgroundAssetVersionId: '', arrivedPoseVersionId: '', atlasVersionId: '', backgroundCompatibility: null, ...(this.value || {}) } }; },
+  props: {
+    value: { type: Object, default: null },
+    assets: { type: Array, default: () => [] },
+    background: { type: Object, default: null },
+  },
+  data() { return { enabled: Boolean(this.value), draft: { templateId: 'tvideoFlyWalk', vocabularySetId: '', layoutPreset: 'centerRoad', backgroundVersionId: '', backgroundAssetVersionId: '', arrivedPoseVersionId: '', atlasVersionId: '', backgroundCompatibility: null, ...(this.value || {}) } }; },
   computed: {
-    backgrounds() { return this.assets.filter((asset) => asset.layer === 'backgroundScene'); },
     arrivedPoses() { return this.assets.filter((asset) => asset.layer === 'robotOverlay' && /arriv|pose/i.test(`${asset.assetKey} ${asset.role || ''}`)); },
     atlases() { return this.assets.filter((asset) => /atlas/i.test(`${asset.assetKey} ${asset.role || ''}`)); },
-    selectedBackground() { return this.backgrounds.find((asset) => asset.assetKey === this.draft.backgroundVersionId); },
-    availableLayouts() { const meta = this.selectedBackground && (this.selectedBackground.compatibility || this.selectedBackground); return compatibleLayouts(meta); },
+    backgroundLabel() { return (this.background && (this.background.name || this.background.assetKey)) || 'Select a lesson background first'; },
+    availableLayouts() { const meta = this.background && (this.background.compatibility || this.background); return compatibleLayouts(meta); },
   },
   watch: {
     enabled() { this.emitValue(); },
     draft: { deep: true, handler() { this.emitValue(); } },
   },
   methods: {
-    syncBackground() { this.draft.backgroundCompatibility = this.selectedBackground && (this.selectedBackground.compatibility || this.selectedBackground); this.draft.backgroundAssetVersionId = (this.selectedBackground && this.selectedBackground.assetVersionId) || ''; if (!this.availableLayouts.includes(this.draft.layoutPreset)) this.draft.layoutPreset = this.availableLayouts[0] || ''; },
     emitValue() { if (!this.enabled) return this.$emit('input', null); try { this.$emit('input', buildTemplateAuthoring(this.draft)); } catch (_) { this.$emit('input', { ...this.draft, invalid: true }); } },
   },
 };

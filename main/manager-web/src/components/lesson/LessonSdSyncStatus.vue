@@ -12,9 +12,22 @@
         <strong>{{ $t('lesson.sdSyncTitle') }}</strong>
         <p class="sd-sync-status__hint">{{ stateDescription }}</p>
       </div>
-      <el-tag :type="stateTagType" size="small" effect="plain">
-        {{ stateLabel }}
-      </el-tag>
+      <div class="sd-sync-status__actions">
+        <el-tag :type="stateTagType" size="small" effect="plain">
+          {{ stateLabel }}
+        </el-tag>
+        <el-button
+          v-if="retryAvailable"
+          type="primary"
+          size="small"
+          :loading="retrying"
+          :disabled="retrying"
+          :aria-label="$t('lesson.sdSyncRetryAction')"
+          @click="$emit('retry')"
+        >
+          {{ $t('lesson.sdSyncRetryAction') }}
+        </el-button>
+      </div>
     </div>
 
     <el-alert
@@ -73,6 +86,7 @@ export default {
   props: {
     status: { type: Object, default: null },
     loading: { type: Boolean, default: false },
+    retrying: { type: Boolean, default: false },
   },
   computed: {
     counters() {
@@ -108,6 +122,9 @@ export default {
       if (this.stateKey === 'Failed') return 'danger';
       if (['Building', 'Materializing', 'Retrying', 'RollingOut'].includes(this.stateKey)) return 'warning';
       return 'info';
+    },
+    retryAvailable() {
+      return ['Failed', 'Retrying', 'GenerationMismatch', 'RollingOut'].includes(this.stateKey);
     },
     buildStateLabel() {
       const label = this.$t(`lesson.sdSyncBuild${this.capitalize(this.status.buildState)}`);
@@ -153,6 +170,12 @@ export default {
   font-size: 12px;
   line-height: 1.4;
   margin: 4px 0 0;
+}
+.sd-sync-status__actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
 }
 .sd-sync-status__success {
   margin-bottom: 12px;
@@ -233,6 +256,10 @@ export default {
   .sd-sync-status__header {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .sd-sync-status__actions {
+    justify-content: space-between;
+    width: 100%;
   }
   .sd-sync-status__meta {
     grid-template-columns: 1fr;

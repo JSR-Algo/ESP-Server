@@ -261,6 +261,17 @@ export default {
     });
   },
 
+  // GET /v1/admin/courses/:courseId/lessons/authoritative -> one live row per lesson key
+  listAuthoritativeLessons(courseId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/courses/${courseId}/lessons/authoritative`,
+      method: 'GET',
+      onSuccess: (p) =>
+        onSuccess((Array.isArray(p) ? p : []).map(normalizeLesson)),
+      onError,
+    });
+  },
+
   // POST /v1/admin/courses/:courseId/lessons { lessonKey, title, locale, ageBand }
   createLesson(courseId, data, onSuccess, onError) {
     nestRequest({
@@ -300,6 +311,26 @@ export default {
       url: `${getNestUrl()}/lessons/${lessonId}`,
       method: 'DELETE',
       onSuccess: () => onSuccess && onSuccess(),
+      onError,
+    });
+  },
+
+  applyLessonVisuals(lessonId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/visuals`,
+      method: 'PUT',
+      data,
+      onSuccess,
+      onError,
+    });
+  },
+
+  retryLessonAssetGeneration(onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lesson-assets/retry`,
+      method: 'POST',
+      data: {},
+      onSuccess,
       onError,
     });
   },

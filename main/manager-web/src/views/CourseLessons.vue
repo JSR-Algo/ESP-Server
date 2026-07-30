@@ -70,7 +70,6 @@
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="lessonKey" :label="$t('lesson.colKey')" min-width="190" show-overflow-tooltip />
           <el-table-column prop="title" :label="$t('lesson.colTitle')" min-width="180" show-overflow-tooltip />
-          <el-table-column prop="lessonVersion" :label="$t('lesson.colVersion')" width="90" align="center" />
           <el-table-column :label="$t('lesson.colStatus')" width="120">
             <template slot-scope="scope">
               <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status }}</el-tag>
@@ -123,21 +122,6 @@
               <el-button type="text" size="small" @click="openMonitoring(scope.row)">
                 {{ $t('lesson.monitor') }}
               </el-button>
-              <el-tooltip
-                v-if="scope.row.status === 'published'"
-                effect="dark"
-                :content="$t('lesson.newVersionHint')"
-                placement="top"
-              >
-                <el-button
-                  type="text"
-                  size="small"
-                  :loading="branchingId === scope.row.lessonId"
-                  @click="createNextVersion(scope.row)"
-                >
-                  {{ $t('lesson.newVersion') }}
-                </el-button>
-              </el-tooltip>
               <el-button
                 v-if="scope.row.status === 'draft'"
                 type="text"
@@ -216,7 +200,6 @@ export default {
       dialogVisible: false,
       editingMetadata: false,
       saving: false,
-      branchingId: '',
       form: blankForm(),
       filters: {
         keyword: '',
@@ -311,7 +294,7 @@ export default {
     },
     fetchList() {
       this.loading = true;
-      Api.lesson.listLessons(
+      Api.lesson.listAuthoritativeLessons(
         this.courseId,
         (rows) => {
           this.loading = false;
@@ -416,29 +399,6 @@ export default {
               this.fetchList();
             },
             (msg) => this.$message.error(msg),
-          );
-        })
-        .catch(() => {});
-    },
-    createNextVersion(row) {
-      this.$confirm(
-        this.$t('lesson.newVersionConfirm', { key: row.lessonKey }),
-        this.$t('lesson.newVersion'),
-        { type: 'warning' },
-      )
-        .then(() => {
-          this.branchingId = row.lessonId;
-          Api.lesson.createNextVersion(
-            row.lessonId,
-            (lesson) => {
-              this.branchingId = '';
-              this.$message.success(this.$t('lesson.newVersionCreated', { v: lesson.lessonVersion }));
-              this.openEditor(lesson);
-            },
-            (msg) => {
-              this.branchingId = '';
-              this.$message.error(msg);
-            },
           );
         })
         .catch(() => {});

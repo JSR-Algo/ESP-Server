@@ -8,6 +8,7 @@ from aiohttp import web
 
 from config.logger import setup_logging
 from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
+from core.api.generation_retry_handler import GenerationRetryHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
@@ -30,6 +31,10 @@ class _GenerationPoller(Protocol):
     def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+    async def run_once(self) -> dict[str, str]: ...
+
+    async def trigger_retry(self) -> dict[str, str]: ...
 
 
 class _GenerationStatus(Protocol):
@@ -112,6 +117,7 @@ class SimpleHttpServer:
             self.lesson_connections,
         )
         self.generation_poller = generation_poller
+        self.generation_retry_handler = GenerationRetryHandler(generation_poller)
         self.generation_status = generation_status
         self.generation_redis = generation_redis
         self.owns_generation_redis = bool(owns_generation_redis)
@@ -204,6 +210,10 @@ class SimpleHttpServer:
                         ),
                         # Admin/backend: after lesson pack lands in ESP cache, fan-out
                         # self.lesson_assets.sync_to_sd to online robots (queue offline).
+                        web.post(
+                            "/internal/lesson-assets/generation/retry",
+                            self.generation_retry_handler.handle_post,
+                        ),
                         web.post(
                             "/internal/lesson-assets/sd-fanout",
                             self.lesson_sd_fanout_handler.handle_post,

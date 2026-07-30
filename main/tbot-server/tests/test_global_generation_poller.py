@@ -1008,6 +1008,84 @@ async def test_concurrent_cold_polls_serialize_and_second_uses_new_etag() -> Non
 
 
 @pytest.mark.asyncio
+async def test_trigger_retry_returns_immediately_and_coalesces_duplicate_requests() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=object(), clock=lambda: NOW
+    )
+
+    async def delayed_run_once():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return {"state": "accepted"}
+
+    poller.run_once = delayed_run_once
+
+    first = await asyncio.wait_for(poller.trigger_retry(), timeout=0.05)
+    second = await asyncio.wait_for(poller.trigger_retry(), timeout=0.05)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    assert first == {"state": "accepted"}
+    assert second == {"state": "not_modified"}
+    assert calls == 1
+
+    release.set()
+    await poller.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_and_awaits_an_active_triggered_retry() -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=object(), clock=lambda: NOW
+    )
+
+    async def delayed_run_once():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    poller.run_once = delayed_run_once
+    assert await poller.trigger_retry() == {"state": "accepted"}
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    await asyncio.wait_for(poller.stop(), timeout=1)
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_triggered_retry_consumes_background_exceptions_without_leaking_details() -> None:
+    messages = []
+
+    class Logger:
+        def warning(self, message):
+            messages.append(message)
+
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=object(), clock=lambda: NOW
+    )
+    poller.log = Logger()
+
+    async def crashing_run_once():
+        raise RuntimeError("https://private.example/?token=secret")
+
+    poller.run_once = crashing_run_once
+    assert await poller.trigger_retry() == {"state": "accepted"}
+    await asyncio.sleep(0)
+    await poller.stop()
+
+    assert messages == ["lesson generation poll state=generation_retry_failed"]
+
+
+@pytest.mark.asyncio
 async def test_stop_cancellation_releases_poll_lock_without_deadlock() -> None:
     entered = asyncio.Event()
     blocker = asyncio.Event()
