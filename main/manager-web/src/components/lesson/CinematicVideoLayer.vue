@@ -12,6 +12,7 @@
       preload="auto"
       @loadeddata="handleLoadedData"
       @play="start"
+      @seeked="handleSeeked"
     />
     <canvas v-if="usesChromaKey" ref="canvas" class="cinematic-canvas" />
   </div>
@@ -50,12 +51,13 @@ export default {
   },
   watch: {
     src() {
+      this.stop();
       this.lastVideoTime = -1;
       this.chromaUnavailable = false;
       this.resetPlaybackGuards();
       this.$nextTick(() => {
-        this.start();
-        this.syncPlayback(true);
+        if (this.controlled) this.syncPlayback(true);
+        else this.start();
       });
     },
     controlled() {
@@ -80,8 +82,11 @@ export default {
   },
   methods: {
     handleLoadedData() {
-      this.start();
-      this.syncPlayback(true);
+      const didSeek = this.syncPlayback(true);
+      this.start(this.controlled && !this.playing && !didSeek);
+    },
+    handleSeeked() {
+      if (this.controlled && !this.playing) this.start(true);
     },
     resetPlaybackGuards() {
       this.playGeneration += 1;
@@ -92,9 +97,11 @@ export default {
       if (!this.controlled || !this.$refs.video) return;
       const video = this.$refs.video;
       const targetSeconds = Math.max(0, Number(this.clockMs) || 0) / 1000;
+      let didSeek = false;
       if (video.readyState > 0 && (force || shouldResyncVideo(targetSeconds, video.currentTime))) {
         try {
           video.currentTime = targetSeconds;
+          didSeek = true;
         } catch (error) {
           // Metadata may still be settling after a source change; loadeddata will retry once.
         }
@@ -102,9 +109,11 @@ export default {
 
       if (!this.playing) {
         video.pause();
-        return;
+        this.stop();
+        return didSeek;
       }
-      if (this.playPending || this.playBlocked) return;
+      if (!video.paused && !video.ended) return didSeek;
+      if (this.playPending || this.playBlocked) return didSeek;
 
       const generation = this.playGeneration;
       let playResult;
@@ -112,9 +121,9 @@ export default {
         playResult = video.play();
       } catch (error) {
         this.playBlocked = true;
-        return;
+        return didSeek;
       }
-      if (!playResult || typeof playResult.then !== 'function') return;
+      if (!playResult || typeof playResult.then !== 'function') return didSeek;
 
       this.playPending = true;
       playResult.then(
@@ -127,21 +136,36 @@ export default {
           this.playBlocked = true;
         }
       );
+      return didSeek;
     },
-    start() {
+    start(forceFrame = false) {
       this.stop();
       if (!this.usesChromaKey || !this.$refs.video || !this.$refs.canvas) return;
-      const render = () => {
+      const drawFrame = (force = false) => {
         const video = this.$refs.video;
-        if (!video || !this.$refs.canvas) return;
-        if (video.readyState >= 2 && video.currentTime !== this.lastVideoTime) {
+        if (!video || !this.$refs.canvas) return false;
+        if (video.readyState >= 2 && (force || video.currentTime !== this.lastVideoTime)) {
           this.lastVideoTime = video.currentTime;
           if (!this.renderFrame(video, this.$refs.canvas)) {
             this.chromaUnavailable = true;
             this.stop();
-            return;
+            return false;
           }
         }
+        return true;
+      };
+
+      if (this.controlled && !this.playing) {
+        if (forceFrame) drawFrame(true);
+        return;
+      }
+
+      const render = () => {
+        if (this.controlled && !this.playing) {
+          this.frameHandle = null;
+          return;
+        }
+        if (!drawFrame()) return;
         this.frameHandle = requestAnimationFrame(render);
       };
       this.frameHandle = requestAnimationFrame(render);

@@ -6,6 +6,10 @@ const source = await readFile(new URL('src/components/lesson/flattened-cinematic
 const preview = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const componentSource = await readFile(new URL('src/components/lesson/FlattenedCinematicPreview.vue', root), 'utf8');
 const videoLayerSource = await readFile(new URL('src/components/lesson/CinematicVideoLayer.vue', root), 'utf8');
+const helperModuleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+const videoLayerScript = videoLayerSource.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
+const videoLayer = (await import(`data:text/javascript;base64,${Buffer.from(videoLayerScript).toString('base64')}`)).default;
 
 for (const token of [
   'data-testid="flattened-cinematic-preview"',
@@ -112,6 +116,117 @@ assert.match(
 );
 assert.match(videoLayerSource, /playPending/, 'controlled playback must guard pending play promises');
 assert.match(videoLayerSource, /playBlocked/, 'controlled playback must block repeated rejected play promises');
+
+const rafCallbacks = new Map();
+const cancelledFrames = [];
+let nextFrameHandle = 1;
+globalThis.requestAnimationFrame = (callback) => {
+  const handle = nextFrameHandle;
+  nextFrameHandle += 1;
+  rafCallbacks.set(handle, callback);
+  return handle;
+};
+globalThis.cancelAnimationFrame = (handle) => {
+  cancelledFrames.push(handle);
+  rafCallbacks.delete(handle);
+};
+
+function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused = true, play } = {}) {
+  const video = {
+    readyState: 2,
+    currentTime,
+    paused,
+    ended: false,
+    playCalls: 0,
+    pauseCalls: 0,
+    play() {
+      this.playCalls += 1;
+      return play ? play() : Promise.resolve();
+    },
+    pause() {
+      this.pauseCalls += 1;
+      this.paused = true;
+    }
+  };
+  const instance = {
+    ...videoLayer.data(),
+    controlled: true,
+    playing,
+    clockMs,
+    replayNonce: 0,
+    usesChromaKey: true,
+    renderCalls: 0,
+    $refs: { video, canvas: {} },
+    $el: { clientWidth: 480, clientHeight: 320 },
+    $nextTick(callback) { callback(); },
+    ...videoLayer.methods
+  };
+  instance.renderFrame = () => {
+    instance.renderCalls += 1;
+    return true;
+  };
+  return { instance, video };
+}
+
+const withinTolerance = createVideoLayer({ playing: false, clockMs: 1000, currentTime: 0.95 });
+withinTolerance.instance.syncPlayback();
+assert.equal(withinTolerance.video.currentTime, 0.95, '50 ms drift must not seek');
+withinTolerance.video.currentTime = 0.8;
+withinTolerance.instance.syncPlayback();
+assert.equal(withinTolerance.video.currentTime, 1, 'clock milliseconds must seek to seconds beyond 80 ms drift');
+
+const alreadyPlaying = createVideoLayer({ playing: true, clockMs: 1000, currentTime: 1, paused: false });
+alreadyPlaying.instance.syncPlayback();
+assert.equal(alreadyPlaying.video.playCalls, 0, 'an already-playing video must not receive redundant play calls');
+
+rafCallbacks.clear();
+cancelledFrames.length = 0;
+const pausedLayer = createVideoLayer({ playing: false, clockMs: 1000, currentTime: 1 });
+pausedLayer.instance.frameHandle = requestAnimationFrame(() => {});
+pausedLayer.instance.syncPlayback();
+assert.equal(rafCallbacks.size, 0, 'pausing controlled playback must cancel its active render loop');
+pausedLayer.instance.start(true);
+assert.equal(pausedLayer.instance.renderCalls, 1, 'paused controlled playback may render one forced frame');
+assert.equal(rafCallbacks.size, 0, 'a paused forced frame must not schedule a continuous render loop');
+
+rafCallbacks.clear();
+const legacyLayer = createVideoLayer({ playing: false });
+legacyLayer.instance.controlled = false;
+legacyLayer.instance.start();
+assert.equal(rafCallbacks.size, 1, 'legacy uncontrolled chroma playback must retain its render loop');
+
+const replayLayer = createVideoLayer({ playing: false, clockMs: 2250, currentTime: 0 });
+videoLayer.watch.replayNonce.call(replayLayer.instance);
+assert.equal(replayLayer.video.currentTime, 2.25, 'replay must force a seek to the shared clock');
+replayLayer.instance.handleSeeked();
+assert.equal(replayLayer.instance.renderCalls, 1, 'the seeked replay frame must render once while paused');
+
+let rejectPlay;
+const rejectedPlay = new Promise((resolve, reject) => { rejectPlay = reject; });
+const blockedLayer = createVideoLayer({ playing: true, play: () => rejectedPlay });
+blockedLayer.instance.syncPlayback();
+rejectPlay(new Error('autoplay blocked'));
+await Promise.resolve();
+blockedLayer.instance.syncPlayback();
+assert.equal(blockedLayer.video.playCalls, 1, 'a rejected play promise must block repeated attempts');
+
+let rejectStalePlay;
+const stalePlay = new Promise((resolve, reject) => { rejectStalePlay = reject; });
+const staleLayer = createVideoLayer({ playing: true, play: () => stalePlay });
+staleLayer.instance.syncPlayback();
+staleLayer.instance.resetPlaybackGuards();
+rejectStalePlay(new Error('stale rejection'));
+await Promise.resolve();
+assert.equal(staleLayer.instance.playBlocked, false, 'a stale play rejection must not block a newer generation');
+
+rafCallbacks.clear();
+cancelledFrames.length = 0;
+const sourceResetLayer = createVideoLayer({ playing: false, clockMs: 0, currentTime: 0 });
+sourceResetLayer.instance.frameHandle = requestAnimationFrame(() => {});
+sourceResetLayer.instance.playBlocked = true;
+videoLayer.watch.src.call(sourceResetLayer.instance);
+assert.equal(sourceResetLayer.instance.playBlocked, false, 'source reset must clear playback guards');
+assert.equal(rafCallbacks.size, 0, 'source reset must clean up the previous render loop');
 
 assert.deepEqual(
   preview.objectFitRect(640, 480, { x: 0, y: 0, width: 480, height: 320, fit: 'fill' }),
