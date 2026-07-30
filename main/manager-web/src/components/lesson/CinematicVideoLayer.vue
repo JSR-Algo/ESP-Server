@@ -91,7 +91,7 @@ export default {
     syncPlayback(force = false) {
       if (!this.controlled || !this.$refs.video) return;
       const video = this.$refs.video;
-      const targetSeconds = Math.max(0, Number(this.clockMs) || 0);
+      const targetSeconds = Math.max(0, Number(this.clockMs) || 0) / 1000;
       if (video.readyState > 0 && (force || shouldResyncVideo(targetSeconds, video.currentTime))) {
         try {
           video.currentTime = targetSeconds;

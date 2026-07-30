@@ -105,6 +105,11 @@ assert.match(
   /shouldResyncVideo\(targetSeconds, video\.currentTime\)/,
   'controlled playback must only seek when drift exceeds the shared tolerance'
 );
+assert.match(
+  videoLayerSource,
+  /const targetSeconds = Math\.max\(0, Number\(this\.clockMs\) \|\| 0\) \/ 1000;/,
+  'controlled playback must convert its millisecond clock to video seconds'
+);
 assert.match(videoLayerSource, /playPending/, 'controlled playback must guard pending play promises');
 assert.match(videoLayerSource, /playBlocked/, 'controlled playback must block repeated rejected play promises');
 
