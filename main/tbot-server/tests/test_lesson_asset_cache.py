@@ -57,9 +57,11 @@ class _FakeClient:
         self.pre_chunk = pre_chunk
         self.status = status
         self.requested = []
+        self.request_headers = []
 
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
         self.requested.append(url)
+        self.request_headers.append(dict(kwargs.get("headers") or {}))
         return _FakeStreamResponse(
             self.content_by_url.get(url, []), status=self.status, pre_chunk=self.pre_chunk
         )
@@ -332,6 +334,70 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         with open(cache._render_safe_path(poster), "rb") as fh:
             self.assertEqual(fh.read(), derivative)
         self.assertIsNotNone(cache.public_url_for_source("poster.jpg"))
+
+    async def test_renderer_v3_mp4_streams_exact_public_bytes_without_credentials_or_jpeg_normalization(self):
+        content = b"\x00\x00\x00\x18ftypmp42renderer-v3-mjpeg"
+        normalized = []
+        asset = {
+            "key": "scene.opening@v3",
+            "path": "https://cdn.test/visuals/scene.opening/v3.mp4",
+            "url": "https://cdn.test/visuals/scene.opening/v3.mp4",
+            "sha256": _sha(content),
+            "size": len(content),
+            "critical": True,
+            "layer": "backgroundScene",
+            "role": "poster",
+            "mediaType": "video/mp4",
+            "sharedAssetKey": "scene.opening",
+            "sharedAssetVersion": 3,
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+                "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+                "chromaKey": None,
+            },
+            "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+        }
+        client = _FakeClient({asset["url"]: [content[:9], content[9:]]})
+        cache = self._cache([asset], client=client, image_normalizer=lambda value: normalized.append(value) or b"bad")
+
+        self.assertTrue(await cache.preload())
+
+        state = cache.assets[0]
+        with open(cache._final_path(state), "rb") as fh:
+            self.assertEqual(fh.read(), content)
+        self.assertEqual(normalized, [])
+        self.assertFalse(os.path.exists(cache._render_safe_path(state)))
+        self.assertEqual(client.requested, [asset["url"]])
+        self.assertEqual(client.request_headers, [{}])
+
+    async def test_renderer_v3_mp4_truncation_never_commits_and_can_retry_cleanly(self):
+        content = b"renderer-v3-exact-mp4-bytes"
+        asset = {
+            "key": "scene.opening@v3", "path": "scene.opening.mp4", "sha256": _sha(content),
+            "size": len(content), "critical": True, "layer": "backgroundScene", "role": "poster",
+            "mediaType": "video/mp4", "sharedAssetKey": "scene.opening", "sharedAssetVersion": 3,
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+                "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+                "chromaKey": None,
+            },
+            "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"}],
+        }
+        cache = self._cache([asset], client=_FakeClient({f"{BASE}/scene.opening.mp4": [content[:-3]]}))
+        state = cache.assets[0]
+        os.makedirs(cache.cache_dir, exist_ok=True)
+
+        await cache._download_one(state)
+
+        self.assertEqual(state.reason, "declared_size_mismatch")
+        self.assertFalse(os.path.exists(cache._tmp_path(state)))
+        self.assertFalse(os.path.exists(cache._final_path(state)))
+
+        cache._client = _FakeClient({f"{BASE}/scene.opening.mp4": [content]})
+        await cache._download_one(state)
+        self.assertEqual(state.state, READY)
+        with open(cache._final_path(state), "rb") as fh:
+            self.assertEqual(fh.read(), content)
 
     async def test_esptft_sd_pack_uses_render_safe_background_poster(self):
         original = b"\xff\xd8\xfforiginal-camera-jpeg"

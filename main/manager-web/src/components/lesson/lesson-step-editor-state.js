@@ -190,9 +190,14 @@ function buildCreateStepPayload({ form, correctChoiceId, assets = [], locale = '
 }
 
 function buildSaveStepRequest({ step, authoring, content, selectedAsset, savedRevision }) {
-  const visualRefs = selectedAsset
-    ? [{ slot: 'teachingObject', assetVersionId: selectedAsset.versionId }]
-    : undefined;
+  const refsBySlot = new Map((Array.isArray(step.visualRefs) ? step.visualRefs : [])
+    .filter((ref) => ref && ref.slot && (ref.assetVersionId || ref.asset_version_id))
+    .map((ref) => [ref.slot, { slot: ref.slot, assetVersionId: ref.assetVersionId || ref.asset_version_id }]));
+  if (selectedAsset && selectedAsset.versionId) {
+    refsBySlot.set('teachingObject', { slot: 'teachingObject', assetVersionId: selectedAsset.versionId });
+  }
+  const slotOrder = ['backgroundScene', 'teachingObject', 'robotOverlay'];
+  const visualRefs = [...refsBySlot.values()].sort((left, right) => slotOrder.indexOf(left.slot) - slotOrder.indexOf(right.slot));
   return {
     stepKey: step.stepKey,
     savedRevision,

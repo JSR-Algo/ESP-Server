@@ -3045,11 +3045,37 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("checksum_verified", messages)
         self.assertIn("downloadedCount=3", messages)
         self.assertIn("skippedCount=0", messages)
+        self.assertIn("reusedCount=0", messages)
         self.assertIn("assetCount=3", messages)
         duration_match = re.search(r"durationMs=(\d+)", messages)
         self.assertIsNotNone(duration_match)
         self.assertGreaterEqual(int(duration_match.group(1)), 1)
         self.assertNotIn("asset_cache_hit", messages)
+
+    async def test_sd_asset_pack_accepts_and_logs_reused_attestation_count(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+
+        async def reused_sync(*_args, **_kwargs):
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 2,
+                "skippedCount": 0,
+                "reusedCount": 1,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=reused_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("lesson_preload_ready", messages)
+        self.assertIn("reusedCount=1", messages)
 
     async def test_sd_sample_uses_fixed_advertised_sync_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
@@ -3250,6 +3276,15 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {
                 "ready": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "reusedCount": -1,
+                "failedCount": 0,
+            },
+            {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "downloadedCount": 3,
                 "skippedCount": 0,
                 "failedCount": 0,
@@ -3297,6 +3332,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("assetCount=3", messages)
                 self.assertIn("downloadedCount=", messages)
                 self.assertIn("skippedCount=", messages)
+                self.assertIn("reusedCount=", messages)
                 self.assertIn("failedCount=", messages)
                 self.assertIn("cacheKeyMatch=", messages)
                 self.assertIn("checksumMatch=", messages)

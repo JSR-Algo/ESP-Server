@@ -40,8 +40,14 @@ from core.lesson.errors import (
     LESSON_FRAME_TOO_LARGE,
     LESSON_FRAME_INVALID,
     LESSON_FRAME_ACK_TIMEOUT,
+    CINEMATIC_CAPABILITY_UNSUPPORTED,
     lesson_capability_ok,
     device_renderer_capabilities,
+)
+from core.lesson.cinematic_contract import (
+    CinematicContractError,
+    RENDERER_V3,
+    project_cinematic_phase,
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
@@ -854,6 +860,24 @@ def _renderer_v2_request_enabled(conn: Any, renderer_capabilities: List[str]) ->
     )
 
 
+def _renderer_v3_request_enabled(conn: Any, renderer_capabilities: List[str]) -> bool:
+    config = getattr(conn, "config", {}) or {}
+    lesson_cfg = _lesson_config(config)
+    features = getattr(conn, "features", None)
+    detail = features.get("lessonRendererV3") if isinstance(features, dict) else None
+    allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+    device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
+    return (
+        lesson_cfg.get("renderer_v3_enabled") is True
+        and RENDERER_V3 in renderer_capabilities
+        and isinstance(detail, dict)
+        and detail.get("directMp4Cinematic") is True
+        and detail.get("sdAssetPack") is True
+        and len(allowlist) == 1
+        and device_id == str(allowlist[0]).strip().lower()
+    )
+
+
 class LessonRuntime:
     """Per-device lesson session state, held on ``ConnectionHandler.lesson_runtime``.
 
@@ -966,6 +990,11 @@ class LessonRuntime:
         self._completion_stop_sent = False
         self._completion_visual_pending = False
         self._sd_asset_pack_online_fallback = False
+        self._cinematic_phase: Optional[Dict[str, Any]] = None
+        self._cinematic_stop_sent = False
+        self._cinematic_cancel_sent = False
+        self._cinematic_pending_command: Optional[Dict[str, Any]] = None
+        self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -987,7 +1016,14 @@ class LessonRuntime:
     async def preload_only(self) -> bool:
         """Validate and materialize assets without sending ``lesson_prepare``."""
         features = getattr(self.conn, "features", None)
-        if not lesson_capability_ok(
+        manifest_version = self.manifest.get("manifestVersion")
+        if manifest_version == RENDERER_V3 and not self._renderer_v3_enabled():
+            self.last_error = LessonError(
+                CINEMATIC_CAPABILITY_UNSUPPORTED,
+                "device did not advertise the exact renderer-v3 direct-MP4 capability",
+            )
+            raise self.last_error
+        if manifest_version != RENDERER_V3 and not lesson_capability_ok(
             features, renderer_v2_enabled=self._renderer_v2_rollout_enabled()
         ):
             # D-CAP-FLAG: absence = no support; MUST NOT send lesson_prepare.
@@ -1001,9 +1037,10 @@ class LessonRuntime:
         # manifest served to a v1-only device is rejected here (LESSON_VERSION_UNSUPPORTED,
         # no crash) — the structural guard that survives a future v2 renderer. Net
         # effect today is identical to the old ``!= PROTOCOL_VERSION`` check.
-        manifest_version = self.manifest.get("manifestVersion")
         if manifest_version not in self.renderer_capabilities or (
             manifest_version == RENDERER_V2 and not self._renderer_v2_rollout_enabled()
+        ) or (
+            manifest_version == RENDERER_V3 and not self._renderer_v3_enabled()
         ):
             self.last_error = LessonError(
                 LESSON_VERSION_UNSUPPORTED, f"unsupported manifestVersion {manifest_version!r}"
@@ -1041,6 +1078,28 @@ class LessonRuntime:
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
                 return False
+        if manifest_version == RENDERER_V3:
+            try:
+                phases = self.manifest.get("cinematicPhases")
+                if not isinstance(phases, list) or not phases:
+                    raise CinematicContractError(
+                        "CINEMATIC_METADATA_MISMATCH", "cinematic manifest has no phases"
+                    )
+                pack_builder = getattr(self.asset_cache, "asset_pack_manifest", None)
+                if not callable(pack_builder):
+                    raise CinematicContractError(
+                        "CINEMATIC_PACK_NOT_READY", "cinematic SD pack is unavailable"
+                    )
+                pack = pack_builder(
+                    assignment_version=self.assignment_version,
+                    lesson_id=self.lesson_id,
+                    lesson_version=self.lesson_version,
+                    manifest_checksum=self.manifest_checksum,
+                )
+                self._cinematic_phase = project_cinematic_phase(phases[0], pack)
+            except CinematicContractError as exc:
+                self.last_error = LessonError(exc.code, exc.message, retryable=False)
+                raise self.last_error
         return True
 
     async def start_protocol(self, *, preloaded: bool = False) -> None:
@@ -1059,6 +1118,7 @@ class LessonRuntime:
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
         self._cancel_child_response_timeout()
+        self._cinematic_deferred_step_ack = None
         if self._preload_task is not None and not self._preload_task.done():
             self._preload_task.cancel()
         for task in list(self._preload_status_report_tasks):
@@ -1112,6 +1172,29 @@ class LessonRuntime:
             and self.negotiated_version == RENDERER_V2
         )
 
+    def _renderer_v3_rollout_enabled(self) -> bool:
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = _lesson_config(config)
+        if lesson_cfg.get("renderer_v3_enabled") is not True:
+            return False
+        allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+        if len(allowlist) != 1:
+            return False
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
+        return bool(device_id and device_id == str(allowlist[0]).strip().lower())
+
+    def _renderer_v3_enabled(self) -> bool:
+        features = getattr(self.conn, "features", None)
+        detail = features.get("lessonRendererV3") if isinstance(features, dict) else None
+        return (
+            self._renderer_v3_rollout_enabled()
+            and self.negotiated_version == RENDERER_V3
+            and RENDERER_V3 in self.renderer_capabilities
+            and isinstance(detail, dict)
+            and detail.get("directMp4Cinematic") is True
+            and detail.get("sdAssetPack") is True
+        )
+
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
         if not callable(replay):
@@ -1135,7 +1218,9 @@ class LessonRuntime:
             return
         if await self._resolve_visual_ack(msg_json):
             return
-        if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
+        if self.state in (S_FAILED, S_COMPLETED) or (
+            self.state == S_PAUSED and not self._renderer_v3_enabled()
+        ):
             return  # terminal is absorbing — no late frame can resurrect/override it
         body = msg_json.get("body") or {}
         legacy_acked = self._legacy_empty_ack_outstanding_seq(msg_json, body)
@@ -1156,12 +1241,112 @@ class LessonRuntime:
                 await self._accept_inbound(msg_json.get("sequence"))
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).
             return
+        pending = self._cinematic_pending_command
+        frame_command = self._cinematic_frame_command(frame)
+        if (
+            isinstance(pending, dict)
+            and pending.get("command") in {"pause", "resume", "stop", "cancel"}
+            and frame.get("type") == "lesson_step"
+        ):
+            await self._defer_cinematic_step_ack(
+                frame, body, acked, msg_json.get("sequence")
+            )
+            return
+        if self.state == S_PAUSED and (
+            frame_command is None or frame_command.get("command") != "resume"
+        ):
+            return
+        if isinstance(pending, dict) and pending.get("command") in {
+            "pause", "resume", "stop", "cancel"
+        }:
+            if (
+                frame_command is None
+                or frame_command.get("command") != pending.get("command")
+                or frame_command.get("commandSequenceId") != pending.get("commandSequenceId")
+            ):
+                return
+        if not self._cinematic_ack_matches(frame, body):
+            return
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
             return
         self._outstanding.pop(acked, None)
+        command = self._cinematic_frame_command(frame)
+        if command is not None:
+            self._cinematic_pending_command = None
         self._cancel_frame_ack_timeout()
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
+
+    async def _defer_cinematic_step_ack(
+        self,
+        frame: Dict[str, Any],
+        body: Dict[str, Any],
+        acked: int,
+        inbound_sequence: Any,
+    ) -> None:
+        if (await self._accept_inbound(inbound_sequence)) != "ok":
+            return
+        self._outstanding.pop(acked, None)
+        self._cancel_step_timeout()
+        if self._cinematic_deferred_step_ack is None:
+            self._cinematic_deferred_step_ack = {
+                "frame": copy.deepcopy(frame),
+                "body": copy.deepcopy(body),
+                "inboundSequence": inbound_sequence,
+            }
+
+    def _cinematic_frame_command(self, frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        body = frame.get("body")
+        if not isinstance(body, dict):
+            return None
+        nested = body.get("cinematicPhase")
+        command = nested if isinstance(nested, dict) else body
+        if not isinstance(command.get("command"), str):
+            return None
+        return command
+
+    def _cinematic_ack_matches(
+        self, frame: Dict[str, Any], ack_body: Dict[str, Any]
+    ) -> bool:
+        if not self._renderer_v3_enabled():
+            return True
+        command = self._cinematic_frame_command(frame)
+        if command is None:
+            return True
+        ack = ack_body.get("cinematicPhase")
+        if not isinstance(ack, dict):
+            return False
+        kind = command.get("command")
+        common = {
+            "event", "command", "phaseId", "commandSequenceId", "accepted"
+        }
+        expected_event = "commandApplied"
+        expected_keys = common
+        if kind == "prepare":
+            expected_event = "frameZeroReady"
+            expected_keys = common | {"frameZeroReady"}
+        elif kind == "start":
+            expected_event = "phaseReady"
+            expected_keys = common | {"phaseReady"}
+        if (
+            set(ack) != expected_keys
+            or ack.get("event") != expected_event
+            or ack.get("command") != kind
+            or ack.get("phaseId") != command.get("phaseId")
+            or ack.get("commandSequenceId") != command.get("commandSequenceId")
+            or ack.get("accepted") is not True
+        ):
+            return False
+        if kind == "prepare" and ack.get("frameZeroReady") is not True:
+            return False
+        if kind == "start" and ack.get("phaseReady") is not True:
+            return False
+        pending = self._cinematic_pending_command
+        return bool(
+            isinstance(pending, dict)
+            and pending.get("command") == kind
+            and pending.get("commandSequenceId") == command.get("commandSequenceId")
+        )
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
         body = msg_json.get("body")
@@ -1728,6 +1913,22 @@ class LessonRuntime:
             self.state = S_RUNNING
             self._forward({"type": "lesson_started", "startedAt": _wire_timestamp()})
             await self._emit_step()
+        elif ftype == "lesson_cinematic_control":
+            command = (frame.get("body") or {}).get("command")
+            if command == "pause":
+                self.state = S_PAUSED
+                self._cancel_visual_waiters(increment_generation=False, reason="paused")
+                self._forward_phase("paused")
+            elif command == "resume":
+                self.state = S_RUNNING
+                self._forward_phase("resumed")
+                await self._apply_deferred_cinematic_step_ack()
+            elif command == "cancel":
+                self.state = S_COMPLETED
+                self._cancel_visual_waiters(increment_generation=True, reason="cancelled")
+                self._cancel_step_timeout()
+                self._cancel_child_response_timeout()
+                self._clear_cinematic_state()
         elif ftype == "lesson_step":
             # Step delivery is confirmed ONLY by its ack (plan §5.8) -> clear timeout.
             self._cancel_step_timeout()
@@ -1766,6 +1967,8 @@ class LessonRuntime:
             if reason != "COMPLETED":
                 self.state = S_COMPLETED
                 self._cancel_visual_waiters(increment_generation=True, reason="lessonAbandoned")
+                if self._renderer_v3_enabled():
+                    self._clear_cinematic_state()
                 self._forward_phase("abandoned")
                 self._forward(
                     {
@@ -2887,12 +3090,32 @@ class LessonRuntime:
     async def pause(self) -> None:
         if self.state != S_RUNNING:
             return
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            if self._cinematic_pending_command is None:
+                await self._emit(
+                    "lesson_cinematic_control",
+                    body={"command": "pause", "phaseId": self._cinematic_phase["phaseId"]},
+                )
+            return
         self.state = S_PAUSED
         self._cancel_visual_waiters(increment_generation=False, reason="paused")
         self._forward_phase("paused")
 
     async def resume(self) -> VisualAckResult:
         if self.state != S_PAUSED:
+            return VisualAckResult(
+                False, False, "unsupportedContract", None, self._visual_generation
+            )
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            if self._cinematic_pending_command is None:
+                await self._emit(
+                    "lesson_cinematic_control",
+                    body={
+                        "command": "resume",
+                        "phaseId": self._cinematic_phase["phaseId"],
+                        "clockRebaseSequenceId": self._seq + 1,
+                    },
+                )
             return VisualAckResult(
                 False, False, "unsupportedContract", None, self._visual_generation
             )
@@ -2970,9 +3193,59 @@ class LessonRuntime:
         return result
 
     async def stop(self) -> None:
-        self._cancel_visual_waiters(increment_generation=True, reason="stopped")
+        if self._renderer_v3_enabled():
+            if self._cinematic_stop_sent or self._cinematic_pending_command is not None:
+                return
+        else:
+            self._cancel_visual_waiters(increment_generation=True, reason="stopped")
         if self.state not in (S_FAILED, S_COMPLETED):
-            await self._emit("lesson_stop", body={"reason": "STOPPED"})
+            body: Dict[str, Any] = {"reason": "STOPPED"}
+            if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+                body["cinematicPhase"] = {
+                    "command": "stop",
+                    "phaseId": self._cinematic_phase["phaseId"],
+                }
+                self._cinematic_stop_sent = True
+            await self._emit("lesson_stop", body=body)
+
+    async def cancel(self, reason: str = "cancelled") -> None:
+        if (
+            not self._renderer_v3_enabled()
+            or self._cinematic_cancel_sent
+            or self._cinematic_pending_command is not None
+        ):
+            return
+        self._cinematic_cancel_sent = True
+        await self._emit(
+            "lesson_cinematic_control",
+            body={
+                "command": "cancel",
+                "phaseId": (self._cinematic_phase or {}).get("phaseId"),
+                "reason": str(reason or "cancelled")[:64],
+            },
+        )
+
+    def _clear_cinematic_state(self) -> None:
+        self._cinematic_pending_command = None
+        self._cinematic_deferred_step_ack = None
+        self._cinematic_phase = None
+        for sequence, frame in list(self._outstanding.items()):
+            if self._cinematic_frame_command(frame) is not None:
+                self._outstanding.pop(sequence, None)
+
+    async def _apply_deferred_cinematic_step_ack(self) -> None:
+        deferred = self._cinematic_deferred_step_ack
+        self._cinematic_deferred_step_ack = None
+        if not isinstance(deferred, dict) or self.state != S_RUNNING:
+            return
+        frame = deferred.get("frame")
+        body = deferred.get("body")
+        if not isinstance(frame, dict) or not isinstance(body, dict):
+            return
+        self._forward_lesson_step_ack_telemetry(
+            frame, body, deferred.get("inboundSequence")
+        )
+        await self._on_frame_acked(frame, body)
 
     async def on_disconnect(self) -> None:
         self._cancel_visual_waiters(increment_generation=True, reason="disconnected")
@@ -3009,6 +3282,29 @@ class LessonRuntime:
     ) -> int:
         seq = self._next_seq()
         frame_body = body or {}
+        if self._renderer_v3_enabled():
+            cinematic = frame_body.get("cinematicPhase")
+            if isinstance(cinematic, dict) and isinstance(cinematic.get("command"), str):
+                cinematic.setdefault("commandSequenceId", seq)
+            if frame_type == "lesson_cinematic_control":
+                frame_body.setdefault("commandSequenceId", seq)
+                if frame_body.get("command") == "resume":
+                    frame_body["clockRebaseSequenceId"] = seq
+            command = self._cinematic_frame_command({"body": frame_body})
+            if command is not None:
+                command_sequence_id = command.get("commandSequenceId", frame_body.get("commandSequenceId"))
+                command["commandSequenceId"] = command_sequence_id
+                self._cinematic_pending_command = {
+                    "command": command.get("command"),
+                    "phaseId": command.get("phaseId"),
+                    "commandSequenceId": command_sequence_id,
+                    "targetState": {
+                        "pause": S_PAUSED,
+                        "resume": S_RUNNING,
+                        "stop": S_COMPLETED,
+                        "cancel": S_COMPLETED,
+                    }.get(command.get("command")),
+                }
         frame = self._envelope(frame_type, step_id=step_id, sequence=seq, body=frame_body)
         if frame_type == "lesson_step":
             scene = frame["body"].get("scene") or {}
@@ -3038,7 +3334,9 @@ class LessonRuntime:
             "body": copy.deepcopy(frame_body),
             "retryCount": max(0, int(frame_ack_retry_count or 0)),
         }
-        if frame_type in {"lesson_prepare", "lesson_start", "lesson_stop"}:
+        if frame_type in {
+            "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
+        }:
             self._start_frame_ack_timeout(frame_type, seq, step_id)
         await self._send(payload)
         return seq
@@ -3160,9 +3458,21 @@ class LessonRuntime:
                         manifest_checksum=self.manifest_checksum,
                     )
                 )
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            body["cinematicPhase"] = {
+                "command": "prepare",
+                **copy.deepcopy(self._cinematic_phase),
+            }
         return body
 
     def _start_body(self) -> Dict[str, Any]:
+        if self._renderer_v3_enabled() and self._cinematic_phase is not None:
+            return {
+                "cinematicPhase": {
+                    "command": "start",
+                    "phaseId": self._cinematic_phase["phaseId"],
+                }
+            }
         if not self._renderer_v2_enabled():
             return {}
         opening = self.manifest.get("openingEntrance")
@@ -3548,6 +3858,7 @@ class LessonRuntime:
                 f"assetCount={diagnostic['assetCount']} "
                 f"downloadedCount={diagnostic['downloadedCount']} "
                 f"skippedCount={diagnostic['skippedCount']} "
+                f"reusedCount={diagnostic['reusedCount']} "
                 f"failedCount={diagnostic['failedCount']} "
                 f"criticalFailedCount={diagnostic['criticalFailedCount']} "
                 f"cacheKeyMatch={diagnostic['cacheKeyMatch']} "
@@ -3559,6 +3870,7 @@ class LessonRuntime:
             f"assetCount={attestation['assetCount']} "
             f"downloadedCount={attestation['downloadedCount']} "
             f"skippedCount={attestation['skippedCount']} "
+            f"reusedCount={attestation['reusedCount']} "
             f"failedCount={attestation['failedCount']} "
             f"durationMs={duration_ms}"
         )
@@ -3608,8 +3920,8 @@ class LessonRuntime:
         if not response_checksums or any(value != expected_checksum for value in response_checksums):
             return None
         counts = {}
-        for key in ("downloadedCount", "skippedCount", "failedCount"):
-            value = result.get(key)
+        for key in ("downloadedCount", "skippedCount", "reusedCount", "failedCount"):
+            value = result.get(key, 0) if key == "reusedCount" else result.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 return None
             counts[key] = value
@@ -3645,6 +3957,7 @@ class LessonRuntime:
             "assetCount": len(assets) if isinstance(assets, list) else -1,
             "downloadedCount": count("downloadedCount"),
             "skippedCount": count("skippedCount"),
+            "reusedCount": count("reusedCount") if "reusedCount" in result else 0,
             "failedCount": count("failedCount"),
             "criticalFailedCount": count("criticalFailedCount"),
             "cacheKeyMatch": isinstance(expected_cache_key, str)
@@ -3823,7 +4136,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         await asyncio.sleep(0.1)
     renderer_capabilities = _device_caps(getattr(conn, "features", None))
     renderer_v2_enabled = _renderer_v2_request_enabled(conn, renderer_capabilities)
-    if not _cap_ok(
+    renderer_v3_enabled = _renderer_v3_request_enabled(conn, renderer_capabilities)
+    if not renderer_v3_enabled and not _cap_ok(
         getattr(conn, "features", None), renderer_v2_enabled=renderer_v2_enabled
     ):
         _set_lesson_start_status(conn, "LESSON_CAPABILITY_MISSING", "Robot chưa sẵn sàng hiển thị bài học.")
@@ -3836,7 +4150,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # conn.features for its start() gate; computing it here keeps the fetch honest.
     requested_renderer_capabilities = (
         renderer_capabilities
-        if renderer_v2_enabled
+        if renderer_v2_enabled or renderer_v3_enabled
         else [PROTOCOL_VERSION]
     )
 

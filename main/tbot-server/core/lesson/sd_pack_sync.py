@@ -436,12 +436,12 @@ def _sync_result_ready(result: Any, requested_pack: dict[str, Any]) -> bool:
     ):
         return False
     counts = []
-    for key in ("downloadedCount", "skippedCount", "failedCount"):
-        value = result.get(key)
+    for key in ("downloadedCount", "skippedCount", "reusedCount", "failedCount"):
+        value = result.get(key, 0) if key == "reusedCount" else result.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return False
         counts.append(value)
-    return counts[2] == 0 and sum(counts) == len(assets)
+    return counts[3] == 0 and sum(counts) == len(assets)
 
 
 def normalize_firmware_sync_result(
@@ -469,6 +469,7 @@ def normalize_firmware_sync_result(
             result.get("downloadedCount", 1 if ready else 0)
         ),
         "skippedCount": _bounded_count(result.get("skippedCount")),
+        "reusedCount": _bounded_count(result.get("reusedCount")),
         "failedCount": failed,
         "criticalFailedCount": critical_failed,
         "ready": ready,

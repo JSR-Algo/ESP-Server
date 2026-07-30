@@ -28,6 +28,7 @@ from core.lesson.shared_asset_store import (
     PackReplayMismatchError,
     SharedAssetStore,
 )
+from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
 
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
@@ -49,6 +50,10 @@ _ASSET_FIELDS = frozenset(
         "url",
         "sdPath",
         "localPath",
+        "sharedAssetKey",
+        "sharedAssetVersion",
+        "compatibilityMetadata",
+        "visualRefs",
     }
 )
 _METRICS = {
@@ -465,10 +470,34 @@ def _validate_asset(
         raise _bad("INVALID_CRITICAL", "Invalid asset critical flag")
     online_url = _alias(item, "onlineUrl", "url")
     sd_path = _alias(item, "sdPath", "localPath")
-    _validate_url(online_url, allowed, production)
+    _validate_url(
+        online_url,
+        allowed,
+        production,
+        allow_fragment=media_type == "video/mp4",
+    )
     expected_sd_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
+    renderer_v3_fields: dict[str, Any] = {}
+    if media_type.lower().startswith("video/"):
+        try:
+            renderer_v3_fields = validate_renderer_v3_shared_mp4(dict(item))
+        except FirmwareSyncPackError:
+            raise _bad("INVALID_RENDERER_V3_MP4", "Invalid renderer-v3 shared MP4") from None
+    elif any(field in item for field in ("sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs")):
+        if "compatibilityMetadata" in item or "visualRefs" in item:
+            raise _bad("INVALID_RENDERER_V3_MP4", "Renderer-v3 metadata is only valid for shared MP4")
+        shared_key = item.get("sharedAssetKey")
+        shared_version = item.get("sharedAssetVersion")
+        if not isinstance(shared_key, str) or not shared_key or type(shared_version) is not int or shared_version < 1:
+            raise _bad("INVALID_SHARED_ASSET_IDENTITY", "Invalid shared asset identity")
+        if key != f"{shared_key}@v{shared_version}":
+            raise _bad("INVALID_SHARED_ASSET_IDENTITY", "Invalid shared asset identity")
+        renderer_v3_fields = {
+            "sharedAssetKey": shared_key,
+            "sharedAssetVersion": shared_version,
+        }
     return {
         "key": key,
         "sha256": digest,
@@ -477,6 +506,7 @@ def _validate_asset(
         "critical": item["critical"],
         "onlineUrl": online_url,
         "sdPath": sd_path,
+        **renderer_v3_fields,
     }
 
 
@@ -506,11 +536,11 @@ def _alias(item: Mapping[str, Any], primary: str, alias: str) -> str:
     return value
 
 
-def _validate_url(url: str, allowed: set[str], production: bool) -> None:
+def _validate_url(url: str, allowed: set[str], production: bool, *, allow_fragment: bool = False) -> None:
     parts = urlsplit(url)
     if not parts.scheme or not parts.netloc or parts.username or parts.password:
         raise _bad("INVALID_URL", "Invalid asset URL")
-    if parts.fragment:
+    if parts.fragment and not allow_fragment:
         raise _bad("URL_FRAGMENT", "Asset URL fragments are not allowed")
     if production and parts.scheme != "https":
         raise _bad("NON_HTTPS_URL", "Production asset URLs must use HTTPS")
@@ -767,20 +797,36 @@ def _replay_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "manifestChecksum": manifest.get("manifestChecksum"),
         "assets": sorted(
             (
-                {
-                    "key": asset.get("key"),
-                    "sha256": asset.get("sha256"),
-                    "size": asset.get("size"),
-                    "mediaType": asset.get("mediaType"),
-                    "critical": asset.get("critical"),
-                    "sdPath": asset.get("sdPath"),
-                }
+                _replay_asset_projection(asset)
                 for asset in manifest.get("assets", [])
                 if isinstance(asset, Mapping)
             ),
             key=lambda asset: str(asset.get("key")),
         ),
     }
+
+
+def _replay_asset_projection(asset: Mapping[str, Any]) -> dict[str, Any]:
+    projection = {
+                    "key": asset.get("key"),
+                    "sha256": asset.get("sha256"),
+                    "size": asset.get("size"),
+                    "mediaType": asset.get("mediaType"),
+                    "critical": asset.get("critical"),
+                    "sdPath": asset.get("sdPath"),
+    }
+    if asset.get("mediaType") == "video/mp4":
+        projection.update({
+            "onlineUrl": asset.get("onlineUrl"),
+            "sharedAssetKey": asset.get("sharedAssetKey"),
+            "sharedAssetVersion": asset.get("sharedAssetVersion"),
+            "compatibilityMetadata": asset.get("compatibilityMetadata"),
+            "visualRefs": sorted(
+                (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
+                key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
+            ),
+        })
+    return projection
 
 def _log(
     logger: Any,

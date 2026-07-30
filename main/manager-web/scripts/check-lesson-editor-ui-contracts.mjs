@@ -66,6 +66,32 @@ function extractNamedFunction(source, name) {
   throw new Error(`${name} function body not closed`);
 }
 
+const normalizeVisualAsset = vm.runInNewContext(
+  `(${extractNamedFunction(read('src/apis/module/lesson.js'), 'normalizeVisualAsset')})`,
+);
+const normalizedMp4 = normalizeVisualAsset({
+  id: 'asset-1',
+  asset_key: 'scene.farm',
+  category: 'scene',
+  version_id: 'version-3',
+  version: 3,
+  url: 'https://cdn.example.test/farm-v3.mp4',
+  mime_type: 'video/mp4',
+  compatibility_metadata: {
+    codec: 'mjpeg', fps: 15, durationMs: 3200, frameCount: 48,
+    rect: { x: 0, y: 0, width: 480, height: 320 }, chromaKey: null,
+  },
+});
+if (JSON.stringify(normalizedMp4) !== JSON.stringify({
+  assetId: 'asset-1', assetKey: 'scene.farm', category: 'scene', title: '',
+  versionId: 'version-3', versionIdentity: 'version-3', version: 3, profile: '', storagePath: '',
+  url: 'https://cdn.example.test/farm-v3.mp4', sha256: '', mimeType: 'video/mp4', bytes: 0,
+  width: 0, height: 0, publicationState: 'draft', usageCount: 0,
+  compatibilityMetadata: normalizedMp4.compatibilityMetadata,
+  codec: 'mjpeg', fps: 15, durationMs: 3200, frameCount: 48,
+  rect: normalizedMp4.rect, chromaKey: null,
+})) throw new Error(`normalizeVisualAsset must expose MP4 backend metadata: ${JSON.stringify(normalizedMp4)}`);
+
 expectContains('src/views/LessonEditor.vue', '<lesson-step-prompt-editor', 'selected draft steps need prompt editing');
 expectContains('src/views/LessonEditor.vue', 'prompt: this.promptDraft', 'save must persist the edited prompt');
 expectContains('src/views/LessonEditor.vue', 'promptDirty', 'prompt edits need explicit dirty tracking');
@@ -111,6 +137,24 @@ expectRegex(
   /<lesson-step-prompt-editor[\s\S]*?:disabled="!isDraft\s*\|\|\s*savingStep\s*\|\|\s*rebindingSharedVisual"/m,
   'prompt input must be disabled during its save request',
 );
+
+// Keep the direct-MP4 picker contract ahead of legacy preview assertions so it
+// remains independently executable while the preview wrapper contract evolves.
+expectNotContains('src/views/LessonEditor.vue', '/backgrounds/backgrounds-manifest.json', 'production cinematic scenes must come from the versioned backend library');
+expectNotContains('src/views/LessonEditor.vue', '/teachobjects/teachobjects-manifest.json', 'production teaching objects must come from the versioned backend library');
+expectContains('src/views/LessonEditor.vue', '<CinematicLayerPicker', 'the production editor must render the backend cinematic picker');
+expectContains('src/views/LessonEditor.vue', "layer-slot=\"robotOverlay\"", 'the production editor must expose the third robot MP4 layer');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "backgroundScene: 'scene'", 'backgroundScene must query the scene category');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "teachingObject: 'teachingObject'", 'teachingObject must keep its backend category');
+expectContains('src/components/lesson/CinematicLayerPicker.vue', "robotOverlay: 'robotPose'", 'robotOverlay must query robotPose assets');
+expectContains('src/components/lesson/SharedAssetPicker.vue', '<video', 'MP4 assets must use a video preview');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'preload="metadata"', 'MP4 previews must avoid eager full downloads');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'selectedVersionId', 'selection identity must use immutable version IDs');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__loading', 'loading must remain visible before assets arrive');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__error', 'backend failures must remain visible when assets are empty');
+expectContains('src/components/lesson/SharedAssetPicker.vue', 'asset-picker__empty', 'an empty backend library needs an explicit state');
+expectContains('src/views/LessonEditor.vue', 'immutable-version-message', 'published lesson versions must explain why cinematic refs are immutable');
+console.log('direct MP4 cinematic picker UI contracts PASS');
 
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
 expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');

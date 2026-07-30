@@ -18,6 +18,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 
 from config.logger import setup_logging
+from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
 
 POLL_INTERVAL_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -62,6 +63,9 @@ _ASSET_FIELDS = frozenset(
         "critical",
     }
 )
+_SHARED_IDENTITY_FIELDS = frozenset({"sharedAssetKey", "sharedAssetVersion"})
+_RENDERER_V3_MP4_FIELDS = frozenset({"compatibilityMetadata", "visualRefs"})
+_ALL_ASSET_FIELDS = _ASSET_FIELDS | _SHARED_IDENTITY_FIELDS | _RENDERER_V3_MP4_FIELDS
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _LESSON_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -407,7 +411,7 @@ def _validate_pack(value: Any, allowed_origins: set[tuple[str, str, int]]) -> di
         "manifestChecksum": manifest_checksum,
         "cacheKey": expected_cache_key,
         "classification": classification,
-        "assets": [{key: asset[key] for key in _ASSET_FIELDS} for asset in assets],
+        "assets": [{key: asset[key] for key in asset if key != "encodedKey"} for asset in assets],
     }
 
 
@@ -418,7 +422,9 @@ def _validate_asset(
 ) -> dict[str, Any]:
     if type(value) is not dict:
         raise _PollRejected("cms_invalid_asset")
-    _exact_fields(value, _ASSET_FIELDS)
+    fields = set(value)
+    if not _ASSET_FIELDS.issubset(fields) or fields - _ALL_ASSET_FIELDS:
+        raise _PollRejected("cms_unknown_field")
     key = value.get("key")
     if not isinstance(key, str) or not key or _CONTROL_RE.search(key):
         raise _PollRejected("cms_invalid_asset_key")
@@ -445,25 +451,57 @@ def _validate_asset(
         raise _PollRejected("cms_sd_path_mismatch")
     if value.get("onlineUrl") != value.get("url"):
         raise _PollRejected("cms_asset_alias_mismatch")
-    _validate_asset_url(value.get("onlineUrl"), allowed_origins)
+    _validate_asset_url(
+        value.get("onlineUrl"),
+        allowed_origins,
+        allow_query_fragment=value.get("mediaType") == "video/mp4",
+    )
     _checksum(value.get("sha256"), "cms_invalid_asset_checksum")
     _safe_integer(value.get("size"), positive=False, code="cms_invalid_asset_size")
     if not isinstance(value.get("mediaType"), str) or not value["mediaType"]:
         raise _PollRejected("cms_invalid_media_type")
     if type(value.get("critical")) is not bool:
         raise _PollRejected("cms_invalid_critical")
+    media_type = value["mediaType"]
+    if media_type.lower().startswith("video/"):
+        try:
+            validate_renderer_v3_shared_mp4(value)
+        except FirmwareSyncPackError:
+            raise _PollRejected("cms_invalid_renderer_v3_mp4") from None
+        if fields != _ALL_ASSET_FIELDS:
+            raise _PollRejected("cms_invalid_renderer_v3_mp4")
+    elif fields & _RENDERER_V3_MP4_FIELDS:
+        raise _PollRejected("cms_invalid_renderer_v3_mp4")
+    elif fields & _SHARED_IDENTITY_FIELDS:
+        if not _SHARED_IDENTITY_FIELDS.issubset(fields):
+            raise _PollRejected("cms_invalid_shared_asset_identity")
+        shared_key = value.get("sharedAssetKey")
+        shared_version = value.get("sharedAssetVersion")
+        if not isinstance(shared_key, str) or not shared_key or type(shared_version) is not int or shared_version < 1:
+            raise _PollRejected("cms_invalid_shared_asset_identity")
+        if value.get("key") != f"{shared_key}@v{shared_version}":
+            raise _PollRejected("cms_invalid_shared_asset_identity")
     return {**value, "encodedKey": encoded}
 
 
-def _validate_asset_url(value: Any, allowed_origins: set[tuple[str, str, int]]) -> None:
+def _validate_asset_url(
+    value: Any,
+    allowed_origins: set[tuple[str, str, int]],
+    *,
+    allow_query_fragment: bool = False,
+) -> None:
     if not isinstance(value, str):
         raise _PollRejected("cms_asset_url_rejected")
     try:
         parts = urlsplit(value)
-        origin = _origin(value, allowed_schemes={"https"})
+        origin = _origin(
+            value,
+            allowed_schemes={"https"},
+            allow_fragment=allow_query_fragment,
+        )
     except _PollRejected:
         raise _PollRejected("cms_asset_url_rejected") from None
-    if parts.username or parts.password or parts.fragment or parts.query:
+    if parts.username or parts.password or (not allow_query_fragment and (parts.fragment or parts.query)):
         raise _PollRejected("cms_asset_url_rejected")
     if origin not in allowed_origins:
         raise _PollRejected("cms_asset_origin_rejected")
@@ -491,7 +529,12 @@ def _js_sort_key(value: str) -> bytes:
     return value.encode("utf-16-be", errors="surrogatepass")
 
 
-def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
+def _origin(
+    url: str,
+    *,
+    allowed_schemes: set[str],
+    allow_fragment: bool = False,
+) -> tuple[str, str, int]:
     try:
         if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
             raise ValueError
@@ -507,7 +550,7 @@ def _origin(url: str, *, allowed_schemes: set[str]) -> tuple[str, str, int]:
         or not parts.netloc
         or parts.username
         or parts.password
-        or parts.fragment
+        or (parts.fragment and not allow_fragment)
     ):
         raise _PollRejected("cms_invalid_url")
     return scheme, hostname, port or (443 if scheme == "https" else 80)

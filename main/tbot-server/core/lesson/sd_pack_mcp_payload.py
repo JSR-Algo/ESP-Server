@@ -25,6 +25,11 @@ _RESERVED_BASENAMES = frozenset(
     }
 )
 _RESERVED_SUFFIXES = (".tmp", ".download", ".part", ".backup")
+_MP4_METADATA_FIELDS = frozenset({"codec", "fps", "durationMs", "frameCount", "hasAudio", "rect", "chromaKey"})
+_RECT_FIELDS = frozenset({"x", "y", "width", "height"})
+_CHROMA_FIELDS = frozenset({"color", "tolerance", "feather"})
+_COLOR_FIELDS = frozenset({"r", "g", "b"})
+_VISUAL_REF_FIELDS = frozenset({"stepKey", "phase", "slot"})
 
 
 class FirmwareSyncPackError(ValueError):
@@ -91,6 +96,79 @@ def _validate_online_url(value: str) -> None:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
         _refuse()
 
+
+def _integer(value: Any, minimum: int, maximum: int = (1 << 53) - 1) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def validate_renderer_v3_shared_mp4(asset: Any) -> dict[str, Any]:
+    """Validate the narrow shared renderer-v3 MJPEG-in-MP4 transport contract."""
+    if not isinstance(asset, dict) or asset.get("mediaType") != "video/mp4":
+        _refuse()
+    shared_key = asset.get("sharedAssetKey")
+    version = asset.get("sharedAssetVersion")
+    if not isinstance(shared_key, str) or not shared_key or not _integer(version, 1):
+        _refuse()
+    if asset.get("key") != f"{shared_key}@v{version}":
+        _refuse()
+    metadata = asset.get("compatibilityMetadata")
+    if not isinstance(metadata, dict) or set(metadata) != _MP4_METADATA_FIELDS:
+        _refuse()
+    if metadata.get("codec") != "mjpeg" or metadata.get("fps") not in {10, 15} or metadata.get("hasAudio") is not False:
+        _refuse()
+    duration = metadata.get("durationMs")
+    frame_count = metadata.get("frameCount")
+    if not _integer(duration, 1) or not _integer(frame_count, 1):
+        _refuse()
+    if abs(frame_count - (duration * metadata["fps"] / 1000)) > 1:
+        _refuse()
+    rect = metadata.get("rect")
+    if not isinstance(rect, dict) or set(rect) != _RECT_FIELDS:
+        _refuse()
+    if not all(_integer(rect.get(field), 0 if field in {"x", "y"} else 1) for field in _RECT_FIELDS):
+        _refuse()
+    refs = asset.get("visualRefs")
+    if not isinstance(refs, list) or not refs:
+        _refuse()
+    slot_roots = set()
+    for ref in refs:
+        if not isinstance(ref, dict) or set(ref) != _VISUAL_REF_FIELDS:
+            _refuse()
+        if not all(isinstance(ref.get(field), str) and ref[field] for field in _VISUAL_REF_FIELDS):
+            _refuse()
+        slot_roots.add(ref["slot"].split(".", 1)[0])
+    if len(slot_roots) != 1:
+        _refuse()
+    slot_root = next(iter(slot_roots))
+    chroma = metadata.get("chromaKey")
+    if slot_root == "backgroundScene":
+        if rect != {"x": 0, "y": 0, "width": 480, "height": 320} or chroma is not None:
+            _refuse()
+    elif slot_root in {"teachingObject", "robotOverlay"}:
+        if rect["width"] > 240 or rect["height"] > 240 or rect["x"] + rect["width"] > 480 or rect["y"] + rect["height"] > 320:
+            _refuse()
+        if not isinstance(chroma, dict) or set(chroma) != _CHROMA_FIELDS:
+            _refuse()
+        color = chroma.get("color")
+        if not isinstance(color, dict) or set(color) != _COLOR_FIELDS:
+            _refuse()
+        if not all(_integer(color.get(channel), 0, 255) for channel in _COLOR_FIELDS):
+            _refuse()
+        if not _integer(chroma.get("tolerance"), 0, 255) or not _integer(chroma.get("feather"), 0, 255):
+            _refuse()
+    else:
+        _refuse()
+    online_url = _matching_alias(asset, "onlineUrl", "url")
+    parsed = urlsplit(online_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        _refuse()
+    return {
+        "sharedAssetKey": shared_key,
+        "sharedAssetVersion": version,
+        "compatibilityMetadata": copy.deepcopy(metadata),
+        "visualRefs": copy.deepcopy(refs),
+    }
+
 def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: str) -> tuple[str, str]:
     if _LOWER_SHA256_RE.fullmatch(asset.get("sha256") or "") is None:
         _refuse()
@@ -106,6 +184,8 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     online_url = _matching_alias(asset, "onlineUrl", "url")
     _validate_source_local_path(local_path, cache_key, basename)
     _validate_online_url(online_url)
+    if media_type.lower().startswith("video/"):
+        validate_renderer_v3_shared_mp4(asset)
     return local_path, online_url
 
 

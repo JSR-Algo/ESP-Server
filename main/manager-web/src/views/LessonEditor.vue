@@ -129,43 +129,40 @@
               />
             </div>
             <div class="preview-stack">
-              <div v-if="backgroundLibrary.length" class="bg-picker" data-testid="background-picker">
-                <div class="preview-heading">
-                  <span class="eyebrow">CHỌN BACKGROUND</span>
-                  <span class="preview-heading__hint">{{ backgroundLibrary.length }} bối cảnh — chọn 1 để áp dụng cho bài học</span>
+              <div v-if="lessonCapabilities.sharedVisualAuthoring || lessonCapabilities.exactEspTftPreview" class="cinematic-pickers">
+                <div v-if="!isDraft" class="immutable-version-message" data-testid="immutable-version-message">
+                  This published lesson version is immutable. Create or edit a draft version to change cinematic layers.
                 </div>
-                <div class="bg-picker__grid">
-                  <button
-                    v-for="bg in backgroundLibrary"
-                    :key="bg.assetKey"
-                    type="button"
-                    :class="['bg-chip', { selected: bg.assetKey === selectedBackgroundKey }]"
-                    :title="bg.assetKey"
-                    @click="selectBackground(bg)"
-                  >
-                    <img :src="bg.posterUrl" :alt="bg.title" loading="lazy" />
-                    <span>{{ bg.title }}</span>
-                  </button>
-                </div>
-              </div>
-              <div v-if="objectLibrary.length" class="bg-picker" data-testid="object-picker">
-                <div class="preview-heading">
-                  <span class="eyebrow">CHỌN VẬT THỂ (TEACHING OBJECT)</span>
-                  <span class="preview-heading__hint">{{ objectLibrary.length }} vật thể — chọn 1 để áp dụng cho bài học</span>
-                </div>
-                <div class="bg-picker__grid">
-                  <button
-                    v-for="obj in objectLibrary"
-                    :key="obj.assetKey"
-                    type="button"
-                    :class="['bg-chip', 'obj-chip', { selected: obj.assetKey === pickedObjectKey }]"
-                    :title="obj.assetKey"
-                    @click="selectTeachObject(obj)"
-                  >
-                    <img :src="obj.posterUrl" :alt="obj.title" loading="lazy" />
-                    <span>{{ obj.title }}</span>
-                  </button>
-                </div>
+                <CinematicLayerPicker
+                  layer-slot="backgroundScene"
+                  title="Background scene"
+                  :assets="cinematicLibraries.backgroundScene"
+                  :selected-version-id="selectedVisualVersionId('backgroundScene')"
+                  :loading="cinematicLibraryLoading.backgroundScene"
+                  :error="cinematicLibraryErrors.backgroundScene"
+                  :disabled="!isDraft || cinematicRefSaving"
+                  @select="selectCinematicLayer"
+                />
+                <CinematicLayerPicker
+                  layer-slot="teachingObject"
+                  title="Teaching object"
+                  :assets="cinematicLibraries.teachingObject"
+                  :selected-version-id="selectedVisualVersionId('teachingObject')"
+                  :loading="cinematicLibraryLoading.teachingObject"
+                  :error="cinematicLibraryErrors.teachingObject"
+                  :disabled="!isDraft || cinematicRefSaving"
+                  @select="selectCinematicLayer"
+                />
+                <CinematicLayerPicker
+                  layer-slot="robotOverlay"
+                  title="Robot overlay"
+                  :assets="cinematicLibraries.robotOverlay"
+                  :selected-version-id="selectedVisualVersionId('robotOverlay')"
+                  :loading="cinematicLibraryLoading.robotOverlay"
+                  :error="cinematicLibraryErrors.robotOverlay"
+                  :disabled="!isDraft || cinematicRefSaving"
+                  @select="selectCinematicLayer"
+                />
               </div>
               <section v-if="cinematicDemoUrl" class="cinematic-effect preview-surface" data-testid="cinematic-design-reference">
                 <div class="preview-heading">
@@ -493,6 +490,7 @@
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
 import LessonAssetManager from '@/components/LessonAssetManager.vue';
+import CinematicLayerPicker, { SLOT_CATEGORY as CINEMATIC_SLOT_CATEGORY } from '@/components/lesson/CinematicLayerPicker.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
@@ -538,6 +536,7 @@ import { createAuthoringDirtyHandle } from '@/utils/serviceWorkerUpdateSafety.mj
 export default {
   name: 'LessonEditor',
   components: {
+    CinematicLayerPicker,
     HeaderBar,
     LessonAssetManager,
     LessonEngagementTrack,
@@ -589,15 +588,10 @@ export default {
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
       sharedBackgrounds: [],
-      // Cinematic background library: published `scene` assets merged with the
-      // /backgrounds manifest that carries each scene's 6s mp4 for the preview.
-      backgroundLibrary: [],
-      selectedBackgroundKey: '',
-      // Teaching-object library: published `teachingObject` assets merged with the
-      // /teachobjects manifest (static poster + optional animated mp4).
-      objectLibrary: [],
-      pickedObjectKey: '',
-      sharedVisualAssets: [],
+      cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
+      cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
+      cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
+      cinematicRefSaving: false,
       // Part-of-speech enum + firmware-supported expression overrides (with REAL
       // on-device emoji so the author is not misled: listening ≡ thinking face).
       partsOfSpeech: ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'determiner'],
@@ -875,7 +869,6 @@ export default {
     }
     this.loadLessonCapabilities();
     this.loadCanonicalDemo();
-    this.loadBackgroundLibrary();
     this.fetchAll();
     // A cinematic iframe announces 'tvideo-ready' once its message listener is
     // attached; push the current step then so the sync never loses the load race.
@@ -914,8 +907,7 @@ export default {
     },
     async loadLessonCapabilities() {
       this.lessonCapabilities = await loadLessonRolloutCapabilities();
-      if (this.lessonCapabilities.sharedVisualAuthoring) this.fetchSharedVisualAssets();
-      if (this.lessonCapabilities.sharedVisualAuthoring || this.lessonCapabilities.exactEspTftPreview) this.loadObjectLibrary();
+      if (this.lessonCapabilities.sharedVisualAuthoring || this.lessonCapabilities.exactEspTftPreview) this.loadCinematicLibraries();
     },
     statusType(status) {
       if (status === 'published') return 'success';
@@ -1652,10 +1644,19 @@ export default {
       this.savingStep = true;
       const visualRefTransition = templateVisualRefTransition(step.stepBody || {}, stepBody);
       const visualRefChanged = this.selectedStepIndex === 0 && visualRefTransition.shouldSync;
+      const visualRefs = (Array.isArray(step.visualRefs) ? step.visualRefs : []).map((ref) => ({
+        slot: ref.slot,
+        assetVersionId: ref.assetVersionId || ref.asset_version_id,
+      })).filter((ref) => ref.slot && ref.assetVersionId);
+      if (visualRefChanged) {
+        const index = visualRefs.findIndex((ref) => ref.slot === 'backgroundScene');
+        if (index >= 0) visualRefs.splice(index, 1);
+        if (visualRefTransition.nextAssetVersionId) visualRefs.push({ slot: 'backgroundScene', assetVersionId: visualRefTransition.nextAssetVersionId });
+      }
       const persistStep = () => Api.lesson.updateStep(
         this.lessonId,
         step.stepKey,
-        { ...step, ...this.selectedContent, prompt: this.promptDraft, stepBody },
+        { ...step, ...this.selectedContent, prompt: this.promptDraft, stepBody, visualRefs },
         () => {
           if (saveGuard.requestId !== this.promptSaveRequestId) return;
           this.fetchSteps({
@@ -1716,13 +1717,6 @@ export default {
       this.$delete(this.dirtyStepKeys, stepKey);
       this.previewManifest = null;
     },
-    fetchSharedVisualAssets() {
-      Api.lesson.listVisualAssets(
-        { category: 'teachingObject', profile: 'espTft' },
-        (assets) => { this.sharedVisualAssets = assets; },
-        (msg) => this.$message.error(msg),
-      );
-    },
     inspectSharedAsset(asset) {
       if (!this.lessonCapabilities.sharedVisualAuthoring) return;
       this.$router.push({ name: 'LessonVisualAssetDetail', params: { assetKey: asset.assetKey } });
@@ -1734,97 +1728,63 @@ export default {
     onPreviewPathChange(payload) {
       this.previewPath = payload;
     },
-    // Push the selected step's data into the cinematic template iframe so the
-    // "as-designed" video reflects the word / prompt / teaching object of the
-    // step currently being edited (layout + robot effects stay untouched).
-    // Build the selectable background list: the /backgrounds manifest supplies the
-    // cinematic mp4 + poster, the scene asset API supplies the version id used to
-    // bind the background onto a draft lesson step.
-    loadBackgroundLibrary() {
-      const withVersions = (versions) => {
-        fetch('/backgrounds/backgrounds-manifest.json', { cache: 'no-store' })
-          .then((r) => (r.ok ? r.json() : { backgrounds: [] }))
-          .then((manifest) => {
-            const rows = Array.isArray(manifest && manifest.backgrounds) ? manifest.backgrounds : [];
-            this.backgroundLibrary = rows.map((row) => ({
-              assetKey: row.assetKey,
-              title: row.title || row.assetKey,
-              video: row.video,
-              posterUrl: row.posterUrl,
-              versionId: versions[row.assetKey] || '',
-            }));
-          })
-          .catch(() => { this.backgroundLibrary = []; });
-      };
-      Api.lesson.listSharedBackgrounds(
-        (rows) => {
-          const versions = {};
-          (Array.isArray(rows) ? rows : []).forEach((row) => {
-            if (row && row.asset_key && row.publication_state === 'published') versions[row.asset_key] = row.version_id;
-          });
-          withVersions(versions);
-        },
-        () => withVersions({}),
-      );
-    },
-    // Selectable teaching objects: manifest supplies poster + animated mp4, the
-    // teachingObject asset API supplies the version id used to bind onto a draft.
-    loadObjectLibrary() {
-      const withVersions = (versions) => {
-        fetch('/teachobjects/teachobjects-manifest.json', { cache: 'no-store' })
-          .then((r) => (r.ok ? r.json() : { objects: [] }))
-          .then((manifest) => {
-            const rows = Array.isArray(manifest && manifest.objects) ? manifest.objects : [];
-            this.objectLibrary = rows.map((row) => ({
-              assetKey: row.assetKey,
-              title: row.title || row.assetKey,
-              posterUrl: row.posterUrl,
-              anim: row.anim || '',
-              versionId: versions[row.assetKey] || '',
-            }));
-          })
-          .catch(() => { this.objectLibrary = []; });
-      };
-      Api.lesson.listVisualAssets(
-        { category: 'teachingObject', profile: 'espTft' },
-        (rows) => {
-          const versions = {};
-          (Array.isArray(rows) ? rows : []).forEach((row) => {
-            const key = row && (row.assetKey || row.asset_key);
-            const vid = row && (row.versionId || row.version_id);
-            if (key && vid) versions[key] = vid;
-          });
-          withVersions(versions);
-        },
-        () => withVersions({}),
-      );
-    },
-    // Choose a teaching object: refresh the cinematic; bind onto the step when draft.
-    selectTeachObject(obj) {
-      if (!obj) return;
-      this.pickedObjectKey = obj.assetKey;
-      this.pushCinematicStep();
-      if (this.isDraft && this.selectedStep && obj.versionId) {
-        Api.lesson.setVisualRef(
-          this.lessonId, this.selectedStep.stepKey, 'teachingObject', obj.versionId,
-          () => { this.$message.success(`Vật thể: ${obj.title}`); this.previewManifest = null; this.doPreview(); },
-          (msg) => this.$message.error(msg),
+    loadCinematicLibraries() {
+      Object.entries(CINEMATIC_SLOT_CATEGORY).forEach(([slot, category]) => {
+        this.$set(this.cinematicLibraryLoading, slot, true);
+        this.$set(this.cinematicLibraryErrors, slot, '');
+        Api.lesson.listVisualAssets(
+          { category, profile: 'espTft' },
+          (rows) => {
+            this.$set(this.cinematicLibraries, slot, Array.isArray(rows) ? rows : []);
+            this.$set(this.cinematicLibraryLoading, slot, false);
+          },
+          (msg) => {
+            this.$set(this.cinematicLibraries, slot, []);
+            this.$set(this.cinematicLibraryLoading, slot, false);
+            this.$set(this.cinematicLibraryErrors, slot, msg || `Could not load ${category} assets.`);
+          },
         );
-      }
+      });
     },
-    // Choose a background: always refresh the cinematic preview; bind it onto the
-    // step only while the lesson is still a draft (published lessons are frozen).
-    selectBackground(bg) {
-      if (!bg) return;
-      this.selectedBackgroundKey = bg.assetKey;
-      this.pushCinematicStep();
-      if (this.isDraft && this.selectedStep && bg.versionId) {
-        Api.lesson.setVisualRef(
-          this.lessonId, this.selectedStep.stepKey, 'backgroundScene', bg.versionId,
-          () => { this.$message.success(`Background: ${bg.title}`); this.previewManifest = null; this.doPreview(); },
-          (msg) => this.$message.error(msg),
-        );
+    selectedVisualVersionId(slot) {
+      const refs = this.selectedStep && Array.isArray(this.selectedStep.visualRefs) ? this.selectedStep.visualRefs : [];
+      const ref = refs.find((row) => row && row.slot === slot);
+      return ref ? (ref.assetVersionId || ref.asset_version_id || ref.versionId || ref.version_id || '') : '';
+    },
+    selectedCinematicAsset(slot) {
+      const versionId = this.selectedVisualVersionId(slot);
+      return (this.cinematicLibraries[slot] || []).find((asset) => asset.versionId === versionId) || null;
+    },
+    selectCinematicLayer(selection) {
+      if (!selection || !this.selectedStep || !selection.assetVersionId) return;
+      if (!this.isDraft) {
+        this.$message.warning('Published lesson versions are immutable. Edit a draft version to change cinematic layers.');
+        return;
       }
+      if (this.cinematicRefSaving) return;
+      this.cinematicRefSaving = true;
+      Api.lesson.setVisualRef(
+        this.lessonId,
+        this.selectedStep.stepKey,
+        selection.slot,
+        selection.assetVersionId,
+        () => {
+          this.cinematicRefSaving = false;
+          this.previewManifest = null;
+          this.validationResult = null;
+          this.fetchSteps({
+            preservePrompt: true,
+            onSuccess: () => {
+              this.pushCinematicStep();
+              this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
+            },
+          });
+        },
+        (msg) => {
+          this.cinematicRefSaving = false;
+          this.$message.error(msg);
+        },
+      );
     },
     // Push the current step to the cinematic iframes now and again shortly after,
     // so the sync lands regardless of the iframe-load / manifest-fetch race order.
@@ -1860,23 +1820,21 @@ export default {
       const teachingObject = scene.teachingObject || step.teachingObject || {};
       const teachingWord = step.teachingWord || {};
       const assetUrl = (a) => (a && (a.url || a.src || (typeof a === 'string' ? a : ''))) || '';
-      // An explicit pick wins; otherwise fall back to whatever the lesson itself has
-      // bound, so every lesson plays the template with its OWN scene/object.
-      const sceneKey = (((scene.backgroundScene || {}).poster) || {}).assetKey;
-      const selectedBg = this.backgroundLibrary.find((b) => b.assetKey === this.selectedBackgroundKey)
-        || this.backgroundLibrary.find((b) => b.assetKey === sceneKey);
-      const pickedObj = this.objectLibrary.find((o) => o.assetKey === this.pickedObjectKey);
+      // The reference iframe is isolated from picker state: it only mirrors refs
+      // that the backend has already returned for the selected step.
+      const selectedBg = this.selectedCinematicAsset('backgroundScene');
+      const pickedObj = this.selectedCinematicAsset('teachingObject');
       const stepMotion = (step.motion && step.motion.present) || '';
       const payload = {
         word: teachingWord.displayText || teachingWord.text || teachingObject.primaryWord || step.subject || '',
         prompt: step.prompt || '',
         stepId: `S${idx + 1}`,
         stepText: step.type || '',
-        obj: pickedObj ? pickedObj.posterUrl : assetUrl(teachingObject.asset),
+        obj: pickedObj ? pickedObj.url : assetUrl(teachingObject.asset),
         active: idx + 1,
         total: steps.length,
         // Keep the author's chosen background applied across step changes.
-        ...(selectedBg ? { bg: selectedBg.video, bgPoster: selectedBg.posterUrl } : {}),
+        ...(selectedBg ? { bg: selectedBg.url } : {}),
         // Step 1 is the intro — replay the robot fly-in when it's (re)selected.
         replay: replayIntro && idx === 0,
         // Drives the robot's up-close clip (celebrate vs greet-loop).

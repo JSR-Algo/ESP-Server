@@ -81,7 +81,16 @@ assert.deepStrictEqual(buildCreateStepPayload({
   locale: 'vi',
 }), { ok: false, reason: 'fillBlankNeedsChoices' });
 
-const step = { stepKey: 's2', prompt: 'Old', stepBody: { existing: true } };
+const step = {
+  stepKey: 's2',
+  prompt: 'Old',
+  stepBody: { existing: true },
+  visualRefs: [
+    { slot: 'backgroundScene', assetVersionId: 'scene-v3' },
+    { slot: 'teachingObject', assetVersionId: 'asset-v1' },
+    { slot: 'robotOverlay', assetVersionId: 'robot-v4' },
+  ],
+};
 const request = buildSaveStepRequest({
   step,
   authoring: { teachingWord: { text: 'BARN' } },
@@ -91,7 +100,11 @@ const request = buildSaveStepRequest({
 });
 assert.equal(request.stepKey, 's2');
 assert.equal(request.savedRevision, 2);
-assert.deepStrictEqual(request.payload.visualRefs, [{ slot: 'teachingObject', assetVersionId: 'asset-v2' }]);
+assert.deepStrictEqual(request.payload.visualRefs, [
+  { slot: 'backgroundScene', assetVersionId: 'scene-v3' },
+  { slot: 'teachingObject', assetVersionId: 'asset-v2' },
+  { slot: 'robotOverlay', assetVersionId: 'robot-v4' },
+]);
 assert.deepStrictEqual(request.payload.stepBody, { existing: true, teachingWord: { text: 'BARN' } });
 
 assert.deepStrictEqual(resolveSaveSuccess({ currentRevision: 2, savedRevision: 2 }), { clearDraft: true });
