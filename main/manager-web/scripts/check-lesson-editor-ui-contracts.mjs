@@ -68,6 +68,12 @@ function extractNamedFunction(source, name) {
   throw new Error(`${name} function body not closed`);
 }
 
+function extractComponentTag(source, name) {
+  const match = new RegExp(`<${name}\\b[\\s\\S]*?\\/>`, 'm').exec(source);
+  if (!match) throw new Error(`${name} component tag not found`);
+  return match[0];
+}
+
 expectContains('src/views/LessonEditor.vue', '<lesson-step-prompt-editor', 'selected draft steps need prompt editing');
 expectContains('src/views/LessonEditor.vue', 'prompt: this.promptDraft', 'save must persist the edited prompt');
 expectContains('src/views/LessonEditor.vue', 'promptDirty', 'prompt edits need explicit dirty tracking');
@@ -154,6 +160,54 @@ expectContains('src/views/LessonEditor.vue', 'applyLessonVisualSelection(patch)'
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
 expectNotContains('src/views/LessonEditor.vue', '<SharedAssetPicker', 'the primary editor must not expose a second per-step object selector');
 const lessonEditorSource = read('src/views/LessonEditor.vue');
+expectContains(
+  'src/views/LessonEditor.vue',
+  "import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';",
+  'LessonEditor must import the preview wrapper it renders',
+);
+expectRegex(
+  'src/views/LessonEditor.vue',
+  /components:\s*\{[\s\S]*?\bRobotLessonPreview\b[\s\S]*?\}/m,
+  'LessonEditor must register the preview wrapper',
+);
+const lessonPreviewTag = extractComponentTag(lessonEditorSource, 'RobotLessonPreview');
+for (const [binding, reason] of [
+  [/:manifest="previewManifest\.manifest"/, 'authoritative manifest'],
+  [/:renderer-metadata="previewManifest"/, 'renderer metadata'],
+  [/:step-index="selectedStepIndex"/, 'selected step index'],
+  [/@path-change="previewPath = \$event"/, 'path-change evidence'],
+]) {
+  if (!binding.test(lessonPreviewTag)) throw new Error(`LessonEditor preview wiring missing ${reason}`);
+}
+
+const lessonPreviewSource = read('src/components/lesson/RobotLessonPreview.vue');
+for (const component of ['RobotEspTftProjectionPreview', 'RobotManifestServerPreview']) {
+  if (!lessonPreviewSource.includes(`import ${component} from './${component}.vue';`)) {
+    throw new Error(`RobotLessonPreview must import ${component}`);
+  }
+  if (!new RegExp(`components:\\s*\\{[\\s\\S]*?\\b${component}\\b[\\s\\S]*?\\}`, 'm').test(lessonPreviewSource)) {
+    throw new Error(`RobotLessonPreview must register ${component}`);
+  }
+}
+const projectionPreviewTag = extractComponentTag(lessonPreviewSource, 'RobotEspTftProjectionPreview');
+for (const [binding, reason] of [
+  [/v-if="manifest"/, 'manifest branch'],
+  [/:manifest="manifest"/, 'manifest'],
+  [/:renderer-metadata="rendererMetadata"/, 'renderer metadata'],
+  [/:step-index="stepIndex"/, 'step index'],
+  [/:initial-path="initialPath"/, 'initial interaction path'],
+  [/@path-change="\$emit\('path-change', \$event\)"/, 'path-change forwarding'],
+]) {
+  if (!binding.test(projectionPreviewTag)) throw new Error(`projection preview wiring missing ${reason}`);
+}
+const serverPreviewTag = extractComponentTag(lessonPreviewSource, 'RobotManifestServerPreview');
+for (const [binding, reason] of [
+  [/v-else-if="manifestPreview"/, 'server-preview fallback branch'],
+  [/:manifest-preview="manifestPreview"/, 'server manifest preview'],
+  [/:step-index="stepIndex"/, 'step index'],
+]) {
+  if (!binding.test(serverPreviewTag)) throw new Error(`server preview wiring missing ${reason}`);
+}
 const backgroundSelectorSource = extractObjectMethod(lessonEditorSource, 'selectBackground');
 const objectSelectorSource = extractObjectMethod(lessonEditorSource, 'selectTeachObject');
 const stepSaveSource = extractObjectMethod(lessonEditorSource, 'saveSelectedStep');
@@ -940,8 +994,6 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
   expectContains(locale, "'lesson.stepSaved'", 'save confirmation must be localized');
 }
 
-expectContains('src/components/lesson/SharedAssetPicker.vue', "this.$emit('select-intent'", 'selection must review impact first');
-expectContains('src/components/lesson/SharedAssetPicker.vue', ':disabled="disabled"', 'selection must lock during save or clone rebind');
 expectNotContains('src/views/LessonEditor.vue', 'SharedAssetPicker', 'orphan per-step asset picker must not be imported or mounted by the lesson editor');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'reviewSharedVisualImpact', 'dialog must load backend usage truth');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneSharedVisual', 'dialog must clone without mutating source pins');

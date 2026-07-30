@@ -6,15 +6,22 @@ const require = createRequire(import.meta.url);
 const logic = require('../src/components/lesson/tvideo-template-logic.js');
 const layouts = require('../src/components/lesson/tvideo-layout-presets.js');
 
+function extractObjectMethod(source, name) {
+  const match = new RegExp(`\\n\\s{2,4}${name}\\(`).exec(source);
+  assert.ok(match, `${name} method must exist`);
+  const start = match.index + match[0].lastIndexOf(name);
+  const paramsStart = source.indexOf('(', start);
+  const paramsEnd = source.indexOf(')', paramsStart);
+  const braceStart = source.indexOf('{', paramsEnd);
+  let depth = 0;
+  for (let index = braceStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}' && --depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`${name} method body not closed`);
+}
+
 assert.deepEqual(logic.TEMPLATE_OPTIONS, ['none', 'tvideoFlyWalk']);
-assert.deepEqual(logic.templateVisualRefTransition(
-  { templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
-  {},
-), { shouldSync: true, previousAssetVersionId: 'old-background-uuid', nextAssetVersionId: null });
-assert.deepEqual(logic.templateVisualRefTransition(
-  { templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
-  { templateAuthoring: { backgroundAssetVersionId: 'new-background-uuid' } },
-), { shouldSync: true, previousAssetVersionId: 'old-background-uuid', nextAssetVersionId: 'new-background-uuid' });
 assert.deepEqual(logic.mergeStepBodyForSave(
   { interaction: { type: 'repeat' }, templateAuthoring: { backgroundAssetVersionId: 'old-background-uuid' } },
   { interaction: { type: 'repeat' } },
@@ -165,9 +172,25 @@ for (const marker of [
 ]) {
   assert.ok(editorSource.includes(marker), `lesson editor batch wiring missing ${marker}`);
 }
-for (const marker of ['templateVisualRefTransition', 'restoreTemplateVisualRef', 'resetStepDraftAfterFailedSave', 'Partial save:', 'assetVersionId,']) {
-  assert.ok(editorSource.includes(marker), `lesson editor visual-ref compensation missing ${marker}`);
+assert.ok(editorSource.includes('<TvideoTemplatePanel'), 'template content editing must remain mounted in LessonEditor');
+assert.ok(editorSource.includes('v-model="selectedTemplateAuthoring"'), 'template content edits must remain part of the step draft');
+
+const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
+assert.equal(saveSelectedStepSource.includes('setVisualRef'), false, 'template step saves must not write per-step visual refs');
+assert.equal(saveSelectedStepSource.includes('visualRefs:'), false, 'template step saves must not submit background/object visual refs');
+assert.ok(saveSelectedStepSource.includes('this.stepPayloadWithoutVisualRefs('), 'template step saves must strip loaded background/object refs');
+assert.equal(saveSelectedStepSource.includes('backgroundScene'), false, 'template step saves must not construct a backgroundScene visual ref');
+const stripVisualRefsSource = extractObjectMethod(editorSource, 'stepPayloadWithoutVisualRefs');
+assert.ok(stripVisualRefsSource.includes('delete sanitized.visualRefs'), 'step payloads must remove all lesson-owned visual refs');
+
+for (const selector of ['selectBackground', 'selectTeachObject']) {
+  const selectorSource = extractObjectMethod(editorSource, selector);
+  assert.ok(selectorSource.includes('this.applyLessonVisualSelection({'), `${selector} must delegate to the lesson-wide selector`);
+  assert.equal(selectorSource.includes('setVisualRef'), false, `${selector} must not write a per-step visual ref`);
 }
+const lessonVisualSaveSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
+assert.ok(lessonVisualSaveSource.includes('Api.lesson.applyLessonVisuals('), 'lesson visual changes must use only the lesson-level endpoint');
+assert.equal(panelSource.includes('setVisualRef'), false, 'the TVideo panel must remain a content/body editor, not a visual-ref writer');
 
 const robotPreviewSource = fs.readFileSync(new URL('../src/components/lesson/RobotManifestServerPreview.vue', import.meta.url), 'utf8');
 const primaryWordMatch = /primaryWord\(\)\s*\{\s*return\s+([\s\S]*?);\s*\},/.exec(robotPreviewSource);
