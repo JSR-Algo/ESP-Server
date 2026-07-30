@@ -23,8 +23,14 @@
       <span v-for="warning in projection.warnings" :key="warning">{{ warning }}</span>
     </div>
 
-    <div class="stage-shell">
-      <div class="stage" data-testid="esp-tft-stage">
+    <div
+      :class="['cinematic-comparison', { 'cinematic-comparison--enabled': cinematicComparisonEnabled }]"
+      :data-testid="cinematicComparisonEnabled ? 'cinematic-preview-comparison' : null"
+    >
+      <section :class="['cinematic-panel', { 'cinematic-panel--legacy': !cinematicComparisonEnabled }]">
+        <h3 v-if="cinematicComparisonEnabled" class="cinematic-panel__label">3 Layers</h3>
+        <div class="stage-shell">
+          <div class="stage" data-testid="esp-tft-stage">
         <template v-for="layer in projection.layers">
           <CinematicVideoLayer
             v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id) && layer.mediaType === 'video/mp4'"
@@ -33,6 +39,10 @@
             :chroma-key="layer.chromaKey"
             :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :position-style="layerStyle(layer)"
+            :controlled="cinematicComparisonEnabled"
+            :playing="cinematicPlaying"
+            :clock-ms="cinematicClockMs"
+            :replay-nonce="cinematicReplayNonce"
           />
           <img
             v-else-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id)"
@@ -79,6 +89,28 @@
         <div v-if="showSafeZones" class="safe-zone safe-bottom" />
         <div v-if="showSafeZones" class="safe-zone safe-left" />
         <div v-if="showSafeZones" class="safe-zone safe-right" />
+          </div>
+        </div>
+      </section>
+      <section v-if="cinematicComparisonEnabled" class="cinematic-panel">
+        <h3 class="cinematic-panel__label">Robot Flattened</h3>
+        <div class="stage-shell">
+          <div class="flattened-stage">
+            <FlattenedCinematicPreview
+              :projection="projection"
+              :playing="cinematicPlaying"
+              :clock-ms="cinematicClockMs"
+              :replay-nonce="cinematicReplayNonce"
+            />
+          </div>
+        </div>
+      </section>
+      <div v-if="cinematicComparisonEnabled" class="cinematic-controls">
+        <button type="button" class="play-btn" :aria-pressed="cinematicPlaying ? 'true' : 'false'" @click="toggleCinematicPlayback">
+          {{ cinematicPlaying ? '❚❚ Pause cinematic' : '► Play cinematic' }}
+        </button>
+        <button type="button" class="cinematic-replay-btn" @click="replayCinematic">↻ Replay</button>
+        <output>{{ Math.round(cinematicClockMs) }}ms / {{ cinematicDurationMs }}ms</output>
       </div>
     </div>
     <p class="truth-note">The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.</p>
@@ -156,10 +188,12 @@ import {
   DEGRADED_REASONS
 } from './robot-preview-projection';
 import CinematicVideoLayer from './CinematicVideoLayer.vue';
+import FlattenedCinematicPreview from './FlattenedCinematicPreview.vue';
+import { isFlattenableProjection } from './flattened-cinematic-preview';
 
 export default {
   name: 'RobotEspTftProjectionPreview',
-  components: { CinematicVideoLayer },
+  components: { CinematicVideoLayer, FlattenedCinematicPreview },
   props: {
     manifest: { type: Object, required: true },
     rendererMetadata: { type: Object, default: null },
@@ -179,6 +213,11 @@ export default {
       playStep: 0,
       playTimer: null,
       previewStepMs: 1700,
+      cinematicPlaying: false,
+      cinematicClockMs: 0,
+      cinematicReplayNonce: 0,
+      cinematicFrameHandle: null,
+      cinematicStartedAt: null,
       responsePaths: RESPONSE_PATHS,
       visualStates: VISUAL_STATES,
       degradedReasons: DEGRADED_REASONS,
@@ -206,6 +245,26 @@ export default {
     },
     projection() {
       return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason, this.rendererMetadata);
+    },
+    cinematicComparisonEnabled() {
+      return isFlattenableProjection(this.projection);
+    },
+    cinematicDurationMs() {
+      const phases = Array.isArray(this.manifest && this.manifest.cinematicPhases)
+        ? this.manifest.cinematicPhases
+        : [];
+      const phase = phases.find((item) => item && item.templateId === 'directMp4Cinematic') || phases[0] || {};
+      const metadata = phase.metadata && typeof phase.metadata === 'object' ? phase.metadata : {};
+      const layers = Array.isArray(phase.layers) ? phase.layers : [];
+      const background = layers.find((layer) => layer && layer.slot === 'backgroundScene');
+      const orderedCandidates = [
+        phase.durationMs,
+        metadata.durationMs,
+        background && background.metadata && background.metadata.durationMs,
+        ...layers.map((layer) => layer && layer.metadata && layer.metadata.durationMs)
+      ];
+      const duration = orderedCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0);
+      return duration || 10000;
     },
     capabilityLabel() {
       if (this.projection.capability.supported === true) return 'Renderer v2 supported';
@@ -256,14 +315,56 @@ export default {
   watch: {
     initialPath(path) {
       if (RESPONSE_PATHS.includes(path)) this.selectPath(path);
+    },
+    projection() {
+      this.resetCinematicPlayback();
     }
   },
   beforeDestroy() {
     this.clearPlayTimer();
+    this.stopCinematicClock();
   },
   methods: {
     clearPlayTimer() {
       if (this.playTimer) { clearTimeout(this.playTimer); this.playTimer = null; }
+    },
+    stopCinematicClock() {
+      if (this.cinematicFrameHandle !== null) cancelAnimationFrame(this.cinematicFrameHandle);
+      this.cinematicFrameHandle = null;
+      this.cinematicStartedAt = null;
+    },
+    scheduleCinematicFrame() {
+      if (!this.cinematicPlaying || !this.cinematicComparisonEnabled || this.cinematicFrameHandle !== null) return;
+      this.cinematicFrameHandle = requestAnimationFrame((timestamp) => {
+        this.cinematicFrameHandle = null;
+        if (!this.cinematicPlaying || !this.cinematicComparisonEnabled) return;
+        if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;
+        const elapsed = Math.max(0, timestamp - this.cinematicStartedAt);
+        this.cinematicClockMs = elapsed % this.cinematicDurationMs;
+        this.scheduleCinematicFrame();
+      });
+    },
+    toggleCinematicPlayback() {
+      if (this.cinematicPlaying) {
+        this.cinematicPlaying = false;
+        this.stopCinematicClock();
+        return;
+      }
+      this.cinematicPlaying = true;
+      this.cinematicStartedAt = null;
+      this.scheduleCinematicFrame();
+    },
+    replayCinematic() {
+      this.stopCinematicClock();
+      this.cinematicClockMs = 0;
+      this.cinematicReplayNonce += 1;
+      if (this.cinematicPlaying) this.scheduleCinematicFrame();
+    },
+    resetCinematicPlayback() {
+      this.stopCinematicClock();
+      this.cinematicPlaying = false;
+      this.cinematicClockMs = 0;
+      this.cinematicReplayNonce += 1;
     },
     togglePlay() {
       if (this.playing) { this.stopPlay(); } else { this.startPlay(); }
@@ -335,6 +436,15 @@ export default {
 .contract-grid dt { color:#6c796f; font-size:11px; text-transform:uppercase; }
 .contract-grid dd { margin:3px 0 0; font-size:13px; font-weight:800; overflow-wrap:anywhere; }
 .firmware-warning { display: grid; gap: 3px; margin-bottom: 12px; padding: 12px 14px; border: 2px solid #9c2218; border-radius: 10px; background: #fff0ea; color: #78140d; }
+.cinematic-comparison { min-width: 0; }
+.cinematic-comparison--enabled { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.cinematic-panel { min-width: 0; }
+.cinematic-panel--legacy { display: contents; }
+.cinematic-panel__label { margin: 0 0 7px; color: #33483b; font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.cinematic-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.cinematic-controls output { color: #66756b; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cinematic-replay-btn { padding: 8px 14px; border: 1px solid #7f9084; border-radius: 999px; background: #fff; color: #26342b; cursor: pointer; font: inherit; font-weight: 800; }
+.flattened-stage { width: 480px; margin: 0 auto; }
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
 .truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }
@@ -388,6 +498,7 @@ export default {
 @keyframes entranceSlide { 0% { transform: translateX(60px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
 @keyframes entrancePop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
+@media (max-width: 1100px) { .cinematic-comparison--enabled { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .contract-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { padding: 8px; }.stage { transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }

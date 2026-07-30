@@ -6,10 +6,52 @@ const source = await readFile(new URL('src/components/lesson/flattened-cinematic
 const preview = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const componentSource = await readFile(new URL('src/components/lesson/FlattenedCinematicPreview.vue', root), 'utf8');
 const videoLayerSource = await readFile(new URL('src/components/lesson/CinematicVideoLayer.vue', root), 'utf8');
+const exactPreviewSource = await readFile(new URL('src/components/lesson/RobotEspTftProjectionPreview.vue', root), 'utf8');
 const helperModuleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const videoLayerScript = videoLayerSource.match(/<script>([\s\S]*?)<\/script>/)[1]
   .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
 const videoLayer = (await import(`data:text/javascript;base64,${Buffer.from(videoLayerScript).toString('base64')}`)).default;
+const emptyComponentUrl = `data:text/javascript;base64,${Buffer.from('export default {};').toString('base64')}`;
+const projectionStubUrl = `data:text/javascript;base64,${Buffer.from(`
+  export const RESPONSE_PATHS = ['correct'];
+  export const VISUAL_STATES = [];
+  export const DEGRADED_REASONS = [];
+  export function projectEspTftPreview() { return {}; }
+`).toString('base64')}`;
+const exactPreviewScript = exactPreviewSource.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replace(/import \{[\s\S]*?\} from '\.\/robot-preview-projection';/, `import { projectEspTftPreview, RESPONSE_PATHS, VISUAL_STATES, DEGRADED_REASONS } from ${JSON.stringify(projectionStubUrl)};`)
+  .replace("'./CinematicVideoLayer.vue'", JSON.stringify(emptyComponentUrl))
+  .replace("'./FlattenedCinematicPreview.vue'", JSON.stringify(emptyComponentUrl))
+  .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
+const exactPreview = (await import(`data:text/javascript;base64,${Buffer.from(exactPreviewScript).toString('base64')}`)).default;
+
+assert.equal(exactPreview.computed.cinematicDurationMs.call({ manifest: {
+  cinematicPhases: [{
+    templateId: 'directMp4Cinematic',
+    layers: [{ slot: 'backgroundScene', metadata: { durationMs: 4321 } }]
+  }]
+} }), 4321, 'shared clock duration must come from the current cinematic phase metadata');
+assert.equal(exactPreview.computed.cinematicDurationMs.call({ manifest: {} }), 10000, 'missing duration metadata must use the safe preview fallback');
+
+for (const token of [
+  "import FlattenedCinematicPreview from './FlattenedCinematicPreview.vue';",
+  'isFlattenableProjection',
+  "cinematicComparisonEnabled ? 'cinematic-preview-comparison' : null",
+  '3 Layers',
+  'Robot Flattened',
+  ':projection="projection"',
+  ':clock-ms="cinematicClockMs"',
+  ':replay-nonce="cinematicReplayNonce"',
+  ':controlled="cinematicComparisonEnabled"'
+]) {
+  assert.ok(exactPreviewSource.includes(token), `RobotEspTftProjectionPreview.vue must include ${token}`);
+}
+assert.ok(exactPreviewSource.includes('data-testid="esp-tft-stage"'), 'legacy exact stage must remain');
+assert.match(exactPreviewSource, /:data-testid="cinematicComparisonEnabled \? 'cinematic-preview-comparison' : null"/, 'comparison test id must only render for a flattenable projection');
+assert.match(exactPreviewSource, /@click="toggleCinematicPlayback"/, 'comparison must expose a play/pause control');
+assert.match(exactPreviewSource, /@click="replayCinematic"/, 'comparison must expose a replay control');
+assert.match(exactPreviewSource, /beforeDestroy\(\)[\s\S]*stopCinematicClock/, 'destroy must cancel the cinematic clock');
+assert.match(exactPreviewSource, /projection\(\)[\s\S]*resetCinematicPlayback/, 'projection changes must reset and cancel cinematic playback');
 
 for (const token of [
   'data-testid="flattened-cinematic-preview"',
@@ -130,6 +172,47 @@ globalThis.cancelAnimationFrame = (handle) => {
   cancelledFrames.push(handle);
   rafCallbacks.delete(handle);
 };
+
+function createExactPreviewClock({ playing = false, clockMs = 0, durationMs = 1000 } = {}) {
+  return {
+    cinematicPlaying: playing,
+    cinematicClockMs: clockMs,
+    cinematicReplayNonce: 0,
+    cinematicFrameHandle: null,
+    cinematicStartedAt: null,
+    cinematicComparisonEnabled: true,
+    cinematicDurationMs: durationMs,
+    ...exactPreview.methods
+  };
+}
+
+rafCallbacks.clear();
+cancelledFrames.length = 0;
+const exactClock = createExactPreviewClock({ playing: true, clockMs: 250, durationMs: 1000 });
+exactClock.scheduleCinematicFrame();
+exactClock.scheduleCinematicFrame();
+assert.equal(rafCallbacks.size, 1, 'shared clock must never schedule duplicate RAF loops');
+const firstClockFrame = [...rafCallbacks.entries()][0];
+rafCallbacks.delete(firstClockFrame[0]);
+firstClockFrame[1](1000);
+assert.equal(exactClock.cinematicClockMs, 250, 'first RAF must preserve the existing clock when anchoring');
+const secondClockFrame = [...rafCallbacks.entries()][0];
+rafCallbacks.delete(secondClockFrame[0]);
+secondClockFrame[1](1900);
+assert.equal(exactClock.cinematicClockMs, 150, 'shared clock must advance by exact elapsed time and wrap at phase duration');
+exactClock.toggleCinematicPlayback();
+assert.equal(exactClock.cinematicPlaying, false, 'pause control must stop shared playback');
+assert.equal(rafCallbacks.size, 0, 'pause control must cancel the active RAF');
+
+exactClock.cinematicPlaying = true;
+exactClock.cinematicClockMs = 740;
+exactClock.replayCinematic();
+assert.equal(exactClock.cinematicClockMs, 0, 'replay must reset the shared clock');
+assert.equal(exactClock.cinematicReplayNonce, 1, 'replay must notify both renderers');
+assert.equal(rafCallbacks.size, 1, 'replay while playing must restart one RAF loop');
+exactClock.resetCinematicPlayback();
+assert.equal(exactClock.cinematicPlaying, false, 'projection reset must pause cinematic playback');
+assert.equal(rafCallbacks.size, 0, 'projection reset must cancel the RAF loop');
 
 function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused = true, play } = {}) {
   const video = {

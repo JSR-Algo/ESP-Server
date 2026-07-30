@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/robot-preview-projection.js', root), 'utf8');
 const previewComponentSource = await readFile(new URL('src/components/lesson/RobotEspTftProjectionPreview.vue', root), 'utf8');
+const flattenedSource = await readFile(new URL('src/components/lesson/flattened-cinematic-preview.js', root), 'utf8');
 const projection = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const flattened = await import(`data:text/javascript;base64,${Buffer.from(flattenedSource).toString('base64')}`);
 
 assert.equal(projection.RENDERER_V2_MANIFEST_VERSION, 'teebot-lesson-renderer.v2');
 assert.deepEqual(projection.VISUAL_STATES, ['teach', 'listen', 'thinking', 'correct', 'nearMiss', 'incorrect', 'retry', 'celebrate', 'completion']);
@@ -55,6 +57,7 @@ delete servedManifest.steps[0].responsePaths;
 delete servedManifest.steps[0].motionPreset;
 
 const servedCorrect = projection.projectEspTftPreview(servedManifest, 0, 'correct');
+assert.equal(flattened.isFlattenableProjection(servedCorrect), false, 'renderer-v1 must keep the legacy single-stage preview');
 assert.equal(servedCorrect.layers.find((layer) => layer.id === 'wordPill').text, 'APPLE');
 assert.ok(servedCorrect.timeline.some((item) => item.label === 'Slave command: goodbye'));
 assert.ok(projection.projectEspTftPreview(servedManifest, 0, 'nearMiss').timeline.some((item) => item.label === 'Slave command: thinking'));
@@ -127,6 +130,7 @@ for (const state of projection.VISUAL_STATES) {
 }
 
 const exactV2 = projection.projectEspTftPreview(rendererV2, 0, 'teach');
+assert.equal(flattened.isFlattenableProjection(exactV2), false, 'renderer-v2 must keep the legacy single-stage preview');
 assert.equal(exactV2.manifestVersion, 'teebot-lesson-renderer.v2');
 assert.equal(exactV2.rendererLabel, 'Renderer v2');
 assert.equal(exactV2.physicalMotionOwner, 'server');
@@ -207,6 +211,7 @@ rendererV3.cinematicPhases = [{
 rendererV3.steps[0].scene.teachingObject.asset.src = 'https://cdn.test/object.mp4';
 rendererV3.steps[0].scene.robotOverlay.asset.src = 'https://cdn.test/robot.mp4';
 const exactV3 = projection.projectEspTftPreview(rendererV3, 0, 'correct');
+assert.equal(flattened.isFlattenableProjection(exactV3), true, 'only a complete renderer-v3 cinematic projection may show the comparison');
 assert.equal(exactV3.warnings.length, 0, 'renderer-v3 MP4 cinematic layers must be firmware-compatible');
 assert.deepEqual(
   exactV3.layers.slice(0, 3).map(({ id, src, mediaType, bounds, chromaKey }) => ({ id, src, mediaType, bounds, chromaKey })),
