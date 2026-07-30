@@ -15,9 +15,6 @@
         <el-input v-model="variant.title" placeholder="Lesson title" />
         <el-input v-model="variant.vocabularySetId" placeholder="vocabularySetId" />
         <el-input v-model="variant.wordsText" placeholder="Words, comma or line separated" />
-        <el-select v-model="variant.backgroundVersionId" placeholder="backgroundVersionId" @change="syncLayout(variant)">
-          <el-option v-for="background in backgrounds" :key="background.assetKey" :label="background.name || background.assetKey" :value="background.assetKey" />
-        </el-select>
         <el-select v-model="variant.layoutPreset" placeholder="layoutPreset">
           <el-option v-for="preset in layoutsFor(variant)" :key="preset" :label="preset" :value="preset" />
         </el-select>
@@ -27,7 +24,7 @@
           <el-option label="Assessment" value="assessment" />
         </el-select>
       </div>
-      <p v-if="variant.backgroundVersionId && !layoutsFor(variant).length" class="blocking">The selected background has no compatible named layout preset.</p>
+      <p v-if="!layoutsFor(variant).length" class="blocking">The lesson-wide background has no compatible named layout preset.</p>
     </div>
 
     <div class="variant-actions">
@@ -67,7 +64,7 @@ let nextRowId = 1;
 export default {
   name: 'TvideoVariantBatchPanel',
   props: {
-    backgrounds: { type: Array, default: () => [] },
+    background: { type: Object, default: null },
     templateAuthoring: { type: Object, default: null },
     generationResult: { type: Object, default: null },
     readiness: { type: Object, default: null },
@@ -89,20 +86,12 @@ export default {
       const base = this.templateAuthoring || {};
       return {
         rowId: nextRowId++, lessonKey: '', title: '', vocabularySetId: '', wordsText: '',
-        backgroundVersionId: base.backgroundVersionId || '', layoutPreset: base.layoutPreset || '', duplicateReason: '',
+        layoutPreset: base.layoutPreset || '', duplicateReason: '',
       };
     },
     addVariant() { this.variants.push(this.blankVariant()); },
     removeVariant(index) { this.variants.splice(index, 1); },
-    backgroundFor(variant) { return this.backgrounds.find((background) => background.assetKey === variant.backgroundVersionId); },
-    layoutsFor(variant) {
-      const background = this.backgroundFor(variant);
-      return compatibleLayouts(background && (background.compatibility || background));
-    },
-    syncLayout(variant) {
-      const layouts = this.layoutsFor(variant);
-      if (!layouts.includes(variant.layoutPreset)) variant.layoutPreset = layouts[0] || '';
-    },
+    layoutsFor() { return compatibleLayouts(this.background && (this.background.compatibility || this.background)); },
     generate() {
       try {
         const base = this.templateAuthoring || {};
@@ -110,7 +99,6 @@ export default {
           ...base,
           ...variant,
           words: variant.wordsText,
-          backgroundAssetVersionId: (this.backgroundFor(variant) || {}).assetVersionId,
         }));
         this.$emit('generate', buildVariantGenerationRequest(variants));
       } catch (error) {

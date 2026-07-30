@@ -144,17 +144,21 @@ const panelSource = fs.readFileSync(new URL('../src/components/lesson/TvideoTemp
 for (const forbidden of ['servoCommand', 'motorCommand', 'chassisCommand', 'timelineEditor', 'coordinateInput']) {
   assert.equal(panelSource.includes(forbidden), false, `author panel exposes ${forbidden}`);
 }
-for (const marker of ['Reuse shared background', 'Clone for this lesson', 'Upload a new shared background version']) {
-  assert.ok(panelSource.includes(marker), `author panel missing background flow ${marker}`);
+for (const forbidden of ['Background workflow', 'Reuse shared background', 'Clone for this lesson', 'Upload a new shared background version', 'Compatible background']) {
+  assert.equal(panelSource.includes(forbidden), false, `TVideo must not expose a second background authority: ${forbidden}`);
 }
+assert.ok(panelSource.includes('lesson-wide background selector'), 'TVideo must explain that its background is derived from the lesson-wide selector');
+assert.ok(panelSource.includes('background: { type: Object'), 'TVideo template must receive the authoritative selected background');
 const batchPanelSource = fs.readFileSync(new URL('../src/components/lesson/TvideoVariantBatchPanel.vue', import.meta.url), 'utf8');
 for (const marker of [
-  'Generate variants', 'Run batch readiness', 'Ready subset', 'vocabularySetId', 'backgroundVersionId', 'layoutPreset',
+  'Generate variants', 'Run batch readiness', 'Ready subset', 'vocabularySetId', 'layoutPreset',
   'Vocabulary', 'Background', 'Pack bytes', 'Peak PSRAM', 'Offline', 'Terminates',
   'duplicateReason', 'Recall', 'Spiral review', 'Assessment',
 ]) {
   assert.ok(batchPanelSource.includes(marker), `batch panel missing ${marker}`);
 }
+assert.equal(batchPanelSource.includes('v-model="variant.backgroundVersionId"'), false, 'variants must not select a background independently');
+assert.equal(batchPanelSource.includes('props: {\n    backgrounds:'), false, 'batch panel must derive background from template authoring');
 for (const forbidden of ['servoCommand', 'motorCommand', 'chassisCommand', 'timelineEditor', 'coordinateInput']) {
   assert.equal(batchPanelSource.includes(forbidden), false, `batch panel exposes ${forbidden}`);
 }
@@ -174,6 +178,8 @@ for (const marker of [
 }
 assert.ok(editorSource.includes('<TvideoTemplatePanel'), 'template content editing must remain mounted in LessonEditor');
 assert.ok(editorSource.includes('v-model="selectedTemplateAuthoring"'), 'template content edits must remain part of the step draft');
+assert.ok(editorSource.includes(':background="selectedTemplateBackground"'), 'LessonEditor must derive TVideo background from its authoritative lesson visual pair');
+assert.equal(editorSource.includes(':backgrounds="templateAssets.filter'), false, 'LessonEditor must not wire a second TVideo background picker');
 
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
 assert.equal(saveSelectedStepSource.includes('setVisualRef'), false, 'template step saves must not write per-step visual refs');

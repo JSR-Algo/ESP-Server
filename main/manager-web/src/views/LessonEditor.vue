@@ -154,10 +154,11 @@
                 v-if="selectedStepIndex === 0"
                 v-model="selectedTemplateAuthoring"
                 :assets="templateAssets"
+                :background="selectedTemplateBackground"
               />
               <TvideoVariantBatchPanel
                 v-if="isDraft && selectedStepIndex === 0 && selectedTemplateAuthoring"
-                :backgrounds="templateAssets.filter((asset) => asset.layer === 'backgroundScene')"
+                :background="selectedTemplateBackground"
                 :template-authoring="selectedTemplateAuthoring"
                 :generation-result="variantGenerationResult"
                 :readiness="variantBatchReadiness"
@@ -758,6 +759,9 @@ export default {
     },
     lessonVisualPair() {
       return this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+    },
+    selectedTemplateBackground() {
+      return this.sharedBackgrounds.find((asset) => asset.assetVersionId === this.lessonVisualPair.backgroundAssetVersionId) || null;
     },
     selectedBackgroundKey() {
       return this.lessonVisualPair.backgroundAssetKey;
