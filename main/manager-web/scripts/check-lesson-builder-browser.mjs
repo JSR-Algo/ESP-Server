@@ -29,11 +29,31 @@ try {
   let id = 0; const pending = new Map(); const runtimeErrors = []; socket.on('message', (raw) => { const message = JSON.parse(raw); if (message.method === 'Runtime.exceptionThrown') runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text); if (message.id && pending.has(message.id)) { const p = pending.get(message.id); pending.delete(message.id); message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result); } });
   const cdp = (method, params = {}) => new Promise((resolve, reject) => { const commandId = ++id; pending.set(commandId, { resolve, reject }); socket.send(JSON.stringify({ id: commandId, method, params })); });
   const evaluate = async (expression) => { const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text); return result.result.value; };
+  const auditLayoutAt = async (width) => {
+    await cdp('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evaluate('new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    return evaluate(`(()=>{const overflowX=(selector)=>{const element=document.querySelector(selector);return element?getComputedStyle(element).overflowX:null};const root=document.documentElement;return{width:${width},clientWidth:root.clientWidth,scrollWidth:root.scrollWidth,assetPickerOverflowX:overflowX('.asset-picker__grid'),advancedStepsOverflowX:overflowX('.advanced-steps-scroll'),stepNavOverflowX:overflowX('.step-nav')}})()`);
+  };
+  const assertNoPageOverflow = (audit) => assert.ok(audit.scrollWidth <= audit.clientWidth + 1, `viewport ${audit.width}px should not overflow horizontally: ${JSON.stringify(audit)}`);
+  const assertResponsiveOverflowControls = (audit) => {
+    assert.equal(audit.assetPickerOverflowX, 'auto', `asset picker should be horizontally scrollable at ${audit.width}px: ${JSON.stringify(audit)}`);
+    assert.equal(audit.advancedStepsOverflowX, 'auto', `advanced steps table scroller should be horizontally scrollable at ${audit.width}px: ${JSON.stringify(audit)}`);
+    if (audit.width <= 760) assert.equal(audit.stepNavOverflowX, 'auto', `step nav should be horizontally scrollable at ${audit.width}px: ${JSON.stringify(audit)}`);
+  };
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
-  const editorReady = 'Boolean(window.__LESSON_BUILDER_READY__) && document.querySelectorAll(".step-nav__item").length >= 2';
+  const editorReady = 'Boolean(window.__LESSON_BUILDER_READY__) && document.querySelectorAll(".step-nav__item").length >= 2 && [...document.querySelectorAll(".right-operations button")].some((button)=>button.textContent.includes("lesson.previewManifest"))';
   for (let i = 0; i < 100 && !(await evaluate(editorReady)); i += 1) await new Promise((r) => setTimeout(r, 50));
-  const editorDiagnostics = await evaluate('({ signaled: Boolean(window.__LESSON_BUILDER_READY__), lessonId: window.__LESSON_BUILDER_TEST__?.editor?.lessonId, lesson: window.__LESSON_BUILDER_TEST__?.editor?.lesson, editorSteps: window.__LESSON_BUILDER_TEST__?.editor?.steps?.length, route: window.__LESSON_BUILDER_TEST__?.editor?.$route?.fullPath, navItems: document.querySelectorAll(".step-nav__item").length, bodyText: document.body.innerText.slice(0, 500) })');
+  const editorDiagnostics = await evaluate('({ signaled: Boolean(window.__LESSON_BUILDER_READY__), lessonId: window.__LESSON_BUILDER_TEST__?.editor?.lessonId, lesson: window.__LESSON_BUILDER_TEST__?.editor?.lesson, editorSteps: window.__LESSON_BUILDER_TEST__?.editor?.steps?.length, route: window.__LESSON_BUILDER_TEST__?.editor?.$route?.fullPath, navItems: document.querySelectorAll(".step-nav__item").length, previewButtonVisible: [...document.querySelectorAll(".right-operations button")].some((button)=>button.textContent.includes("lesson.previewManifest")), bodyText: document.body.innerText.slice(0, 500) })');
   assert.equal(await evaluate(editorReady), true, `mounted LessonEditor did not become ready: ${JSON.stringify(editorDiagnostics)}; ${runtimeErrors.join('; ')}`);
+  const initialLayoutAudits = [];
+  for (const width of [1440, 1024, 768, 390]) {
+    initialLayoutAudits.push(await auditLayoutAt(width));
+  }
+  await auditLayoutAt(1440);
+  for (const audit of initialLayoutAudits) {
+    assertNoPageOverflow(audit);
+    assertResponsiveOverflowControls(audit);
+  }
   const result = await evaluate(`(async()=>{
     const t=window.__LESSON_BUILDER_TEST__,e=t.editor, tick=()=>new Promise(r=>setTimeout(r,0)),waitFor=async(test)=>{for(let i=0;i<50&&!test();i+=1)await tick();if(!test())throw new Error('browser fixture condition timed out')};
     const setInput=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
@@ -142,6 +162,22 @@ try {
   assert.equal(result.newerDraftWord, 'RACE NEW', 'a newer draft should survive an older save response');
   assert.equal(result.validateBeforeSaveIgnored, true);
   assert.equal(result.validationIssuesRendered, true);
+
+  const layoutAudits = [];
+  for (const width of [1440, 1024, 768, 390]) {
+    layoutAudits.push(await auditLayoutAt(width));
+  }
+  await auditLayoutAt(1440);
+  for (const audit of layoutAudits) {
+    assertNoPageOverflow(audit);
+    assertResponsiveOverflowControls(audit);
+  }
+  await evaluate(`(async()=>{const t=window.__LESSON_BUILDER_TEST__,e=t.editor,tick=()=>new Promise(r=>setTimeout(r,0));t.layoutStress={status:e.lesson.status,backgroundLoading:e.cinematicLibraryLoading.backgroundScene,teachingObject:e.cinematicLibraries.teachingObject,robotOverlayError:e.cinematicLibraryErrors.robotOverlay};e.lesson.status='published';e.$set(e.cinematicLibraryLoading,'backgroundScene',true);e.$set(e.cinematicLibraries,'teachingObject',[]);e.$set(e.cinematicLibraryErrors,'robotOverlay','robot library unavailable');await tick()})()`);
+  const stressedAudit = await auditLayoutAt(390);
+  await auditLayoutAt(1440);
+  await evaluate(`(async()=>{const t=window.__LESSON_BUILDER_TEST__,e=t.editor,tick=()=>new Promise(r=>setTimeout(r,0)),state=t.layoutStress;e.lesson.status=state.status;e.$set(e.cinematicLibraryLoading,'backgroundScene',state.backgroundLoading);e.$set(e.cinematicLibraries,'teachingObject',state.teachingObject);e.$set(e.cinematicLibraryErrors,'robotOverlay',state.robotOverlayError);delete t.layoutStress;await tick()})()`);
+  assertNoPageOverflow(stressedAudit);
+  assertResponsiveOverflowControls(stressedAudit);
 
   const disabledResult = await evaluate('window.__MOUNT_DISABLED_LESSON_EDITOR__()');
   assert.deepEqual(disabledResult, {
