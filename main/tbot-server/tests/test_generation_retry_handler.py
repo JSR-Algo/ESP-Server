@@ -29,15 +29,15 @@ async def test_generation_retry_invokes_global_poller_and_returns_strict_result(
     calls = []
 
     class Poller:
-        async def run_once(self):
-            calls.append("run_once")
+        async def trigger_retry(self):
+            calls.append("trigger_retry")
             return poll_result
 
     response = await GenerationRetryHandler(Poller()).handle_post(Request())
 
     assert response.status == 200
     assert json.loads(response.text) == expected
-    assert calls == ["run_once"]
+    assert calls == ["trigger_retry"]
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,7 @@ async def test_generation_retry_rejects_missing_or_invalid_internal_auth(monkeyp
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
 
     class Poller:
-        async def run_once(self):
+        async def trigger_retry(self):
             raise AssertionError("unauthorized request must not invoke poller")
 
     missing = await GenerationRetryHandler(Poller()).handle_post(Request(None))
@@ -60,7 +60,7 @@ async def test_generation_retry_never_leaks_raw_poller_failures(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
 
     class Poller:
-        async def run_once(self):
+        async def trigger_retry(self):
             raise RuntimeError("https://private.example/?token=secret")
 
     response = await GenerationRetryHandler(Poller()).handle_post(Request())
@@ -78,7 +78,7 @@ async def test_generation_retry_rejects_non_strict_poller_results(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "secret")
 
     class Poller:
-        async def run_once(self):
+        async def trigger_retry(self):
             return {"state": "accepted", "leaked": "secret"}
 
     response = await GenerationRetryHandler(Poller()).handle_post(Request())

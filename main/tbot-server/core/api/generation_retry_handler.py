@@ -23,12 +23,12 @@ class GenerationRetryHandler:
             return auth_error
 
         poller = self.generation_poller
-        run_once = getattr(poller, "run_once", None)
-        if not callable(run_once):
+        trigger_retry = getattr(poller, "trigger_retry", None)
+        if not callable(trigger_retry):
             return _rejected("generation_poller_unavailable")
 
         try:
-            result = await run_once()
+            result = await trigger_retry()
         except Exception:
             return _rejected("generation_retry_failed")
 

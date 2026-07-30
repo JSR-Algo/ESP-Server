@@ -119,6 +119,7 @@ class GlobalGenerationPoller:
         self._etag: str | None = None
         self._payload: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._retry_task: asyncio.Task[None] | None = None
         self._run_lock = asyncio.Lock()
         self._owns_http = http is None
         self.http = http or httpx.AsyncClient(
@@ -133,13 +134,38 @@ class GlobalGenerationPoller:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
+        retry_task, self._retry_task = self._retry_task, None
         if task is not None and not task.done():
             task.cancel()
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
         if task is not None:
             with suppress(asyncio.CancelledError):
                 await task
+        if retry_task is not None:
+            with suppress(asyncio.CancelledError):
+                await retry_task
         if self._owns_http:
             await self.http.aclose()
+
+    async def trigger_retry(self) -> dict[str, str]:
+        task = self._retry_task
+        if task is not None and not task.done():
+            return {"state": "not_modified"}
+        self._retry_task = asyncio.create_task(self._run_triggered_retry())
+        return {"state": "accepted"}
+
+    async def _run_triggered_retry(self) -> None:
+        current = asyncio.current_task()
+        try:
+            await self.run_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._log("warning", "generation_retry_failed")
+        finally:
+            if self._retry_task is current:
+                self._retry_task = None
 
     async def run_once(self) -> dict[str, str]:
         async with self._run_lock:
