@@ -4,6 +4,21 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/flattened-cinematic-preview.js', root), 'utf8');
 const preview = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const componentSource = await readFile(new URL('src/components/lesson/FlattenedCinematicPreview.vue', root), 'utf8');
+
+for (const token of [
+  'data-testid="flattened-cinematic-preview"',
+  'width="480"',
+  'height="320"',
+  'crossorigin="anonymous"',
+  'requestAnimationFrame',
+  'cancelAnimationFrame',
+  'getImageData',
+  'applyChromaKey',
+  'flattened-preview__error'
+]) {
+  assert.ok(componentSource.includes(token), `FlattenedCinematicPreview.vue must include ${token}`);
+}
 
 assert.deepEqual(preview.CINEMATIC_LAYER_IDS, ['background', 'teachingObject', 'robotOverlay']);
 assert.equal(preview.CINEMATIC_SYNC_TOLERANCE_SEC, 0.08);
