@@ -244,45 +244,47 @@
       <!-- Steps -->
       <el-card shadow="never" class="content-area">
         <div slot="header" class="card-header">Advanced step structure · {{ steps.length }} steps</div>
-        <el-table :data="steps" stripe style="width: 100%">
-          <el-table-column :label="'#'" width="60" align="center">
-            <template slot-scope="scope">{{ scope.$index + 1 }}</template>
-          </el-table-column>
-          <el-table-column prop="stepType" :label="$t('lesson.stepType')" width="130" />
-          <el-table-column prop="prompt" :label="$t('lesson.prompt')" min-width="200" />
-          <el-table-column prop="subject" :label="$t('lesson.subject')" width="120" />
-          <el-table-column :label="$t('lesson.colChoices')" min-width="160">
-            <template slot-scope="scope">
-              <span v-if="scope.row.choices && scope.row.choices.length" class="small">
-                <el-tag
-                  v-for="c in scope.row.choices"
-                  :key="c.id || c.label"
-                  size="mini"
-                  :type="c.isCorrect ? 'success' : 'info'"
-                  effect="plain"
-                  style="margin: 0 4px 2px 0"
-                >{{ c.label }}</el-tag>
-              </span>
-              <span v-else class="muted">—</span>
-            </template>
-          </el-table-column>
-          <el-table-column :label="$t('lesson.renderTriple')" min-width="200">
-            <template slot-scope="scope">
-              <span class="muted mono small">{{ scope.row.robotState }}/{{ scope.row.pose }}/{{ scope.row.phase }}</span>
-              <el-tag v-if="isExpressionOverride(scope.row)" size="mini" type="warning" effect="plain" style="margin-left: 6px">
-                {{ scope.row.expression }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
-            <template slot-scope="scope">
-              <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
-              <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
-              <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
-            </template>
-          </el-table-column>
-          <template slot="empty"><span class="muted">{{ $t('lesson.noSteps') }}</span></template>
-        </el-table>
+        <div class="advanced-steps-scroll">
+          <el-table :data="steps" stripe style="width: 100%">
+            <el-table-column :label="'#'" width="60" align="center">
+              <template slot-scope="scope">{{ scope.$index + 1 }}</template>
+            </el-table-column>
+            <el-table-column prop="stepType" :label="$t('lesson.stepType')" width="130" />
+            <el-table-column prop="prompt" :label="$t('lesson.prompt')" min-width="200" />
+            <el-table-column prop="subject" :label="$t('lesson.subject')" width="120" />
+            <el-table-column :label="$t('lesson.colChoices')" min-width="160">
+              <template slot-scope="scope">
+                <span v-if="scope.row.choices && scope.row.choices.length" class="small">
+                  <el-tag
+                    v-for="c in scope.row.choices"
+                    :key="c.id || c.label"
+                    size="mini"
+                    :type="c.isCorrect ? 'success' : 'info'"
+                    effect="plain"
+                    style="margin: 0 4px 2px 0"
+                  >{{ c.label }}</el-tag>
+                </span>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="$t('lesson.renderTriple')" min-width="200">
+              <template slot-scope="scope">
+                <span class="muted mono small">{{ scope.row.robotState }}/{{ scope.row.pose }}/{{ scope.row.phase }}</span>
+                <el-tag v-if="isExpressionOverride(scope.row)" size="mini" type="warning" effect="plain" style="margin-left: 6px">
+                  {{ scope.row.expression }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
+              <template slot-scope="scope">
+                <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
+                <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
+                <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
+              </template>
+            </el-table-column>
+            <template slot="empty"><span class="muted">{{ $t('lesson.noSteps') }}</span></template>
+          </el-table>
+        </div>
 
         <!-- Add step (draft only) -->
         <div v-if="isDraft" class="add-row">
@@ -2736,48 +2738,75 @@ export default {
   padding: 16px 24px 0;
   flex-wrap: wrap;
   gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
-.left-title { display: flex; align-items: center; gap: 12px; }
-.page-title { margin: 0; font-size: 18px; }
-.right-operations { display: flex; align-items: center; gap: 8px; }
-.main-wrapper { padding: 16px 24px; }
-.content-area { margin-bottom: 16px; }
+.left-title { display: flex; align-items: center; gap: 12px; flex:1 1 320px; flex-wrap:wrap; min-width:0; }
+.page-title { margin: 0; font-size: 18px; min-width:0; overflow-wrap:anywhere; }
+.right-operations { display: flex; align-items: center; gap: 8px; flex:0 1 auto; flex-wrap:wrap; justify-content:flex-end; min-width:0; }
+.main-wrapper { box-sizing:border-box; max-width:100%; min-width:0; padding:16px 24px; width:100%; }
+.content-area { box-sizing:border-box; margin-bottom:16px; max-width:100%; min-width:0; }
+.content-area ::v-deep .el-card__body { box-sizing:border-box; max-width:100%; min-width:0; }
 .card-header { font-weight: 600; }
 .add-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-.kv { display: flex; gap: 10px; padding: 2px 0; }
-.kv .muted { width: 130px; display: inline-block; }
+.kv { display: flex; gap: 10px; min-width:0; padding: 2px 0; }
+.kv .muted { flex:0 0 130px; display: inline-block; }
+.kv span:last-child { min-width:0; overflow-wrap:anywhere; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
 .small { font-size: 12px; }
 .muted { color: #909399; }
 .danger-text { color: #f56c6c; }
 .preview-card { margin-bottom: 16px; }
-.canonical-demo { align-items:center; background:#17312d; border-radius:20px; color:#fff8df; display:grid; gap:20px; grid-template-columns:minmax(220px,.75fr) minmax(320px,1.25fr); margin-bottom:18px; overflow:hidden; padding:18px; }
+.canonical-demo { align-items:center; background:#17312d; border-radius:20px; box-sizing:border-box; color:#fff8df; display:grid; gap:20px; grid-template-columns:minmax(220px,.75fr) minmax(320px,1.25fr); margin-bottom:18px; max-width:100%; min-width:0; overflow:hidden; padding:18px; }
+.canonical-demo > * { min-width:0; }
 .canonical-demo__copy h3 { font-family:Georgia,serif; font-size:25px; margin:5px 0 8px; }
 .canonical-demo__copy p { color:#c7d7d1; line-height:1.5; margin:0 0 12px; max-width:480px; }
-.canonical-demo__sources { display:flex; gap:8px; margin-top:14px; }
+.canonical-demo__sources { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; min-width:0; }
 .canonical-demo__sources img { background:#f6ecd1; border:1px solid rgba(255,255,255,.2); border-radius:9px; height:58px; object-fit:contain; width:76px; }
-.canonical-demo video { background:#0c1c19; border-radius:14px; display:block; max-height:360px; object-fit:cover; width:100%; }
+.canonical-demo video { background:#0c1c19; border-radius:14px; display:block; max-height:360px; max-width:100%; min-width:0; object-fit:cover; width:100%; }
 .choice-group { display: block; }
 .choice-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 14px; min-width:0; }
 .focus-title { margin: 6px 0; font-weight: 600; }
 .focus-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .focus-row .el-input-number { width: 110px; }
-.lesson-studio { align-items:start; background:linear-gradient(135deg,#f3ead5 0%,#edf3ea 55%,#f8dfb5 100%); border:1px solid #e5d7bd; border-radius:24px; display:grid; gap:16px; grid-template-columns:210px minmax(0,1fr); margin-bottom:18px; padding:16px; }
-.lesson-studio__canvas { display:grid; gap:14px; min-width:0; }
-.lesson-studio__toolbar { align-items:center; display:flex; justify-content:space-between; }
-.lesson-studio__toolbar h3 { color:#17312d; font-family:Georgia,serif; font-size:24px; margin:3px 0 0; }
-.lesson-visual-pair { background:rgba(255,255,255,.72); border:1px solid #d8c9ac; border-radius:18px; padding:14px; }
+.lesson-studio { align-items:start; background:linear-gradient(135deg,#f3ead5 0%,#edf3ea 55%,#f8dfb5 100%); border:1px solid #e5d7bd; border-radius:24px; box-sizing:border-box; display:grid; gap:16px; grid-template-columns:210px minmax(0,1fr); margin-bottom:18px; max-width:100%; min-width:0; padding:16px; }
+.lesson-studio__canvas { display:grid; gap:14px; grid-template-columns:minmax(0,1fr); max-width:100%; min-width:0; }
+.lesson-studio__canvas > * { box-sizing:border-box; max-width:100%; min-width:0; }
+.lesson-studio__toolbar { align-items:center; display:flex; gap:12px; justify-content:space-between; max-width:100%; min-width:0; }
+.lesson-studio__toolbar > div { min-width:0; }
+.lesson-studio__toolbar h3 { color:#17312d; font-family:Georgia,serif; font-size:24px; margin:3px 0 0; overflow-wrap:anywhere; }
+.lesson-studio__toolbar .el-button { flex:0 0 auto; }
+.lesson-visual-pair { background:rgba(255,255,255,.72); border:1px solid #d8c9ac; border-radius:18px; box-sizing:border-box; max-width:100%; min-width:0; padding:14px; }
 .lesson-visual-pair__heading { align-items:flex-start; display:flex; gap:16px; justify-content:space-between; }
+.lesson-visual-pair__heading > div { min-width:0; }
 .lesson-visual-pair__heading h4 { color:#17312d; font-family:Georgia,serif; font-size:20px; margin:0 0 3px; }
 .lesson-visual-pair__heading p { color:#5f6f63; font-size:13px; margin:0; }
 .lesson-visual-pair__heading [role="status"] { color:#9a6820; font-size:12px; font-weight:800; }
 .lesson-visual-pair__notice { background:#fff4d6; border-radius:9px; color:#7a531c; font-size:12px; margin:10px 0 0; padding:8px 10px; }
 .eyebrow { color:#9a6820; font-size:10px; font-weight:800; letter-spacing:.16em; }
-.lesson-studio__workbench { display:grid; gap:14px; grid-template-columns:minmax(330px,1fr) minmax(360px,1fr); }
+.cinematic-pickers { display:grid; gap:12px; grid-template-columns:minmax(0,1fr); max-width:100%; min-width:0; }
+.cinematic-pickers > * { max-width:100%; min-width:0; }
+.lesson-studio__workbench { display:grid; gap:14px; grid-template-columns:minmax(330px,1fr) minmax(360px,1fr); max-width:100%; min-width:0; }
+.lesson-studio__workbench > * { max-width:100%; min-width:0; }
+.lesson-studio__workbench .content-card,
+.lesson-studio__workbench .el-form,
+.lesson-studio__workbench .el-form-item,
+.lesson-studio__workbench .el-input,
+.lesson-studio__workbench .el-select { max-width:100%; min-width:0; }
+.preview-stack { max-width:100%; min-width:0; }
+.lesson-studio__canvas ::v-deep .readiness,
+.lesson-studio__canvas ::v-deep .validation-result,
+.lesson-studio__canvas ::v-deep .validation-profiles,
+.lesson-studio__canvas ::v-deep .validation-list,
+.lesson-studio__canvas ::v-deep .readiness__issues,
+.lesson-studio__canvas ::v-deep .readiness__issue { box-sizing:border-box; max-width:100%; min-width:0; overflow-wrap:anywhere; }
+.lesson-studio__canvas ::v-deep .readiness__grid { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); max-width:100%; min-width:0; }
+.lesson-studio__canvas ::v-deep .readiness__grid > div { min-width:0; }
 .preview-heading { align-items:baseline; display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 8px; }
 .preview-heading .eyebrow { font-weight:800; letter-spacing:.08em; }
-.preview-heading__hint { color:#7c8a7f; font-size:12px; }
+.preview-heading__hint { color:#7c8a7f; flex:1 1 220px; font-size:12px; min-width:0; overflow-wrap:anywhere; }
 .replay-btn { margin-left:auto; padding:5px 12px; border:1px solid #16251c; border-radius:999px; background:#b9ec45; color:#16251c; cursor:pointer; font:inherit; font-size:12px; font-weight:700; }
 .replay-btn:active { transform:translateY(1px); }
 .bg-picker { margin-bottom:16px; }
@@ -2793,13 +2822,36 @@ export default {
 /* Objects are transparent PNGs — show them on a light plate, not cropped. */
 .obj-chip img { aspect-ratio:1/1; object-fit:contain; background:#f4f7ec; padding:4px; }
 .cinematic-effect { margin-bottom:18px; }
-.preview-surface { border:1px solid #d8e2dd; border-radius:18px; background:#fff; padding:14px; }
+.preview-surface { border:1px solid #d8e2dd; border-radius:18px; background:#fff; box-sizing:border-box; max-width:100%; min-width:0; padding:14px; }
 .exact-renderer-surface { margin-top:18px; }
-.cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; overflow:hidden; width:100%; }
-.cinematic-frame iframe { border:0; display:block; height:100%; width:100%; }
+.cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; box-sizing:border-box; max-width:100%; min-width:0; overflow:hidden; width:100%; }
+.cinematic-frame iframe { border:0; display:block; height:100%; max-width:100%; min-width:0; width:100%; }
 .cinematic-note { color:#5f6f63; font-size:12.5px; line-height:1.45; margin:8px 2px 0; }
-.preview-empty { align-items:center; background:#17312d; border-radius:18px; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; min-height:320px; padding:30px; text-align:center; }
+.preview-empty { align-items:center; background:#17312d; border-radius:18px; box-sizing:border-box; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; max-width:100%; min-height:320px; min-width:0; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }
-@media (max-width:1100px) { .lesson-studio__workbench { grid-template-columns:1fr; } }
-@media (max-width:760px) { .canonical-demo,.lesson-studio { grid-template-columns:1fr; }.lesson-studio__toolbar { align-items:flex-start; flex-direction:column; gap:10px; } }
+.advanced-steps-scroll { max-width:100%; min-width:0; overflow-x:auto; }
+.advanced-steps-scroll .el-table { min-width:870px; }
+.advanced-steps-scroll ::v-deep .el-table__header-wrapper,
+.advanced-steps-scroll ::v-deep .el-table__body-wrapper,
+.advanced-steps-scroll ::v-deep .el-table__footer-wrapper { overflow-x:hidden; }
+
+@media (max-width:1100px) {
+  .lesson-studio__workbench { grid-template-columns:minmax(0,1fr); }
+}
+
+@media (max-width:760px) {
+  .operation-bar { align-items:flex-start; padding:12px 12px 0; }
+  .left-title,
+  .right-operations { flex-basis:100%; justify-content:flex-start; }
+  .page-title { font-size:16px; }
+  .main-wrapper { padding:12px; }
+  .canonical-demo,
+  .lesson-studio { border-radius:14px; grid-template-columns:minmax(0,1fr); padding:12px; }
+  .lesson-studio__toolbar,
+  .lesson-visual-pair__heading { align-items:flex-start; flex-direction:column; gap:10px; }
+  .grid-2 { grid-template-columns:minmax(0,1fr); }
+  .preview-surface,
+  .preview-empty { padding:12px; }
+  .advanced-steps-scroll .el-table { min-width:760px; }
+}
 </style>

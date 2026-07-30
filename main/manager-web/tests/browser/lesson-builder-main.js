@@ -12,9 +12,15 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'lesson-builder-test-session');
 
-const calls = { update: [], visualFilters: [], visualRefSets: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, deferNextUpdate: false, deferNextValidate: false, pendingUpdates: [], pendingValidations: [] };
+const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, deferNextUpdate: false, deferNextValidate: false, pendingUpdates: [], pendingValidations: [] };
 let steps = [
-  { stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 } },
+  {
+    stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 },
+    visualRefs: [
+      { slot: 'backgroundScene', assetVersionId: 'scene-v3', assetKey: 'scene.farm' },
+      { slot: 'teachingObject', assetVersionId: 'teach-v2', assetKey: 'object.barn' },
+    ],
+  },
   {
     stepKey: 's2', stepType: 'repeat', prompt: 'Say barn', subject: 'barn', stepBody: { durationSec: 12 },
     visualRefs: [
@@ -73,6 +79,22 @@ Object.assign(Api.lesson, {
       return { ...step, visualRefs };
     });
     ok({ slot, assetVersionId });
+  },
+  applyLessonVisuals(lessonId, payload, ok) {
+    calls.lessonVisualSets.push({ lessonId, payload: { ...payload } });
+    const slots = [
+      ['backgroundScene', payload.backgroundAssetVersionId],
+      ['teachingObject', payload.objectAssetVersionId],
+    ];
+    steps = steps.map((step) => {
+      const visualRefs = (step.visualRefs || []).filter((ref) => !slots.some(([slot]) => ref.slot === slot));
+      slots.forEach(([slot, assetVersionId]) => {
+        const asset = sharedAssets.find((row) => row.versionId === assetVersionId);
+        visualRefs.push({ slot, assetVersionId, assetKey: asset ? asset.assetKey : '' });
+      });
+      return { ...step, visualRefs };
+    });
+    ok({ lessonId, ...payload });
   },
   updateStep(lessonId, stepKey, payload, ok, fail) {
     calls.update.push({ lessonId, stepKey, payload: JSON.parse(JSON.stringify(payload)) });

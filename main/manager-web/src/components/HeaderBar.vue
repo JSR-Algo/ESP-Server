@@ -629,8 +629,7 @@ export default {
   background: #f6fcfe66;
   border: 1px solid #fff;
   height: 63px !important;
-  min-width: 900px;
-  /* Set min width to prevent over-compression */
+  min-width: 0;
   overflow: visible;
 }
 
@@ -640,6 +639,7 @@ export default {
   align-items: center;
   height: 100%;
   padding: 0 10px;
+  min-width: 0;
 }
 
 .header-left {
@@ -667,6 +667,8 @@ export default {
   display: flex;
   align-items: center;
   gap: 25px;
+  max-width: 100%;
+  min-width: 0;
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
@@ -676,8 +678,9 @@ export default {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-width: 300px;
+  min-width: 0;
   justify-content: flex-end;
+  flex: 1 1 0;
 }
 
 .equipment-management {
@@ -831,6 +834,10 @@ export default {
 }
 .el-user-dropdown {
   cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Navigation text style - Support Chinese/English line breaks */
@@ -882,7 +889,7 @@ export default {
   transition: transform 0.3s ease;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   .header {
     min-width: 0;
     height: auto !important;
@@ -916,13 +923,16 @@ export default {
     transform: none;
     flex: 1 1 auto;
     gap: 8px;
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
     padding-bottom: 2px;
   }
 
   .header-right {
     order: 3;
-    flex: 0 0 auto;
+    flex: 1 1 auto;
     min-width: 0;
     margin-left: auto;
   }
