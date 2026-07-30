@@ -32,6 +32,7 @@ function extractObjectMethod(source, name) {
 const {
   canonicalLessonVisualPair,
   buildLessonVisualRequest,
+  newestPublishedAssetVersions,
 } = require('../src/components/lesson/lesson-visual-selection');
 
 const firstStep = {
@@ -99,6 +100,19 @@ assert.throws(
   /background and object asset version ids are required/i,
 );
 
+assert.deepEqual(newestPublishedAssetVersions([
+  { asset_key: 'background.forest', version_id: 'forest-v2', version: 2, publication_state: 'published' },
+  { asset_key: 'background.forest', version_id: 'forest-invalid', version: 2.5, publication_state: 'published' },
+  { asset_key: 'background.forest', version_id: 'forest-v4', version: 4, publication_state: 'published' },
+  { assetKey: 'object.apple', versionId: 'apple-v1', version: 1, publicationState: 'published' },
+  { assetKey: 'object.apple', versionId: 'apple-v3', version: 3, publicationState: 'published' },
+  { assetKey: 'object.zero', versionId: 'zero-v0', version: 0, publicationState: 'published' },
+  { assetKey: 'object.draft', versionId: 'draft-v9', version: 9, publicationState: 'draft' },
+]), {
+  'background.forest': { versionId: 'forest-v4', version: 4 },
+  'object.apple': { versionId: 'apple-v3', version: 3 },
+}, 'newest published selection must normalize snake/camel fields, maximize numeric version, and reject invalid records');
+
 function loadLessonApi() {
   const calls = [];
   const source = read('src/apis/module/lesson.js')
@@ -154,6 +168,11 @@ assertSourceIncludes(
   editorSource,
   "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
   'LessonEditor must import the lesson-wide visual helpers through named CommonJS interop',
+);
+assertSourceIncludes(
+  editorSource,
+  "import { newestPublishedAssetVersions } from '@/components/lesson/lesson-visual-selection';",
+  'LessonEditor must use order-independent published visual version selection',
 );
 assertSourceIncludes(editorSource, 'data-testid="lesson-background-selector"', 'background selector needs a stable lesson-level test id');
 assertSourceIncludes(editorSource, 'data-testid="lesson-object-selector"', 'object selector needs a stable lesson-level test id');
@@ -378,17 +397,20 @@ assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':",
 async function verifyPublishedObjectLibraryContract() {
   const loadObjectLibrarySource = extractObjectMethod(editorSource, 'loadObjectLibrary');
   const objectRows = [
-    { assetKey: 'object.apple', versionId: 'apple-draft-v5', publicationState: 'draft' },
-    { assetKey: 'object.apple', versionId: 'apple-published-v4', publicationState: 'published' },
-    { assetKey: 'object.apple', versionId: 'apple-retired-v3', publicationState: 'retired' },
-    { assetKey: 'object.apple', versionId: 'apple-published-v2', publicationState: 'published' },
-    { assetKey: 'object.unpublished', versionId: 'unpublished-draft-v2', publicationState: 'draft' },
-    { assetKey: 'object.unpublished', versionId: 'unpublished-retired-v1', publicationState: 'retired' },
+    { assetKey: 'object.apple', versionId: 'apple-draft-v5', version: 5, publicationState: 'draft' },
+    { assetKey: 'object.apple', versionId: 'apple-published-v2', version: 2, publicationState: 'published' },
+    { assetKey: 'object.apple', versionId: 'apple-invalid-v99', version: 1.5, publicationState: 'published' },
+    { assetKey: 'object.apple', versionId: 'apple-published-v4', version: 4, publicationState: 'published' },
+    { assetKey: 'object.apple', versionId: 'apple-retired-v3', version: 3, publicationState: 'retired' },
+    { assetKey: 'object.unpublished', versionId: 'unpublished-draft-v2', version: 2, publicationState: 'draft' },
+    { assetKey: 'object.unpublished', versionId: 'unpublished-retired-v1', version: 1, publicationState: 'retired' },
+    { assetKey: 'object.invalid', versionId: 'invalid-zero', version: 0, publicationState: 'published' },
   ];
   const manifest = {
     objects: [
       { assetKey: 'object.apple', title: 'Apple', posterUrl: '/apple.png', anim: '/apple.mp4' },
       { assetKey: 'object.unpublished', title: 'Hidden', posterUrl: '/hidden.png' },
+      { assetKey: 'object.invalid', title: 'Invalid', posterUrl: '/invalid.png' },
     ],
   };
   const context = { objectLibrary: [] };
@@ -402,6 +424,7 @@ async function verifyPublishedObjectLibraryContract() {
       },
     },
     Array,
+    newestPublishedAssetVersions,
     fetch: async () => ({ ok: true, json: async () => manifest }),
   });
 
@@ -426,16 +449,19 @@ async function verifyPublishedObjectLibraryContract() {
 async function verifyPublishedBackgroundLibraryContract() {
   const loadBackgroundLibrarySource = extractObjectMethod(editorSource, 'loadBackgroundLibrary');
   const backgroundRows = [
-    { asset_key: 'background.forest', version_id: 'forest-draft-v5', publication_state: 'draft' },
-    { asset_key: 'background.forest', version_id: 'forest-published-v4', publication_state: 'published' },
-    { asset_key: 'background.forest', version_id: 'forest-retired-v3', publication_state: 'retired' },
-    { asset_key: 'background.forest', version_id: 'forest-published-v2', publication_state: 'published' },
-    { asset_key: 'background.unpublished', version_id: 'unpublished-draft-v2', publication_state: 'draft' },
+    { asset_key: 'background.forest', version_id: 'forest-draft-v5', version: 5, publication_state: 'draft' },
+    { asset_key: 'background.forest', version_id: 'forest-published-v2', version: 2, publication_state: 'published' },
+    { asset_key: 'background.forest', version_id: 'forest-invalid-v99', version: 1.5, publication_state: 'published' },
+    { asset_key: 'background.forest', version_id: 'forest-published-v4', version: 4, publication_state: 'published' },
+    { asset_key: 'background.forest', version_id: 'forest-retired-v3', version: 3, publication_state: 'retired' },
+    { asset_key: 'background.unpublished', version_id: 'unpublished-draft-v2', version: 2, publication_state: 'draft' },
+    { asset_key: 'background.invalid', version_id: 'invalid-zero', version: 0, publication_state: 'published' },
   ];
   const manifest = {
     backgrounds: [
       { assetKey: 'background.forest', title: 'Forest', video: '/forest.mp4', posterUrl: '/forest.png' },
       { assetKey: 'background.unpublished', title: 'Hidden', video: '/hidden.mp4', posterUrl: '/hidden.png' },
+      { assetKey: 'background.invalid', title: 'Invalid', video: '/invalid.mp4', posterUrl: '/invalid.png' },
     ],
   };
   const context = { backgroundLibrary: [] };
@@ -449,6 +475,7 @@ async function verifyPublishedBackgroundLibraryContract() {
       },
     },
     Array,
+    newestPublishedAssetVersions,
     fetch: async () => ({ ok: true, json: async () => manifest }),
   });
 

@@ -40,7 +40,24 @@ function buildLessonVisualRequest(current, patch) {
   return { backgroundAssetVersionId, objectAssetVersionId };
 }
 
+function newestPublishedAssetVersions(rows) {
+  const selected = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const assetKey = String((row && (row.assetKey || row.asset_key)) || '').trim();
+    const versionId = String((row && (row.versionId || row.version_id)) || '').trim();
+    const publicationState = row && (row.publicationState || row.publication_state);
+    const version = Number(row && row.version);
+    if (!assetKey || !versionId || publicationState !== 'published'
+      || !Number.isInteger(version) || version < 1) return;
+    if (!selected[assetKey] || version > selected[assetKey].version) {
+      selected[assetKey] = { versionId, version };
+    }
+  });
+  return selected;
+}
+
 module.exports = {
   canonicalLessonVisualPair,
   buildLessonVisualRequest,
+  newestPublishedAssetVersions,
 };

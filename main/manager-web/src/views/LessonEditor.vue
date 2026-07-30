@@ -530,6 +530,7 @@ import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
 import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';
+import { newestPublishedAssetVersions } from '@/components/lesson/lesson-visual-selection';
 import {
   bindClonedAssetToStep,
   collectAssetReferences,
@@ -1841,21 +1842,14 @@ export default {
               title: row.title || row.assetKey,
               video: row.video,
               posterUrl: row.posterUrl,
-              versionId: versions[row.assetKey] || '',
+              versionId: versions[row.assetKey].versionId,
             }));
           })
           .catch(() => { this.backgroundLibrary = []; });
       };
       Api.lesson.listSharedBackgrounds(
         (rows) => {
-          const versions = {};
-          (Array.isArray(rows) ? rows : []).forEach((row) => {
-            if (row && row.asset_key && row.version_id
-              && row.publication_state === 'published' && !versions[row.asset_key]) {
-              versions[row.asset_key] = row.version_id;
-            }
-          });
-          withVersions(versions);
+          withVersions(newestPublishedAssetVersions(rows));
         },
         () => withVersions({}),
       );
@@ -1873,7 +1867,7 @@ export default {
               title: row.title || row.assetKey,
               posterUrl: row.posterUrl,
               anim: row.anim || '',
-              versionId: versions[row.assetKey] || '',
+              versionId: versions[row.assetKey].versionId,
             }));
           })
           .catch(() => { this.objectLibrary = []; });
@@ -1881,15 +1875,7 @@ export default {
       Api.lesson.listVisualAssets(
         { category: 'teachingObject', profile: 'espTft' },
         (rows) => {
-          const versions = {};
-          (Array.isArray(rows) ? rows : [])
-            .filter((row) => row && row.publicationState === 'published')
-            .forEach((row) => {
-              const key = row && (row.assetKey || row.asset_key);
-              const vid = row && (row.versionId || row.version_id);
-              if (key && vid && !versions[key]) versions[key] = vid;
-            });
-          withVersions(versions);
+          withVersions(newestPublishedAssetVersions(rows));
         },
         () => withVersions({}),
       );
