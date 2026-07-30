@@ -118,6 +118,31 @@ expectNotContains('src/views/LessonEditor.vue', 'v{{ lesson.lessonVersion }}', '
 expectNotContains('src/views/CourseLessons.vue', 'prop="lessonVersion"', 'normal lesson lists must not present a version column');
 expectNotContains('src/views/CourseLessons.vue', 'createNextVersion', 'normal lesson lists must not expose the compatibility version action');
 expectContains(
+  'src/apis/module/lesson.js',
+  'listAuthoritativeLessons(courseId, onSuccess, onError)',
+  'normal lesson browsing needs a dedicated authoritative API without changing full-history consumers',
+);
+expectContains(
+  'src/apis/module/lesson.js',
+  '/lessons/authoritative',
+  'the authoritative API must target the dedicated backend route',
+);
+expectContains(
+  'src/views/CourseLessons.vue',
+  'Api.lesson.listAuthoritativeLessons(',
+  'normal lesson browsing must show exactly one authoritative row per lesson key',
+);
+expectNotContains(
+  'src/views/CourseLessons.vue',
+  'Api.lesson.listLessons(',
+  'CourseLessons must not load historical rows',
+);
+expectContains(
+  'src/views/LessonEditor.vue',
+  'Api.lesson.listLessons(',
+  'publish reconciliation must retain the full-history API',
+);
+expectContains(
   'src/views/LessonEditor.vue',
   "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
   'the editor must use the canonical lesson visual helper contract',

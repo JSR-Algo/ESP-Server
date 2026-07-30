@@ -253,6 +253,17 @@ export default {
     });
   },
 
+  // GET /v1/admin/courses/:courseId/lessons/authoritative -> one live row per lesson key
+  listAuthoritativeLessons(courseId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/courses/${courseId}/lessons/authoritative`,
+      method: 'GET',
+      onSuccess: (p) =>
+        onSuccess((Array.isArray(p) ? p : []).map(normalizeLesson)),
+      onError,
+    });
+  },
+
   // POST /v1/admin/courses/:courseId/lessons { lessonKey, title, locale, ageBand }
   createLesson(courseId, data, onSuccess, onError) {
     nestRequest({

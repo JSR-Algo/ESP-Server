@@ -294,7 +294,7 @@ export default {
     },
     fetchList() {
       this.loading = true;
-      Api.lesson.listLessons(
+      Api.lesson.listAuthoritativeLessons(
         this.courseId,
         (rows) => {
           this.loading = false;
