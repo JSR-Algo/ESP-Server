@@ -1243,6 +1243,15 @@ class LessonRuntime:
             return
         pending = self._cinematic_pending_command
         frame_command = self._cinematic_frame_command(frame)
+        if (
+            isinstance(pending, dict)
+            and pending.get("command") in {"pause", "resume", "stop", "cancel"}
+            and frame.get("type") == "lesson_step"
+        ):
+            await self._defer_cinematic_step_ack(
+                frame, body, acked, msg_json.get("sequence")
+            )
+            return
         if self.state == S_PAUSED and (
             frame_command is None or frame_command.get("command") != "resume"
         ):
@@ -1250,21 +1259,6 @@ class LessonRuntime:
         if isinstance(pending, dict) and pending.get("command") in {
             "pause", "resume", "stop", "cancel"
         }:
-            if (
-                frame.get("type") == "lesson_step"
-                and pending.get("command") in {"pause", "stop", "cancel"}
-            ):
-                if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
-                    return
-                self._outstanding.pop(acked, None)
-                self._cancel_step_timeout()
-                if self._cinematic_deferred_step_ack is None:
-                    self._cinematic_deferred_step_ack = {
-                        "frame": copy.deepcopy(frame),
-                        "body": copy.deepcopy(body),
-                        "inboundSequence": msg_json.get("sequence"),
-                    }
-                return
             if (
                 frame_command is None
                 or frame_command.get("command") != pending.get("command")
@@ -1282,6 +1276,24 @@ class LessonRuntime:
         self._cancel_frame_ack_timeout()
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
+
+    async def _defer_cinematic_step_ack(
+        self,
+        frame: Dict[str, Any],
+        body: Dict[str, Any],
+        acked: int,
+        inbound_sequence: Any,
+    ) -> None:
+        if (await self._accept_inbound(inbound_sequence)) != "ok":
+            return
+        self._outstanding.pop(acked, None)
+        self._cancel_step_timeout()
+        if self._cinematic_deferred_step_ack is None:
+            self._cinematic_deferred_step_ack = {
+                "frame": copy.deepcopy(frame),
+                "body": copy.deepcopy(body),
+                "inboundSequence": inbound_sequence,
+            }
 
     def _cinematic_frame_command(self, frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         body = frame.get("body")

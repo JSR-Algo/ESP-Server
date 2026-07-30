@@ -1743,6 +1743,40 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     for frame in rt._outstanding.values()
                 ))
 
+    async def test_step_ack_during_pending_resume_is_consumed_and_applied_once(self):
+        rt = _cinematic_runtime()
+        next_inbound = await self._advance_to_running(rt)
+        step = [f for f in self._frames(rt) if f["type"] == "lesson_step"][-1]
+        await rt.pause()
+        pause = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, pause, next_inbound))
+        self.assertEqual(rt.state, S_PAUSED)
+
+        await rt.resume()
+        resume = self._frames(rt)[-1]
+        step_ack = T._ack(step["sequence"], next_inbound + 1, step_id=step["stepId"])
+        step_ack["protocolVersion"] = RENDERER_V3
+        await rt.on_lesson_ack(step_ack)
+
+        self.assertEqual(rt._last_inbound_sequence, next_inbound + 1)
+        self.assertEqual(rt.state, S_PAUSED)
+        self.assertFalse(rt._step_acked)
+        self.assertNotIn(step["sequence"], rt._outstanding)
+        self.assertIsNotNone(rt._cinematic_deferred_step_ack)
+        await rt.on_lesson_ack(step_ack)
+        self.assertEqual(rt._last_inbound_sequence, next_inbound + 1)
+
+        await rt.on_lesson_ack(self._ack(rt, resume, next_inbound + 2))
+        self.assertEqual(rt.state, S_RUNNING)
+        self.assertTrue(rt._step_acked)
+        self.assertTrue(rt._step_visuals_ready)
+        self.assertIsNone(rt._cinematic_deferred_step_ack)
+        self.assertIsNone(rt._cinematic_pending_command)
+        self.assertNotIn(resume["sequence"], rt._outstanding)
+        sent = len(self._frames(rt))
+        await rt.on_lesson_ack(self._ack(rt, resume, next_inbound + 2))
+        self.assertEqual(len(self._frames(rt)), sent)
+
 
 if __name__ == "__main__":
     unittest.main()
