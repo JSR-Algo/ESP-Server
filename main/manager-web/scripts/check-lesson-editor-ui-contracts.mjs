@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
 
 const root = process.cwd();
+const require = createRequire(import.meta.url);
 
 function read(rel) {
   return fs.readFileSync(path.join(root, rel), 'utf8');
@@ -161,11 +163,11 @@ if (stepSaveSource.includes('setVisualRef') || stepSaveSource.includes('template
   throw new Error('step metadata saves must not write per-step lesson visuals');
 }
 
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'width: 480px', 'inner stage must match espTft width');
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'height: 320px', 'inner stage must match espTft height');
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.preview.profile', 'preview metadata must come from the server');
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.checksum', 'preview checksum must remain visible');
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'manifestPreview.etag', 'preview ETag must remain visible');
+expectContains('src/components/lesson/RobotEspTftProjectionPreview.vue', 'width: 480px', 'projected stage must match espTft width');
+expectContains('src/components/lesson/RobotEspTftProjectionPreview.vue', 'height: 320px', 'projected stage must match espTft height');
+expectContains('src/components/lesson/RobotManifestServerPreview.vue', 'manifestPreview.preview.profile', 'preview metadata must come from the server');
+expectContains('src/components/lesson/RobotManifestServerPreview.vue', 'manifestPreview.checksum', 'preview checksum must remain visible');
+expectContains('src/components/lesson/RobotManifestServerPreview.vue', 'manifestPreview.etag', 'preview ETag must remain visible');
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'Api.lesson.simulate', 'simulation must use backend manifest truth');
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'terminationReason', 'simulation termination reason must be rendered');
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'event.attempt', 'simulation attempts must be rendered');
@@ -173,7 +175,7 @@ expectContains('src/components/lesson/LessonSimulationPanel.vue', 'event.action'
 expectContains('src/views/LessonEditor.vue', 'invalidatePreview', 'all authoring mutations must invalidate stale preview');
 expectContains('src/views/LessonEditor.vue', 'acceptSimulationEvidence', 'parent proof state must reject stale simulation evidence');
 expectContains('src/components/lesson/LessonSimulationPanel.vue', 'beforeDestroy', 'destroyed simulation panels must cancel pending callbacks');
-expectContains('src/components/lesson/RobotLessonPreview.vue', 'ResizeObserver', 'responsive preview needs a non-container-query resize path');
+expectContains('src/components/lesson/RobotManifestServerPreview.vue', 'ResizeObserver', 'responsive preview needs a non-container-query resize path');
 expectContains('src/views/LessonEditor.vue', 'beforeDestroy', 'destroyed editors must invalidate proof request tokens');
 expectRegex(
   'src/views/LessonEditor.vue',
@@ -257,6 +259,7 @@ const publishTestSimulation = {
 };
 const publishReadyContext = {
   editorDestroying: false, isDraft: true, publishing: false, publishPreparing: false,
+  lessonCapabilities: { exactEspTftPreview: true },
   publishReviewVisible: false, hasUnsafeProofState: () => false, readinessReady: true,
   proofVersion: 7, validationProofVersion: 7, previewProofVersion: 7, simulationProofVersion: 7,
   validationResult: { valid: true, profiles: ['espTft'], errors: [], warnings: [] },
@@ -500,6 +503,7 @@ const doPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPr
 });
 const proofContext = {
   lessonId: 'lesson-1',
+  lessonCapabilities: { exactEspTftPreview: true },
   proofVersion: 0,
   previewRequestId: 0,
   previewing: false,
@@ -542,7 +546,11 @@ let guardedPreviewCalls = 0;
 const guardedPreview = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'doPreview')})`, {
   Api: { lesson: { manifestPreview: () => { guardedPreviewCalls += 1; } } },
 });
-guardedPreview.call({ hasUnsafeProofState: () => true, proofActionsDisabled: true });
+guardedPreview.call({
+  lessonCapabilities: { exactEspTftPreview: true },
+  hasUnsafeProofState: () => true,
+  proofActionsDisabled: true,
+});
 if (guardedPreviewCalls !== 0) throw new Error('programmatic preview calls must reject unsafe dirty state');
 const validManifestPreviewResponse = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'validManifestPreviewResponse')})`);
 if (!validManifestPreviewResponse.call({}, {
@@ -553,6 +561,7 @@ if (validManifestPreviewResponse.call({}, {
 })) throw new Error('preview proof must reject non-authoritative espTft dimensions');
 const malformedPreviewContext = {
   lessonId: 'lesson-1', proofVersion: 0, previewRequestId: 0, previewing: false,
+  lessonCapabilities: { exactEspTftPreview: true },
   preview: { checksum: 'valid-checksum' }, previewManifest: currentPreview, simulationEvidence: { checksum: 'valid' },
   hasUnsafeProofState: () => false, validManifestPreviewResponse,
   $message: { error(message) { malformedPreviewContext.errorMessage = message; } },
@@ -621,6 +630,7 @@ if (uncertainProof.preview || uncertainReconciles !== 1) {
 
 function persistedProof(overrides = {}) {
   return {
+    lessonCapabilities: { exactEspTftPreview: true },
     proofVersion: 8,
     previewRequestId: 12,
     previewing: false,
@@ -631,6 +641,10 @@ function persistedProof(overrides = {}) {
     hasUnsafeProofState: () => false,
     handleUncertainMutationError,
     isUncertainMutationError,
+    studioRevision: 0,
+    stepDraftRevisions: {},
+    $set(target, key, value) { target[key] = value; },
+    markStudioChanged: vm.runInNewContext(`(${extractObjectMethod(editorSource, 'markStudioChanged')})`),
     $message: { success() {}, error() {}, warning() {} },
     $t: (key) => key,
     ...overrides,
@@ -713,7 +727,7 @@ if (successfulDelete.preview || successfulDelete.proofVersion !== 9 || successfu
 let createStepRequest;
 const addStep = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'addStep')})`, {
   Api: { lesson: { createStep: (...args) => { createStepRequest = args; } } },
-  mergeAuthoringFields: () => ({}),
+  buildCreateStepPayload: require('../src/components/lesson/lesson-step-editor-state').buildCreateStepPayload,
 });
 function createStepContext() {
   return persistedProof({
@@ -721,9 +735,9 @@ function createStepContext() {
     stepForm: {
       stepType: 'listen', prompt: 'Say seed', subject: 'seed', helperText: '', l1TransferHint: '',
       choices: [], renderExpression: '', scene: { primaryWord: 'seed' },
+      vocab: { word: 'seed', ipa: '', partOfSpeech: '', translationVi: '', definition: '', examples: [] },
     },
-    buildScene: () => null,
-    buildVocab: () => null,
+    correctChoiceId: '', bundleAssets: [], lesson: { locale: 'vi' }, lessonLoadRequestId: 1,
     fetchSteps() { this.fetchAfterCreate = true; },
   });
 }
@@ -743,8 +757,12 @@ if (uncertainCreate.preview || !uncertainCreate.fetchAfterCreate) throw new Erro
 const successfulCreate = createStepContext();
 addStep.call(successfulCreate);
 createStepRequest[2]({ stepKey: 's2' });
-if (successfulCreate.preview || successfulCreate.proofVersion !== 9 || !successfulCreate.fetchAfterCreate) {
+if (successfulCreate.preview || successfulCreate.proofVersion !== 9 || !successfulCreate.fetchAfterCreate
+  || successfulCreate.studioRevision !== 1) {
   throw new Error('successful create must invalidate before authoritative refetch');
+}
+if (createStepRequest[1].subject !== 'seed' || createStepRequest[1].stepBody.vocab.word !== 'seed') {
+  throw new Error('addStep fixture must exercise the real create-step payload builder');
 }
 
 let renameRequest;
@@ -858,7 +876,7 @@ if (malformedSimulation.events.some(([event, value]) => event === 'evidence' && 
   throw new Error('simulation response missing preview identity must be rejected safely');
 }
 
-const robotPreviewSource = read('src/components/lesson/RobotLessonPreview.vue');
+const robotPreviewSource = read('src/components/lesson/RobotManifestServerPreview.vue');
 const previewScaleForWidth = vm.runInNewContext(`(${extractObjectMethod(robotPreviewSource, 'previewScaleForWidth')})`);
 const narrowScale = previewScaleForWidth.call({}, 320);
 if (Math.abs(narrowScale - (2 / 3)) > 0.0001) {
@@ -891,15 +909,18 @@ const saveCleanupContext = {
   promptSaveRequestId: 12,
   stepEditRevisions: { A: 4, B: 9 },
   selectedStepDrafts: { A: { durationPreset: 5 }, B: { durationPreset: 8 } },
+  selectedContentDrafts: { A: { helperText: 'A' }, B: { helperText: 'B' } },
   selectedAssetDrafts: { A: { assetKey: 'asset-a' }, B: { assetKey: 'asset-b' } },
   dirtyStepKeys: { A: true, B: true },
   $delete(target, key) { delete target[key]; },
 };
 clearSavedStepDraft.call(saveCleanupContext, { requestId: 12, stepKey: 'A', stepRevision: 4 });
-if (saveCleanupContext.selectedStepDrafts.A || saveCleanupContext.selectedAssetDrafts.A || saveCleanupContext.dirtyStepKeys.A) {
+if (saveCleanupContext.selectedStepDrafts.A || saveCleanupContext.selectedContentDrafts.A
+  || saveCleanupContext.selectedAssetDrafts.A || saveCleanupContext.dirtyStepKeys.A) {
   throw new Error('server-confirmed save must clean step A even after navigation');
 }
-if (!saveCleanupContext.selectedStepDrafts.B || !saveCleanupContext.selectedAssetDrafts.B || !saveCleanupContext.dirtyStepKeys.B) {
+if (!saveCleanupContext.selectedStepDrafts.B || !saveCleanupContext.selectedContentDrafts.B
+  || !saveCleanupContext.selectedAssetDrafts.B || !saveCleanupContext.dirtyStepKeys.B) {
   throw new Error('step A save cleanup must preserve selected step B drafts');
 }
 const staleCleanupContext = {
@@ -921,7 +942,7 @@ for (const locale of ['src/i18n/en.js', 'src/i18n/vi.js']) {
 
 expectContains('src/components/lesson/SharedAssetPicker.vue', "this.$emit('select-intent'", 'selection must review impact first');
 expectContains('src/components/lesson/SharedAssetPicker.vue', ':disabled="disabled"', 'selection must lock during save or clone rebind');
-expectNotContains('src/components/lesson/SharedAssetPicker.vue', "$emit('select', asset)", 'shared selection must not mutate a draft before review');
+expectNotContains('src/views/LessonEditor.vue', 'SharedAssetPicker', 'orphan per-step asset picker must not be imported or mounted by the lesson editor');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'reviewSharedVisualImpact', 'dialog must load backend usage truth');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', 'cloneSharedVisual', 'dialog must clone without mutating source pins');
 expectContains('src/components/lesson/SharedVisualImpactDialog.vue', "profile: 'espTft'", 'clone payload must target the firmware profile');
@@ -1008,6 +1029,7 @@ if (!/this\.rebindingSharedVisual/.test(saveSelectedStepSource)) {
   throw new Error('saveSelectedStep must reject overlap with clone rebind');
 }
 const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
+const stepPayloadWithoutVisualRefs = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'stepPayloadWithoutVisualRefs')})`);
 if (!/this\.savingStep/.test(rebindClonedVisualSource)) {
   throw new Error('rebindClonedVisual must reject overlap with prompt save');
 }
@@ -1033,8 +1055,10 @@ if (updateCalls.length !== 0) throw new Error('overlapping save/rebind guards mu
 
 let rebindAttempts = 0;
 let successfulClose = 0;
+let recoveryPayload;
 const recoveryApi = { lesson: { updateStep: (lessonId, stepKey, payload, success, error) => {
   rebindAttempts += 1;
+  recoveryPayload = payload;
   if (rebindAttempts === 1) error('write failed');
   else success();
 } } };
@@ -1069,10 +1093,12 @@ const recoveryContext = {
   proofVersion: 0,
   previewRequestId: 0,
   invalidatePreview,
+  stepPayloadWithoutVisualRefs,
 };
 const committedClone = { assetId: 'clone-b', assetKey: 'clone-b', path: '/clone-b.png', sha256: 'clone-b-sha' };
 recoveryRebind.call(recoveryContext, committedClone);
 if (successfulClose !== 0) throw new Error('failed updateStep must keep recovery context open');
+if ('visualRefs' in recoveryPayload) throw new Error('clone rebind must not overwrite lesson-wide visual refs');
 recoveryRebind.call(recoveryContext, committedClone);
 if (rebindAttempts !== 2 || successfulClose !== 1) throw new Error('retry must rebind the existing clone and close only after refresh success');
 
@@ -1352,6 +1378,14 @@ if (Object.keys(parentMutationTokens.assetMutationTokens).length) {
 
 const onAssetMutationDetached = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onAssetMutationDetached')})`);
 const beforeDestroyEditor = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'beforeDestroy')})`);
+const clearLessonAssetGenerationPoll = vm.runInNewContext(
+  `(${extractObjectMethod(editorSource, 'clearLessonAssetGenerationPoll')})`,
+  { clearTimeout },
+);
+let lessonSafetyReleases = 0;
+function lessonUpdateSafetySpy() {
+  return { release() { lessonSafetyReleases += 1; } };
+}
 let terminalAssetRead;
 let terminalAssetReads = [];
 let testSharedAssetReadEpoch = 0;
@@ -1376,6 +1410,9 @@ const destroyedParent = {
   $delete(target, key) { destroyedTokenDeletes += 1; delete target[key]; },
   $message: { error() { destroyedMessages += 1; } },
   invalidatePreview,
+  lessonAssetGenerationPollTimer: null,
+  clearLessonAssetGenerationPoll,
+  lessonUpdateSafety: lessonUpdateSafetySpy(),
   onAssetsLoaded() { throw new Error('destroyed editor must not apply reconciled assets'); },
 };
 beforeDestroyEditor.call(destroyedParent);
@@ -1424,6 +1461,9 @@ const reconciliationParent = {
   assetAppliedReadEpoch: 0,
   assetLatestReadEpoch: 0,
   onAssetsLoaded() { reconciliationAssetApplies += 1; },
+  lessonAssetGenerationPollTimer: null,
+  clearLessonAssetGenerationPoll,
+  lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 terminalAssetRead = null;
 settleAssetMutation.call(reconciliationParent, { id: 'reconcile', outcome: 'success' });
@@ -1443,6 +1483,9 @@ const destroyedSimulation = {
   simulationEvidence: null, previewManifest: currentPreview,
   previewIdentityMatches: simulationProofContext.previewIdentityMatches,
   validSimulationEvidence: simulationProofContext.validSimulationEvidence,
+  lessonAssetGenerationPollTimer: null,
+  clearLessonAssetGenerationPoll,
+  lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 beforeDestroyEditor.call(destroyedSimulation);
 acceptSimulationEvidence.call(destroyedSimulation, validSimulationResult, destroyedSimulation.proofVersion);
@@ -1458,8 +1501,12 @@ const destroyedPreview = {
   editorDestroying: false,
   lessonId: 'lesson-1', proofVersion: 2, previewRequestId: 2, promptSaveRequestId: 2,
   previewing: false, preview: null, previewManifest: null, simulationEvidence: { checksum: 'old' },
+  lessonCapabilities: { exactEspTftPreview: true },
   hasUnsafeProofState() { return false; },
   validManifestPreviewResponse() { return true; },
+  lessonAssetGenerationPollTimer: null,
+  clearLessonAssetGenerationPoll,
+  lessonUpdateSafety: lessonUpdateSafetySpy(),
   $message: { error() { previewMessages += 1; } },
 };
 destroyedDoPreview.call(destroyedPreview, () => { previewContinuations += 1; }, () => { previewContinuations += 1; });
@@ -1527,6 +1574,9 @@ const destroyedSharedRefresh = {
   reloadAssets(success, failure) { sharedCallbacks.push(success, failure); },
   doValidate(success, failure) { sharedCallbacks.push(success, failure); },
   doPreview(success, failure) { sharedCallbacks.push(success, failure); },
+  lessonAssetGenerationPollTimer: null,
+  clearLessonAssetGenerationPoll,
+  lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 refreshSharedVisualTruth.call(destroyedSharedRefresh, () => { sharedSuccesses += 1; }, () => { sharedFailures += 1; });
 beforeDestroyEditor.call(destroyedSharedRefresh);
@@ -1535,6 +1585,7 @@ sharedCallbacks.forEach((callback) => callback('late'));
 if (JSON.stringify(destroyedSharedRefresh) !== sharedRefreshSnapshot || sharedSuccesses || sharedFailures) {
   throw new Error('shared refresh callbacks must no-op after parent teardown');
 }
+if (lessonSafetyReleases !== 5) throw new Error('every destroyed editor fixture must release update-safety state');
 const detachedParent = {
   lessonId: 'lesson-1', assetMutationTokens: { [remountIdA]: true, [remountIdB]: true },
   assetReconciliationEpoch: 0, assetReconciliationRequests: {},
