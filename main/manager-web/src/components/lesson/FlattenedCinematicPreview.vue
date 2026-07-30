@@ -12,12 +12,14 @@
       :key="`${layer.id}-${layer.src}`"
       ref="layerVideos"
       class="flattened-preview__source"
+      :data-layer-id="layer.id"
       :src="layer.src"
       crossorigin="anonymous"
       muted
       playsinline
       preload="auto"
       @loadeddata="startRendering"
+      @seeked="handleSeeked"
       @error="failLayer"
     />
     <p v-if="errorMessage" class="flattened-preview__error" role="alert">
@@ -47,9 +49,15 @@ export default {
   data() {
     return {
       frameHandle: null,
-      offscreenCanvas: null,
+      chromaCanvasesByLayer: Object.create(null),
+      chromaFrameSignaturesByLayer: Object.create(null),
       errorMessage: '',
-      forceResync: true
+      forceResync: true,
+      forceRender: true,
+      lastRenderSignature: '',
+      playPendingByLayer: Object.create(null),
+      playBlockedByLayer: Object.create(null),
+      playGeneration: 0
     };
   },
   computed: {
@@ -65,13 +73,20 @@ export default {
       }
     },
     playing() {
+      this.resetPlaybackGuards();
+      this.forceRender = true;
       this.syncPlayback();
       this.startRendering();
     },
     clockMs() {
-      if (!this.playing) this.renderFrame();
+      if (!this.playing) {
+        this.forceRender = true;
+        this.renderFrame();
+      }
     },
     replayNonce() {
+      this.resetPlaybackGuards();
+      this.invalidateFrameCache();
       this.forceResync = true;
       this.startRendering();
     }
@@ -80,19 +95,24 @@ export default {
     this.stopRendering();
   },
   methods: {
-    layerVideos() {
+    videoRefs() {
       const videos = this.$refs.layerVideos;
       if (!videos) return [];
       return Array.isArray(videos) ? videos : [videos];
+    },
+    videoByLayerId(layerId) {
+      return this.videoRefs().find((video) => video.dataset.layerId === layerId) || null;
     },
     restartRendering() {
       this.stopRendering();
       this.errorMessage = '';
       this.forceResync = true;
+      this.invalidateFrameCache();
       this.$nextTick(this.startRendering);
     },
     startRendering() {
       if (this.errorMessage) return;
+      this.forceRender = true;
       this.syncPlayback();
       if (this.frameHandle !== null) return;
       const render = () => {
@@ -104,14 +124,21 @@ export default {
       };
       this.frameHandle = requestAnimationFrame(render);
     },
+    handleSeeked() {
+      this.invalidateFrameCache();
+      this.startRendering();
+    },
     stopRendering() {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       this.frameHandle = null;
-      this.layerVideos().forEach((video) => video.pause());
+      this.videoRefs().forEach((video) => video.pause());
+      this.resetPlaybackGuards();
     },
     syncPlayback() {
       const targetTime = Math.max(0, Number(this.clockMs) || 0) / 1000;
-      this.layerVideos().forEach((video) => {
+      this.layers.forEach((layer) => {
+        const video = this.videoByLayerId(layer.id);
+        if (!video) return;
         if (video.readyState >= 1 && (this.forceResync || shouldResyncVideo(targetTime, video.currentTime))) {
           try {
             video.currentTime = targetTime;
@@ -121,15 +148,50 @@ export default {
           }
         }
         if (this.playing) {
-          if (video.paused) {
-            const playResult = video.play();
-            if (playResult && typeof playResult.catch === 'function') playResult.catch(() => {});
-          }
+          if (video.paused) this.playVideo(layer.id, video);
         } else if (!video.paused) {
           video.pause();
         }
       });
       this.forceResync = false;
+    },
+    playVideo(layerId, video) {
+      if (this.playPendingByLayer[layerId] || this.playBlockedByLayer[layerId]) return;
+      const generation = this.playGeneration;
+      let playResult;
+      try {
+        playResult = video.play();
+      } catch (error) {
+        this.playBlockedByLayer[layerId] = true;
+        return;
+      }
+      if (!playResult || typeof playResult.then !== 'function') return;
+      this.playPendingByLayer[layerId] = playResult;
+      playResult.then(() => {
+        if (generation === this.playGeneration) delete this.playPendingByLayer[layerId];
+      }).catch(() => {
+        if (generation !== this.playGeneration) return;
+        delete this.playPendingByLayer[layerId];
+        this.playBlockedByLayer[layerId] = true;
+      });
+    },
+    resetPlaybackGuards() {
+      this.playGeneration += 1;
+      this.playPendingByLayer = Object.create(null);
+      this.playBlockedByLayer = Object.create(null);
+    },
+    invalidateFrameCache() {
+      this.forceRender = true;
+      this.lastRenderSignature = '';
+      this.chromaFrameSignaturesByLayer = Object.create(null);
+    },
+    videoFrameSignature(video) {
+      if (typeof video.getVideoPlaybackQuality === 'function') {
+        const quality = video.getVideoPlaybackQuality();
+        if (quality && Number.isFinite(quality.totalVideoFrames)) return `frames:${quality.totalVideoFrames}`;
+      }
+      if (Number.isFinite(video.webkitDecodedFrameCount)) return `frames:${video.webkitDecodedFrameCount}`;
+      return `time:${Math.floor((Number(video.currentTime) || 0) * 30)}`;
     },
     renderFrame() {
       const canvas = this.$refs.canvas;
@@ -139,13 +201,21 @@ export default {
 
       try {
         this.syncPlayback();
+        const renderableLayers = this.layers.map((layer) => ({
+          layer,
+          video: this.videoByLayerId(layer.id)
+        })).filter(({ video }) => video && video.readyState >= 2 && video.videoWidth && video.videoHeight);
+        const signature = renderableLayers
+          .map(({ layer, video }) => `${layer.id}:${this.videoFrameSignature(video)}`)
+          .join('|');
+        if (!this.forceRender && signature === this.lastRenderSignature) return;
+
         context.clearRect(0, 0, canvas.width, canvas.height);
-        const videos = this.layerVideos();
-        this.layers.forEach((layer, index) => {
-          const video = videos[index];
-          if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+        renderableLayers.forEach(({ layer, video }) => {
           this.drawLayer(context, video, layer);
         });
+        this.lastRenderSignature = signature;
+        this.forceRender = false;
       } catch (error) {
         this.failLayer();
       }
@@ -159,21 +229,29 @@ export default {
 
       const width = Math.max(1, Math.ceil(rect.dw));
       const height = Math.max(1, Math.ceil(rect.dh));
-      const offscreen = this.getOffscreenCanvas(width, height);
+      const frameSignature = this.videoFrameSignature(video);
+      const offscreen = this.getOffscreenCanvas(layer.id, width, height);
       const offscreenContext = offscreen.getContext('2d', { willReadFrequently: true });
       if (!offscreenContext) throw new Error('Canvas context unavailable');
-      offscreenContext.clearRect(0, 0, width, height);
-      offscreenContext.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, width, height);
-      const frame = offscreenContext.getImageData(0, 0, width, height);
-      applyChromaKey(frame.data, layer.chromaKey);
-      offscreenContext.putImageData(frame, 0, 0);
+      if (this.chromaFrameSignaturesByLayer[layer.id] !== frameSignature) {
+        offscreenContext.clearRect(0, 0, width, height);
+        offscreenContext.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, width, height);
+        const frame = offscreenContext.getImageData(0, 0, width, height);
+        applyChromaKey(frame.data, layer.chromaKey);
+        offscreenContext.putImageData(frame, 0, 0);
+        this.chromaFrameSignaturesByLayer[layer.id] = frameSignature;
+      }
       context.drawImage(offscreen, rect.dx, rect.dy, rect.dw, rect.dh);
     },
-    getOffscreenCanvas(width, height) {
-      if (!this.offscreenCanvas) this.offscreenCanvas = document.createElement('canvas');
-      if (this.offscreenCanvas.width !== width) this.offscreenCanvas.width = width;
-      if (this.offscreenCanvas.height !== height) this.offscreenCanvas.height = height;
-      return this.offscreenCanvas;
+    getOffscreenCanvas(layerId, width, height) {
+      let canvas = this.chromaCanvasesByLayer[layerId];
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        this.chromaCanvasesByLayer[layerId] = canvas;
+      }
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      return canvas;
     },
     failLayer() {
       this.errorMessage = CORS_ERROR;

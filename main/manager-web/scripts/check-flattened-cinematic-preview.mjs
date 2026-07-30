@@ -20,6 +20,29 @@ for (const token of [
   assert.ok(componentSource.includes(token), `FlattenedCinematicPreview.vue must include ${token}`);
 }
 
+assert.ok(componentSource.includes(':data-layer-id="layer.id"'), 'source videos must carry their projection layer id');
+assert.match(componentSource, /videoByLayerId\(layerId\)[\s\S]*dataset\.layerId === layerId/, 'video lookup must match data-layer-id');
+assert.doesNotMatch(componentSource, /videos\s*\[\s*index\s*\]/, 'rendering must not depend on Vue ref array order');
+
+assert.ok(componentSource.includes('playPendingByLayer'), 'play promises must be tracked per layer');
+assert.ok(componentSource.includes('playBlockedByLayer'), 'rejected play attempts must be blocked per layer');
+assert.match(
+  componentSource,
+  /if \(this\.playPendingByLayer\[layerId\] \|\| this\.playBlockedByLayer\[layerId\]\) return;/,
+  'pending or rejected play attempts must not retry every animation frame'
+);
+assert.match(componentSource, /resetPlaybackGuards\(\)[\s\S]*playGeneration/, 'play guards must be invalidated during lifecycle resets');
+
+assert.ok(componentSource.includes('videoFrameSignature'), 'rendering must identify decoded source frames');
+assert.ok(componentSource.includes('lastRenderSignature'), 'rendering must cache its last source-frame signature');
+assert.match(
+  componentSource,
+  /if \(!this\.forceRender && signature === this\.lastRenderSignature\) return;/,
+  'duplicate source frames must skip canvas compositing'
+);
+assert.match(componentSource, /invalidateFrameCache\(\)[\s\S]*lastRenderSignature/, 'source and replay changes must invalidate frame caches');
+assert.match(componentSource, /stopRendering\(\)[\s\S]*cancelAnimationFrame[\s\S]*pause/, 'cleanup must cancel RAF and pause source videos');
+
 assert.deepEqual(preview.CINEMATIC_LAYER_IDS, ['background', 'teachingObject', 'robotOverlay']);
 assert.equal(preview.CINEMATIC_SYNC_TOLERANCE_SEC, 0.08);
 
