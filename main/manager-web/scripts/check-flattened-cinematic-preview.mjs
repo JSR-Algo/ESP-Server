@@ -5,6 +5,7 @@ const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/flattened-cinematic-preview.js', root), 'utf8');
 const preview = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const componentSource = await readFile(new URL('src/components/lesson/FlattenedCinematicPreview.vue', root), 'utf8');
+const videoLayerSource = await readFile(new URL('src/components/lesson/CinematicVideoLayer.vue', root), 'utf8');
 
 for (const token of [
   'data-testid="flattened-cinematic-preview"',
@@ -77,6 +78,35 @@ assert.equal(preview.chooseMasterLayer([]), null);
 assert.equal(preview.shouldResyncVideo(1, 1.079), false);
 assert.equal(preview.shouldResyncVideo(1, 1.081), true);
 assert.equal(preview.shouldResyncVideo(Number.NaN, 1.2), false);
+
+for (const propContract of [
+  /controlled:\s*\{\s*type:\s*Boolean,\s*default:\s*false\s*\}/,
+  /playing:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/,
+  /clockMs:\s*\{\s*type:\s*Number,\s*default:\s*0\s*\}/,
+  /replayNonce:\s*\{\s*type:\s*Number,\s*default:\s*0\s*\}/
+]) {
+  assert.match(videoLayerSource, propContract, 'CinematicVideoLayer must expose the controlled playback props');
+}
+assert.match(
+  videoLayerSource,
+  /import\s*\{\s*shouldResyncVideo\s*\}\s*from\s*['"]\.\/flattened-cinematic-preview['"]/,
+  'CinematicVideoLayer must share the 80 ms synchronization helper'
+);
+assert.ok(videoLayerSource.includes('syncPlayback('), 'CinematicVideoLayer must provide syncPlayback');
+assert.match(videoLayerSource, /:autoplay="!controlled"/, 'legacy mode must retain autoplay while controlled mode disables it');
+assert.match(videoLayerSource, /:loop="!controlled"/, 'legacy mode must retain looping while controlled mode disables it');
+assert.match(
+  videoLayerSource,
+  /syncPlayback\([^)]*\)\s*\{[\s\S]*if \(!this\.controlled/,
+  'external playback synchronization must be gated behind controlled mode'
+);
+assert.match(
+  videoLayerSource,
+  /shouldResyncVideo\(targetSeconds, video\.currentTime\)/,
+  'controlled playback must only seek when drift exceeds the shared tolerance'
+);
+assert.match(videoLayerSource, /playPending/, 'controlled playback must guard pending play promises');
+assert.match(videoLayerSource, /playBlocked/, 'controlled playback must block repeated rejected play promises');
 
 assert.deepEqual(
   preview.objectFitRect(640, 480, { x: 0, y: 0, width: 480, height: 320, fit: 'fill' }),
