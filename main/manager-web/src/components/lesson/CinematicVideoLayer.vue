@@ -82,8 +82,8 @@ export default {
   },
   methods: {
     handleLoadedData() {
-      const didSeek = this.syncPlayback(true);
-      this.start(this.controlled && !this.playing && !didSeek);
+      this.syncPlayback(true);
+      this.start(this.controlled && !this.playing);
     },
     handleSeeked() {
       if (this.controlled && !this.playing) this.start(true);

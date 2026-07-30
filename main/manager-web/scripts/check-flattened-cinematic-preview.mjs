@@ -190,6 +190,12 @@ assert.equal(pausedLayer.instance.renderCalls, 1, 'paused controlled playback ma
 assert.equal(rafCallbacks.size, 0, 'a paused forced frame must not schedule a continuous render loop');
 
 rafCallbacks.clear();
+const pausedLoadLayer = createVideoLayer({ playing: false, clockMs: 0, currentTime: 0 });
+pausedLoadLayer.instance.handleLoadedData();
+assert.equal(pausedLoadLayer.instance.renderCalls, 1, 'loadeddata at the paused clock must render its available frame');
+assert.equal(rafCallbacks.size, 0, 'a paused loadeddata frame must not schedule a render loop');
+
+rafCallbacks.clear();
 const legacyLayer = createVideoLayer({ playing: false });
 legacyLayer.instance.controlled = false;
 legacyLayer.instance.start();
