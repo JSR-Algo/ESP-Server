@@ -1679,6 +1679,70 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         wire = json.dumps(frames[0])
         self.assertNotRegex(wire, r"nextPhase|nextStep|branch|choice")
 
+    async def test_step_ack_between_pause_command_and_ack_is_consumed_then_resumed_once(self):
+        rt = _cinematic_runtime()
+        next_inbound = await self._advance_to_running(rt)
+        step = [f for f in self._frames(rt) if f["type"] == "lesson_step"][-1]
+
+        await rt.pause()
+        pause = self._frames(rt)[-1]
+        self.assertEqual(pause["body"]["command"], "pause")
+        step_ack = T._ack(step["sequence"], next_inbound, step_id=step["stepId"])
+        step_ack["protocolVersion"] = RENDERER_V3
+        await rt.on_lesson_ack(step_ack)
+
+        self.assertEqual(rt._last_inbound_sequence, next_inbound)
+        self.assertNotIn(step["sequence"], rt._outstanding)
+        self.assertFalse(rt._step_acked)
+        self.assertIsNotNone(rt._cinematic_deferred_step_ack)
+        sent_before_duplicate = len(self._frames(rt))
+        await rt.on_lesson_ack(step_ack)
+        self.assertEqual(len(self._frames(rt)), sent_before_duplicate)
+        self.assertEqual(rt._last_inbound_sequence, next_inbound)
+
+        await rt.on_lesson_ack(self._ack(rt, pause, next_inbound + 1))
+        self.assertEqual(rt.state, S_PAUSED)
+        self.assertIsNone(rt.last_error)
+        await rt.resume()
+        resume = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, resume, next_inbound + 2))
+
+        self.assertEqual(rt.state, S_RUNNING)
+        self.assertTrue(rt._step_acked)
+        self.assertTrue(rt._step_visuals_ready)
+        self.assertIsNone(rt._cinematic_deferred_step_ack)
+        sent_after_resume = len(self._frames(rt))
+        await rt.on_lesson_ack(self._ack(rt, resume, next_inbound + 2))
+        self.assertEqual(len(self._frames(rt)), sent_after_resume)
+
+    async def test_stop_and_cancel_discard_deferred_step_ack_without_leaks(self):
+        for command in ("stop", "cancel"):
+            with self.subTest(command=command):
+                rt = _cinematic_runtime()
+                next_inbound = await self._advance_to_running(rt)
+                step = [f for f in self._frames(rt) if f["type"] == "lesson_step"][-1]
+                if command == "stop":
+                    await rt.stop()
+                else:
+                    await rt.cancel("assignmentReplaced")
+                terminal = self._frames(rt)[-1]
+                step_ack = T._ack(step["sequence"], next_inbound, step_id=step["stepId"])
+                step_ack["protocolVersion"] = RENDERER_V3
+
+                await rt.on_lesson_ack(step_ack)
+                self.assertEqual(rt._last_inbound_sequence, next_inbound)
+                self.assertIsNotNone(rt._cinematic_deferred_step_ack)
+                self.assertNotIn(step["sequence"], rt._outstanding)
+                await rt.on_lesson_ack(self._ack(rt, terminal, next_inbound + 1))
+
+                self.assertEqual(rt.state, S_COMPLETED)
+                self.assertIsNone(rt._cinematic_deferred_step_ack)
+                self.assertIsNone(rt._cinematic_pending_command)
+                self.assertFalse(any(
+                    rt._cinematic_frame_command(frame) is not None
+                    for frame in rt._outstanding.values()
+                ))
+
 
 if __name__ == "__main__":
     unittest.main()

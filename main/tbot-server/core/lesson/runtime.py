@@ -994,6 +994,7 @@ class LessonRuntime:
         self._cinematic_stop_sent = False
         self._cinematic_cancel_sent = False
         self._cinematic_pending_command: Optional[Dict[str, Any]] = None
+        self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1117,6 +1118,7 @@ class LessonRuntime:
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
         self._cancel_child_response_timeout()
+        self._cinematic_deferred_step_ack = None
         if self._preload_task is not None and not self._preload_task.done():
             self._preload_task.cancel()
         for task in list(self._preload_status_report_tasks):
@@ -1248,6 +1250,21 @@ class LessonRuntime:
         if isinstance(pending, dict) and pending.get("command") in {
             "pause", "resume", "stop", "cancel"
         }:
+            if (
+                frame.get("type") == "lesson_step"
+                and pending.get("command") in {"pause", "stop", "cancel"}
+            ):
+                if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+                    return
+                self._outstanding.pop(acked, None)
+                self._cancel_step_timeout()
+                if self._cinematic_deferred_step_ack is None:
+                    self._cinematic_deferred_step_ack = {
+                        "frame": copy.deepcopy(frame),
+                        "body": copy.deepcopy(body),
+                        "inboundSequence": msg_json.get("sequence"),
+                    }
+                return
             if (
                 frame_command is None
                 or frame_command.get("command") != pending.get("command")
@@ -1893,6 +1910,7 @@ class LessonRuntime:
             elif command == "resume":
                 self.state = S_RUNNING
                 self._forward_phase("resumed")
+                await self._apply_deferred_cinematic_step_ack()
             elif command == "cancel":
                 self.state = S_COMPLETED
                 self._cancel_visual_waiters(increment_generation=True, reason="cancelled")
@@ -3197,10 +3215,25 @@ class LessonRuntime:
 
     def _clear_cinematic_state(self) -> None:
         self._cinematic_pending_command = None
+        self._cinematic_deferred_step_ack = None
         self._cinematic_phase = None
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:
                 self._outstanding.pop(sequence, None)
+
+    async def _apply_deferred_cinematic_step_ack(self) -> None:
+        deferred = self._cinematic_deferred_step_ack
+        self._cinematic_deferred_step_ack = None
+        if not isinstance(deferred, dict) or self.state != S_RUNNING:
+            return
+        frame = deferred.get("frame")
+        body = deferred.get("body")
+        if not isinstance(frame, dict) or not isinstance(body, dict):
+            return
+        self._forward_lesson_step_ack_telemetry(
+            frame, body, deferred.get("inboundSequence")
+        )
+        await self._on_frame_acked(frame, body)
 
     async def on_disconnect(self) -> None:
         self._cancel_visual_waiters(increment_generation=True, reason="disconnected")
