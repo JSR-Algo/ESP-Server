@@ -26,8 +26,16 @@
     <div class="stage-shell">
       <div class="stage" data-testid="esp-tft-stage">
         <template v-for="layer in projection.layers">
+          <CinematicVideoLayer
+            v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id) && layer.mediaType === 'video/mp4'"
+            :key="layer.id === 'robotOverlay' ? `robotOverlay-video-${activeIndex}-${motionNonce}` : `${layer.id}-video`"
+            :src="layer.src"
+            :chroma-key="layer.chromaKey"
+            :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
+            :position-style="layerStyle(layer)"
+          />
           <img
-            v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id)"
+            v-else-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id)"
             :key="layer.id === 'robotOverlay' ? `robotOverlay-${activeIndex}-${motionNonce}` : layer.id"
             :class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :style="layerStyle(layer)"
@@ -147,9 +155,11 @@ import {
   VISUAL_STATES,
   DEGRADED_REASONS
 } from './robot-preview-projection';
+import CinematicVideoLayer from './CinematicVideoLayer.vue';
 
 export default {
   name: 'RobotEspTftProjectionPreview',
+  components: { CinematicVideoLayer },
   props: {
     manifest: { type: Object, required: true },
     rendererMetadata: { type: Object, default: null },

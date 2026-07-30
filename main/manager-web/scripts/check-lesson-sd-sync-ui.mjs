@@ -429,7 +429,9 @@ for (const location of statusLocations) {
   assert.doesNotMatch(location, /proxy_cache(?:_key)?\s/, 'ESP status must remain uncached');
 }
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
-assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3300/);
+assert.match(adminServer, /proxy_pass https:\/\/tbot-backend-8wmh\.onrender\.com/);
+assert.match(adminServer, /proxy_ssl_server_name on/);
+assert.match(adminServer, /proxy_ssl_name tbot-backend-8wmh\.onrender\.com/);
 assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
 assert.equal((adminServer.match(/if \(\$request_method !~ \^\(GET\|HEAD\)\$\) \{ return 405; \}/g) || []).length, 2, 'admin public proxies must reject mutations');
 assert.ok(!/auth_basic|auth_request/.test(adminServer), 'admin public proxies must bypass interactive and subrequest auth');

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('src/components/lesson/robot-preview-projection.js', root), 'utf8');
+const previewComponentSource = await readFile(new URL('src/components/lesson/RobotEspTftProjectionPreview.vue', root), 'utf8');
 const projection = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 assert.equal(projection.RENDERER_V2_MANIFEST_VERSION, 'teebot-lesson-renderer.v2');
@@ -179,8 +180,51 @@ const v1Only = structuredClone(rendererV2);
 v1Only.rendererCapabilities = ['teebot-lesson-renderer.v1'];
 assert.ok(projection.projectEspTftPreview(v1Only).warnings.some((warning) => warning.includes('renderer-v1')));
 
+const rendererV3 = structuredClone(servedManifest);
+rendererV3.manifestVersion = 'teebot-lesson-renderer.v3';
+rendererV3.protocolVersion = 'teebot-lesson-renderer.v3';
+rendererV3.features = {
+  lessonRendererV3: {
+    directMp4Cinematic: true,
+    assetSource: 'publishedVersionedVisualRefs'
+  }
+};
+rendererV3.assets = [
+  { assetKey: 'scene.cinematic', mediaType: 'video/mp4', url: 'https://cdn.test/background.mp4' },
+  { assetKey: 'object.cinematic', mediaType: 'video/mp4', url: 'https://cdn.test/object.mp4' },
+  { assetKey: 'robot.cinematic', mediaType: 'video/mp4', url: 'https://cdn.test/robot.mp4' }
+];
+rendererV3.cinematicPhases = [{
+  templateId: 'directMp4Cinematic',
+  templateVersion: 1,
+  phaseId: 'opening',
+  layers: [
+    { slot: 'backgroundScene', mediaType: 'video/mp4', url: 'https://cdn.test/background.mp4', metadata: { rect: { x: 0, y: 0, width: 480, height: 320 } } },
+    { slot: 'teachingObject', mediaType: 'video/mp4', url: 'https://cdn.test/object.mp4', metadata: { rect: { x: 30, y: 110, width: 200, height: 200 }, chromaKey: { color: { r: 255, g: 255, b: 255 } } } },
+    { slot: 'robotOverlay', mediaType: 'video/mp4', url: 'https://cdn.test/robot.mp4', metadata: { rect: { x: 260, y: 100, width: 200, height: 200 }, chromaKey: { color: { r: 255, g: 255, b: 255 } } } }
+  ]
+}];
+rendererV3.steps[0].scene.teachingObject.asset.src = 'https://cdn.test/object.mp4';
+rendererV3.steps[0].scene.robotOverlay.asset.src = 'https://cdn.test/robot.mp4';
+const exactV3 = projection.projectEspTftPreview(rendererV3, 0, 'correct');
+assert.equal(exactV3.warnings.length, 0, 'renderer-v3 MP4 cinematic layers must be firmware-compatible');
+assert.deepEqual(
+  exactV3.layers.slice(0, 3).map(({ id, src, mediaType, bounds, chromaKey }) => ({ id, src, mediaType, bounds, chromaKey })),
+  [
+    { id: 'background', src: 'https://cdn.test/background.mp4', mediaType: 'video/mp4', bounds: { x: 0, y: 0, width: 480, height: 320, fit: 'cover' }, chromaKey: null },
+    { id: 'teachingObject', src: 'https://cdn.test/object.mp4', mediaType: 'video/mp4', bounds: { x: 30, y: 110, width: 200, height: 200, fit: 'contain' }, chromaKey: { color: { r: 255, g: 255, b: 255 } } },
+    { id: 'robotOverlay', src: 'https://cdn.test/robot.mp4', mediaType: 'video/mp4', bounds: { x: 260, y: 100, width: 200, height: 200, fit: 'contain' }, chromaKey: { color: { r: 255, g: 255, b: 255 } } }
+  ]
+);
+const hostileV3 = structuredClone(rendererV3);
+hostileV3.steps[0].scene.robotOverlay.asset.src = 'https://bad.test/robot.webm';
+assert.ok(projection.findForbiddenFirmwareCapabilities(hostileV3).some((warning) => warning.includes('video source')));
+
 const duplicateOpening = structuredClone(rendererV2);
 duplicateOpening.steps.push({ ...structuredClone(duplicateOpening.steps[0]), id: 'second-step', entrance: 'flyIn' });
 assert.ok(projection.projectEspTftPreview(duplicateOpening).warnings.some((warning) => warning.includes('exactly one opening entrance')));
+
+assert.match(previewComponentSource, /CinematicVideoLayer/, 'renderer-v3 preview must dispatch video layers through the cinematic compositor');
+assert.match(previewComponentSource, /layer\.mediaType === 'video\/mp4'/, 'renderer-v3 preview must distinguish MP4 layers from static images');
 
 console.log('robot lesson preview projection: golden layouts, renderer-v2 states, capability, and degraded fallbacks PASS');

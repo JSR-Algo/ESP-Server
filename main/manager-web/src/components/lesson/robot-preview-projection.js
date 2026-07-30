@@ -23,6 +23,7 @@ export const RESPONSE_PATHS = Object.freeze([
 ]);
 
 export const RENDERER_V2_MANIFEST_VERSION = 'teebot-lesson-renderer.v2';
+export const RENDERER_V3_MANIFEST_VERSION = 'teebot-lesson-renderer.v3';
 export const RENDERER_V2_OPENING_PHASES = Object.freeze([
   'hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent'
 ]);
@@ -78,7 +79,8 @@ const DEFAULT_PATHS = Object.freeze({
 });
 
 const FORBIDDEN_KEYS = /(?:rawServo|servoAngle|servoCommand|firmwareCommand|motorCommand)/i;
-const FORBIDDEN_MEDIA = /\.(?:gif|webm|mp4|mov|m4v)(?:[?#].*)?$/i;
+const FORBIDDEN_MEDIA = /\.(?:gif|webm|mov|m4v)(?:[?#].*)?$/i;
+const MP4_MEDIA = /\.mp4(?:[?#].*)?$/i;
 const MOTION_PATH_KEY = Object.freeze({ retry: 'incorrect', timeout: 'listen', braveTry: 'nearMiss', completion: 'correct' });
 const PATH_STATE = Object.freeze({
   timeout: 'listen',
@@ -182,9 +184,9 @@ function mediaSource(value) {
   return typeof candidate.src === 'string' ? candidate.src : '';
 }
 
-function walkForbidden(value, warnings, path = 'manifest') {
+function walkForbidden(value, warnings, path = 'manifest', allowDirectMp4 = false) {
   if (Array.isArray(value)) {
-    value.forEach((item, index) => walkForbidden(item, warnings, `${path}[${index}]`));
+    value.forEach((item, index) => walkForbidden(item, warnings, `${path}[${index}]`, allowDirectMp4));
     return;
   }
   if (!value || typeof value !== 'object') return;
@@ -192,20 +194,48 @@ function walkForbidden(value, warnings, path = 'manifest') {
     const childPath = `${path}.${key}`;
     if (FORBIDDEN_KEYS.test(key)) warnings.add(`Forbidden raw servo or firmware command at ${childPath}. Use a named motion preset.`);
     if (key === 'video' && child) warnings.add(`Forbidden background video at ${childPath}. espTft requires a poster.`);
-    if (typeof child === 'string' && FORBIDDEN_MEDIA.test(child)) {
+    if (typeof child === 'string' && (FORBIDDEN_MEDIA.test(child) || (!allowDirectMp4 && MP4_MEDIA.test(child)))) {
       const kind = /\.gif/i.test(child) ? 'GIF' : 'video';
       warnings.add(`Forbidden ${kind} source at ${childPath}. Use PNG/JPEG static assets.`);
     }
-    walkForbidden(child, warnings, childPath);
+    walkForbidden(child, warnings, childPath, allowDirectMp4);
   });
+}
+
+function supportsDirectMp4Cinematic(manifest) {
+  const value = asObject(manifest);
+  const feature = asObject(asObject(value.features).lessonRendererV3);
+  return value.manifestVersion === RENDERER_V3_MANIFEST_VERSION
+    && value.protocolVersion === RENDERER_V3_MANIFEST_VERSION
+    && feature.directMp4Cinematic === true
+    && feature.assetSource === 'publishedVersionedVisualRefs';
 }
 
 export function findForbiddenFirmwareCapabilities(manifest) {
   const warnings = new Set();
   const value = asObject(manifest);
   if (value.profile && value.profile !== 'espTft') warnings.add(`Unsupported profile "${value.profile}". Preview parity only applies to espTft.`);
-  walkForbidden(value, warnings);
+  walkForbidden(value, warnings, 'manifest', supportsDirectMp4Cinematic(value));
   return [...warnings].sort();
+}
+
+function cinematicLayer(manifest, slot) {
+  if (!supportsDirectMp4Cinematic(manifest)) return null;
+  const phases = Array.isArray(manifest.cinematicPhases) ? manifest.cinematicPhases : [];
+  const phase = phases.find((candidate) => asObject(candidate).templateId === 'directMp4Cinematic');
+  const layers = Array.isArray(asObject(phase).layers) ? phase.layers : [];
+  return layers.find((candidate) => asObject(candidate).slot === slot) || null;
+}
+
+function cinematicBounds(layer, fallback, fit) {
+  const rect = asObject(asObject(layer).metadata).rect;
+  const valid = ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(rect[key]));
+  return { ...(valid ? rect : fallback), fit };
+}
+
+function cinematicSource(layer) {
+  const value = asObject(layer);
+  return typeof value.url === 'string' && value.url ? value.url : (typeof value.path === 'string' ? value.path : '');
 }
 
 function rendererLabel(manifestVersion) {
@@ -286,6 +316,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const degradedFallback = degradedReason ? DEGRADED_FALLBACKS[degradedReason] : null;
   const manifestVersion = String(served.manifestVersion || '');
   const v2 = manifestVersion === RENDERER_V2_MANIFEST_VERSION;
+  const v3 = supportsDirectMp4Cinematic(served);
   const capability = rendererCapability(served, metadata);
   const motionOwner = physicalMotionOwner(served, metadata);
   const opening = asObject(served.openingEntrance);
@@ -296,7 +327,12 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   if (v2 && motionOwner && motionOwner !== 'server') warnings.add('Renderer v2 requires physicalMotionOwner=server.');
   if (v2 && capability.supported === false) warnings.add('Selected firmware is renderer-v1 only; the authored renderer-v2 entrance and visual states are unsupported.');
   if (degradedReason) warnings.add(`Deterministic degraded fallback: ${degradedReason} -> ${degradedFallback.fallback}.`);
-  const robotSrc = mediaSource(robot.asset) || mediaSource(robot.atlas);
+  const cinematicBackground = cinematicLayer(served, 'backgroundScene');
+  const cinematicObject = cinematicLayer(served, 'teachingObject');
+  const cinematicRobot = cinematicLayer(served, 'robotOverlay');
+  const backgroundSrc = v3 ? cinematicSource(cinematicBackground) : mediaSource(background.poster);
+  const objectSrc = v3 ? cinematicSource(cinematicObject) : mediaSource(object.asset);
+  const robotSrc = v3 ? cinematicSource(cinematicRobot) : (mediaSource(robot.asset) || mediaSource(robot.atlas));
   const hideRobotOverlay = Boolean(degradedFallback && degradedFallback.hideOverlay);
 
   return {
@@ -329,9 +365,9 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     stage: ESP_TFT_GEOMETRY.stage,
     safeZones: ESP_TFT_GEOMETRY.safeZones,
     layers: [
-      { id: 'background', z: 0, bounds: ESP_TFT_GEOMETRY.background, src: mediaSource(background.poster), visible: Boolean(mediaSource(background.poster)) },
-      { id: 'teachingObject', z: 10, bounds: ESP_TFT_GEOMETRY.teachingObject, src: optionalVisualMissing ? '' : mediaSource(object.asset), visible: !optionalVisualMissing && Boolean(mediaSource(object.asset)) },
-      { id: 'robotOverlay', z: 20, bounds: openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay, src: robotSrc, visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
+      { id: 'background', z: 0, bounds: v3 ? cinematicBounds(cinematicBackground, ESP_TFT_GEOMETRY.background, 'cover') : ESP_TFT_GEOMETRY.background, src: backgroundSrc, mediaType: v3 ? String(asObject(cinematicBackground).mediaType || '') : '', chromaKey: null, visible: Boolean(backgroundSrc) },
+      { id: 'teachingObject', z: 10, bounds: v3 ? cinematicBounds(cinematicObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : ESP_TFT_GEOMETRY.teachingObject, src: optionalVisualMissing ? '' : objectSrc, mediaType: v3 ? String(asObject(cinematicObject).mediaType || '') : '', chromaKey: v3 ? (asObject(asObject(cinematicObject).metadata).chromaKey || null) : null, visible: !optionalVisualMissing && Boolean(objectSrc) },
+      { id: 'robotOverlay', z: 20, bounds: v3 ? cinematicBounds(cinematicRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay), src: robotSrc, mediaType: v3 ? String(asObject(cinematicRobot).mediaType || '') : '', chromaKey: v3 ? (asObject(asObject(cinematicRobot).metadata).chromaKey || null) : null, visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
       { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: String(teachingWord.text || object.primaryWord || ''), visible: Boolean(teachingWord.text || object.primaryWord) },
       { id: 'progress', z: 40, bounds: ESP_TFT_GEOMETRY.progress, active: safeIndex + 1, total: steps.length, visible: steps.length > 0 },
       { id: 'prompt', z: 50, bounds: ESP_TFT_GEOMETRY.prompt, text: String(response.prompt || step.prompt || ''), visible: Boolean(response.prompt || step.prompt) }
