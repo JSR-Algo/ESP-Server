@@ -110,7 +110,7 @@
           {{ cinematicPlaying ? '❚❚ Pause cinematic' : '► Play cinematic' }}
         </button>
         <button type="button" class="cinematic-replay-btn" @click="replayCinematic">↻ Replay</button>
-        <output>{{ Math.round(cinematicClockMs) }}ms / {{ cinematicDurationMs }}ms</output>
+        <span aria-hidden="true">{{ Math.round(cinematicClockMs) }}ms / {{ cinematicDurationMs }}ms</span>
       </div>
     </div>
     <p class="truth-note">The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.</p>
@@ -442,7 +442,7 @@ export default {
 .cinematic-panel--legacy { display: contents; }
 .cinematic-panel__label { margin: 0 0 7px; color: #33483b; font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
 .cinematic-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
-.cinematic-controls output { color: #66756b; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cinematic-controls > span { color: #66756b; font-size: 12px; font-variant-numeric: tabular-nums; }
 .cinematic-replay-btn { padding: 8px 14px; border: 1px solid #7f9084; border-radius: 999px; background: #fff; color: #26342b; cursor: pointer; font: inherit; font-weight: 800; }
 .flattened-stage { width: 480px; margin: 0 auto; }
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }

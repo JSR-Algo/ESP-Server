@@ -50,6 +50,8 @@ assert.ok(exactPreviewSource.includes('data-testid="esp-tft-stage"'), 'legacy ex
 assert.match(exactPreviewSource, /:data-testid="cinematicComparisonEnabled \? 'cinematic-preview-comparison' : null"/, 'comparison test id must only render for a flattenable projection');
 assert.match(exactPreviewSource, /@click="toggleCinematicPlayback"/, 'comparison must expose a play/pause control');
 assert.match(exactPreviewSource, /@click="replayCinematic"/, 'comparison must expose a replay control');
+assert.doesNotMatch(exactPreviewSource, /<output>[\s\S]*cinematicClockMs[\s\S]*<\/output>/, 'RAF clock must not announce every frame through an output element');
+assert.match(exactPreviewSource, /<span aria-hidden="true">\{\{ Math\.round\(cinematicClockMs\) \}\}ms \/ \{\{ cinematicDurationMs \}\}ms<\/span>/, 'visual cinematic timer must be hidden from assistive technology');
 assert.match(exactPreviewSource, /beforeDestroy\(\)[\s\S]*stopCinematicClock/, 'destroy must cancel the cinematic clock');
 assert.match(exactPreviewSource, /projection\(\)[\s\S]*resetCinematicPlayback/, 'projection changes must reset and cancel cinematic playback');
 
