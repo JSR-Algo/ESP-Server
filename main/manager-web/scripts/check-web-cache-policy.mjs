@@ -85,6 +85,11 @@ expectRegex(
   /Dockerfile-web"[\s\S]*--build-arg "VUE_APP_NEST_AUTH_DISABLED=\$\{VUE_APP_NEST_AUTH_DISABLED\}"/,
   'the full Docker web build must receive the selected Nest auth mode',
 );
+expectRegex(
+  '.github/workflows/docker-image.yml',
+  /workflow_dispatch:[\s\S]*nest_auth_disabled:[\s\S]*default:\s*false[\s\S]*VUE_APP_NEST_AUTH_DISABLED=\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.nest_auth_disabled \|\| false \}\}/,
+  'the release workflow must expose an explicit, safe-default Nest auth build input',
+);
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');

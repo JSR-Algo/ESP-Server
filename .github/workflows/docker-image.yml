@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*.*.*'  # 只在以 v 开头的标签推送时触发，例如 v1.0.0
   workflow_dispatch:
+    inputs:
+      nest_auth_disabled:
+        description: Build manager-web without Nest bearer auth for the protected admin deployment
+        required: false
+        type: boolean
+        default: false
   workflow_run:
     workflows: ["Build Base Image"]
     types:
@@ -96,3 +102,4 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_PROGRESS=plain
+            VUE_APP_NEST_AUTH_DISABLED=${{ github.event_name == 'workflow_dispatch' && inputs.nest_auth_disabled || false }}
