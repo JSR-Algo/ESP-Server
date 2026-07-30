@@ -1,10 +1,27 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const logic = require('../src/components/lesson/tvideo-template-logic.js');
 const layouts = require('../src/components/lesson/tvideo-layout-presets.js');
+const Vue = require('vue');
+
+function loadComponentOptions(source, imports) {
+  const script = /<script>([\s\S]*?)<\/script>/.exec(source)?.[1];
+  assert.ok(script, 'component script block is missing');
+  const transformed = script
+    .replace(/^import .*;$/gm, '')
+    .replace('export default', 'componentOptions =');
+  const context = vm.createContext({ componentOptions: null, ...imports });
+  vm.runInContext(transformed, context);
+  return context.componentOptions;
+}
+
+async function tick() {
+  await new Promise((resolve) => Vue.nextTick(resolve));
+}
 
 function extractObjectMethod(source, name) {
   const match = new RegExp(`\\n\\s{2,4}${name}\\(`).exec(source);
@@ -149,6 +166,36 @@ for (const forbidden of ['Background workflow', 'Reuse shared background', 'Clon
 }
 assert.ok(panelSource.includes('lesson-wide background selector'), 'TVideo must explain that its background is derived from the lesson-wide selector');
 assert.ok(panelSource.includes('background: { type: Object'), 'TVideo template must receive the authoritative selected background');
+const templateOptions = loadComponentOptions(panelSource, {
+  buildTemplateAuthoring: logic.buildTemplateAuthoring,
+  compatibleLayouts: logic.compatibleLayouts,
+});
+const TemplatePanel = Vue.extend({ ...templateOptions, render(h) { return h('div'); } });
+const templatePanel = new TemplatePanel({
+  propsData: {
+    value: {
+      templateId: 'tvideoFlyWalk', layoutPreset: 'centerRoad', vocabularySetId: 'animals',
+      backgroundVersionId: 'scene.old@v1', backgroundAssetVersionId: 'old-version-id', arrivedPoseVersionId: 'pose-v1',
+    },
+    assets: [],
+    background: null,
+  },
+});
+let templateInputAttempts = 0;
+let mutationBlocked = false;
+templatePanel.$on('input', () => { templateInputAttempts += 1; if (mutationBlocked) throw new Error('blocked parent setter must never receive a background-derived input'); });
+templatePanel.$mount();
+await tick();
+assert.equal(templateInputAttempts, 0, 'mounting before the background library loads must not dirty the step');
+templatePanel.background = { assetKey: 'scene.farm@v2', assetVersionId: 'farm-version-id', compatibility: { geometryVersion: 1, supportedLayoutPresets: ['centerRoad'] } };
+await tick();
+assert.equal(templateInputAttempts, 0, 'async background library load must not emit through v-model');
+assert.equal(templatePanel.draft.backgroundVersionId, 'scene.old@v1', 'async library load must not mutate authored step metadata');
+mutationBlocked = true;
+templatePanel.background = { assetKey: 'scene.town@v3', assetVersionId: 'town-version-id', compatibility: { geometryVersion: 1, supportedLayoutPresets: ['leftApproach'] } };
+await tick();
+assert.equal(templateInputAttempts, 0, 'background changes during a pending lesson visual save must not attempt a suppressed step mutation');
+assert.equal(templatePanel.draft.backgroundVersionId, 'scene.old@v1', 'background changes must remain read-only in the template editor');
 const batchPanelSource = fs.readFileSync(new URL('../src/components/lesson/TvideoVariantBatchPanel.vue', import.meta.url), 'utf8');
 for (const marker of [
   'Generate variants', 'Run batch readiness', 'Ready subset', 'vocabularySetId', 'layoutPreset',
@@ -159,6 +206,31 @@ for (const marker of [
 }
 assert.equal(batchPanelSource.includes('v-model="variant.backgroundVersionId"'), false, 'variants must not select a background independently');
 assert.equal(batchPanelSource.includes('props: {\n    backgrounds:'), false, 'batch panel must derive background from template authoring');
+const batchOptions = loadComponentOptions(batchPanelSource, {
+  buildVariantGenerationRequest: logic.buildVariantGenerationRequest,
+  compatibleLayouts: logic.compatibleLayouts,
+  readinessVocabularySummary: logic.readinessVocabularySummary,
+});
+const BatchPanel = Vue.extend({ ...batchOptions, render(h) { return h('div'); } });
+const batchPanel = new BatchPanel({
+  propsData: {
+    background: { assetKey: 'scene.farm@v2', assetVersionId: 'farm-version-id', compatibility: { geometryVersion: 1, supportedLayoutPresets: ['centerRoad'] } },
+    templateAuthoring: { templateId: 'tvideoFlyWalk', layoutPreset: 'centerRoad', backgroundVersionId: 'scene.old@v1', backgroundAssetVersionId: 'old-version-id', arrivedPoseVersionId: 'pose-v1' },
+  },
+});
+batchPanel.$message = { error() {} };
+let generatedPayload;
+batchPanel.$on('generate', (payloadValue) => { generatedPayload = payloadValue; });
+batchPanel.$mount();
+batchPanel.variants[0] = { ...batchPanel.variants[0], lessonKey: 'animals-new', vocabularySetId: 'animals', wordsText: 'CAT' };
+batchPanel.generate();
+assert.equal(generatedPayload.variants[0].templateAuthoring.backgroundVersionId, 'scene.farm@v2', 'variant request must inject the authoritative background key');
+assert.equal(generatedPayload.variants[0].templateAuthoring.backgroundAssetVersionId, 'farm-version-id', 'variant request must inject the authoritative background version id');
+generatedPayload = undefined;
+batchPanel.background = null;
+await tick();
+batchPanel.generate();
+assert.equal(generatedPayload, undefined, 'an unavailable authoritative background must clear stale template metadata and block generation');
 for (const forbidden of ['servoCommand', 'motorCommand', 'chassisCommand', 'timelineEditor', 'coordinateInput']) {
   assert.equal(batchPanelSource.includes(forbidden), false, `batch panel exposes ${forbidden}`);
 }

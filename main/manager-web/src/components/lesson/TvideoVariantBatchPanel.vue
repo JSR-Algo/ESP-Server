@@ -95,10 +95,13 @@ export default {
     generate() {
       try {
         const base = this.templateAuthoring || {};
+        const authoritativeBackground = this.background || {};
         const variants = this.variants.map((variant) => ({
           ...base,
           ...variant,
           words: variant.wordsText,
+          backgroundVersionId: authoritativeBackground.assetKey || '',
+          backgroundAssetVersionId: authoritativeBackground.assetVersionId || '',
         }));
         this.$emit('generate', buildVariantGenerationRequest(variants));
       } catch (error) {

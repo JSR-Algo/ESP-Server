@@ -46,10 +46,8 @@ export default {
   watch: {
     enabled() { this.emitValue(); },
     draft: { deep: true, handler() { this.emitValue(); } },
-    background: { deep: true, immediate: true, handler() { this.syncBackground(); } },
   },
   methods: {
-    syncBackground() { if (!this.background) return; this.draft.backgroundCompatibility = this.background.compatibility || this.background; this.draft.backgroundVersionId = this.background.assetKey || ''; this.draft.backgroundAssetVersionId = this.background.assetVersionId || ''; if (!this.availableLayouts.includes(this.draft.layoutPreset)) this.draft.layoutPreset = this.availableLayouts[0] || ''; },
     emitValue() { if (!this.enabled) return this.$emit('input', null); try { this.$emit('input', buildTemplateAuthoring(this.draft)); } catch (_) { this.$emit('input', { ...this.draft, invalid: true }); } },
   },
 };
