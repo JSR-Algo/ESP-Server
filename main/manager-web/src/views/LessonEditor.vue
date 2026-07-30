@@ -1463,21 +1463,20 @@ export default {
       this.lessonAssetGenerationRetryRequestId = retryRequestId;
       this.clearLessonAssetGenerationPoll();
       this.lessonAssetGenerationRetrying = true;
-      Api.lesson.retrySdSync(
-        lessonId,
+      Api.lesson.retryLessonAssetGeneration(
         (result) => {
           if (this.editorDestroying || retryRequestId !== this.lessonAssetGenerationRetryRequestId
             || lessonLoadRequestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lessonAssetGenerationRetrying = false;
-          if (Number(result && result.retried) > 0 && !(result && result.refused)) {
+          if (result && result.generationQueued === true
+            && ['accepted', 'not_modified'].includes(result.espRetry)) {
             this.$message.success(this.$t('lesson.sdSyncRetryQueued'));
+          } else if (result && result.generationQueued === true && result.espRetry === 'deferred') {
+            this.$message.warning(this.$t('lesson.sdSyncRetryQueuedDeferred'));
+          } else if (result && result.generationQueued === true && result.espRetry === 'unavailable') {
+            this.$message.warning(this.$t('lesson.sdSyncRetryQueuedUnavailable'));
           } else {
-            const refusalKey = {
-              no_job: 'lesson.sdSyncRetryRefusedNoJob',
-              terminal_job: 'lesson.sdSyncRetryRefusedTerminalJob',
-              no_eligible: 'lesson.sdSyncRetryRefusedNoEligible',
-            }[result && result.refused] || 'lesson.sdSyncRetryRefused';
-            this.$message.warning(this.$t(refusalKey));
+            this.$message.error(this.$t('lesson.sdSyncRetryNotQueued'));
           }
           this.loadLessonAssetGenerationStatus({ silent: true });
         },

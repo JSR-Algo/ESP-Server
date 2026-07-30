@@ -156,9 +156,9 @@ assert.strictEqual(calls[0].data, data);
 assert.strictEqual(calls[0].onSuccess, onSuccess);
 assert.strictEqual(calls[0].onError, onError);
 
-lessonApi.retrySdSync('lesson-7', onSuccess, onError);
+lessonApi.retryLessonAssetGeneration(onSuccess, onError);
 assert.equal(calls[1].method, 'POST');
-assert.equal(calls[1].url, '/nestjs/v1/admin/lessons/lesson-7/sd-sync/retry');
+assert.equal(calls[1].url, '/nestjs/v1/admin/lesson-assets/retry');
 assert.deepEqual(JSON.parse(JSON.stringify(calls[1].data)), {});
 assert.strictEqual(calls[1].onSuccess, onSuccess);
 assert.strictEqual(calls[1].onError, onError);

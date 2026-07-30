@@ -204,6 +204,7 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
     assert "/internal/devices/{deviceId}/lesson-nudge" in route_paths
     assert "/internal/devices/{deviceId}/lesson-child-response" in route_paths
     assert "/internal/devices/{deviceId}/mcp-call" in route_paths
+    assert "/internal/lesson-assets/generation/retry" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
     assert "/internal/lesson-runtime/metrics" in route_paths

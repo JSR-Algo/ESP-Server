@@ -317,9 +317,9 @@ export default {
     });
   },
 
-  retrySdSync(lessonId, onSuccess, onError) {
+  retryLessonAssetGeneration(onSuccess, onError) {
     nestRequest({
-      url: `${getNestUrl()}/lessons/${lessonId}/sd-sync/retry`,
+      url: `${getNestUrl()}/lesson-assets/retry`,
       method: 'POST',
       data: {},
       onSuccess,
