@@ -676,6 +676,8 @@ export default {
       sharedImpactUncertainCloneKey: '',
       sharedImpactReconciling: false,
       lessonLoadRequestId: 0,
+      lessonStepsRequestId: 0,
+      lessonVisualSaveRequestId: 0,
       lessonAssetGenerationStatus: null,
       lessonAssetGenerationLoading: false,
       lessonAssetGenerationRequestId: 0,
@@ -907,6 +909,8 @@ export default {
       this.savingLessonVisuals = false;
       this.pendingLessonVisualPair = null;
       this.lessonVisualReconciliationRequired = false;
+      this.lessonStepsRequestId += 1;
+      this.lessonVisualSaveRequestId += 1;
       this.deletingStepKey = '';
       this.addingStep = false;
       this.reordering = false;
@@ -955,6 +959,9 @@ export default {
     this.publishRequestId += 1;
     this.publishReconcileRequestId += 1;
     this.promptSaveRequestId += 1;
+    this.lessonLoadRequestId += 1;
+    this.lessonStepsRequestId += 1;
+    this.lessonVisualSaveRequestId += 1;
     this.lessonAssetGenerationRequestId += 1;
     this.lessonAssetGenerationRetryRequestId += 1;
     this.lessonAssetGenerationRetrying = false;
@@ -1349,9 +1356,16 @@ export default {
       );
     },
     fetchSteps(options = {}) {
+      const requestId = this.lessonStepsRequestId + 1;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const lessonId = this.lessonId;
+      this.lessonStepsRequestId = requestId;
+      const requestIsCurrent = () => !this.editorDestroying
+        && requestId === this.lessonStepsRequestId
+        && lessonLoadRequestId === this.lessonLoadRequestId
+        && lessonId === this.lessonId;
       Api.lesson.listSteps(lessonId, (rows) => {
-        if (this.editorDestroying || lessonId !== this.lessonId) return;
+        if (!requestIsCurrent()) return;
         const selectedKey = this.selectedStepKey;
         this.steps = rows;
         if (this.lessonVisualReconciliationRequired) {
@@ -1379,7 +1393,7 @@ export default {
           this.$nextTick(() => this.doPreview());
         }
       }, (msg) => {
-        if (this.editorDestroying || lessonId !== this.lessonId) return;
+        if (!requestIsCurrent()) return;
         this.$message.error(msg);
         if (options.onError) options.onError(msg);
       });
@@ -1822,7 +1836,7 @@ export default {
           .then((r) => (r.ok ? r.json() : { backgrounds: [] }))
           .then((manifest) => {
             const rows = Array.isArray(manifest && manifest.backgrounds) ? manifest.backgrounds : [];
-            this.backgroundLibrary = rows.map((row) => ({
+            this.backgroundLibrary = rows.filter((row) => versions[row.assetKey]).map((row) => ({
               assetKey: row.assetKey,
               title: row.title || row.assetKey,
               video: row.video,
@@ -1836,7 +1850,10 @@ export default {
         (rows) => {
           const versions = {};
           (Array.isArray(rows) ? rows : []).forEach((row) => {
-            if (row && row.asset_key && row.publication_state === 'published') versions[row.asset_key] = row.version_id;
+            if (row && row.asset_key && row.version_id
+              && row.publication_state === 'published' && !versions[row.asset_key]) {
+              versions[row.asset_key] = row.version_id;
+            }
           });
           withVersions(versions);
         },
@@ -1909,16 +1926,23 @@ export default {
 
       const request = buildLessonVisualRequest(this.lessonVisualPair, patch);
       const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
+      const saveRequestId = this.lessonVisualSaveRequestId + 1;
+      this.lessonVisualSaveRequestId = saveRequestId;
+      const saveIsCurrent = () => !this.editorDestroying
+        && saveRequestId === this.lessonVisualSaveRequestId
+        && lessonLoadRequestId === this.lessonLoadRequestId
+        && lessonId === this.lessonId;
       this.savingLessonVisuals = true;
       Api.lesson.applyLessonVisuals(
         lessonId,
         request,
         () => {
-          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          if (!saveIsCurrent()) return;
           this.invalidatePreview();
           this.fetchSteps({
             onSuccess: () => {
-              if (this.editorDestroying || lessonId !== this.lessonId) return;
+              if (!saveIsCurrent()) return;
               this.pendingLessonVisualPair = null;
               this.savingLessonVisuals = false;
               this.lessonVisualReconciliationRequired = false;
@@ -1927,7 +1951,7 @@ export default {
               this.syncCinematicSoon();
             },
             onError: () => {
-              if (lessonId !== this.lessonId) return;
+              if (!saveIsCurrent()) return;
               this.savingLessonVisuals = false;
               this.lessonVisualReconciliationRequired = true;
               this.syncCinematicSoon();
@@ -1936,7 +1960,7 @@ export default {
           });
         },
         (msg) => {
-          if (this.editorDestroying || lessonId !== this.lessonId) return;
+          if (!saveIsCurrent()) return;
           this.savingLessonVisuals = false;
           if (confirmedPair) {
             this.pendingLessonVisualPair = confirmedPair;

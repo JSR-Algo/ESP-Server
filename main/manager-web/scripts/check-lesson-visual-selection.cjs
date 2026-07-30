@@ -423,7 +423,210 @@ async function verifyPublishedObjectLibraryContract() {
   assert.equal(selectedRequest.objectAssetVersionId, 'apple-published-v4', 'selector requests must use the newest published object version');
 }
 
-verifyPublishedObjectLibraryContract()
+async function verifyPublishedBackgroundLibraryContract() {
+  const loadBackgroundLibrarySource = extractObjectMethod(editorSource, 'loadBackgroundLibrary');
+  const backgroundRows = [
+    { asset_key: 'background.forest', version_id: 'forest-draft-v5', publication_state: 'draft' },
+    { asset_key: 'background.forest', version_id: 'forest-published-v4', publication_state: 'published' },
+    { asset_key: 'background.forest', version_id: 'forest-retired-v3', publication_state: 'retired' },
+    { asset_key: 'background.forest', version_id: 'forest-published-v2', publication_state: 'published' },
+    { asset_key: 'background.unpublished', version_id: 'unpublished-draft-v2', publication_state: 'draft' },
+  ];
+  const manifest = {
+    backgrounds: [
+      { assetKey: 'background.forest', title: 'Forest', video: '/forest.mp4', posterUrl: '/forest.png' },
+      { assetKey: 'background.unpublished', title: 'Hidden', video: '/hidden.mp4', posterUrl: '/hidden.png' },
+    ],
+  };
+  const context = { backgroundLibrary: [] };
+  const loadBackgroundLibrary = vm.runInNewContext(`(${loadBackgroundLibrarySource.replace(
+    /^loadBackgroundLibrary/,
+    'function loadBackgroundLibrary',
+  )})`, {
+    Api: {
+      lesson: {
+        listSharedBackgrounds: (onSuccess) => onSuccess(backgroundRows),
+      },
+    },
+    Array,
+    fetch: async () => ({ ok: true, json: async () => manifest }),
+  });
+
+  loadBackgroundLibrary.call(context);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(JSON.parse(JSON.stringify(context.backgroundLibrary)), [{
+    assetKey: 'background.forest',
+    title: 'Forest',
+    video: '/forest.mp4',
+    posterUrl: '/forest.png',
+    versionId: 'forest-published-v4',
+  }], 'the visible background library must use the newest published version and omit assets without one');
+}
+
+function verifyOrderedStepRefreshContract() {
+  const fetchStepsSource = extractObjectMethod(editorSource, 'fetchSteps');
+  const calls = [];
+  const fetchSteps = vm.runInNewContext(`(${fetchStepsSource.replace(/^fetchSteps/, 'function fetchSteps')})`, {
+    Api: { lesson: { listSteps: (...args) => calls.push(args) } },
+    Math,
+  });
+  const messages = [];
+  const context = {
+    lessonId: 'lesson-a',
+    lessonLoadRequestId: 7,
+    lessonStepsRequestId: 0,
+    editorDestroying: false,
+    selectedStepKey: 'step-new',
+    selectedStepIndex: 0,
+    steps: [{ stepKey: 'initial' }],
+    pendingLessonVisualPair: { backgroundAssetVersionId: 'confirmed' },
+    lessonVisualReconciliationRequired: true,
+    promptStepKey: '',
+    promptDraft: '',
+    cinematicDemoUrl: '',
+    lessonCapabilities: {},
+    previewManifest: null,
+    previewing: false,
+    resetPromptDraft() {},
+    $message: { error(message) { messages.push(message); } },
+  };
+
+  fetchSteps.call(context);
+  fetchSteps.call(context);
+  assert.equal(calls.length, 2, 'overlapping step refreshes must both dispatch');
+
+  calls[1][1]([{ stepKey: 'step-new', prompt: 'newest' }]);
+  context.pendingLessonVisualPair = { backgroundAssetVersionId: 'new-confirmed' };
+  context.lessonVisualReconciliationRequired = true;
+  calls[0][1]([{ stepKey: 'step-old', prompt: 'oldest' }]);
+  calls[0][2]('stale failure');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(context.steps)), [{ stepKey: 'step-new', prompt: 'newest' }], 'an older listSteps response must not replace newer steps');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.pendingLessonVisualPair)), { backgroundAssetVersionId: 'new-confirmed' }, 'an older listSteps response must not clear a newer confirmed visual pair');
+  assert.equal(context.lessonVisualReconciliationRequired, true, 'an older listSteps response must not clear newer reconciliation state');
+  assert.deepEqual(messages, [], 'an older listSteps error must not surface after a newer refresh');
+}
+
+function verifyVisualSaveNavigationEpochContract() {
+  const calls = [];
+  const applyLessonVisualSelection = vm.runInNewContext(`(${applyLessonVisualSelectionSource.replace(
+    /^applyLessonVisualSelection/,
+    'function applyLessonVisualSelection',
+  )})`, {
+    Api: { lesson: { applyLessonVisuals: (...args) => calls.push(args) } },
+    Object,
+    buildLessonVisualRequest,
+  });
+  const messages = [];
+  const context = {
+    lessonId: 'lesson-a',
+    lessonLoadRequestId: 10,
+    lessonVisualSaveRequestId: 0,
+    editorDestroying: false,
+    savingLessonVisuals: false,
+    savingStep: false,
+    rebindingSharedVisual: false,
+    assetMutating: false,
+    sharedImpactReconciling: false,
+    savingStepKeys: {},
+    addingStep: false,
+    reordering: false,
+    deletingStepKey: '',
+    steps: [{ stepKey: 'step-a' }],
+    lessonVisualPair: {
+      backgroundAssetVersionId: 'background-v1',
+      backgroundAssetKey: 'background.one',
+      objectAssetVersionId: 'object-v1',
+      objectAssetKey: 'object.one',
+    },
+    pendingLessonVisualPair: null,
+    lessonVisualReconciliationRequired: false,
+    $nextTick(callback) { callback(); },
+    pushCinematicStep() {},
+    syncCinematicSoon() { throw new Error('stale callback reached cinematic sync'); },
+    invalidatePreview() { throw new Error('stale callback invalidated the reopened lesson'); },
+    fetchSteps() { throw new Error('stale callback refreshed the reopened lesson'); },
+    loadLessonAssetGenerationStatus() { throw new Error('stale callback refreshed SD status'); },
+    $t(key) { return key; },
+    $message: {
+      success(message) { messages.push(['success', message]); },
+      warning(message) { messages.push(['warning', message]); },
+      error(message) { messages.push(['error', message]); },
+    },
+  };
+
+  applyLessonVisualSelection.call(context, {
+    objectAssetVersionId: 'object-v2',
+    objectAssetKey: 'object.two',
+  });
+  assert.equal(calls.length, 1, 'visual save must dispatch once');
+
+  context.lessonLoadRequestId = 12;
+  context.lessonVisualSaveRequestId += 1;
+  context.savingLessonVisuals = false;
+  context.pendingLessonVisualPair = { backgroundAssetVersionId: 'reopened-session' };
+  context.lessonVisualReconciliationRequired = true;
+  const reopenedSnapshot = JSON.stringify({
+    savingLessonVisuals: context.savingLessonVisuals,
+    pendingLessonVisualPair: context.pendingLessonVisualPair,
+    lessonVisualReconciliationRequired: context.lessonVisualReconciliationRequired,
+  });
+
+  calls[0][2]({});
+  calls[0][3]('stale save failed');
+
+  assert.equal(JSON.stringify({
+    savingLessonVisuals: context.savingLessonVisuals,
+    pendingLessonVisualPair: context.pendingLessonVisualPair,
+    lessonVisualReconciliationRequired: context.lessonVisualReconciliationRequired,
+  }), reopenedSnapshot, 'A to B to A stale visual callbacks must not mutate the reopened lesson session');
+  assert.deepEqual(messages, [], 'A to B to A stale visual callbacks must not show messages');
+
+  let authoritativeReloadOptions = null;
+  let invalidations = 0;
+  context.lessonLoadRequestId = 20;
+  context.lessonVisualSaveRequestId += 1;
+  context.savingLessonVisuals = false;
+  context.pendingLessonVisualPair = null;
+  context.lessonVisualReconciliationRequired = false;
+  context.invalidatePreview = () => { invalidations += 1; };
+  context.fetchSteps = (options) => { authoritativeReloadOptions = options; };
+  applyLessonVisualSelection.call(context, {
+    objectAssetVersionId: 'object-v3',
+    objectAssetKey: 'object.three',
+  });
+  calls[1][2]({});
+  assert.equal(invalidations, 1, 'a current visual PUT success must invalidate preview before authoritative reload');
+  assert.ok(authoritativeReloadOptions, 'a current visual PUT success must request authoritative steps');
+
+  context.lessonLoadRequestId = 22;
+  context.lessonVisualSaveRequestId += 1;
+  context.savingLessonVisuals = false;
+  context.pendingLessonVisualPair = { backgroundAssetVersionId: 'second-reopened-session' };
+  context.lessonVisualReconciliationRequired = true;
+  const secondReopenedSnapshot = JSON.stringify({
+    savingLessonVisuals: context.savingLessonVisuals,
+    pendingLessonVisualPair: context.pendingLessonVisualPair,
+    lessonVisualReconciliationRequired: context.lessonVisualReconciliationRequired,
+  });
+  authoritativeReloadOptions.onSuccess([]);
+  authoritativeReloadOptions.onError('stale reload failed');
+  assert.equal(JSON.stringify({
+    savingLessonVisuals: context.savingLessonVisuals,
+    pendingLessonVisualPair: context.pendingLessonVisualPair,
+    lessonVisualReconciliationRequired: context.lessonVisualReconciliationRequired,
+  }), secondReopenedSnapshot, 'stale authoritative reload callbacks must not mutate a reopened lesson session');
+  assert.deepEqual(messages, [], 'stale authoritative reload callbacks must not show messages');
+}
+
+verifyVisualSaveNavigationEpochContract();
+verifyOrderedStepRefreshContract();
+
+Promise.all([
+  verifyPublishedObjectLibraryContract(),
+  verifyPublishedBackgroundLibraryContract(),
+])
   .then(() => console.log('lesson visual selection contract: OK'))
   .catch((error) => {
     console.error(error);
