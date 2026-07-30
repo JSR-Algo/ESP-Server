@@ -1,6 +1,6 @@
 <template>
   <section class="asset-picker">
-    <div class="asset-picker__head"><strong>{{ title || $t('lesson.sharedVisual') }}</strong><el-input v-model="query" size="mini" clearable :placeholder="$t('lesson.sharedVisualFilter')" /></div>
+    <div class="asset-picker__head"><strong class="asset-picker__title">{{ title || $t('lesson.sharedVisual') }}</strong><el-input v-model="query" size="mini" clearable :placeholder="$t('lesson.sharedVisualFilter')" /></div>
     <div v-if="loading" class="asset-picker__state asset-picker__loading">Loading cinematic assets…</div>
     <div v-else-if="error" class="asset-picker__state asset-picker__error" role="alert">{{ error }}</div>
     <div v-else-if="!filtered.length" class="asset-picker__state asset-picker__empty">{{ $t('lesson.sharedVisualEmpty') }}</div>
@@ -43,6 +43,27 @@ export default {
 };
 </script>
 <style scoped>
-.asset-picker { border-top:1px solid #eee3cd; margin-top:16px; padding-top:14px; }.asset-picker__head { align-items:center; display:flex; gap:14px; justify-content:space-between; }.asset-picker__head .el-input { width:190px; }
-.asset-picker__grid { display:flex; gap:9px; margin-top:10px; overflow-x:auto; }.asset-picker__state { border-radius:10px; margin-top:10px; padding:16px; }.asset-picker__loading,.asset-picker__empty { background:#f3f6f4; color:#66736f; }.asset-picker__error { background:#fff1f0; color:#a63b32; }.asset-tile { background:#fff; border:2px solid transparent; border-radius:12px; display:grid; flex:0 0 145px; gap:4px; padding:7px; text-align:left; }.asset-tile.selected { border-color:#e6a62c; }.asset-tile__select { background:transparent;border:0;cursor:pointer;display:grid;gap:4px;padding:0;text-align:left;width:100%}.asset-tile__select:disabled { cursor:not-allowed; opacity:.55; }.asset-tile__preview { align-items:center; background:#edf2ef; border-radius:8px; display:flex; height:68px; justify-content:center; overflow:hidden; }.asset-tile__preview img,.asset-tile__preview video { height:100%; object-fit:cover; width:100%; }.asset-tile small { color:#7c8582; }.asset-tile__actions{display:flex;gap:4px}.asset-tile__actions button{background:#edf2ef;border:0;border-radius:7px;color:#31524a;cursor:pointer;flex:1;font-size:11px;padding:5px}.asset-tile__actions button:disabled{cursor:not-allowed;opacity:.55}
+.asset-picker { border-top:1px solid #eee3cd; margin-top:16px; max-width:100%; min-width:0; padding-top:14px; }
+.asset-picker__head { align-items:center; display:flex; gap:14px; justify-content:space-between; max-width:100%; min-width:0; }
+.asset-picker__title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.asset-picker__head .el-input { flex:0 1 190px; min-width:0; width:190px; }
+.asset-picker__grid { display:flex; gap:9px; margin-top:10px; max-width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }
+.asset-picker__state { border-radius:10px; margin-top:10px; max-width:100%; min-width:0; overflow:hidden; padding:16px; text-overflow:ellipsis; }
+.asset-picker__loading,.asset-picker__empty { background:#f3f6f4; color:#66736f; }.asset-picker__error { background:#fff1f0; color:#a63b32; }
+.asset-tile { background:#fff; border:2px solid transparent; border-radius:12px; display:grid; flex:0 0 145px; gap:4px; max-width:145px; min-width:0; padding:7px; text-align:left; }
+.asset-tile.selected { border-color:#e6a62c; }
+.asset-tile__select { background:transparent;border:0;cursor:pointer;display:grid;gap:4px;min-width:0;padding:0;text-align:left;width:100%}
+.asset-tile__select:disabled { cursor:not-allowed; opacity:.55; }
+.asset-tile__preview { align-items:center; background:#edf2ef; border-radius:8px; display:flex; height:68px; justify-content:center; min-width:0; overflow:hidden; }
+.asset-tile__preview img,.asset-tile__preview video { height:100%; object-fit:cover; width:100%; }
+.asset-tile strong,.asset-tile small { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.asset-tile small { color:#7c8582; }
+.asset-tile__actions{display:flex;gap:4px;min-width:0}
+.asset-tile__actions button{background:#edf2ef;border:0;border-radius:7px;color:#31524a;cursor:pointer;flex:1;font-size:11px;min-width:0;overflow:hidden;padding:5px;text-overflow:ellipsis;white-space:nowrap}
+.asset-tile__actions button:disabled{cursor:not-allowed;opacity:.55}
+@media (max-width:560px) {
+  .asset-picker__head { align-items:stretch; flex-direction:column; gap:8px; }
+  .asset-picker__title { white-space:normal; }
+  .asset-picker__head .el-input { flex:0 0 auto; width:100%; }
+}
 </style>
