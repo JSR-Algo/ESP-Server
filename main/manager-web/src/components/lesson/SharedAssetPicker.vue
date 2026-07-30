@@ -48,7 +48,7 @@ export default {
 .asset-picker__title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .asset-picker__head .el-input { flex:0 1 190px; min-width:0; width:190px; }
 .asset-picker__grid { display:flex; gap:9px; margin-top:10px; max-width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }
-.asset-picker__state { border-radius:10px; margin-top:10px; max-width:100%; min-width:0; overflow:hidden; padding:16px; text-overflow:ellipsis; }
+.asset-picker__state { border-radius:10px; margin-top:10px; max-width:100%; min-width:0; overflow-wrap:anywhere; padding:16px; word-break:break-word; }
 .asset-picker__loading,.asset-picker__empty { background:#f3f6f4; color:#66736f; }.asset-picker__error { background:#fff1f0; color:#a63b32; }
 .asset-tile { background:#fff; border:2px solid transparent; border-radius:12px; display:grid; flex:0 0 145px; gap:4px; max-width:145px; min-width:0; padding:7px; text-align:left; }
 .asset-tile.selected { border-color:#e6a62c; }
