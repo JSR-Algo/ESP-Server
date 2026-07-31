@@ -1474,6 +1474,8 @@ export default {
         || this.sharedImpactReconciling
         || this.savingStep
         || this.savingLessonVisuals
+        || this.tvideoJourneyDirty
+        || this.tvideoJourneySaving
         || Boolean(this.pendingLessonVisualPair)
         || this.validating
         || this.previewing

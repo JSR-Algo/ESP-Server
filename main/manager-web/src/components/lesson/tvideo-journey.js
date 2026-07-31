@@ -31,8 +31,12 @@ export function clampPose(value = {}) {
 }
 
 export function clampSafeZone(value = {}) {
-  const point = clampPoint(value);
-  const bounded = (size, origin) => Number(Math.min(1 - origin, Math.max(0.01, finite(size, 0.01))).toFixed(6));
+  const minExtent = 0.01;
+  const point = {
+    x: Math.min(1 - minExtent, clamp01(value.x)),
+    y: Math.min(1 - minExtent, clamp01(value.y)),
+  };
+  const bounded = (size, origin) => Number(Math.min(1 - origin, Math.max(minExtent, finite(size, minExtent))).toFixed(6));
   return {
     ...point,
     width: bounded(value.width, point.x),
