@@ -6,6 +6,7 @@ import {
   normalizeStep,
   normalizeStepType,
 } from '../nestHttp';
+import { normalizeFlattenedDerivativeStatus } from '@/components/lesson/flattened-derivative-status';
 
 /**
  * Lesson / step / asset / validate / preview / publish CRUD — backed by the
@@ -601,6 +602,26 @@ export default {
       url: `${getNestUrl()}/lessons/${lessonId}/manifest-preview?profile=${encodeURIComponent(profile || 'espTft')}`,
       method: 'GET',
       onSuccess,
+      onError,
+    });
+  },
+
+  // GET /v1/admin/lessons/:lessonId/flattened-cinematic-derivatives
+  // Returns public output URLs only; malformed or unsafe responses fail closed.
+  getFlattenedDerivativeStatus(lessonId, lessonVersion, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/flattened-cinematic-derivatives`,
+      method: 'GET',
+      onSuccess: (payload) => {
+        const normalized = normalizeFlattenedDerivativeStatus(payload, { lessonId, lessonVersion });
+        if (normalized) {
+          if (onSuccess) onSuccess(normalized);
+          return;
+        }
+        if (onError) onError('Malformed flattened cinematic derivative status.', {
+          code: 'FLATTENED_DERIVATIVE_STATUS_MALFORMED', transport: false,
+        });
+      },
       onError,
     });
   },

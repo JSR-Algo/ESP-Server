@@ -11,6 +11,7 @@
     "test:tvideo-template": "node scripts/check-tvideo-template-contracts.mjs",
     "test:lesson-editor-ui": "node scripts/check-lesson-editor-ui-contracts.mjs",
     "test:flattened-cinematic-preview": "node scripts/check-flattened-cinematic-preview.mjs",
+    "test:flattened-derivative-status": "node scripts/check-flattened-derivative-status.mjs",
     "test:lesson-sd-sync-ui": "node scripts/check-lesson-sd-sync-ui.mjs",
     "test:lesson-visual-selection": "node scripts/check-lesson-visual-selection.cjs",
     "test:lesson-builder-logic": "node scripts/check-lesson-builder-logic.cjs",

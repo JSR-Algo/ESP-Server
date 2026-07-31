@@ -65,6 +65,9 @@ const manifest = {
 Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi' }); },
+  getFlattenedDerivativeStatus(lessonId, lessonVersion, ok) {
+    ok({ lessonId, lessonVersion, sourceRevision: null, phases: [] });
+  },
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
   listSharedBackgrounds(ok) { ok([]); },

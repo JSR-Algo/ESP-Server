@@ -199,6 +199,51 @@
                 </div>
                 <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
               </section>
+              <section class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
+                <div class="preview-heading">
+                  <span class="eyebrow">{{ $t('lesson.flattenedDerivativeTitle') }}</span>
+                  <span class="preview-heading__hint">{{ $t('lesson.flattenedDerivativeHint') }}</span>
+                  <el-button size="mini" :loading="flattenedDerivativeLoading" @click="loadFlattenedDerivativeStatus({ manual: true })">
+                    {{ $t('lesson.flattenedDerivativeRefresh') }}
+                  </el-button>
+                </div>
+                <p v-if="flattenedDerivativeError" class="derivative-readiness__message derivative-readiness__message--error" role="alert">
+                  {{ flattenedDerivativeError }}
+                </p>
+                <p v-else-if="flattenedDerivativeLoading && !flattenedDerivativeStatus" class="derivative-readiness__message" role="status">
+                  {{ $t('lesson.flattenedDerivativeLoading') }}
+                </p>
+                <p v-else-if="!flattenedDerivativeStatus || !flattenedDerivativeStatus.phases.length" class="derivative-readiness__message">
+                  {{ $t('lesson.flattenedDerivativeNotRequired') }}
+                </p>
+                <template v-else>
+                  <div class="derivative-readiness__phases">
+                    <div v-for="phase in flattenedDerivativeStatus.phases" :key="phase.phaseId" class="derivative-readiness__phase">
+                      <span class="mono">{{ phase.phaseId }}</span>
+                      <el-tag size="mini" :type="flattenedDerivativeTagType(phase.state)">
+                        {{ $t(`lesson.flattenedDerivativeState.${phase.state}`) }}
+                      </el-tag>
+                      <span v-if="phase.state === 'failed'" class="derivative-readiness__failure">
+                        {{ flattenedDerivativeFailureMessage(phase) }}
+                      </span>
+                    </div>
+                  </div>
+                  <video
+                    v-if="flattenedDerivativeReadyPreview"
+                    :key="flattenedDerivativeReadyPreview.url"
+                    class="derivative-readiness__video"
+                    :src="flattenedDerivativeReadyPreview.url"
+                    controls
+                    playsinline
+                    preload="metadata"
+                    @loadeddata="flattenedDerivativePreviewError = ''"
+                    @error="onFlattenedDerivativePreviewError"
+                  />
+                  <p v-if="flattenedDerivativePreviewError" class="derivative-readiness__message derivative-readiness__message--preview" role="alert">
+                    {{ flattenedDerivativePreviewError }}
+                  </p>
+                </template>
+              </section>
               <section v-if="previewManifest" class="preview-surface exact-renderer-surface" data-testid="exact-robot-renderer">
                 <div class="preview-heading">
                   <span class="eyebrow">EXACT ROBOT RENDERER</span>
@@ -557,6 +602,10 @@ import { isUncertainNestError } from '@/apis/nestHttp';
 import { loadLessonRolloutCapabilities, NO_LESSON_ROLLOUT_CAPABILITIES } from '@/utils/lessonRolloutCapabilities';
 import { loadCanonicalDemoContext } from '@/utils/canonicalDemoContext.mjs';
 import { createAuthoringDirtyHandle } from '@/utils/serviceWorkerUpdateSafety.mjs';
+import {
+  anyFlattenedDerivativeProcessing,
+  flattenedDerivativeResponseIsCurrent,
+} from '@/components/lesson/flattened-derivative-status';
 
 export default {
   name: 'LessonEditor',
@@ -684,6 +733,13 @@ export default {
       lessonAssetGenerationRetrying: false,
       lessonAssetGenerationRetryRequestId: 0,
       lessonAssetGenerationPollTimer: null,
+      flattenedDerivativeStatus: null,
+      flattenedDerivativeLoading: false,
+      flattenedDerivativeError: '',
+      flattenedDerivativePreviewError: '',
+      flattenedDerivativeRequestId: 0,
+      flattenedDerivativeSourceEpoch: 0,
+      flattenedDerivativePollTimer: null,
     };
   },
   computed: {
@@ -726,6 +782,18 @@ export default {
     stepDraftRevisions() { return this.stepEditor.draftRevisions; },
     lessonId() {
       return this.$route.query.lessonId;
+    },
+    flattenedDerivativeManifestVersion() {
+      const manifest = this.previewManifest && this.previewManifest.manifest;
+      if (manifest && typeof manifest.manifestVersion === 'string') return manifest.manifestVersion;
+      return this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases.length
+        ? 'teebot-lesson-renderer.v4'
+        : '';
+    },
+    flattenedDerivativeReadyPreview() {
+      const phases = this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases;
+      const phase = Array.isArray(phases) ? phases.find((row) => row.state === 'ready' && row.output) : null;
+      return phase ? phase.output : null;
     },
     isDraft() {
       return this.lesson && this.lesson.status === 'draft';
@@ -918,6 +986,7 @@ export default {
       this.addingStep = false;
       this.reordering = false;
       this.resetLessonAssetGenerationStatus();
+      this.resetFlattenedDerivativeStatus();
       this.fetchAll();
     },
     hasPendingAuthoringChanges: {
@@ -968,6 +1037,10 @@ export default {
     this.lessonAssetGenerationRetryRequestId += 1;
     this.lessonAssetGenerationRetrying = false;
     this.clearLessonAssetGenerationPoll();
+    if (this.flattenedDerivativePollTimer) clearTimeout(this.flattenedDerivativePollTimer);
+    this.flattenedDerivativePollTimer = null;
+    this.flattenedDerivativeRequestId = Number(this.flattenedDerivativeRequestId || 0) + 1;
+    this.flattenedDerivativeSourceEpoch = Number(this.flattenedDerivativeSourceEpoch || 0) + 1;
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
@@ -991,6 +1064,111 @@ export default {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
       return 'warning';
+    },
+    flattenedDerivativeTagType(state) {
+      if (state === 'ready') return 'success';
+      if (state === 'failed') return 'danger';
+      if (state === 'processing') return 'warning';
+      return 'info';
+    },
+    onFlattenedDerivativePreviewError() {
+      this.flattenedDerivativePreviewError = this.$t('lesson.flattenedDerivativePreviewFailed');
+    },
+    flattenedDerivativeFailureMessage(phase) {
+      return this.$t('lesson.flattenedDerivativeServerFailed', { code: phase.errorCode });
+    },
+    clearFlattenedDerivativeStatusPoll() {
+      if (this.flattenedDerivativePollTimer) {
+        clearTimeout(this.flattenedDerivativePollTimer);
+        this.flattenedDerivativePollTimer = null;
+      }
+    },
+    resetFlattenedDerivativeStatus() {
+      this.clearFlattenedDerivativeStatusPoll();
+      this.flattenedDerivativeRequestId += 1;
+      this.flattenedDerivativeSourceEpoch += 1;
+      this.flattenedDerivativeStatus = null;
+      this.flattenedDerivativeLoading = false;
+      this.flattenedDerivativeError = '';
+      this.flattenedDerivativePreviewError = '';
+    },
+    invalidateFlattenedDerivativeStatus() {
+      this.clearFlattenedDerivativeStatusPoll();
+      this.flattenedDerivativeRequestId += 1;
+      this.flattenedDerivativeSourceEpoch += 1;
+      this.flattenedDerivativeLoading = false;
+      this.flattenedDerivativeError = '';
+      this.flattenedDerivativePreviewError = '';
+      if (this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases.length) {
+        this.flattenedDerivativeStatus = {
+          ...this.flattenedDerivativeStatus,
+          sourceRevision: null,
+          phases: this.flattenedDerivativeStatus.phases.map((phase) => ({
+            phaseId: phase.phaseId,
+            derivativeId: phase.derivativeId,
+            sourceRevision: phase.sourceRevision,
+            state: 'stale',
+            errorCode: null,
+          })),
+        };
+      }
+    },
+    scheduleFlattenedDerivativeStatusPoll(status = this.flattenedDerivativeStatus) {
+      this.clearFlattenedDerivativeStatusPoll();
+      if (this.editorDestroying || !anyFlattenedDerivativeProcessing(status)) return false;
+      const lessonId = this.lessonId;
+      const sourceEpoch = this.flattenedDerivativeSourceEpoch;
+      this.flattenedDerivativePollTimer = setTimeout(() => {
+        this.flattenedDerivativePollTimer = null;
+        if (!this.editorDestroying && lessonId === this.lessonId
+          && sourceEpoch === this.flattenedDerivativeSourceEpoch) this.loadFlattenedDerivativeStatus({ silent: true });
+      }, 5000);
+      return true;
+    },
+    loadFlattenedDerivativeStatus(options = {}) {
+      if (this.editorDestroying || !this.lesson || !this.lessonId
+        || !Api.lesson || typeof Api.lesson.getFlattenedDerivativeStatus !== 'function') return false;
+      const guard = {
+        requestId: this.flattenedDerivativeRequestId + 1,
+        lessonId: this.lessonId,
+        sourceEpoch: this.flattenedDerivativeSourceEpoch,
+      };
+      this.flattenedDerivativeRequestId = guard.requestId;
+      this.clearFlattenedDerivativeStatusPoll();
+      if (!options.silent) this.flattenedDerivativeLoading = true;
+      this.flattenedDerivativeError = '';
+      Api.lesson.getFlattenedDerivativeStatus(
+        guard.lessonId,
+        this.lesson.lessonVersion,
+        (status) => {
+          const current = {
+            requestId: this.flattenedDerivativeRequestId,
+            lessonId: this.lessonId,
+            sourceEpoch: this.flattenedDerivativeSourceEpoch,
+          };
+          if (this.editorDestroying || !flattenedDerivativeResponseIsCurrent(guard, current)) return;
+          const previousUrl = this.flattenedDerivativeReadyPreview && this.flattenedDerivativeReadyPreview.url;
+          this.flattenedDerivativeStatus = status;
+          this.flattenedDerivativeLoading = false;
+          const next = status.phases.find((phase) => phase.state === 'ready' && phase.output);
+          if (!next || next.output.url !== previousUrl) this.flattenedDerivativePreviewError = '';
+          this.scheduleFlattenedDerivativeStatusPoll(status);
+        },
+        (message, error) => {
+          const current = {
+            requestId: this.flattenedDerivativeRequestId,
+            lessonId: this.lessonId,
+            sourceEpoch: this.flattenedDerivativeSourceEpoch,
+          };
+          if (this.editorDestroying || !flattenedDerivativeResponseIsCurrent(guard, current)) return;
+          this.flattenedDerivativeLoading = false;
+          this.flattenedDerivativeError = this.$t('lesson.flattenedDerivativeStatusFailed', { reason: message });
+          if (options.manual || Number(error && (error.status || (error.response && error.response.status))) === 409) {
+            this.$message.error(this.flattenedDerivativeError);
+          }
+        },
+      );
+      return true;
     },
     // Fresh step-form skeleton incl. scene + vocab + expression-override state.
     blankStepForm() {
@@ -1333,6 +1511,7 @@ export default {
           this.loading = false;
           this.loadLessonAssetGenerationStatus();
           this.fetchSteps();
+          this.loadFlattenedDerivativeStatus();
         },
         (msg) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
@@ -1787,12 +1966,14 @@ export default {
         stepPayload,
         () => {
           if (saveGuard.requestId !== this.promptSaveRequestId) return;
+          this.invalidateFlattenedDerivativeStatus();
           this.fetchSteps({
             promptGuard: saveGuard,
             onSuccess: () => {
               if (saveGuard.requestId !== this.promptSaveRequestId) return;
               this.savingStep = false;
               this.clearSavedStepDraft(saveGuard);
+              this.loadFlattenedDerivativeStatus();
               this.$message.success(this.$t('lesson.stepSaved'));
             },
             onError: () => {
@@ -1868,11 +2049,13 @@ export default {
         selection.assetVersionId,
         () => {
           this.cinematicRefSaving = false;
+          this.invalidateFlattenedDerivativeStatus();
           this.previewManifest = null;
           this.validationResult = null;
           this.fetchSteps({
             preservePrompt: true,
             onSuccess: () => {
+              this.loadFlattenedDerivativeStatus();
               this.pushCinematicStep();
               this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
             },
@@ -1930,6 +2113,7 @@ export default {
         request,
         () => {
           if (!saveIsCurrent()) return;
+          this.invalidateFlattenedDerivativeStatus();
           this.invalidatePreview();
           this.fetchSteps({
             onSuccess: () => {
@@ -1938,6 +2122,7 @@ export default {
               this.savingLessonVisuals = false;
               this.lessonVisualReconciliationRequired = false;
               this.loadLessonAssetGenerationStatus();
+              this.loadFlattenedDerivativeStatus();
               this.$message.success(this.$t('lesson.visualPairSaved'));
               this.syncCinematicSoon();
             },
@@ -2055,6 +2240,7 @@ export default {
         (updated) => {
           if (this.editorDestroying || lessonId !== this.lessonId
             || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          this.invalidateFlattenedDerivativeStatus();
           this.$delete(this.savingStepKeys, step.stepKey);
           if (resolveSaveSuccess({
             currentRevision: this.stepDraftRevisions[step.stepKey],
@@ -2068,6 +2254,7 @@ export default {
           this.previewManifest = null;
           this.validationResult = null;
           this.fetchSteps();
+          this.loadFlattenedDerivativeStatus();
           this.$message.success('Step saved to the lesson draft.');
         },
         (msg) => {
@@ -2352,6 +2539,10 @@ export default {
         && this.simulationEvidence
         && this.simulationProofVersion === this.proofVersion
         && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
+        && (this.flattenedDerivativeManifestVersion !== 'teebot-lesson-renderer.v4'
+          || Boolean(this.flattenedDerivativeStatus
+            && this.flattenedDerivativeStatus.phases.length
+            && this.flattenedDerivativeStatus.phases.every((phase) => phase.state === 'ready' && phase.output)))
       );
     },
     publishReviewIsCurrent(snapshot = this.publishReviewSnapshot) {
@@ -2718,6 +2909,15 @@ export default {
         (message, error) => {
           if (this.editorDestroying || requestId !== this.publishRequestId) return;
           this.publishing = false;
+          const status = Number(error && (error.status || (error.response && error.response.status)));
+          if (status === 409 && this.flattenedDerivativeManifestVersion === 'teebot-lesson-renderer.v4') {
+            this.invalidateFlattenedDerivativeStatus();
+            this.flattenedDerivativeError = this.$t('lesson.flattenedDerivativePublishConflict');
+            this.publishResult = { type: 'error', title: this.flattenedDerivativeError };
+            this.loadFlattenedDerivativeStatus();
+            this.$message.error(this.flattenedDerivativeError);
+            return;
+          }
           const uncertain = this.isUncertainMutationError(error);
           if (uncertain) this.latchUncertainPublish(snapshot, requestId, message);
           else this.publishResult = { type: 'error', title: this.$t('lesson.publishFailed', { reason: message }) };
@@ -2827,6 +3027,15 @@ export default {
 .cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; box-sizing:border-box; max-width:100%; min-width:0; overflow:hidden; width:100%; }
 .cinematic-frame iframe { border:0; display:block; height:100%; max-width:100%; min-width:0; width:100%; }
 .cinematic-note { color:#5f6f63; font-size:12.5px; line-height:1.45; margin:8px 2px 0; }
+.derivative-readiness { margin-bottom:18px; overflow:hidden; }
+.derivative-readiness__phases { display:grid; gap:8px; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); max-width:100%; min-width:0; }
+.derivative-readiness__phase { align-items:center; background:#f3f7ef; border:1px solid #d7e2d0; border-radius:10px; box-sizing:border-box; display:flex; flex-wrap:wrap; gap:8px; min-width:0; padding:9px 10px; }
+.derivative-readiness__phase .mono { min-width:0; overflow-wrap:anywhere; }
+.derivative-readiness__failure { color:#b13b2e; flex:1 1 100%; font-size:12px; line-height:1.4; overflow-wrap:anywhere; }
+.derivative-readiness__message { background:#f3f7ef; border-radius:9px; color:#526258; font-size:12px; line-height:1.45; margin:8px 0 0; overflow-wrap:anywhere; padding:9px 10px; }
+.derivative-readiness__message--error { background:#fff0ed; color:#a83024; }
+.derivative-readiness__message--preview { background:#fff7df; color:#865b16; }
+.derivative-readiness__video { background:#0c1c19; border-radius:12px; display:block; margin-top:12px; max-height:320px; max-width:100%; width:100%; }
 .preview-empty { align-items:center; background:#17312d; border-radius:18px; box-sizing:border-box; color:#fff8df; display:flex; flex-direction:column; gap:12px; justify-content:center; max-width:100%; min-height:320px; min-width:0; padding:30px; text-align:center; }
 .preview-empty span { color:#b9cbc5; max-width:320px; }
 .advanced-steps-scroll { max-width:100%; min-width:0; overflow-x:auto; }
@@ -2852,6 +3061,7 @@ export default {
   .grid-2 { grid-template-columns:minmax(0,1fr); }
   .preview-surface,
   .preview-empty { padding:12px; }
+  .derivative-readiness__phases { grid-template-columns:minmax(0,1fr); }
   .advanced-steps-scroll .el-table { min-width:760px; }
 }
 </style>
