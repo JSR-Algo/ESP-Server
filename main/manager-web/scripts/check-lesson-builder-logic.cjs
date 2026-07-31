@@ -393,6 +393,7 @@ const lessonApiSource = fs.readFileSync(
 const executableLessonApiSource = lessonApiSource
   .replace(/^import \{ getNestUrl \} from '\.\.\/api';$/m, '')
   .replace(/import \{[\s\S]*?\} from '\.\.\/nestHttp';/, '')
+  .replace(/import \{[\s\S]*?\} from '@\/components\/lesson\/flattened-derivative-status';/, '')
   .replace(/^export function /gm, 'function ')
   .replace('export default {', 'const lessonApi = {')
   .concat('\nmodule.exports = lessonApi;\n');
@@ -406,6 +407,7 @@ const apiSandbox = {
   normalizeLesson: (value) => value,
   normalizeStep: (value) => value,
   normalizeStepType: (value) => value,
+  normalizeFlattenedDerivativeStatusResponse: (value) => value,
 };
 vm.runInNewContext(executableLessonApiSource, apiSandbox, { filename: 'lesson.js' });
 const lessonApi = apiSandbox.module.exports;

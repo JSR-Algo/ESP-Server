@@ -207,6 +207,12 @@ assert.match(editorSource, /canPublishCurrentProof\(\)[\s\S]*flattenedDerivative
 assert.doesNotMatch(editorSource, /flattenedDerivative(?:Status|Loading|Error|PollTimer|SourceEpoch|RequestId)[\s\S]{0,100}lessonUpdateSafety\.setDirty/, 'polling must not dirty the lesson');
 
 assert.equal(packageSource.scripts['test:flattened-derivative-status'], 'node scripts/check-flattened-derivative-status.mjs');
+const lessonStudioChain = packageSource.scripts['test:lesson-studio'];
+assert.ok(lessonStudioChain.includes('npm run test:flattened-derivative-status'), 'lesson studio aggregate must run the derivative readiness gate');
+assert.ok(
+  lessonStudioChain.indexOf('npm run test:flattened-derivative-status') < lessonStudioChain.indexOf('npm run test:flattened-cinematic-preview'),
+  'derivative readiness gate must run before downstream cinematic preview checks',
+);
 for (const locale of ['en', 'vi']) {
   const source = await readFile(new URL(`src/i18n/${locale}.js`, root), 'utf8');
   for (const key of ['lesson.flattenedDerivativeTitle', 'lesson.flattenedDerivativeServerFailed', 'lesson.flattenedDerivativePreviewFailed']) {
