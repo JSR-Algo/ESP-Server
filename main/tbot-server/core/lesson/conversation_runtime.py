@@ -1,0 +1,423 @@
+"""Pure server-authoritative state machine for one conversational lesson step."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+from types import MappingProxyType
+from typing import Any
+
+from core.lesson.conversation_contract import (
+    CueSpec,
+    LessonConversationContract,
+    LessonToolIdentity,
+    PronunciationGuidance,
+)
+
+
+class ConversationState(str, Enum):
+    ASKING = "ASKING"
+    LISTENING = "LISTENING"
+    BRIDGING = "BRIDGING"
+    COACHING = "COACHING"
+    REACTING = "REACTING"
+    COMPLETE = "COMPLETE"
+
+
+@dataclass(frozen=True)
+class ModelGuidanceFacts:
+    target_word: str
+    meanings_vi: tuple[str, ...]
+    related_concepts: tuple[str, ...]
+    teaching_copy: str
+    expected_answer: str
+    pronunciation: PronunciationGuidance
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "target_word": self.target_word,
+            "meanings_vi": self.meanings_vi,
+            "related_concepts": self.related_concepts,
+            "teaching_copy": self.teaching_copy,
+            "expected_answer": self.expected_answer,
+            "pronunciation": {
+                "slow_model": self.pronunciation.slow_model,
+                "segments": self.pronunciation.segments,
+                "phonemes": self.pronunciation.phonemes,
+                "l1_guidance_vi": self.pronunciation.l1_guidance_vi,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ConversationDecision:
+    accepted: bool
+    code: str
+    state: ConversationState
+    next_intent: str
+    cue_id: str | None
+    effect: str | None
+    coaching_level: int
+    outcome: str | None
+    review_needed: bool
+    guidance: ModelGuidanceFacts
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "accepted": self.accepted,
+            "code": self.code,
+            "state": self.state.value,
+            "next_intent": self.next_intent,
+            "cue_id": self.cue_id,
+            "effect": self.effect,
+            "coaching_level": self.coaching_level,
+            "outcome": self.outcome,
+            "review_needed": self.review_needed,
+            "guidance": self.guidance.to_mapping(),
+        }
+
+
+_SPEAKING_STATES = frozenset(
+    {
+        ConversationState.ASKING,
+        ConversationState.BRIDGING,
+        ConversationState.COACHING,
+        ConversationState.REACTING,
+    }
+)
+_VISUAL_ROLES = MappingProxyType(
+    {
+        ConversationState.ASKING: frozenset({"teach", "listen"}),
+        ConversationState.LISTENING: frozenset(
+            {"listen", "thinking", "retry_level_1", "retry_level_2", "retry_level_3"}
+        ),
+        ConversationState.BRIDGING: frozenset({"teach", "listen"}),
+        ConversationState.COACHING: frozenset({"listen", "retry_level_1", "retry_level_2", "retry_level_3"}),
+        ConversationState.REACTING: frozenset({"thinking", "correct", "celebrate"}),
+        ConversationState.COMPLETE: frozenset({"word_transition"}),
+    }
+)
+
+
+class LessonConversationRuntime:
+    """Own all semantic progress for a single validated lesson step."""
+
+    def __init__(
+        self,
+        contract: LessonConversationContract,
+        *,
+        attempt_id_factory: Callable[[], str],
+    ) -> None:
+        if not isinstance(contract, LessonConversationContract):
+            raise TypeError("contract must be a LessonConversationContract")
+        if not callable(attempt_id_factory):
+            raise TypeError("attempt_id_factory must be callable")
+        self._contract = contract
+        self._attempt_id_factory = attempt_id_factory
+        self._state = ConversationState.COMPLETE
+        self._turn_sequence_id = 0
+        self._attempt_id: str | None = None
+        self._attempt_count = 0
+        self._coaching_level = 0
+        self._contextual_turn_count = 0
+        self._outcome: str | None = None
+        self._review_needed = False
+        self._mastered = False
+        self._speaking_evidence = False
+        self._used_identities: set[LessonToolIdentity] = set()
+        self._guidance = ModelGuidanceFacts(
+            target_word=contract.target_word,
+            meanings_vi=contract.meanings_vi,
+            related_concepts=contract.related_concepts,
+            teaching_copy=contract.teaching_copy,
+            expected_answer=contract.expected_answer,
+            pronunciation=contract.pronunciation,
+        )
+
+    @property
+    def current_target(self) -> str:
+        return self._contract.target_word
+
+    @property
+    def state(self) -> ConversationState:
+        return self._state
+
+    @property
+    def turn_sequence_id(self) -> int:
+        return self._turn_sequence_id
+
+    @property
+    def attempt_id(self) -> str | None:
+        return self._attempt_id
+
+    @property
+    def attempt_count(self) -> int:
+        return self._attempt_count
+
+    @property
+    def contextual_turn_count(self) -> int:
+        return self._contextual_turn_count
+
+    @property
+    def mastered(self) -> bool:
+        return self._mastered
+
+    def identity(self, *, cue_id: str | None = None) -> LessonToolIdentity:
+        if self._attempt_id is None or self._turn_sequence_id < 1:
+            raise RuntimeError("open_attempt must establish identity first")
+        return LessonToolIdentity(
+            lesson_session_id=self._contract.lesson_session_id,
+            turn_sequence_id=self._turn_sequence_id,
+            attempt_id=self._attempt_id,
+            step_key=self._contract.step_key,
+            cue_id=cue_id,
+        )
+
+    def snapshot(self) -> tuple[Any, ...]:
+        return (
+            self._state,
+            self._turn_sequence_id,
+            self._attempt_id,
+            self._attempt_count,
+            self._coaching_level,
+            self._contextual_turn_count,
+            self._outcome,
+            self._review_needed,
+            self._mastered,
+            self._speaking_evidence,
+            frozenset(self._used_identities),
+        )
+
+    def _cue(self, role: str) -> CueSpec:
+        return self._contract.cue_map[role]
+
+    def _allowed_visual_roles(self, state: ConversationState | None = None) -> frozenset[str]:
+        selected_state = state or self._state
+        if selected_state is ConversationState.REACTING:
+            return frozenset({"correct", "celebrate"}) if self._mastered else frozenset({"thinking"})
+        return _VISUAL_ROLES[selected_state]
+
+    def _decision(
+        self,
+        *,
+        accepted: bool = True,
+        code: str = "ACCEPTED",
+        intent: str,
+        cue_role: str | None = None,
+    ) -> ConversationDecision:
+        cue = self._cue(cue_role) if cue_role else None
+        return ConversationDecision(
+            accepted=accepted,
+            code=code,
+            state=self._state,
+            next_intent=intent,
+            cue_id=cue.cue_id if cue else None,
+            effect=cue.effect if cue else None,
+            coaching_level=self._coaching_level,
+            outcome=self._outcome,
+            review_needed=self._review_needed,
+            guidance=self._guidance,
+        )
+
+    def _reject(self, code: str) -> ConversationDecision:
+        return self._decision(accepted=False, code=code, intent="retain_authoritative_state")
+
+    def _identity_rejection(self, identity: LessonToolIdentity | None) -> ConversationDecision | None:
+        if not isinstance(identity, LessonToolIdentity):
+            return self._reject("MISSING_IDENTITY")
+        if identity.lesson_session_id != self._contract.lesson_session_id:
+            return self._reject("CROSS_SESSION")
+        if identity.attempt_id != self._attempt_id:
+            return self._reject("CROSS_ATTEMPT")
+        if identity.step_key != self._contract.step_key:
+            return self._reject("CROSS_STEP")
+        if identity in self._used_identities:
+            return self._reject("DUPLICATE_IDENTITY")
+        if identity.turn_sequence_id < self._turn_sequence_id:
+            return self._reject("STALE_IDENTITY")
+        if identity.turn_sequence_id > self._turn_sequence_id:
+            return self._reject("REORDERED_IDENTITY")
+        return None
+
+    def _consume(self, identity: LessonToolIdentity) -> None:
+        self._used_identities.add(identity)
+        self._turn_sequence_id += 1
+
+    def open_attempt(self) -> ConversationDecision:
+        if self._attempt_id is not None and self._state is not ConversationState.COMPLETE:
+            return self._reject("ATTEMPT_ACTIVE")
+        attempt_id = self._attempt_id_factory()
+        LessonToolIdentity(
+            lesson_session_id=self._contract.lesson_session_id,
+            turn_sequence_id=1,
+            attempt_id=attempt_id,
+            step_key=self._contract.step_key,
+        )
+        self._attempt_id = attempt_id
+        self._attempt_count += 1
+        self._turn_sequence_id += 1
+        self._state = ConversationState.ASKING
+        self._coaching_level = 0
+        self._contextual_turn_count = 0
+        self._outcome = None
+        self._review_needed = False
+        self._mastered = False
+        self._speaking_evidence = False
+        self._used_identities.clear()
+        return self._decision(intent="scene_question", cue_role="listen")
+
+    def child_response(self, identity: LessonToolIdentity | None, response_class: str) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if self._state is ConversationState.COMPLETE:
+            return self._reject("ATTEMPT_COMPLETE")
+        if response_class not in {"target", "meaning_vi", "related", "silence", "uncertain"}:
+            return self._reject("UNSUPPORTED_RESPONSE_CLASS")
+        assert identity is not None
+        self._consume(identity)
+        if response_class == "target":
+            self._state = ConversationState.REACTING
+            self._speaking_evidence = True
+            self._outcome = "speaking_evidence"
+            return self._decision(intent="assess_pronunciation", cue_role="thinking")
+        if response_class == "meaning_vi":
+            self._state = ConversationState.BRIDGING
+            self._outcome = "comprehension_only"
+            return self._decision(intent="bridge_vietnamese", cue_role="teach")
+        if response_class == "related":
+            self._state = ConversationState.BRIDGING
+            self._outcome = "related_understanding"
+            return self._decision(intent="bridge_related", cue_role="teach")
+        self._state = ConversationState.COACHING
+        self._outcome = "supporting"
+        intent = "narrow_question" if response_class == "silence" else "contrast_then_model"
+        return self._decision(intent=intent, cue_role="retry_level_1")
+
+    def pronunciation_outcome(self, identity: LessonToolIdentity | None, outcome: str) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if not self._speaking_evidence:
+            return self._reject("SPEAKING_EVIDENCE_REQUIRED")
+        if outcome not in {"correct", "retry", "uncertain"}:
+            return self._reject("UNSUPPORTED_PRONUNCIATION_OUTCOME")
+        assert identity is not None
+        self._consume(identity)
+        if outcome == "correct":
+            self._state = ConversationState.REACTING
+            self._mastered = True
+            self._outcome = "mastered"
+            self._review_needed = False
+            return self._decision(intent="celebrate_mastery", cue_role="celebrate")
+        if self._coaching_level < 3:
+            self._coaching_level += 1
+            self._state = ConversationState.LISTENING
+            self._outcome = "trying"
+            intents = {
+                1: "praise_effort",
+                2: "slow_whole_word",
+                3: "approved_pronunciation_guidance",
+            }
+            return self._decision(
+                intent=intents[self._coaching_level],
+                cue_role=f"retry_level_{self._coaching_level}",
+            )
+        self._state = ConversationState.COMPLETE
+        self._outcome = "attempted"
+        self._review_needed = True
+        return self._decision(intent="praise_effort_continue", cue_role="word_transition")
+
+    def context_turn(self, identity: LessonToolIdentity | None) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if self._state is ConversationState.COMPLETE:
+            return self._reject("ATTEMPT_COMPLETE")
+        assert identity is not None
+        self._consume(identity)
+        self._state = ConversationState.BRIDGING
+        if self._contextual_turn_count < self._contract.max_contextual_turns:
+            self._contextual_turn_count += 1
+            return self._decision(intent="bounded_context", cue_role="teach")
+        return self._decision(intent="forced_back_to_target", cue_role="listen")
+
+    def begin_turn(
+        self,
+        identity: LessonToolIdentity | None,
+        cue_role: str,
+        state: ConversationState,
+    ) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        cue = self._contract.cue_map.get(cue_role)
+        if cue is None or identity is None or identity.cue_id != cue.cue_id:
+            return self._reject("ILLEGAL_CUE")
+        if state not in _SPEAKING_STATES or cue_role not in self._allowed_visual_roles(state):
+            return self._reject("ILLEGAL_STATE_TRANSITION")
+        self._consume(identity)
+        self._state = state
+        return self._decision(intent="begin_model_turn", cue_role=cue_role)
+
+    def interrupt(self, identity: LessonToolIdentity | None) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if self._state not in _SPEAKING_STATES:
+            return self._reject("INTERRUPT_NOT_AVAILABLE")
+        assert identity is not None
+        self._consume(identity)
+        self._state = ConversationState.LISTENING
+        return self._decision(intent="listen_to_child", cue_role="listen")
+
+    def visual_reaction(
+        self,
+        identity: LessonToolIdentity | None,
+        cue_role: str,
+        *,
+        effect: str | None = None,
+    ) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        cue = self._contract.cue_map.get(cue_role)
+        if cue is None or identity is None or identity.cue_id != cue.cue_id:
+            return self._reject("ILLEGAL_CUE")
+        if cue_role not in self._allowed_visual_roles():
+            return self._reject("ILLEGAL_CUE")
+        if effect != cue.effect:
+            return self._reject("ILLEGAL_EFFECT")
+        self._consume(identity)
+        return self._decision(intent="play_approved_reaction", cue_role=cue_role)
+
+    def continue_lesson(
+        self,
+        identity: LessonToolIdentity | None,
+        *,
+        effect: str | None = None,
+        next_step_key: str | None = None,
+    ) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if not (self._mastered or (self._outcome == "attempted" and self._review_needed)):
+            return self._reject("CONTINUE_NOT_ALLOWED")
+        cue = self._cue("word_transition")
+        if identity is None or identity.cue_id != cue.cue_id:
+            return self._reject("ILLEGAL_CUE")
+        if effect != cue.effect:
+            return self._reject("ILLEGAL_EFFECT")
+        if next_step_key is not None:
+            return self._reject("MODEL_STEP_SELECTION_FORBIDDEN")
+        assert identity is not None
+        self._consume(identity)
+        self._state = ConversationState.COMPLETE
+        return self._decision(intent="continue_lesson", cue_role="word_transition")
+
+    def mark_mastered(self, identity: LessonToolIdentity | None) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        return self._reject("DIRECT_MASTERY_FORBIDDEN")
