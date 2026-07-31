@@ -35,11 +35,13 @@
           <CinematicVideoLayer
             v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id) && layer.mediaType === 'video/mp4'"
             :key="layer.id === 'robotOverlay' ? `robotOverlay-video-${activeIndex}-${motionNonce}` : `${layer.id}-video`"
+            ref="cinematicLayers"
+            :layer-id="layer.id"
             :src="layer.src"
             :chroma-key="layer.chromaKey"
             :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :position-style="layerStyle(layer)"
-            :controlled="cinematicComparisonEnabled"
+            :controlled="cinematicFlattenable"
             :playing="cinematicPlaying"
             :clock-ms="cinematicClockMs"
             :replay-nonce="cinematicReplayNonce"
@@ -97,15 +99,19 @@
         <div class="stage-shell">
           <div class="flattened-stage">
             <FlattenedCinematicPreview
+              v-if="cinematicFlattenable"
               :projection="projection"
               :playing="cinematicPlaying"
               :clock-ms="cinematicClockMs"
               :replay-nonce="cinematicReplayNonce"
             />
+            <p v-else class="flattened-status" data-testid="flattened-cinematic-status" role="status">
+              {{ cinematicStatusMessage }}
+            </p>
           </div>
         </div>
       </section>
-      <div v-if="cinematicComparisonEnabled" class="cinematic-controls">
+      <div v-if="cinematicFlattenable" class="cinematic-controls">
         <button type="button" class="play-btn" :aria-pressed="cinematicPlaying ? 'true' : 'false'" @click="toggleCinematicPlayback">
           {{ cinematicPlaying ? '❚❚ Pause cinematic' : '► Play cinematic' }}
         </button>
@@ -189,7 +195,7 @@ import {
 } from './robot-preview-projection';
 import CinematicVideoLayer from './CinematicVideoLayer.vue';
 import FlattenedCinematicPreview from './FlattenedCinematicPreview.vue';
-import { isFlattenableProjection } from './flattened-cinematic-preview';
+import { cinematicProjectionStatus } from './flattened-cinematic-preview';
 
 export default {
   name: 'RobotEspTftProjectionPreview',
@@ -247,7 +253,20 @@ export default {
       return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason, this.rendererMetadata);
     },
     cinematicComparisonEnabled() {
-      return isFlattenableProjection(this.projection);
+      return this.cinematicComparisonStatus.candidate;
+    },
+    cinematicComparisonStatus() {
+      return cinematicProjectionStatus(this.projection);
+    },
+    cinematicFlattenable() {
+      return this.cinematicComparisonStatus.flattenable;
+    },
+    cinematicStatusMessage() {
+      const status = this.cinematicComparisonStatus;
+      const details = [];
+      if (status.missingLayerIds.length) details.push(`Missing required layers: ${status.missingLayerIds.join(', ')}.`);
+      if (status.unsupportedLayerIds.length) details.push(`Unsupported layers: ${status.unsupportedLayerIds.join(', ')}.`);
+      return `Robot Flattened preview is incomplete. ${details.join(' ')}`;
     },
     cinematicDurationMs() {
       const phases = Array.isArray(this.manifest && this.manifest.cinematicPhases)
@@ -333,14 +352,34 @@ export default {
       this.cinematicFrameHandle = null;
       this.cinematicStartedAt = null;
     },
+    cinematicLayerRefs() {
+      const refs = this.$refs.cinematicLayers;
+      if (!refs) return [];
+      return Array.isArray(refs) ? refs : [refs];
+    },
+    cinematicLayerById(layerId) {
+      return this.cinematicLayerRefs().find((layer) => layer && layer.layerId === layerId) || null;
+    },
+    advanceCinematicClock(timestamp) {
+      const background = this.cinematicLayerById('background');
+      const master = background && typeof background.mediaPlaybackState === 'function'
+        ? background.mediaPlaybackState()
+        : null;
+      if (master && master.ready) {
+        this.cinematicClockMs = Math.round(Math.max(0, master.currentTimeSec) * 1000) % this.cinematicDurationMs;
+        this.cinematicStartedAt = null;
+        return;
+      }
+      if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;
+      const elapsed = Math.max(0, timestamp - this.cinematicStartedAt);
+      this.cinematicClockMs = elapsed % this.cinematicDurationMs;
+    },
     scheduleCinematicFrame() {
-      if (!this.cinematicPlaying || !this.cinematicComparisonEnabled || this.cinematicFrameHandle !== null) return;
+      if (!this.cinematicPlaying || !this.cinematicFlattenable || this.cinematicFrameHandle !== null) return;
       this.cinematicFrameHandle = requestAnimationFrame((timestamp) => {
         this.cinematicFrameHandle = null;
-        if (!this.cinematicPlaying || !this.cinematicComparisonEnabled) return;
-        if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;
-        const elapsed = Math.max(0, timestamp - this.cinematicStartedAt);
-        this.cinematicClockMs = elapsed % this.cinematicDurationMs;
+        if (!this.cinematicPlaying || !this.cinematicFlattenable) return;
+        this.advanceCinematicClock(timestamp);
         this.scheduleCinematicFrame();
       });
     },
@@ -445,6 +484,7 @@ export default {
 .cinematic-controls > span { color: #66756b; font-size: 12px; font-variant-numeric: tabular-nums; }
 .cinematic-replay-btn { padding: 8px 14px; border: 1px solid #7f9084; border-radius: 999px; background: #fff; color: #26342b; cursor: pointer; font: inherit; font-weight: 800; }
 .flattened-stage { width: 480px; margin: 0 auto; }
+.flattened-status { box-sizing: border-box; min-height: 320px; margin: 0; padding: 24px; border: 2px dashed #bd7b32; background: #fff5df; color: #6c3d0c; font-size: 14px; font-weight: 800; line-height: 1.5; }
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
 .truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }

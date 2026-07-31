@@ -20,7 +20,7 @@
       preload="auto"
       @loadeddata="startRendering"
       @seeked="handleSeeked"
-      @error="failLayer"
+      @error="handleMediaError(layer.id, layer.src, $event)"
     />
     <p v-if="errorMessage" class="flattened-preview__error" role="alert">
       {{ errorMessage }}
@@ -143,7 +143,7 @@ export default {
           try {
             video.currentTime = targetTime;
           } catch (error) {
-            this.failLayer();
+            this.failRender(layer.id);
             return;
           }
         }
@@ -211,20 +211,20 @@ export default {
         if (!this.forceRender && signature === this.lastRenderSignature) return;
 
         context.clearRect(0, 0, canvas.width, canvas.height);
-        renderableLayers.forEach(({ layer, video }) => {
-          this.drawLayer(context, video, layer);
-        });
+        for (const { layer, video } of renderableLayers) {
+          if (!this.drawLayer(context, video, layer)) return;
+        }
         this.lastRenderSignature = signature;
         this.forceRender = false;
       } catch (error) {
-        this.failLayer();
+        this.failRender();
       }
     },
     drawLayer(context, video, layer) {
       const rect = objectFitRect(video.videoWidth, video.videoHeight, layer.bounds);
       if (!layer.chromaKey) {
         context.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, rect.dx, rect.dy, rect.dw, rect.dh);
-        return;
+        return true;
       }
 
       const width = Math.max(1, Math.ceil(rect.dw));
@@ -236,12 +236,19 @@ export default {
       if (this.chromaFrameSignaturesByLayer[layer.id] !== frameSignature) {
         offscreenContext.clearRect(0, 0, width, height);
         offscreenContext.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, width, height);
-        const frame = offscreenContext.getImageData(0, 0, width, height);
+        let frame;
+        try {
+          frame = offscreenContext.getImageData(0, 0, width, height);
+        } catch (error) {
+          this.failCanvasReadback(layer.id);
+          return false;
+        }
         applyChromaKey(frame.data, layer.chromaKey);
         offscreenContext.putImageData(frame, 0, 0);
         this.chromaFrameSignaturesByLayer[layer.id] = frameSignature;
       }
       context.drawImage(offscreen, rect.dx, rect.dy, rect.dw, rect.dh);
+      return true;
     },
     getOffscreenCanvas(layerId, width, height) {
       let canvas = this.chromaCanvasesByLayer[layerId];
@@ -253,8 +260,18 @@ export default {
       if (canvas.height !== height) canvas.height = height;
       return canvas;
     },
-    failLayer() {
-      this.errorMessage = CORS_ERROR;
+    handleMediaError(layerId, source) {
+      const currentLayer = this.layers.find((layer) => layer.id === layerId && layer.src === source);
+      if (!currentLayer) return;
+      this.errorMessage = `Flattened preview unavailable: ${layerId} failed to load/decode.`;
+      this.stopRendering();
+    },
+    failCanvasReadback(layerId) {
+      this.errorMessage = `${CORS_ERROR} Affected layer: ${layerId}.`;
+      this.stopRendering();
+    },
+    failRender(layerId = 'unknown') {
+      this.errorMessage = `Flattened preview unavailable: ${layerId} could not be rendered.`;
       this.stopRendering();
     }
   }

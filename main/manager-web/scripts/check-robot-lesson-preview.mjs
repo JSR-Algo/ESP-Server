@@ -221,6 +221,24 @@ assert.deepEqual(
     { id: 'robotOverlay', src: 'https://cdn.test/robot.mp4', mediaType: 'video/mp4', bounds: { x: 260, y: 100, width: 200, height: 200, fit: 'contain' }, chromaKey: { color: { r: 255, g: 255, b: 255 } } }
   ]
 );
+const incompleteV3 = structuredClone(rendererV3);
+incompleteV3.cinematicPhases[0].layers = incompleteV3.cinematicPhases[0].layers
+  .filter((layer) => layer.slot !== 'teachingObject');
+assert.deepEqual(flattened.cinematicProjectionStatus(projection.projectEspTftPreview(incompleteV3, 0, 'correct')), {
+  candidate: true,
+  flattenable: false,
+  missingLayerIds: ['teachingObject'],
+  unsupportedLayerIds: []
+}, 'renderer-v3 must preserve an explicit incomplete comparison instead of silently using the legacy-only layout');
+
+const unsupportedLayerV3 = structuredClone(rendererV3);
+unsupportedLayerV3.cinematicPhases[0].layers.find((layer) => layer.slot === 'robotOverlay').mediaType = 'video/webm';
+assert.deepEqual(flattened.cinematicProjectionStatus(projection.projectEspTftPreview(unsupportedLayerV3, 0, 'correct')), {
+  candidate: true,
+  flattenable: false,
+  missingLayerIds: [],
+  unsupportedLayerIds: ['robotOverlay']
+}, 'renderer-v3 must identify unsupported required cinematic layers');
 const hostileV3 = structuredClone(rendererV3);
 hostileV3.steps[0].scene.robotOverlay.asset.src = 'https://bad.test/robot.webm';
 assert.ok(projection.findForbiddenFirmwareCapabilities(hostileV3).some((warning) => warning.includes('video source')));

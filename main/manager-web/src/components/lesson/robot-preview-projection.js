@@ -228,7 +228,7 @@ function cinematicLayer(manifest, slot) {
 }
 
 function cinematicBounds(layer, fallback, fit) {
-  const rect = asObject(asObject(layer).metadata).rect;
+  const rect = asObject(asObject(asObject(layer).metadata).rect);
   const valid = ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(rect[key]));
   return { ...(valid ? rect : fallback), fit };
 }

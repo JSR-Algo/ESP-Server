@@ -13,9 +13,33 @@ export function flattenableLayers(projection) {
 }
 
 export function isFlattenableProjection(projection) {
-  if (!projection || projection.manifestVersion !== 'teebot-lesson-renderer.v3') return false;
-  const ids = new Set(flattenableLayers(projection).map((layer) => layer.id));
-  return CINEMATIC_LAYER_IDS.every((id) => ids.has(id));
+  return cinematicProjectionStatus(projection).flattenable;
+}
+
+export function cinematicProjectionStatus(projection) {
+  const candidate = Boolean(projection && projection.manifestVersion === 'teebot-lesson-renderer.v3');
+  if (!candidate) {
+    return { candidate: false, flattenable: false, missingLayerIds: [], unsupportedLayerIds: [] };
+  }
+
+  const layers = projection && Array.isArray(projection.layers) ? projection.layers : [];
+  const missingLayerIds = [];
+  const unsupportedLayerIds = [];
+  CINEMATIC_LAYER_IDS.forEach((id) => {
+    const layer = layers.find((candidateLayer) => candidateLayer && candidateLayer.id === id);
+    if (!layer || !layer.visible || !layer.src) {
+      missingLayerIds.push(id);
+    } else if (layer.mediaType !== 'video/mp4') {
+      unsupportedLayerIds.push(id);
+    }
+  });
+
+  return {
+    candidate,
+    flattenable: missingLayerIds.length === 0 && unsupportedLayerIds.length === 0,
+    missingLayerIds,
+    unsupportedLayerIds
+  };
 }
 
 export function chooseMasterLayer(layers) {

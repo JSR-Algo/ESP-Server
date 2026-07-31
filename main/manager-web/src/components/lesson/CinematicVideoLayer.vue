@@ -24,6 +24,7 @@ import { shouldResyncVideo } from './flattened-cinematic-preview';
 export default {
   name: 'CinematicVideoLayer',
   props: {
+    layerId: { type: String, default: '' },
     src: { type: String, required: true },
     chromaKey: { type: Object, default: null },
     layerClass: { type: [String, Array, Object], default: '' },
@@ -81,6 +82,15 @@ export default {
     this.stop();
   },
   methods: {
+    mediaPlaybackState() {
+      const video = this.$refs.video;
+      const currentTimeSec = video ? Number(video.currentTime) : Number.NaN;
+      return {
+        layerId: this.layerId,
+        ready: Boolean(video && video.readyState >= 1 && Number.isFinite(currentTimeSec)),
+        currentTimeSec: Number.isFinite(currentTimeSec) ? currentTimeSec : 0
+      };
+    },
     handleLoadedData() {
       this.syncPlayback(true);
       this.start(this.controlled && !this.playing);

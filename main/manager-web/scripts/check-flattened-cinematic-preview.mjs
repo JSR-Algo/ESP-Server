@@ -11,6 +11,9 @@ const helperModuleUrl = `data:text/javascript;base64,${Buffer.from(source).toStr
 const videoLayerScript = videoLayerSource.match(/<script>([\s\S]*?)<\/script>/)[1]
   .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
 const videoLayer = (await import(`data:text/javascript;base64,${Buffer.from(videoLayerScript).toString('base64')}`)).default;
+const flattenedComponentScript = componentSource.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
+const flattenedComponent = (await import(`data:text/javascript;base64,${Buffer.from(flattenedComponentScript).toString('base64')}`)).default;
 const emptyComponentUrl = `data:text/javascript;base64,${Buffer.from('export default {};').toString('base64')}`;
 const projectionStubUrl = `data:text/javascript;base64,${Buffer.from(`
   export const RESPONSE_PATHS = ['correct'];
@@ -35,19 +38,22 @@ assert.equal(exactPreview.computed.cinematicDurationMs.call({ manifest: {} }), 1
 
 for (const token of [
   "import FlattenedCinematicPreview from './FlattenedCinematicPreview.vue';",
-  'isFlattenableProjection',
+  'cinematicProjectionStatus',
   "cinematicComparisonEnabled ? 'cinematic-preview-comparison' : null",
   '3 Layers',
   'Robot Flattened',
   ':projection="projection"',
   ':clock-ms="cinematicClockMs"',
   ':replay-nonce="cinematicReplayNonce"',
-  ':controlled="cinematicComparisonEnabled"'
+  ':controlled="cinematicFlattenable"',
+  ':layer-id="layer.id"'
 ]) {
   assert.ok(exactPreviewSource.includes(token), `RobotEspTftProjectionPreview.vue must include ${token}`);
 }
 assert.ok(exactPreviewSource.includes('data-testid="esp-tft-stage"'), 'legacy exact stage must remain');
-assert.match(exactPreviewSource, /:data-testid="cinematicComparisonEnabled \? 'cinematic-preview-comparison' : null"/, 'comparison test id must only render for a flattenable projection');
+assert.match(exactPreviewSource, /:data-testid="cinematicComparisonEnabled \? 'cinematic-preview-comparison' : null"/, 'comparison test id must render for every renderer-v3 cinematic candidate');
+assert.ok(exactPreviewSource.includes('data-testid="flattened-cinematic-status"'), 'an incomplete renderer-v3 comparison must keep the Robot Flattened panel and show status');
+assert.match(exactPreviewSource, /<FlattenedCinematicPreview\s+v-if="cinematicFlattenable"/, 'only complete supported layers may mount the flattened canvas');
 assert.match(exactPreviewSource, /@click="toggleCinematicPlayback"/, 'comparison must expose a play/pause control');
 assert.match(exactPreviewSource, /@click="replayCinematic"/, 'comparison must expose a replay control');
 assert.doesNotMatch(exactPreviewSource, /<output>[\s\S]*cinematicClockMs[\s\S]*<\/output>/, 'RAF clock must not announce every frame through an output element');
@@ -119,6 +125,55 @@ assert.equal(preview.isFlattenableProjection(projection), true);
 assert.equal(preview.isFlattenableProjection({ ...projection, manifestVersion: 'teebot-lesson-renderer.v2' }), false);
 assert.equal(preview.isFlattenableProjection({ ...projection, layers: projection.layers.slice(0, 3) }), false);
 
+assert.deepEqual(preview.cinematicProjectionStatus(projection), {
+  candidate: true,
+  flattenable: true,
+  missingLayerIds: [],
+  unsupportedLayerIds: []
+});
+const incompleteProjection = {
+  ...projection,
+  layers: projection.layers.map((layer) => layer.id === 'teachingObject'
+    ? { ...layer, src: '', visible: false }
+    : layer)
+};
+assert.deepEqual(preview.cinematicProjectionStatus(incompleteProjection), {
+  candidate: true,
+  flattenable: false,
+  missingLayerIds: ['teachingObject'],
+  unsupportedLayerIds: []
+});
+const unsupportedProjection = {
+  ...projection,
+  layers: projection.layers.map((layer) => layer.id === 'robotOverlay'
+    ? { ...layer, mediaType: 'video/webm' }
+    : layer)
+};
+assert.deepEqual(preview.cinematicProjectionStatus(unsupportedProjection), {
+  candidate: true,
+  flattenable: false,
+  missingLayerIds: [],
+  unsupportedLayerIds: ['robotOverlay']
+});
+assert.equal(preview.cinematicProjectionStatus({ ...projection, manifestVersion: 'teebot-lesson-renderer.v2' }).candidate, false);
+assert.equal(
+  exactPreview.computed.cinematicComparisonEnabled.call({ cinematicComparisonStatus: preview.cinematicProjectionStatus(incompleteProjection) }),
+  true,
+  'incomplete renderer-v3 cinematics must not silently fall back to the legacy-only layout'
+);
+assert.equal(
+  exactPreview.computed.cinematicFlattenable.call({ cinematicComparisonStatus: preview.cinematicProjectionStatus(incompleteProjection) }),
+  false,
+  'incomplete renderer-v3 cinematics must show status instead of mounting the canvas'
+);
+assert.equal(
+  exactPreview.computed.cinematicStatusMessage.call({ cinematicComparisonStatus: {
+    missingLayerIds: ['teachingObject'], unsupportedLayerIds: ['robotOverlay']
+  } }),
+  'Robot Flattened preview is incomplete. Missing required layers: teachingObject. Unsupported layers: robotOverlay.',
+  'incomplete status must list every affected required layer id'
+);
+
 assert.equal(preview.chooseMasterLayer(layers).id, 'background');
 assert.equal(preview.chooseMasterLayer(layers.slice(1)).id, 'teachingObject');
 assert.equal(preview.chooseMasterLayer([]), null);
@@ -131,7 +186,8 @@ for (const propContract of [
   /controlled:\s*\{\s*type:\s*Boolean,\s*default:\s*false\s*\}/,
   /playing:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/,
   /clockMs:\s*\{\s*type:\s*Number,\s*default:\s*0\s*\}/,
-  /replayNonce:\s*\{\s*type:\s*Number,\s*default:\s*0\s*\}/
+  /replayNonce:\s*\{\s*type:\s*Number,\s*default:\s*0\s*\}/,
+  /layerId:\s*\{\s*type:\s*String,\s*default:\s*''\s*\}/
 ]) {
   assert.match(videoLayerSource, propContract, 'CinematicVideoLayer must expose the controlled playback props');
 }
@@ -160,6 +216,12 @@ assert.match(
 );
 assert.match(videoLayerSource, /playPending/, 'controlled playback must guard pending play promises');
 assert.match(videoLayerSource, /playBlocked/, 'controlled playback must block repeated rejected play promises');
+assert.ok(videoLayerSource.includes('mediaPlaybackState()'), 'CinematicVideoLayer must expose safe media time and readiness');
+assert.doesNotMatch(exactPreviewSource, /cinematicLayers\s*\[\s*\d+\s*\]/, 'master lookup must never depend on Vue ref array order');
+
+assert.match(componentSource, /@error="handleMediaError\(layer\.id, layer\.src/, 'media error handlers must preserve the affected layer id and source');
+assert.match(componentSource, /failed to load\/decode/, 'media load/decode failures must not be reported as CORS');
+assert.match(componentSource, /media host must allow CORS/, 'canvas readback failures must retain the explicit CORS guidance');
 
 const rafCallbacks = new Map();
 const cancelledFrames = [];
@@ -183,7 +245,9 @@ function createExactPreviewClock({ playing = false, clockMs = 0, durationMs = 10
     cinematicFrameHandle: null,
     cinematicStartedAt: null,
     cinematicComparisonEnabled: true,
+    cinematicFlattenable: true,
     cinematicDurationMs: durationMs,
+    $refs: {},
     ...exactPreview.methods
   };
 }
@@ -216,6 +280,28 @@ exactClock.resetCinematicPlayback();
 assert.equal(exactClock.cinematicPlaying, false, 'projection reset must pause cinematic playback');
 assert.equal(rafCallbacks.size, 0, 'projection reset must cancel the RAF loop');
 
+const masterClock = createExactPreviewClock({ playing: true, clockMs: 250, durationMs: 5000 });
+masterClock.$refs.cinematicLayers = [{
+  layerId: 'teachingObject',
+  mediaPlaybackState: () => ({ layerId: 'teachingObject', ready: true, currentTimeSec: 4 })
+}, {
+  layerId: 'background',
+  mediaPlaybackState: () => ({ layerId: 'background', ready: true, currentTimeSec: 1.234 })
+}];
+masterClock.advanceCinematicClock(99000);
+assert.equal(masterClock.cinematicClockMs, 1234, 'background media time must override the unrelated RAF timestamp');
+masterClock.advanceCinematicClock(109000);
+assert.equal(masterClock.cinematicClockMs, 1234, 'a stalled background master must stop the shared cinematic clock');
+
+const fallbackClock = createExactPreviewClock({ playing: true, clockMs: 250, durationMs: 1000 });
+fallbackClock.$refs.cinematicLayers = [{
+  layerId: 'background',
+  mediaPlaybackState: () => ({ layerId: 'background', ready: false, currentTimeSec: 0 })
+}];
+fallbackClock.advanceCinematicClock(1000);
+fallbackClock.advanceCinematicClock(1900);
+assert.equal(fallbackClock.cinematicClockMs, 150, 'RAF elapsed time must remain the fallback before the background master is ready');
+
 function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused = true, play } = {}) {
   const video = {
     readyState: 2,
@@ -239,6 +325,7 @@ function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused
     playing,
     clockMs,
     replayNonce: 0,
+    layerId: 'background',
     usesChromaKey: true,
     renderCalls: 0,
     $refs: { video, canvas: {} },
@@ -252,6 +339,11 @@ function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused
   };
   return { instance, video };
 }
+
+const playbackStateLayer = createVideoLayer({ currentTime: 1.234 });
+assert.deepEqual(playbackStateLayer.instance.mediaPlaybackState(), {
+  layerId: 'background', ready: true, currentTimeSec: 1.234
+});
 
 const withinTolerance = createVideoLayer({ playing: false, clockMs: 1000, currentTime: 0.95 });
 withinTolerance.instance.syncPlayback();
@@ -318,6 +410,51 @@ sourceResetLayer.instance.playBlocked = true;
 videoLayer.watch.src.call(sourceResetLayer.instance);
 assert.equal(sourceResetLayer.instance.playBlocked, false, 'source reset must clear playback guards');
 assert.equal(rafCallbacks.size, 0, 'source reset must clean up the previous render loop');
+
+function createFlattenedInstance(layers = projection.layers) {
+  const instance = {
+    ...flattenedComponent.data(),
+    layers,
+    stopCalls: 0,
+    ...flattenedComponent.methods
+  };
+  instance.stopRendering = function stopRendering() { this.stopCalls += 1; };
+  return instance;
+}
+
+const loadFailure = createFlattenedInstance();
+loadFailure.handleMediaError('teachingObject', 'object.mp4');
+assert.equal(loadFailure.errorMessage, 'Flattened preview unavailable: teachingObject failed to load/decode.');
+assert.equal(loadFailure.stopCalls, 1);
+
+const staleLoadFailure = createFlattenedInstance();
+staleLoadFailure.handleMediaError('teachingObject', 'old-object.mp4');
+assert.equal(staleLoadFailure.errorMessage, '', 'stale media errors from a replaced source must be ignored');
+
+const corsFailure = createFlattenedInstance();
+corsFailure.failCanvasReadback('robotOverlay');
+assert.equal(corsFailure.errorMessage, 'Flattened preview unavailable: media host must allow CORS. Affected layer: robotOverlay.');
+
+const readbackFailure = createFlattenedInstance();
+readbackFailure.getOffscreenCanvas = () => ({
+  getContext: () => ({
+    clearRect() {},
+    drawImage() {},
+    getImageData() { throw new DOMException('tainted', 'SecurityError'); }
+  })
+});
+const readbackResult = readbackFailure.drawLayer({ drawImage() {} }, {
+  videoWidth: 480,
+  videoHeight: 320,
+  currentTime: 0,
+  webkitDecodedFrameCount: 1
+}, {
+  id: 'teachingObject',
+  bounds: { x: 0, y: 0, width: 200, height: 200, fit: 'contain' },
+  chromaKey: { color: { r: 255, g: 255, b: 255 } }
+});
+assert.equal(readbackResult, false);
+assert.equal(readbackFailure.errorMessage, 'Flattened preview unavailable: media host must allow CORS. Affected layer: teachingObject.');
 
 assert.deepEqual(
   preview.objectFitRect(640, 480, { x: 0, y: 0, width: 480, height: 320, fit: 'fill' }),
