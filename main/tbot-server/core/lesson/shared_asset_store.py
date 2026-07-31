@@ -383,16 +383,22 @@ class SharedAssetStore:
             "mediaType": asset.get("mediaType"), "critical": asset.get("critical"), "sdPath": asset.get("sdPath"),
         }
         if asset.get("mediaType") == "video/mp4":
-            projection.update({
-                "onlineUrl": asset.get("onlineUrl"),
-                "sharedAssetKey": asset.get("sharedAssetKey"),
-                "sharedAssetVersion": asset.get("sharedAssetVersion"),
-                "compatibilityMetadata": asset.get("compatibilityMetadata"),
-                "visualRefs": sorted(
-                    (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
-                    key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
-                ),
-            })
+            projection["onlineUrl"] = asset.get("onlineUrl")
+            projection["compatibilityMetadata"] = asset.get("compatibilityMetadata")
+            if asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
+                projection.update({
+                    "derivativeId": asset.get("derivativeId"),
+                    "phaseId": asset.get("phaseId"),
+                })
+            else:
+                projection.update({
+                    "sharedAssetKey": asset.get("sharedAssetKey"),
+                    "sharedAssetVersion": asset.get("sharedAssetVersion"),
+                    "visualRefs": sorted(
+                        (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
+                        key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
+                    ),
+                })
         return projection
 
     def cleanup_parts(self) -> int:

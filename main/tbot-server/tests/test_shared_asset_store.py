@@ -57,6 +57,21 @@ def _rich_mp4_manifest(cache_key: str, digest: str, size: int) -> dict:
     return manifest
 
 
+def _rich_flattened_manifest(cache_key: str, digest: str, size: int) -> dict:
+    manifest = _rich_manifest(cache_key, digest, size)
+    manifest["assets"][0].update({
+        "key": "flattenedCinematic.opening", "mediaType": "video/mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/flattenedCinematic.opening",
+        "derivativeId": "d" * 64, "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+    })
+    return manifest
+
+
 def test_ready_rich_pack_replay_accepts_rotated_online_url(tmp_path):
     store = SharedAssetStore(tmp_path / "tbot")
     content = b"poster"
@@ -127,6 +142,48 @@ def test_ready_renderer_v3_pack_rejects_changed_rich_identity(tmp_path, mutate):
 
     with pytest.raises(PackReplayMismatchError):
         store.commit_pack(cache_key, {"scene.opening@v3": digest}, manifest=changed)
+
+
+def test_ready_renderer_v4_pack_reuses_exact_flattened_identity(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"flattened-mp4"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v4-{'a' * 64}"
+    store.put_bytes(content, digest)
+    manifest = _rich_flattened_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {"flattenedCinematic.opening": digest}, manifest=manifest)
+
+    _pack, status = store.commit_pack(
+        cache_key,
+        {"flattenedCinematic.opening": digest},
+        manifest=deepcopy(manifest),
+        return_status=True,
+    )
+
+    assert status == PACK_COMMIT_REPLAYED
+
+
+@pytest.mark.parametrize("field,value", [
+    ("derivativeId", "e" * 64),
+    ("phaseId", "greet"),
+])
+def test_ready_renderer_v4_pack_rejects_changed_flattened_identity(tmp_path, field, value):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"flattened-mp4"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v4-{'a' * 64}"
+    store.put_bytes(content, digest)
+    manifest = _rich_flattened_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {"flattenedCinematic.opening": digest}, manifest=manifest)
+    changed = deepcopy(manifest)
+    changed["assets"][0][field] = value
+
+    with pytest.raises(PackReplayMismatchError):
+        store.commit_pack(
+            cache_key,
+            {"flattenedCinematic.opening": digest},
+            manifest=changed,
+        )
 
 
 def _hold_atomic_write(root, started, release):
