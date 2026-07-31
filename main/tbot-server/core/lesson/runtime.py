@@ -902,6 +902,25 @@ def _renderer_v4_request_enabled(conn: Any, renderer_capabilities: List[str]) ->
     )
 
 
+def _requested_renderer_capabilities(
+    advertised: List[str],
+    *,
+    renderer_v2_enabled: bool,
+    renderer_v3_enabled: bool,
+    renderer_v4_enabled: bool,
+) -> List[str]:
+    enabled = (
+        (RENDERER_V4, renderer_v4_enabled),
+        (RENDERER_V3, renderer_v3_enabled),
+        (RENDERER_V2, renderer_v2_enabled),
+    )
+    advertised_set = set(advertised)
+    for renderer, rollout_enabled in enabled:
+        if rollout_enabled and renderer in advertised_set:
+            return [renderer]
+    return [PROTOCOL_VERSION]
+
+
 def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     assets = [
         {
@@ -4258,10 +4277,11 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # current firmware). Forwarded to the manifest fetch so the backend serves a
     # manifest this device can render. The runtime re-derives the same set from
     # conn.features for its start() gate; computing it here keeps the fetch honest.
-    requested_renderer_capabilities = (
-        renderer_capabilities
-        if renderer_v2_enabled or renderer_v3_enabled or renderer_v4_enabled
-        else [PROTOCOL_VERSION]
+    requested_renderer_capabilities = _requested_renderer_capabilities(
+        renderer_capabilities,
+        renderer_v2_enabled=renderer_v2_enabled,
+        renderer_v3_enabled=renderer_v3_enabled,
+        renderer_v4_enabled=renderer_v4_enabled,
     )
 
     async with httpx.AsyncClient(

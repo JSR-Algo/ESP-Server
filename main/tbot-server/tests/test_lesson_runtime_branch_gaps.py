@@ -51,6 +51,8 @@ from core.lesson.runtime import (  # noqa: E402
     S_RUNNING,
     VISUAL_DEGRADED_REASONS,
     VISUAL_REJECTED_REASONS,
+    _renderer_v4_request_enabled,
+    _requested_renderer_capabilities,
 )
 
 
@@ -286,6 +288,54 @@ def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
             asset_cache=asset_cache if asset_cache is not None else T._FakeAssetCache(ready=True),
             forwarder=forwarder if forwarder is not None else T._FakeForwarder(),
             manifest_checksum=T._manifest_checksum(),
+        )
+
+
+class CinematicCapabilitySelectionTest(unittest.TestCase):
+    def test_requests_only_enabled_exact_advertised_renderer_lanes(self):
+        cases = (
+            ("v2 only", ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"], True, False, False, ["teebot-lesson-renderer.v2"]),
+            ("v3 only", [RENDERER_V3, RENDERER_V4], False, True, False, [RENDERER_V3]),
+            ("v4 only", [RENDERER_V3, RENDERER_V4], False, False, True, [RENDERER_V4]),
+            ("highest cinematic", [RENDERER_V3, RENDERER_V4], False, True, True, [RENDERER_V4]),
+            ("disabled cinematic", [RENDERER_V3, RENDERER_V4], False, False, False, ["teebot-lesson-renderer.v1"]),
+        )
+        for label, advertised, v2, v3, v4, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    _requested_renderer_capabilities(
+                        advertised,
+                        renderer_v2_enabled=v2,
+                        renderer_v3_enabled=v3,
+                        renderer_v4_enabled=v4,
+                    ),
+                    expected,
+                )
+
+    def test_excludes_incomplete_v4_feature_even_when_version_is_advertised(self):
+        conn = T._FakeConn(features={
+            "lesson": True,
+            "renderer": [RENDERER_V3, RENDERER_V4],
+            "lessonRendererV3": {"directMp4Cinematic": True, "sdAssetPack": True},
+            "lessonRendererV4": {"sdAssetPack": True},
+        })
+        conn.device_id = "robot-cinematic"
+        conn.config = {"lesson": {
+            "renderer_v3_enabled": True,
+            "renderer_v4_enabled": True,
+            "rollout_device_allowlist": ["robot-cinematic"],
+        }}
+        capabilities = [RENDERER_V3, RENDERER_V4]
+        self.assertFalse(_renderer_v4_request_enabled(conn, capabilities))
+
+        self.assertEqual(
+            _requested_renderer_capabilities(
+                capabilities,
+                renderer_v2_enabled=False,
+                renderer_v3_enabled=True,
+                renderer_v4_enabled=False,
+            ),
+            [RENDERER_V3],
         )
 
 
