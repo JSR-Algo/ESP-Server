@@ -133,13 +133,40 @@ LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
 await router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
-Vue.prototype.$t = (key) => key;
+const testI18n = Vue.observable({ locale: 'keys' });
+const journeyTranslations = {
+  en: {
+    'lesson.tvideoJourney.field.x': 'Horizontal position', 'lesson.tvideoJourney.field.y': 'Vertical position',
+    'lesson.tvideoJourney.field.width': 'Safe width', 'lesson.tvideoJourney.field.height': 'Safe height',
+    'lesson.tvideoJourney.field.stepKey': 'Step key', 'lesson.tvideoJourney.pronunciation.segments': 'Approved segments',
+    'lesson.tvideoJourney.pronunciation.phonemes': 'Approved phonemes',
+    'lesson.tvideoJourney.branch.target': 'Target word', 'lesson.tvideoJourney.branch.meaning_vi': 'Vietnamese meaning',
+    'lesson.tvideoJourney.branch.related': 'Related concept', 'lesson.tvideoJourney.branch.silence': 'Silence',
+    'lesson.tvideoJourney.branch.uncertain': 'Uncertain contribution', 'lesson.tvideoJourney.branch.retry_level_1': 'Retry coaching · level 1',
+    'lesson.tvideoJourney.branch.retry_level_2': 'Retry coaching · level 2', 'lesson.tvideoJourney.branch.retry_level_3': 'Retry coaching · level 3',
+  },
+  vi: {
+    'lesson.tvideoJourney.field.x': 'Vị trí ngang', 'lesson.tvideoJourney.field.y': 'Vị trí dọc',
+    'lesson.tvideoJourney.field.width': 'Chiều rộng an toàn', 'lesson.tvideoJourney.field.height': 'Chiều cao an toàn',
+    'lesson.tvideoJourney.field.stepKey': 'Khóa bước', 'lesson.tvideoJourney.pronunciation.segments': 'Âm đoạn đã duyệt',
+    'lesson.tvideoJourney.pronunciation.phonemes': 'Âm vị đã duyệt',
+    'lesson.tvideoJourney.branch.target': 'Từ mục tiêu', 'lesson.tvideoJourney.branch.meaning_vi': 'Nghĩa tiếng Việt',
+    'lesson.tvideoJourney.branch.related': 'Khái niệm liên quan', 'lesson.tvideoJourney.branch.silence': 'Im lặng',
+    'lesson.tvideoJourney.branch.uncertain': 'Đóng góp chưa chắc chắn', 'lesson.tvideoJourney.branch.retry_level_1': 'Hướng dẫn thử lại · mức 1',
+    'lesson.tvideoJourney.branch.retry_level_2': 'Hướng dẫn thử lại · mức 2', 'lesson.tvideoJourney.branch.retry_level_3': 'Hướng dẫn thử lại · mức 3',
+  },
+};
+Vue.prototype.$t = function translate(key, params) {
+  const template = (journeyTranslations[testI18n.locale] && journeyTranslations[testI18n.locale][key]) || key;
+  return Object.entries(params || {}).reduce((value, [name, replacement]) => value.replace(`{${name}}`, replacement), template);
+};
 Vue.prototype.$message = { success() {}, error(message) { calls.errors.push(message); }, warning(message) { calls.warnings.push(message); } };
 Vue.prototype.$confirm = () => Promise.resolve();
 let vm = new Vue({ router, render: (h) => h(LessonEditor) }).$mount('#app');
 
 const editor = vm.$children[0];
 window.__LESSON_BUILDER_TEST__ = { editor, calls, sharedAssets, validation, manifest };
+window.__SET_TEST_LOCALE__ = async (locale) => { testI18n.locale = locale; await Vue.nextTick(); };
 window.__MOUNT_DISABLED_LESSON_EDITOR__ = async () => {
   vm.$destroy();
   vm.$el.remove();

@@ -38,10 +38,7 @@ export default {
   },
   methods: {
     branchLabel(value) {
-      return {
-        target: 'target', meaning_vi: 'meaning_vi', related: 'related', silence: 'silence', uncertain: 'uncertain',
-        retry_level_1: 'retry_level_1', retry_level_2: 'retry_level_2', retry_level_3: 'retry_level_3',
-      }[value];
+      return this.$t(`lesson.tvideoJourney.branch.${value}`);
     },
   },
 };

@@ -87,9 +87,16 @@ for (const key of i18nKeys) {
 for (const copy of ['DETERMINISTIC SIMULATOR', 'PREVIEW · NOT PUBLISH AUTHORITY', 'BACKEND DERIVATIVES', 'EXACT TWO-STEP CONTENT', 'Selected journey word', 'Selected robot role', 'ADMIN PREVIEW · NOT PUBLISH AUTHORITY']) {
   assert.ok(componentSources.every((source) => !source.includes(copy)), `hard-coded visible copy must use i18n: ${copy}`);
 }
+for (const literal of ['label="x"', 'label="y"', 'label="width"', 'label="height"', 'label="stepKey"', 'label="approvedSegments"', 'label="approvedPhonemes"']) {
+  assert.ok(!editor.includes(literal), `visible field label must use i18n: ${literal}`);
+}
+assert.match(conversation, /lesson\.tvideoJourney\.branch\./, 'conversation options must use localized human branch labels');
 
 for (const key of ['tab.sources', 'tab.path', 'tab.conversation', 'tab.flattened']) assert.ok(editor.includes(`lesson.tvideoJourney.${key}`), `missing preview tab i18n key ${key}`);
-for (const branch of helper.CONVERSATION_BRANCHES) assert.ok(conversation.includes(branch), `missing branch ${branch}`);
+for (const branch of helper.CONVERSATION_BRANCHES) {
+  assert.ok(en.includes(`'lesson.tvideoJourney.branch.${branch}'`), `missing English branch label ${branch}`);
+  assert.ok(vi.includes(`'lesson.tvideoJourney.branch.${branch}'`), `missing Vietnamese branch label ${branch}`);
+}
 for (const marker of ['role="tablist"', 'role="tab"', 'aria-selected', '@keydown', 'touch-action', '@media (prefers-reduced-motion: reduce)']) {
   assert.ok(editor.includes(marker) || robot.includes(marker), `missing accessibility/responsive marker ${marker}`);
 }
