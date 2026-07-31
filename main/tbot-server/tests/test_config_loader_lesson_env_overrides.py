@@ -33,6 +33,7 @@ from config.config_loader import (
 _LESSON_ENV = (
     "LESSON_RUNTIME_ENABLED",
     "LESSON_RENDERER_V2_ENABLED",
+    "LESSON_RENDERER_V4_ENABLED",
     "COURSE_BACKEND_URL",
     "LESSON_ASSET_ORIGIN_BASE",
     "LESSON_ASSET_PUBLIC_BASE_URL",
@@ -110,6 +111,17 @@ def test_default_config_keeps_interactive_sample_lesson_disabled():
     assert config["lesson"]["asset_pack_local_root"] == "sd://tbot/lesson-assets"
     assert config["lesson"]["asset_pack_mount_root"] == "/sdcard/tbot/lesson-assets"
     assert config["lesson"]["storage_hil_device_allowlist"] == []
+    assert config["lesson"]["renderer_v4_enabled"] is False
+
+
+def test_renderer_v4_rollout_env_requires_and_accepts_one_device(monkeypatch):
+    monkeypatch.setenv("LESSON_RENDERER_V4_ENABLED", "true")
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", "robot-v4")
+
+    config = _apply_lesson_env_overrides({"lesson": {}})
+
+    assert config["lesson"]["renderer_v4_enabled"] is True
+    assert config["lesson"]["rollout_device_allowlist"] == ["robot-v4"]
 
 
 def test_storage_hil_allowlist_normalizes_one_mixed_case_colon_mac(monkeypatch):

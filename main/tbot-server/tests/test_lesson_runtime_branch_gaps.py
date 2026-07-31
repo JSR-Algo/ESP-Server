@@ -55,6 +55,7 @@ from core.lesson.runtime import (  # noqa: E402
 
 
 RENDERER_V3 = "teebot-lesson-renderer.v3"
+RENDERER_V4 = "teebot-lesson-renderer.v4"
 
 
 def _cinematic_metadata(duration_ms, *, background=False):
@@ -210,6 +211,68 @@ def _cinematic_runtime(*, conn=None, manifest=None, cache=None, sleep=None):
             forwarder=T._FakeForwarder(),
             manifest_checksum=T._manifest_checksum(),
             sleep=sleep,
+        )
+
+
+def _flattened_manifest():
+    manifest = T._build_manifest()
+    manifest["manifestVersion"] = RENDERER_V4
+    manifest["protocolVersion"] = RENDERER_V4
+    manifest["features"] = {
+        "lessonRendererV4": {
+            "flattenedMjpegCinematic": True,
+            "assetSource": "publishedFlattenedDerivative",
+        }
+    }
+    manifest["cinematicPhases"] = [{
+        "templateId": "flattenedMjpegCinematic", "templateVersion": 1,
+        "phaseId": "opening", "timing": {"durationMs": 9000},
+        "asset": {
+            "derivativeId": "d" * 64,
+            "path": f"lessons/derivatives/{'d' * 64}/opening.mp4",
+            "url": f"https://cdn.example.test/lessons/derivatives/{'d' * 64}/opening.mp4",
+            "sha256": "a" * 64, "bytes": 1234, "mediaType": "video/mp4",
+            "width": 480, "height": 320,
+            "metadata": {
+                "codec": "mjpeg", "fps": 10, "durationMs": 9000,
+                "frameCount": 90, "hasAudio": False,
+            },
+        },
+    }]
+    return manifest
+
+
+class _FlattenedAssetCache(_CinematicAssetCache):
+    def asset_pack_manifest(self, **kwargs):
+        pack = T._FakeAssetCache.asset_pack_manifest(self, **kwargs)
+        path = f"{pack['localRoot']}/flattenedCinematic.opening"
+        pack["assets"] = [{
+            "key": "flattenedCinematic.opening", "state": "READY", "checksumOk": True,
+            "localPath": path, "sdPath": path, "sha256": "a" * 64, "size": 1234,
+            "mediaType": "video/mp4", "derivativeId": "d" * 64, "phaseId": "opening",
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+                "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+            },
+        }]
+        return pack
+
+
+def _flattened_runtime(*, conn=None):
+    conn = conn or T._FakeConn(features={
+        "lesson": True, "renderer": [RENDERER_V4],
+        "lessonRendererV4": {"flattenedMjpegCinematic": True, "sdAssetPack": True},
+    })
+    conn.device_id = "robot-v4"
+    conn.config = {"lesson": {
+        "renderer_v4_enabled": True, "rollout_device_allowlist": ["robot-v4"],
+        "asset_delivery_mode": "sd_pack", "frame_ack_timeout_sec": 60,
+    }}
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn, assignment=T._build_assignment(), manifest=_flattened_manifest(),
+            asset_cache=_FlattenedAssetCache(), forwarder=T._FakeForwarder(),
+            manifest_checksum=T._manifest_checksum(),
         )
 
 
@@ -1443,6 +1506,106 @@ class CinematicContractTest(unittest.TestCase):
                 with self.assertRaises(module.CinematicContractError) as ctx:
                     module.project_cinematic_phase(candidate, pack)
                 self.assertEqual(ctx.exception.code, code)
+
+
+class FlattenedCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _frames(rt):
+        return [json.loads(payload) for payload in rt.conn.websocket.sent]
+
+    def _ack(self, rt, frame, sequence, *, session_id=None):
+        body = frame["body"]
+        command = body.get("cinematicPhase") if isinstance(body.get("cinematicPhase"), dict) else body
+        kind = command["command"]
+        event = "frameZeroReady" if kind == "prepare" else "phaseReady" if kind == "start" else "commandApplied"
+        cinematic_ack = {
+            "event": event, "command": kind,
+            "phaseId": command["phaseId"],
+            "commandSequenceId": command.get("commandSequenceId", body.get("commandSequenceId")),
+            "accepted": True,
+        }
+        if kind == "prepare":
+            cinematic_ack["frameZeroReady"] = True
+        elif kind == "start":
+            cinematic_ack["phaseReady"] = True
+        return {
+            "type": "lesson_ack", "protocolVersion": RENDERER_V4,
+            "assignmentId": rt.assignment_id,
+            "sessionId": session_id or rt.session_id,
+            "lessonId": rt.lesson_id, "lessonVersion": rt.lesson_version,
+            "sequence": sequence, "timestamp": 1,
+            "body": {
+                "acks": frame["sequence"],
+                "assetPack": {"ready": True, "cacheKey": rt.asset_cache.cache_key},
+                "cinematicPhase": cinematic_ack,
+            },
+        }
+
+    async def test_v4_requires_exact_feature_and_never_relabeled_v3(self):
+        cases = [
+            {"lesson": True, "renderer": [RENDERER_V3], "lessonRendererV3": {"directMp4Cinematic": True, "sdAssetPack": True}},
+            {"lesson": True, "renderer": [RENDERER_V4], "lessonRendererV4": {"sdAssetPack": True}},
+            {"lesson": True, "renderer": [RENDERER_V4], "lessonRendererV4": {"flattenedMjpegCinematic": True}},
+        ]
+        for features in cases:
+            with self.subTest(features=features):
+                conn = T._FakeConn(features=features)
+                rt = _flattened_runtime(conn=conn)
+                with self.assertRaises(LessonError) as ctx:
+                    await rt.start()
+                self.assertEqual(ctx.exception.code, "CINEMATIC_CAPABILITY_UNSUPPORTED")
+                self.assertEqual(conn.websocket.sent, [])
+
+    async def test_v4_prepare_has_one_file_and_session_fencing_matches_v3(self):
+        rt = _flattened_runtime()
+        await rt.start()
+        prepare = self._frames(rt)[0]
+        self.assertEqual(prepare["protocolVersion"], RENDERER_V4)
+        command = prepare["body"]["cinematicPhase"]
+        self.assertEqual(command["command"], "prepare")
+        self.assertEqual(command["phaseId"], "opening")
+        self.assertEqual(command["durationMs"], 9000)
+        self.assertEqual(command["fps"], 10)
+        self.assertEqual(command["frameCount"], 90)
+        self.assertEqual(command["asset"]["phaseId"], "opening")
+        self.assertTrue(command["asset"]["sdPath"].endswith("/flattenedCinematic.opening"))
+        self.assertNotIn("layers", command)
+
+        stale = self._ack(rt, prepare, 1, session_id="stale-session")
+        await rt.on_lesson_ack(stale)
+        self.assertEqual(len(self._frames(rt)), 1)
+        await rt.on_lesson_ack(self._ack(rt, prepare, 1))
+        frames = self._frames(rt)
+        self.assertEqual([frame["type"] for frame in frames], ["lesson_prepare", "lesson_start"])
+        self.assertEqual(frames[-1]["protocolVersion"], RENDERER_V4)
+
+    async def test_v4_pause_resume_and_cancel_keep_v3_command_ownership(self):
+        rt = _flattened_runtime()
+        await rt.start()
+        prepare = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, prepare, 1))
+        start = self._frames(rt)[-1]
+        await rt.on_lesson_ack(self._ack(rt, start, 2))
+        self.assertEqual(rt.state, S_RUNNING)
+
+        await rt.pause()
+        pause = self._frames(rt)[-1]
+        self.assertEqual(pause["body"]["command"], "pause")
+        await rt.on_lesson_ack(self._ack(rt, pause, 3))
+        self.assertEqual(rt.state, S_PAUSED)
+
+        await rt.resume()
+        resume = self._frames(rt)[-1]
+        self.assertEqual(resume["body"]["command"], "resume")
+        await rt.on_lesson_ack(self._ack(rt, resume, 4))
+        self.assertEqual(rt.state, S_RUNNING)
+
+        await rt.cancel("assignmentReplaced")
+        cancel = self._frames(rt)[-1]
+        self.assertEqual(cancel["body"]["command"], "cancel")
+        await rt.on_lesson_ack(self._ack(rt, cancel, 5))
+        self.assertEqual(rt.state, S_COMPLETED)
+        self.assertIsNone(rt._cinematic_phase)
 
 
 class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):

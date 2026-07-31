@@ -176,6 +176,53 @@ def _mp4_manifest():
     }])
 
 
+def _flattened_mp4_manifest():
+    content = b"renderer-v4-flattened"
+    key = "flattenedCinematic.opening"
+    url = "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4"
+    return content, _manifest(assets=[{
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key), "localPath": _sd_path(key),
+        "derivativeId": "d" * 64, "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1000, "frameCount": 10, "hasAudio": False,
+        },
+    }])
+
+
+@pytest.mark.asyncio
+async def test_renderer_v4_one_file_pack_materializes_reuses_and_never_activates_corrupt(tmp_path):
+    content, manifest = _flattened_mp4_manifest()
+    url = manifest["assets"][0]["onlineUrl"]
+    client = _Client({url: [content]})
+
+    first = await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=client, resolver=_public_resolver,
+    )
+    second = await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=client, resolver=_public_resolver,
+    )
+
+    assert first["downloadedCount"] == 1
+    assert second["skippedCount"] == 1
+    assert client.requests == [url]
+    pack_path = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json"
+    stored = json.loads(pack_path.read_text(encoding="utf-8"))
+    assert stored["assets"][0]["derivativeId"] == "d" * 64
+    assert stored["assets"][0]["phaseId"] == "opening"
+    assert stored["assets"][0]["compatibilityMetadata"]["width"] == 480
+
+    corrupt_root = tmp_path / "corrupt"
+    corrupt_client = _Client({url: [content + b"corrupt"]})
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            manifest, config=_config(corrupt_root), client=corrupt_client, resolver=_public_resolver,
+        )
+    assert exc_info.value.code in {"DECLARED_SIZE_MISMATCH", "CHECKSUM_MISMATCH"}
+    assert not (corrupt_root / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "READY").exists()
+
+
 def _config(tmp_path, **lesson):
     cfg = {
         "lesson": {

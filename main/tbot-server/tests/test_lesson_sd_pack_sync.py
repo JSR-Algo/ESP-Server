@@ -139,6 +139,41 @@ def test_cached_asset_packs_preserve_ready_rich_pack_metadata(tmp_path):
     assert poster_asset["localPath"] == poster_asset["sdPath"]
     assert by_key["teachingObject.barn"]["critical"] is False
 
+
+def test_cached_asset_packs_preserve_renderer_v4_flattened_identity(tmp_path):
+    checksum = "4" * 64
+    cache_key = f"lesson-a/v4-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    content = b"flattened"
+    digest = hashlib.sha256(content).hexdigest()
+    key = "flattenedCinematic.opening"
+    store.put_bytes(content, digest)
+    manifest = {
+        "lessonId": "lesson-a", "lessonVersion": 4, "profile": "espTft",
+        "manifestChecksum": checksum, "cacheKey": cache_key,
+        "assets": [{
+            "key": key, "sha256": digest, "size": len(content), "mediaType": "video/mp4",
+            "critical": True,
+            "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+            "sdPath": _rich_sd_path(cache_key, key),
+            "derivativeId": "d" * 64, "phaseId": "opening",
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+                "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+            },
+        }],
+    }
+    store.commit_pack(cache_key, {key: digest}, manifest=manifest)
+
+    packs = list(sd_pack_sync.cached_asset_packs({"lesson": {"asset_pack_mount_root": str(pack_root)}}))
+
+    assert len(packs) == 1
+    asset = packs[0]["assets"][0]
+    assert asset["derivativeId"] == "d" * 64
+    assert asset["phaseId"] == "opening"
+    assert asset["compatibilityMetadata"]["frameCount"] == 90
+
 def test_cached_asset_packs_use_pack_mount_root_when_cache_root_is_absent(tmp_path):
     checksum = "0123456789abcdef" * 4
     cache_key = f"lesson-a/v3-{checksum}"

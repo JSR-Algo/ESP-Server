@@ -505,6 +505,7 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
         "motion_presets_enabled",
         "playful_interactions_enabled",
         "renderer_v2_enabled",
+        "renderer_v4_enabled",
     ):
         if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
             raise ValueError(f"lesson.{key} must be a boolean")
@@ -554,6 +555,7 @@ def _apply_lesson_env_overrides(config):
     motion_presets_flag = _parse_strict_bool_env("LESSON_MOTION_PRESETS_ENABLED")
     playful_interactions_flag = _parse_strict_bool_env("LESSON_PLAYFUL_INTERACTIONS_ENABLED")
     renderer_v2_flag = _parse_strict_bool_env("LESSON_RENDERER_V2_ENABLED")
+    renderer_v4_flag = _parse_strict_bool_env("LESSON_RENDERER_V4_ENABLED")
     rollout_allowlist_raw = _clean_env("LESSON_ROLLOUT_DEVICE_ALLOWLIST")
     storage_hil_allowlist_raw = _clean_env("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST")
     course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
@@ -623,6 +625,7 @@ def _apply_lesson_env_overrides(config):
         and motion_presets_flag is None
         and playful_interactions_flag is None
         and renderer_v2_flag is None
+        and renderer_v4_flag is None
         and rollout_allowlist_raw is None
     ):
         lesson_cfg = config.get("lesson")
@@ -633,6 +636,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.setdefault("motion_presets_enabled", False)
         lesson_cfg.setdefault("playful_interactions_enabled", False)
         lesson_cfg.setdefault("renderer_v2_enabled", False)
+        lesson_cfg.setdefault("renderer_v4_enabled", False)
         lesson_cfg.setdefault("rollout_device_allowlist", [])
         lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
         configured_allowlist = lesson_cfg["rollout_device_allowlist"]
@@ -647,6 +651,7 @@ def _apply_lesson_env_overrides(config):
             lesson_cfg.get("motion_presets_enabled") is True
             or lesson_cfg.get("playful_interactions_enabled") is True
             or lesson_cfg.get("renderer_v2_enabled") is True
+            or lesson_cfg.get("renderer_v4_enabled") is True
             or lesson_cfg.get("sample_lesson") is True
         ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
             raise ValueError("enabled lesson rollout controls require exactly one device")
@@ -660,6 +665,7 @@ def _apply_lesson_env_overrides(config):
     lesson_cfg.setdefault("motion_presets_enabled", False)
     lesson_cfg.setdefault("playful_interactions_enabled", False)
     lesson_cfg.setdefault("renderer_v2_enabled", False)
+    lesson_cfg.setdefault("renderer_v4_enabled", False)
     lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
@@ -677,6 +683,11 @@ def _apply_lesson_env_overrides(config):
         renderer_v2_flag
         if renderer_v2_flag is not None
         else lesson_cfg["renderer_v2_enabled"]
+    )
+    lesson_cfg["renderer_v4_enabled"] = (
+        renderer_v4_flag
+        if renderer_v4_flag is not None
+        else lesson_cfg["renderer_v4_enabled"]
     )
     if rollout_allowlist_raw is not None:
         lesson_cfg["rollout_device_allowlist"] = sorted(
@@ -748,6 +759,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.get("motion_presets_enabled") is True
         or lesson_cfg.get("playful_interactions_enabled") is True
         or lesson_cfg.get("renderer_v2_enabled") is True
+        or lesson_cfg.get("renderer_v4_enabled") is True
         or lesson_cfg.get("sample_lesson") is True
     ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
         raise ValueError("enabled lesson rollout controls require exactly one device")
@@ -979,6 +991,7 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "motion_presets_enabled",
     "playful_interactions_enabled",
     "renderer_v2_enabled",
+    "renderer_v4_enabled",
     "rollout_device_allowlist",
     "storage_hil_device_allowlist",
 )

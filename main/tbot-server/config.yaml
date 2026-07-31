@@ -460,6 +460,7 @@ lesson:
   # both controls apply only to listed device IDs/MACs.
   motion_presets_enabled: false
   playful_interactions_enabled: false
+  renderer_v4_enabled: false
   rollout_device_allowlist: []
   # Lab-only raw MCP gate. Empty by default; accepts at most one live robot MAC.
   storage_hil_device_allowlist: []

@@ -239,6 +239,28 @@ def test_rejects_arbitrary_video_that_lacks_validated_renderer_v3_shared_identit
     with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
         build_firmware_sync_pack(render_pack)
 
+
+def test_renderer_v4_flattened_mp4_preserves_exact_identity_and_physical_path():
+    render_pack = _pack("flattenedCinematic.opening")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64, "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+    })
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["derivativeId"] == "d" * 64
+    assert sent["phaseId"] == "opening"
+    assert sent["compatibilityMetadata"]["frameCount"] == 90
+    assert sent["localPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/flattenedCinematic.opening"
+    assert sent["sdPath"] == sent["localPath"]
+
 @pytest.mark.parametrize(
     ("mutate", "secret"),
     [

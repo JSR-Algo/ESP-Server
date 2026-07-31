@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
+from core.lesson.sd_pack_mcp_payload import (
+    FirmwareSyncPackError,
+    build_firmware_sync_pack,
+    validate_renderer_v3_shared_mp4,
+    validate_renderer_v4_flattened_mp4,
+)
 from core.lesson.shared_asset_store import SharedAssetStore
 from core.utils.util import get_vision_url
 
@@ -316,6 +321,15 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
             return None
     except OSError:
         return None
+    rich_identity: dict[str, Any] = {}
+    if media_type == "video/mp4":
+        try:
+            if "derivativeId" in item or "phaseId" in item:
+                rich_identity = validate_renderer_v4_flattened_mp4(dict(item))
+            else:
+                rich_identity = validate_renderer_v3_shared_mp4(dict(item))
+        except FirmwareSyncPackError:
+            return None
     return {
         "key": key,
         "path": key,
@@ -329,6 +343,7 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
         "checksumOk": True,
         "sdPath": sd_path,
         "localPath": sd_path,
+        **rich_identity,
     }
 
 def _safe_int(value: Any, default: int) -> int:

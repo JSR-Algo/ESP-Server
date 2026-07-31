@@ -44,7 +44,11 @@ from core.lesson.errors import (
     PreloadTimeout,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
-from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
+from core.lesson.sd_pack_mcp_payload import (
+    FirmwareSyncPackError,
+    validate_renderer_v3_shared_mp4,
+    validate_renderer_v4_flattened_mp4,
+)
 
 TAG = "LessonAssetCache"
 
@@ -87,7 +91,8 @@ class AssetState:
     __slots__ = (
         "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
         "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
-        "renderer_v3_mp4", "state", "checksum_ok", "reason",
+        "derivative_id", "phase_id", "renderer_v3_mp4", "renderer_v4_mp4",
+        "state", "checksum_ok", "reason",
     )
 
     def __init__(self, asset: Dict[str, Any]) -> None:
@@ -119,11 +124,18 @@ class AssetState:
         self.shared_asset_version: Optional[int] = asset.get("sharedAssetVersion")
         self.compatibility_metadata: Any = asset.get("compatibilityMetadata")
         self.visual_refs: Any = asset.get("visualRefs")
+        self.derivative_id: Optional[str] = asset.get("derivativeId")
+        self.phase_id: Optional[str] = asset.get("phaseId")
         try:
             validate_renderer_v3_shared_mp4(asset)
             self.renderer_v3_mp4 = True
         except FirmwareSyncPackError:
             self.renderer_v3_mp4 = False
+        try:
+            validate_renderer_v4_flattened_mp4(asset)
+            self.renderer_v4_mp4 = True
+        except FirmwareSyncPackError:
+            self.renderer_v4_mp4 = False
         self.state: str = PENDING
         self.checksum_ok: bool = False
         self.reason: Optional[str] = None
@@ -403,6 +415,8 @@ class AssetCache:
             "sharedAssetVersion": asset.shared_asset_version,
             "compatibilityMetadata": asset.compatibility_metadata,
             "visualRefs": asset.visual_refs,
+            "derivativeId": asset.derivative_id,
+            "phaseId": asset.phase_id,
         }
         return {k: v for k, v in record.items() if v is not None}
 

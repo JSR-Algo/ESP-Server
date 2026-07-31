@@ -67,6 +67,22 @@ def _renderer_v3_mp4_asset(*, cache_key: str = f"lesson-a/v3-{HASH_B}") -> dict:
     return asset
 
 
+def _renderer_v4_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
+    asset = _asset("flattenedCinematic.opening", size=900000, cache_key=cache_key)
+    asset.update({
+        "onlineUrl": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "url": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "mediaType": "video/mp4",
+        "derivativeId": "d" * 64,
+        "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+    })
+    return asset
+
+
 def _pack(*, lesson_id: str = "lesson-a", classification: str = "curriculum") -> dict:
     checksum = HASH_B
     cache_key = f"{lesson_id}/v3-{checksum}"
@@ -207,6 +223,52 @@ async def test_validated_renderer_v3_shared_mp4_metadata_passes_through_unchange
 
     assert await poller.run_once() == {"state": "accepted"}
     assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+async def test_validated_renderer_v4_flattened_asset_passes_through_unchanged() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    pack["assets"] = [_renderer_v4_mp4_asset(cache_key=pack["cacheKey"])]
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutate", [
+    lambda asset: asset.update(extra=True),
+    lambda asset: asset.pop("derivativeId"),
+    lambda asset: asset.update(key="flattenedCinematic.greet"),
+    lambda asset: asset.update(phaseId="dance"),
+    lambda asset: asset["compatibilityMetadata"].update(width=320),
+    lambda asset: asset["compatibilityMetadata"].update(frameCount=89),
+])
+async def test_renderer_v4_flattened_asset_rejects_non_exact_contract(mutate) -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    asset = _renderer_v4_mp4_asset(cache_key=pack["cacheKey"])
+    mutate(asset)
+    pack["assets"] = [asset]
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    result = await poller.run_once()
+    assert result["state"] == "rejected"
+    assert result["errorCode"] == "cms_invalid_renderer_v4_mp4"
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,11 @@ from core.lesson.shared_asset_store import (
     PackReplayMismatchError,
     SharedAssetStore,
 )
-from core.lesson.sd_pack_mcp_payload import FirmwareSyncPackError, validate_renderer_v3_shared_mp4
+from core.lesson.sd_pack_mcp_payload import (
+    FirmwareSyncPackError,
+    validate_renderer_v3_shared_mp4,
+    validate_renderer_v4_flattened_mp4,
+)
 
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
@@ -54,6 +58,8 @@ _ASSET_FIELDS = frozenset(
         "sharedAssetVersion",
         "compatibilityMetadata",
         "visualRefs",
+        "derivativeId",
+        "phaseId",
     }
 )
 _METRICS = {
@@ -481,11 +487,20 @@ def _validate_asset(
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     renderer_v3_fields: dict[str, Any] = {}
     if media_type.lower().startswith("video/"):
-        try:
-            renderer_v3_fields = validate_renderer_v3_shared_mp4(dict(item))
-        except FirmwareSyncPackError:
-            raise _bad("INVALID_RENDERER_V3_MP4", "Invalid renderer-v3 shared MP4") from None
-    elif any(field in item for field in ("sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs")):
+        if "derivativeId" in item or "phaseId" in item:
+            try:
+                renderer_v3_fields = validate_renderer_v4_flattened_mp4(dict(item))
+            except FirmwareSyncPackError:
+                raise _bad("INVALID_RENDERER_V4_MP4", "Invalid renderer-v4 flattened MP4") from None
+        else:
+            try:
+                renderer_v3_fields = validate_renderer_v3_shared_mp4(dict(item))
+            except FirmwareSyncPackError:
+                raise _bad("INVALID_RENDERER_V3_MP4", "Invalid renderer-v3 shared MP4") from None
+    elif any(field in item for field in (
+        "sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs",
+        "derivativeId", "phaseId",
+    )):
         if "compatibilityMetadata" in item or "visualRefs" in item:
             raise _bad("INVALID_RENDERER_V3_MP4", "Renderer-v3 metadata is only valid for shared MP4")
         shared_key = item.get("sharedAssetKey")
@@ -816,16 +831,22 @@ def _replay_asset_projection(asset: Mapping[str, Any]) -> dict[str, Any]:
                     "sdPath": asset.get("sdPath"),
     }
     if asset.get("mediaType") == "video/mp4":
-        projection.update({
-            "onlineUrl": asset.get("onlineUrl"),
-            "sharedAssetKey": asset.get("sharedAssetKey"),
-            "sharedAssetVersion": asset.get("sharedAssetVersion"),
-            "compatibilityMetadata": asset.get("compatibilityMetadata"),
-            "visualRefs": sorted(
-                (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
-                key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
-            ),
-        })
+        projection["onlineUrl"] = asset.get("onlineUrl")
+        projection["compatibilityMetadata"] = asset.get("compatibilityMetadata")
+        if asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
+            projection.update({
+                "derivativeId": asset.get("derivativeId"),
+                "phaseId": asset.get("phaseId"),
+            })
+        else:
+            projection.update({
+                "sharedAssetKey": asset.get("sharedAssetKey"),
+                "sharedAssetVersion": asset.get("sharedAssetVersion"),
+                "visualRefs": sorted(
+                    (dict(ref) for ref in asset.get("visualRefs", []) if isinstance(ref, Mapping)),
+                    key=lambda ref: (str(ref.get("phase")), str(ref.get("slot")), str(ref.get("stepKey"))),
+                ),
+            })
     return projection
 
 def _log(

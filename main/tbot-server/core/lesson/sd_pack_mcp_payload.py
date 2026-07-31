@@ -30,6 +30,12 @@ _RECT_FIELDS = frozenset({"x", "y", "width", "height"})
 _CHROMA_FIELDS = frozenset({"color", "tolerance", "feather"})
 _COLOR_FIELDS = frozenset({"r", "g", "b"})
 _VISUAL_REF_FIELDS = frozenset({"stepKey", "phase", "slot"})
+_FLATTENED_METADATA_FIELDS = frozenset(
+    {"codec", "width", "height", "fps", "durationMs", "frameCount", "hasAudio"}
+)
+_FLATTENED_PHASE_IDS = frozenset(
+    {"opening", "greet", "teach", "listen", "thinking", "correct", "retry", "celebrate"}
+)
 
 
 class FirmwareSyncPackError(ValueError):
@@ -169,6 +175,43 @@ def validate_renderer_v3_shared_mp4(asset: Any) -> dict[str, Any]:
         "visualRefs": copy.deepcopy(refs),
     }
 
+
+def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
+    """Validate the exact one-file renderer-v4 flattened MJPEG transport."""
+    if not isinstance(asset, dict) or asset.get("mediaType") != "video/mp4":
+        _refuse()
+    derivative_id = asset.get("derivativeId")
+    phase_id = asset.get("phaseId")
+    if (
+        not isinstance(derivative_id, str)
+        or _LOWER_SHA256_RE.fullmatch(derivative_id) is None
+        or phase_id not in _FLATTENED_PHASE_IDS
+        or asset.get("key") != f"flattenedCinematic.{phase_id}"
+    ):
+        _refuse()
+    metadata = asset.get("compatibilityMetadata")
+    if not isinstance(metadata, dict) or set(metadata) != _FLATTENED_METADATA_FIELDS:
+        _refuse()
+    duration_ms = metadata.get("durationMs")
+    frame_count = metadata.get("frameCount")
+    if (
+        metadata.get("codec") != "mjpeg"
+        or metadata.get("width") != 480
+        or metadata.get("height") != 320
+        or metadata.get("fps") != 10
+        or metadata.get("hasAudio") is not False
+        or not _integer(duration_ms, 1)
+        or not _integer(frame_count, 1)
+        or duration_ms != frame_count * 100
+    ):
+        _refuse()
+    _validate_online_url(_matching_alias(asset, "onlineUrl", "url"))
+    return {
+        "derivativeId": derivative_id,
+        "phaseId": phase_id,
+        "compatibilityMetadata": copy.deepcopy(metadata),
+    }
+
 def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: str) -> tuple[str, str]:
     if _LOWER_SHA256_RE.fullmatch(asset.get("sha256") or "") is None:
         _refuse()
@@ -185,7 +228,10 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     _validate_source_local_path(local_path, cache_key, basename)
     _validate_online_url(online_url)
     if media_type.lower().startswith("video/"):
-        validate_renderer_v3_shared_mp4(asset)
+        if "derivativeId" in asset or "phaseId" in asset:
+            validate_renderer_v4_flattened_mp4(asset)
+        else:
+            validate_renderer_v3_shared_mp4(asset)
     return local_path, online_url
 
 
