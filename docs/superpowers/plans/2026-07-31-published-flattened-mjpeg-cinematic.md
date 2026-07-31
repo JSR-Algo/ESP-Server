@@ -217,6 +217,15 @@ git commit -m "feat(lessons): generate flattened MJPEG cinematics"
 
 ### Task 5: Wire Authoring Status, Publish Gate, And v4 Generation
 
+Before the integration steps below, implement the following foundation as a separately reviewed TDD slice:
+
+- migration `115_flattened_cinematic_source_foundation.sql` adds positive monotonic `cinematic_source_revision` to lessons;
+- source video metadata accepts exact H.264 or MJPEG authoring inputs without weakening the robot-output MJPEG validator;
+- shared visual queries expose the pinned asset-version UUID and complete source metadata;
+- object-fit is derived as `cover` for background and `contain` for teaching-object/robot-overlay;
+- a trusted source materializer downloads only from configured HTTPS origin allowlists (or a separately configured realpath-confined mounted root), rejects cross-origin redirects, bounds size/time, verifies bytes/SHA-256, and atomically caches local files;
+- the real `FLATTENED_CINEMATIC_SOURCE_RESOLVER` is bound only after this foundation can reconstruct and materialize the exact current descriptor.
+
 **Files:**
 - Modify: `src/lessons/authoring/lesson-authoring.service.ts`
 - Modify: `src/lessons/authoring/lesson-authoring.controller.ts`

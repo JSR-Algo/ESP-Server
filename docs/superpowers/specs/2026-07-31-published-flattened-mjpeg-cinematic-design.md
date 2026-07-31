@@ -80,6 +80,12 @@ All fields are parsed with exact-key validation. Width, height, codec, FPS, fram
 
 Admin source assets may remain normal browser-friendly MP4, including H.264. They are authoring inputs and are not required to satisfy the robot MJPEG profile.
 
+Each draft lesson has a positive monotonic `cinematicSourceRevision`. The backend increments it in the same transaction as any cinematic layer selection, phase timing, destination rectangle, chroma setting, or other composition mutation. Timestamps are not revision identities. Cloning a new draft initializes its revision from the copied cinematic state and subsequent mutations increment only the new draft.
+
+Source asset compatibility metadata is separate from the robot-output metadata contract. A cinematic source MP4 records its probed codec, width, height, duration, frame count, frame-rate numerator/denominator, audio presence, destination rectangle, and optional chroma key. H.264 and MJPEG source codecs are supported initially; the flattened output remains constrained to MJPEG. The pinned asset-version UUID, logical version ID, SHA-256, and byte size are all part of the source descriptor.
+
+Object-fit is deterministic rather than another free authoring field in the first release: background uses `cover`; teaching-object and robot-overlay use `contain`. These derived values are included in the canonical identity and used identically by admin preview and FFmpeg.
+
 The derivative build identity is a canonical SHA-256 over:
 
 - renderer/template/encoder profile versions;
@@ -105,6 +111,8 @@ The production implementation invokes a pinned FFmpeg/ffprobe executable profile
 - output `480x320`, 10 FPS, MJPEG, no audio, independently decodable frames;
 - write to a temporary path and atomically promote only after verification;
 - terminate promptly on worker abort or application shutdown.
+
+Before invoking FFmpeg, a trusted source materializer resolves each pinned storage path to an HTTPS URL whose origin is present in `FLATTENED_CINEMATIC_SOURCE_ORIGINS`. It disables credentials and cross-origin redirects, downloads to a worker-owned cache root with bounded size/time, verifies the registered byte count and SHA-256, and atomically promotes the verified local source. A cache hit is reusable only when the complete pinned identity matches. Local mounted storage may be supported through a separately configured realpath-confined root. Arbitrary public URL fetching is forbidden.
 
 The first release is fixed at 10 FPS. Fifteen FPS is a later encoder profile and requires real-device soak evidence before promotion.
 
