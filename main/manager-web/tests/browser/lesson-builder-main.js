@@ -14,7 +14,7 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'lesson-builder-test-session');
 
-const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeySaves: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
+const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
 let steps = [
   {
     stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 },
@@ -69,12 +69,19 @@ const manifest = {
     { stepKey: 's2', prompt: 'Say barn', scene: { robotOverlay: { asset: robotAsset } }, teachingWord: { text: 'BARN' }, entrance: 'none', templateProjection, visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: stateMotions[state], overlayKey: state }])) },
   ]
 };
+const lessonManifestVersions = {
+  'lesson-1': 'teebot-lesson-renderer.v2',
+  'journey-v4': 'teebot-lesson-renderer.v4',
+  'legacy-v1': 'teebot-lesson-renderer.v1',
+  'legacy-v2': 'teebot-lesson-renderer.v2',
+  'legacy-v3': 'teebot-lesson-renderer.v3',
+};
 
 Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
-  getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: 'teebot-lesson-renderer.v2' }); },
+  getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: lessonManifestVersions[id] || 'teebot-lesson-renderer.v2' }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
-  getTVideoJourney(id, ok) { ok({ state: 'not-configured', lessonId: id, cinematicSourceRevision: 0, set: { state: 'invalid', issues: [{ code: 'MISSING_CUES', cueIds: [] }] }, statuses: [], publishReady: false }); },
+  getTVideoJourney(id, ok) { calls.journeyLoads.push(id); ok({ state: 'not-configured', lessonId: id, cinematicSourceRevision: 0, set: { state: 'invalid', issues: [{ code: 'MISSING_CUES', cueIds: [] }] }, statuses: [], publishReady: false }); },
   saveTVideoJourney(id, payload, ok, fail) {
     calls.journeySaves.push(JSON.parse(JSON.stringify(payload)));
     if (calls.deferNextJourneySave) { calls.deferNextJourneySave = false; calls.pendingJourneySaves.push({ id, payload, ok, fail }); return; }

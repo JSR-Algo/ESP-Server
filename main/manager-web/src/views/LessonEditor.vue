@@ -826,7 +826,11 @@ export default {
         : '';
     },
     isTVideoJourney() {
-      return this.flattenedDerivativeManifestVersion === 'teebot-lesson-renderer.v4';
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
+      );
     },
     tvideoJourneyPublishReady() {
       return !this.isTVideoJourney || (this.tvideoJourneyResponse && this.tvideoJourneyResponse.publishReady === true);
@@ -932,8 +936,7 @@ export default {
         || this.renaming
         || this.publishing
         || this.savingLessonVisuals
-        || this.tvideoJourneyDirty
-        || this.tvideoJourneySaving
+        || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key]);
     },
     selectedAuthoring: {
@@ -1032,6 +1035,7 @@ export default {
       this.deletingStepKey = '';
       this.addingStep = false;
       this.reordering = false;
+      this.resetTVideoJourneyState();
       this.resetLessonAssetGenerationStatus();
       this.resetFlattenedDerivativeStatus();
       this.fetchAll();
@@ -1088,8 +1092,7 @@ export default {
     this.flattenedDerivativePollTimer = null;
     this.flattenedDerivativeRequestId = Number(this.flattenedDerivativeRequestId || 0) + 1;
     this.flattenedDerivativeSourceEpoch = Number(this.flattenedDerivativeSourceEpoch || 0) + 1;
-    this.tvideoJourneyRequestId += 1;
-    this.tvideoJourneySaving = false;
+    this.resetTVideoJourneyState();
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
@@ -1121,6 +1124,18 @@ export default {
       const details = error && error.details;
       const typedDetails = details && typeof details === 'object' ? ` · ${JSON.stringify(details)}` : '';
       return `${code ? `${code}: ` : ''}${message || this.$t('lesson.tvideoJourney.loadFailed')}${typedDetails}`;
+    },
+    resetTVideoJourneyState() {
+      this.tvideoJourneyRequestId += 1;
+      this.tvideoJourneyPreset = null;
+      this.tvideoJourneyResponse = { state: 'not-configured', set: { state: 'invalid', issues: [] }, statuses: [], publishReady: false };
+      this.tvideoJourneyDraft = null;
+      this.tvideoJourneyAssets = [];
+      this.tvideoJourneyLoading = false;
+      this.tvideoJourneySaving = false;
+      this.tvideoJourneyDirty = false;
+      this.tvideoJourneyError = '';
+      this.tvideoJourneySaveMessage = '';
     },
     loadTVideoJourney() {
       if (!this.isTVideoJourney || this.editorDestroying) return false;
@@ -1474,8 +1489,7 @@ export default {
         || this.sharedImpactReconciling
         || this.savingStep
         || this.savingLessonVisuals
-        || this.tvideoJourneyDirty
-        || this.tvideoJourneySaving
+        || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Boolean(this.pendingLessonVisualPair)
         || this.validating
         || this.previewing
@@ -1623,11 +1637,12 @@ export default {
         (l) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lesson = l;
+          if (l.manifestVersion !== 'teebot-lesson-renderer.v4') this.resetTVideoJourneyState();
           this.loading = false;
           this.loadLessonAssetGenerationStatus();
           this.fetchSteps();
           this.loadFlattenedDerivativeStatus();
-          if (this.flattenedDerivativeManifestVersion === 'teebot-lesson-renderer.v4') this.loadTVideoJourney();
+          if (l.manifestVersion === 'teebot-lesson-renderer.v4') this.loadTVideoJourney();
         },
         (msg) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;

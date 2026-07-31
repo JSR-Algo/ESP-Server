@@ -61,7 +61,10 @@ try {
     const gatedProof=async(flag)=>{e.tvideoJourneyDirty=false;e.tvideoJourneySaving=false;e[flag]=true;await tick();const [validateButton,previewButton,publishButton]=proofButtons();const before=[t.calls.validate,t.calls.preview];const started=[e.doValidate(),e.doPreview()];return[e.proofActionsDisabled,validateButton.disabled,previewButton.disabled,publishButton.disabled,started,t.calls.validate-before[0],t.calls.preview-before[1],e.canPublishCurrentProof()]};
     const dirtyProof=await gatedProof('tvideoJourneyDirty');const savingProof=await gatedProof('tvideoJourneySaving');e.tvideoJourneyDirty=false;e.tvideoJourneySaving=false;await tick();const restoredButtons=proofButtons();const restoredProof=[e.proofActionsDisabled,...restoredButtons.map(button=>button.disabled),e.canPublishCurrentProof()];
     e.tvideoJourneyResponse={...e.tvideoJourneyResponse,publishReady:false};await tick();const gateFalse=e.canPublishCurrentProof();e.tvideoJourneyResponse={...e.tvideoJourneyResponse,publishReady:true};await tick();const gateTrue=e.canPublishCurrentProof();
-    return{legacy,localized,unconfigured,hardcodedVisible,tabStates,keyboard,picker,path,branch,robotState,saveSuccess,saveError,dirtyProof,savingProof,restoredProof,gate:[gateFalse,gateTrue],runtimeText:document.body.innerText.slice(0,200)};
+    e.tvideoJourneyDirty=true;e.tvideoJourneySaving=true;e.tvideoJourneyError='stale';e.tvideoJourneySaveMessage='stale';e.tvideoJourneyAssets=[{assetId:'stale'}];
+    const routeReset=[];for(const version of ['v1','v2','v3']){await e.$router.push({path:'/',query:{lessonId:'legacy-'+version}});await wait(()=>e.lesson&&e.lesson.lessonId==='legacy-'+version&&!e.loading);e.validationResult={valid:true};e.validationProofVersion=e.proofVersion;e.previewManifest={checksum:'proof',manifest:{manifestVersion:'teebot-lesson-renderer.'+version,steps:[]}};e.previewProofVersion=e.proofVersion;e.simulationEvidence={};e.simulationProofVersion=e.proofVersion;e.validSimulationEvidence=()=>true;await tick();const buttons=proofButtons();routeReset.push([version,Boolean(document.querySelector('[data-testid="tvideo-journey-editor"]')),e.tvideoJourneyPreset,e.tvideoJourneyLoading,e.tvideoJourneySaving,e.tvideoJourneyError,e.tvideoJourneyResponse.state,e.tvideoJourneyDraft,e.tvideoJourneyDirty,e.tvideoJourneyAssets.length,e.tvideoJourneySaveMessage,e.proofActionsDisabled,...buttons.map(button=>button.disabled),e.canPublishCurrentProof()])}
+    const journeyLoadsBefore=t.calls.journeyLoads.length;await e.$router.push({path:'/',query:{lessonId:'journey-v4'}});await wait(()=>e.lesson&&e.lesson.lessonId==='journey-v4'&&!e.loading);for(let index=0;index<10;index+=1)await tick();const routeReload=[t.calls.journeyLoads.length-journeyLoadsBefore,t.calls.journeyLoads.at(-1),e.tvideoJourneyDirty,Boolean(e.tvideoJourneyPreset),Boolean(e.tvideoJourneyDraft),Boolean(document.querySelector('[data-testid="tvideo-journey-editor"]'))];
+    return{legacy,localized,unconfigured,hardcodedVisible,tabStates,keyboard,picker,path,branch,robotState,saveSuccess,saveError,dirtyProof,savingProof,restoredProof,gate:[gateFalse,gateTrue],routeReset,routeReload,runtimeText:document.body.innerText.slice(0,200)};
   })()`);
 
   assert.deepEqual(result.legacy, { 'teebot-lesson-renderer.v1': false, 'teebot-lesson-renderer.v2': false, 'teebot-lesson-renderer.v3': false });
@@ -90,6 +93,12 @@ try {
   assert.deepEqual(result.savingProof, [true, true, true, true, [false, false], 0, 0, false]);
   assert.deepEqual(result.restoredProof, [false, false, false, false, true]);
   assert.deepEqual(result.gate, [false, true]);
+  assert.deepEqual(result.routeReset, [
+    ['v1', false, null, false, false, '', 'not-configured', null, false, 0, '', false, false, false, false, true],
+    ['v2', false, null, false, false, '', 'not-configured', null, false, 0, '', false, false, false, false, true],
+    ['v3', false, null, false, false, '', 'not-configured', null, false, 0, '', false, false, false, false, true],
+  ]);
+  assert.deepEqual(result.routeReload, [1, 'journey-v4', false, true, true, true]);
   assert.deepEqual(runtimeErrors, [], `mounted journey runtime errors: ${runtimeErrors.join('; ')}`);
   console.log('mounted TVideo Journey tabs, media, editing, simulation, clock, save, gate, accessibility, and legacy isolation PASS (11 groups)');
 } finally {
