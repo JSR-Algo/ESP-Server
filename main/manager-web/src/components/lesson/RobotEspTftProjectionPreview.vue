@@ -360,6 +360,12 @@ export default {
     cinematicLayerById(layerId) {
       return this.cinematicLayerRefs().find((layer) => layer && layer.layerId === layerId) || null;
     },
+    syncCinematicSecondaryLayers() {
+      this.cinematicLayerRefs().forEach((layer) => {
+        if (!layer || layer.layerId === 'background' || typeof layer.syncToExternalClock !== 'function') return;
+        layer.syncToExternalClock(this.cinematicClockMs);
+      });
+    },
     advanceCinematicClock(timestamp) {
       const background = this.cinematicLayerById('background');
       const master = background && typeof background.mediaPlaybackState === 'function'
@@ -368,6 +374,7 @@ export default {
       if (master && master.ready) {
         this.cinematicClockMs = Math.round(Math.max(0, master.currentTimeSec) * 1000) % this.cinematicDurationMs;
         this.cinematicStartedAt = null;
+        this.syncCinematicSecondaryLayers();
         return;
       }
       if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;

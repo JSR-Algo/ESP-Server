@@ -211,12 +211,13 @@ assert.match(
 );
 assert.match(
   videoLayerSource,
-  /const targetSeconds = Math\.max\(0, Number\(this\.clockMs\) \|\| 0\) \/ 1000;/,
+  /const targetSeconds = Math\.max\(0, Number\(externalClockMs\) \|\| 0\) \/ 1000;/,
   'controlled playback must convert its millisecond clock to video seconds'
 );
 assert.match(videoLayerSource, /playPending/, 'controlled playback must guard pending play promises');
 assert.match(videoLayerSource, /playBlocked/, 'controlled playback must block repeated rejected play promises');
 assert.ok(videoLayerSource.includes('mediaPlaybackState()'), 'CinematicVideoLayer must expose safe media time and readiness');
+assert.ok(videoLayerSource.includes('syncToExternalClock('), 'CinematicVideoLayer must expose an explicit external-clock resync hook');
 assert.doesNotMatch(exactPreviewSource, /cinematicLayers\s*\[\s*\d+\s*\]/, 'master lookup must never depend on Vue ref array order');
 
 assert.match(componentSource, /@error="handleMediaError\(layer\.id, layer\.src/, 'media error handlers must preserve the affected layer id and source');
@@ -344,6 +345,16 @@ const playbackStateLayer = createVideoLayer({ currentTime: 1.234 });
 assert.deepEqual(playbackStateLayer.instance.mediaPlaybackState(), {
   layerId: 'background', ready: true, currentTimeSec: 1.234
 });
+
+const stalledMaster = createVideoLayer({ playing: true, clockMs: 1000, currentTime: 1, paused: false });
+const driftingSecondary = createVideoLayer({ playing: true, clockMs: 1000, currentTime: 1.2, paused: false });
+driftingSecondary.instance.layerId = 'teachingObject';
+const stalledMasterClock = createExactPreviewClock({ playing: true, clockMs: 1000, durationMs: 5000 });
+stalledMasterClock.$refs.cinematicLayers = [driftingSecondary.instance, stalledMaster.instance];
+stalledMasterClock.advanceCinematicClock(9000);
+assert.equal(stalledMasterClock.cinematicClockMs, 1000, 'a stalled master must keep the parent clock fixed');
+assert.equal(driftingSecondary.video.currentTime, 1, 'every master tick must actively resync a drifting secondary even when clockMs is unchanged');
+assert.equal(stalledMaster.video.currentTime, 1, 'the master must not recursively resync itself');
 
 const withinTolerance = createVideoLayer({ playing: false, clockMs: 1000, currentTime: 0.95 });
 withinTolerance.instance.syncPlayback();

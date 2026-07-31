@@ -91,6 +91,10 @@ export default {
         currentTimeSec: Number.isFinite(currentTimeSec) ? currentTimeSec : 0
       };
     },
+    syncToExternalClock(clockMs = this.clockMs) {
+      if (!this.controlled) return false;
+      return this.syncPlayback(false, clockMs);
+    },
     handleLoadedData() {
       this.syncPlayback(true);
       this.start(this.controlled && !this.playing);
@@ -103,10 +107,10 @@ export default {
       this.playPending = false;
       this.playBlocked = false;
     },
-    syncPlayback(force = false) {
+    syncPlayback(force = false, externalClockMs = this.clockMs) {
       if (!this.controlled || !this.$refs.video) return;
       const video = this.$refs.video;
-      const targetSeconds = Math.max(0, Number(this.clockMs) || 0) / 1000;
+      const targetSeconds = Math.max(0, Number(externalClockMs) || 0) / 1000;
       let didSeek = false;
       if (video.readyState > 0 && (force || shouldResyncVideo(targetSeconds, video.currentTime))) {
         try {
