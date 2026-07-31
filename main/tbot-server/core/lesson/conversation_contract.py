@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z '\-]{0,79}")
@@ -60,19 +60,19 @@ def _fail(code: str, message: str) -> None:
 def _exact_mapping(value: Any, fields: set[str] | frozenset[str], label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         _fail("INVALID_FIELDS", f"{label} fields must match the contract exactly")
-    return value
+    return cast(Mapping[str, Any], value)
 
 
 def _safe_id(value: Any, label: str) -> str:
     if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
         _fail("UNSAFE_ID", f"{label} is not a safe identifier")
-    return value
+    return cast(str, value)
 
 
 def _nonempty_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or any(ord(char) < 32 for char in value):
         _fail("INVALID_CONTENT", f"{label} must be non-empty safe text")
-    return value.strip()
+    return cast(str, value).strip()
 
 
 def _normalize(value: str) -> str:

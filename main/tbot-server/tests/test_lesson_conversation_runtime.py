@@ -16,13 +16,13 @@ from core.lesson.conversation_runtime import (
 )
 
 
-def _payload(*, phonemes: bool = False) -> dict:
-    pronunciation = {
+def _payload(*, phonemes: bool = False) -> dict[str, object]:
+    pronunciation: dict[str, object] = {
         "slow_model": "ap-ple",
         "l1_guidance_vi": "Mở miệng nhẹ ở âm đầu.",
     }
     pronunciation["phonemes" if phonemes else "segments"] = ["æ", "p", "əl"] if phonemes else ["ap", "ple"]
-    effects = {
+    effects: dict[str, str] = {
         "teach": "show_teaching_scene",
         "listen": "show_listening_scene",
         "thinking": "show_thinking_scene",
@@ -33,7 +33,7 @@ def _payload(*, phonemes: bool = False) -> dict:
         "celebrate": "show_celebration",
         "word_transition": "show_word_transition",
     }
-    return {
+    payload: dict[str, object] = {
         "lesson_session_id": "session-7a",
         "lesson_id": "farm-english",
         "lesson_version": 3,
@@ -50,6 +50,7 @@ def _payload(*, phonemes: bool = False) -> dict:
         "cues": {role: {"cue_id": f"farm.apple.{role}", "effect": effect} for role, effect in effects.items()},
         "max_contextual_turns": 2,
     }
+    return payload
 
 
 def _contract(**kwargs) -> LessonConversationContract:
@@ -69,8 +70,12 @@ def _identity(runtime: LessonConversationRuntime, *, cue_id: str | None = None) 
 def test_contract_is_exact_deeply_immutable_and_supports_either_pronunciation_union() -> None:
     payload = _payload()
     contract = LessonConversationContract.from_mapping(payload)
-    payload["meanings_vi"].append("changed")
-    payload["cues"]["listen"]["cue_id"] = "changed"
+    meanings = payload["meanings_vi"]
+    cues = payload["cues"]
+    assert isinstance(meanings, list)
+    assert isinstance(cues, dict)
+    meanings.append("changed")
+    cues["listen"]["cue_id"] = "changed"
 
     assert contract.meanings_vi == ("quả táo", "trái táo")
     assert contract.cues[1].cue_id == "farm.apple.listen"
@@ -130,7 +135,7 @@ def test_english_target_first_attempt_is_speaking_evidence_and_mastery() -> None
 
     heard = runtime.child_response(_identity(runtime), "target")
     assert heard.outcome == "speaking_evidence"
-    assert heard.state is ConversationState.REACTING
+    assert heard.state is ConversationState.LISTENING
     correct = runtime.pronunciation_outcome(_identity(runtime), "correct")
     assert (correct.outcome, correct.next_intent, correct.cue_id) == (
         "mastered",
@@ -301,19 +306,22 @@ def test_duplicate_stale_reordered_and_cross_identity_reject_without_mutation() 
 
 
 @pytest.mark.parametrize(
-    ("response_class", "expected_state"),
+    ("setup", "expected_state"),
     [
         (None, ConversationState.ASKING),
         ("meaning_vi", ConversationState.BRIDGING),
         ("silence", ConversationState.COACHING),
-        ("target", ConversationState.REACTING),
+        ("correct", ConversationState.REACTING),
     ],
 )
-def test_interrupt_during_model_speech_or_reaction_retires_identity_and_listens(response_class, expected_state) -> None:
+def test_interrupt_during_model_speech_or_reaction_retires_identity_and_listens(setup, expected_state) -> None:
     runtime = _runtime()
     runtime.open_attempt()
-    if response_class is not None:
-        runtime.child_response(_identity(runtime), response_class)
+    if setup == "correct":
+        runtime.child_response(_identity(runtime), "target")
+        runtime.pronunciation_outcome(_identity(runtime), "correct")
+    elif setup is not None:
+        runtime.child_response(_identity(runtime), setup)
     assert runtime.state is expected_state
     old = _identity(runtime)
     decision = runtime.interrupt(old)
@@ -370,19 +378,22 @@ def test_begin_turn_rejects_caller_selected_semantic_state_jumps_without_mutatio
 
 
 @pytest.mark.parametrize(
-    ("response_class", "expected_state", "cue_role"),
+    ("setup", "expected_state", "cue_role"),
     [
         (None, ConversationState.ASKING, "teach"),
         ("meaning_vi", ConversationState.BRIDGING, "teach"),
         ("silence", ConversationState.COACHING, "retry_level_1"),
-        ("target", ConversationState.REACTING, "thinking"),
+        ("correct", ConversationState.REACTING, "celebrate"),
     ],
 )
-def test_begin_turn_can_retain_each_authoritative_speaking_state(response_class, expected_state, cue_role) -> None:
+def test_begin_turn_can_retain_each_authoritative_speaking_state(setup, expected_state, cue_role) -> None:
     runtime = _runtime()
     runtime.open_attempt()
-    if response_class is not None:
-        runtime.child_response(_identity(runtime), response_class)
+    if setup == "correct":
+        runtime.child_response(_identity(runtime), "target")
+        runtime.pronunciation_outcome(_identity(runtime), "correct")
+    elif setup is not None:
+        runtime.child_response(_identity(runtime), setup)
     before_sequence = runtime.turn_sequence_id
     cue_id = f"farm.apple.{cue_role}"
     decision = runtime.begin_turn(_identity(runtime, cue_id=cue_id), cue_role)
@@ -391,12 +402,15 @@ def test_begin_turn_can_retain_each_authoritative_speaking_state(response_class,
     assert runtime.turn_sequence_id == before_sequence + 1
 
 
-@pytest.mark.parametrize("response_class", [None, "meaning_vi", "silence", "target"])
-def test_begin_turn_allows_only_listening_transition_from_speaking_states(response_class) -> None:
+@pytest.mark.parametrize("setup", [None, "meaning_vi", "silence", "correct"])
+def test_begin_turn_allows_only_listening_transition_from_speaking_states(setup) -> None:
     runtime = _runtime()
     runtime.open_attempt()
-    if response_class is not None:
-        runtime.child_response(_identity(runtime), response_class)
+    if setup == "correct":
+        runtime.child_response(_identity(runtime), "target")
+        runtime.pronunciation_outcome(_identity(runtime), "correct")
+    elif setup is not None:
+        runtime.child_response(_identity(runtime), setup)
     decision = runtime.begin_turn(
         _identity(runtime, cue_id="farm.apple.listen"),
         "listen",
@@ -441,6 +455,60 @@ def test_begin_turn_listening_transition_requires_listen_cue_without_mutation() 
         transition_to=ConversationState.LISTENING,
     )
     assert decision.code == "ILLEGAL_STATE_TRANSITION"
+    assert runtime.snapshot() == snapshot
+
+
+@pytest.mark.parametrize("setup", [None, "meaning_vi", "silence", "correct"])
+def test_pronunciation_outcome_rejects_non_assessment_states_without_mutation(setup) -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    if setup == "correct":
+        runtime.child_response(_identity(runtime), "target")
+        runtime.pronunciation_outcome(_identity(runtime), "correct")
+    elif setup is not None:
+        runtime.child_response(_identity(runtime), setup)
+    snapshot = runtime.snapshot()
+    decision = runtime.pronunciation_outcome(_identity(runtime), "retry")
+    assert decision.code == "PRONUNCIATION_NOT_AVAILABLE"
+    assert runtime.snapshot() == snapshot
+
+
+def test_mastered_completion_rejects_pronunciation_and_cannot_reopen() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    snapshot = runtime.snapshot()
+    assert runtime.pronunciation_outcome(_identity(runtime), "correct").code == ("PRONUNCIATION_NOT_AVAILABLE")
+    assert runtime.open_attempt().code == "ATTEMPT_ALREADY_OPENED"
+    assert runtime.snapshot() == snapshot
+
+
+def test_interrupt_retires_prior_speaking_evidence_before_listening() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.interrupt(_identity(runtime))
+    snapshot = runtime.snapshot()
+    decision = runtime.pronunciation_outcome(_identity(runtime), "retry")
+    assert decision.code == "SPEAKING_EVIDENCE_REQUIRED"
+    assert runtime.snapshot() == snapshot
+
+
+def test_attempted_completion_rejects_pronunciation_and_cannot_reopen() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    for _ in range(4):
+        runtime.pronunciation_outcome(_identity(runtime), "retry")
+    snapshot = runtime.snapshot()
+    assert runtime.pronunciation_outcome(_identity(runtime), "correct").code == ("PRONUNCIATION_NOT_AVAILABLE")
+    assert runtime.open_attempt().code == "ATTEMPT_ALREADY_OPENED"
     assert runtime.snapshot() == snapshot
 
 

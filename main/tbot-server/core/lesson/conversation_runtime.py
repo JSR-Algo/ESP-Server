@@ -254,8 +254,8 @@ class LessonConversationRuntime:
         self._turn_sequence_id += 1
 
     def open_attempt(self) -> ConversationDecision:
-        if self._attempt_id is not None and self._state is not ConversationState.COMPLETE:
-            return self._reject("ATTEMPT_ACTIVE")
+        if self._attempt_id is not None:
+            return self._reject("ATTEMPT_ALREADY_OPENED")
         attempt_id = self._attempt_id_factory()
         LessonToolIdentity(
             lesson_session_id=self._contract.lesson_session_id,
@@ -288,7 +288,7 @@ class LessonConversationRuntime:
         assert identity is not None
         self._consume(identity)
         if response_class == "target":
-            self._state = ConversationState.REACTING
+            self._state = ConversationState.LISTENING
             self._speaking_evidence = True
             self._outcome = "speaking_evidence"
             return self._decision(intent="assess_pronunciation", cue_role="thinking")
@@ -309,6 +309,8 @@ class LessonConversationRuntime:
         rejected = self._identity_rejection(identity)
         if rejected:
             return rejected
+        if self._state is not ConversationState.LISTENING:
+            return self._reject("PRONUNCIATION_NOT_AVAILABLE")
         if not self._speaking_evidence:
             return self._reject("SPEAKING_EVIDENCE_REQUIRED")
         if outcome not in {"correct", "retry", "uncertain"}:
@@ -378,6 +380,7 @@ class LessonConversationRuntime:
         self._consume(identity, retired=True)
         if transition_to is ConversationState.LISTENING:
             self._state = ConversationState.LISTENING
+            self._speaking_evidence = False
         return self._decision(intent="begin_model_turn", cue_role=cue_role)
 
     def interrupt(self, identity: LessonToolIdentity | None) -> ConversationDecision:
@@ -389,6 +392,7 @@ class LessonConversationRuntime:
         assert identity is not None
         self._consume(identity, retired=True)
         self._state = ConversationState.LISTENING
+        self._speaking_evidence = False
         return self._decision(intent="listen_to_child", cue_role="listen")
 
     def visual_reaction(
