@@ -6,7 +6,7 @@ import {
   normalizeStep,
   normalizeStepType,
 } from '../nestHttp';
-import { normalizeFlattenedDerivativeStatus } from '@/components/lesson/flattened-derivative-status';
+import { normalizeFlattenedDerivativeStatusResponse } from '@/components/lesson/flattened-derivative-status';
 
 /**
  * Lesson / step / asset / validate / preview / publish CRUD — backed by the
@@ -24,6 +24,15 @@ const MATERIALIZATION_STATES = new Set(['empty', 'polling', 'materializing', 're
 const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
 const ERROR_CODE_PATTERN = /^[a-z0-9][a-z0-9_]{0,63}$/;
 const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
+
+export function normalizeAuthoringLesson(raw) {
+  const normalized = normalizeLesson(raw);
+  const value = raw || {};
+  return {
+    ...normalized,
+    manifestVersion: value.manifest_version ?? value.manifestVersion ?? '',
+  };
+}
 
 function validSafeCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -290,7 +299,7 @@ export default {
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}`,
       method: 'GET',
-      onSuccess: (p) => onSuccess(normalizeLesson(p)),
+      onSuccess: (p) => onSuccess(normalizeAuthoringLesson(p)),
       onError,
     });
   },
@@ -613,7 +622,7 @@ export default {
       url: `${getNestUrl()}/lessons/${lessonId}/flattened-cinematic-derivatives`,
       method: 'GET',
       onSuccess: (payload) => {
-        const normalized = normalizeFlattenedDerivativeStatus(payload, { lessonId, lessonVersion });
+        const normalized = normalizeFlattenedDerivativeStatusResponse(payload, { lessonId, lessonVersion });
         if (normalized) {
           if (onSuccess) onSuccess(normalized);
           return;

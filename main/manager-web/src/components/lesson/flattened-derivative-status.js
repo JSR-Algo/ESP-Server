@@ -88,15 +88,53 @@ export function normalizeFlattenedDerivativeStatus(payload, lesson) {
   return { lessonId: lesson.lessonId, lessonVersion: lesson.lessonVersion, sourceRevision, phases };
 }
 
+export function normalizeFlattenedDerivativeStatusResponse(payload, lesson) {
+  if (Array.isArray(payload)) return normalizeFlattenedDerivativeStatus(payload, lesson);
+  if (!exactKeys(payload, ['data']) || !Array.isArray(payload.data)) return null;
+  return normalizeFlattenedDerivativeStatus(payload.data, lesson);
+}
+
 export function anyFlattenedDerivativeProcessing(status) {
   return Boolean(status && Array.isArray(status.phases)
     && status.phases.some((phase) => phase.state === 'processing'));
 }
 
-export function flattenedDerivativesReadyForPublish(manifestVersion, status) {
+export function flattenedDerivativesReadyForPublish(manifestVersion, status, requiredPhaseIds, currentSourceRevision) {
   if (manifestVersion !== 'teebot-lesson-renderer.v4') return true;
-  return Boolean(status && status.phases.length
-    && status.phases.every((phase) => phase.state === 'ready' && phase.output));
+  if (!positiveSafeInteger(currentSourceRevision) || !status || status.sourceRevision !== currentSourceRevision
+    || !Array.isArray(requiredPhaseIds) || !requiredPhaseIds.length || !Array.isArray(status.phases)) return false;
+  const required = new Set();
+  for (const phaseId of requiredPhaseIds) {
+    if (typeof phaseId !== 'string' || !PHASE_ID_PATTERN.test(phaseId) || required.has(phaseId)) return false;
+    required.add(phaseId);
+  }
+  if (status.phases.length !== required.size) return false;
+  const actual = new Set();
+  for (const phase of status.phases) {
+    if (!phase || actual.has(phase.phaseId) || !required.has(phase.phaseId)
+      || phase.sourceRevision !== currentSourceRevision || phase.state !== 'ready' || !phase.output) return false;
+    actual.add(phase.phaseId);
+  }
+  return actual.size === required.size;
+}
+
+export function requiredFlattenedDerivativePhaseIds(manifest, steps) {
+  const manifestPhases = manifest && Array.isArray(manifest.cinematicPhases) ? manifest.cinematicPhases : null;
+  const firstStep = Array.isArray(steps) ? steps[0] : null;
+  const authoredPhases = firstStep && firstStep.stepBody && Array.isArray(firstStep.stepBody.cinematicPhases)
+    ? firstStep.stepBody.cinematicPhases
+    : null;
+  const phases = manifestPhases || authoredPhases;
+  if (!phases || !phases.length) return null;
+  const phaseIds = [];
+  const seen = new Set();
+  for (const phase of phases) {
+    const phaseId = phase && phase.phaseId;
+    if (typeof phaseId !== 'string' || !PHASE_ID_PATTERN.test(phaseId) || seen.has(phaseId)) return null;
+    seen.add(phaseId);
+    phaseIds.push(phaseId);
+  }
+  return phaseIds;
 }
 
 export function flattenedDerivativeResponseIsCurrent(expected, actual) {

@@ -56,6 +56,11 @@ assert.equal(helper.normalizeFlattenedDerivativeStatus([phase('ready', {
   output: { ...readyOutput, url: 'lessons/derivatives/opening.mp4' },
 })], lesson).phases[0].output.url, 'lessons/derivatives/opening.mp4', 'backend-relative public URLs must remain valid');
 assert.equal(helper.normalizeFlattenedDerivativeStatus([phase('failed')], lesson).phases[0].errorCode, 'ffmpeg_failed');
+assert.deepEqual(helper.normalizeFlattenedDerivativeStatusResponse({ data: [phase('ready')] }, lesson),
+  helper.normalizeFlattenedDerivativeStatus([phase('ready')], lesson), 'raw backend envelopes must use the production parser');
+assert.equal(helper.normalizeFlattenedDerivativeStatusResponse({ data: [phase('ready', { path: '/private/output.mp4' })] }, lesson), null);
+assert.equal(helper.normalizeFlattenedDerivativeStatusResponse({ data: [{ ...phase('ready'), extra: true }] }, lesson), null);
+assert.equal(helper.normalizeFlattenedDerivativeStatusResponse({ data: [], extra: true }, lesson), null);
 
 const malformed = [
   [phase('queued')],
@@ -72,9 +77,19 @@ for (const payload of malformed) assert.equal(helper.normalizeFlattenedDerivativ
 
 assert.equal(helper.anyFlattenedDerivativeProcessing({ phases: [phase('processing')] }), true);
 assert.equal(helper.anyFlattenedDerivativeProcessing({ phases: [phase('ready')] }), false);
-assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', { phases: [phase('ready')] }), true);
-assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', { phases: [phase('failed')] }), false);
-assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v3', null), true, 'v1-v3 publish behavior must remain unchanged');
+const exactReady = { sourceRevision: 7, phases: [phase('ready'), phase('ready', { phaseId: 'teach' })] };
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, ['opening', 'teach'], 7), true);
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, ['opening'], 7), false, 'extra phases fail closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, ['opening', 'teach', 'review'], 7), false, 'missing phases fail closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', { sourceRevision: 7, phases: [phase('ready'), phase('ready')] }, ['opening'], 7), false, 'duplicate phase ids fail closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, ['opening', 'teach'], 8), false, 'stale revisions fail closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, ['opening', 'teach'], null), false, 'missing current revision fails closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v4', exactReady, [], 7), false, 'missing required phase identity fails closed');
+assert.equal(helper.flattenedDerivativesReadyForPublish('teebot-lesson-renderer.v3', null, [], null), true, 'v1-v3 publish behavior must remain unchanged');
+assert.deepEqual(helper.requiredFlattenedDerivativePhaseIds({ cinematicPhases: [{ phaseId: 'opening' }, { phaseId: 'teach' }] }, []), ['opening', 'teach']);
+assert.deepEqual(helper.requiredFlattenedDerivativePhaseIds(null, [{ stepBody: { cinematicPhases: [{ phaseId: 'opening' }] } }]), ['opening']);
+assert.equal(helper.requiredFlattenedDerivativePhaseIds({ cinematicPhases: [{ phaseId: 'opening' }, { phaseId: 'opening' }] }, []), null);
+assert.equal(helper.requiredFlattenedDerivativePhaseIds({}, []), null);
 assert.equal(helper.flattenedDerivativeResponseIsCurrent({ requestId: 2, lessonId: lesson.lessonId, sourceEpoch: 4 }, { requestId: 2, lessonId: lesson.lessonId, sourceEpoch: 4 }), true);
 assert.equal(helper.flattenedDerivativeResponseIsCurrent({ requestId: 2, lessonId: lesson.lessonId, sourceEpoch: 4 }, { requestId: 1, lessonId: lesson.lessonId, sourceEpoch: 4 }), false);
 assert.equal(helper.flattenedDerivativeResponseIsCurrent({ requestId: 2, lessonId: lesson.lessonId, sourceEpoch: 4 }, { requestId: 2, lessonId: lesson.lessonId, sourceEpoch: 5 }), false);
@@ -127,8 +142,11 @@ assert.equal(invalidationContext.flattenedDerivativeRequestId, 4);
 assert.equal(invalidationContext.flattenedDerivativeSourceEpoch, 6);
 assert.equal(invalidationContext.flattenedDerivativeStatus.phases[0].state, 'stale');
 assert.equal('output' in invalidationContext.flattenedDerivativeStatus.phases[0], false);
+assert.equal(invalidationContext.flattenedDerivativeCurrentSourceRevision, null);
 
-const canPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'canPublishCurrentProof')})`);
+const canPublish = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'canPublishCurrentProof')})`, {
+  flattenedDerivativesReadyForPublish: helper.flattenedDerivativesReadyForPublish,
+});
 const publishContext = {
   editorDestroying: false, isDraft: true, publishing: false, publishPreparing: false,
   publishUncertainState: null, publishReconciling: false, readinessReady: true,
@@ -138,8 +156,8 @@ const publishContext = {
   simulationEvidence: {}, simulationProofVersion: 4, validSimulationEvidence: () => true,
 };
 assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v3' }), true);
-assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { phases: [phase('failed')] } }), false);
-assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { phases: [phase('ready')] } }), true);
+assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { sourceRevision: 7, phases: [phase('failed')] }, flattenedDerivativeRequiredPhaseIds: ['opening'], flattenedDerivativeCurrentSourceRevision: 7 }), false);
+assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { sourceRevision: 7, phases: [phase('ready')] }, flattenedDerivativeRequiredPhaseIds: ['opening'], flattenedDerivativeCurrentSourceRevision: 7 }), true);
 
 const previewFailure = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onFlattenedDerivativePreviewError')})`);
 const previewContext = { flattenedDerivativeStatus: { phases: [phase('ready')] }, flattenedDerivativePreviewError: '', $t: (key) => key };
@@ -147,9 +165,16 @@ previewFailure.call(previewContext);
 assert.equal(previewContext.flattenedDerivativePreviewError, 'lesson.flattenedDerivativePreviewFailed');
 assert.equal(previewContext.flattenedDerivativeStatus.phases[0].state, 'ready', 'browser media errors must not change server readiness');
 
+const stepChangesSource = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'flattenedStepMutationChangesSource')})`);
+assert.equal(stepChangesSource.call({ flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4' }, { prompt: 'text only', stepBody: { durationSec: 8 } }), false);
+assert.equal(stepChangesSource.call({ flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4' }, { stepBody: { cinematicPhases: [] } }), true);
+assert.equal(stepChangesSource.call({ flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v3' }, { stepBody: { cinematicPhases: [] } }), false);
+
 for (const token of [
   'flattened-cinematic-derivatives',
   'normalizeFlattenedDerivativeStatus',
+  'normalizeAuthoringLesson',
+  'manifest_version ?? value.manifestVersion',
   'getFlattenedDerivativeStatus(lessonId, lessonVersion',
 ]) assert.ok(apiSource.includes(token), `lesson API must include ${token}`);
 assert.doesNotMatch(apiSource, /flattened[^\n]{0,80}(?:path|filesystem)/i, 'API must not expose local derivative paths');
@@ -172,7 +197,13 @@ assert.match(editorSource, /'\$route\.query\.lessonId'[\s\S]*resetFlattenedDeriv
 assert.match(editorSource, /scheduleFlattenedDerivativeStatusPoll[\s\S]*setTimeout[\s\S]*5000/, 'processing polling must use a bounded five-second interval');
 assert.match(editorSource, /applyLessonVisualSelection[\s\S]*invalidateFlattenedDerivativeStatus/, 'cinematic composition saves must invalidate derivative status');
 assert.match(editorSource, /selectCinematicLayer[\s\S]*invalidateFlattenedDerivativeStatus/, 'cinematic source saves must invalidate derivative status');
-assert.match(editorSource, /canPublishCurrentProof\(\)[\s\S]*teebot-lesson-renderer\.v4[\s\S]*phase\.state === 'ready'/, 'publish gate must include renderer-v4 derivative readiness');
+for (const method of ['rebindClonedVisual', 'moveStep', 'deleteStep', 'addStep', 'saveSelectedStep', 'saveSelectedStepStudio']) {
+  const source = extractObjectMethod(editorSource, method);
+  const invalidateAt = source.indexOf('invalidateFlattenedDerivativeStatus');
+  const reloadAt = source.indexOf('loadFlattenedDerivativeStatus');
+  assert.ok(invalidateAt >= 0 && reloadAt > invalidateAt, `${method} must invalidate then reload authoritative status`);
+}
+assert.match(editorSource, /canPublishCurrentProof\(\)[\s\S]*flattenedDerivativesReadyForPublish/, 'publish gate must use exact renderer-v4 phase/revision readiness');
 assert.doesNotMatch(editorSource, /flattenedDerivative(?:Status|Loading|Error|PollTimer|SourceEpoch|RequestId)[\s\S]{0,100}lessonUpdateSafety\.setDirty/, 'polling must not dirty the lesson');
 
 assert.equal(packageSource.scripts['test:flattened-derivative-status'], 'node scripts/check-flattened-derivative-status.mjs');

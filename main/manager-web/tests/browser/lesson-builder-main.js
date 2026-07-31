@@ -6,6 +6,7 @@ import Api from '@/apis/api';
 import { resetLessonRolloutCapabilities } from '@/utils/lessonRolloutCapabilities';
 import applicationRouter from '@/router';
 import applicationStore from '@/store';
+import { normalizeFlattenedDerivativeStatusResponse } from '@/components/lesson/flattened-derivative-status';
 
 Vue.use(ElementUI);
 Vue.use(VueRouter);
@@ -66,7 +67,7 @@ Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi' }); },
   getFlattenedDerivativeStatus(lessonId, lessonVersion, ok) {
-    ok({ lessonId, lessonVersion, sourceRevision: null, phases: [] });
+    ok(normalizeFlattenedDerivativeStatusResponse({ data: [] }, { lessonId, lessonVersion }));
   },
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
