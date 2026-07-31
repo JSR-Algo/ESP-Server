@@ -320,18 +320,128 @@ def test_interrupt_during_model_speech_or_reaction_retires_identity_and_listens(
     assert decision.state is ConversationState.LISTENING
     assert decision.next_intent == "listen_to_child"
     assert runtime.turn_sequence_id == old.turn_sequence_id + 1
-    assert runtime.child_response(old, "target").code == "DUPLICATE_IDENTITY"
+    assert runtime.child_response(old, "target").code == "STALE_IDENTITY"
 
 
 def test_begin_turn_increments_sequence_and_child_can_barge_into_listening() -> None:
     runtime = _runtime()
     runtime.open_attempt()
     identity = _identity(runtime, cue_id="farm.apple.teach")
-    begun = runtime.begin_turn(identity, "teach", ConversationState.ASKING)
+    begun = runtime.begin_turn(identity, "teach")
     assert begun.accepted
     assert runtime.turn_sequence_id == identity.turn_sequence_id + 1
+    assert runtime.begin_turn(identity, "teach").code == "STALE_IDENTITY"
     barged = runtime.child_response(_identity(runtime), "meaning_vi")
     assert barged.state is ConversationState.BRIDGING
+
+
+def test_semantic_replay_is_duplicate_until_newer_turn_retires_it_as_stale() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    semantic_identity = _identity(runtime)
+    runtime.child_response(semantic_identity, "meaning_vi")
+    assert runtime.child_response(semantic_identity, "meaning_vi").code == "DUPLICATE_IDENTITY"
+
+    runtime.begin_turn(_identity(runtime, cue_id="farm.apple.teach"), "teach")
+    assert runtime.child_response(semantic_identity, "meaning_vi").code == "STALE_IDENTITY"
+
+
+@pytest.mark.parametrize(
+    "transition_to",
+    [
+        ConversationState.ASKING,
+        ConversationState.BRIDGING,
+        ConversationState.COACHING,
+        ConversationState.REACTING,
+        ConversationState.COMPLETE,
+    ],
+)
+def test_begin_turn_rejects_caller_selected_semantic_state_jumps_without_mutation(transition_to) -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    snapshot = runtime.snapshot()
+    decision = runtime.begin_turn(
+        _identity(runtime, cue_id="farm.apple.teach"),
+        "teach",
+        transition_to=transition_to,
+    )
+    assert decision.code == "ILLEGAL_STATE_TRANSITION"
+    assert runtime.snapshot() == snapshot
+
+
+@pytest.mark.parametrize(
+    ("response_class", "expected_state", "cue_role"),
+    [
+        (None, ConversationState.ASKING, "teach"),
+        ("meaning_vi", ConversationState.BRIDGING, "teach"),
+        ("silence", ConversationState.COACHING, "retry_level_1"),
+        ("target", ConversationState.REACTING, "thinking"),
+    ],
+)
+def test_begin_turn_can_retain_each_authoritative_speaking_state(response_class, expected_state, cue_role) -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    if response_class is not None:
+        runtime.child_response(_identity(runtime), response_class)
+    before_sequence = runtime.turn_sequence_id
+    cue_id = f"farm.apple.{cue_role}"
+    decision = runtime.begin_turn(_identity(runtime, cue_id=cue_id), cue_role)
+    assert decision.accepted
+    assert decision.state is expected_state
+    assert runtime.turn_sequence_id == before_sequence + 1
+
+
+@pytest.mark.parametrize("response_class", [None, "meaning_vi", "silence", "target"])
+def test_begin_turn_allows_only_listening_transition_from_speaking_states(response_class) -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    if response_class is not None:
+        runtime.child_response(_identity(runtime), response_class)
+    decision = runtime.begin_turn(
+        _identity(runtime, cue_id="farm.apple.listen"),
+        "listen",
+        transition_to=ConversationState.LISTENING,
+    )
+    assert decision.accepted
+    assert decision.state is ConversationState.LISTENING
+
+
+def test_begin_turn_rejects_complete_state_without_mutation() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    snapshot = runtime.snapshot()
+    decision = runtime.begin_turn(_identity(runtime, cue_id="farm.apple.word_transition"), "word_transition")
+    assert decision.code == "TURN_NOT_AVAILABLE"
+    assert runtime.snapshot() == snapshot
+
+
+def test_begin_turn_rejects_new_turn_from_listening_without_mutation() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.interrupt(_identity(runtime))
+    snapshot = runtime.snapshot()
+    decision = runtime.begin_turn(_identity(runtime, cue_id="farm.apple.listen"), "listen")
+    assert decision.code == "TURN_NOT_AVAILABLE"
+    assert runtime.snapshot() == snapshot
+
+
+def test_begin_turn_listening_transition_requires_listen_cue_without_mutation() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    snapshot = runtime.snapshot()
+    decision = runtime.begin_turn(
+        _identity(runtime, cue_id="farm.apple.teach"),
+        "teach",
+        transition_to=ConversationState.LISTENING,
+    )
+    assert decision.code == "ILLEGAL_STATE_TRANSITION"
+    assert runtime.snapshot() == snapshot
 
 
 def test_visual_reaction_continue_and_skip_are_server_authoritative() -> None:

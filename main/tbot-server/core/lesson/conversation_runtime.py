@@ -126,6 +126,7 @@ class LessonConversationRuntime:
         self._mastered = False
         self._speaking_evidence = False
         self._used_identities: set[LessonToolIdentity] = set()
+        self._retired_identities: set[LessonToolIdentity] = set()
         self._guidance = ModelGuidanceFacts(
             target_word=contract.target_word,
             meanings_vi=contract.meanings_vi,
@@ -187,6 +188,7 @@ class LessonConversationRuntime:
             self._mastered,
             self._speaking_evidence,
             frozenset(self._used_identities),
+            frozenset(self._retired_identities),
         )
 
     def _cue(self, role: str) -> CueSpec:
@@ -232,6 +234,8 @@ class LessonConversationRuntime:
             return self._reject("CROSS_ATTEMPT")
         if identity.step_key != self._contract.step_key:
             return self._reject("CROSS_STEP")
+        if identity in self._retired_identities:
+            return self._reject("STALE_IDENTITY")
         if identity in self._used_identities:
             return self._reject("DUPLICATE_IDENTITY")
         if identity.turn_sequence_id < self._turn_sequence_id:
@@ -240,8 +244,13 @@ class LessonConversationRuntime:
             return self._reject("REORDERED_IDENTITY")
         return None
 
-    def _consume(self, identity: LessonToolIdentity) -> None:
-        self._used_identities.add(identity)
+    def _consume(self, identity: LessonToolIdentity, *, retired: bool = False) -> None:
+        if retired:
+            self._retired_identities.update(self._used_identities)
+            self._used_identities.clear()
+            self._retired_identities.add(identity)
+        else:
+            self._used_identities.add(identity)
         self._turn_sequence_id += 1
 
     def open_attempt(self) -> ConversationDecision:
@@ -265,6 +274,7 @@ class LessonConversationRuntime:
         self._mastered = False
         self._speaking_evidence = False
         self._used_identities.clear()
+        self._retired_identities.clear()
         return self._decision(intent="scene_question", cue_role="listen")
 
     def child_response(self, identity: LessonToolIdentity | None, response_class: str) -> ConversationDecision:
@@ -347,18 +357,27 @@ class LessonConversationRuntime:
         self,
         identity: LessonToolIdentity | None,
         cue_role: str,
-        state: ConversationState,
+        *,
+        transition_to: ConversationState | None = None,
     ) -> ConversationDecision:
         rejected = self._identity_rejection(identity)
         if rejected:
             return rejected
+        if self._state not in _SPEAKING_STATES:
+            return self._reject("TURN_NOT_AVAILABLE")
+        if transition_to is not None and transition_to is not ConversationState.LISTENING:
+            return self._reject("ILLEGAL_STATE_TRANSITION")
         cue = self._contract.cue_map.get(cue_role)
         if cue is None or identity is None or identity.cue_id != cue.cue_id:
             return self._reject("ILLEGAL_CUE")
-        if state not in _SPEAKING_STATES or cue_role not in self._allowed_visual_roles(state):
+        if transition_to is ConversationState.LISTENING:
+            if cue_role != "listen":
+                return self._reject("ILLEGAL_STATE_TRANSITION")
+        elif cue_role not in self._allowed_visual_roles():
             return self._reject("ILLEGAL_STATE_TRANSITION")
-        self._consume(identity)
-        self._state = state
+        self._consume(identity, retired=True)
+        if transition_to is ConversationState.LISTENING:
+            self._state = ConversationState.LISTENING
         return self._decision(intent="begin_model_turn", cue_role=cue_role)
 
     def interrupt(self, identity: LessonToolIdentity | None) -> ConversationDecision:
@@ -368,7 +387,7 @@ class LessonConversationRuntime:
         if self._state not in _SPEAKING_STATES:
             return self._reject("INTERRUPT_NOT_AVAILABLE")
         assert identity is not None
-        self._consume(identity)
+        self._consume(identity, retired=True)
         self._state = ConversationState.LISTENING
         return self._decision(intent="listen_to_child", cue_role="listen")
 
