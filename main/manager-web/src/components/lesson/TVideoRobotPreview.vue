@@ -1,9 +1,9 @@
 <template>
   <section class="robot-flattened" aria-labelledby="tvideo-flattened-title">
     <div class="robot-flattened__head">
-      <div><span class="eyebrow">PREVIEW · NOT PUBLISH AUTHORITY</span><h4 id="tvideo-flattened-title">Robot Flattened</h4></div>
+      <div><span class="eyebrow">{{ $t('lesson.tvideoJourney.previewAuthorityEyebrow') }}</span><h4 id="tvideo-flattened-title">{{ $t('lesson.tvideoJourney.tab.flattened') }}</h4></div>
       <div class="robot-flattened__controls">
-        <el-select v-model="cueId" size="mini" aria-label="Preview cue">
+        <el-select v-model="cueId" size="mini" :aria-label="$t('lesson.tvideoJourney.previewCueLabel')">
           <el-option v-for="cue in cues" :key="cue.cueId" :label="`${cue.cueId} · ${cue.effect}`" :value="cue.cueId" />
         </el-select>
         <el-button size="mini" @click="toggle">{{ playing ? $t('lesson.tvideoJourney.pause') : $t('lesson.tvideoJourney.play') }}</el-button>
@@ -11,15 +11,15 @@
       </div>
     </div>
     <div class="robot-flattened__viewport">
-      <canvas ref="canvas" width="480" height="320" aria-label="TVideo Journey flattened 480 by 320 preview canvas" />
+      <canvas ref="canvas" width="480" height="320" :aria-label="$t('lesson.tvideoJourney.canvasLabel')" />
       <video v-if="backgroundUrl" ref="background" class="robot-flattened__media" :src="backgroundUrl" muted playsinline loop preload="auto" @loadeddata="draw" />
       <video v-if="robotUrl" ref="robot" class="robot-flattened__media" :src="robotUrl" muted playsinline loop preload="auto" @loadeddata="draw" />
       <img v-if="objectUrl" ref="object" class="robot-flattened__media" :src="objectUrl" alt="" @load="draw" />
     </div>
     <div class="robot-flattened__identity">
       <span class="mono">{{ preset.presetId }}@{{ preset.presetVersion }}</span>
-      <span class="mono">build {{ shortHash(preset.rendererBuildSha256) }}</span>
-      <span>{{ clockMs }} ms · 10 FPS</span>
+      <span class="mono">{{ $t('lesson.tvideoJourney.buildIdentity', { hash: shortHash(preset.rendererBuildSha256) }) }}</span>
+      <span>{{ $t('lesson.tvideoJourney.clockSummary', { clock: clockMs, fps: 10 }) }}</span>
     </div>
     <p class="robot-flattened__notice">{{ $t('lesson.tvideoJourney.previewOnly') }}</p>
   </section>
@@ -60,7 +60,7 @@ export default {
   },
   beforeDestroy() { this.stopTimer(); },
   methods: {
-    shortHash(value) { return value ? `${value.slice(0, 8)}…${value.slice(-6)}` : 'unavailable'; },
+    shortHash(value) { return value ? `${value.slice(0, 8)}…${value.slice(-6)}` : this.$t('lesson.tvideoJourney.unavailable'); },
     toggle() { this.playing = !this.playing; if (this.playing) this.startTimer(); else this.stopTimer(); },
     replay() { this.clockMs = 0; this.draw(); if (this.playing) this.startTimer(); },
     startTimer() { this.stopTimer(); this.timer = setInterval(() => { this.clockMs = quantizeClockMs(this.clockMs + 100); this.draw(); }, 100); },
@@ -77,7 +77,7 @@ export default {
       const object = path.objectAnchor; if (!this.drawMedia(ctx, this.$refs.object, object.x * 480 - 38, object.y * 320 - 42, 76, 76)) { ctx.fillStyle = '#d95f43'; ctx.fillRect(object.x * 480 - 28, object.y * 320 - 28, 56, 56); }
       ctx.fillStyle = 'rgba(255,255,255,.92)'; ctx.fillRect(22, 22, 155, 80); ctx.fillStyle = '#243c35'; ctx.font = '700 12px sans-serif'; ctx.fillText(`${this.step.progress ? this.step.progress.index : 1} / 2`, 34, 43); ctx.font = '700 27px sans-serif'; ctx.fillText(String(this.step.targetWord || '').toUpperCase(), 34, 74); ctx.font = '12px sans-serif'; ctx.fillText(effect, 34, 94);
       if (effect === 'celebrate' || effect === 'correct') { const state = deterministicPreviewState({ clockMs: this.clockMs, cueId: this.cueId, seed: this.preset.confettiSeed, pieces: this.preset.confettiPieces || 64 }); state.confetti.forEach((piece) => { ctx.save(); ctx.translate(piece.x * 480, piece.y * 320); ctx.rotate(piece.rotation * Math.PI / 180); ctx.fillStyle = CONFETTI[piece.colorIndex]; ctx.fillRect(-4, -7, 8, 14); ctx.restore(); }); }
-      ctx.fillStyle = 'rgba(17,34,29,.72)'; ctx.fillRect(278, 287, 192, 22); ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.fillText('ADMIN PREVIEW · NOT PUBLISH AUTHORITY', 287, 302);
+      ctx.fillStyle = 'rgba(17,34,29,.72)'; ctx.fillRect(250, 287, 220, 22); ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.fillText(this.$t('lesson.tvideoJourney.canvasPreviewLabel'), 258, 302);
     },
   },
 };

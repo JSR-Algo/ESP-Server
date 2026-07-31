@@ -78,15 +78,25 @@ const [editor, conversation, robot, lessonEditor, api, pkg, en, vi] = await Prom
   read('src/i18n/vi.js'),
 ]);
 
-for (const label of ['3 Sources', 'Journey Path', 'Conversation', 'Robot Flattened']) {
-  assert.ok(editor.includes(label), `missing exact preview tab ${label}`);
+const componentSources = [editor, conversation, robot];
+const i18nKeys = new Set(componentSources.flatMap((source) => [...source.matchAll(/\$t\('([^']+)'/g)].map((match) => match[1])));
+for (const key of i18nKeys) {
+  assert.ok(en.includes(`'${key}'`), `missing English translation for mounted component key ${key}`);
+  assert.ok(vi.includes(`'${key}'`), `missing Vietnamese translation for mounted component key ${key}`);
 }
+for (const copy of ['DETERMINISTIC SIMULATOR', 'PREVIEW · NOT PUBLISH AUTHORITY', 'BACKEND DERIVATIVES', 'EXACT TWO-STEP CONTENT', 'Selected journey word', 'Selected robot role', 'ADMIN PREVIEW · NOT PUBLISH AUTHORITY']) {
+  assert.ok(componentSources.every((source) => !source.includes(copy)), `hard-coded visible copy must use i18n: ${copy}`);
+}
+
+for (const key of ['tab.sources', 'tab.path', 'tab.conversation', 'tab.flattened']) assert.ok(editor.includes(`lesson.tvideoJourney.${key}`), `missing preview tab i18n key ${key}`);
 for (const branch of helper.CONVERSATION_BRANCHES) assert.ok(conversation.includes(branch), `missing branch ${branch}`);
 for (const marker of ['role="tablist"', 'role="tab"', 'aria-selected', '@keydown', 'touch-action', '@media (prefers-reduced-motion: reduce)']) {
   assert.ok(editor.includes(marker) || robot.includes(marker), `missing accessibility/responsive marker ${marker}`);
 }
 assert.ok(editor.includes('CinematicLayerPicker'));
 assert.ok(editor.includes('assetVersionId'));
+assert.match(editor, /class="path-stage__background"[\s\S]*muted[\s\S]*playsinline/);
+assert.doesNotMatch(editor, /backgroundImage:[^\n]*url\(/);
 assert.doesNotMatch(editor, /durationMs[^\n]*(?:el-input|el-slider)|easing[^\n]*(?:el-input|el-slider)|confettiPieces[^\n]*(?:el-input|el-slider)/i);
 assert.ok(robot.includes('width="480"') && robot.includes('height="320"'));
 assert.ok(robot.includes('100'));
@@ -106,7 +116,7 @@ assert.doesNotMatch(lessonEditor, /tvideoJourney[^\n]{0,60}(?:storagePath|filesy
 
 const packageJson = JSON.parse(pkg);
 assert.equal(packageJson.scripts['test:tvideo-journey-editor'], 'node scripts/check-tvideo-journey-editor.mjs');
-for (const key of ['lesson.tvideoJourney.title', 'lesson.tvideoJourney.previewOnly', 'lesson.tvideoJourney.status.stale']) {
+for (const key of ['lesson.tvideoJourney.title', 'lesson.tvideoJourney.previewOnly', 'lesson.tvideoJourney.status.stale', 'lesson.tvideoJourney.tab.sources', 'lesson.tvideoJourney.canvasLabel']) {
   assert.ok(en.includes(`'${key}'`), `missing English key ${key}`);
   assert.ok(vi.includes(`'${key}'`), `missing Vietnamese key ${key}`);
 }

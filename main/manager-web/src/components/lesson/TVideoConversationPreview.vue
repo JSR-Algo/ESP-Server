@@ -2,10 +2,10 @@
   <section class="conversation-preview" aria-labelledby="tvideo-conversation-title">
     <div class="conversation-preview__head">
       <div>
-        <span class="eyebrow">DETERMINISTIC SIMULATOR</span>
+        <span class="eyebrow">{{ $t('lesson.tvideoJourney.simulatorEyebrow') }}</span>
         <h4 id="tvideo-conversation-title">{{ step.targetWord }}</h4>
       </div>
-      <el-select v-model="branch" size="small" aria-label="Child input class">
+      <el-select v-model="branch" size="small" :aria-label="$t('lesson.tvideoJourney.childInputClassLabel')">
         <el-option v-for="item in branches" :key="item" :label="branchLabel(item)" :value="item" />
       </el-select>
     </div>
@@ -13,9 +13,9 @@
       <article><small>{{ $t('lesson.tvideoJourney.inputClass') }}</small><strong>{{ result.inputClass }}</strong></article>
       <article><small>{{ $t('lesson.tvideoJourney.nextIntent') }}</small><strong>{{ result.nextIntent }}</strong></article>
       <article class="conversation-preview__wide"><small>{{ $t('lesson.tvideoJourney.question') }}</small><p>{{ result.question || '—' }}</p></article>
-      <article class="conversation-preview__wide"><small>{{ $t('lesson.tvideoJourney.bridge') }}</small><p>{{ result.bridge }}</p></article>
-      <article class="conversation-preview__wide"><small>{{ $t('lesson.tvideoJourney.coaching') }}</small><p>{{ result.coaching }}</p></article>
-      <article><small>cueId / effect</small><strong class="mono">{{ result.cueId }} · {{ result.effect }}</strong></article>
+      <article class="conversation-preview__wide"><small>{{ $t('lesson.tvideoJourney.bridge') }}</small><p>{{ $t(result.bridge, result.bridgeParams) }}</p></article>
+      <article class="conversation-preview__wide"><small>{{ $t('lesson.tvideoJourney.coaching') }}</small><p>{{ $t(result.coaching, result.coachingParams) }}</p></article>
+      <article><small>{{ $t('lesson.tvideoJourney.cueEffectLabel') }}</small><strong class="mono">{{ result.cueId }} · {{ result.effect }}</strong></article>
       <article><small>{{ $t('lesson.tvideoJourney.coachingLevel') }}</small><strong>{{ result.coachingLevel || '—' }}</strong></article>
       <article><small>{{ $t('lesson.tvideoJourney.progressResult') }}</small><strong>{{ result.progressResult }}</strong></article>
     </div>
