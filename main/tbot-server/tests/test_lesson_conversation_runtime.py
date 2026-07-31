@@ -67,6 +67,17 @@ def _identity(runtime: LessonConversationRuntime, *, cue_id: str | None = None) 
     return runtime.identity(cue_id=cue_id)
 
 
+def _raw_identity(runtime: LessonConversationRuntime, cue_id: str) -> LessonToolIdentity:
+    assert runtime.attempt_id is not None
+    return LessonToolIdentity(
+        lesson_session_id="session-7a",
+        turn_sequence_id=runtime.turn_sequence_id,
+        attempt_id=runtime.attempt_id,
+        step_key="farm.apple",
+        cue_id=cue_id,
+    )
+
+
 def test_contract_is_exact_deeply_immutable_and_supports_either_pronunciation_union() -> None:
     payload = _payload()
     contract = LessonConversationContract.from_mapping(payload)
@@ -334,11 +345,11 @@ def test_interrupt_during_model_speech_or_reaction_retires_identity_and_listens(
 def test_begin_turn_increments_sequence_and_child_can_barge_into_listening() -> None:
     runtime = _runtime()
     runtime.open_attempt()
-    identity = _identity(runtime, cue_id="farm.apple.teach")
-    begun = runtime.begin_turn(identity, "teach")
+    identity = _identity(runtime, cue_id="farm.apple.listen")
+    begun = runtime.begin_turn(identity, "listen")
     assert begun.accepted
     assert runtime.turn_sequence_id == identity.turn_sequence_id + 1
-    assert runtime.begin_turn(identity, "teach").code == "STALE_IDENTITY"
+    assert runtime.begin_turn(identity, "listen").code == "STALE_IDENTITY"
     barged = runtime.child_response(_identity(runtime), "meaning_vi")
     assert barged.state is ConversationState.BRIDGING
 
@@ -369,8 +380,8 @@ def test_begin_turn_rejects_caller_selected_semantic_state_jumps_without_mutatio
     runtime.open_attempt()
     snapshot = runtime.snapshot()
     decision = runtime.begin_turn(
-        _identity(runtime, cue_id="farm.apple.teach"),
-        "teach",
+        _identity(runtime, cue_id="farm.apple.listen"),
+        "listen",
         transition_to=transition_to,
     )
     assert decision.code == "ILLEGAL_STATE_TRANSITION"
@@ -380,7 +391,7 @@ def test_begin_turn_rejects_caller_selected_semantic_state_jumps_without_mutatio
 @pytest.mark.parametrize(
     ("setup", "expected_state", "cue_role"),
     [
-        (None, ConversationState.ASKING, "teach"),
+        (None, ConversationState.ASKING, "listen"),
         ("meaning_vi", ConversationState.BRIDGING, "teach"),
         ("silence", ConversationState.COACHING, "retry_level_1"),
         ("correct", ConversationState.REACTING, "celebrate"),
@@ -402,8 +413,11 @@ def test_begin_turn_can_retain_each_authoritative_speaking_state(setup, expected
     assert runtime.turn_sequence_id == before_sequence + 1
 
 
-@pytest.mark.parametrize("setup", [None, "meaning_vi", "silence", "correct"])
-def test_begin_turn_allows_only_listening_transition_from_speaking_states(setup) -> None:
+@pytest.mark.parametrize(
+    ("setup", "cue_role"),
+    [(None, "listen"), ("meaning_vi", "teach"), ("silence", "retry_level_1"), ("correct", "celebrate")],
+)
+def test_begin_turn_allows_only_listening_transition_from_speaking_states(setup, cue_role) -> None:
     runtime = _runtime()
     runtime.open_attempt()
     if setup == "correct":
@@ -412,8 +426,8 @@ def test_begin_turn_allows_only_listening_transition_from_speaking_states(setup)
     elif setup is not None:
         runtime.child_response(_identity(runtime), setup)
     decision = runtime.begin_turn(
-        _identity(runtime, cue_id="farm.apple.listen"),
-        "listen",
+        _identity(runtime, cue_id=f"farm.apple.{cue_role}"),
+        cue_role,
         transition_to=ConversationState.LISTENING,
     )
     assert decision.accepted
@@ -426,8 +440,8 @@ def test_begin_turn_rejects_complete_state_without_mutation() -> None:
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
     runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"),
-        effect="show_word_transition",
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
     )
     snapshot = runtime.snapshot()
     decision = runtime.begin_turn(_identity(runtime, cue_id="farm.apple.word_transition"), "word_transition")
@@ -445,16 +459,16 @@ def test_begin_turn_rejects_new_turn_from_listening_without_mutation() -> None:
     assert runtime.snapshot() == snapshot
 
 
-def test_begin_turn_listening_transition_requires_listen_cue_without_mutation() -> None:
+def test_begin_turn_listening_transition_requires_pending_cue_without_mutation() -> None:
     runtime = _runtime()
     runtime.open_attempt()
     snapshot = runtime.snapshot()
     decision = runtime.begin_turn(
-        _identity(runtime, cue_id="farm.apple.teach"),
+        _raw_identity(runtime, "farm.apple.teach"),
         "teach",
         transition_to=ConversationState.LISTENING,
     )
-    assert decision.code == "ILLEGAL_STATE_TRANSITION"
+    assert decision.code == "ILLEGAL_CUE"
     assert runtime.snapshot() == snapshot
 
 
@@ -479,8 +493,8 @@ def test_mastered_completion_rejects_pronunciation_and_cannot_reopen() -> None:
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
     runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"),
-        effect="show_word_transition",
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
     )
     snapshot = runtime.snapshot()
     assert runtime.pronunciation_outcome(_identity(runtime), "correct").code == ("PRONUNCIATION_NOT_AVAILABLE")
@@ -515,13 +529,17 @@ def test_attempted_completion_rejects_pronunciation_and_cannot_reopen() -> None:
 def test_visual_reaction_continue_and_skip_are_server_authoritative() -> None:
     runtime = _runtime()
     runtime.open_attempt()
-    bad_cue = runtime.visual_reaction(_identity(runtime, cue_id="farm.apple.celebrate"), "correct")
+    bad_cue = runtime.visual_reaction(
+        _raw_identity(runtime, "farm.apple.correct"),
+        "correct",
+        effect="show_correct_reaction",
+    )
     bad_effect = runtime.visual_reaction(
         _identity(runtime, cue_id="farm.apple.listen"), "listen", effect="show_celebration"
     )
     premature = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"),
-        effect="show_word_transition",
+        _identity(runtime, cue_id="farm.apple.listen"),
+        effect="show_listening_scene",
     )
     direct_mastery = runtime.mark_mastered(_identity(runtime))
     assert [bad_cue.code, bad_effect.code, premature.code, direct_mastery.code] == [
@@ -535,8 +553,8 @@ def test_visual_reaction_continue_and_skip_are_server_authoritative() -> None:
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
     continued = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"),
-        effect="show_word_transition",
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
     )
     assert continued.next_intent == "continue_lesson"
     assert continued.cue_id == "farm.apple.word_transition"
@@ -547,7 +565,7 @@ def test_celebration_is_unavailable_before_authoritative_pronunciation_mastery()
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     decision = runtime.visual_reaction(
-        _identity(runtime, cue_id="farm.apple.celebrate"),
+        _raw_identity(runtime, "farm.apple.celebrate"),
         "celebrate",
         effect="show_celebration",
     )
@@ -562,20 +580,83 @@ def test_visual_reaction_requires_the_exact_approved_effect() -> None:
     assert decision.code == "ILLEGAL_EFFECT"
 
 
+def test_target_thinking_cue_blocks_future_retry_cues_without_mutation() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    snapshot = runtime.snapshot()
+
+    with pytest.raises(ValueError, match="pending cue"):
+        _identity(runtime, cue_id="farm.apple.retry_level_3")
+    visual = runtime.visual_reaction(
+        _raw_identity(runtime, "farm.apple.retry_level_3"),
+        "retry_level_3",
+        effect="show_pronunciation_guide",
+    )
+    begun = runtime.begin_turn(_raw_identity(runtime, "farm.apple.retry_level_2"), "retry_level_2")
+    assert [visual.code, begun.code] == ["ILLEGAL_CUE", "ILLEGAL_CUE"]
+    assert runtime.snapshot() == snapshot
+
+
+def test_silence_level_one_blocks_unissued_later_retry_cues() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "silence")
+    snapshot = runtime.snapshot()
+    for role, effect in (
+        ("retry_level_2", "show_slow_model"),
+        ("retry_level_3", "show_pronunciation_guide"),
+    ):
+        visual = runtime.visual_reaction(_raw_identity(runtime, f"farm.apple.{role}"), role, effect=effect)
+        begun = runtime.begin_turn(_raw_identity(runtime, f"farm.apple.{role}"), role)
+        assert [visual.code, begun.code] == ["ILLEGAL_CUE", "ILLEGAL_CUE"]
+        assert runtime.snapshot() == snapshot
+
+
+def test_retry_cues_unlock_only_when_issued_and_old_cues_expire() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+
+    level_one = runtime.pronunciation_outcome(_identity(runtime), "retry")
+    assert level_one.cue_id == "farm.apple.retry_level_1"
+    assert runtime.visual_reaction(
+        _identity(runtime, cue_id=level_one.cue_id),
+        "retry_level_1",
+        effect="show_effort_reaction",
+    ).accepted
+
+    level_two = runtime.pronunciation_outcome(_identity(runtime), "retry")
+    assert level_two.cue_id == "farm.apple.retry_level_2"
+    stale_level_one = runtime.visual_reaction(
+        _raw_identity(runtime, "farm.apple.retry_level_1"),
+        "retry_level_1",
+        effect="show_effort_reaction",
+    )
+    assert stale_level_one.code == "ILLEGAL_CUE"
+    assert runtime.visual_reaction(
+        _identity(runtime, cue_id=level_two.cue_id),
+        "retry_level_2",
+        effect="show_slow_model",
+    ).accepted
+
+    level_three = runtime.pronunciation_outcome(_identity(runtime), "retry")
+    assert level_three.cue_id == "farm.apple.retry_level_3"
+    assert runtime.begin_turn(_identity(runtime, cue_id=level_three.cue_id), "retry_level_3").accepted
+
+
 def test_continue_rejects_model_selected_cue_effect_or_step() -> None:
     runtime = _runtime()
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
-    wrong_cue = runtime.continue_lesson(
+    wrong_cue = runtime.continue_lesson(_raw_identity(runtime, "farm.apple.word_transition"), effect="show_celebration")
+    wrong_effect = runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"), effect="show_word_transition"
     )
-    wrong_effect = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"), effect="show_celebration"
-    )
     selected_step = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.word_transition"),
-        effect="show_word_transition",
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
         next_step_key="farm.pear",
     )
     assert [wrong_cue.code, wrong_effect.code, selected_step.code] == [

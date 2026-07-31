@@ -127,6 +127,9 @@ class LessonConversationRuntime:
         self._speaking_evidence = False
         self._used_identities: set[LessonToolIdentity] = set()
         self._retired_identities: set[LessonToolIdentity] = set()
+        self._pending_cue_id: str | None = None
+        self._pending_effect: str | None = None
+        self._pending_intent: str | None = None
         self._guidance = ModelGuidanceFacts(
             target_word=contract.target_word,
             meanings_vi=contract.meanings_vi,
@@ -164,9 +167,23 @@ class LessonConversationRuntime:
     def mastered(self) -> bool:
         return self._mastered
 
+    @property
+    def pending_cue_id(self) -> str | None:
+        return self._pending_cue_id
+
+    @property
+    def pending_effect(self) -> str | None:
+        return self._pending_effect
+
+    @property
+    def pending_intent(self) -> str | None:
+        return self._pending_intent
+
     def identity(self, *, cue_id: str | None = None) -> LessonToolIdentity:
         if self._attempt_id is None or self._turn_sequence_id < 1:
             raise RuntimeError("open_attempt must establish identity first")
+        if cue_id is not None and cue_id != self._pending_cue_id:
+            raise ValueError("cue_id does not match the pending cue")
         return LessonToolIdentity(
             lesson_session_id=self._contract.lesson_session_id,
             turn_sequence_id=self._turn_sequence_id,
@@ -189,6 +206,9 @@ class LessonConversationRuntime:
             self._speaking_evidence,
             frozenset(self._used_identities),
             frozenset(self._retired_identities),
+            self._pending_cue_id,
+            self._pending_effect,
+            self._pending_intent,
         )
 
     def _cue(self, role: str) -> CueSpec:
@@ -209,7 +229,7 @@ class LessonConversationRuntime:
         cue_role: str | None = None,
     ) -> ConversationDecision:
         cue = self._cue(cue_role) if cue_role else None
-        return ConversationDecision(
+        decision = ConversationDecision(
             accepted=accepted,
             code=code,
             state=self._state,
@@ -221,6 +241,11 @@ class LessonConversationRuntime:
             review_needed=self._review_needed,
             guidance=self._guidance,
         )
+        if accepted:
+            self._pending_cue_id = decision.cue_id
+            self._pending_effect = decision.effect
+            self._pending_intent = decision.next_intent
+        return decision
 
     def _reject(self, code: str) -> ConversationDecision:
         return self._decision(accepted=False, code=code, intent="retain_authoritative_state")
@@ -365,23 +390,34 @@ class LessonConversationRuntime:
         rejected = self._identity_rejection(identity)
         if rejected:
             return rejected
-        if self._state not in _SPEAKING_STATES:
+        cue = self._contract.cue_map.get(cue_role)
+        if cue is None or identity is None or identity.cue_id != cue.cue_id or cue.cue_id != self._pending_cue_id:
+            return self._reject("ILLEGAL_CUE")
+        if self._state is ConversationState.COMPLETE:
             return self._reject("TURN_NOT_AVAILABLE")
         if transition_to is not None and transition_to is not ConversationState.LISTENING:
             return self._reject("ILLEGAL_STATE_TRANSITION")
-        cue = self._contract.cue_map.get(cue_role)
-        if cue is None or identity is None or identity.cue_id != cue.cue_id:
-            return self._reject("ILLEGAL_CUE")
+        if self._state is ConversationState.LISTENING and cue_role not in {
+            "thinking",
+            "retry_level_1",
+            "retry_level_2",
+            "retry_level_3",
+        }:
+            return self._reject("TURN_NOT_AVAILABLE")
+        if self._state not in _SPEAKING_STATES and self._state is not ConversationState.LISTENING:
+            return self._reject("TURN_NOT_AVAILABLE")
         if transition_to is ConversationState.LISTENING:
-            if cue_role != "listen":
-                return self._reject("ILLEGAL_STATE_TRANSITION")
+            output_role = "listen"
         elif cue_role not in self._allowed_visual_roles():
             return self._reject("ILLEGAL_STATE_TRANSITION")
+        else:
+            output_role = cue_role
         self._consume(identity, retired=True)
         if transition_to is ConversationState.LISTENING:
             self._state = ConversationState.LISTENING
             self._speaking_evidence = False
-        return self._decision(intent="begin_model_turn", cue_role=cue_role)
+            return self._decision(intent="listen_to_child", cue_role=output_role)
+        return self._decision(intent="begin_model_turn", cue_role=output_role)
 
     def interrupt(self, identity: LessonToolIdentity | None) -> ConversationDecision:
         rejected = self._identity_rejection(identity)
@@ -406,11 +442,11 @@ class LessonConversationRuntime:
         if rejected:
             return rejected
         cue = self._contract.cue_map.get(cue_role)
-        if cue is None or identity is None or identity.cue_id != cue.cue_id:
+        if cue is None or identity is None or identity.cue_id != cue.cue_id or cue.cue_id != self._pending_cue_id:
             return self._reject("ILLEGAL_CUE")
         if cue_role not in self._allowed_visual_roles():
             return self._reject("ILLEGAL_CUE")
-        if effect != cue.effect:
+        if effect != cue.effect or effect != self._pending_effect:
             return self._reject("ILLEGAL_EFFECT")
         self._consume(identity)
         return self._decision(intent="play_approved_reaction", cue_role=cue_role)
@@ -427,10 +463,13 @@ class LessonConversationRuntime:
             return rejected
         if not (self._mastered or (self._outcome == "attempted" and self._review_needed)):
             return self._reject("CONTINUE_NOT_ALLOWED")
-        cue = self._cue("word_transition")
-        if identity is None or identity.cue_id != cue.cue_id:
+        pending = next(
+            (cue for cue in self._contract.cues if cue.cue_id == self._pending_cue_id),
+            None,
+        )
+        if identity is None or pending is None or identity.cue_id != pending.cue_id:
             return self._reject("ILLEGAL_CUE")
-        if effect != cue.effect:
+        if effect != pending.effect or effect != self._pending_effect:
             return self._reject("ILLEGAL_EFFECT")
         if next_step_key is not None:
             return self._reject("MODEL_STEP_SELECTION_FORBIDDEN")
