@@ -78,6 +78,7 @@ const manifest = {
 const lessonManifestVersions = {
   'lesson-1': 'teebot-lesson-renderer.v2',
   'journey-v4': 'teebot-lesson-renderer.v4',
+  'legacy-v4': 'teebot-lesson-renderer.v4',
   'legacy-v1': 'teebot-lesson-renderer.v1',
   'legacy-v2': 'teebot-lesson-renderer.v2',
   'legacy-v3': 'teebot-lesson-renderer.v3',
@@ -87,7 +88,14 @@ Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: lessonManifestVersions[id] || 'teebot-lesson-renderer.v2' }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
-  getTVideoJourney(id, ok) { calls.journeyLoads.push(id); ok({ state: 'not-configured', lessonId: id, cinematicSourceRevision: 0, set: { state: 'invalid', issues: [{ code: 'MISSING_CUES', cueIds: [] }] }, statuses: [], publishReady: false }); },
+  getTVideoJourney(id, ok) {
+    calls.journeyLoads.push(id);
+    if (id === 'lesson-1' || id === 'journey-v4') {
+      ok({ state: 'configured', lessonId: id, lessonVersion: 1, sourceRevision: 1, cinematicSourceRevision: 1, journey: createFarmJourneyDraft(), set: { state: 'ready', issues: [] }, statuses: [], publishReady: false });
+      return;
+    }
+    ok({ state: 'not-configured', lessonId: id, cinematicSourceRevision: 0, set: { state: 'invalid', issues: [{ code: 'MISSING_CUES', cueIds: [] }] }, statuses: [], publishReady: false });
+  },
   saveTVideoJourney(id, payload, ok, fail) {
     calls.journeySaves.push(JSON.parse(JSON.stringify(payload)));
     if (calls.deferNextJourneySave) { calls.deferNextJourneySave = false; calls.pendingJourneySaves.push({ id, payload, ok, fail }); return; }

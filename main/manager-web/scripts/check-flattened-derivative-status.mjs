@@ -117,7 +117,7 @@ const loadStatus = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'loa
   flattenedDerivativeResponseIsCurrent: helper.flattenedDerivativeResponseIsCurrent,
 });
 const loadContext = {
-  editorDestroying: false, isTVideoJourney: false, lesson, lessonId: lesson.lessonId,
+  editorDestroying: false, hasAuthoritativeTVideoJourney: false, lesson, lessonId: lesson.lessonId,
   flattenedDerivativeRequestId: 0, flattenedDerivativeSourceEpoch: 2,
   flattenedDerivativeStatus: null, flattenedDerivativeLoading: false, flattenedDerivativeError: '',
   flattenedDerivativeReadyPreview: null, flattenedDerivativePreviewError: '',
@@ -131,12 +131,12 @@ statusError('late error', { status: 500 });
 assert.equal(loadContext.flattenedDerivativeStatus, null, 'late success/error callbacks must be ignored after a source epoch change');
 statusSuccess = undefined;
 statusError = undefined;
-assert.equal(loadStatus.call({ ...loadContext, isTVideoJourney: true }), false, 'TVideo Journey must not call the legacy flattened phase endpoint');
+assert.equal(loadStatus.call({ ...loadContext, hasAuthoritativeTVideoJourney: true }), false, 'TVideo Journey must not call the legacy flattened phase endpoint');
 assert.equal(statusSuccess, undefined);
 assert.equal(statusError, undefined);
 assert.equal(loadStatus.call({
   ...loadContext,
-  isTVideoJourney: false,
+  hasAuthoritativeTVideoJourney: false,
   lesson: { ...lesson, manifestVersion: 'teebot-lesson-renderer.v4' },
 }), true, 'non-TVideo renderer-v4 lessons must retain legacy derivative readiness');
 
@@ -168,6 +168,8 @@ const publishContext = {
 assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v3' }), true);
 assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { sourceRevision: 7, phases: [phase('failed')] }, flattenedDerivativeRequiredPhaseIds: ['opening'], flattenedDerivativeCurrentSourceRevision: 7 }), false);
 assert.equal(canPublish.call({ ...publishContext, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: { sourceRevision: 7, phases: [phase('ready')] }, flattenedDerivativeRequiredPhaseIds: ['opening'], flattenedDerivativeCurrentSourceRevision: 7 }), true);
+assert.equal(canPublish.call({ ...publishContext, hasAuthoritativeTVideoJourney: true, tvideoJourneyPublishReady: true, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: null, flattenedDerivativeRequiredPhaseIds: null, flattenedDerivativeCurrentSourceRevision: null }), true, 'TVideo publish readiness must bypass the legacy flattened phase gate');
+assert.equal(canPublish.call({ ...publishContext, hasAuthoritativeTVideoJourney: true, tvideoJourneyPublishReady: false, flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v4', flattenedDerivativeStatus: null, flattenedDerivativeRequiredPhaseIds: null, flattenedDerivativeCurrentSourceRevision: null }), false, 'TVideo publish must still fail closed on authoritative cue readiness');
 
 const previewFailure = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'onFlattenedDerivativePreviewError')})`);
 const previewContext = { flattenedDerivativeStatus: { phases: [phase('ready')] }, flattenedDerivativePreviewError: '', $t: (key) => key };
@@ -202,7 +204,7 @@ for (const token of [
   "this.$t('lesson.flattenedDerivativeServerFailed'",
   "this.$t('lesson.flattenedDerivativePreviewFailed'",
 ]) assert.ok(editorSource.includes(token), `LessonEditor.vue must include ${token}`);
-assert.match(editorSource, /<section v-if="!isTVideoJourney" class="preview-surface derivative-readiness"/, 'TVideo Journey must hide the legacy flattened phase panel');
+assert.match(editorSource, /<section v-if="showLegacyFlattenedDerivativeReadiness" class="preview-surface derivative-readiness"/, 'legacy flattened readiness visibility must use the authoritative journey discriminator');
 assert.match(editorSource, /beforeDestroy\(\)[\s\S]*flattenedDerivativePollTimer[\s\S]*clearTimeout/, 'destroy must stop derivative polling');
 assert.match(editorSource, /'\$route\.query\.lessonId'[\s\S]*resetFlattenedDerivativeStatus/, 'route changes must reset polling and epochs');
 assert.match(editorSource, /scheduleFlattenedDerivativeStatusPoll[\s\S]*setTimeout[\s\S]*5000/, 'processing polling must use a bounded five-second interval');

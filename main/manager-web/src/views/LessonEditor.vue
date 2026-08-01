@@ -217,7 +217,7 @@
                 </div>
                 <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
               </section>
-              <section v-if="!isTVideoJourney" class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
+              <section v-if="showLegacyFlattenedDerivativeReadiness" class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
                 <div class="preview-heading">
                   <span class="eyebrow">{{ $t('lesson.flattenedDerivativeTitle') }}</span>
                   <span class="preview-heading__hint">{{ $t('lesson.flattenedDerivativeHint') }}</span>
@@ -824,8 +824,25 @@ export default {
         && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
       );
     },
+    hasAuthoritativeTVideoJourney() {
+      const response = this.tvideoJourneyResponse;
+      const journey = response && response.journey;
+      return Boolean(
+        this.isTVideoJourney
+        && response.lessonId === this.lessonId
+        && response.state === 'configured'
+        && journey
+        && journey.presetId === 'tvideoJourney'
+        && journey.presetVersion === 1
+      );
+    },
+    showLegacyFlattenedDerivativeReadiness() {
+      return !this.isTVideoJourney
+        || (!this.tvideoJourneyLoading && !this.hasAuthoritativeTVideoJourney);
+    },
     tvideoJourneyPublishReady() {
-      return !this.isTVideoJourney || (this.tvideoJourneyResponse && this.tvideoJourneyResponse.publishReady === true);
+      return !this.hasAuthoritativeTVideoJourney
+        || (this.tvideoJourneyResponse && this.tvideoJourneyResponse.publishReady === true);
     },
     flattenedDerivativeReadyPreview() {
       const phases = this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases;
@@ -1150,6 +1167,8 @@ export default {
           : createFarmJourneyDraft();
         this.tvideoJourneyDirty = false;
         this.tvideoJourneyLoading = false;
+        if (this.hasAuthoritativeTVideoJourney) this.resetFlattenedDerivativeStatus();
+        else this.loadFlattenedDerivativeStatus();
       };
       const fail = (message, error) => {
         if (!current()) return;
@@ -1175,6 +1194,7 @@ export default {
         this.tvideoJourneyDraft = response.journey;
         this.tvideoJourneyDirty = false;
         this.tvideoJourneySaveMessage = this.$t('lesson.tvideoJourney.saved');
+        if (this.hasAuthoritativeTVideoJourney) this.resetFlattenedDerivativeStatus();
       }, (message, error) => {
         if (this.editorDestroying || requestId !== this.tvideoJourneyRequestId || lessonId !== this.lessonId) return;
         this.tvideoJourneySaving = false;
@@ -1245,7 +1265,7 @@ export default {
       return true;
     },
     loadFlattenedDerivativeStatus(options = {}) {
-      if (this.editorDestroying || this.isTVideoJourney || !this.lesson || !this.lessonId
+      if (this.editorDestroying || this.hasAuthoritativeTVideoJourney || !this.lesson || !this.lessonId
         || !Api.lesson || typeof Api.lesson.getFlattenedDerivativeStatus !== 'function') return false;
       const guard = {
         requestId: this.flattenedDerivativeRequestId + 1,
@@ -1633,8 +1653,8 @@ export default {
           this.loading = false;
           this.loadLessonAssetGenerationStatus();
           this.fetchSteps();
-          this.loadFlattenedDerivativeStatus();
           if (l.manifestVersion === 'teebot-lesson-renderer.v4') this.loadTVideoJourney();
+          else this.loadFlattenedDerivativeStatus();
         },
         (msg) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
@@ -2686,7 +2706,8 @@ export default {
         && this.simulationProofVersion === this.proofVersion
         && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
         && this.tvideoJourneyPublishReady !== false
-        && (typeof flattenedDerivativesReadyForPublish !== 'function'
+        && (this.hasAuthoritativeTVideoJourney
+          || typeof flattenedDerivativesReadyForPublish !== 'function'
           || flattenedDerivativesReadyForPublish(
             this.flattenedDerivativeManifestVersion,
             this.flattenedDerivativeStatus,
