@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -75,6 +76,14 @@ DEFAULT_INTERRUPT_PROMPT = (
 DEFAULT_IDLE_PROMPT = (
     "Hãy kể một câu chuyện ngắn bằng tiếng Việt trong khoảng hai phút."
 )
+TVIDEO_FARM_TURNS = (
+    ("lesson_start", "Bắt đầu bài học nông trại."),
+    ("target", "Barn."),
+    ("meaning_bridge", "Nông trại."),
+    ("related_bridge", "Hay."),
+    ("retry", "Con chưa chắc, cô chú gợi ý nhẹ cho con nhé."),
+)
+TVIDEO_FARM_BARGEIN_CORRECTION = "Barn."
 
 LOG_INTERRUPT_RE = re.compile(
     r"Google Live user_interrupted reason=(?P<reason>\w+) "
@@ -88,6 +97,26 @@ LOG_AUDIO_START_RE = re.compile(r"Google Live audio_start")
 LOG_GOAWAY_RE = re.compile(r"session_expiring|go_away|goAway", re.I)
 LOG_RECONNECT_RE = re.compile(r"reconnect attempt (\d+) succeeded")
 LOG_FALLBACK_RE = re.compile(r"fallback_triggered")
+GOOGLE_LIVE_CREDENTIAL_ENV_NAMES = (
+    "GOOGLE_API_KEY",
+    "TBOT_GOOGLE_LIVE_API_KEY",
+    "GEMINI_API_KEY",
+    "TBOT_GEMINI_TTS_API_KEY",
+)
+
+
+def _credential_gated_tvideo_farm_report(args):
+    if any(str(os.environ.get(name, "")).strip() for name in GOOGLE_LIVE_CREDENTIAL_ENV_NAMES):
+        return None
+    return {
+        "scenario": "tvideo-farm",
+        "status": "SKIP_GOOGLE_LIVE_CREDENTIALS",
+        "audio_source": args.audio_source,
+        "duration_sec": args.event_timeout_sec,
+        "raw_audio_persisted": False,
+        "transcript_persisted": False,
+        "exit_code": 0,
+    }
 
 
 def _safe_soak_config(args):
@@ -626,6 +655,83 @@ async def _run_rapid_interrupt_mode(args):
     return report
 
 
+async def _run_tvideo_farm_scenario(args):
+    """Exercise the bounded farm conversation without recording speech content."""
+    headers = {
+        "device-id": args.device_mac if args.device_mac else args.device_id,
+        "client-id": args.client_id,
+    }
+    started_at = time.time()
+    records = []
+    timeout = max(1.0, float(args.event_timeout_sec))
+
+    async with websockets.connect(
+        args.websocket_url,
+        additional_headers=headers,
+        open_timeout=args.open_timeout_sec,
+        max_size=None,
+    ) as websocket:
+        await websocket.send(json.dumps(_hello_message()))
+        hello_payload, _, _ = await _recv_until(
+            websocket,
+            lambda payload: payload.get("type") == "hello",
+            min(timeout, args.event_timeout_sec),
+        )
+        if hello_payload is None:
+            raise RuntimeError("hello ack timeout")
+
+        for label, synthetic_text in TVIDEO_FARM_TURNS:
+            record = {"label": label, "outcome": "FAIL", "tts_started": False, "tts_stopped": False}
+            turn_started = time.monotonic()
+            await websocket.send(json.dumps(_detect_message(synthetic_text)))
+            tts_start, _, _ = await _recv_until(
+                websocket,
+                lambda payload: _is_tts_state(payload, "start"),
+                timeout,
+            )
+            record["tts_started"] = tts_start is not None
+            if tts_start is None:
+                record["error"] = "tts_start_timeout"
+                records.append(record)
+                continue
+
+            if label == "retry":
+                await asyncio.sleep(min(args.speak_for_sec, 1.0))
+                await websocket.send(
+                    json.dumps(_detect_message(TVIDEO_FARM_BARGEIN_CORRECTION))
+                )
+                record["bargein_sent"] = True
+
+            tts_stop, _, _ = await _recv_until(
+                websocket,
+                lambda payload: _is_tts_state(payload, "stop"),
+                timeout,
+            )
+            record["tts_stopped"] = tts_stop is not None
+            record["latency_ms"] = round((time.monotonic() - turn_started) * 1000, 1)
+            if tts_stop is None:
+                record["error"] = "tts_stop_timeout"
+            else:
+                record["outcome"] = "PASS"
+            records.append(record)
+
+        await websocket.close()
+
+    passed = len(records) == len(TVIDEO_FARM_TURNS) and all(
+        record["outcome"] == "PASS" for record in records
+    )
+    return {
+        "scenario": "tvideo-farm",
+        "status": "PASS" if passed else "FAIL",
+        "audio_source": args.audio_source,
+        "duration_sec": round(time.time() - started_at, 1),
+        "turns": records,
+        "raw_audio_persisted": False,
+        "transcript_persisted": False,
+        "exit_code": 0 if passed else 1,
+    }
+
+
 def _dry_run_report(args):
     """Return a placeholder report when --dry-run is set (no server needed)."""
     started_at = time.time()
@@ -666,6 +772,8 @@ def _dry_run_report(args):
 
 
 async def run_soak(args):
+    if getattr(args, "scenario", None) == "tvideo-farm":
+        return await _run_tvideo_farm_scenario(args)
     mode = getattr(args, "mode", None)
     if mode == "false_positive":
         return await _run_false_positive_mode(args)
@@ -758,8 +866,14 @@ async def run_soak(args):
     return report
 
 
-def main():
+def _build_argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scenario",
+        choices=["tvideo-farm"],
+        default=None,
+        help="bounded lesson validation scenario; tvideo-farm is credential-gated",
+    )
     # Mode selector for PR5 §6.4 modes
     parser.add_argument(
         "--mode",
@@ -828,6 +942,11 @@ def main():
     # Dry-run: validate args + emit placeholder report, no websocket connect
     parser.add_argument("--dry-run", action="store_true",
                         help="skip websocket connect; emit placeholder report for CI smoke")
+    return parser
+
+
+def main():
+    parser = _build_argument_parser()
     args = parser.parse_args()
 
     # --inject-text overrides --interrupt-prompt when provided
@@ -836,6 +955,15 @@ def main():
 
     # device_id alias for backward compat in _run_bargein_cycle / _run_idle_cycle
     args.device_id = args.device_mac or "unknown"
+
+    if args.scenario == "tvideo-farm":
+        skipped = _credential_gated_tvideo_farm_report(args)
+        if skipped is not None:
+            if args.report:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                args.report.write_text(json.dumps(skipped, indent=2))
+            print("SKIP_GOOGLE_LIVE_CREDENTIALS")
+            return 0
 
     try:
         report = asyncio.run(run_soak(args))
