@@ -1074,6 +1074,7 @@ class LessonRuntime:
         self._preload_task: Optional[asyncio.Task] = None
         self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
+        self._frame_ack_timeout_sequence: Optional[int] = None
         self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
         self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
         self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
@@ -1682,7 +1683,7 @@ class LessonRuntime:
         command = self._cinematic_pending_command
         if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
             self._cinematic_pending_command = None
-        self._cancel_frame_ack_timeout()
+        self._cancel_frame_ack_timeout(sequence)
 
     def _retire_conversation_visual(self) -> None:
         pending = self._conversation_pending_visual
@@ -1820,7 +1821,7 @@ class LessonRuntime:
         command = self._cinematic_frame_command(frame)
         if command is not None:
             self._cinematic_pending_command = None
-        self._cancel_frame_ack_timeout()
+        self._cancel_frame_ack_timeout(acked)
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
 
@@ -3097,6 +3098,10 @@ class LessonRuntime:
                 await self._sleep(timeout_sec)
             except asyncio.CancelledError:
                 return
+            if self._frame_ack_timeout_sequence != seq:
+                return
+            self._frame_ack_timeout_task = None
+            self._frame_ack_timeout_sequence = None
             if seq not in self._outstanding or self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
                 return
             frame = self._outstanding.pop(seq, None) or {}
@@ -3129,12 +3134,21 @@ class LessonRuntime:
             await self._emit_error(self.last_error)
             await self._notify_lesson_terminal("frame_ack_timeout")
 
+        self._frame_ack_timeout_sequence = seq
         self._frame_ack_timeout_task = asyncio.create_task(_timeout())
 
-    def _cancel_frame_ack_timeout(self) -> None:
-        if self._frame_ack_timeout_task is not None and not self._frame_ack_timeout_task.done():
-            self._frame_ack_timeout_task.cancel()
+    def _cancel_frame_ack_timeout(self, sequence: Optional[int] = None) -> None:
+        if sequence is not None and self._frame_ack_timeout_sequence != sequence:
+            return
+        task = self._frame_ack_timeout_task
         self._frame_ack_timeout_task = None
+        self._frame_ack_timeout_sequence = None
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
 
     def _start_child_response_timeout(self) -> None:
         self._cancel_child_response_timeout()

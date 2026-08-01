@@ -13,11 +13,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as legacy
 from core.lesson.conversation_contract import LessonToolIdentity
-from core.lesson.errors import LessonError
+from core.lesson.errors import LESSON_FRAME_ACK_TIMEOUT, LessonError
 from core.lesson.runtime import (
     LessonRuntime,
     RENDERER_V4,
     S_COMPLETED,
+    S_FAILED,
     S_IDLE,
     S_PAUSED,
     S_RUNNING,
@@ -647,6 +648,78 @@ async def test_interrupt_during_blocked_visual_send_retires_old_turn_without_rol
     }
     await runtime.on_lesson_ack(late)
     assert runtime.conversation.snapshot() == interrupted_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion", ["ack", "timeout"])
+async def test_stale_visual_cleanup_preserves_new_visual_ack_timeout(
+    completion: str,
+) -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.conn.config["lesson"]["frame_ack_max_retries"] = 0
+    old_send_started = asyncio.Event()
+    release_old_send = asyncio.Event()
+    release_timeout = asyncio.Event()
+    sent: list[dict] = []
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await release_timeout.wait()
+
+    async def block_first_send(payload: str) -> None:
+        sent.append(json.loads(payload))
+        if len(sent) == 1:
+            old_send_started.set()
+            await release_old_send.wait()
+
+    runtime._sleep = controlled_sleep
+    runtime._send = block_first_send
+    old_visual_task = asyncio.create_task(
+        runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    )
+    await old_send_started.wait()
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+
+    new_visual = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+    assert new_visual.accepted
+    old_frame, new_frame = sent
+    new_sequence = new_frame["sequence"]
+    new_timeout = runtime._frame_ack_timeout_task
+    assert runtime._cinematic_pending_command["commandSequenceId"] == new_sequence
+    assert runtime._conversation_pending_visual["sequence"] == new_sequence
+
+    release_old_send.set()
+    stale_visual = await old_visual_task
+
+    assert stale_visual.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert old_frame["sequence"] not in runtime._outstanding
+    assert new_sequence in runtime._outstanding
+    assert runtime._cinematic_pending_command["commandSequenceId"] == new_sequence
+    assert runtime._conversation_pending_visual["sequence"] == new_sequence
+    assert runtime._frame_ack_timeout_task is new_timeout
+    assert runtime._frame_ack_timeout_sequence == new_sequence
+    assert new_timeout is not None and not new_timeout.done()
+
+    await runtime.on_lesson_ack(_ack(runtime, old_frame, 1))
+    assert new_sequence in runtime._outstanding
+    assert runtime._frame_ack_timeout_task is new_timeout
+
+    if completion == "ack":
+        await runtime.on_lesson_ack(_ack(runtime, new_frame, 1))
+        assert new_sequence not in runtime._outstanding
+        assert runtime._conversation_pending_visual is None
+        assert runtime._frame_ack_timeout_task is None
+        assert runtime._frame_ack_timeout_sequence is None
+    else:
+        release_timeout.set()
+        await new_timeout
+        assert runtime.state == S_FAILED
+        assert runtime.last_error is not None
+        assert runtime.last_error.code == LESSON_FRAME_ACK_TIMEOUT
 
 
 @pytest.mark.asyncio
