@@ -26,6 +26,26 @@ function expectRegex(file, regex, reason) {
   }
 }
 
+function expectPublicLatestCmsUpstreams() {
+  const file = 'deploy/nginx/tjbot.vn.conf';
+  const body = readFromRepo(file);
+  const blocks = [...body.matchAll(
+    /location\s*=\s*\/v1\/public\/lesson-assets\/latest\s*\{([\s\S]*?)^    \}/gm,
+  )].map(match => match[1]);
+
+  if (blocks.length !== 2) {
+    throw new Error(`${file} must define exactly two public latest-index locations`);
+  }
+  for (const block of blocks) {
+    if (!block.includes('proxy_pass http://127.0.0.1:3003;')) {
+      throw new Error(`${file} public latest-index locations must proxy to the local CMS`);
+    }
+    if (/onrender\.com|proxy_ssl_/.test(block)) {
+      throw new Error(`${file} public latest-index locations must not retain the Render TLS upstream`);
+    }
+  }
+}
+
 const noStore = 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0';
 const immutable = 'public, max-age=31536000, immutable';
 
@@ -98,6 +118,7 @@ expectRegex(
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');
+expectPublicLatestCmsUpstreams();
 
 expectContains('main/manager-web/src/registerServiceWorker.js', 'registration.update()', 'registered service worker should proactively check for updates');
 expectContains('main/manager-web/src/utils/serviceWorkerUpdateSafety.mjs', 'SKIP_WAITING', 'new service worker should activate without stale UI waiting');
