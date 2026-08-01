@@ -79,6 +79,7 @@ const lessonManifestVersions = {
   'lesson-1': 'teebot-lesson-renderer.v2',
   'journey-v4': 'teebot-lesson-renderer.v4',
   'legacy-v4': 'teebot-lesson-renderer.v4',
+  'legacy-v4-fail': 'teebot-lesson-renderer.v4',
   'legacy-v1': 'teebot-lesson-renderer.v1',
   'legacy-v2': 'teebot-lesson-renderer.v2',
   'legacy-v3': 'teebot-lesson-renderer.v3',
@@ -88,8 +89,12 @@ Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: lessonManifestVersions[id] || 'teebot-lesson-renderer.v2' }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
-  getTVideoJourney(id, ok) {
+  getTVideoJourney(id, ok, fail) {
     calls.journeyLoads.push(id);
+    if (id === 'legacy-v4-fail') {
+      fail('journey unavailable', { status: 404 });
+      return;
+    }
     if (id === 'lesson-1' || id === 'journey-v4') {
       ok({ state: 'configured', lessonId: id, lessonVersion: 1, sourceRevision: 1, cinematicSourceRevision: 1, journey: createFarmJourneyDraft(), set: { state: 'ready', issues: [] }, statuses: [], publishReady: false });
       return;

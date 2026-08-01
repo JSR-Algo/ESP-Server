@@ -1156,6 +1156,7 @@ export default {
       let preset = null;
       let response = null;
       let completed = 0;
+      let failed = false;
       const current = () => !this.editorDestroying && requestId === this.tvideoJourneyRequestId && lessonId === this.lessonId;
       const finish = () => {
         completed += 1;
@@ -1171,9 +1172,11 @@ export default {
         else this.loadFlattenedDerivativeStatus();
       };
       const fail = (message, error) => {
-        if (!current()) return;
+        if (!current() || failed) return;
+        failed = true;
         this.tvideoJourneyLoading = false;
         this.tvideoJourneyError = this.formatTVideoJourneyError(message, error);
+        if (!this.hasAuthoritativeTVideoJourney) this.loadFlattenedDerivativeStatus();
       };
       Api.lesson.getTVideoJourneyPreset((value) => { if (current()) { preset = value; finish(); } }, fail);
       Api.lesson.getTVideoJourney(lessonId, (value) => { if (current()) { response = value; finish(); } }, fail);
