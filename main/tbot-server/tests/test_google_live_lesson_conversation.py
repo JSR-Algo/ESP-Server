@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 from types import SimpleNamespace
 
 from core.providers.tools.product_toolset import product_tool_names
@@ -75,6 +76,9 @@ class _Client:
     async def send_tool_response(self, responses):
         self.responses.append(responses)
 
+    async def send_text(self, text):
+        self.responses.append(text)
+
 
 class _Handler:
     def __init__(self, response=None):
@@ -120,6 +124,58 @@ class LessonConversationSchemaTest(unittest.TestCase):
         self.assertEqual({item["name"] for item in declarations}, LESSON_TOOL_NAMES)
         self.assertTrue(all(item["parameters"]["additionalProperties"] is False for item in declarations))
 
+    def test_typed_sdk_boundary_strips_unsupported_schema_without_mutating_canonical(self):
+        from core.voice.google_live.client import GoogleLiveClient
+
+        captured = []
+
+        class FunctionDeclaration:
+            def __init__(self, **kwargs):
+                def assert_supported(value):
+                    if isinstance(value, dict):
+                        assert "additionalProperties" not in value
+                        for nested in value.values():
+                            assert_supported(nested)
+                    elif isinstance(value, list):
+                        for nested in value:
+                            assert_supported(nested)
+
+                assert_supported(kwargs.get("parameters"))
+                captured.append(kwargs)
+
+        client = GoogleLiveClient(
+            {"functions": list(LESSON_CONVERSATION_TOOL_SPECS.values())},
+            _Logger(),
+        )
+        client._types = SimpleNamespace(
+            FunctionDeclaration=FunctionDeclaration,
+            Tool=lambda **kwargs: kwargs,
+        )
+        client._build_tools()
+
+        self.assertEqual(len(captured), 5)
+        self.assertIs(
+            LESSON_CONVERSATION_TOOL_SPECS["lesson_child_response"]["function"]["parameters"]["additionalProperties"],
+            False,
+        )
+
+    def test_pinned_google_genai_constructs_all_lesson_declarations_when_available(self):
+        try:
+            from google.genai import types
+        except ImportError:
+            self.skipTest("google-genai is not installed in this interpreter")
+        from core.voice.google_live.client import GoogleLiveClient
+
+        client = GoogleLiveClient(
+            {"functions": list(LESSON_CONVERSATION_TOOL_SPECS.values())},
+            _Logger(),
+        )
+        client._types = types
+
+        tools = client._build_tools()
+
+        self.assertEqual(len(tools[0].function_declarations), 5)
+
     def test_lesson_enabled_product_surface_includes_only_semantic_lesson_tools(self):
         names = set(product_tool_names(_Conn()))
         self.assertTrue(LESSON_TOOL_NAMES.issubset(names))
@@ -163,6 +219,18 @@ class _Runtime:
         self.calls.append((identity, response_class))
         return _Decision()
 
+    def conversation_tool_context(self):
+        return {
+            "identity": {
+                "lessonSessionId": "lesson-session",
+                "turnSequenceId": 3,
+                "attemptId": "attempt-1",
+                "stepKey": "word-1",
+                "cueId": "word-1-teach",
+            },
+            "allowedTools": ["lesson_visual_reaction"],
+        }
+
 
 class _InterruptConversation:
     attempt_id = "attempt-1"
@@ -181,10 +249,22 @@ class _InterruptRuntime:
         self.conversation = _InterruptConversation()
         self.identities = []
 
-    async def conversation_interrupt(self, identity):
-        self.identities.append(identity)
+    async def conversation_interrupt_current(self):
+        self.identities.append(self.conversation.identity())
         self.conversation.turn_sequence_id += 1
         return SimpleNamespace(accepted=True, code="ACCEPTED")
+
+    def conversation_tool_context(self):
+        return {
+            "identity": {
+                "lessonSessionId": "lesson-session",
+                "turnSequenceId": self.conversation.turn_sequence_id,
+                "attemptId": "attempt-1",
+                "stepKey": "word-1",
+                "cueId": "word-1-listen",
+            },
+            "allowedTools": ["lesson_visual_reaction"],
+        }
 
 
 class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
@@ -206,6 +286,7 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(identity.cue_id, None)
         self.assertEqual(response_class, "meaning_vi")
         self.assertEqual(result.result["nextIntent"], "bridge_vietnamese")
+        self.assertEqual(result.result["context"]["identity"]["turnSequenceId"], 3)
 
     async def test_handler_rejects_extra_fields_before_runtime_mutation(self):
         conn = _Conn()
@@ -238,6 +319,106 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_client_captures_generation_before_delayed_tool_only_turn_arrives(self):
+        from core.voice.google_live.client import GoogleLiveClient
+
+        release = asyncio.Event()
+        current = 7
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def receive(self):
+                self.calls += 1
+
+                async def messages():
+                    if self.calls == 1:
+                        await release.wait()
+                        yield SimpleNamespace(
+                            tool_call=SimpleNamespace(
+                                function_calls=[
+                                    SimpleNamespace(
+                                        id="tool-only",
+                                        name="lesson_continue",
+                                        args={},
+                                    )
+                                ]
+                            )
+                        )
+
+                return messages()
+
+        client = GoogleLiveClient({}, _Logger())
+        client.connected = True
+        client._session = Session()
+        client.set_response_generation_getter(lambda: current)
+        events = client.receive_events()
+        pending = asyncio.create_task(anext(events))
+        await asyncio.sleep(0)
+        current = 8
+        release.set()
+
+        event = await pending
+
+        self.assertEqual(event["response_generation"], 7)
+        await events.aclose()
+
+    async def test_reused_live_activation_injects_instruction_and_context_once(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        conn.voice_provider = provider
+        provider._client = _Client()
+        provider._session_generation = 4
+        context = {
+            "identity": {
+                "lessonSessionId": "lesson-session",
+                "turnSequenceId": 2,
+                "attemptId": "attempt-1",
+                "stepKey": "word-1",
+                "cueId": "word-1-listen",
+            },
+            "nextIntent": "scene_question",
+            "allowedTools": ["lesson_visual_reaction"],
+            "cueId": "word-1-listen",
+            "effect": "show_listening_scene",
+        }
+
+        await provider.publish_lesson_conversation_context(context)
+        await provider.publish_lesson_conversation_context(context)
+
+        self.assertEqual(len(provider._client.responses), 1)
+        sent = provider._client.responses[0]
+        self.assertIn("Never say", sent)
+        self.assertIn('"attemptId":"attempt-1"', sent)
+
+    async def test_fresh_lesson_connect_sends_context_without_duplicate_instruction(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        conn.voice_provider = provider
+        provider._client = _Client()
+        provider._session_generation = 4
+        provider._lesson_instruction_generation = 4
+        context = {"identity": {"attemptId": "attempt-1"}, "allowedTools": []}
+
+        await provider.publish_lesson_conversation_context(context)
+
+        self.assertEqual(len(provider._client.responses), 1)
+        self.assertNotIn("Never say", provider._client.responses[0])
+        self.assertIn('"attemptId":"attempt-1"', provider._client.responses[0])
+
+    async def test_lesson_exit_clears_reused_live_coaching_constraint(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
+        provider._session_generation = 2
+        provider._lesson_instruction_generation = 2
+
+        await provider.deactivate_lesson_conversation_context()
+
+        self.assertIn("lesson has ended", provider._client.responses[0].lower())
+        self.assertIsNone(provider._lesson_instruction_generation)
+
     async def test_barge_in_interrupts_authoritative_conversation(self):
         conn = _Conn()
         conn.lesson_runtime = _InterruptRuntime()
@@ -259,6 +440,7 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
         await provider._handle_tool_call_event(
             {
                 "type": "tool_call",
+                "response_generation": 0,
                 "calls": [
                     {
                         "id": "call-1",
@@ -362,6 +544,7 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
         await bridge.handle_event(
             {
                 "type": "tool_call",
+                "response_generation": 0,
                 "calls": [{"id": "1", "name": "lesson_child_response", "args": {}}],
             }
         )
@@ -373,4 +556,81 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([event["calls"][0]["name"] for event in calls], ["lesson_child_response"])
+        await bridge.close()
+
+    async def test_tool_only_event_preserves_client_captured_origin_generation(self):
+        conn = _Conn()
+        calls = []
+
+        async def handler(event):
+            calls.append(event)
+
+        bridge = GoogleLiveAudioBridge(
+            conn,
+            SimpleNamespace(),
+            conn.logger,
+            response_id_getter=lambda: 8,
+            tool_call_handler=handler,
+        )
+        await bridge.handle_event(
+            {
+                "type": "tool_call",
+                "response_generation": 7,
+                "calls": [{"id": "old", "name": "lesson_continue", "args": {}}],
+            }
+        )
+
+        self.assertEqual(calls[0]["response_generation"], 7)
+        await bridge.close()
+
+    async def test_post_audio_end_late_tool_keeps_pre_barge_generation(self):
+        conn = _Conn()
+        calls = []
+        current = 3
+
+        async def handler(event):
+            calls.append(event)
+
+        bridge = GoogleLiveAudioBridge(
+            conn,
+            SimpleNamespace(),
+            conn.logger,
+            response_id_getter=lambda: current,
+            tool_call_handler=handler,
+        )
+        await bridge.handle_event({"type": "audio_start"})
+        await bridge.handle_event({"type": "audio_end"})
+        current = 4
+        await bridge.handle_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "late", "name": "lesson_continue", "args": {}}],
+            }
+        )
+
+        self.assertEqual(calls[0]["response_generation"], 3)
+        await bridge.close()
+
+    async def test_lesson_tool_without_origin_generation_is_dropped_fail_closed(self):
+        conn = _Conn()
+        calls = []
+
+        async def handler(event):
+            calls.append(event)
+
+        bridge = GoogleLiveAudioBridge(
+            conn,
+            SimpleNamespace(),
+            conn.logger,
+            response_id_getter=lambda: 5,
+            tool_call_handler=handler,
+        )
+        await bridge.handle_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "unknown", "name": "lesson_continue", "args": {}}],
+            }
+        )
+
+        self.assertEqual(calls, [])
         await bridge.close()

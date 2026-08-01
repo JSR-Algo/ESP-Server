@@ -100,6 +100,7 @@ class GoogleLiveAudioBridge:
         self._aec_reference_resampler_rates = None
         self._aec_reference_resampler_state = None
         self._active_response_id = None
+        self._model_response_generation = None
         self._locally_cancelled_response_ids = set()
         self._input_decoder = None
         self._output_encoder = None
@@ -216,8 +217,12 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_start":
+            origin_generation = event.get("response_generation")
+            if not isinstance(origin_generation, int):
+                origin_generation = self._response_id_getter()
+            self._model_response_generation = origin_generation
             if self._should_drop_lesson_model_output(event_type):
-                self._active_response_id = self._response_id_getter()
+                self._active_response_id = origin_generation
                 self._mark_active_response_cancelled()
                 return True
             if self._moderation_block_active:
@@ -234,7 +239,9 @@ class GoogleLiveAudioBridge:
                 self._active_response_id = self._response_id_getter()
                 self._mark_active_response_cancelled()
                 return True
-            self._active_response_id = self._response_id_getter()
+            event_generation = event.get("response_generation")
+            self._active_response_id = event_generation if isinstance(event_generation, int) else origin_generation
+            self._model_response_generation = self._active_response_id
             self._locally_cancelled_response_ids.discard(self._active_response_id)
             if len(self._locally_cancelled_response_ids) > 20:
                 self._locally_cancelled_response_ids = set(
@@ -367,12 +374,22 @@ class GoogleLiveAudioBridge:
             if self._tool_call_handler is not None:
                 try:
                     if isinstance(event, dict):
-                        event.setdefault(
-                            "response_generation",
-                            self._active_response_id
-                            if self._active_response_id is not None
-                            else self._response_id_getter(),
-                        )
+                        generation = event.get("response_generation")
+                        if not isinstance(generation, int):
+                            generation = self._model_response_generation
+                        if not isinstance(generation, int):
+                            calls = event.get("calls") or []
+                            if any(
+                                isinstance(call, Mapping) and call.get("name") in LESSON_CONVERSATION_TOOLS
+                                for call in calls
+                            ):
+                                self.logger.bind(tag="GoogleLive").warning(
+                                    "Google Live lesson_tool_call_dropped reason=missing_origin_generation"
+                                )
+                                return True
+                        else:
+                            event["response_generation"] = generation
+                            self._model_response_generation = generation
                     await self._tool_call_handler(event)
                 except Exception as exc:
                     self.logger.bind(tag="GoogleLive").warning(
@@ -391,6 +408,12 @@ class GoogleLiveAudioBridge:
                 return True
             if self._tool_call_cancellation_handler is not None:
                 try:
+                    if isinstance(event, dict):
+                        generation = event.get("response_generation")
+                        if not isinstance(generation, int):
+                            generation = self._model_response_generation
+                        if isinstance(generation, int):
+                            event["response_generation"] = generation
                     await self._tool_call_cancellation_handler(event)
                 except Exception as exc:
                     self.logger.bind(tag="GoogleLive").warning(

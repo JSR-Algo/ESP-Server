@@ -239,6 +239,16 @@ async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> 
     assert runtime.conversation is not None
     assert runtime.conversation.identity().lesson_session_id == runtime.session_id
     assert runtime.conversation.identity().step_key == runtime._step_id == "barn"
+    context = runtime.conversation_tool_context()
+    assert context["identity"] == {
+        "lessonSessionId": runtime.session_id,
+        "turnSequenceId": 1,
+        "attemptId": "lesson-session:barn:1",
+        "stepKey": "barn",
+        "cueId": "barn-listen",
+    }
+    assert context["allowedTools"] == ["lesson_visual_reaction"]
+    assert context["guidance"]["pronunciation"]["slowModel"]
 
     for mutate in (
         lambda manifest: manifest["cinematicPhases"][0].update(templateVersion=1),
@@ -261,6 +271,27 @@ async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> 
         gated._bind_conversation_for_current_step()
         assert gated.conversation is None
         assert gated.conn.websocket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_context_refreshes_to_new_attempt_after_word_transition() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    first = runtime.conversation_tool_context()
+    runtime._step_index = 1
+    runtime._step = runtime._steps[1]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq += 1
+    runtime._step_acked = True
+    runtime._step_visuals_ready = True
+    runtime._step_completed = False
+    runtime._bind_conversation_for_current_step()
+
+    second = runtime.conversation_tool_context()
+
+    assert second["identity"]["stepKey"] == "hay"
+    assert second["identity"]["attemptId"] != first["identity"]["attemptId"]
+    assert second["identity"]["turnSequenceId"] == 1
 
 
 @pytest.mark.asyncio
@@ -632,6 +663,9 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
         _identity(runtime, cue=True), effect="show_celebration"
     )
     assert continued.cue_id == "barn-to-hay-word-transition"
+    transition_context = runtime.conversation_tool_context()
+    assert transition_context["cueId"] == "barn-to-hay-word-transition"
+    assert transition_context["allowedTools"] == ["lesson_visual_reaction"]
     assert runtime._step_id == "barn"
     transition = await runtime.conversation_visual_reaction(
         _identity(runtime, cue=True), "word_transition", effect="show_word_transition"

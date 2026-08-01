@@ -56,6 +56,10 @@ class GoogleLiveClient:
         self._audio_started = False
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
+        self._response_generation_getter = None
+
+    def set_response_generation_getter(self, getter):
+        self._response_generation_getter = getter if callable(getter) else None
 
     async def connect(self):
         genai_module = self._import_genai_module()
@@ -157,6 +161,9 @@ class GoogleLiveClient:
         try:
             while self.connected and self._session is not None:
                 received_turn_message = False
+                origin_generation = (
+                    self._response_generation_getter() if self._response_generation_getter is not None else None
+                )
                 message_iterator = self._session.receive().__aiter__()
                 while self.connected:
                     if pending_message_task is None:
@@ -174,6 +181,9 @@ class GoogleLiveClient:
                         break
                     received_turn_message = True
                     for event in self._normalize_message(message):
+                        if isinstance(event, dict) and origin_generation is not None:
+                            event = dict(event)
+                            event.setdefault("response_generation", origin_generation)
                         yield event
                 if not received_turn_message:
                     break
@@ -396,7 +406,10 @@ class GoogleLiveClient:
         if self._types is not None and hasattr(self._types, "FunctionDeclaration"):
             kwargs = {"name": name, "description": description}
             if parameters:
-                kwargs["parameters"] = parameters
+                kwargs["parameters"] = self._sanitize_schema(
+                    parameters,
+                    preserve_additional_properties=False,
+                )
             return self._types.FunctionDeclaration(**kwargs)
         declaration = {"name": name, "description": description}
         if parameters:

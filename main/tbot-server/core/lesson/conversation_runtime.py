@@ -221,6 +221,10 @@ class LessonConversationRuntime:
     def continue_applied(self) -> bool:
         return self._continue_applied
 
+    @property
+    def guidance(self) -> ModelGuidanceFacts:
+        return self._guidance
+
     def identity(self, *, cue_id: str | None = None) -> LessonToolIdentity:
         if self._attempt_id is None or self._turn_sequence_id < 1:
             raise RuntimeError("open_attempt must establish identity first")

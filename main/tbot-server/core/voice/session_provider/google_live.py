@@ -214,6 +214,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._interaction = GoogleLiveInteractionController(conn)
         self._idle_close_task = None
         self._voice_consent_denied = False
+        self._lesson_instruction_generation = None
+        self._lesson_context_signature = None
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -2737,10 +2739,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._cancelled_response_ids.clear()
         self._pending_tool_calls.clear()
         self._cancelled_tool_call_ids.clear()
-        self._client = self._client_factory(
-            self._get_live_config_with_functions(),
-            self.conn.logger,
+        live_config = self._get_live_config_with_functions()
+        lesson_instruction_in_config = (
+            self._lesson_runtime_active()
+            or normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
         )
+        self._client = self._client_factory(live_config, self.conn.logger)
+        generation_getter = getattr(self._client, "set_response_generation_getter", None)
+        if callable(generation_getter):
+            generation_getter(self.current_response_id)
         self._bridge = GoogleLiveAudioBridge(
             self.conn,
             self._client,
@@ -2756,6 +2763,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         self._ensure_required_aec_ready()
         await self._client.connect()
+        self._lesson_instruction_generation = generation if lesson_instruction_in_config else None
+        self._lesson_context_signature = None
+        await self._publish_current_lesson_context()
         self.conn.google_live_session_started_at = time.monotonic()
         self._touch_live_activity()
         if (
@@ -2873,14 +2883,66 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # system_instruction the model only chats verbally and ignores
         # Vietnamese intents like "tăng âm lượng".
         prompt = self.conn.config.get("prompt") if self.conn else None
+        lesson_active = (
+            self._lesson_runtime_active()
+            or normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
+        )
         if prompt:
             prompt = self._augment_prompt_with_child_name(prompt)
-            if self._lesson_runtime_active() or normalize_session_mode(
-                getattr(self.conn, "session_mode", SessionMode.DORMANT)
-            ) == SessionMode.LESSON:
+            if lesson_active:
                 prompt += LESSON_CONVERSATION_SYSTEM_INSTRUCTION
             config["system_prompt"] = prompt
+        elif lesson_active:
+            config["system_prompt"] = LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip()
         return config
+
+    async def publish_lesson_conversation_context(self, context):
+        if not isinstance(context, Mapping) or self._client is None:
+            return False
+        sender = getattr(self._client, "send_text", None)
+        if not callable(sender):
+            return False
+        serialized = json.dumps(dict(context), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        signature = (self._session_generation, serialized)
+        instruction_needed = self._lesson_instruction_generation != self._session_generation
+        if self._lesson_context_signature == signature and not instruction_needed:
+            return True
+        prefix = "Internal lesson control update. Do not repeat or explain this control message. "
+        if instruction_needed:
+            prefix += LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip() + " "
+        await sender(prefix + "Authoritative lesson context JSON: " + serialized)
+        self._lesson_instruction_generation = self._session_generation
+        self._lesson_context_signature = signature
+        return True
+
+    async def _publish_current_lesson_context(self):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(snapshot):
+            return False
+        try:
+            context = snapshot()
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live lesson_context_snapshot_failed error={}",
+                self._safe_error_message(exc),
+            )
+            return False
+        return await self.publish_lesson_conversation_context(context)
+
+    async def deactivate_lesson_conversation_context(self):
+        sender = getattr(self._client, "send_text", None)
+        try:
+            if callable(sender) and self._lesson_instruction_generation is not None:
+                await sender(
+                    "Internal control update: the lesson has ended. Return to the base "
+                    "general-chat system instruction. Ignore the prior lesson coaching "
+                    "constraint and do not call lesson tools unless a new authoritative "
+                    "lesson context is supplied. Do not repeat this message."
+                )
+        finally:
+            self._lesson_instruction_generation = None
+            self._lesson_context_signature = None
 
     def _handle_session_resumption_update(self, event):
         if not isinstance(event, Mapping):
@@ -5189,10 +5251,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         calls = event.get("calls") if isinstance(event, Mapping) else None
         if not calls:
             return
-        in_lesson = normalize_session_mode(
-            getattr(self.conn, "session_mode", SessionMode.DORMANT)
-        ) == SessionMode.LESSON or self._lesson_runtime_active()
-        event_generation = event.get("response_generation", self._response_generation)
+        in_lesson = (
+            normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
+            or self._lesson_runtime_active()
+        )
+        event_generation = event.get("response_generation")
         try:
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live tool_call received count={} names=[{}]",
@@ -5215,6 +5278,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         "response": self._tool_error(
                             "LESSON_MODE_TOOL_BLOCKED",
                             "Tool calls are blocked while lesson mode owns the child interaction.",
+                        ),
+                    }
+                )
+                continue
+            if in_lesson and not isinstance(event_generation, int):
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "MISSING_ORIGIN_GENERATION",
+                            "Lesson tool call is missing its originating model response generation.",
                         ),
                     }
                 )
@@ -5604,21 +5679,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def _interrupt_lesson_conversation(self):
         runtime = getattr(self.conn, "lesson_runtime", None)
-        conversation = getattr(runtime, "conversation", None)
-        identity_factory = getattr(conversation, "identity", None)
-        interrupt = getattr(runtime, "conversation_interrupt", None)
-        if not callable(identity_factory) or not callable(interrupt):
+        interrupt = getattr(runtime, "conversation_interrupt_current", None)
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(interrupt) or not callable(snapshot):
             return
         try:
-            decision = await interrupt(identity_factory())
-            current = getattr(runtime, "conversation", None)
-            if current is not None and getattr(current, "attempt_id", None) is not None:
+            decision = await interrupt()
+            context = snapshot()
+            identity = context.get("identity") if isinstance(context, Mapping) else None
+            if isinstance(identity, Mapping):
                 self._interaction.bind_lesson_attempt(
-                    lesson_session_id=current.identity().lesson_session_id,
-                    attempt_id=current.attempt_id,
-                    step_key=current.identity().step_key,
-                    turn_sequence_id=current.turn_sequence_id,
+                    lesson_session_id=identity.get("lessonSessionId"),
+                    attempt_id=identity.get("attemptId"),
+                    step_key=identity.get("stepKey"),
+                    turn_sequence_id=identity.get("turnSequenceId"),
                 )
+                await self.publish_lesson_conversation_context(context)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_conversation_interrupted accepted={} code={}",
                 bool(getattr(decision, "accepted", False)),

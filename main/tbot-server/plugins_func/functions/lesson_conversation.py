@@ -104,7 +104,7 @@ def _validate_arguments(tool_name: str, arguments: Mapping[str, Any]) -> bool:
     return set(arguments) == set(parameters["required"])
 
 
-def _decision_payload(decision: Any) -> dict[str, Any]:
+def _decision_payload(decision: Any, context: Mapping[str, Any] | None) -> dict[str, Any]:
     raw = decision.to_mapping()
     return {
         "accepted": raw["accepted"],
@@ -117,6 +117,7 @@ def _decision_payload(decision: Any) -> dict[str, Any]:
         "outcome": raw["outcome"],
         "reviewNeeded": raw["review_needed"],
         "guidance": raw["guidance"],
+        "context": dict(context) if isinstance(context, Mapping) else None,
     }
 
 
@@ -184,15 +185,17 @@ async def _execute(conn: Any, operation: str, arguments: Mapping[str, Any], admi
                 effect=arguments.get("effect"),
             )
         else:
-            conversation = getattr(runtime, "conversation", None)
-            cue_id = getattr(conversation, "pending_cue_id", None)
-            effect = getattr(conversation, "pending_effect", None)
-            decision = await runtime.conversation_continue(_identity(arguments, cue_id=cue_id), effect=effect)
+            decision = await runtime.conversation_continue_from_tool(_identity(arguments))
     except ConversationContractError as exc:
         return _rejected(exc.code)
     except (TypeError, ValueError):
         return _rejected("INVALID_TOOL_ARGS")
-    return ActionResponse(action=Action.REQLLM, result=_decision_payload(decision))
+    snapshot = getattr(runtime, "conversation_tool_context", None)
+    context = snapshot() if callable(snapshot) else None
+    return ActionResponse(
+        action=Action.REQLLM,
+        result=_decision_payload(decision, context),
+    )
 
 
 @register_function(

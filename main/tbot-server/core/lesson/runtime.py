@@ -63,6 +63,7 @@ from core.lesson.conversation_contract import (
 )
 from core.lesson.conversation_runtime import (
     ConversationDecision,
+    ConversationState,
     LessonConversationRuntime,
     inactive_conversation_decision,
 )
@@ -1450,6 +1451,112 @@ class LessonRuntime:
         conversation.open_attempt()
         self.conversation = conversation
 
+    def conversation_tool_context(self) -> Optional[Dict[str, Any]]:
+        conversation = self.conversation
+        if conversation is None or conversation.attempt_id is None:
+            return None
+        pending_cue = conversation.pending_cue_id
+        identity = conversation.identity(cue_id=pending_cue)
+        guidance = conversation.guidance
+        allowed_tools: list[str] = []
+        authoritative = self._conversation_authority_token() is not None
+        visual_pending = isinstance(self._conversation_pending_visual, dict)
+        visual_acked = self._conversation_visual_ack == (
+            conversation.attempt_id,
+            pending_cue,
+        )
+        if authoritative and not visual_pending:
+            if conversation.state is ConversationState.COMPLETE:
+                if conversation.continue_applied:
+                    allowed_tools = ["lesson_visual_reaction"] if pending_cue is not None else []
+                else:
+                    allowed_tools = ["lesson_continue"]
+            elif not visual_acked:
+                if conversation.outcome == "attempted" and conversation.review_needed:
+                    allowed_tools = ["lesson_continue"]
+                elif pending_cue is not None:
+                    allowed_tools = ["lesson_visual_reaction"]
+            elif conversation.state is ConversationState.LISTENING:
+                allowed_tools = (
+                    ["lesson_pronunciation_outcome"]
+                    if conversation.outcome == "speaking_evidence"
+                    else ["lesson_child_response", "lesson_context_turn"]
+                )
+            elif conversation.state is ConversationState.REACTING:
+                allowed_tools = ["lesson_continue"]
+            else:
+                allowed_tools = ["lesson_child_response", "lesson_context_turn"]
+        return {
+            "identity": {
+                "lessonSessionId": identity.lesson_session_id,
+                "turnSequenceId": identity.turn_sequence_id,
+                "attemptId": identity.attempt_id,
+                "stepKey": identity.step_key,
+                "cueId": identity.cue_id,
+            },
+            "nextIntent": conversation.pending_intent,
+            "allowedTools": allowed_tools,
+            "cueId": pending_cue,
+            "effect": conversation.pending_effect,
+            "guidance": {
+                "targetWord": guidance.target_word,
+                "meaningsVi": list(guidance.meanings_vi),
+                "relatedConcepts": list(guidance.related_concepts),
+                "teachingCopy": guidance.teaching_copy,
+                "expectedAnswer": guidance.expected_answer,
+                "pronunciation": {
+                    "slowModel": guidance.pronunciation.slow_model,
+                    "segments": (
+                        list(guidance.pronunciation.segments) if guidance.pronunciation.segments is not None else None
+                    ),
+                    "phonemes": (
+                        list(guidance.pronunciation.phonemes) if guidance.pronunciation.phonemes is not None else None
+                    ),
+                    "l1GuidanceVi": guidance.pronunciation.l1_guidance_vi,
+                },
+            },
+        }
+
+    async def _publish_conversation_tool_context(self) -> bool:
+        context = self.conversation_tool_context()
+        publisher = getattr(
+            getattr(self.conn, "voice_provider", None),
+            "publish_lesson_conversation_context",
+            None,
+        )
+        if context is None or not callable(publisher):
+            return False
+        try:
+            return bool(await publisher(context))
+        except Exception as exc:
+            self._log(
+                "warning",
+                f"conversation context publish failed error={type(exc).__name__}",
+            )
+            return False
+
+    async def conversation_continue_from_tool(self, identity: LessonToolIdentity | None) -> ConversationDecision:
+        conversation = self.conversation
+        if conversation is None or not isinstance(identity, LessonToolIdentity):
+            return inactive_conversation_decision()
+        enriched = LessonToolIdentity(
+            lesson_session_id=identity.lesson_session_id,
+            turn_sequence_id=identity.turn_sequence_id,
+            attempt_id=identity.attempt_id,
+            step_key=identity.step_key,
+            cue_id=conversation.pending_cue_id,
+        )
+        return await self.conversation_continue(
+            enriched,
+            effect=conversation.pending_effect,
+        )
+
+    async def conversation_interrupt_current(self) -> ConversationDecision:
+        conversation = self.conversation
+        if conversation is None:
+            return inactive_conversation_decision()
+        return await self.conversation_interrupt(conversation.identity())
+
     def _conversation_authority_token(self) -> Optional[tuple[Any, ...]]:
         conversation = self.conversation
         if (
@@ -1764,6 +1871,7 @@ class LessonRuntime:
             return
         self._conversation_pending_visual = None
         self._conversation_visual_ack = (self.conversation.attempt_id, command["cueId"])
+        await self._publish_conversation_tool_context()
         if pending.get("advancesStep") is True:
             token = self._conversation_authority_token()
             if token is not None:
@@ -2701,6 +2809,7 @@ class LessonRuntime:
             return
         self._step_visuals_ready = True
         if self.conversation is not None:
+            await self._publish_conversation_tool_context()
             return
         prompt_handed_off = await self._speak_step_prompt(self._step)
         if not continuation_is_current():
@@ -2966,6 +3075,7 @@ class LessonRuntime:
         self._child_response_timeout_count = 0
         self._safe_speaking_session = None
         self._bind_conversation_for_current_step()
+        await self._publish_conversation_tool_context()
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
