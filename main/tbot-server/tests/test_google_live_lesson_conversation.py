@@ -171,6 +171,16 @@ class _AcceptedDecision:
         }
 
 
+class _RejectedDecision(_AcceptedDecision):
+    def __init__(self, code):
+        self.code = code
+
+    def to_mapping(self):
+        payload = super().to_mapping()
+        payload.update({"accepted": False, "code": self.code})
+        return payload
+
+
 class _CanonicalAuditRuntime:
     state = "RUNNING"
 
@@ -214,6 +224,17 @@ class _CanonicalAuditRuntime:
                 "cueId": "barn-listen",
             }
         }
+
+
+class _RejectedCanonicalAuditRuntime(_CanonicalAuditRuntime):
+    def __init__(self, code):
+        super().__init__()
+        self.code = code
+
+    def _decision(self, identity):
+        self.turn_sequence_id = identity.turn_sequence_id
+        self.identity = identity
+        return _RejectedDecision(self.code)
 
 
 class LessonConversationSchemaTest(unittest.TestCase):
@@ -1476,6 +1497,54 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(conn.websocket.sent, [])
+
+    async def test_validation_tool_audit_suppresses_rejected_canonical_decisions(self):
+        for code in (
+            "STALE_IDENTITY",
+            "INVALID_STATE",
+            "DUPLICATE_VISUAL_REACTION",
+        ):
+            with self.subTest(code=code):
+                conn = _Conn(_CanonicalLessonHandler())
+                conn.lesson_runtime = _RejectedCanonicalAuditRuntime(code)
+                conn.client_id = "soak-harness-client"
+                conn.features = {"googleLiveValidationToolAuditV1": True}
+                conn.websocket = _WebSocket()
+                conn.config["google_live"].update(
+                    {
+                        "validation_tool_audit_enabled": True,
+                        "validation_tool_audit_mode": "local_soak",
+                        "validation_tool_audit_client_ids": ["soak-harness-client"],
+                        "validation_tool_audit_device_ids": ["robot-1"],
+                    }
+                )
+                provider = GoogleLiveProvider(conn)
+                conn.voice_provider = provider
+                provider._client = _Client()
+
+                await provider._handle_tool_call_event(
+                    {
+                        "type": "tool_call",
+                        "response_generation": 0,
+                        "calls": [
+                            {
+                                "id": f"rejected-{code}",
+                                "name": "lesson_context_turn",
+                                "args": {
+                                    "lessonSessionId": "lesson-session",
+                                    "turnSequenceId": 1,
+                                    "attemptId": "attempt-1",
+                                    "stepKey": "barn",
+                                },
+                            }
+                        ],
+                    }
+                )
+
+                self.assertEqual(conn.websocket.sent, [])
+                response = provider._client.responses[0][0]["response"]
+                self.assertIs(response["accepted"], False)
+                self.assertEqual(response["code"], code)
 
     async def test_validation_tool_audit_rejects_non_lesson_and_unadmitted_calls(self):
         for session_mode, runtime, response_generation in (

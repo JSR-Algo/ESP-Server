@@ -5390,6 +5390,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         if not isinstance(args, Mapping) or not isinstance(response_payload, Mapping):
             return
+        if response_payload.get("accepted") is not True:
+            return
         if not isinstance(validation_receipt, Mapping):
             return
         if validation_receipt.get("canonicalToolName") != name:

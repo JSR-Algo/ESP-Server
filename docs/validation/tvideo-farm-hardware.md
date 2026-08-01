@@ -183,7 +183,10 @@ exactly one `validation_tool_audit_device_ids` entry matching the websocket
 `device_id`. The connection must also be in `LESSON` mode with an active lesson
 runtime, and the audit must carry a canonical admission receipt produced by the
 real lesson-conversation tool path. Generic handler mappings, missing runtime
-context, and refreshed-identity mismatches do not emit an audit frame.
+context, refreshed-identity mismatches, and canonical decisions whose
+`accepted` value is not exactly `true` do not emit an audit frame. Rejected tool
+responses still return to Google Live normally; only validation audit emission
+is suppressed.
 
 ## Rollout remains dark
 

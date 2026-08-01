@@ -225,10 +225,15 @@ async def _execute(
         return _rejected("INVALID_TOOL_ARGS")
     snapshot = getattr(runtime, "conversation_tool_context", None)
     context = snapshot() if callable(snapshot) else None
+    decision_payload = _decision_payload(decision, context)
     admission = _GOOGLE_LIVE_LESSON_ADMISSION.get()
     receipt = admission[2] if isinstance(admission, tuple) and len(admission) == 3 else None
     refreshed_identity = context.get("identity") if isinstance(context, Mapping) else None
-    if isinstance(receipt, dict) and isinstance(refreshed_identity, Mapping):
+    if (
+        decision_payload.get("accepted") is True
+        and isinstance(receipt, dict)
+        and isinstance(refreshed_identity, Mapping)
+    ):
         receipt.update(
             {
                 "canonicalToolName": tool_name,
@@ -237,7 +242,7 @@ async def _execute(
         )
     return ActionResponse(
         action=Action.REQLLM,
-        result=_decision_payload(decision, context),
+        result=decision_payload,
     )
 
 
