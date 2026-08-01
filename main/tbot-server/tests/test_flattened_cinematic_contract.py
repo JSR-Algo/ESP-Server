@@ -212,6 +212,41 @@ def test_cinematic_identity_key_is_discriminated() -> None:
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        {"phaseId": None, "cueId": "barn-listen"},
+        {"phaseId": "", "cueId": "barn-listen"},
+        {"phaseId": "opening", "cueId": None},
+        {"phaseId": "opening", "cueId": ""},
+        {"phaseId": None, "cueId": None},
+        {"phaseId": "", "cueId": ""},
+        {},
+    ],
+)
+def test_cinematic_identity_key_rejects_both_present_or_neither_even_if_empty(command) -> None:
+    with pytest.raises(FlattenedCinematicContractError):
+        cinematic_identity_key(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"phaseId": ""},
+        {"phaseId": None},
+        {"phaseId": []},
+        {"phaseId": "dance"},
+        {"cueId": ""},
+        {"cueId": None},
+        {"cueId": []},
+        {"cueId": "Barn Listen"},
+    ],
+)
+def test_cinematic_identity_key_rejects_invalid_selected_value(command) -> None:
+    with pytest.raises(FlattenedCinematicContractError):
+        cinematic_identity_key(command)
+
+
+@pytest.mark.parametrize(
     "mutate",
     [
         lambda phases: phases.append(deepcopy(phases[0])),

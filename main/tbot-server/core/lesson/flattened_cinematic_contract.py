@@ -59,13 +59,17 @@ def cinematic_identity_key(command: Any) -> str:
     """Return the sole control identity, rejecting ambiguous commands and ACKs."""
     if not isinstance(command, dict):
         _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic command identity is invalid")
-    phase_id = command.get("phaseId")
-    cue_id = command.get("cueId")
-    has_phase = isinstance(phase_id, str) and bool(phase_id)
-    has_cue = isinstance(cue_id, str) and bool(cue_id)
+    has_phase = "phaseId" in command
+    has_cue = "cueId" in command
     if has_phase == has_cue:
         _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic command must have exactly one identity")
-    return cast(str, phase_id if has_phase else cue_id)
+    identity = command["phaseId"] if has_phase else command["cueId"]
+    if has_phase:
+        if not isinstance(identity, str) or identity not in KNOWN_PHASE_IDS:
+            _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic phase identity is invalid")
+    elif not isinstance(identity, str) or _SLUG_RE.fullmatch(identity) is None:
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic cue identity is invalid")
+    return cast(str, identity)
 
 
 def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:

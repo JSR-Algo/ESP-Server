@@ -1714,6 +1714,7 @@ class FlattenedCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_v4_v2_ack_uses_cue_identity_and_rejects_phase_or_stale_cue(self):
         rt = _flattened_v2_runtime()
         await rt.start()
+        self.assertEqual(rt._cinematic_identity_payload(), {"cueId": "barn-opening"})
         prepare = self._frames(rt)[0]
         command = prepare["body"]["cinematicPhase"]
         self.assertEqual(command["cueId"], "barn-opening")
