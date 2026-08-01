@@ -153,6 +153,12 @@ class LessonConversationSchemaTest(unittest.TestCase):
         self.assertNotIn("model prose", serialized)
         self.assertNotIn("child words", serialized)
 
+        detect = google_live_robot_soak._bargein_injection_detect(args)
+        detect_serialized = str(detect)
+        self.assertNotIn("adult-voice.wav", detect_serialized)
+        self.assertNotIn("child words", detect_serialized)
+        self.assertNotIn("secret utterance", detect_serialized)
+
     def test_exact_five_tool_schemas_are_closed_and_identity_bound(self):
         self.assertEqual(set(LESSON_CONVERSATION_TOOL_SPECS), LESSON_TOOL_NAMES)
         common = {"lessonSessionId", "turnSequenceId", "attemptId", "stepKey"}
@@ -476,6 +482,154 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_hard_lesson_interrupt_uses_only_live_fallback_authority_boundary(self):
+        conn = _Conn()
+        conn.config["google_live"]["hard_reconnect_on_interrupt"] = True
+        provider = GoogleLiveProvider(conn)
+        provider._receive_task = asyncio.current_task()
+        provider._client = _Client()
+        calls = []
+
+        async def normal_interrupt():
+            calls.append("normal")
+
+        async def live_interrupt(reason):
+            calls.append(("live", reason))
+            return True
+
+        provider._interrupt_lesson_conversation = normal_interrupt
+        provider._handle_lesson_live_interruption = live_interrupt
+        provider._lesson_conversation_tool_path_active = lambda: True
+
+        await provider._begin_user_interrupt("explicit_interrupt")
+
+        self.assertEqual(calls, [("live", "interrupted")])
+
+    async def test_rejected_live_fallback_does_not_swallow_runtime_failure(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        calls = []
+        provider._lesson_conversation_tool_path_active = lambda: True
+        provider._handle_lesson_live_interruption = lambda _reason: asyncio.sleep(0, result=False)
+
+        async def reconnect(_exc):
+            calls.append("general_reconnect")
+            return True
+
+        provider._try_reconnect_with_lease = reconnect
+        await provider._handle_runtime_failure_with_lease(RuntimeError("network"))
+
+        self.assertEqual(calls, ["general_reconnect"])
+
+    async def test_hard_interrupt_falls_through_when_live_fallback_rejects(self):
+        conn = _Conn()
+        conn.config["google_live"]["hard_reconnect_on_interrupt"] = True
+        provider = GoogleLiveProvider(conn)
+        provider._receive_task = asyncio.current_task()
+        provider._client = _Client()
+        provider._lesson_conversation_tool_path_active = lambda: True
+        provider._handle_lesson_live_interruption = lambda _reason: asyncio.sleep(0, result=False)
+        reconnects = []
+
+        async def hard_reconnect(reason, **_kwargs):
+            reconnects.append(reason)
+            return True
+
+        provider._hard_reconnect_after_interrupt = hard_reconnect
+        await provider._begin_user_interrupt("explicit_interrupt")
+
+        self.assertEqual(reconnects, ["explicit_interrupt"])
+
+    async def test_curated_prompt_waits_for_exact_thinking_ack(self):
+        ack = asyncio.Event()
+
+        class Runtime:
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=True,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, window_id, timeout_sec):
+                self.waited = (window_id, timeout_sec)
+                await ack.wait()
+                return True
+
+        conn = _Conn()
+        conn.lesson_runtime = Runtime()
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
+        provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=False)
+
+        pending = asyncio.create_task(provider._handle_lesson_live_interruption("timeout"))
+        await asyncio.sleep(0)
+        self.assertEqual(provider._client.responses, [])
+        self.assertFalse(pending.done())
+        ack.set()
+        self.assertTrue(await pending)
+        self.assertEqual(provider._client.responses, ["Say barn."])
+
+    async def test_missing_thinking_ack_fails_closed_without_prompt(self):
+        class Runtime:
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=True,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
+                return False
+
+        conn = _Conn()
+        conn.lesson_runtime = Runtime()
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
+        provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=False)
+
+        handled = await provider._handle_lesson_live_interruption("timeout")
+
+        self.assertFalse(handled)
+        self.assertEqual(provider._client.responses, [])
+
+    async def test_failed_reconnect_without_delivery_returns_unhandled_and_clears_client(self):
+        class ClosingClient(_Client):
+            async def close(self):
+                self.connected = False
+
+        class Runtime:
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=True,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, _timeout_sec):
+                return True
+
+        conn = _Conn()
+        conn.lesson_runtime = Runtime()
+        provider = GoogleLiveProvider(conn)
+        provider._client = ClosingClient()
+        provider._open_live_session = lambda: (_ for _ in ()).throw(RuntimeError("network"))
+
+        handled = await provider._handle_lesson_live_interruption("transport")
+
+        self.assertFalse(handled)
+        self.assertIsNone(provider._client)
+
     async def test_lesson_live_failure_reconnects_once_per_window_then_uses_curated_fallback(self):
         class FallbackRuntime:
             def __init__(self):
@@ -498,6 +652,10 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
 
             def conversation_live_reconnect_succeeded(self, window_id):
                 self.succeeded.append(window_id)
+                return True
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
                 return True
 
             def conversation_tool_context(self):

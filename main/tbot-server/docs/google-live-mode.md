@@ -237,10 +237,18 @@ general chat:
   the `thinking` cue; firmware visual state changes only after the existing
   cinematic command is accepted and ACKed
 - the provider makes at most one reconnect attempt for that interruption window
+- a curated prompt is released only after the exact thinking cue, attempt, and
+  cinematic command sequence receive an ACK; wrong, stale, or timed-out ACKs
+  fail closed
 - a successful reconnect closes the window, republishes the current lesson
   identity, and permits one attempt in a later independent window
+- a failed window remains bounded for the same authoritative turn; after the
+  child starts a genuinely new turn, that new turn owns a fresh reconnect window
 - a failed or repeated reconnect uses one short deterministic prompt composed
   only from the validated `targetWord` guidance
+- if reconnect fails and no verified prompt channel remains, the lesson fallback
+  returns unhandled so the existing transport failure path can reconnect or fail
+  terminally instead of pretending recovery succeeded
 - fallback never calls pronunciation mastery and never advances progress; only
   an accepted pronunciation outcome can produce `mastered` evidence
 - diagnostics contain typed codes, reason classes, and attempt counts only; they
@@ -337,6 +345,11 @@ python scripts/google_live_robot_soak.py \
   --inject-audio data/synthetic_stop_vn.wav \
   --report /tmp/google-live-soak.json
 ```
+
+The current text-mode soak never embeds the `--inject-audio` path or configured
+prompt into websocket detect messages. It sends a fixed
+`SOAK_AUDIO_INTERRUPT_SENTINEL`; actual binary audio injection remains an
+attended hardware-smoke path.
 
 Physical interrupt/course audit for the production robot should use one strict
 preset so latency, transcript accuracy, AEC-forwarding, and full lesson-prompt

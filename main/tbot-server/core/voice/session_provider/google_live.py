@@ -2535,8 +2535,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
 
         if self._lesson_conversation_tool_path_active():
-            await self._handle_lesson_live_interruption("transport")
-            return
+            handled = await self._handle_lesson_live_interruption("transport")
+            if handled:
+                return
 
         reconnect_result = await self._try_reconnect_with_lease(exc)
         if reconnect_result is not False:
@@ -5681,7 +5682,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             turn_id=self._response_generation,
             response_id=self._response_generation,
         )
-        await self._interrupt_lesson_conversation()
+        hard_lesson_interrupt = bool(
+            self._should_hard_reconnect_on_interrupt()
+            and self._receive_task is not None
+            and self._lesson_conversation_tool_path_active()
+        )
+        if not hard_lesson_interrupt:
+            await self._interrupt_lesson_conversation()
         if len(self._cancelled_response_ids) > 20:
             self._cancelled_response_ids = set(
                 sorted(self._cancelled_response_ids)[-10:]
@@ -5747,8 +5754,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._safe_error_message(exc),
                 )
         if self._should_hard_reconnect_on_interrupt() and self._receive_task is not None:
-            if self._lesson_conversation_tool_path_active():
-                await self._handle_lesson_live_interruption("interrupted")
+            if hard_lesson_interrupt:
+                handled = await self._handle_lesson_live_interruption("interrupted")
+                if not handled:
+                    await self._hard_reconnect_after_interrupt(reason)
             else:
                 await self._hard_reconnect_after_interrupt(reason)
         if reason in {"audio_input", "loud_input"}:
@@ -5824,11 +5833,39 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     reset(window_id)
                 await self._publish_current_lesson_context()
                 return True
+        wait_for_ack = getattr(runtime, "wait_conversation_live_fallback_ack", None)
+        if not callable(wait_for_ack) or not isinstance(window_id, str):
+            return False
+        try:
+            acked = bool(
+                await wait_for_ack(
+                    window_id,
+                    timeout_sec=self._lesson_live_fallback_ack_timeout_sec(),
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        if not acked:
+            return False
         prompt = getattr(directive, "prompt", "")
         sender = getattr(self._client, "send_text", None)
         if isinstance(prompt, str) and prompt.strip() and callable(sender):
-            await sender(prompt)
-        return True
+            try:
+                await sender(prompt)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def _lesson_live_fallback_ack_timeout_sec(self):
+        config = self._get_live_config()
+        try:
+            value = float(config.get("lesson_live_fallback_ack_timeout_sec", 2.0))
+        except (TypeError, ValueError):
+            value = 2.0
+        return max(0.1, min(value, 5.0))
 
     async def _attempt_lesson_reconnect_once(self, reason):
         if self._closing or self._fallback_provider is not None or self._reconnecting:

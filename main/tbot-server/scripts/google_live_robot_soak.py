@@ -121,6 +121,12 @@ def _safe_soak_config(args):
     return config
 
 
+def _bargein_injection_detect(args):
+    if getattr(args, "inject_audio", None):
+        return _detect_message("SOAK_AUDIO_INTERRUPT_SENTINEL")
+    return _detect_message(str(getattr(args, "interrupt_prompt", "") or ""))
+
+
 class LogTail:
     """Cheap server.log tail: capture file offset at start, read on demand."""
 
@@ -462,12 +468,9 @@ async def _run_bargein_latency_mode(args):
 
             await asyncio.sleep(args.speak_for_sec)
 
-            # T0: inject stop utterance via text (audio injection path is hardware-gated)
+            # T0: emit only a non-sensitive sentinel; binary audio stays hardware-gated.
             t0 = time.monotonic()
-            inject_prompt = args.interrupt_prompt
-            if args.inject_audio:
-                inject_prompt = f"[audio:{args.inject_audio}] {inject_prompt}"
-            await websocket.send(json.dumps(_detect_message(inject_prompt)))
+            await websocket.send(json.dumps(_bargein_injection_detect(args)))
 
             tts_stop, _, _ = await _recv_until(
                 websocket,

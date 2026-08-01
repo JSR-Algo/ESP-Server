@@ -841,6 +841,14 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     thinking = _frames(runtime)[-1]
     assert thinking["body"]["cueId"] == "barn-thinking"
     assert runtime._conversation_visual_ack is None
+    ack_wait = asyncio.create_task(
+        runtime.wait_conversation_live_fallback_ack(directive.window_id, timeout_sec=0.2)
+    )
+    await asyncio.sleep(0)
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 2, cue_id="hay-thinking"))
+    assert not ack_wait.done()
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    assert await ack_wait is True
     bounded = await runtime.conversation_live_interruption("timeout")
     assert bounded.accepted
     assert bounded.reconnect_allowed is False
@@ -850,16 +858,31 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     assert stale_window.accepted is False
     assert stale_window.code == "RUNTIME_NOT_AUTHORITATIVE"
     runtime.conn.lesson_runtime = runtime
-    assert runtime.conversation_live_reconnect_succeeded(directive.window_id)
-    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
     assert runtime._conversation_visual_ack == (
         runtime.conversation.attempt_id,
         "barn-thinking",
     )
+    await runtime.conversation_child_response(_identity(runtime), "meaning_vi")
+    assert runtime.conversation_live_reconnect_succeeded(directive.window_id) is False
     next_window = await runtime.conversation_live_interruption("transport")
     assert next_window.accepted
     assert next_window.reconnect_allowed
     assert next_window.window_id != directive.window_id
+
+
+@pytest.mark.asyncio
+async def test_live_fallback_recognizes_prior_normal_interrupt_without_double_consuming() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    before = runtime.conversation.turn_sequence_id
+    assert (await runtime.conversation_interrupt_current()).accepted
+
+    directive = await runtime.conversation_live_interruption("interrupted")
+
+    assert directive.accepted
+    assert runtime.conversation.turn_sequence_id == before + 2
+    assert _frames(runtime)[-1]["body"]["cueId"] == "barn-thinking"
 
 
 @pytest.mark.asyncio
