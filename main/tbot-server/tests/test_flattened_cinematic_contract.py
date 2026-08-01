@@ -273,6 +273,29 @@ def test_v2_manifest_rejects_duplicate_missing_extra_or_mixed_cues(mutate) -> No
 
 
 @pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("effect",), []), (("effect",), {}), (("effect",), None),
+        (("templateVersion",), True), (("templateVersion",), 2.0),
+        (("timing", "durationMs"), True), (("timing", "durationMs"), 1300.0),
+        (("asset", "bytes"), True), (("asset", "bytes"), 1234567.0),
+        (("asset", "width"), 480.0), (("asset", "height"), True),
+        (("asset", "metadata", "fps"), 10.0),
+        (("asset", "metadata", "frameCount"), 13.0),
+    ],
+)
+def test_v2_projection_rejects_malformed_types_with_stable_contract_error(path, value) -> None:
+    cue = _cue("barn-listen")
+    target = cue
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(FlattenedCinematicContractError):
+        project_flattened_cinematic_phase(cue, _v2_pack("barn-listen"))
+
+
+@pytest.mark.parametrize(
     ("label", "mutate", "code"),
     [
         ("pack not ready", lambda pack, phase: pack.update(ready=False), "CINEMATIC_PACK_NOT_READY"),

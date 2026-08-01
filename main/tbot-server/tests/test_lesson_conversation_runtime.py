@@ -208,6 +208,30 @@ def test_backend_conversation_adapter_rejects_missing_extra_stale_or_terminal_cu
         )
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest["conversation"].update(presetVersion=True),
+        lambda manifest: manifest["conversation"].update(presetVersion=1.0),
+        lambda manifest: manifest["conversation"].update(maxContextualTurns=2.0),
+        lambda manifest: manifest["conversation"]["steps"][0]["progress"].update(index=True),
+        lambda manifest: manifest["conversation"]["steps"][0]["progress"].update(count=2.0),
+        lambda manifest: manifest["conversation"]["steps"][0]["cues"][0].update(effect=[]),
+        lambda manifest: manifest["conversation"]["steps"][0]["cues"][0].update(playbackMode=[]),
+        lambda manifest: manifest["cinematicPhases"][0].update(templateVersion=2.0),
+        lambda manifest: manifest["cinematicPhases"][0].update(effect=[]),
+    ],
+)
+def test_backend_adapter_rejects_malformed_types_as_contract_errors(mutate) -> None:
+    manifest = _backend_manifest()
+    mutate(manifest)
+
+    with pytest.raises(ConversationContractError):
+        lesson_conversation_contract_from_backend(
+            manifest, lesson_session_id="session-7a", step_key="barn"
+        )
+
+
 def test_terminal_step_continue_completes_without_nonexistent_transition_cue() -> None:
     contract = lesson_conversation_contract_from_backend(
         _backend_manifest(), lesson_session_id="session-7a", step_key="hay"

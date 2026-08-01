@@ -207,7 +207,11 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
         _refuse()
     if has_phase:
         phase_id = asset.get("phaseId")
-        if phase_id not in _FLATTENED_PHASE_IDS or asset.get("key") != f"flattenedCinematic.{phase_id}":
+        if (
+            not isinstance(phase_id, str)
+            or phase_id not in _FLATTENED_PHASE_IDS
+            or asset.get("key") != f"flattenedCinematic.{phase_id}"
+        ):
             _refuse()
         identity = {"phaseId": phase_id}
     else:
@@ -220,7 +224,9 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
             or _SAFE_SLUG_RE.fullmatch(cue_id) is None
             or not isinstance(step_key, str)
             or _SAFE_SLUG_RE.fullmatch(step_key) is None
+            or not isinstance(effect, str)
             or effect not in _FLATTENED_CUE_EFFECTS
+            or not isinstance(playback_mode, str)
             or playback_mode != _FLATTENED_CUE_PLAYBACK_MODE.get(effect)
             or asset.get("key") != f"flattenedCinematic.{cue_id}"
         ):
@@ -238,8 +244,11 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     frame_count = metadata.get("frameCount")
     if (
         metadata.get("codec") != "mjpeg"
+        or type(metadata.get("width")) is not int
         or metadata.get("width") != 480
+        or type(metadata.get("height")) is not int
         or metadata.get("height") != 320
+        or type(metadata.get("fps")) is not int
         or metadata.get("fps") != 10
         or metadata.get("hasAudio") is not False
         or not _integer(duration_ms, 1)

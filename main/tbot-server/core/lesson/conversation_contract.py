@@ -251,9 +251,13 @@ def lesson_conversation_contract_from_backend(
         {"presetId", "presetVersion", "maxContextualTurns", "steps"},
         "conversation DTO",
     )
-    if conversation["presetId"] != "tvideoJourney" or conversation["presetVersion"] != 1:
+    if (
+        conversation["presetId"] != "tvideoJourney"
+        or type(conversation["presetVersion"]) is not int
+        or conversation["presetVersion"] != 1
+    ):
         _fail("INVALID_BACKEND_MANIFEST", "unsupported conversation preset")
-    if conversation["maxContextualTurns"] != 2:
+    if type(conversation["maxContextualTurns"]) is not int or conversation["maxContextualTurns"] != 2:
         _fail("INVALID_BACKEND_MANIFEST", "maxContextualTurns must be exactly two")
     raw_steps = conversation["steps"]
     if not isinstance(raw_steps, list) or len(raw_steps) != 2:
@@ -276,7 +280,12 @@ def lesson_conversation_contract_from_backend(
             _fail("INVALID_BACKEND_MANIFEST", "conversation step keys must be unique")
         seen_steps.add(current_step_key)
         progress = _exact_mapping(step["progress"], {"index", "count"}, "progress DTO")
-        if progress["index"] != index + 1 or progress["count"] != len(raw_steps):
+        if (
+            type(progress["index"]) is not int
+            or type(progress["count"]) is not int
+            or progress["index"] != index + 1
+            or progress["count"] != len(raw_steps)
+        ):
             _fail("INVALID_BACKEND_MANIFEST", "conversation progress does not match step order")
         teaching = _exact_mapping(
             step["teachingCopy"], {"intro", "explanation", "prompt"}, "teachingCopy DTO"
@@ -305,11 +314,17 @@ def lesson_conversation_contract_from_backend(
         for raw_cue in raw_cues:
             cue = _exact_mapping(raw_cue, {"cueId", "effect", "playbackMode"}, "cue DTO")
             effect = cue["effect"]
-            if effect not in expected_effects or effect in actual_effects:
+            playback_value = cue["playbackMode"]
+            if (
+                not isinstance(effect, str)
+                or effect not in expected_effects
+                or effect in actual_effects
+                or not isinstance(playback_value, str)
+            ):
                 _fail("INVALID_BACKEND_MANIFEST", "cue effects do not match the authored step")
             role, internal_effect, playback_mode = _BACKEND_CUE_EFFECTS[effect]
             cue_id = _safe_id(cue["cueId"], "cueId")
-            if cue_id in seen_cues or cue["playbackMode"] != playback_mode:
+            if cue_id in seen_cues or playback_value != playback_mode:
                 _fail("INVALID_BACKEND_MANIFEST", "cue identity or playback mode is stale")
             actual_effects.add(effect)
             seen_cues.add(cue_id)
@@ -372,7 +387,13 @@ def lesson_conversation_contract_from_backend(
             },
             "cinematic cue DTO",
         )
-        if phase["templateId"] != "flattenedMjpegCinematic" or phase["templateVersion"] != 2:
+        if (
+            phase["templateId"] != "flattenedMjpegCinematic"
+            or type(phase["templateVersion"]) is not int
+            or phase["templateVersion"] != 2
+            or not isinstance(phase["effect"], str)
+            or not isinstance(phase["playbackMode"], str)
+        ):
             _fail("INVALID_BACKEND_MANIFEST", "cinematic cue template identity is invalid")
         actual_cinematics.append(
             (

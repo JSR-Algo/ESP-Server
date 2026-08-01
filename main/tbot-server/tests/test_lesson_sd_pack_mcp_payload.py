@@ -282,6 +282,58 @@ def test_renderer_v4_v2_cue_preserves_semantic_identity_and_playback_mode():
         "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
     }
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("effect", []), ("effect", {}), ("effect", None),
+        ("cueId", []), ("stepKey", {}), ("playbackMode", []),
+    ],
+)
+def test_renderer_v4_v2_malformed_identity_raises_stable_pack_error(field, value):
+    render_pack = _pack("flattenedCinematic.barn-listen")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64,
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    })
+    asset[field] = value
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("width", 480.0), ("height", True), ("fps", 10.0),
+        ("durationMs", 1300.0), ("frameCount", True),
+    ],
+)
+def test_renderer_v4_v2_metadata_requires_exact_integers(field, value):
+    render_pack = _pack("flattenedCinematic.barn-listen")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64,
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    })
+    asset["compatibilityMetadata"][field] = value
+
+    with pytest.raises(FirmwareSyncPackError):
+        build_firmware_sync_pack(render_pack)
+
 @pytest.mark.parametrize(
     ("mutate", "secret"),
     [

@@ -91,7 +91,8 @@ class AssetState:
     __slots__ = (
         "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
         "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
-        "derivative_id", "phase_id", "renderer_v3_mp4", "renderer_v4_mp4",
+        "derivative_id", "phase_id", "cue_id", "effect", "step_key", "playback_mode",
+        "renderer_v3_mp4", "renderer_v4_mp4",
         "state", "checksum_ok", "reason",
     )
 
@@ -126,6 +127,10 @@ class AssetState:
         self.visual_refs: Any = asset.get("visualRefs")
         self.derivative_id: Optional[str] = asset.get("derivativeId")
         self.phase_id: Optional[str] = asset.get("phaseId")
+        self.cue_id: Optional[str] = asset.get("cueId")
+        self.effect: Optional[str] = asset.get("effect")
+        self.step_key: Optional[str] = asset.get("stepKey")
+        self.playback_mode: Optional[str] = asset.get("playbackMode")
         try:
             validate_renderer_v3_shared_mp4(asset)
             self.renderer_v3_mp4 = True
@@ -417,6 +422,10 @@ class AssetCache:
             "visualRefs": asset.visual_refs,
             "derivativeId": asset.derivative_id,
             "phaseId": asset.phase_id,
+            "cueId": asset.cue_id,
+            "effect": asset.effect,
+            "stepKey": asset.step_key,
+            "playbackMode": asset.playback_mode,
         }
         return {k: v for k, v in record.items() if v is not None}
 

@@ -74,7 +74,7 @@ def cinematic_identity_key(command: Any) -> str:
 
 def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:
     version = entry.get("templateVersion")
-    if entry.get("templateId") != TEMPLATE_ID:
+    if entry.get("templateId") != TEMPLATE_ID or type(version) is not int:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
     if version == TEMPLATE_VERSION_V1:
         _exact_dict(
@@ -94,13 +94,17 @@ def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:
             },
             "flattened cinematic cue fields are invalid",
         )
+        effect = entry.get("effect")
+        playback_mode = entry.get("playbackMode")
         if (
             not isinstance(entry.get("cueId"), str)
             or _SLUG_RE.fullmatch(entry["cueId"]) is None
             or not isinstance(entry.get("stepKey"), str)
             or _SLUG_RE.fullmatch(entry["stepKey"]) is None
-            or entry.get("effect") not in _V2_EFFECTS
-            or entry.get("playbackMode") != _V2_PLAYBACK_MODE.get(str(entry.get("effect")))
+            or not isinstance(effect, str)
+            or effect not in _V2_EFFECTS
+            or not isinstance(playback_mode, str)
+            or playback_mode != _V2_PLAYBACK_MODE[effect]
         ):
             _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cue identity is invalid")
         return TEMPLATE_VERSION_V2, entry["cueId"]
@@ -147,7 +151,9 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or _SHA256_RE.fullmatch(str(asset.get("sha256") or "")) is None
         or not _positive_int(asset.get("bytes"))
         or asset.get("mediaType") != "video/mp4"
+        or type(asset.get("width")) is not int
         or asset.get("width") != 480
+        or type(asset.get("height")) is not int
         or asset.get("height") != 320
     ):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic asset identity is invalid")
@@ -158,8 +164,11 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     )
     if (
         metadata.get("codec") != "mjpeg"
+        or type(metadata.get("fps")) is not int
         or metadata.get("fps") != 10
+        or type(metadata.get("durationMs")) is not int
         or metadata.get("durationMs") != duration_ms
+        or type(metadata.get("frameCount")) is not int
         or metadata.get("frameCount") != duration_ms // 100
         or metadata.get("hasAudio") is not False
     ):

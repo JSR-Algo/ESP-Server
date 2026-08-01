@@ -20,6 +20,7 @@ from core.lesson import asset_cache as asset_cache_module
 from core.lesson.asset_cache import AssetCache, AssetState, DOWNLOADING, EVICTED, FAILED, READY
 from core.lesson.errors import AssetChecksumMismatch, AssetProfileUnavailable, PreloadTimeout
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
 
 
 def _sha(content: bytes) -> str:
@@ -192,7 +193,6 @@ def _critical_assets():
 
 
 def _client_for(assets, *, corrupt=None, **kw):
-    content = {f"{BASE}/{a['path']}": (corrupt if corrupt and a["key"] == corrupt[0] else None) for a in assets}
     mapping = {}
     for a in assets:
         url = f"{BASE}/{a['path']}"
@@ -267,6 +267,54 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("authoritative sha256 verifier", source)
         self.assertIn("READY gate", source)
+
+    def test_real_asset_cache_preserves_v2_cue_identity_into_firmware_sync_pack(self):
+        content = b"renderer-v4-cue-cache"
+        checksum = "f" * 64
+        asset = {
+            "key": "flattenedCinematic.barn-listen",
+            "path": "lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+            "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+            "sha256": _sha(content), "size": len(content), "critical": True,
+            "layer": "flattenedCinematic", "role": "barn-listen", "mediaType": "video/mp4",
+            "derivativeId": "d" * 64, "cueId": "barn-listen", "effect": "listen",
+            "stepKey": "barn", "playbackMode": "loop",
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+                "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+            },
+        }
+        cache = self._cache(
+            [asset], lesson_version=4, manifest_checksum=checksum,
+            public_base_url="https://esp.example",
+            asset_pack_local_root="/sdcard/tbot/lesson-assets",
+        )
+        state = cache.assets[0]
+        os.makedirs(cache.cache_dir, exist_ok=True)
+        with open(cache._final_path(state), "wb") as handle:
+            handle.write(content)
+        state.state = READY
+        state.checksum_ok = True
+
+        pack = cache.asset_pack_manifest(
+            assignment_version=7, lesson_id="w01-d01-barn-say-it",
+            lesson_version=4, manifest_checksum=checksum,
+        )
+        sent = build_firmware_sync_pack(pack)["assets"][0]
+
+        self.assertEqual(
+            {key: sent[key] for key in ("cueId", "effect", "stepKey", "playbackMode")},
+            {"cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop"},
+        )
+
+        legacy = dict(asset)
+        legacy.update(key="flattenedCinematic.opening", phaseId="opening")
+        for field in ("cueId", "effect", "stepKey", "playbackMode"):
+            legacy.pop(field, None)
+        state.__init__(legacy)
+        legacy_record = cache._asset_pack_record(state)
+        self.assertEqual(legacy_record["phaseId"], "opening")
+        self.assertFalse({"cueId", "effect", "stepKey", "playbackMode"} & set(legacy_record))
 
     async def test_preload_lifecycle_and_sha256_gate(self):
         assets = _critical_assets()
