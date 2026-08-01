@@ -119,6 +119,14 @@ assert.doesNotMatch(editor, /durationMs[^\n]*(?:el-input|el-slider)|easing[^\n]*
 assert.ok(robot.includes('width="480"') && robot.includes('height="320"'));
 assert.ok(robot.includes('100'));
 assert.ok(robot.includes('preview'));
+for (const marker of [
+  'previewFrameState', 'opening-flight', 'opening-landing', 'opening-walk',
+  'progressDots', 'cardVariant', 'listeningGlow', 'correctChip',
+  'retryLevel', 'wordTransition', 'drawGroundShadow', 'drawLandingPuff',
+]) assert.ok(robot.includes(marker), `flattened preview omits journey frame-state marker ${marker}`);
+assert.doesNotMatch(robot, /\.gif(?:['"?])/i, 'flattened preview must not use GIF assets');
+assert.doesNotMatch(robot, /<video[^>]+autoplay/i, 'flattened preview media must follow the explicit 100 ms clock');
+assert.match(robot, /clockMs = quantizeClockMs\(this\.clockMs \+ 100\); this\.syncMediaClock\(\); this\.draw\(\)/);
 
 for (const route of [
   '/lessons/authoring/presets/tvideoJourney/1',
