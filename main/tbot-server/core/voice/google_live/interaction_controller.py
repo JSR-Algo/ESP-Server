@@ -28,6 +28,10 @@ class InteractionIdentity:
     response_id: int
     audio_seq: int
     state: str
+    lesson_session_id: str | None = None
+    lesson_turn_sequence_id: int = 0
+    lesson_attempt_id: str | None = None
+    lesson_step_key: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +43,10 @@ class InteractionIdentity:
             "response_id": self.response_id,
             "audio_seq": self.audio_seq,
             "state": self.state,
+            "lesson_session_id": self.lesson_session_id,
+            "lesson_turn_sequence_id": self.lesson_turn_sequence_id,
+            "lesson_attempt_id": self.lesson_attempt_id,
+            "lesson_step_key": self.lesson_step_key,
         }
 
 
@@ -53,6 +61,10 @@ class GoogleLiveInteractionController:
         self.audio_seq = 0
         self.live_connection_id = live_connection_id
         self.cancelled_response_ids: set[int] = set()
+        self.lesson_session_id = None
+        self.lesson_turn_sequence_id = 0
+        self.lesson_attempt_id = None
+        self.lesson_step_key = None
 
     def start_live_connection(self, live_connection_id: str | int | None):
         self.live_connection_id = None if live_connection_id is None else str(live_connection_id)
@@ -79,8 +91,17 @@ class GoogleLiveInteractionController:
         else:
             self.turn_id = int(turn_id)
         self.cancelled_response_ids.add(previous_response_id)
+        if self.lesson_session_id is not None:
+            self.lesson_turn_sequence_id += 1
         self.transition(InteractionState.INTERRUPTING)
         return self.snapshot(reason=reason)
+
+    def bind_lesson_attempt(self, *, lesson_session_id, attempt_id, step_key, turn_sequence_id=1):
+        self.lesson_session_id = str(lesson_session_id)
+        self.lesson_attempt_id = str(attempt_id)
+        self.lesson_step_key = str(step_key)
+        self.lesson_turn_sequence_id = int(turn_sequence_id)
+        return self.snapshot(reason="lesson_attempt")
 
     def next_audio_identity(self, state: InteractionState | str | None = None):
         if state is not None:
@@ -109,4 +130,8 @@ class GoogleLiveInteractionController:
             response_id=self.response_id,
             audio_seq=self.audio_seq,
             state=self.state.value,
+            lesson_session_id=self.lesson_session_id,
+            lesson_turn_sequence_id=self.lesson_turn_sequence_id,
+            lesson_attempt_id=self.lesson_attempt_id,
+            lesson_step_key=self.lesson_step_key,
         )

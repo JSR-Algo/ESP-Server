@@ -32,6 +32,13 @@ ALWAYS_INCLUDE = (
 )
 
 ALWAYS_INCLUDE_WHEN_LESSON_ENABLED = ("start_lesson",)
+LESSON_CONVERSATION_TOOLS = (
+    "lesson_child_response",
+    "lesson_pronunciation_outcome",
+    "lesson_context_turn",
+    "lesson_visual_reaction",
+    "lesson_continue",
+)
 
 # Music remains a classic-pipeline allowance for existing product behavior. Live
 # removes it with its documented incompatibility filter before sending tools to
@@ -64,6 +71,8 @@ def product_tool_names(conn: Any) -> List[str]:
     names.extend(_configured_child_tools(conn))
     if lesson_start_enabled(conn):
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
+    if lesson_runtime_enabled(conn):
+        names.extend(LESSON_CONVERSATION_TOOLS)
     return _dedupe(name for name in names if _is_child_allowed(name))
 
 

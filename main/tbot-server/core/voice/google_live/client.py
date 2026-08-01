@@ -3,7 +3,7 @@ import time
 import asyncio
 import warnings
 from contextlib import suppress
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 from core.voice.child_safety import ensure_child_safety_block
 
@@ -379,7 +379,10 @@ class GoogleLiveClient:
             if not name:
                 continue
             description = spec.get("description", "") or ""
-            parameters = self._sanitize_schema(spec.get("parameters"))
+            parameters = self._sanitize_schema(
+                spec.get("parameters"),
+                preserve_additional_properties=str(name).startswith("lesson_"),
+            )
             function_declarations.append(
                 self._build_function_declaration(name, description, parameters)
             )
@@ -400,16 +403,27 @@ class GoogleLiveClient:
             declaration["parameters"] = parameters
         return declaration
 
-    def _sanitize_schema(self, schema):
+    def _sanitize_schema(self, schema, *, preserve_additional_properties=False):
         if isinstance(schema, Mapping):
             sanitized = {}
             for key, value in schema.items():
-                if key in {"additionalProperties", "$schema", "title", "default"}:
+                if key in {"$schema", "title", "default"} or (
+                    key == "additionalProperties" and not preserve_additional_properties
+                ):
                     continue
-                sanitized[key] = self._sanitize_schema(value)
+                sanitized[key] = self._sanitize_schema(
+                    value,
+                    preserve_additional_properties=preserve_additional_properties,
+                )
             return sanitized
         if isinstance(schema, list):
-            return [self._sanitize_schema(value) for value in schema]
+            return [
+                self._sanitize_schema(
+                    value,
+                    preserve_additional_properties=preserve_additional_properties,
+                )
+                for value in schema
+            ]
         return schema
 
     def _build_function_response(self, response):

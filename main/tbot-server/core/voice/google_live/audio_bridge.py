@@ -17,6 +17,7 @@ import time
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS
 
 
 EMOTION_EMOJI = {
@@ -359,12 +360,19 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "tool_call":
-            if self._should_drop_lesson_model_output(event_type):
+            if self._should_drop_lesson_model_output(event_type, event):
                 return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._tool_call_handler is not None:
                 try:
+                    if isinstance(event, dict):
+                        event.setdefault(
+                            "response_generation",
+                            self._active_response_id
+                            if self._active_response_id is not None
+                            else self._response_id_getter(),
+                        )
                     await self._tool_call_handler(event)
                 except Exception as exc:
                     self.logger.bind(tag="GoogleLive").warning(
@@ -585,13 +593,18 @@ class GoogleLiveAudioBridge:
         self._log_stale_model_event_drop(event_type, "blocked_until_user_turn")
         return True
 
-    def _should_drop_lesson_model_output(self, event_type):
+    def _should_drop_lesson_model_output(self, event_type, event=None):
         try:
             in_lesson = normalize_session_mode(
                 getattr(self.conn, "session_mode", None)
             ) == SessionMode.LESSON
         except Exception:
             in_lesson = False
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        in_lesson = in_lesson or str(getattr(runtime, "state", "")).upper() in {
+            "PRELOADING",
+            "RUNNING",
+        }
         if not in_lesson:
             return False
         if (
@@ -600,6 +613,16 @@ class GoogleLiveAudioBridge:
         ):
             return False
         if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+            return False
+        if event_type == "tool_call" and isinstance(event, Mapping):
+            calls = event.get("calls") or []
+            if any(
+                isinstance(call, Mapping)
+                and call.get("name") in LESSON_CONVERSATION_TOOLS
+                for call in calls
+            ):
+                return False
+        if event_type == "tool_call_cancellation":
             return False
         if event_type not in {
             "transcript",
