@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -12,7 +13,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as legacy
 from core.lesson.conversation_contract import LessonToolIdentity
-from core.lesson.runtime import LessonRuntime, RENDERER_V4, S_RUNNING
+from core.lesson.errors import LessonError
+from core.lesson.runtime import (
+    LessonRuntime,
+    RENDERER_V4,
+    S_COMPLETED,
+    S_IDLE,
+    S_PAUSED,
+    S_RUNNING,
+)
 
 from test_lesson_conversation_runtime import _backend_manifest
 
@@ -78,6 +87,11 @@ class _ConversationAssetCache(legacy._FakeAssetCache):
         super().__init__(ready=True)
         self._manifest = manifest
         self.asset_pack_local_root = "sd://tbot/lesson-assets"
+        self.preload_calls = 0
+
+    async def preload(self):
+        self.preload_calls += 1
+        return await super().preload()
 
     def asset_pack_manifest(self, **kwargs):
         pack = super().asset_pack_manifest(**kwargs)
@@ -135,7 +149,7 @@ def _runtime(*, manifest: dict | None = None) -> LessonRuntime:
     assignment = legacy._build_assignment()
     assignment.update(lessonId="farm-english", lessonVersion=4)
     with mock.patch("core.lesson.runtime.uuid.uuid4", return_value="lesson-session"):
-        return LessonRuntime(
+        runtime = LessonRuntime(
             conn,
             assignment=assignment,
             manifest=selected,
@@ -143,6 +157,8 @@ def _runtime(*, manifest: dict | None = None) -> LessonRuntime:
             forwarder=legacy._FakeForwarder(),
             manifest_checksum=legacy._manifest_checksum(),
         )
+    conn.lesson_runtime = runtime
+    return runtime
 
 
 async def _activate(runtime: LessonRuntime, step_index: int = 0) -> None:
@@ -153,6 +169,7 @@ async def _activate(runtime: LessonRuntime, step_index: int = 0) -> None:
     runtime._step_id = runtime._step["id"]
     runtime._step_seq = 20 + step_index
     runtime._step_acked = True
+    runtime._step_visuals_ready = True
     runtime._step_completed = False
     runtime._bind_conversation_for_current_step()
 
@@ -193,6 +210,21 @@ def _ack(runtime: LessonRuntime, frame: dict, inbound_sequence: int, *, cue_id: 
     }
 
 
+async def _visual_and_ack(
+    runtime: LessonRuntime,
+    cue_role: str,
+    effect: str,
+    inbound_sequence: int,
+) -> dict:
+    decision = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), cue_role, effect=effect
+    )
+    assert decision.accepted
+    frame = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, frame, inbound_sequence))
+    return frame
+
+
 @pytest.mark.asyncio
 async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> None:
     runtime = _runtime()
@@ -202,19 +234,50 @@ async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> 
     assert runtime.conversation.identity().step_key == runtime._step_id == "barn"
 
     for mutate in (
-        lambda manifest: manifest.update(manifestVersion="teebot-lesson-renderer.v3"),
         lambda manifest: manifest["cinematicPhases"][0].update(templateVersion=1),
         lambda manifest: manifest.pop("conversation"),
     ):
         candidate = _manifest()
         mutate(candidate)
         gated = _runtime(manifest=candidate)
+        if "conversation" in candidate:
+            with pytest.raises(LessonError):
+                await gated.preload_only()
+        else:
+            assert await gated.preload_only()
         gated.state = S_RUNNING
         gated._step_index = 0
         gated._step = gated._steps[0]
         gated._step_id = "barn"
+        gated._step_acked = True
+        gated._step_visuals_ready = True
         gated._bind_conversation_for_current_step()
         assert gated.conversation is None
+        assert gated.conn.websocket.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["reordered", "extra", "missing"])
+async def test_conversation_activation_rejects_manifest_step_order_drift(mutation: str) -> None:
+    manifest = _manifest()
+    if mutation == "reordered":
+        manifest["steps"].reverse()
+    elif mutation == "extra":
+        extra = copy.deepcopy(manifest["steps"][-1])
+        extra["id"] = "extra"
+        manifest["steps"].append(extra)
+    else:
+        manifest["steps"].pop()
+    runtime = _runtime(manifest=manifest)
+
+    with pytest.raises(LessonError) as exc:
+        await runtime.preload_only()
+
+    assert exc.value.code == "LESSON_CONVERSATION_CONTRACT_INVALID"
+    assert runtime.conversation is None
+    assert runtime._conversation_contract_valid is False
+    assert runtime.asset_cache.preload_calls == 0
+    assert runtime.state == S_IDLE
 
 
 @pytest.mark.asyncio
@@ -253,6 +316,7 @@ async def test_visual_tool_uses_cinematic_sequence_fencing_and_duplicate_is_noop
 async def test_invalid_semantic_identity_never_mutates_progress() -> None:
     runtime = _runtime()
     await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     snapshot = runtime.conversation.snapshot()
     forwarded = runtime.forwarder.batches[:]
     stale = LessonToolIdentity(
@@ -269,9 +333,201 @@ async def test_invalid_semantic_identity_never_mutates_progress() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    ["replaced", "candidate", "paused", "stopped", "unacked", "visuals_pending", "closed"],
+)
+async def test_public_semantic_boundaries_reject_when_runtime_authority_is_lost(mode: str) -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    snapshot = runtime.conversation.snapshot()
+    frames = _frames(runtime)
+    if mode == "replaced":
+        runtime.conn.lesson_runtime = object()
+    elif mode == "candidate":
+        runtime.conn.lesson_runtime = object()
+        runtime.conn.lesson_runtime_candidate = runtime
+    elif mode == "paused":
+        runtime.state = S_PAUSED
+    elif mode == "stopped":
+        runtime.state = S_COMPLETED
+    elif mode == "unacked":
+        runtime._step_acked = False
+    elif mode == "visuals_pending":
+        runtime._step_visuals_ready = False
+    else:
+        runtime._closed = True
+
+    decision = await runtime.conversation_child_response(_identity(runtime), "target")
+
+    assert decision.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert runtime.conversation.snapshot() == snapshot
+    assert _frames(runtime) == frames
+    assert runtime._steps_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_every_public_conversation_boundary_uses_the_same_authority_guard() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.state = S_PAUSED
+    snapshot = runtime.conversation.snapshot()
+    calls = (
+        lambda: runtime.conversation_child_response(_identity(runtime), "target"),
+        lambda: runtime.conversation_pronunciation_outcome(_identity(runtime), "correct"),
+        lambda: runtime.conversation_context_turn(_identity(runtime)),
+        lambda: runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        ),
+        lambda: runtime.conversation_interrupt(_identity(runtime)),
+        lambda: runtime.conversation_continue(
+            _identity(runtime, cue=True), effect="show_listening_scene"
+        ),
+    )
+
+    for call in calls:
+        decision = await call()
+        assert decision.code == "RUNTIME_NOT_AUTHORITATIVE"
+        assert runtime.conversation.snapshot() == snapshot
+
+
+@pytest.mark.asyncio
+async def test_visual_send_race_rolls_back_fsm_and_cinematic_authority() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    snapshot = runtime.conversation.snapshot()
+
+    async def replace_during_send(_payload: str) -> None:
+        runtime.conn.lesson_runtime = object()
+
+    runtime._send = replace_during_send
+    decision = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+
+    assert decision.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert runtime.conversation.snapshot() == snapshot
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+
+
+@pytest.mark.asyncio
+async def test_terminal_continue_race_rejects_without_progress_or_fsm_mutation() -> None:
+    runtime = _runtime()
+    await _activate(runtime, step_index=1)
+    runtime._steps_completed = 1
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+    await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
+    await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_correct_reaction"
+    )
+    await _visual_and_ack(runtime, "celebrate", "show_celebration", 4)
+    snapshot = runtime.conversation.snapshot()
+    forwarded = runtime.forwarder.batches[:]
+
+    task = asyncio.create_task(
+        runtime.conversation_continue(
+            _identity(runtime, cue=True), effect="show_celebration"
+        )
+    )
+    await asyncio.sleep(0)
+    runtime.conn.lesson_runtime = object()
+    decision = await task
+
+    assert decision.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert runtime.conversation.snapshot() == snapshot
+    assert runtime._steps_completed == 1
+    assert runtime.forwarder.batches == forwarded
+
+
+@pytest.mark.asyncio
+async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    initial = runtime.conversation.snapshot()
+
+    blocked = await runtime.conversation_child_response(_identity(runtime), "target")
+    assert blocked.code == "VISUAL_ACK_REQUIRED"
+    assert runtime.conversation.snapshot() == initial
+
+    listen = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+    assert listen.accepted
+    listen_frame = _frames(runtime)[-1]
+    assert listen_frame["body"]["cueId"] == "barn-listen"
+    assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
+
+    await runtime.on_lesson_ack(_ack(runtime, listen_frame, 1, cue_id="hay-listen"))
+    assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
+    await runtime.on_lesson_ack(_ack(runtime, listen_frame, 1))
+
+    heard = await runtime.conversation_child_response(_identity(runtime), "target")
+    assert heard.cue_id == "barn-thinking"
+    assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")).code == "VISUAL_ACK_REQUIRED"
+
+    thinking = await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    assert thinking["body"]["cueId"] == "barn-thinking"
+    correct = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+    assert correct.cue_id == "barn-correct"
+    assert (await runtime.conversation_continue(_identity(runtime, cue=True), effect="show_correct_reaction")).code == "VISUAL_ACK_REQUIRED"
+
+    correct_frame = await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
+    assert correct_frame["body"]["cueId"] == "barn-correct"
+    celebrate = await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_correct_reaction"
+    )
+    assert celebrate.cue_id == "barn-celebrate"
+    celebrate_frame = await _visual_and_ack(runtime, "celebrate", "show_celebration", 4)
+    assert celebrate_frame["body"]["cueId"] == "barn-celebrate"
+
+    continued = await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_celebration"
+    )
+    assert continued.cue_id == "barn-to-hay-word-transition"
+    assert runtime._step_id == "barn"
+    transition = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
+    )
+    assert transition.accepted
+    transition_frame = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, transition_frame, 5, cue_id="barn-listen"))
+    assert runtime._step_id == "barn"
+    await runtime.on_lesson_ack(_ack(runtime, transition_frame, 5))
+    assert runtime._step_id == "hay"
+
+
+@pytest.mark.asyncio
+async def test_retry_cue_requires_visual_authorization_and_ack() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+
+    retry = await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")
+    assert retry.cue_id == "barn-retry-level-1"
+    retry_frame = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "retry_level_1", effect="show_effort_reaction"
+    )
+    assert retry_frame.accepted
+    command = _frames(runtime)[-1]
+    assert command["body"]["cueId"] == "barn-retry-level-1"
+    assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")).code == "VISUAL_ACK_REQUIRED"
+    await runtime.on_lesson_ack(_ack(runtime, command, 3))
+    assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")).accepted
+
+
+@pytest.mark.asyncio
 async def test_interrupt_retires_old_visual_and_ignores_late_ack() -> None:
     runtime = _runtime()
     await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "meaning_vi")
     await runtime.conversation_visual_reaction(
         _identity(runtime, cue=True), "teach", effect="show_teaching_scene"
@@ -280,39 +536,53 @@ async def test_interrupt_retires_old_visual_and_ignores_late_ack() -> None:
 
     interrupted = await runtime.conversation_interrupt(_identity(runtime))
     assert interrupted.next_intent == "listen_to_child"
-    listening = _frames(runtime)[-1]
-    assert listening["body"]["cueId"] == "barn-listen"
     assert old["sequence"] not in runtime._outstanding
+    assert runtime.conversation.pending_cue_id == "barn-listen"
 
-    await runtime.on_lesson_ack(_ack(runtime, old, 1))
-    assert listening["sequence"] in runtime._outstanding
+    await runtime.on_lesson_ack(_ack(runtime, old, 2))
+    assert runtime._conversation_visual_ack is None
+    listening = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+    assert listening.accepted
 
 
 @pytest.mark.asyncio
 async def test_nonterminal_continue_advances_only_after_exact_transition_ack_once() -> None:
     runtime = _runtime()
     await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+    await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
+    await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_correct_reaction"
+    )
+    await _visual_and_ack(runtime, "celebrate", "show_celebration", 4)
 
     continued = await runtime.conversation_continue(
         _identity(runtime, cue=True), effect="show_celebration"
     )
     assert continued.next_intent == "continue_lesson"
+    visual = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
+    )
+    assert visual.accepted
     transition = _frames(runtime)[-1]
     assert transition["body"]["cueId"] == "barn-to-hay-word-transition"
     assert runtime._step_id == "barn"
     assert runtime._steps_completed == 0
 
-    await runtime.on_lesson_ack(_ack(runtime, transition, 1, cue_id="barn-listen"))
+    await runtime.on_lesson_ack(_ack(runtime, transition, 5, cue_id="barn-listen"))
     assert runtime._step_id == "barn"
-    await runtime.on_lesson_ack(_ack(runtime, transition, 1))
+    await runtime.on_lesson_ack(_ack(runtime, transition, 5))
     assert runtime._step_id == "hay"
     assert runtime._steps_completed == 1
     assert runtime.conversation is not None
     assert runtime.conversation.identity().step_key == "hay"
 
-    await runtime.on_lesson_ack(_ack(runtime, transition, 2))
+    await runtime.on_lesson_ack(_ack(runtime, transition, 6))
     assert runtime._steps_completed == 1
 
 
@@ -321,12 +591,15 @@ async def test_terminal_continue_completes_without_fake_transition() -> None:
     runtime = _runtime()
     await _activate(runtime, step_index=1)
     runtime._steps_completed = 1
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
-    await runtime.conversation_visual_reaction(
-        _identity(runtime, cue=True), "celebrate", effect="show_celebration"
+    await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
+    await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_correct_reaction"
     )
-    stale_celebration = _frames(runtime)[-1]
+    await _visual_and_ack(runtime, "celebrate", "show_celebration", 4)
 
     before = len(_frames(runtime))
     decision = await runtime.conversation_continue(
@@ -336,5 +609,4 @@ async def test_terminal_continue_completes_without_fake_transition() -> None:
     emitted = _frames(runtime)[before:]
     assert all(frame["body"].get("cueId") != "word-transition" for frame in emitted)
     assert emitted[-1]["type"] == "lesson_stop"
-    assert stale_celebration["sequence"] not in runtime._outstanding
     assert runtime._steps_completed == 2

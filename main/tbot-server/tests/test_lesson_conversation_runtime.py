@@ -240,6 +240,9 @@ def test_terminal_step_continue_completes_without_nonexistent_transition_cue() -
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="hay-correct"), effect="show_correct_reaction"
+    )
 
     continued = runtime.continue_lesson(
         _identity(runtime, cue_id="hay-celebrate"), effect="show_celebration"
@@ -322,9 +325,32 @@ def test_english_target_first_attempt_is_speaking_evidence_and_mastery() -> None
     correct = runtime.pronunciation_outcome(_identity(runtime), "correct")
     assert (correct.outcome, correct.next_intent, correct.cue_id) == (
         "mastered",
-        "celebrate_mastery",
-        "farm.apple.celebrate",
+        "acknowledge_correct",
+        "farm.apple.correct",
     )
+
+
+def test_mastery_requires_correct_then_celebrate_before_final_continue() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+
+    celebrate = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
+    assert celebrate.next_intent == "celebrate_mastery"
+    assert celebrate.cue_id == "farm.apple.celebrate"
+    assert runtime.continue_applied is False
+
+    continued = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
+    )
+    assert continued.next_intent == "continue_lesson"
+    assert continued.cue_id == "farm.apple.word_transition"
+    assert runtime.continue_applied is True
 
 
 def test_vietnamese_meaning_bridges_comprehension_then_invites_english_without_mastery() -> None:
@@ -566,7 +592,7 @@ def test_begin_turn_rejects_caller_selected_semantic_state_jumps_without_mutatio
         (None, ConversationState.ASKING, "listen"),
         ("meaning_vi", ConversationState.BRIDGING, "teach"),
         ("silence", ConversationState.COACHING, "retry_level_1"),
-        ("correct", ConversationState.REACTING, "celebrate"),
+        ("correct", ConversationState.REACTING, "correct"),
     ],
 )
 def test_begin_turn_can_retain_each_authoritative_speaking_state(setup, expected_state, cue_role) -> None:
@@ -587,7 +613,7 @@ def test_begin_turn_can_retain_each_authoritative_speaking_state(setup, expected
 
 @pytest.mark.parametrize(
     ("setup", "cue_role"),
-    [(None, "listen"), ("meaning_vi", "teach"), ("silence", "retry_level_1"), ("correct", "celebrate")],
+    [(None, "listen"), ("meaning_vi", "teach"), ("silence", "retry_level_1"), ("correct", "correct")],
 )
 def test_begin_turn_allows_only_listening_transition_from_speaking_states(setup, cue_role) -> None:
     runtime = _runtime()
@@ -611,6 +637,10 @@ def test_begin_turn_rejects_complete_state_without_mutation() -> None:
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
     runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"),
         effect="show_celebration",
@@ -664,6 +694,10 @@ def test_mastered_completion_rejects_pronunciation_and_cannot_reopen() -> None:
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
     runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"),
         effect="show_celebration",
@@ -724,6 +758,10 @@ def test_visual_reaction_continue_and_skip_are_server_authoritative() -> None:
 
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
     continued = runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"),
         effect="show_celebration",
@@ -824,11 +862,11 @@ def test_continue_rejects_model_selected_cue_effect_or_step() -> None:
     runtime.pronunciation_outcome(_identity(runtime), "correct")
     wrong_cue = runtime.continue_lesson(_raw_identity(runtime, "farm.apple.word_transition"), effect="show_celebration")
     wrong_effect = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.celebrate"), effect="show_word_transition"
+        _identity(runtime, cue_id="farm.apple.correct"), effect="show_word_transition"
     )
     selected_step = runtime.continue_lesson(
-        _identity(runtime, cue_id="farm.apple.celebrate"),
-        effect="show_celebration",
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
         next_step_key="farm.pear",
     )
     assert [wrong_cue.code, wrong_effect.code, selected_step.code] == [
@@ -843,6 +881,10 @@ def test_mastered_continue_is_applied_only_once_without_mutation_on_replay() -> 
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
     first = runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"),
         effect="show_celebration",
@@ -882,6 +924,10 @@ def test_word_transition_visual_ack_does_not_renew_continue_authority() -> None:
     runtime.open_attempt()
     runtime.child_response(_identity(runtime), "target")
     runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.correct"),
+        effect="show_correct_reaction",
+    )
     runtime.continue_lesson(
         _identity(runtime, cue_id="farm.apple.celebrate"),
         effect="show_celebration",

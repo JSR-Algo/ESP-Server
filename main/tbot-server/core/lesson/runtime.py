@@ -1114,7 +1114,7 @@ class LessonRuntime:
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
         self._conversation_pending_visual: Optional[Dict[str, Any]] = None
-        self._conversation_opening_decision: Optional[ConversationDecision] = None
+        self._conversation_visual_ack: Optional[tuple[str, str]] = None
         self._conversation_progress_forwarded: set[str] = set()
         self.conversation: Optional[LessonConversationRuntime] = None
 
@@ -1194,6 +1194,21 @@ class LessonRuntime:
             self.last_error = LessonError("LESSON_STEP_MISSING", "no renderable step in manifest")
             raise self.last_error
 
+        if manifest_version == RENDERER_V4:
+            try:
+                validate_flattened_cinematic_manifest(self.manifest)
+            except FlattenedCinematicContractError as exc:
+                self.last_error = LessonError(exc.code, exc.message, retryable=False)
+                raise self.last_error
+            self._conversation_contract_valid = self._validate_conversation_contracts()
+            if self.manifest.get("conversation") is not None and not self._conversation_contract_valid:
+                self.last_error = LessonError(
+                    "LESSON_CONVERSATION_CONTRACT_INVALID",
+                    "conversation steps do not exactly match the lesson runtime order",
+                    retryable=False,
+                )
+                raise self.last_error
+
         self.state = S_PRELOADING
         if not self._preparing_phase_forwarded:
             self._preparing_phase_forwarded = True
@@ -1235,7 +1250,6 @@ class LessonRuntime:
                         if cue.get("templateVersion") == 2
                         and isinstance(cue.get("cueId"), str)
                     }
-                    self._conversation_contract_valid = self._validate_conversation_contracts()
             except (CinematicContractError, FlattenedCinematicContractError) as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error
@@ -1365,6 +1379,17 @@ class LessonRuntime:
         steps = conversation.get("steps") if isinstance(conversation, dict) else None
         if not isinstance(steps, list) or not steps:
             return False
+        manifest_step_keys = [
+            step.get("id") for step in self._steps if isinstance(step.get("id"), str)
+        ]
+        conversation_step_keys = [
+            step.get("stepKey") for step in steps if isinstance(step, dict)
+        ]
+        if (
+            len(manifest_step_keys) != len(self._steps)
+            or manifest_step_keys != conversation_step_keys
+        ):
+            return False
         try:
             for step in steps:
                 step_key = step.get("stepKey") if isinstance(step, dict) else None
@@ -1383,7 +1408,7 @@ class LessonRuntime:
     def _bind_conversation_for_current_step(self) -> None:
         self.conversation = None
         self._conversation_pending_visual = None
-        self._conversation_opening_decision = None
+        self._conversation_visual_ack = None
         if (
             not self._conversation_contract_valid
             or self.negotiated_version != RENDERER_V4
@@ -1410,26 +1435,113 @@ class LessonRuntime:
             contract,
             attempt_id_factory=next_attempt_id,
         )
-        self._conversation_opening_decision = conversation.open_attempt()
+        conversation.open_attempt()
         self.conversation = conversation
+
+    def _conversation_authority_token(self) -> Optional[tuple[Any, ...]]:
+        conversation = self.conversation
+        if (
+            conversation is None
+            or self._closed
+            or getattr(self.conn, "lesson_runtime", None) is not self
+            or self.state != S_RUNNING
+            or not self._step_acked
+            or not self._step_visuals_ready
+            or self._step_completed
+            or self._step_index < 0
+            or self._step_index >= len(self._steps)
+            or self._steps[self._step_index] is not self._step
+            or not isinstance(self._step_id, str)
+            or self._step_id != conversation.identity().step_key
+            or conversation.attempt_id is None
+        ):
+            return None
+        return (
+            id(conversation),
+            self.session_id,
+            self._step_id,
+            self._step_seq,
+            conversation.attempt_id,
+            conversation.turn_sequence_id,
+        )
+
+    def _conversation_token_is_current(self, token: tuple[Any, ...]) -> bool:
+        current = self._conversation_authority_token()
+        return current is not None and current[:5] == token[:5]
+
+    def _conversation_snapshot_owner_matches(
+        self,
+        conversation: LessonConversationRuntime,
+        token: tuple[Any, ...],
+    ) -> bool:
+        attempt_id = conversation.attempt_id
+        return (
+            self.conversation is conversation
+            and self.session_id == token[1]
+            and self._step_id == token[2]
+            and self._step_seq == token[3]
+            and attempt_id == token[4]
+        )
+
+    def _conversation_guard(self) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
+        conversation = self._require_conversation()
+        token = self._conversation_authority_token()
+        if token is None:
+            return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+        return conversation, token
+
+    def _conversation_semantic_guard(
+        self,
+    ) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        pending_cue = conversation.pending_cue_id
+        acknowledged = self._conversation_visual_ack
+        if (
+            not isinstance(pending_cue, str)
+            or acknowledged != (conversation.attempt_id, pending_cue)
+        ):
+            return conversation.reject("VISUAL_ACK_REQUIRED")
+        return conversation, token
 
     async def conversation_child_response(
         self, identity: LessonToolIdentity | None, response_class: str
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
-        return conversation.child_response(identity, response_class)
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.child_response(identity, response_class)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+        return decision
 
     async def conversation_pronunciation_outcome(
         self, identity: LessonToolIdentity | None, outcome: str
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
-        return conversation.pronunciation_outcome(identity, outcome)
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.pronunciation_outcome(identity, outcome)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+        return decision
 
     async def conversation_context_turn(
         self, identity: LessonToolIdentity | None
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
-        return conversation.context_turn(identity)
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.context_turn(identity)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+        return decision
 
     async def conversation_visual_reaction(
         self,
@@ -1438,20 +1550,37 @@ class LessonRuntime:
         *,
         effect: str | None,
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        pending = self._conversation_pending_visual
+        if isinstance(pending, dict):
+            return conversation.reject("VISUAL_ACK_REQUIRED")
+        snapshot = conversation.snapshot()
         decision = conversation.visual_reaction(identity, cue_role, effect=effect)
-        if decision.accepted:
-            await self._emit_conversation_cue(decision)
+        if decision.accepted and not await self._emit_conversation_cue(
+            decision,
+            token=token,
+            advances_step=cue_role == "word_transition",
+        ):
+            if self._conversation_snapshot_owner_matches(conversation, token):
+                conversation.restore_authoritative_snapshot(snapshot)
+            return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
         return decision
 
     async def conversation_interrupt(
         self, identity: LessonToolIdentity | None
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
         decision = conversation.interrupt(identity)
         if decision.accepted:
             self._retire_conversation_visual()
-            await self._emit_conversation_cue(decision)
+            self._conversation_visual_ack = None
         return decision
 
     async def conversation_continue(
@@ -1461,7 +1590,13 @@ class LessonRuntime:
         effect: str | None,
         next_step_key: str | None = None,
     ) -> ConversationDecision:
-        conversation = self._require_conversation()
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        snapshot = conversation.snapshot()
+        visual_ack = self._conversation_visual_ack
         decision = conversation.continue_lesson(
             identity,
             effect=effect,
@@ -1469,11 +1604,14 @@ class LessonRuntime:
         )
         if not decision.accepted:
             return decision
+        self._conversation_visual_ack = None
         if decision.next_intent == "complete_lesson":
             self._retire_conversation_visual()
-            await self._complete_conversation_step()
-        else:
-            await self._emit_conversation_cue(decision, advances_step=True)
+            if not await self._complete_conversation_step(token):
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                    self._conversation_visual_ack = visual_ack
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
         return decision
 
     def _require_conversation(self) -> LessonConversationRuntime:
@@ -1485,8 +1623,9 @@ class LessonRuntime:
         self,
         decision: ConversationDecision,
         *,
+        token: tuple[Any, ...],
         advances_step: bool = False,
-    ) -> None:
+    ) -> bool:
         cue_id = decision.cue_id
         cue = self._conversation_cues.get(cue_id) if isinstance(cue_id, str) else None
         if (
@@ -1495,13 +1634,18 @@ class LessonRuntime:
             or cue.get("stepKey") != self._step_id
             and not advances_step
         ):
-            return
+            return False
+        if not self._conversation_token_is_current(token):
+            return False
         self._retire_conversation_visual()
         sequence = await self._emit(
             "lesson_cinematic_control",
             step_id=self._step_id,
             body={"command": "start", **copy.deepcopy(cue)},
         )
+        if not self._conversation_token_is_current(token):
+            self._retire_conversation_visual_sequence(sequence)
+            return False
         self._conversation_pending_visual = {
             "sequence": sequence,
             "cueId": cue_id,
@@ -1509,6 +1653,14 @@ class LessonRuntime:
             "attemptId": self.conversation.attempt_id if self.conversation else None,
             "advancesStep": advances_step,
         }
+        return True
+
+    def _retire_conversation_visual_sequence(self, sequence: int) -> None:
+        self._outstanding.pop(sequence, None)
+        command = self._cinematic_pending_command
+        if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
+            self._cinematic_pending_command = None
+        self._cancel_frame_ack_timeout()
 
     def _retire_conversation_visual(self) -> None:
         pending = self._conversation_pending_visual
@@ -1517,11 +1669,7 @@ class LessonRuntime:
             return
         sequence = pending.get("sequence")
         if type(sequence) is int:
-            self._outstanding.pop(sequence, None)
-        command = self._cinematic_pending_command
-        if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
-            self._cinematic_pending_command = None
-        self._cancel_frame_ack_timeout()
+            self._retire_conversation_visual_sequence(sequence)
 
     async def _on_conversation_visual_acked(self, frame: Dict[str, Any]) -> None:
         pending = self._conversation_pending_visual
@@ -1537,15 +1685,21 @@ class LessonRuntime:
         ):
             return
         self._conversation_pending_visual = None
+        self._conversation_visual_ack = (self.conversation.attempt_id, command["cueId"])
         if pending.get("advancesStep") is True:
-            await self._complete_conversation_step()
+            token = self._conversation_authority_token()
+            if token is not None:
+                await self._complete_conversation_step(token)
 
-    async def _complete_conversation_step(self) -> None:
+    async def _complete_conversation_step(self, token: tuple[Any, ...]) -> bool:
+        await asyncio.sleep(0)
+        if not self._conversation_token_is_current(token):
+            return False
         if self.conversation is None or not isinstance(self._step_id, str):
-            return
+            return False
         step_id = self._step_id
         if step_id in self._conversation_progress_forwarded:
-            return
+            return True
         self._conversation_progress_forwarded.add(step_id)
         self._forward(
             {
@@ -1564,6 +1718,7 @@ class LessonRuntime:
         )
         self._step_completed = True
         await self._maybe_finish_step()
+        return True
 
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
@@ -2414,10 +2569,6 @@ class LessonRuntime:
             return
         self._step_visuals_ready = True
         if self.conversation is not None:
-            opening = self._conversation_opening_decision
-            self._conversation_opening_decision = None
-            if opening is not None:
-                await self._emit_conversation_cue(opening)
             return
         prompt_handed_off = await self._speak_step_prompt(self._step)
         if not continuation_is_current():

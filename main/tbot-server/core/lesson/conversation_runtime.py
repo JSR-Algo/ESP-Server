@@ -217,6 +217,31 @@ class LessonConversationRuntime:
             self._continue_applied,
         )
 
+    def restore_authoritative_snapshot(self, snapshot: tuple[Any, ...]) -> None:
+        (
+            self._state,
+            self._turn_sequence_id,
+            self._attempt_id,
+            self._attempt_count,
+            self._coaching_level,
+            self._contextual_turn_count,
+            self._outcome,
+            self._review_needed,
+            self._mastered,
+            self._speaking_evidence,
+            used_identities,
+            retired_identities,
+            self._pending_cue_id,
+            self._pending_effect,
+            self._pending_intent,
+            self._continue_applied,
+        ) = snapshot
+        self._used_identities = set(used_identities)
+        self._retired_identities = set(retired_identities)
+
+    def reject(self, code: str) -> ConversationDecision:
+        return self._reject(code)
+
     def _cue(self, role: str) -> CueSpec:
         return self._contract.cue_map[role]
 
@@ -353,7 +378,7 @@ class LessonConversationRuntime:
             self._mastered = True
             self._outcome = "mastered"
             self._review_needed = False
-            return self._decision(intent="celebrate_mastery", cue_role="celebrate")
+            return self._decision(intent="acknowledge_correct", cue_role="correct")
         if self._coaching_level < 3:
             self._coaching_level += 1
             self._state = ConversationState.LISTENING
@@ -459,7 +484,21 @@ class LessonConversationRuntime:
             return self._reject("ILLEGAL_EFFECT")
         self._consume(identity)
         if cue_role == "word_transition":
-            return self._decision(intent="word_transition_acknowledged")
+            self._pending_cue_id = None
+            self._pending_effect = None
+            self._pending_intent = "word_transition_authorized"
+            return ConversationDecision(
+                accepted=True,
+                code="ACCEPTED",
+                state=self._state,
+                next_intent="word_transition_authorized",
+                cue_id=cue.cue_id,
+                effect=cue.effect,
+                coaching_level=self._coaching_level,
+                outcome=self._outcome,
+                review_needed=self._review_needed,
+                guidance=self._guidance,
+            )
         return self._decision(intent="play_approved_reaction", cue_role=cue_role)
 
     def continue_lesson(
@@ -476,6 +515,19 @@ class LessonConversationRuntime:
             return self._reject("CONTINUE_ALREADY_APPLIED")
         if not (self._mastered or (self._outcome == "attempted" and self._review_needed)):
             return self._reject("CONTINUE_NOT_ALLOWED")
+        pending_role = next(
+            (cue.role for cue in self._contract.cues if cue.cue_id == self._pending_cue_id),
+            None,
+        )
+        if self._mastered and pending_role == "correct":
+            if identity is None or identity.cue_id != self._pending_cue_id:
+                return self._reject("ILLEGAL_CUE")
+            if effect != self._pending_effect:
+                return self._reject("ILLEGAL_EFFECT")
+            if next_step_key is not None:
+                return self._reject("MODEL_STEP_SELECTION_FORBIDDEN")
+            self._consume(identity)
+            return self._decision(intent="celebrate_mastery", cue_role="celebrate")
         if self._contract.is_terminal_step:
             pending = next(
                 (cue for cue in self._contract.cues if cue.cue_id == self._pending_cue_id),
