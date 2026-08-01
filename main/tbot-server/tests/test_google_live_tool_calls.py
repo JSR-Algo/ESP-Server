@@ -744,8 +744,9 @@ class AudioBridgeToolCallForwardingTest(unittest.IsolatedAsyncioTestCase):
             and str(args[0]).startswith("Google Live transcript source=")
         ]
         self.assertEqual(len(transcript_logs), 1)
-        self.assertIn("text=", transcript_logs[0][0])
-        self.assertEqual(transcript_logs[0][3], "bắt đầu bài học")
+        self.assertNotIn("text=", transcript_logs[0][0])
+        self.assertNotIn("bắt đầu bài học", repr(transcript_logs[0]))
+        self.assertEqual(transcript_logs[0][2], len("bắt đầu bài học"))
 
     async def test_lesson_mode_drops_live_model_output_events(self):
         from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge

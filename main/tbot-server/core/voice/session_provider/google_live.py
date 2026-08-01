@@ -643,7 +643,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         ):
             return False
-        if self._lesson_child_audio_pending_transcript:
+        semantic_tool_path = self._lesson_conversation_tool_path_active()
+        if semantic_tool_path:
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+        elif self._lesson_child_audio_pending_transcript:
             self.conn.client_abort = False
             return True
         self._force_lesson_session_mode("lesson_child_audio")
@@ -704,7 +708,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._record_user_stream_audio(frame)
             if self._user_turn_can_finalize():
                 await self._finalize_user_turn_clean()
-                self._lesson_child_audio_pending_transcript = True
+                if not semantic_tool_path:
+                    self._lesson_child_audio_pending_transcript = True
             else:
                 self._schedule_input_flush()
             self.conn.client_abort = False
@@ -963,12 +968,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await client.send_text(f"{self._WAKE_GREETING_LIVE_INSTRUCTION}{greeting}")
             self._touch_live_activity()
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live wake_greeting_sent reason={} chars={} protect_ms={:.0f} "
-                "text_preview={!r}",
+                "Google Live wake_greeting_sent reason={} chars={} protect_ms={:.0f}",
                 reason,
                 len(greeting),
                 protect_sec * 1000,
-                greeting[:40],
             )
             return True
         except Exception as exc:
@@ -1507,16 +1510,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception:
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live user_transcript_suppressed_as_model_echo "
-            "chars={} text_preview={!r}",
+            "Google Live user_transcript_suppressed_as_model_echo chars={}",
             len(transcript_text or ""),
-            str(transcript_text or "")[:40],
         )
         return True
 
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_audio.clear()
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_conversation_transcript_ignored source=user chars={}",
+                len(str(transcript_text or "")),
+            )
+            return True
         if self._suppress_user_transcript_as_model_echo(transcript_text):
             return True
         if await self._dispatch_lesson_child_response(transcript_text):
@@ -1526,8 +1535,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if time.monotonic() < float(self._wake_audio_window_until or 0.0):
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live wake_transcript_ignored_duplicate "
-                    "text_preview={!r} window_ms_left={:.0f}",
-                    str(transcript_text or "")[:40],
+                    "chars={} window_ms_left={:.0f}",
+                    len(str(transcript_text or "")),
                     max(0.0, (self._wake_audio_window_until - time.monotonic()) * 1000),
                 )
                 return True
@@ -1544,8 +1553,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._reset_conversation_live_context("wake_transcript")
             self._schedule_live_prewarm("wake_transcript", delay_sec=0.0)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live wake_transcript_only text_preview={!r}",
-                str(transcript_text or "")[:40],
+                "Google Live wake_transcript_only chars={}",
+                len(str(transcript_text or "")),
             )
             return True
         if await self._dispatch_lesson_start_intent(transcript_text):
@@ -1564,15 +1573,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_start_intent_suppressed reason=duplicate_window "
-                "text_preview={!r}",
-                (transcript_text or "")[:40],
+                "chars={}",
+                len(str(transcript_text or "")),
             )
             return True
         if self._lesson_runtime_active():
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_start_intent_suppressed reason=lesson_already_active "
-                "text_preview={!r}",
-                (transcript_text or "")[:40],
+                "chars={}",
+                len(str(transcript_text or "")),
             )
             self._suppress_start_lesson_tool_call_until = (
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
@@ -1612,9 +1621,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except Exception:
                 pass
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent tool={} text_preview={!r}",
+                "Google Live lesson_start_intent tool={} chars={}",
                 payload.get("name"),
-                (transcript_text or "")[:40],
+                len(str(transcript_text or "")),
             )
             return True
         except Exception as exc:
@@ -1637,9 +1646,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         try:
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent miss normalized={!r} text_preview={!r}",
-                text[:80],
-                str(transcript_text or "")[:80],
+                "Google Live lesson_start_intent miss normalized_chars={} chars={}",
+                len(text),
+                len(str(transcript_text or "")),
             )
         except Exception:
             pass
@@ -1942,6 +1951,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return True
 
     def _lesson_child_response_route_active(self):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if (
             self._lesson_child_response_window_active()
             or self._lesson_child_response_window_active(
@@ -2061,8 +2072,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not str(transcript_text or "").strip():
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_response_consumed_unhandled text_preview='{}'",
-            str(transcript_text or "").strip()[:80],
+            "Google Live lesson_child_response_consumed_unhandled chars={}",
+            len(str(transcript_text or "").strip()),
         )
         return True
 
@@ -2113,6 +2124,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def _dispatch_lesson_child_response_failure(self, reason):
         """Route a finalized child-audio turn that produced no usable transcript."""
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            return False
         if not self._lesson_child_response_route_active():
             return False
         runtime = getattr(self.conn, "lesson_runtime", None)
@@ -2386,8 +2401,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def _handle_local_stop_word(self, text):
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live local_stop_word detected text_preview={!r}",
-            str(text or "")[:40],
+            "Google Live local_stop_word detected chars={}",
+            len(str(text or "")),
         )
         await self._begin_user_interrupt("local_stop_word")
 
@@ -3821,13 +3836,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if self._classify_lesson_start_intent(transcript) is None:
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_start_asr_fallback miss text_preview={!r}",
-                    transcript[:40],
+                    "Google Live lesson_start_asr_fallback miss chars={}",
+                    len(transcript),
                 )
                 return
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_asr_fallback transcript text_preview={!r}",
-                transcript[:40],
+                "Google Live lesson_start_asr_fallback transcript chars={}",
+                len(transcript),
             )
             self._start_lesson_asr_fallback_audio.clear()
             await self._dispatch_lesson_start_intent(transcript)
@@ -4161,7 +4176,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._waiting_model_since = time.monotonic()
             self._schedule_waiting_model_timeout_task()
             self._clear_user_stream()
-            if self._lesson_child_response_window_active(require_audio_window=False):
+            if (
+                not self._lesson_conversation_tool_path_active()
+                and self._lesson_child_response_window_active(require_audio_window=False)
+            ):
                 self._lesson_child_audio_pending_transcript = True
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live input stream flushed after {:.0f} ms idle",
@@ -4213,6 +4231,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             existing_task.cancel()
 
     def _complete_lesson_child_audio_finalization(self, reason):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if not self._lesson_child_response_window_active(require_audio_window=False):
             return False
         self._cancel_waiting_model_timeout_task()
@@ -4260,6 +4280,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await asyncio.sleep(timeout)
             if self._closing or not self._lesson_child_audio_pending_transcript:
                 return
+            if self._lesson_conversation_tool_path_active():
+                self._lesson_child_audio_pending_transcript = False
+                self._clear_lesson_child_speech_start_frames()
+                return
             if not self._lesson_child_response_window_active(require_audio_window=False):
                 self._lesson_child_audio_pending_transcript = False
                 self._clear_lesson_child_speech_start_frames()
@@ -4285,6 +4309,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await self._handle_runtime_failure(exc)
 
     def _complete_lesson_audio_without_model_wait(self, reason):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if normalize_session_mode(
             getattr(self.conn, "session_mode", SessionMode.DORMANT)
         ) != SessionMode.LESSON:
@@ -4656,6 +4682,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_user_stream()
 
     async def _on_user_transcript_barge_in(self, transcript_text):
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_conversation_transcript_barge_in_ignored chars={}",
+                len(str(transcript_text or "")),
+            )
+            return
         if await self._dispatch_lesson_child_response(transcript_text):
             # The child answer is the legitimate turn: do not interrupt Live or
             # dispatch chat/music intents.
@@ -4708,6 +4742,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if runtime is None:
             return False
         return str(getattr(runtime, "state", "")).upper() in {"PRELOADING", "RUNNING"}
+
+    def _lesson_conversation_tool_path_active(self):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        active = getattr(runtime, "conversation_tool_path_active", None)
+        if callable(active):
+            try:
+                return bool(active())
+            except Exception:
+                return False
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(snapshot):
+            return False
+        try:
+            context = snapshot()
+        except Exception:
+            return False
+        return isinstance(context, Mapping) and isinstance(context.get("identity"), Mapping)
 
     def _get_user_audio_window_sec(self, reason):
         config = self._get_live_config()
@@ -4845,9 +4896,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         try:
             await func_handler.handle_llm_function_call(self.conn, payload)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live music_control_intent tool={} text_preview={!r}",
+                "Google Live music_control_intent tool={} chars={}",
                 payload.get("name"),
-                (transcript_text or "")[:40],
+                len(str(transcript_text or "")),
             )
             self.conn.logger.bind(tag="GoogleLive").info(
                 "music_state_changed state={} trigger=vietnamese_command",
@@ -5329,8 +5380,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 continue
             args = call.get("args") if isinstance(call, Mapping) else {}
             if in_lesson and isinstance(args, Mapping):
-                args = dict(args)
-                args["_provider_admission_generation"] = event_generation
+                args = {
+                    key: value
+                    for key, value in args.items()
+                    if not str(key).startswith("_provider_admission_")
+                }
             if call_id is not None:
                 self._pending_tool_calls.add(call_id)
                 self._cancelled_tool_call_ids.discard(call_id)
@@ -5339,6 +5393,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 name,
                 args,
                 call_id=call_id,
+                lesson_admission_generation=event_generation if in_lesson else None,
             )
             latency_ms = (time.monotonic() - started_at) * 1000
             if call_id is not None and call_id in self._cancelled_tool_call_ids:
@@ -5400,10 +5455,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
             ",".join(str(i) for i in ids),
         )
 
-    async def _execute_tool_call_with_timeout(self, name, args, call_id=None):
+    async def _execute_tool_call_with_timeout(
+        self,
+        name,
+        args,
+        call_id=None,
+        lesson_admission_generation=None,
+    ):
         try:
             if name in LESSON_CONVERSATION_TOOLS:
-                return await self._execute_tool_call(name, args, call_id=call_id)
+                from plugins_func.functions.lesson_conversation import (
+                    _google_live_lesson_tool_admission,
+                )
+
+                with _google_live_lesson_tool_admission(
+                    self,
+                    lesson_admission_generation,
+                ):
+                    return await self._execute_tool_call(name, args, call_id=call_id)
             timeout = self._get_tool_timeout_sec()
             if timeout is None:
                 return await self._execute_tool_call(name, args, call_id=call_id)

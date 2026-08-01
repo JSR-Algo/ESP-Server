@@ -182,10 +182,9 @@ class GoogleLiveAudioBridge:
             if transcript_text is None:
                 return False
             self.logger.bind(tag="GoogleLive").info(
-                "Google Live transcript source={} chars={} text={!r}",
+                "Google Live transcript source={} chars={}",
                 event.get("source") or "unknown",
                 len(transcript_text),
-                transcript_text[:80],
             )
             if event.get("source") == "user":
                 if await self._maybe_handle_user_transcript_intent(transcript_text):
@@ -748,15 +747,13 @@ class GoogleLiveAudioBridge:
         if self.looks_like_model_echo(transcript_text):
             self.logger.bind(tag="GoogleLive").info(
                 "Google Live transcript_barge_in suppressed_as_model_echo "
-                "chars={} text_preview={!r}",
+                "chars={}",
                 len(transcript_text),
-                transcript_text[:40],
             )
             return
         self.logger.bind(tag="GoogleLive").info(
-            "Google Live transcript_barge_in chars={} text_preview={!r}",
+            "Google Live transcript_barge_in chars={}",
             len(transcript_text),
-            transcript_text[:40],
         )
         try:
             await self._user_transcript_barge_in_handler(transcript_text)

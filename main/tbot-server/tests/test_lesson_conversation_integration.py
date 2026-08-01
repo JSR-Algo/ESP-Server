@@ -237,6 +237,7 @@ async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> 
     runtime = _runtime()
     await _activate(runtime)
     assert runtime.conversation is not None
+    assert runtime.conversation_tool_path_active()
     assert runtime.conversation.identity().lesson_session_id == runtime.session_id
     assert runtime.conversation.identity().step_key == runtime._step_id == "barn"
     context = runtime.conversation_tool_context()

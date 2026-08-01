@@ -1517,6 +1517,18 @@ class LessonRuntime:
             },
         }
 
+    def conversation_tool_path_active(self) -> bool:
+        conversation = self.conversation
+        return bool(
+            conversation is not None
+            and conversation.attempt_id is not None
+            and self._conversation_contract_valid
+            and self.negotiated_version == RENDERER_V4
+            and not self._closed
+            and getattr(self.conn, "lesson_runtime", None) is self
+            and self.state == S_RUNNING
+        )
+
     async def _publish_conversation_tool_context(self) -> bool:
         context = self.conversation_tool_context()
         publisher = getattr(
