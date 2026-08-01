@@ -15,7 +15,7 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'lesson-builder-test-session');
 
-const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
+const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], flattenedDerivativeLoads: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
 let steps = [
   {
     stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 },
@@ -95,6 +95,7 @@ Object.assign(Api.lesson, {
     ok({ state: 'configured', lessonId: id, lessonVersion: 2, sourceRevision: 2, cinematicSourceRevision: 2, journey: payload, set: { state: 'invalid', issues: [{ code: 'QUEUED_CUES', cueIds: requiredCueIds(payload.steps) }] }, statuses: [], publishReady: false });
   },
   getFlattenedDerivativeStatus(lessonId, lessonVersion, ok) {
+    calls.flattenedDerivativeLoads.push({ lessonId, lessonVersion });
     ok(normalizeFlattenedDerivativeStatusResponse({ data: [] }, { lessonId, lessonVersion }));
   },
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },

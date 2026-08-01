@@ -217,7 +217,7 @@
                 </div>
                 <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
               </section>
-              <section class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
+              <section v-if="!isTVideoJourney" class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
                 <div class="preview-heading">
                   <span class="eyebrow">{{ $t('lesson.flattenedDerivativeTitle') }}</span>
                   <span class="preview-heading__hint">{{ $t('lesson.flattenedDerivativeHint') }}</span>
@@ -1245,7 +1245,7 @@ export default {
       return true;
     },
     loadFlattenedDerivativeStatus(options = {}) {
-      if (this.editorDestroying || !this.lesson || !this.lessonId
+      if (this.editorDestroying || this.isTVideoJourney || !this.lesson || !this.lessonId
         || !Api.lesson || typeof Api.lesson.getFlattenedDerivativeStatus !== 'function') return false;
       const guard = {
         requestId: this.flattenedDerivativeRequestId + 1,
