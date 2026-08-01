@@ -49,7 +49,8 @@ python3 -m pytest -q \
   tests/test_flattened_cinematic_contract.py \
   tests/test_lesson_sd_pack_sync.py \
   tests/test_lesson_sd_pack_materializer.py \
-  tests/test_tvideo_farm_cross_repo_fixture.py
+  tests/test_tvideo_farm_cross_repo_fixture.py \
+  tests/test_tvideo_farm_fixture_generator.py
 ```
 
 Result: `428 passed, 1 skipped`. The skip is the existing credential-gated Google Live smoke. The farm test downloads and verifies all 19 deterministic fixture payloads, commits the SD pack atomically, reloads its attestation, and projects every cue with exact identity, playback, timing, derivative, SHA, bytes, and SD path. The generator tests also prove that stale backend `dist`, ignored/untracked source, a wrong commit pin, and modified tracked build inputs cannot influence fixture generation.
@@ -77,11 +78,12 @@ Result: new-file Ruff and isolated mypy pass; compileall and diff-check pass. Re
 
 ```bash
 cd /Users/manhhodinh/Documents/TBOT/.worktrees/firmware-google-live-tvideo-journey
+./scripts/run_host_native_lesson_cinematic_renderer_test.sh
 ./scripts/run_host_native_lesson_flattened_cinematic_renderer_test.sh
 ./scripts/run_host_native_lesson_handler_test.sh
 ```
 
-Result: flattened renderer sanitizer test passed; real handler test passed with `1912 checks`. The handler parses all 38 fixture frames, opens exactly 19 flattened streams, returns `frameZeroReady` for every prepare and `phaseReady` for every strict control-start, and rejects leaked prepare metadata on start.
+Result: legacy and flattened renderer sanitizer tests passed; real handler test passed with `1917 checks`. The handler parses all 38 fixture frames, opens exactly 19 flattened streams, returns `frameZeroReady` for every prepare and `phaseReady` for every strict control-start, and rejects leaked prepare metadata on start. Control-frame `start` is accepted only for an active renderer-v4/template-v2 session; renderer-v3 and renderer-v4/template-v1 reject it while preserving their legacy nested `lesson_start` path.
 
 The supplemental firmware Python proof returned `25 passed, 1 failed`; the failure is a pre-existing source-text delimiter assertion in `tests/test_lesson_sd_sync_attestation_contract.py`. `main/mcp_server.cc` is unchanged from firmware base commit `32d7e9b18cf26b024bb75e0d0b720c5e6b1f248e` at the referenced symbols.
 
