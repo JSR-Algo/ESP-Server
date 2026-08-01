@@ -5,13 +5,15 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+import scripts.generate_tvideo_farm_manifest_fixture as fixture_generator
 from scripts.generate_tvideo_farm_manifest_fixture import (
     FixtureGenerationError,
     _extract_archive,
+    _verify_backend,
     generate_fixture,
 )
 
@@ -144,6 +146,38 @@ def test_generator_rejects_uncommitted_tracked_build_input_mutation(tmp_path: Pa
             node=Path("node"),
             run=lambda *_args, **_kwargs: pytest.fail("compiler must not run"),
         )
+
+
+def test_generator_materializes_verified_commit_when_head_moves_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend, verified_head = _backend_repo(tmp_path)
+
+    def verify_then_advance_head(root: Path, expected_head: str) -> tuple[str, str, list[str]]:
+        verified = _verify_backend(root, expected_head)
+        source = root / "src" / "lessons" / "tvideo-journey" / "fixtures" / "farm-golden.ts"
+        source.write_text("export const FARM_TVIDEO_JOURNEY_V1 = { version: 2 };\n", encoding="utf-8")
+        _git(root, "add", "src")
+        _git(root, "commit", "-qm", "advance HEAD during generation")
+        return cast(tuple[str, str, list[str]], verified)
+
+    monkeypatch.setattr(fixture_generator, "_verify_backend", verify_then_advance_head)
+    output = tmp_path / "manifest.json"
+
+    result = generate_fixture(
+        backend_root=backend,
+        output=output,
+        provenance_output=tmp_path / "manifest.provenance.json",
+        expected_backend_head=verified_head,
+        node=Path("node"),
+        run=_recording_runner([]),
+    )
+
+    assert _git(backend, "rev-parse", "HEAD") != verified_head
+    assert "version: 1" in output.read_text(encoding="utf-8")
+    assert "version: 2" not in output.read_text(encoding="utf-8")
+    assert result["backend"]["head"] == verified_head
+    assert result["backend"]["tree"] == _git(backend, "rev-parse", f"{verified_head}^{{tree}}")
 
 
 def test_approved_source_commit_changes_build_provenance(tmp_path: Path) -> None:

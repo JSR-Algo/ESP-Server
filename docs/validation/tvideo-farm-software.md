@@ -35,7 +35,7 @@ python3 scripts/project_tvideo_farm_firmware_fixture.py \
   --output /Users/manhhodinh/Documents/TBOT/.worktrees/firmware-google-live-tvideo-journey/tests/fixtures/tvideo_farm_command_v2.json
 ```
 
-The wrapper rejects a mismatched backend HEAD or modified tracked build input, archives the exact approved Git tree into a path-validated temporary source root, compiles that snapshot into an isolated temporary build, copies tracked runtime `.cjs` inputs such as the canonical manifest serializer, and loads only that temporary build. Backend `dist`, ignored files, and untracked files cannot enter the fixture. Temporary source/build trees are removed automatically. The sidecar `tests/fixtures/tvideo_farm_manifest_v2.provenance.json` pins the full commit/tree, aggregate build-input hash, relevant source hashes, generator hashes, and manifest hashes/checksum.
+The wrapper rejects a mismatched backend HEAD or tracked build input that differs from the approved commit. It resolves the approved commit once, enumerates inputs from that immutable tree, compares tracked content against that commit, and archives that exact commit into a path-validated temporary source root. A concurrent branch or HEAD move after verification therefore cannot change the compiled snapshot or provenance. The wrapper compiles the snapshot into an isolated temporary build, copies tracked runtime `.cjs` inputs such as the canonical manifest serializer, and loads only that temporary build. Backend `dist`, ignored files, and untracked files cannot enter the fixture. Temporary source/build trees are removed automatically. The sidecar `tests/fixtures/tvideo_farm_manifest_v2.provenance.json` pins the full commit/tree, aggregate build-input hash, relevant source hashes, generator hashes, and manifest hashes/checksum.
 
 ## ESP proof
 
@@ -53,7 +53,7 @@ python3 -m pytest -q \
   tests/test_tvideo_farm_fixture_generator.py
 ```
 
-Result: `428 passed, 1 skipped`. The skip is the existing credential-gated Google Live smoke. The farm test downloads and verifies all 19 deterministic fixture payloads, commits the SD pack atomically, reloads its attestation, and projects every cue with exact identity, playback, timing, derivative, SHA, bytes, and SD path. The generator tests also prove that stale backend `dist`, ignored/untracked source, a wrong commit pin, and modified tracked build inputs cannot influence fixture generation.
+Result: `428 passed, 1 skipped`. The skip is the existing credential-gated Google Live smoke. The farm test downloads and verifies all 19 deterministic fixture payloads, commits the SD pack atomically, reloads its attestation, and projects every cue with exact identity, playback, timing, derivative, SHA, bytes, and SD path. The generator tests also prove that stale backend `dist`, ignored/untracked source, a wrong commit pin, modified tracked build inputs, and a HEAD move after verification cannot influence fixture generation.
 
 An expanded runtime/SD regression gate passed `316` tests, including the v2 startup prepare path that shares the same wire schema as conversation cue preparation. The separate legacy `tests/test_lesson_runtime.py` run returned `238 passed, 6 failed`; all six require backend canonical seed files that are absent from this checkout at the paths named by the failures, and none exercise the changed conversation prepare ownership path.
 

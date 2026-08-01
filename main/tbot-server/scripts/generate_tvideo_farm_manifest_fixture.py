@@ -51,8 +51,17 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _tracked_build_inputs(backend: Path) -> list[str]:
-    tracked = _git(backend, "ls-files", "--", "src", *BUILD_CONFIG_INPUTS).splitlines()
+def _tracked_build_inputs(backend: Path, commit: str) -> list[str]:
+    tracked = _git(
+        backend,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        commit,
+        "--",
+        "src",
+        *BUILD_CONFIG_INPUTS,
+    ).splitlines()
     return sorted(path for path in tracked if path)
 
 
@@ -73,11 +82,11 @@ def _verify_backend(backend: Path, expected_head: str) -> tuple[str, str, list[s
     head = _git(backend, "rev-parse", "HEAD")
     if head != expected_head:
         raise FixtureGenerationError(f"backend HEAD mismatch: expected {expected_head}, found {head}")
-    inputs = _tracked_build_inputs(backend)
+    inputs = _tracked_build_inputs(backend, head)
     if not inputs:
         raise FixtureGenerationError("backend has no tracked TypeScript build inputs")
     diff = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--", *inputs],
+        ["git", "diff", "--quiet", head, "--", *inputs],
         cwd=backend,
         check=False,
     )
@@ -85,7 +94,7 @@ def _verify_backend(backend: Path, expected_head: str) -> tuple[str, str, list[s
         raise FixtureGenerationError("tracked backend build inputs differ from HEAD")
     if diff.returncode != 0:
         raise FixtureGenerationError(f"could not verify backend build inputs (git exit {diff.returncode})")
-    tree = _git(backend, "rev-parse", "HEAD^{tree}")
+    tree = _git(backend, "rev-parse", f"{head}^{{tree}}")
     return head, tree, inputs
 
 
@@ -106,9 +115,9 @@ def _extract_archive(archive: bytes, destination: Path) -> None:
         bundle.extractall(destination)
 
 
-def _materialize_backend_head(backend: Path, destination: Path) -> None:
+def _materialize_backend_commit(backend: Path, commit: str, destination: Path) -> None:
     archive = subprocess.run(
-        ["git", "archive", "--format=tar", "HEAD"],
+        ["git", "archive", "--format=tar", commit],
         cwd=backend,
         check=True,
         capture_output=True,
@@ -183,7 +192,7 @@ def generate_fixture(
         source_root = temporary_root / "backend-source"
         build_root = temporary_root / "backend-build"
         compiled_generator = temporary_root / "generator.mjs"
-        _materialize_backend_head(backend, source_root)
+        _materialize_backend_commit(backend, head, source_root)
         (source_root / "node_modules").symlink_to(backend / "node_modules", target_is_directory=True)
         run(
             [
