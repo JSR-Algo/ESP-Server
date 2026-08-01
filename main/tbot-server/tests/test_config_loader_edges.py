@@ -1,4 +1,3 @@
-import asyncio
 import importlib.util
 import sys
 import types
@@ -57,9 +56,7 @@ def clean_config_cache():
 
 def test_normalize_and_env_helpers_handle_non_mappings_and_bad_values(monkeypatch):
     assert config_loader.normalize_voice_config(None)["voice_mode"]["type"] == "classic_pipeline"
-    repaired_live = config_loader.normalize_voice_config(
-        {"voice_mode": {"type": "google_live"}, "google_live": "bad"}
-    )
+    repaired_live = config_loader.normalize_voice_config({"voice_mode": {"type": "google_live"}, "google_live": "bad"})
     assert repaired_live["google_live"]["language_code"] == "vi-VN"
     assert config_loader._apply_lesson_env_overrides(None) is None
     assert config_loader._apply_connection_env_overrides(None) is None
@@ -144,6 +141,7 @@ def test_google_live_defaults_pin_single_robot_voice():
 
     assert result["google_live"]["voice_name"] == "Kore"
 
+
 def test_google_live_runtime_policy_ignores_voice_env_override(monkeypatch):
     monkeypatch.setenv("TBOT_GOOGLE_LIVE_VOICE_NAME", "Aoede")
     config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
@@ -151,6 +149,7 @@ def test_google_live_runtime_policy_ignores_voice_env_override(monkeypatch):
     result = config_loader.normalize_voice_config(config)
 
     assert result["google_live"]["voice_name"] == "Kore"
+
 
 @pytest.mark.asyncio
 async def test_private_config_honors_session_resumption_env_override(monkeypatch):
@@ -208,13 +207,110 @@ async def test_private_config_inherits_base_google_live_for_external_and_lesson(
     assert result["google_live"]["voice_name"] == "Kore"
     assert result["lesson"]["runtime_enabled"] is True
 
-def test_voice_env_accepts_google_gemini_api_key_alias(monkeypatch):
+
+def _clear_live_credential_env(monkeypatch):
+    for name in (
+        "GOOGLE_API_KEY",
+        "TBOT_GOOGLE_LIVE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_API_KEY",
+        "TBOT_GEMINI_TTS_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_voice_env_accepts_exact_google_live_api_key_aliases(monkeypatch):
+    for env_name in (
+        "GOOGLE_API_KEY",
+        "TBOT_GOOGLE_LIVE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_API_KEY",
+    ):
+        _clear_live_credential_env(monkeypatch)
+        monkeypatch.setenv(env_name, f" {env_name.lower()} ")
+        config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
+
+        result = config_loader._apply_voice_env_overrides(config)
+
+        assert result["google_live"]["api_key"] == env_name.lower()
+
+
+def test_voice_env_uses_google_live_alias_precedence(monkeypatch):
+    _clear_live_credential_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google")
+    monkeypatch.setenv("TBOT_GOOGLE_LIVE_API_KEY", "tbot-live")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini")
+    monkeypatch.setenv("GOOGLE_GEMINI_API_KEY", "google-gemini")
+    config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
+
+    result = config_loader._apply_voice_env_overrides(config)
+
+    assert result["google_live"]["api_key"] == "google"
+
+
+def test_voice_env_accepts_only_google_gemini_api_key_alias(monkeypatch):
+    _clear_live_credential_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_GEMINI_API_KEY", "google-gemini-key")
     config = {"voice_mode": {"type": "google_live"}, "google_live": {}}
 
     result = config_loader._apply_voice_env_overrides(config)
 
     assert result["google_live"]["api_key"] == "google-gemini-key"
+
+
+def test_tts_only_key_does_not_backfill_google_live_api_key(monkeypatch):
+    _clear_live_credential_env(monkeypatch)
+    tts_key = "AIza" + ("t" * 35)
+    monkeypatch.setenv("TBOT_GEMINI_TTS_API_KEY", tts_key)
+    config = {
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"api_key": "${GOOGLE_API_KEY}"},
+        "selected_module": {"TTS": "GeminiTTS"},
+        "TTS": {"GeminiTTS": {"type": "gemini", "api_key": "??api_key"}},
+    }
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["api_key"] == "${GOOGLE_API_KEY}"
+    assert result["TTS"]["GeminiTTS"]["api_key"] == tts_key
+
+    normalized_again = config_loader.normalize_voice_config(result)
+
+    assert normalized_again["google_live"]["api_key"] == "${GOOGLE_API_KEY}"
+    assert normalized_again["TTS"]["GeminiTTS"]["api_key"] == tts_key
+
+
+def test_dedicated_tts_key_remains_separate_from_valid_live_key(monkeypatch):
+    _clear_live_credential_env(monkeypatch)
+    live_key = "AQ." + ("l" * 40)
+    tts_key = "AIza" + ("t" * 35)
+    monkeypatch.setenv("TBOT_GEMINI_TTS_API_KEY", tts_key)
+    config = {
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"api_key": live_key},
+        "selected_module": {"TTS": "GeminiTTS"},
+        "TTS": {"GeminiTTS": {"type": "gemini", "api_key": "??api_key"}},
+    }
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["api_key"] == live_key
+    assert result["TTS"]["GeminiTTS"]["api_key"] == tts_key
+
+
+def test_config_template_live_api_key_placeholder_uses_live_env_alias(monkeypatch):
+    _clear_live_credential_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_GEMINI_API_KEY", "AIza" + ("g" * 35))
+    config = {
+        "voice_mode": {"type": "google_live"},
+        "google_live": {"api_key": "${GOOGLE_API_KEY}"},
+        "TTS": {"GeminiTTS": {"type": "gemini", "api_key": "??api_key"}},
+    }
+
+    result = config_loader.normalize_voice_config(config)
+
+    assert result["google_live"]["api_key"] == "AIza" + ("g" * 35)
+    assert result["TTS"]["GeminiTTS"]["api_key"] == "AIza" + ("g" * 35)
 
 
 def test_gemini_tts_inherits_google_live_api_key_when_config_key_is_placeholder():
@@ -336,6 +432,7 @@ def test_gemini_tts_edge_fallback_defaults_to_vietnamese_voice(monkeypatch):
         "output_dir": "tmp/",
     }
 
+
 def test_tts_provider_env_can_force_edge_tts(monkeypatch):
     monkeypatch.setenv("TBOT_TTS_PROVIDER", "edge")
     monkeypatch.setenv("TBOT_EDGE_TTS_VOICE", "en-US-JennyNeural")
@@ -400,6 +497,7 @@ def test_server_endpoint_overrides_repair_bad_shapes_and_sync_lesson_api(monkeyp
     result = config_loader._apply_server_endpoint_env_overrides(config)
     assert result["lesson"]["api_base"] == "https://backend.test/v1"
 
+
 def test_server_auth_enabled_env_override_wins_without_endpoint_env(monkeypatch):
     monkeypatch.setenv("TBOT_SERVER_AUTH_ENABLED", "true")
     config = {"server": {"auth": {"enabled": False}}}
@@ -460,7 +558,13 @@ def test_load_config_returns_cached_value(monkeypatch):
 
 def test_load_config_manager_api_sync_path_and_cache(monkeypatch):
     calls = []
-    monkeypatch.setattr(config_loader, "read_config", lambda path: {"manager-api": {"url": "http://manager", "secret": "s"}} if path.endswith("data/.config.yaml") else {})
+    monkeypatch.setattr(
+        config_loader,
+        "read_config",
+        lambda path: (
+            {"manager-api": {"url": "http://manager", "secret": "s"}} if path.endswith("data/.config.yaml") else {}
+        ),
+    )
     monkeypatch.setattr(config_loader, "get_project_dir", lambda: "/project/")
     monkeypatch.setattr(config_loader, "ensure_directories", lambda config: calls.append(("ensure", config)))
 
@@ -529,9 +633,7 @@ async def test_manager_api_websocket_ping_preserves_local_boolean_and_defaults_s
             "selected_module": {"LLM": "local-must-not-override"},
         }
     )
-    defaulted = await config_loader.get_config_from_api_async(
-        {"manager-api": {"url": "http://m", "secret": "s"}}
-    )
+    defaulted = await config_loader.get_config_from_api_async({"manager-api": {"url": "http://m", "secret": "s"}})
 
     assert explicit["enable_websocket_ping"] is False
     assert explicit["selected_module"] == {"LLM": "remote-authority"}
@@ -584,7 +686,15 @@ async def test_load_config_async_paths_and_cache(monkeypatch):
     calls = []
     monkeypatch.setattr(config_loader, "get_project_dir", lambda: "/project/")
     monkeypatch.setattr(config_loader, "ensure_directories", lambda config: calls.append(("ensure", config)))
-    monkeypatch.setattr(config_loader, "read_config", lambda path: {"server": {"auth": {"enabled": False}}} if path.endswith("config.yaml") else {"voice_mode": {"type": "classic_pipeline"}})
+    monkeypatch.setattr(
+        config_loader,
+        "read_config",
+        lambda path: (
+            {"server": {"auth": {"enabled": False}}}
+            if path.endswith("config.yaml")
+            else {"voice_mode": {"type": "classic_pipeline"}}
+        ),
+    )
 
     result = await config_loader.load_config_async()
     assert result["server"]["auth"]["enabled"] is False
@@ -596,7 +706,13 @@ async def test_load_config_async_paths_and_cache(monkeypatch):
     assert calls == []
 
     _clear_config_cache()
-    monkeypatch.setattr(config_loader, "read_config", lambda path: {"manager-api": {"url": "http://manager", "secret": "s"}} if path.endswith("data/.config.yaml") else {})
+    monkeypatch.setattr(
+        config_loader,
+        "read_config",
+        lambda path: (
+            {"manager-api": {"url": "http://manager", "secret": "s"}} if path.endswith("data/.config.yaml") else {}
+        ),
+    )
 
     async def fake_api_config(custom_config):
         calls.append(("api", custom_config))
@@ -688,6 +804,7 @@ async def test_manager_config_inherits_base_google_live_policy(monkeypatch):
     assert config["voice_mode"]["fallback_to_classic_on_error"] is False
     assert config["google_live"]["model"] == "manager-live-model"
     assert config["google_live"]["voice_name"] == "Kore"
+
 
 @pytest.mark.asyncio
 async def test_get_private_config_from_api_exceptions_and_fallbacks(monkeypatch):

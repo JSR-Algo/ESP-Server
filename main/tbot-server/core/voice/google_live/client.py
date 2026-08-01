@@ -1,11 +1,12 @@
-import os
-import time
 import asyncio
+import time
 import warnings
-from contextlib import suppress
 from collections.abc import Mapping
+from contextlib import suppress
 
 from core.voice.child_safety import ensure_child_safety_block
+from core.voice.google_live_credentials import resolve_google_live_api_key
+
 
 # Eager import of google.genai at module load (server startup).
 # First-time import of this SDK costs 80-100 seconds (protobuf + grpc + auth
@@ -605,25 +606,7 @@ class GoogleLiveClient:
         return {"role": "user", "parts": [{"text": text}]}
 
     def _resolve_api_key(self):
-        api_key = self.config.get("api_key") or ""
-        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
-            env_name = api_key[2:-1]
-            # Support ${GOOGLE_API_KEY:-default} style placeholders from YAML.
-            if ":-" in env_name:
-                env_name = env_name.split(":-", 1)[0]
-            api_key = os.environ.get(env_name, "")
-        if not str(api_key or "").strip():
-            for env_name in (
-                "GOOGLE_API_KEY",
-                "TBOT_GOOGLE_LIVE_API_KEY",
-                "GEMINI_API_KEY",
-                "GOOGLE_GEMINI_API_KEY",
-            ):
-                candidate = os.environ.get(env_name, "")
-                if str(candidate or "").strip():
-                    api_key = candidate
-                    break
-        return "".join(str(api_key).split())
+        return resolve_google_live_api_key(self.config.get("api_key"))
 
     def _import_genai_module(self):
         # Return the eagerly-imported module from server startup so that the

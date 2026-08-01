@@ -34,12 +34,13 @@ Usage:
     python scripts/google_live_robot_soak.py --mode rapid_interrupt \\
         --trials 10 --report /tmp/rapid.json
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
-import os
 import re
 import sys
 import time
@@ -52,12 +53,21 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
+from core.voice.google_live_credentials import (  # noqa: E402
+    GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
+    resolve_google_live_env_api_key,
+)
+from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
+    _opus_packets_from_audio_file,
+)
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
     _detect_message,
     _hello_message,
     _is_tts_state,
     _recv_until,
 )
+
+__all__ = ["GOOGLE_LIVE_CREDENTIAL_ENV_NAMES"]
 
 # ---------------------------------------------------------------------------
 # Latency-chain patterns for PR5 modes (also used by analyze_google_live_log)
@@ -67,46 +77,214 @@ LOG_REPLAYED_INTERRUPT_RE = re.compile(r"replayed_interrupt_audio")
 LOG_INTERRUPT_FINALIZED_RE = re.compile(r"interrupt_input_finalized")
 LOG_TRANSCRIPT_SOURCE_USER_RE = re.compile(r"transcript source=user")
 
-DEFAULT_FIRST_PROMPT = (
-    "Hãy đếm số tiếng Việt từ một đến năm mươi, chậm rãi và rõ ràng."
+DEFAULT_FIRST_PROMPT = "Hãy đếm số tiếng Việt từ một đến năm mươi, chậm rãi và rõ ràng."
+DEFAULT_INTERRUPT_PROMPT = "Đổi đề tài. Hãy trả lời ngắn về thời tiết Hà Nội hôm nay."
+DEFAULT_IDLE_PROMPT = "Hãy kể một câu chuyện ngắn bằng tiếng Việt trong khoảng hai phút."
+TVIDEO_FARM_EXPECTED_PROGRESS = (
+    {
+        "label": "lesson_start",
+        "cue_id": "barn-listen",
+        "effect": "listen",
+        "step_key": "barn",
+    },
+    {
+        "label": "target_answer",
+        "cue_id": "barn-thinking",
+        "effect": "thinking",
+        "step_key": "barn",
+    },
+    {
+        "label": "meaning_bridge",
+        "cue_id": "barn-correct",
+        "effect": "correct",
+        "step_key": "barn",
+    },
+    {
+        "label": "related_concept",
+        "cue_id": "barn-retry-level-1",
+        "effect": "retry-level-1",
+        "step_key": "barn",
+    },
+    {
+        "label": "retry_coaching",
+        "cue_id": "barn-correct",
+        "effect": "correct",
+        "step_key": "barn",
+        "opens_bargein_window": True,
+    },
+    {
+        "label": "correction_bargein",
+        "cue_id": "barn-to-hay-word-transition",
+        "effect": "word-transition",
+        "step_key": "barn",
+        "requires_interruption": True,
+    },
+    {
+        "label": "hay_listen",
+        "cue_id": "hay-listen",
+        "effect": "listen",
+        "step_key": "hay",
+    },
+    {
+        "label": "hay_thinking",
+        "cue_id": "hay-thinking",
+        "effect": "thinking",
+        "step_key": "hay",
+    },
+    {
+        "label": "hay_correct",
+        "cue_id": "hay-correct",
+        "effect": "correct",
+        "step_key": "hay",
+    },
+    {
+        "label": "hay_celebrate",
+        "cue_id": "hay-celebrate",
+        "effect": "celebrate",
+        "step_key": "hay",
+    },
 )
-DEFAULT_INTERRUPT_PROMPT = (
-    "Đổi đề tài. Hãy trả lời ngắn về thời tiết Hà Nội hôm nay."
-)
-DEFAULT_IDLE_PROMPT = (
-    "Hãy kể một câu chuyện ngắn bằng tiếng Việt trong khoảng hai phút."
-)
-TVIDEO_FARM_TURNS = (
-    ("lesson_start", "Bắt đầu bài học nông trại."),
-    ("target", "Barn."),
-    ("meaning_bridge", "Nông trại."),
-    ("related_bridge", "Hay."),
-    ("retry", "Con chưa chắc, cô chú gợi ý nhẹ cho con nhé."),
-)
-TVIDEO_FARM_BARGEIN_CORRECTION = "Barn."
+TVIDEO_FARM_AUDIO_FIXTURES = {
+    "synthetic": {
+        "fixture_set_id": "tvideo-farm-synthetic-speech-v1",
+        "path": SERVER_ROOT / "tests" / "fixtures" / "tvideo_farm_audio" / "synthetic_speech_24k_mono.wav",
+        "sha256": "654c23b4d1d0fc4b65b9b59141b0f71b7709a3ab4e0b22db69527ddcf97ec237",
+        "sample_rate": 24000,
+        "format": "wav/pcm_s16le/mono",
+        "frame_duration_ms": 60,
+    },
+    "adult": {
+        "fixture_set_id": "tvideo-farm-adult-speech-v1",
+        "path": SERVER_ROOT / "tests" / "fixtures" / "tvideo_farm_audio" / "adult_speech_24k_mono.wav",
+        "sha256": "dbd55231b25b5de9d7cbe0e54c8b237944b25aedede780afe745802e4d1696c4",
+        "sample_rate": 24000,
+        "format": "wav/pcm_s16le/mono",
+        "frame_duration_ms": 60,
+    },
+}
+TVIDEO_FARM_TURN_AUDIO_FIXTURES = {
+    "synthetic": {
+        "lesson_start": (
+            "tvideo-farm-synthetic-lesson-start-v1",
+            "synthetic_lesson_start_24k_mono.wav",
+            "432742e9b0aac86caac690b4b821f67a606973459559343e002faecee5112007",
+        ),
+        "target_answer": (
+            "tvideo-farm-synthetic-target-answer-v1",
+            "synthetic_target_answer_24k_mono.wav",
+            "d5c73802b4b7a8f2d0a67d0a4f28c8916b8c019590d1a428595557cc74a989ab",
+        ),
+        "meaning_bridge": (
+            "tvideo-farm-synthetic-meaning-bridge-v1",
+            "synthetic_meaning_bridge_24k_mono.wav",
+            "57ef32076172af256267c17d24eb0a00912428f6c25010bda65e4486a42d8f9a",
+        ),
+        "related_concept": (
+            "tvideo-farm-synthetic-related-concept-v1",
+            "synthetic_related_concept_24k_mono.wav",
+            "7fb7e7ad115138dc08760db17c1ecc5f287d7c7d50493e12fbef82b023f05451",
+        ),
+        "retry_coaching": (
+            "tvideo-farm-synthetic-retry-coaching-v1",
+            "synthetic_retry_coaching_24k_mono.wav",
+            "d8f258774d056716d68b25693d7800ee32e050f80dea61ff2eff8fa25fc9e24e",
+        ),
+        "correction_bargein": (
+            "tvideo-farm-synthetic-target-correction-v1",
+            "synthetic_target_correction_24k_mono.wav",
+            "d5c73802b4b7a8f2d0a67d0a4f28c8916b8c019590d1a428595557cc74a989ab",
+        ),
+        "hay_listen": (
+            "tvideo-farm-synthetic-hay-listen-v1",
+            "synthetic_hay_listen_24k_mono.wav",
+            "24746145784a5260d6b3390e2ed1428e5d45c2a81cc29a1ab03d56e0816b224f",
+        ),
+        "hay_thinking": (
+            "tvideo-farm-synthetic-hay-thinking-v1",
+            "synthetic_hay_thinking_24k_mono.wav",
+            "ebdae2d6e845f77e001b58c9cbef2726567095d11d6374b2e9832cb8f2417065",
+        ),
+        "hay_correct": (
+            "tvideo-farm-synthetic-hay-correct-v1",
+            "synthetic_hay_correct_24k_mono.wav",
+            "e1d5534073b16a10297ead81e2e078b848c448e0841828592d1d6d45f5357f5d",
+        ),
+        "hay_celebrate": (
+            "tvideo-farm-synthetic-hay-celebrate-v1",
+            "synthetic_hay_celebrate_24k_mono.wav",
+            "8b926c0b8a71185cede36f52109608ac9149802925851c71a438666e5d5336fd",
+        ),
+    },
+    "adult": {
+        "lesson_start": (
+            "tvideo-farm-adult-lesson-start-v1",
+            "adult_lesson_start_24k_mono.wav",
+            "a817f1ddf56ce1bc11b85d1d6c33fa775b44239d4c9c43ea6e3e6d62163fd232",
+        ),
+        "target_answer": (
+            "tvideo-farm-adult-target-answer-v1",
+            "adult_target_answer_24k_mono.wav",
+            "27912233181138c7bfece6d754ee4f65a5d9df1b3ec8c6a623dd3054fa9b4aab",
+        ),
+        "meaning_bridge": (
+            "tvideo-farm-adult-meaning-bridge-v1",
+            "adult_meaning_bridge_24k_mono.wav",
+            "6169cff81fa06bad54ea7681abaad767210868bad137213cd6a162dd102b542e",
+        ),
+        "related_concept": (
+            "tvideo-farm-adult-related-concept-v1",
+            "adult_related_concept_24k_mono.wav",
+            "a4a609955e33f615869f8e118bc60c3d194c48079fd1287b3b041cdd2f4ed401",
+        ),
+        "retry_coaching": (
+            "tvideo-farm-adult-retry-coaching-v1",
+            "adult_retry_coaching_24k_mono.wav",
+            "22c14a0763533fab25d5968abebac0380fc2edfc7bd582c743936f70aa95d977",
+        ),
+        "correction_bargein": (
+            "tvideo-farm-adult-target-correction-v1",
+            "adult_target_correction_24k_mono.wav",
+            "27912233181138c7bfece6d754ee4f65a5d9df1b3ec8c6a623dd3054fa9b4aab",
+        ),
+        "hay_listen": (
+            "tvideo-farm-adult-hay-listen-v1",
+            "adult_hay_listen_24k_mono.wav",
+            "dd0fd6704855e4562f33493796fd629b224c16061fb778472ad168d53e36963f",
+        ),
+        "hay_thinking": (
+            "tvideo-farm-adult-hay-thinking-v1",
+            "adult_hay_thinking_24k_mono.wav",
+            "97eb90ef5e55e743a487f9d86ce594b2ed4cee349465c543d9eec6e12937e3f9",
+        ),
+        "hay_correct": (
+            "tvideo-farm-adult-hay-correct-v1",
+            "adult_hay_correct_24k_mono.wav",
+            "1af59cd826d0d1464d994de93a4d29d4fb55361d750e76b2be0956e80ed4d02a",
+        ),
+        "hay_celebrate": (
+            "tvideo-farm-adult-hay-celebrate-v1",
+            "adult_hay_celebrate_24k_mono.wav",
+            "f537034a1d0bbc67eb1f90ad14d776b6f9a87531f7fc0b8183a3534a9c04c391",
+        ),
+    },
+}
 
 LOG_INTERRUPT_RE = re.compile(
     r"Google Live user_interrupted reason=(?P<reason>\w+) "
     r"cancelled_response_id=(?P<cancelled>\d+) "
     r"next_response_id=(?P<next>\d+)"
 )
-LOG_TRANSCRIPT_USER_RE = re.compile(
-    r"Google Live transcript source=user chars=(?P<chars>\d+)"
-)
+LOG_TRANSCRIPT_USER_RE = re.compile(r"Google Live transcript source=user chars=(?P<chars>\d+)")
 LOG_AUDIO_START_RE = re.compile(r"Google Live audio_start")
 LOG_GOAWAY_RE = re.compile(r"session_expiring|go_away|goAway", re.I)
 LOG_RECONNECT_RE = re.compile(r"reconnect attempt (\d+) succeeded")
 LOG_FALLBACK_RE = re.compile(r"fallback_triggered")
-GOOGLE_LIVE_CREDENTIAL_ENV_NAMES = (
-    "GOOGLE_API_KEY",
-    "TBOT_GOOGLE_LIVE_API_KEY",
-    "GEMINI_API_KEY",
-    "TBOT_GEMINI_TTS_API_KEY",
-)
 
 
 def _credential_gated_tvideo_farm_report(args):
-    if any(str(os.environ.get(name, "")).strip() for name in GOOGLE_LIVE_CREDENTIAL_ENV_NAMES):
+    if getattr(args, "server_has_google_live_credentials", False):
+        return None
+    if resolve_google_live_env_api_key():
         return None
     return {
         "scenario": "tvideo-farm",
@@ -140,11 +318,7 @@ def _safe_soak_config(args):
         "ac1_goaway_budget",
         "dry_run",
     )
-    config = {
-        name: getattr(args, name)
-        for name in safe_names
-        if hasattr(args, name)
-    }
+    config = {name: getattr(args, name) for name in safe_names if hasattr(args, name)}
     config["inject_audio"] = bool(getattr(args, "inject_audio", None))
     config["inject_text"] = bool(getattr(args, "inject_text", None))
     return config
@@ -154,6 +328,281 @@ def _bargein_injection_detect(args):
     if getattr(args, "inject_audio", None):
         return _detect_message("SOAK_AUDIO_INTERRUPT_SENTINEL")
     return _detect_message(str(getattr(args, "interrupt_prompt", "") or ""))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tvideo_farm_fixture_config(audio_source: str) -> dict:
+    fixture = TVIDEO_FARM_AUDIO_FIXTURES[audio_source]
+    actual = _sha256_file(fixture["path"])
+    if actual != fixture["sha256"]:
+        raise RuntimeError("tvideo farm audio fixture digest mismatch")
+    return fixture
+
+
+def _tvideo_farm_safe_fixture_report(fixture: dict) -> dict:
+    return {
+        "source": fixture["fixture_set_id"],
+        "sha256": fixture["sha256"],
+        "sample_rate": fixture["sample_rate"],
+        "format": fixture["format"],
+        "frame_duration_ms": fixture["frame_duration_ms"],
+    }
+
+
+def _tvideo_farm_opus_packets(args) -> tuple[list[bytes], dict]:
+    fixture = _tvideo_farm_fixture_config(args.audio_source)
+    sample_rate = int(getattr(args, "sample_rate", fixture["sample_rate"]))
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", fixture["frame_duration_ms"]))
+    if sample_rate != fixture["sample_rate"] or frame_duration_ms != fixture["frame_duration_ms"]:
+        raise RuntimeError("tvideo farm audio params must match committed fixture metadata")
+    packets = _opus_packets_from_audio_file(
+        str(fixture["path"]),
+        sample_rate,
+        frame_duration_ms,
+    )
+    if not packets:
+        raise RuntimeError("tvideo farm audio fixture produced no opus packets")
+    return packets, fixture
+
+
+def _tvideo_farm_turn_fixture_config(audio_source: str, label: str, base_fixture: dict) -> dict:
+    fixture_id, filename, sha256 = TVIDEO_FARM_TURN_AUDIO_FIXTURES[audio_source][label]
+    path = SERVER_ROOT / "tests" / "fixtures" / "tvideo_farm_audio" / filename
+    actual = _sha256_file(path)
+    if actual != sha256:
+        raise RuntimeError("tvideo farm turn audio fixture digest mismatch")
+    return {
+        "fixture_id": fixture_id,
+        "path": path,
+        "sha256": sha256,
+        "sample_rate": base_fixture["sample_rate"],
+        "format": base_fixture["format"],
+        "frame_duration_ms": base_fixture["frame_duration_ms"],
+    }
+
+
+def _tvideo_farm_turn_opus_packets(args, label: str, base_fixture: dict) -> tuple[list[bytes], dict]:
+    fixture = _tvideo_farm_turn_fixture_config(args.audio_source, label, base_fixture)
+    sample_rate = int(getattr(args, "sample_rate", fixture["sample_rate"]))
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", fixture["frame_duration_ms"]))
+    if sample_rate != fixture["sample_rate"] or frame_duration_ms != fixture["frame_duration_ms"]:
+        raise RuntimeError("tvideo farm audio params must match committed fixture metadata")
+    packets = _opus_packets_from_audio_file(str(fixture["path"]), sample_rate, frame_duration_ms)
+    if not packets:
+        raise RuntimeError("tvideo farm turn audio fixture produced no opus packets")
+    return packets, fixture
+
+
+def _tvideo_farm_cinematic(payload: dict) -> dict | None:
+    if payload.get("type") not in {"lesson_prepare", "lesson_cinematic_control"}:
+        return None
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    phase = body.get("cinematicPhase") if isinstance(body.get("cinematicPhase"), dict) else body
+    if not isinstance(phase, dict):
+        return None
+    return {
+        "frame_type": payload.get("type"),
+        "command": phase.get("command") or body.get("command"),
+        "cue_id": phase.get("cueId"),
+        "effect": phase.get("effect"),
+        "step_key": phase.get("stepKey") or payload.get("stepId"),
+        "command_sequence_id": phase.get("commandSequenceId") or body.get("commandSequenceId"),
+        "envelope_sequence": payload.get("sequence"),
+        "assignment_id": payload.get("assignmentId"),
+        "session_id": payload.get("sessionId"),
+        "lesson_id": payload.get("lessonId"),
+        "lesson_version": payload.get("lessonVersion"),
+        "payload": payload,
+    }
+
+
+def _tvideo_farm_ack(frame: dict, inbound_sequence: int) -> dict:
+    event = "frameZeroReady" if frame["command"] == "prepare" else "phaseReady"
+    return {
+        "type": "lesson_ack",
+        "protocolVersion": frame["payload"].get("protocolVersion"),
+        "assignmentId": frame["assignment_id"],
+        "sessionId": frame["session_id"],
+        "lessonId": frame["lesson_id"],
+        "lessonVersion": frame["lesson_version"],
+        "stepId": frame["payload"].get("stepId"),
+        "sequence": inbound_sequence,
+        "timestamp": 1,
+        "body": {
+            "acks": frame["envelope_sequence"],
+            "rendered": True,
+            "degraded": False,
+            "cinematicPhase": {
+                "event": event,
+                "command": frame["command"],
+                "cueId": frame["cue_id"],
+                "commandSequenceId": frame["command_sequence_id"],
+                "accepted": True,
+                event: True,
+            },
+        },
+    }
+
+
+async def _send_tvideo_farm_audio_turn(websocket, packets, frame_duration_ms):
+    for packet in packets:
+        await websocket.send(packet)
+        await asyncio.sleep(frame_duration_ms / 1000)
+
+
+async def _observe_tvideo_farm_turn(
+    websocket,
+    expected,
+    timeout,
+    previous_sequence,
+    inbound_ack_sequence,
+    lesson_identity,
+    previous_output_open,
+    output_decoder,
+    output_frame_size,
+):
+    deadline = time.monotonic() + timeout
+    tts_started = False
+    tts_stopped = False
+    output_binary_chunks = 0
+    late_output_chunks = 0
+    interruption_stopped = False
+    requires_interruption = bool(expected.get("requires_interruption"))
+    opens_bargein_window = bool(expected.get("opens_bargein_window"))
+    events = []
+    errors = []
+
+    if requires_interruption and not previous_output_open:
+        errors.append("bargein_without_active_output")
+
+    while time.monotonic() < deadline:
+        remaining = max(0.01, deadline - time.monotonic())
+        try:
+            message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+        if isinstance(message, bytes):
+            if requires_interruption and interruption_stopped and not tts_started:
+                late_output_chunks += 1
+            elif tts_started and not tts_stopped:
+                try:
+                    decoded = output_decoder.decode(message, output_frame_size)
+                except Exception:
+                    errors.append("invalid_output_opus")
+                else:
+                    if not decoded:
+                        errors.append("invalid_output_opus")
+                    else:
+                        output_binary_chunks += 1
+                        if opens_bargein_window and len(events) == 2:
+                            break
+            continue
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+
+        cinematic = _tvideo_farm_cinematic(payload)
+        if cinematic is not None:
+            if requires_interruption and not interruption_stopped:
+                errors.append("missing_interruption_stop")
+            expected_command = "prepare" if not events else "start"
+            expected_frame_type = "lesson_prepare" if expected_command == "prepare" else "lesson_cinematic_control"
+            if cinematic["command"] != expected_command:
+                errors.append("wrong_cinematic_command")
+            if cinematic["frame_type"] != expected_frame_type:
+                errors.append("wrong_cinematic_frame_type")
+            if cinematic["cue_id"] != expected["cue_id"]:
+                errors.append("wrong_cue")
+            if cinematic["effect"] != expected["effect"]:
+                errors.append("wrong_effect")
+            if cinematic["step_key"] != expected["step_key"]:
+                errors.append("wrong_step")
+
+            command_sequence = cinematic["command_sequence_id"]
+            envelope_sequence = cinematic["envelope_sequence"]
+            if not isinstance(command_sequence, int):
+                errors.append("missing_command_sequence")
+            elif command_sequence <= previous_sequence:
+                errors.append("non_increasing_command_sequence")
+            else:
+                previous_sequence = command_sequence
+            if command_sequence != envelope_sequence:
+                errors.append("command_sequence_envelope_mismatch")
+
+            current_identity = {
+                "assignment_id": cinematic["assignment_id"],
+                "session_id": cinematic["session_id"],
+                "lesson_id": cinematic["lesson_id"],
+                "lesson_version": cinematic["lesson_version"],
+            }
+            if lesson_identity is None:
+                if not all(current_identity.values()):
+                    errors.append("missing_lesson_identity")
+                lesson_identity = current_identity
+            elif current_identity != lesson_identity:
+                errors.append("lesson_session_mismatch")
+
+            inbound_ack_sequence += 1
+            await websocket.send(json.dumps(_tvideo_farm_ack(cinematic, inbound_ack_sequence)))
+            events.append(cinematic)
+            continue
+
+        if _is_tts_state(payload, "start"):
+            if requires_interruption and not interruption_stopped:
+                errors.append("missing_interruption_stop")
+            if len(events) != 2:
+                errors.append("missing_cinematic_event")
+            tts_started = True
+            continue
+        if _is_tts_state(payload, "stop"):
+            if requires_interruption and not interruption_stopped and not tts_started:
+                if payload.get("reason") != "interrupt":
+                    errors.append("wrong_interruption_reason")
+                interruption_stopped = True
+                continue
+            tts_stopped = True
+            if len(events) == 2 and tts_started:
+                break
+
+    if len(events) != 2:
+        errors.append("missing_cinematic_event")
+    if not tts_started:
+        errors.append("tts_start_timeout")
+    if not opens_bargein_window and not tts_stopped:
+        errors.append("tts_stop_timeout")
+    if output_binary_chunks == 0:
+        errors.append("missing_output_audio")
+    if requires_interruption and not interruption_stopped:
+        errors.append("missing_interruption_stop")
+    if late_output_chunks:
+        errors.append("late_output_after_interruption")
+
+    event = events[-1] if events else None
+    if expected["cue_id"] == "hay-listen" and event and event["step_key"] != "hay":
+        errors.append("stale_or_missing_step_transition")
+    if event and expected["cue_id"].startswith("hay-") and str(event["cue_id"]).startswith("barn-"):
+        errors.append("stale_or_missing_step_transition")
+    return (
+        errors,
+        event,
+        previous_sequence,
+        inbound_ack_sequence,
+        lesson_identity,
+        {
+            "output_binary_chunks": output_binary_chunks,
+            "interruption_count": int(interruption_stopped),
+            "late_output_chunks": late_output_chunks,
+            "output_open": opens_bargein_window and tts_started and not tts_stopped,
+        },
+    )
 
 
 class LogTail:
@@ -237,9 +686,7 @@ async def _run_bargein_cycle(websocket, cycle_index, args, log_tail):
     await asyncio.sleep(args.speak_for_sec)
 
     t_int_send = time.monotonic()
-    await websocket.send(
-        json.dumps(_detect_message(f"{args.interrupt_prompt} Lần {cycle_index + 1}."))
-    )
+    await websocket.send(json.dumps(_detect_message(f"{args.interrupt_prompt} Lần {cycle_index + 1}.")))
     stop_payload, _, _ = await _recv_until(
         websocket,
         lambda payload: _is_tts_state(payload, "stop"),
@@ -278,8 +725,7 @@ async def _run_bargein_cycle(websocket, cycle_index, args, log_tail):
         record["new_response_id"] = int(interrupt_match.group("next"))
 
     pass_conditions = [
-        record["bargein_latency_ms"] is not None
-        and record["bargein_latency_ms"] <= args.bargein_latency_budget_ms,
+        record["bargein_latency_ms"] is not None and record["bargein_latency_ms"] <= args.bargein_latency_budget_ms,
         record["new_response_id"] is not None
         and record["cancelled_response_id"] is not None
         and record["new_response_id"] > record["cancelled_response_id"],
@@ -330,14 +776,8 @@ def _summarize_acs(cycles, full_log, args):
     fallback_count = len(LOG_FALLBACK_RE.findall(full_log))
 
     bargein_pass = sum(1 for c in bargein_cycles if c["outcome"] == "PASS")
-    bargein_latencies = [
-        c["bargein_latency_ms"] for c in bargein_cycles if c["bargein_latency_ms"] is not None
-    ]
-    p95 = (
-        sorted(bargein_latencies)[max(0, int(0.95 * (len(bargein_latencies) - 1)))]
-        if bargein_latencies
-        else None
-    )
+    bargein_latencies = [c["bargein_latency_ms"] for c in bargein_cycles if c["bargein_latency_ms"] is not None]
+    p95 = sorted(bargein_latencies)[max(0, int(0.95 * (len(bargein_latencies) - 1)))] if bargein_latencies else None
 
     idle_pass = sum(1 for c in idle_cycles if c["outcome"] == "PASS")
 
@@ -350,20 +790,13 @@ def _summarize_acs(cycles, full_log, args):
             "budget_goaway": args.ac1_goaway_budget,
         },
         "AC2": {
-            "pass": (
-                len(bargein_cycles) > 0
-                and p95 is not None
-                and p95 <= args.bargein_latency_budget_ms
-            ),
+            "pass": (len(bargein_cycles) > 0 and p95 is not None and p95 <= args.bargein_latency_budget_ms),
             "cycles": len(bargein_cycles),
             "p95_latency_ms": p95,
             "budget_ms": args.bargein_latency_budget_ms,
         },
         "AC3": {
-            "pass": (
-                len(bargein_cycles) > 0
-                and bargein_pass >= max(1, int(0.8 * len(bargein_cycles)))
-            ),
+            "pass": (len(bargein_cycles) > 0 and bargein_pass >= max(1, int(0.8 * len(bargein_cycles)))),
             "ratio": f"{bargein_pass}/{len(bargein_cycles)}",
             "rule": ">= 80% bargein cycles must produce new response id with user transcript",
         },
@@ -383,6 +816,7 @@ def _summarize_acs(cycles, full_log, args):
 # ---------------------------------------------------------------------------
 # PR5 §6.4: Three new mode runners
 # ---------------------------------------------------------------------------
+
 
 async def _run_false_positive_mode(args):
     """AC1: count user_interrupted events during robot soliloquy (no user present)."""
@@ -483,9 +917,7 @@ async def _run_bargein_latency_mode(args):
 
         for i in range(trials):
             log_tail.reset()
-            await websocket.send(
-                json.dumps(_detect_message(f"{args.first_prompt} Trial {i + 1}."))
-            )
+            await websocket.send(json.dumps(_detect_message(f"{args.first_prompt} Trial {i + 1}.")))
             tts_start, _, _ = await _recv_until(
                 websocket,
                 lambda payload: _is_tts_state(payload, "start"),
@@ -517,13 +949,15 @@ async def _run_bargein_latency_mode(args):
 
             log_chunk = log_tail.read_new()
             has_interrupted = bool(LOG_INTERRUPT_RE.search(log_chunk))
-            trial_records.append({
-                "trial": i,
-                "outcome": "PASS",
-                "t0_to_t2_ms": round(latency_ms, 1),
-                "user_interrupted_in_log": has_interrupted,
-                "skip_firmware_timing": skip_firmware,
-            })
+            trial_records.append(
+                {
+                    "trial": i,
+                    "outcome": "PASS",
+                    "t0_to_t2_ms": round(latency_ms, 1),
+                    "user_interrupted_in_log": has_interrupted,
+                    "skip_firmware_timing": skip_firmware,
+                }
+            )
 
             # wait for next tts_start before next trial
             await _recv_until(
@@ -591,9 +1025,7 @@ async def _run_rapid_interrupt_mode(args):
 
         for i in range(trials):
             log_tail.reset()
-            await websocket.send(
-                json.dumps(_detect_message(f"{args.first_prompt} Trial {i + 1}."))
-            )
+            await websocket.send(json.dumps(_detect_message(f"{args.first_prompt} Trial {i + 1}.")))
             tts_start, _, _ = await _recv_until(
                 websocket,
                 lambda payload: _is_tts_state(payload, "start"),
@@ -624,12 +1056,14 @@ async def _run_rapid_interrupt_mode(args):
             if is_single_interrupt:
                 single_interrupt_count += 1
 
-            trial_records.append({
-                "trial": i,
-                "outcome": "PASS" if is_single_interrupt else "FAIL",
-                "interrupt_count": interrupt_count,
-                "tts_stopped": tts_stop is not None,
-            })
+            trial_records.append(
+                {
+                    "trial": i,
+                    "outcome": "PASS" if is_single_interrupt else "FAIL",
+                    "interrupt_count": interrupt_count,
+                    "tts_stopped": tts_stop is not None,
+                }
+            )
 
             # Allow the response to settle before next trial
             await _recv_until(
@@ -663,7 +1097,24 @@ async def _run_tvideo_farm_scenario(args):
     }
     started_at = time.time()
     records = []
+    validation_errors = []
     timeout = max(1.0, float(args.event_timeout_sec))
+    fixture = _tvideo_farm_fixture_config(args.audio_source)
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", fixture["frame_duration_ms"]))
+    binary_chunks_sent = 0
+    output_binary_chunks = 0
+    interruption_count = 0
+    late_output_chunks = 0
+    previous_sequence = 0
+    inbound_ack_sequence = 0
+    lesson_identity = None
+    previous_output_open = False
+    bargein_audio_sent_while_output_active = False
+    observed_step_keys = []
+    import opuslib_next
+
+    output_decoder = opuslib_next.Decoder(fixture["sample_rate"], 1)
+    output_frame_size = int(fixture["sample_rate"] * fixture["frame_duration_ms"] / 1000)
 
     async with websockets.connect(
         args.websocket_url,
@@ -680,55 +1131,114 @@ async def _run_tvideo_farm_scenario(args):
         if hello_payload is None:
             raise RuntimeError("hello ack timeout")
 
-        for label, synthetic_text in TVIDEO_FARM_TURNS:
-            record = {"label": label, "outcome": "FAIL", "tts_started": False, "tts_stopped": False}
+        for expected in TVIDEO_FARM_EXPECTED_PROGRESS:
             turn_started = time.monotonic()
-            await websocket.send(json.dumps(_detect_message(synthetic_text)))
-            tts_start, _, _ = await _recv_until(
+            packets, turn_fixture = _tvideo_farm_turn_opus_packets(args, expected["label"], fixture)
+            if expected.get("requires_interruption") and previous_output_open:
+                bargein_audio_sent_while_output_active = True
+            await _send_tvideo_farm_audio_turn(websocket, packets, frame_duration_ms)
+            binary_chunks_sent += len(packets)
+            (
+                errors,
+                event,
+                previous_sequence,
+                inbound_ack_sequence,
+                lesson_identity,
+                wire_metrics,
+            ) = await _observe_tvideo_farm_turn(
                 websocket,
-                lambda payload: _is_tts_state(payload, "start"),
+                expected,
                 timeout,
+                previous_sequence,
+                inbound_ack_sequence,
+                lesson_identity,
+                previous_output_open,
+                output_decoder,
+                output_frame_size,
             )
-            record["tts_started"] = tts_start is not None
-            if tts_start is None:
-                record["error"] = "tts_start_timeout"
-                records.append(record)
-                continue
-
-            if label == "retry":
-                await asyncio.sleep(min(args.speak_for_sec, 1.0))
-                await websocket.send(
-                    json.dumps(_detect_message(TVIDEO_FARM_BARGEIN_CORRECTION))
-                )
-                record["bargein_sent"] = True
-
-            tts_stop, _, _ = await _recv_until(
-                websocket,
-                lambda payload: _is_tts_state(payload, "stop"),
-                timeout,
-            )
-            record["tts_stopped"] = tts_stop is not None
+            validation_errors.extend(errors)
+            output_binary_chunks += wire_metrics["output_binary_chunks"]
+            interruption_count += wire_metrics["interruption_count"]
+            late_output_chunks += wire_metrics["late_output_chunks"]
+            previous_output_open = wire_metrics["output_open"]
+            if event and (not observed_step_keys or observed_step_keys[-1] != event["step_key"]):
+                observed_step_keys.append(event["step_key"])
+            record = {
+                "input_fixture_id": turn_fixture["fixture_id"],
+                "input_fixture_sha256": turn_fixture["sha256"],
+                "input_opus_packets": len(packets),
+            }
             record["latency_ms"] = round((time.monotonic() - turn_started) * 1000, 1)
-            if tts_stop is None:
-                record["error"] = "tts_stop_timeout"
-            else:
-                record["outcome"] = "PASS"
             records.append(record)
 
         await websocket.close()
 
-    passed = len(records) == len(TVIDEO_FARM_TURNS) and all(
-        record["outcome"] == "PASS" for record in records
-    )
+    conversation_identity_changes = max(0, len(observed_step_keys) - 1)
+    if observed_step_keys != ["barn", "hay"]:
+        validation_errors.append("conversation_identity_transition_mismatch")
+    if interruption_count != 1:
+        validation_errors.append("interruption_count_mismatch")
+    if not bargein_audio_sent_while_output_active:
+        validation_errors.append("bargein_not_sent_while_output_active")
+    lesson_session_consistent = "lesson_session_mismatch" not in validation_errors
+    passed = len(records) == len(TVIDEO_FARM_EXPECTED_PROGRESS) and not validation_errors
     return {
         "scenario": "tvideo-farm",
         "status": "PASS" if passed else "FAIL",
         "audio_source": args.audio_source,
+        "fixture_set_id": fixture["fixture_set_id"],
+        "fixture": _tvideo_farm_safe_fixture_report(fixture),
+        "binary_chunks_sent": binary_chunks_sent,
+        "output_binary_chunks": output_binary_chunks,
+        "interruption_count": interruption_count,
+        "late_output_chunks": late_output_chunks,
+        "conversation_identity_changes": conversation_identity_changes,
+        "bargein_audio_sent_while_output_active": bargein_audio_sent_while_output_active,
+        "lesson_session_consistent": lesson_session_consistent,
         "duration_sec": round(time.time() - started_at, 1),
         "turns": records,
+        "validation_errors": sorted(set(validation_errors)),
         "raw_audio_persisted": False,
         "transcript_persisted": False,
         "exit_code": 0 if passed else 1,
+    }
+
+
+def _dry_run_tvideo_farm_report(args):
+    started_at = time.time()
+    fixture = _tvideo_farm_fixture_config(args.audio_source)
+    turns = []
+    binary_chunks_sent = 0
+    for item in TVIDEO_FARM_EXPECTED_PROGRESS:
+        packets, turn_fixture = _tvideo_farm_turn_opus_packets(args, item["label"], fixture)
+        binary_chunks_sent += len(packets)
+        turns.append(
+            {
+                "input_fixture_id": turn_fixture["fixture_id"],
+                "input_fixture_sha256": turn_fixture["sha256"],
+                "input_opus_packets": len(packets),
+            }
+        )
+    return {
+        "scenario": "tvideo-farm",
+        "status": "FAKE_PASS",
+        "dry_run": True,
+        "audio_source": args.audio_source,
+        "fixture_set_id": fixture["fixture_set_id"],
+        "fixture": _tvideo_farm_safe_fixture_report(fixture),
+        "binary_chunks_sent": binary_chunks_sent,
+        "output_binary_chunks": 0,
+        "interruption_count": 0,
+        "late_output_chunks": 0,
+        "conversation_identity_changes": 1,
+        "bargein_audio_sent_while_output_active": False,
+        "lesson_session_consistent": False,
+        "duration_sec": round(time.time() - started_at, 3),
+        "turns": turns,
+        "validation_errors": [],
+        "raw_audio_persisted": False,
+        "transcript_persisted": False,
+        "exit_code": 0,
     }
 
 
@@ -753,7 +1263,12 @@ def _dry_run_report(args):
     ]
     ac_results = {
         "AC1": {"pass": None, "details": "dry_run — not evaluated"},
-        "AC2": {"pass": None, "p95_latency_ms": None, "budget_ms": args.bargein_latency_budget_ms, "details": "dry_run"},
+        "AC2": {
+            "pass": None,
+            "p95_latency_ms": None,
+            "budget_ms": args.bargein_latency_budget_ms,
+            "details": "dry_run",
+        },
         "AC3": {"pass": None, "ratio": f"0/{n}", "rule": "dry_run"},
         "AC4": {"pass": None, "ratio": "0/0", "rule": "dry_run"},
         "AC5": {"pass": None, "fallback_triggered": 0, "rule": "dry_run"},
@@ -773,6 +1288,8 @@ def _dry_run_report(args):
 
 async def run_soak(args):
     if getattr(args, "scenario", None) == "tvideo-farm":
+        if getattr(args, "dry_run", False):
+            return _dry_run_tvideo_farm_report(args)
         return await _run_tvideo_farm_scenario(args)
     mode = getattr(args, "mode", None)
     if mode == "false_positive":
@@ -847,9 +1364,7 @@ async def run_soak(args):
             full_log = ""
 
     ac_results = _summarize_acs(cycles, full_log, args)
-    error_distribution = dict(
-        Counter(err for cycle in cycles for err in cycle.get("errors", []))
-    )
+    error_distribution = dict(Counter(err for cycle in cycles for err in cycle.get("errors", [])))
 
     all_pass = all(ac["pass"] for ac in ac_results.values())
     report = {
@@ -885,45 +1400,82 @@ def _build_argument_parser():
             "rapid_interrupt: AC4 double-interrupt debounce check"
         ),
     )
-    parser.add_argument("--duration", type=int, default=300,
-                        help="duration in seconds for --mode false_positive (default 300)")
-    parser.add_argument("--trials", type=int, default=10,
-                        help="number of trials for --mode bargein_latency / rapid_interrupt")
-    parser.add_argument("--env", default="unknown",
-                        choices=["quiet", "music", "chatter", "unknown"],
-                        help="acoustic environment label for --mode false_positive")
-    parser.add_argument("--skip-firmware-timing", action="store_true", default=True,
-                        help="skip T3/T4 firmware UART timing (software-only run; default: True)")
+    parser.add_argument(
+        "--duration", type=int, default=300, help="duration in seconds for --mode false_positive (default 300)"
+    )
+    parser.add_argument(
+        "--trials", type=int, default=10, help="number of trials for --mode bargein_latency / rapid_interrupt"
+    )
+    parser.add_argument(
+        "--env",
+        default="unknown",
+        choices=["quiet", "music", "chatter", "unknown"],
+        help="acoustic environment label for --mode false_positive",
+    )
+    parser.add_argument(
+        "--skip-firmware-timing",
+        action="store_true",
+        default=True,
+        help="skip T3/T4 firmware UART timing (software-only run; default: True)",
+    )
     # Primary URL arg (spec name --ws-url; --websocket-url kept for backward compat)
-    parser.add_argument("--ws-url", "--websocket-url", dest="websocket_url",
-                        default="ws://localhost:8000/xiaozhi/v1")
+    parser.add_argument("--ws-url", "--websocket-url", dest="websocket_url", default="ws://localhost:8000/xiaozhi/v1")
     # Device identity — spec uses --device-mac; --device-id kept for backward compat
-    parser.add_argument("--device-mac", "--device-id", dest="device_mac", default=None,
-                        help="Device MAC / device-id header sent in websocket handshake")
-    parser.add_argument("--client-id", default="soak-harness-client",
-                        help="client-id header (optional for text-mode soak)")
-    parser.add_argument("--log-path", default="tmp/server.log",
-                        help="path to server.log for AC3/AC4 log-tail validation")
+    parser.add_argument(
+        "--device-mac",
+        "--device-id",
+        dest="device_mac",
+        default=None,
+        help="Device MAC / device-id header sent in websocket handshake",
+    )
+    parser.add_argument(
+        "--client-id", default="soak-harness-client", help="client-id header (optional for text-mode soak)"
+    )
+    parser.add_argument(
+        "--log-path", default="tmp/server.log", help="path to server.log for AC3/AC4 log-tail validation"
+    )
     # Cycle counts — --cycles sets bargein-cycles (spec §8 primary knob)
-    parser.add_argument("--cycles", "--bargein-cycles", dest="bargein_cycles",
-                        type=int, default=10,
-                        help="number of barge-in Q&A cycles (spec §8 default 10)")
+    parser.add_argument(
+        "--cycles",
+        "--bargein-cycles",
+        dest="bargein_cycles",
+        type=int,
+        default=10,
+        help="number of barge-in Q&A cycles (spec §8 default 10)",
+    )
     parser.add_argument("--idle-cycles", type=int, default=1)
     # Per-cycle max wall-clock (spec §8 --duration-sec)
-    parser.add_argument("--duration-sec", dest="event_timeout_sec",
-                        type=float, default=600,
-                        help="per-cycle max wall-clock in seconds (spec §8 default 600)")
+    parser.add_argument(
+        "--duration-sec",
+        dest="event_timeout_sec",
+        type=float,
+        default=600,
+        help="per-cycle max wall-clock in seconds (spec §8 default 600)",
+    )
     # Audio injection (spec §8)
-    parser.add_argument("--inject-audio", dest="inject_audio", default=None,
-                        help="synthetic or consenting-adult WAV; never use child recordings")
+    parser.add_argument(
+        "--inject-audio",
+        dest="inject_audio",
+        default=None,
+        help="synthetic or consenting-adult WAV; never use child recordings",
+    )
     parser.add_argument(
         "--audio-source",
         choices=["synthetic", "adult"],
         default="synthetic",
         help="privacy provenance for injected audio; child audio is forbidden",
     )
-    parser.add_argument("--inject-text", dest="inject_text", default=None,
-                        help="text injection for interrupt (default: use --interrupt-prompt)")
+    parser.add_argument(
+        "--server-has-google-live-credentials",
+        action="store_true",
+        help=("run against a server whose manager/private config already supplies Google Live credentials"),
+    )
+    parser.add_argument(
+        "--inject-text",
+        dest="inject_text",
+        default=None,
+        help="text injection for interrupt (default: use --interrupt-prompt)",
+    )
     # Prompts
     parser.add_argument("--first-prompt", default=DEFAULT_FIRST_PROMPT)
     parser.add_argument("--interrupt-prompt", default=DEFAULT_INTERRUPT_PROMPT)
@@ -937,11 +1489,11 @@ def _build_argument_parser():
     parser.add_argument("--bargein-latency-budget-ms", type=float, default=500.0)
     parser.add_argument("--ac1-goaway-budget", type=int, default=0)
     # Output
-    parser.add_argument("--report", type=Path, default=None,
-                        help="write JSON report to this path (required for CI)")
+    parser.add_argument("--report", type=Path, default=None, help="write JSON report to this path (required for CI)")
     # Dry-run: validate args + emit placeholder report, no websocket connect
-    parser.add_argument("--dry-run", action="store_true",
-                        help="skip websocket connect; emit placeholder report for CI smoke")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="skip websocket connect; emit placeholder report for CI smoke"
+    )
     return parser
 
 
@@ -956,7 +1508,7 @@ def main():
     # device_id alias for backward compat in _run_bargein_cycle / _run_idle_cycle
     args.device_id = args.device_mac or "unknown"
 
-    if args.scenario == "tvideo-farm":
+    if args.scenario == "tvideo-farm" and not args.dry_run:
         skipped = _credential_gated_tvideo_farm_report(args)
         if skipped is not None:
             if args.report:

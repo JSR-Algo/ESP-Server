@@ -98,9 +98,9 @@ def test_preview_entry_loads_the_side_effect_fixture_without_tree_shaking() -> N
 
 
 def test_preview_fixture_uses_committed_media_instead_of_missing_placeholders() -> None:
-    fixture = (
-        tvideo_farm_preview.MANAGER_ROOT / "tests" / "browser" / "lesson-builder-main.js"
-    ).read_text(encoding="utf-8")
+    fixture = (tvideo_farm_preview.MANAGER_ROOT / "tests" / "browser" / "lesson-builder-main.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "/fixtures/" not in fixture
     assert "data:image/png" not in fixture
@@ -133,6 +133,57 @@ def test_tvideo_farm_missing_credentials_is_a_typed_privacy_safe_skip(
     serialized = json.dumps(report)
     assert "prompt" not in serialized.lower()
     assert "utterance" not in serialized.lower()
+
+
+@pytest.mark.parametrize("env_name", google_live_robot_soak.GOOGLE_LIVE_CREDENTIAL_ENV_NAMES)
+def test_tvideo_farm_credential_gate_accepts_every_production_live_alias(monkeypatch, env_name) -> None:
+    for name in google_live_robot_soak.GOOGLE_LIVE_CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("TBOT_GEMINI_TTS_API_KEY", raising=False)
+    monkeypatch.setenv(env_name, "live-key")
+
+    assert (
+        google_live_robot_soak._credential_gated_tvideo_farm_report(
+            SimpleNamespace(
+                scenario="tvideo-farm",
+                audio_source="synthetic",
+                event_timeout_sec=1.0,
+            )
+        )
+        is None
+    )
+
+
+def test_tvideo_farm_credential_gate_rejects_tts_only_alias(monkeypatch) -> None:
+    for name in google_live_robot_soak.GOOGLE_LIVE_CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TBOT_GEMINI_TTS_API_KEY", "tts-only")
+
+    report = google_live_robot_soak._credential_gated_tvideo_farm_report(
+        SimpleNamespace(
+            scenario="tvideo-farm",
+            audio_source="synthetic",
+            event_timeout_sec=1.0,
+        )
+    )
+
+    assert report["status"] == "SKIP_GOOGLE_LIVE_CREDENTIALS"
+
+
+def test_tvideo_farm_credential_gate_allows_manager_provisioned_server(monkeypatch) -> None:
+    for name in google_live_robot_soak.GOOGLE_LIVE_CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    report = google_live_robot_soak._credential_gated_tvideo_farm_report(
+        SimpleNamespace(
+            scenario="tvideo-farm",
+            audio_source="synthetic",
+            event_timeout_sec=1.0,
+            server_has_google_live_credentials=True,
+        )
+    )
+
+    assert report is None
 
 
 def test_tvideo_farm_accepts_only_synthetic_or_adult_audio_metadata() -> None:
@@ -192,3 +243,392 @@ def test_tvideo_farm_scenario_uses_the_bounded_live_runner(monkeypatch) -> None:
 
     assert result is expected
     assert calls == ["tvideo-farm"]
+
+
+def test_tvideo_farm_explicit_dry_run_uses_local_fake_server_without_credentials(
+    monkeypatch,
+) -> None:
+    for name in google_live_robot_soak.GOOGLE_LIVE_CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    result = asyncio.run(google_live_robot_soak.run_soak(_tvideo_farm_args(dry_run=True)))
+
+    assert result["status"] == "FAKE_PASS"
+    assert result["dry_run"] is True
+    assert result["binary_chunks_sent"] > 0
+    assert result["raw_audio_persisted"] is False
+    assert result["transcript_persisted"] is False
+    serialized = json.dumps(result)
+    assert "prompt" not in serialized.lower()
+    assert "utterance" not in serialized.lower()
+    assert "/fixtures/" not in serialized
+
+
+def _tvideo_farm_frame(
+    frame_type: str,
+    cue_id: str,
+    sequence: int,
+    *,
+    command: str = "start",
+    effect: str | None = None,
+) -> str:
+    step_key = cue_id.split("-", 1)[0]
+    resolved_effect = effect or cue_id.removeprefix(f"{step_key}-")
+    if cue_id == "barn-to-hay-word-transition" and effect is None:
+        resolved_effect = "word-transition"
+    return json.dumps(
+        {
+            "type": frame_type,
+            "protocolVersion": "teebot-lesson-renderer.v4",
+            "assignmentId": "assignment-1",
+            "sessionId": "lesson-session-1",
+            "lessonId": "farm-english",
+            "lessonVersion": 4,
+            "sequence": sequence,
+            "stepId": step_key,
+            "body": {
+                "command": command,
+                "cueId": cue_id,
+                "commandSequenceId": sequence,
+                "cinematicPhase": {
+                    "command": command,
+                    "cueId": cue_id,
+                    "stepKey": step_key,
+                    "effect": resolved_effect,
+                    "commandSequenceId": sequence,
+                },
+            },
+        }
+    )
+
+
+def _passing_tvideo_farm_messages() -> list[str | bytes]:
+    cues = [
+        "barn-listen",
+        "barn-thinking",
+        "barn-correct",
+        "barn-retry-level-1",
+        "barn-correct",
+        "barn-to-hay-word-transition",
+        "hay-listen",
+        "hay-thinking",
+        "hay-correct",
+        "hay-celebrate",
+    ]
+    messages = [json.dumps({"type": "hello"})]
+    for index, cue_id in enumerate(cues, start=1):
+        if cue_id == "barn-to-hay-word-transition":
+            messages.append(json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}))
+        messages.append(_tvideo_farm_frame("lesson_prepare", cue_id, index * 2 - 1, command="prepare"))
+        messages.append(_tvideo_farm_frame("lesson_cinematic_control", cue_id, index * 2, command="start"))
+        messages.append(json.dumps({"type": "tts", "state": "start"}))
+        messages.append(_valid_output_opus_packet())
+        if cue_id != "barn-correct" or index != 5:
+            messages.append(json.dumps({"type": "tts", "state": "stop"}))
+    return messages
+
+
+def _valid_output_opus_packet() -> bytes:
+    args = _tvideo_farm_args()
+    base_fixture = google_live_robot_soak._tvideo_farm_fixture_config(args.audio_source)
+    packets, _fixture = google_live_robot_soak._tvideo_farm_turn_opus_packets(args, "target_answer", base_fixture)
+    return packets[0]
+
+
+def _find_frame_index(messages, cue_id: str, command: str) -> int:
+    for index, message in enumerate(messages):
+        if not isinstance(message, str):
+            continue
+        payload = json.loads(message)
+        phase = (payload.get("body") or {}).get("cinematicPhase") or {}
+        if phase.get("cueId") == cue_id and phase.get("command") == command:
+            return index
+    raise AssertionError(f"frame not found: {cue_id}/{command}")
+
+
+def _replace_frame(messages, cue_id: str, command: str, replacement: str) -> None:
+    messages[_find_frame_index(messages, cue_id, command)] = replacement
+
+
+def _remove_frame(messages, cue_id: str, command: str) -> None:
+    messages.pop(_find_frame_index(messages, cue_id, command))
+
+
+def _remove_interrupt_stop(messages) -> None:
+    transition = _find_frame_index(messages, "barn-to-hay-word-transition", "prepare")
+    assert json.loads(messages[transition - 1])["state"] == "stop"
+    messages.pop(transition - 1)
+
+
+def _replace_interrupt_reason(messages) -> None:
+    transition = _find_frame_index(messages, "barn-to-hay-word-transition", "prepare")
+    payload = json.loads(messages[transition - 1])
+    payload["reason"] = "natural_end"
+    messages[transition - 1] = json.dumps(payload)
+
+
+def _insert_late_output_after_transition_cue(messages) -> None:
+    start = _find_frame_index(messages, "barn-to-hay-word-transition", "start")
+    messages.insert(start + 1, b"late-cancelled-generation-opus")
+
+
+def _remove_command_sequence(messages) -> None:
+    index = _find_frame_index(messages, "barn-thinking", "start")
+    payload = json.loads(messages[index])
+    payload["body"].pop("commandSequenceId", None)
+    payload["body"]["cinematicPhase"].pop("commandSequenceId", None)
+    messages[index] = json.dumps(payload)
+
+
+def _replace_lesson_session(messages) -> None:
+    index = _find_frame_index(messages, "hay-listen", "start")
+    payload = json.loads(messages[index])
+    payload["sessionId"] = "stale-lesson-session"
+    messages[index] = json.dumps(payload)
+
+
+def _replace_output_with_corrupt_binary(messages) -> None:
+    messages[messages.index(_valid_output_opus_packet())] = b"not-opus"
+
+
+class _TVideoFarmFakeWebSocket:
+    def __init__(self, messages: list[str | bytes]):
+        self.messages = list(messages)
+        self.sent: list[str | bytes] = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    async def recv(self):
+        if not self.messages:
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError
+        return self.messages.pop(0)
+
+    async def close(self):
+        return None
+
+
+class _TVideoFarmFakeConnect:
+    def __init__(self, websocket: _TVideoFarmFakeWebSocket):
+        self.websocket = websocket
+
+    async def __aenter__(self):
+        return self.websocket
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+def _tvideo_farm_args(**overrides) -> SimpleNamespace:
+    values = {
+        "scenario": "tvideo-farm",
+        "websocket_url": "ws://fake/tbot/v1",
+        "device_mac": "robot-1",
+        "device_id": "robot-1",
+        "client_id": "client-1",
+        "audio_source": "synthetic",
+        "event_timeout_sec": 0.2,
+        "open_timeout_sec": 0.2,
+        "speak_for_sec": 0,
+        "frame_duration_ms": 60,
+        "sample_rate": 24000,
+        "dry_run": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_tvideo_farm_live_audio_runner_sends_binary_fixtures_and_validates_progression(
+    monkeypatch,
+) -> None:
+    websocket = _TVideoFarmFakeWebSocket(_passing_tvideo_farm_messages())
+
+    def _connect(_url, **_kwargs):
+        return _TVideoFarmFakeConnect(websocket)
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(google_live_robot_soak.websockets, "connect", _connect)
+    monkeypatch.setattr(google_live_robot_soak.asyncio, "sleep", _sleep)
+
+    report = asyncio.run(google_live_robot_soak._run_tvideo_farm_scenario(_tvideo_farm_args()))
+
+    sent_json = [json.loads(payload) for payload in websocket.sent if isinstance(payload, str)]
+    assert report["status"] == "PASS"
+    assert report["audio_source"] == "synthetic"
+    assert report["fixture_set_id"] == "tvideo-farm-synthetic-speech-v1"
+    assert report["binary_chunks_sent"] > 0
+    assert report["output_binary_chunks"] == 10
+    assert report["interruption_count"] == 1
+    assert report["late_output_chunks"] == 0
+    assert report["conversation_identity_changes"] == 1
+    assert report["bargein_audio_sent_while_output_active"] is True
+    assert report["lesson_session_consistent"] is True
+    assert [turn["input_fixture_id"] for turn in report["turns"]] == [
+        "tvideo-farm-synthetic-lesson-start-v1",
+        "tvideo-farm-synthetic-target-answer-v1",
+        "tvideo-farm-synthetic-meaning-bridge-v1",
+        "tvideo-farm-synthetic-related-concept-v1",
+        "tvideo-farm-synthetic-retry-coaching-v1",
+        "tvideo-farm-synthetic-target-correction-v1",
+        "tvideo-farm-synthetic-hay-listen-v1",
+        "tvideo-farm-synthetic-hay-thinking-v1",
+        "tvideo-farm-synthetic-hay-correct-v1",
+        "tvideo-farm-synthetic-hay-celebrate-v1",
+    ]
+    assert report["turns"][5]["input_fixture_id"].endswith("target-correction-v1")
+    assert len({turn["input_fixture_sha256"] for turn in report["turns"]}) >= 6
+    assert all(turn["input_opus_packets"] > 0 for turn in report["turns"])
+    assert all(payload for payload in websocket.sent if isinstance(payload, bytes))
+    assert sent_json[0] == {
+        "type": "hello",
+        "version": 1,
+        "transport": "websocket",
+        "audio_params": {
+            "format": "opus",
+            "sample_rate": 24000,
+            "channels": 1,
+            "frame_duration": 60,
+        },
+        "features": {},
+    }
+    acknowledgements = sent_json[1:]
+    assert len(acknowledgements) == 20
+    assert [ack["body"]["acks"] for ack in acknowledgements] == list(range(1, 21))
+    assert [ack["sequence"] for ack in acknowledgements] == list(range(1, 21))
+    assert {ack["sessionId"] for ack in acknowledgements} == {"lesson-session-1"}
+    serialized = json.dumps(report)
+    assert "prompt" not in serialized.lower()
+    assert "utterance" not in serialized.lower()
+    assert "fixture" in report
+    assert sorted(report["fixture"]) == [
+        "format",
+        "frame_duration_ms",
+        "sample_rate",
+        "sha256",
+        "source",
+    ]
+    assert all(
+        sorted(turn)
+        == [
+            "input_fixture_id",
+            "input_fixture_sha256",
+            "input_opus_packets",
+            "latency_ms",
+        ]
+        for turn in report["turns"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate,expected_error",
+    [
+        (
+            lambda messages: _remove_frame(messages, "barn-thinking", "prepare"),
+            "missing_cinematic_event",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-thinking",
+                "start",
+                _tvideo_farm_frame("lesson_cinematic_control", "hay-listen", 4, command="start"),
+            ),
+            "wrong_cue",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "hay-listen",
+                "start",
+                _tvideo_farm_frame("lesson_cinematic_control", "barn-correct", 14, command="start"),
+            ),
+            "stale_or_missing_step_transition",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-correct",
+                "start",
+                _tvideo_farm_frame("lesson_cinematic_control", "barn-correct", 4, command="start"),
+            ),
+            "non_increasing_command_sequence",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-thinking",
+                "start",
+                _tvideo_farm_frame(
+                    "lesson_cinematic_control",
+                    "barn-thinking",
+                    4,
+                    command="start",
+                    effect="incorrect-effect",
+                ),
+            ),
+            "wrong_effect",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-listen",
+                "prepare",
+                _tvideo_farm_frame(
+                    "lesson_cinematic_control",
+                    "barn-listen",
+                    1,
+                    command="prepare",
+                ),
+            ),
+            "wrong_cinematic_frame_type",
+        ),
+        (
+            lambda messages: messages.pop(_find_frame_index(messages, "barn-listen", "start") + 2),
+            "missing_output_audio",
+        ),
+        (
+            _insert_late_output_after_transition_cue,
+            "late_output_after_interruption",
+        ),
+        (_remove_interrupt_stop, "missing_interruption_stop"),
+        (_replace_interrupt_reason, "wrong_interruption_reason"),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-listen",
+                "prepare",
+                _tvideo_farm_frame("lesson_prepare", "barn-listen", 1, command="pause"),
+            ),
+            "wrong_cinematic_command",
+        ),
+        (_remove_command_sequence, "missing_command_sequence"),
+        (_replace_lesson_session, "lesson_session_mismatch"),
+        (_replace_output_with_corrupt_binary, "invalid_output_opus"),
+    ],
+)
+def test_tvideo_farm_live_audio_runner_rejects_broken_authoritative_transcripts(
+    monkeypatch,
+    mutate,
+    expected_error,
+) -> None:
+    messages = _passing_tvideo_farm_messages()
+    mutate(messages)
+    websocket = _TVideoFarmFakeWebSocket(messages)
+
+    def _connect(_url, **_kwargs):
+        return _TVideoFarmFakeConnect(websocket)
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(google_live_robot_soak.websockets, "connect", _connect)
+    monkeypatch.setattr(google_live_robot_soak.asyncio, "sleep", _sleep)
+
+    report = asyncio.run(google_live_robot_soak._run_tvideo_farm_scenario(_tvideo_farm_args()))
+
+    assert report["status"] == "FAIL"
+    assert expected_error in report["validation_errors"]
+    assert report["exit_code"] == 1
