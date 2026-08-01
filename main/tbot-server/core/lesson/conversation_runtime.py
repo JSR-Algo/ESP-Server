@@ -130,6 +130,7 @@ class LessonConversationRuntime:
         self._pending_cue_id: str | None = None
         self._pending_effect: str | None = None
         self._pending_intent: str | None = None
+        self._continue_applied = False
         self._guidance = ModelGuidanceFacts(
             target_word=contract.target_word,
             meanings_vi=contract.meanings_vi,
@@ -179,6 +180,10 @@ class LessonConversationRuntime:
     def pending_intent(self) -> str | None:
         return self._pending_intent
 
+    @property
+    def continue_applied(self) -> bool:
+        return self._continue_applied
+
     def identity(self, *, cue_id: str | None = None) -> LessonToolIdentity:
         if self._attempt_id is None or self._turn_sequence_id < 1:
             raise RuntimeError("open_attempt must establish identity first")
@@ -209,6 +214,7 @@ class LessonConversationRuntime:
             self._pending_cue_id,
             self._pending_effect,
             self._pending_intent,
+            self._continue_applied,
         )
 
     def _cue(self, role: str) -> CueSpec:
@@ -449,6 +455,8 @@ class LessonConversationRuntime:
         if effect != cue.effect or effect != self._pending_effect:
             return self._reject("ILLEGAL_EFFECT")
         self._consume(identity)
+        if cue_role == "word_transition":
+            return self._decision(intent="word_transition_acknowledged")
         return self._decision(intent="play_approved_reaction", cue_role=cue_role)
 
     def continue_lesson(
@@ -461,6 +469,8 @@ class LessonConversationRuntime:
         rejected = self._identity_rejection(identity)
         if rejected:
             return rejected
+        if self._continue_applied:
+            return self._reject("CONTINUE_ALREADY_APPLIED")
         if not (self._mastered or (self._outcome == "attempted" and self._review_needed)):
             return self._reject("CONTINUE_NOT_ALLOWED")
         pending = next(
@@ -474,6 +484,7 @@ class LessonConversationRuntime:
         if next_step_key is not None:
             return self._reject("MODEL_STEP_SELECTION_FORBIDDEN")
         assert identity is not None
+        self._continue_applied = True
         self._consume(identity)
         self._state = ConversationState.COMPLETE
         return self._decision(intent="continue_lesson", cue_role="word_transition")

@@ -666,6 +666,75 @@ def test_continue_rejects_model_selected_cue_effect_or_step() -> None:
     ]
 
 
+def test_mastered_continue_is_applied_only_once_without_mutation_on_replay() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+    first = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
+    )
+    assert first.accepted
+    snapshot = runtime.snapshot()
+    replay = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    assert replay.code == "CONTINUE_ALREADY_APPLIED"
+    assert runtime.snapshot() == snapshot
+
+
+def test_attempted_review_continue_is_applied_only_once() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    for _ in range(4):
+        runtime.pronunciation_outcome(_identity(runtime), "retry")
+    first = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    assert first.accepted
+    snapshot = runtime.snapshot()
+    replay = runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    assert replay.code == "CONTINUE_ALREADY_APPLIED"
+    assert runtime.snapshot() == snapshot
+
+
+def test_word_transition_visual_ack_does_not_renew_continue_authority() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+    runtime.continue_lesson(
+        _identity(runtime, cue_id="farm.apple.celebrate"),
+        effect="show_celebration",
+    )
+    acknowledged = runtime.visual_reaction(
+        _identity(runtime, cue_id="farm.apple.word_transition"),
+        "word_transition",
+        effect="show_word_transition",
+    )
+    assert acknowledged.accepted
+    snapshot = runtime.snapshot()
+    replay = runtime.continue_lesson(
+        _raw_identity(runtime, "farm.apple.word_transition"),
+        effect="show_word_transition",
+    )
+    repeated_visual = runtime.visual_reaction(
+        _raw_identity(runtime, "farm.apple.word_transition"),
+        "word_transition",
+        effect="show_word_transition",
+    )
+    assert replay.code == "CONTINUE_ALREADY_APPLIED"
+    assert repeated_visual.code == "ILLEGAL_CUE"
+    assert runtime.snapshot() == snapshot
+
+
 def test_decisions_are_immutable_safe_and_never_contain_negative_wording_or_transcript() -> None:
     runtime = _runtime()
     decisions = [runtime.open_attempt()]
