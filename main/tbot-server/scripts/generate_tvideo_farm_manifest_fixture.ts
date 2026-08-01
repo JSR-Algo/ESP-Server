@@ -4,14 +4,14 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const args = new Map(process.argv.slice(2).map((value, index, all) => [value, all[index + 1]]));
-const backendRoot = resolve(args.get('--backend-root') ?? '');
+const backendBuildRoot = resolve(args.get('--backend-build-root') ?? '');
 const output = resolve(args.get('--output') ?? '');
-if (!backendRoot || !output) throw new Error('usage: --backend-root PATH --output PATH');
+if (!backendBuildRoot || !output) throw new Error('usage: --backend-build-root PATH --output PATH');
 process.env.LESSON_ASSET_ORIGIN_BASE = 'https://fixtures.example.test';
 
 const load = async (relative: string) => import(pathToFileURL(join(
-  backendRoot,
-  relative.replace(/^src\//, 'dist/').replace(/\.ts$/, '.js'),
+  backendBuildRoot,
+  relative.replace(/^src\//, '').replace(/\.ts$/, '.js'),
 )).href);
 const { FARM_TVIDEO_JOURNEY_V1 } = await load('src/lessons/tvideo-journey/fixtures/farm-golden.ts');
 const { deriveTVideoJourneyCuePlan } = await load('src/lessons/tvideo-journey/tvideo-journey.cues.ts');

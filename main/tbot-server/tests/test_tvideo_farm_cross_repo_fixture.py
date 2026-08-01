@@ -17,6 +17,7 @@ from core.lesson.sd_pack_materializer import materialize_lesson_sd_pack
 from scripts.project_tvideo_farm_firmware_fixture import build_firmware_fixture
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tvideo_farm_manifest_v2.json"
+PROVENANCE = Path(__file__).parent / "fixtures" / "tvideo_farm_manifest_v2.provenance.json"
 EXPECTED_CUES = [
     "barn-opening",
     "barn-greet",
@@ -39,6 +40,8 @@ EXPECTED_CUES = [
     "hay-celebrate",
 ]
 MANIFEST_CHECKSUM = "bb7d4dcdf6318096c0b9224dc48bcdcb3ff78b325706cdc9c5d39bd4e7da94e4"
+BACKEND_HEAD = "f78f8eae312616d7d1a30bf350404e9d8028bab0"
+BACKEND_BUILD_INPUT_SHA256 = "f47ac8c0d0dca550dfb47262037a22a6f1f9e354a7b1d6299cfb43648fdb8be1"
 
 
 class _Response:
@@ -71,6 +74,40 @@ class _Client:
 
 async def _public_resolver(_host: str) -> list[str]:
     return ["93.184.216.34"]
+
+
+def test_farm_fixture_records_pinned_backend_source_provenance() -> None:
+    provenance = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+
+    assert provenance["backend"]["head"] == BACKEND_HEAD
+    assert provenance["backend"]["buildInputSha256"] == BACKEND_BUILD_INPUT_SHA256
+    assert provenance["backend"]["buildInputCount"] == 1088
+    assert provenance["backend"]["typescriptCompilerSha256"] == (
+        "3ae902c92cc44dace175c0e69e13a4b0899f6983c6121d76b9ab8dd5795e7675"
+    )
+    assert provenance["backend"]["relevantSources"] == {
+        "src/lessons/authoring/lesson-authoring.flattened-derivatives.ts": (
+            "f6930f54987351ce2cd41266dba179855d06691c4e9545789f4c046de784f705"
+        ),
+        "src/lessons/lesson-manifest.logic.ts": (
+            "95b694505c629ba19c0145aaacd05d5e7003a40f2c8d5af5f9cc11ba6a1f88fc"
+        ),
+        "src/lessons/lesson.constants.ts": (
+            "8b1ff0b9b4e873f6151c8c1845e84fe4102d488b4760822040ab01193ecb5dd2"
+        ),
+        "src/lessons/tvideo-journey/fixtures/farm-golden.ts": (
+            "f5826f62a3b876f6266ca702037943f4ef118184ec6d599068207fceadbd1eb0"
+        ),
+        "src/lessons/tvideo-journey/tvideo-journey.cues.ts": (
+            "22856732ec7d59e19092999e82c0faffabd61bc03b9badf8a2e32afe57398f59"
+        ),
+    }
+    assert provenance["manifest"] == {
+        "canonicalSha256": "44f1dd88f44acd903c7196b7ad1245e5d2177c18f5dd7de49e137a045bf4d50f",
+        "cueCount": 19,
+        "fileSha256": "77f196f20c488aa215fc0051dcdbe490a154f651d8edb060c1b098fba7dc846a",
+        "manifestChecksum": MANIFEST_CHECKSUM,
+    }
 
 
 def test_backend_farm_fixture_projects_exact_conversation_and_sd_asset_identities() -> None:

@@ -1,0 +1,27 @@
+{
+  "backend": {
+    "buildInputCount": 1088,
+    "buildInputSha256": "f47ac8c0d0dca550dfb47262037a22a6f1f9e354a7b1d6299cfb43648fdb8be1",
+    "head": "f78f8eae312616d7d1a30bf350404e9d8028bab0",
+    "relevantSources": {
+      "src/lessons/authoring/lesson-authoring.flattened-derivatives.ts": "f6930f54987351ce2cd41266dba179855d06691c4e9545789f4c046de784f705",
+      "src/lessons/lesson-manifest.logic.ts": "95b694505c629ba19c0145aaacd05d5e7003a40f2c8d5af5f9cc11ba6a1f88fc",
+      "src/lessons/lesson.constants.ts": "8b1ff0b9b4e873f6151c8c1845e84fe4102d488b4760822040ab01193ecb5dd2",
+      "src/lessons/tvideo-journey/fixtures/farm-golden.ts": "f5826f62a3b876f6266ca702037943f4ef118184ec6d599068207fceadbd1eb0",
+      "src/lessons/tvideo-journey/tvideo-journey.cues.ts": "22856732ec7d59e19092999e82c0faffabd61bc03b9badf8a2e32afe57398f59"
+    },
+    "tree": "1115da00ba248749db0ef4cbdb669c7b23ed9cbb",
+    "typescriptCompilerSha256": "3ae902c92cc44dace175c0e69e13a4b0899f6983c6121d76b9ab8dd5795e7675"
+  },
+  "generator": {
+    "pythonSha256": "b18e653f173103d68e1b9e5e99349c37d1575d17f13d12025fc17a927911571a",
+    "typescriptSha256": "c7ad9c0a9f71385440e8d544c948011bac482b11831b845bdd1aed14e8e204fd"
+  },
+  "manifest": {
+    "canonicalSha256": "44f1dd88f44acd903c7196b7ad1245e5d2177c18f5dd7de49e137a045bf4d50f",
+    "cueCount": 19,
+    "fileSha256": "77f196f20c488aa215fc0051dcdbe490a154f651d8edb060c1b098fba7dc846a",
+    "manifestChecksum": "bb7d4dcdf6318096c0b9224dc48bcdcb3ff78b325706cdc9c5d39bd4e7da94e4"
+  },
+  "schemaVersion": 1
+}
