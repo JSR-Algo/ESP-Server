@@ -3,16 +3,35 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
 RENDERER_V4 = "teebot-lesson-renderer.v4"
 TEMPLATE_ID = "flattenedMjpegCinematic"
-TEMPLATE_VERSION = 1
+TEMPLATE_VERSION_V1 = 1
+TEMPLATE_VERSION_V2 = 2
 KNOWN_PHASE_IDS = frozenset(
     {"opening", "greet", "teach", "listen", "thinking", "correct", "retry", "celebrate"}
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_V2_EFFECTS = frozenset(
+    {
+        "opening", "greet", "teach", "listen", "thinking", "correct",
+        "retry-level-1", "retry-level-2", "retry-level-3", "celebrate",
+        "word-transition",
+    }
+)
+_V2_PLAYBACK_MODE = {
+    effect: "loop" if effect in {"greet", "listen", "thinking"} else "once"
+    for effect in _V2_EFFECTS
+}
+_V2_DURATION_MS = {
+    "opening": 9500, "greet": 1200, "teach": 2600, "listen": 1300,
+    "thinking": 1300, "correct": 600, "retry-level-1": 1200,
+    "retry-level-2": 1400, "retry-level-3": 1600, "celebrate": 3000,
+    "word-transition": 1100,
+}
 
 
 class FlattenedCinematicContractError(ValueError):
@@ -22,7 +41,7 @@ class FlattenedCinematicContractError(ValueError):
         self.message = message
 
 
-def _fail(code: str, message: str) -> None:
+def _fail(code: str, message: str) -> NoReturn:
     raise FlattenedCinematicContractError(code, message)
 
 
@@ -33,33 +52,81 @@ def _positive_int(value: Any) -> bool:
 def _exact_dict(value: Any, fields: set[str], message: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != fields:
         _fail("CINEMATIC_METADATA_MISMATCH", message)
-    return value
+    return cast(dict[str, Any], value)
 
 
-def _manifest_asset(phase: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    phase_id = phase.get("phaseId")
-    if (
-        phase.get("templateId") != TEMPLATE_ID
-        or phase.get("templateVersion") != TEMPLATE_VERSION
-        or phase_id not in KNOWN_PHASE_IDS
-    ):
+def cinematic_identity_key(command: Any) -> str:
+    """Return the sole control identity, rejecting ambiguous commands and ACKs."""
+    if not isinstance(command, dict):
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic command identity is invalid")
+    phase_id = command.get("phaseId")
+    cue_id = command.get("cueId")
+    has_phase = isinstance(phase_id, str) and bool(phase_id)
+    has_cue = isinstance(cue_id, str) and bool(cue_id)
+    if has_phase == has_cue:
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "cinematic command must have exactly one identity")
+    return cast(str, phase_id if has_phase else cue_id)
+
+
+def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:
+    version = entry.get("templateVersion")
+    if entry.get("templateId") != TEMPLATE_ID:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
+    if version == TEMPLATE_VERSION_V1:
+        _exact_dict(
+            entry,
+            {"templateId", "templateVersion", "phaseId", "timing", "asset"},
+            "flattened cinematic phase fields are invalid",
+        )
+        if entry.get("phaseId") not in KNOWN_PHASE_IDS:
+            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
+        return TEMPLATE_VERSION_V1, entry["phaseId"]
+    if version == TEMPLATE_VERSION_V2:
+        _exact_dict(
+            entry,
+            {
+                "templateId", "templateVersion", "cueId", "effect", "stepKey",
+                "playbackMode", "timing", "asset",
+            },
+            "flattened cinematic cue fields are invalid",
+        )
+        if (
+            not isinstance(entry.get("cueId"), str)
+            or _SLUG_RE.fullmatch(entry["cueId"]) is None
+            or not isinstance(entry.get("stepKey"), str)
+            or _SLUG_RE.fullmatch(entry["stepKey"]) is None
+            or entry.get("effect") not in _V2_EFFECTS
+            or entry.get("playbackMode") != _V2_PLAYBACK_MODE.get(str(entry.get("effect")))
+        ):
+            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cue identity is invalid")
+        return TEMPLATE_VERSION_V2, entry["cueId"]
+    _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
+
+
+def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], int, str]:
+    version, entry_id = _entry_identity(entry)
     timing = _exact_dict(
-        phase.get("timing"), {"durationMs"}, "flattened cinematic timing fields are invalid"
+        entry.get("timing"), {"durationMs"}, "flattened cinematic timing fields are invalid"
     )
-    duration_ms = timing.get("durationMs")
-    if not _positive_int(duration_ms) or duration_ms % 100 != 0:
+    raw_duration_ms = timing.get("durationMs")
+    if not _positive_int(raw_duration_ms):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic duration is invalid")
+    duration_ms = cast(int, raw_duration_ms)
+    if duration_ms % 100 != 0:
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic duration is invalid")
+    if version == TEMPLATE_VERSION_V2 and duration_ms != _V2_DURATION_MS[entry["effect"]]:
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cue duration is stale")
     asset = _exact_dict(
-        phase.get("asset"),
+        entry.get("asset"),
         {"derivativeId", "path", "url", "sha256", "bytes", "mediaType", "width", "height", "metadata"},
         "flattened cinematic asset fields are invalid",
     )
     derivative_id = asset.get("derivativeId")
-    expected_path = f"lessons/derivatives/{derivative_id}/{phase_id}.mp4"
+    expected_path = f"lessons/derivatives/{derivative_id}/{entry_id}.mp4"
+    asset_url = asset.get("url")
     try:
-        parsed_url = urlsplit(asset.get("url"))
-    except (TypeError, ValueError):
+        parsed_url = urlsplit(asset_url) if isinstance(asset_url, str) else None
+    except ValueError:
         parsed_url = None
     if (
         not isinstance(derivative_id, str)
@@ -93,7 +160,7 @@ def _manifest_asset(phase: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or metadata.get("hasAudio") is not False
     ):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic media metadata is invalid")
-    return asset, metadata
+    return asset, metadata, version, entry_id
 
 
 def _local_sd_path(asset: dict[str, Any], local_root: str, expected_key: str) -> str:
@@ -118,7 +185,7 @@ def _local_sd_path(asset: dict[str, Any], local_root: str, expected_key: str) ->
         or "://" in relative
     ):
         _fail("CINEMATIC_SD_PATH_MISSING", "flattened cinematic SD path has unsafe syntax")
-    return path
+    return cast(str, path)
 
 
 def validate_flattened_cinematic_manifest(manifest: Any) -> None:
@@ -142,16 +209,18 @@ def validate_flattened_cinematic_manifest(manifest: Any) -> None:
     if not isinstance(phases, list) or not phases:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic manifest has no phases")
     seen: set[str] = set()
+    version: int | None = None
     for phase in phases:
-        exact = _exact_dict(
-            phase,
-            {"templateId", "templateVersion", "phaseId", "timing", "asset"},
-            "flattened cinematic phase fields are invalid",
-        )
-        _manifest_asset(exact)
-        if exact["phaseId"] in seen:
-            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic phase is duplicated")
-        seen.add(exact["phaseId"])
+        if not isinstance(phase, dict):
+            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic entry is invalid")
+        _, _, entry_version, entry_id = _manifest_asset(phase)
+        if version is None:
+            version = entry_version
+        elif version != entry_version:
+            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic versions cannot be mixed")
+        if entry_id in seen:
+            _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is duplicated")
+        seen.add(entry_id)
 
 
 def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
@@ -162,21 +231,36 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     assets = pack.get("assets")
     if not isinstance(local_root, str) or not isinstance(assets, list):
         _fail("CINEMATIC_PACK_NOT_READY", "flattened cinematic pack attestation is incomplete")
-    phase = _exact_dict(
-        phase,
-        {"templateId", "templateVersion", "phaseId", "timing", "asset"},
-        "flattened cinematic phase fields are invalid",
-    )
-    source, metadata = _manifest_asset(phase)
-    phase_id = phase["phaseId"]
-    expected_key = f"flattenedCinematic.{phase_id}"
+    if not isinstance(phase, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic entry is invalid")
+    source, metadata, version, entry_id = _manifest_asset(phase)
+    expected_key = f"flattenedCinematic.{entry_id}"
     matches = [item for item in assets if isinstance(item, dict) and item.get("key") == expected_key]
     if len(matches) != 1:
-        if any(isinstance(item, dict) and item.get("phaseId") == phase_id for item in assets):
+        identity_field = "phaseId" if version == TEMPLATE_VERSION_V1 else "cueId"
+        if any(isinstance(item, dict) and item.get(identity_field) == entry_id for item in assets):
             _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "flattened cinematic pack key is unsupported")
         _fail("CINEMATIC_SD_PATH_MISSING", "flattened cinematic asset is missing from the SD pack")
     packed = matches[0]
-    if packed.get("derivativeId") != source["derivativeId"] or packed.get("phaseId") != phase_id:
+    expected_identity = (
+        {"phaseId": entry_id}
+        if version == TEMPLATE_VERSION_V1
+        else {
+            "cueId": entry_id,
+            "effect": phase["effect"],
+            "stepKey": phase["stepKey"],
+            "playbackMode": phase["playbackMode"],
+        }
+    )
+    forbidden_identity = (
+        {"cueId", "effect", "stepKey", "playbackMode"}
+        if version == TEMPLATE_VERSION_V1 else {"phaseId"}
+    )
+    if (
+        packed.get("derivativeId") != source["derivativeId"]
+        or any(packed.get(key) != value for key, value in expected_identity.items())
+        or any(key in packed for key in forbidden_identity)
+    ):
         _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "flattened cinematic derivative identity does not match")
     expected_metadata = {
         "codec": metadata["codec"],
@@ -197,21 +281,43 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     ):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic pack metadata does not match")
     sd_path = _local_sd_path(packed, local_root, expected_key)
+    common_asset = {
+        "derivativeId": source["derivativeId"],
+        "sdPath": sd_path,
+        "sha256": source["sha256"],
+        "bytes": source["bytes"],
+        "mediaType": source["mediaType"],
+        "width": source["width"],
+        "height": source["height"],
+    }
+    if version == TEMPLATE_VERSION_V1:
+        return {
+            "templateId": TEMPLATE_ID,
+            "templateVersion": TEMPLATE_VERSION_V1,
+            "phaseId": entry_id,
+            "durationMs": phase["timing"]["durationMs"],
+            "fps": metadata["fps"],
+            "frameCount": metadata["frameCount"],
+            "asset": {
+                "derivativeId": source["derivativeId"],
+                "phaseId": entry_id,
+                "sdPath": sd_path,
+                "sha256": source["sha256"],
+                "bytes": source["bytes"],
+                "mediaType": source["mediaType"],
+                "width": source["width"],
+                "height": source["height"],
+            },
+        }
     return {
         "templateId": TEMPLATE_ID,
-        "templateVersion": TEMPLATE_VERSION,
-        "phaseId": phase_id,
+        "templateVersion": TEMPLATE_VERSION_V2,
+        "cueId": entry_id,
+        "effect": phase["effect"],
+        "stepKey": phase["stepKey"],
+        "playbackMode": phase["playbackMode"],
         "durationMs": phase["timing"]["durationMs"],
         "fps": metadata["fps"],
         "frameCount": metadata["frameCount"],
-        "asset": {
-            "derivativeId": source["derivativeId"],
-            "phaseId": phase_id,
-            "sdPath": sd_path,
-            "sha256": source["sha256"],
-            "bytes": source["bytes"],
-            "mediaType": source["mediaType"],
-            "width": source["width"],
-            "height": source["height"],
-        },
+        "asset": {"derivativeId": source["derivativeId"], "cueId": entry_id, **common_asset},
     }

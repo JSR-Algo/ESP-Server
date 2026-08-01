@@ -69,7 +69,11 @@ _ASSET_FIELDS = frozenset(
 )
 _SHARED_IDENTITY_FIELDS = frozenset({"sharedAssetKey", "sharedAssetVersion"})
 _RENDERER_V3_MP4_FIELDS = frozenset({"compatibilityMetadata", "visualRefs"})
-_RENDERER_V4_MP4_FIELDS = frozenset({"compatibilityMetadata", "derivativeId", "phaseId"})
+_RENDERER_V4_V1_MP4_FIELDS = frozenset({"compatibilityMetadata", "derivativeId", "phaseId"})
+_RENDERER_V4_V2_MP4_FIELDS = frozenset(
+    {"compatibilityMetadata", "derivativeId", "cueId", "effect", "stepKey", "playbackMode"}
+)
+_RENDERER_V4_MP4_FIELDS = _RENDERER_V4_V1_MP4_FIELDS | _RENDERER_V4_V2_MP4_FIELDS
 _ALL_ASSET_FIELDS = (
     _ASSET_FIELDS | _SHARED_IDENTITY_FIELDS | _RENDERER_V3_MP4_FIELDS | _RENDERER_V4_MP4_FIELDS
 )
@@ -457,7 +461,7 @@ def _validate_asset(
         raise _PollRejected("cms_invalid_asset")
     fields = set(value)
     if not _ASSET_FIELDS.issubset(fields) or fields - _ALL_ASSET_FIELDS:
-        if fields & {"derivativeId", "phaseId"}:
+        if fields & {"derivativeId", "phaseId", "cueId"}:
             raise _PollRejected("cms_invalid_renderer_v4_mp4")
         raise _PollRejected("cms_unknown_field")
     key = value.get("key")
@@ -483,7 +487,7 @@ def _validate_asset(
     if value.get("sdPath") != value.get("localPath"):
         raise _PollRejected("cms_asset_alias_mismatch")
     if value.get("sdPath") != expected_path:
-        if fields & {"derivativeId", "phaseId"}:
+        if fields & {"derivativeId", "phaseId", "cueId"}:
             raise _PollRejected("cms_invalid_renderer_v4_mp4")
         raise _PollRejected("cms_sd_path_mismatch")
     if value.get("onlineUrl") != value.get("url"):
@@ -501,12 +505,17 @@ def _validate_asset(
         raise _PollRejected("cms_invalid_critical")
     media_type = value["mediaType"]
     if media_type.lower().startswith("video/"):
-        if fields & frozenset({"derivativeId", "phaseId"}):
+        if fields & frozenset({"derivativeId", "phaseId", "cueId"}):
             try:
                 validate_renderer_v4_flattened_mp4(value)
             except FirmwareSyncPackError:
                 raise _PollRejected("cms_invalid_renderer_v4_mp4") from None
-            if fields != _ASSET_FIELDS | _RENDERER_V4_MP4_FIELDS:
+            expected_fields = (
+                _ASSET_FIELDS | _RENDERER_V4_V1_MP4_FIELDS
+                if "phaseId" in fields
+                else _ASSET_FIELDS | _RENDERER_V4_V2_MP4_FIELDS
+            )
+            if fields != expected_fields:
                 raise _PollRejected("cms_invalid_renderer_v4_mp4")
         else:
             try:

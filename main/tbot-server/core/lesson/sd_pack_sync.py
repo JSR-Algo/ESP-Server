@@ -324,7 +324,7 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
     rich_identity: dict[str, Any] = {}
     if media_type == "video/mp4":
         try:
-            if "derivativeId" in item or "phaseId" in item:
+            if "derivativeId" in item or "phaseId" in item or "cueId" in item:
                 rich_identity = validate_renderer_v4_flattened_mp4(dict(item))
             else:
                 rich_identity = validate_renderer_v3_shared_mp4(dict(item))

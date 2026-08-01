@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z '\-]{0,79}")
@@ -21,6 +21,19 @@ _CUE_EFFECTS = MappingProxyType(
         "retry_level_3": "show_pronunciation_guide",
         "celebrate": "show_celebration",
         "word_transition": "show_word_transition",
+    }
+)
+_BACKEND_CUE_EFFECTS = MappingProxyType(
+    {
+        "teach": ("teach", "show_teaching_scene", "once"),
+        "listen": ("listen", "show_listening_scene", "loop"),
+        "thinking": ("thinking", "show_thinking_scene", "loop"),
+        "correct": ("correct", "show_correct_reaction", "once"),
+        "retry-level-1": ("retry_level_1", "show_effort_reaction", "once"),
+        "retry-level-2": ("retry_level_2", "show_slow_model", "once"),
+        "retry-level-3": ("retry_level_3", "show_pronunciation_guide", "once"),
+        "celebrate": ("celebrate", "show_celebration", "once"),
+        "word-transition": ("word_transition", "show_word_transition", "once"),
     }
 )
 _CONTRACT_FIELDS = frozenset(
@@ -53,7 +66,7 @@ class ConversationContractError(ValueError):
         self.message = message
 
 
-def _fail(code: str, message: str) -> None:
+def _fail(code: str, message: str) -> NoReturn:
     raise ConversationContractError(code, message)
 
 
@@ -167,10 +180,15 @@ class LessonConversationContract:
             _fail("TARGET_ANSWER_MISMATCH", "expected answer must be the target English word")
         if _normalize(target) not in _normalize(teaching_copy):
             _fail("TARGET_COPY_MISMATCH", "teaching copy must teach the target word")
-        cues_source = _exact_mapping(source["cues"], set(_CUE_EFFECTS), "cues")
+        expected_cue_roles = set(_CUE_EFFECTS)
+        if progress_index == progress_count:
+            expected_cue_roles.remove("word_transition")
+        cues_source = _exact_mapping(source["cues"], expected_cue_roles, "cues")
         cues: list[CueSpec] = []
         seen_ids: set[str] = set()
         for role, expected_effect in _CUE_EFFECTS.items():
+            if role not in expected_cue_roles:
+                continue
             cue = _exact_mapping(cues_source[role], {"cue_id", "effect"}, f"cue {role}")
             cue_id = _safe_id(cue["cue_id"], f"cue {role}")
             if cue_id in seen_ids:
@@ -203,6 +221,173 @@ class LessonConversationContract:
     @property
     def cue_map(self) -> Mapping[str, CueSpec]:
         return MappingProxyType({cue.role: cue for cue in self.cues})
+
+    @property
+    def is_terminal_step(self) -> bool:
+        return self.progress_index == self.progress_count
+
+
+def lesson_conversation_contract_from_backend(
+    manifest: Any,
+    *,
+    lesson_session_id: str,
+    step_key: str,
+) -> LessonConversationContract:
+    """Validate the backend v4 DTO and adapt one authored step to the pure FSM shape."""
+    if not isinstance(manifest, Mapping):
+        _fail("INVALID_BACKEND_MANIFEST", "lesson manifest must be an object")
+    root = cast(Mapping[str, Any], manifest)
+    if (
+        root.get("manifestVersion") != "teebot-lesson-renderer.v4"
+        or root.get("protocolVersion") != "teebot-lesson-renderer.v4"
+    ):
+        _fail("INVALID_BACKEND_MANIFEST", "conversation requires renderer v4")
+    lesson_id = _safe_id(root.get("lessonId"), "lessonId")
+    lesson_version = root.get("lessonVersion")
+    if type(lesson_version) is not int or lesson_version <= 0:
+        _fail("INVALID_BACKEND_MANIFEST", "lessonVersion must be positive")
+    conversation = _exact_mapping(
+        root.get("conversation"),
+        {"presetId", "presetVersion", "maxContextualTurns", "steps"},
+        "conversation DTO",
+    )
+    if conversation["presetId"] != "tvideoJourney" or conversation["presetVersion"] != 1:
+        _fail("INVALID_BACKEND_MANIFEST", "unsupported conversation preset")
+    if conversation["maxContextualTurns"] != 2:
+        _fail("INVALID_BACKEND_MANIFEST", "maxContextualTurns must be exactly two")
+    raw_steps = conversation["steps"]
+    if not isinstance(raw_steps, list) or len(raw_steps) != 2:
+        _fail("INVALID_BACKEND_MANIFEST", "tvideoJourney.v1 requires exactly two authored steps")
+    normalized_steps: list[dict[str, Any]] = []
+    seen_steps: set[str] = set()
+    seen_cues: set[str] = set()
+    for index, raw_step in enumerate(raw_steps):
+        step = _exact_mapping(
+            raw_step,
+            {
+                "stepKey", "targetWord", "vietnameseMeanings", "relatedConcepts",
+                "questionSeeds", "teachingCopy", "expectedAnswer", "progress",
+                "pronunciation", "contextTurns", "cues",
+            },
+            "conversation step DTO",
+        )
+        current_step_key = _safe_id(step["stepKey"], "stepKey")
+        if current_step_key in seen_steps:
+            _fail("INVALID_BACKEND_MANIFEST", "conversation step keys must be unique")
+        seen_steps.add(current_step_key)
+        progress = _exact_mapping(step["progress"], {"index", "count"}, "progress DTO")
+        if progress["index"] != index + 1 or progress["count"] != len(raw_steps):
+            _fail("INVALID_BACKEND_MANIFEST", "conversation progress does not match step order")
+        teaching = _exact_mapping(
+            step["teachingCopy"], {"intro", "explanation", "prompt"}, "teachingCopy DTO"
+        )
+        pronunciation_source = step["pronunciation"]
+        if not isinstance(pronunciation_source, Mapping):
+            _fail("INVALID_BACKEND_MANIFEST", "pronunciation DTO must be an object")
+        unit_key = "approvedSegments" if "approvedSegments" in pronunciation_source else "approvedPhonemes"
+        pronunciation = _exact_mapping(
+            pronunciation_source,
+            {"slowModel", unit_key, "vietnameseL1Guidance"},
+            "pronunciation DTO",
+        )
+        context_turns = _unique_text_tuple(step["contextTurns"], "contextTurns")
+        if len(context_turns) > 2:
+            _fail("INVALID_BACKEND_MANIFEST", "contextTurns exceeds the bounded contract")
+        raw_cues = step["cues"]
+        if not isinstance(raw_cues, list):
+            _fail("INVALID_BACKEND_MANIFEST", "cues DTO must be a list")
+        expected_effect_order = list(_BACKEND_CUE_EFFECTS)
+        if index + 1 == len(raw_steps):
+            expected_effect_order.remove("word-transition")
+        expected_effects = set(expected_effect_order)
+        cue_mapping: dict[str, dict[str, str]] = {}
+        actual_effects: set[str] = set()
+        for raw_cue in raw_cues:
+            cue = _exact_mapping(raw_cue, {"cueId", "effect", "playbackMode"}, "cue DTO")
+            effect = cue["effect"]
+            if effect not in expected_effects or effect in actual_effects:
+                _fail("INVALID_BACKEND_MANIFEST", "cue effects do not match the authored step")
+            role, internal_effect, playback_mode = _BACKEND_CUE_EFFECTS[effect]
+            cue_id = _safe_id(cue["cueId"], "cueId")
+            if cue_id in seen_cues or cue["playbackMode"] != playback_mode:
+                _fail("INVALID_BACKEND_MANIFEST", "cue identity or playback mode is stale")
+            actual_effects.add(effect)
+            seen_cues.add(cue_id)
+            cue_mapping[role] = {"cue_id": cue_id, "effect": internal_effect}
+        if actual_effects != expected_effects or [cue["effect"] for cue in raw_cues] != expected_effect_order:
+            _fail("INVALID_BACKEND_MANIFEST", "cue effects do not match the authored step")
+        normalized_steps.append(
+            {
+                "lesson_session_id": lesson_session_id,
+                "lesson_id": lesson_id,
+                "lesson_version": lesson_version,
+                "step_key": current_step_key,
+                "target_word": step["targetWord"],
+                "meanings_vi": step["vietnameseMeanings"],
+                "related_concepts": step["relatedConcepts"],
+                "question_seeds": step["questionSeeds"],
+                "teaching_copy": " ".join(
+                    _nonempty_text(teaching[field], field)
+                    for field in ("intro", "explanation", "prompt")
+                ),
+                "expected_answer": step["expectedAnswer"],
+                "progress_index": progress["index"],
+                "progress_count": progress["count"],
+                "pronunciation": {
+                    "slow_model": pronunciation["slowModel"],
+                    "segments" if unit_key == "approvedSegments" else "phonemes": pronunciation[unit_key],
+                    "l1_guidance_vi": " ".join(
+                        _unique_text_tuple(pronunciation["vietnameseL1Guidance"], "vietnameseL1Guidance")
+                    ),
+                },
+                "cues": cue_mapping,
+                "max_contextual_turns": conversation["maxContextualTurns"],
+            }
+        )
+    first_step_key = normalized_steps[0]["step_key"]
+    expected_cinematics: list[tuple[str, str, str, str]] = [
+        (f"{first_step_key}-opening", "opening", first_step_key, "once"),
+        (f"{first_step_key}-greet", "greet", first_step_key, "loop"),
+    ]
+    for index, step in enumerate(normalized_steps):
+        for raw_cue in raw_steps[index]["cues"]:
+            cue_step_key = (
+                normalized_steps[index + 1]["step_key"]
+                if raw_cue["effect"] == "word-transition"
+                else step["step_key"]
+            )
+            expected_cinematics.append(
+                (raw_cue["cueId"], raw_cue["effect"], cue_step_key, raw_cue["playbackMode"])
+            )
+    cinematic_phases = root.get("cinematicPhases")
+    if not isinstance(cinematic_phases, list) or len(cinematic_phases) != 19:
+        _fail("INVALID_BACKEND_MANIFEST", "tvideoJourney.v1 requires exactly 19 cinematic cues")
+    actual_cinematics: list[tuple[str, str, str, str]] = []
+    for raw_phase in cinematic_phases:
+        phase = _exact_mapping(
+            raw_phase,
+            {
+                "templateId", "templateVersion", "cueId", "effect", "stepKey",
+                "playbackMode", "timing", "asset",
+            },
+            "cinematic cue DTO",
+        )
+        if phase["templateId"] != "flattenedMjpegCinematic" or phase["templateVersion"] != 2:
+            _fail("INVALID_BACKEND_MANIFEST", "cinematic cue template identity is invalid")
+        actual_cinematics.append(
+            (
+                _safe_id(phase["cueId"], "cinematic cueId"),
+                phase["effect"],
+                _safe_id(phase["stepKey"], "cinematic stepKey"),
+                phase["playbackMode"],
+            )
+        )
+    if actual_cinematics != expected_cinematics:
+        _fail("INVALID_BACKEND_MANIFEST", "cinematic cues do not match conversation authority")
+    selected = next((step for step in normalized_steps if step["step_key"] == step_key), None)
+    if selected is None:
+        _fail("INVALID_BACKEND_MANIFEST", "requested conversation step is absent")
+    return LessonConversationContract.from_mapping(selected)
 
 
 @dataclass(frozen=True)

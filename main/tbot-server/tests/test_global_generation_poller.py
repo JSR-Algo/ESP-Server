@@ -83,6 +83,21 @@ def _renderer_v4_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
     return asset
 
 
+def _renderer_v4_v2_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
+    asset = _asset("flattenedCinematic.barn-listen", size=130000, cache_key=cache_key)
+    asset.update({
+        "onlineUrl": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "url": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64,
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    })
+    return asset
+
+
 def _pack(*, lesson_id: str = "lesson-a", classification: str = "curriculum") -> dict:
     checksum = HASH_B
     cache_key = f"{lesson_id}/v3-{checksum}"
@@ -231,6 +246,24 @@ async def test_validated_renderer_v4_flattened_asset_passes_through_unchanged() 
     pack["lessonVersion"] = 4
     pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
     pack["assets"] = [_renderer_v4_mp4_asset(cache_key=pack["cacheKey"])]
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+async def test_validated_renderer_v4_v2_cue_passes_through_unchanged() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    pack["assets"] = [_renderer_v4_v2_mp4_asset(cache_key=pack["cacheKey"])]
     payload = _payload(index=[pack])
     received = []
     poller = GlobalGenerationPoller(

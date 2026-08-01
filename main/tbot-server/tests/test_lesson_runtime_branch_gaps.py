@@ -260,6 +260,40 @@ class _FlattenedAssetCache(_CinematicAssetCache):
         return pack
 
 
+def _flattened_v2_manifest():
+    manifest = _flattened_manifest()
+    manifest["cinematicPhases"] = [copy.deepcopy(manifest["cinematicPhases"][0])]
+    cue = manifest["cinematicPhases"][0]
+    cue.update({
+        "templateVersion": 2, "cueId": "barn-opening", "effect": "opening",
+        "stepKey": "barn", "playbackMode": "once",
+    })
+    cue.pop("phaseId")
+    cue["timing"]["durationMs"] = 9500
+    cue["asset"]["metadata"]["durationMs"] = 9500
+    cue["asset"]["metadata"]["frameCount"] = 95
+    cue["asset"]["path"] = f"lessons/derivatives/{'d' * 64}/barn-opening.mp4"
+    cue["asset"]["url"] = f"https://cdn.example.test/lessons/derivatives/{'d' * 64}/barn-opening.mp4"
+    return manifest
+
+
+class _FlattenedV2AssetCache(_CinematicAssetCache):
+    def asset_pack_manifest(self, **kwargs):
+        pack = T._FakeAssetCache.asset_pack_manifest(self, **kwargs)
+        path = f"{pack['localRoot']}/flattenedCinematic.barn-opening"
+        pack["assets"] = [{
+            "key": "flattenedCinematic.barn-opening", "state": "READY", "checksumOk": True,
+            "localPath": path, "sdPath": path, "sha256": "a" * 64, "size": 1234,
+            "mediaType": "video/mp4", "derivativeId": "d" * 64,
+            "cueId": "barn-opening", "effect": "opening", "stepKey": "barn", "playbackMode": "once",
+            "compatibilityMetadata": {
+                "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+                "durationMs": 9500, "frameCount": 95, "hasAudio": False,
+            },
+        }]
+        return pack
+
+
 def _flattened_runtime(*, conn=None):
     conn = conn or T._FakeConn(features={
         "lesson": True, "renderer": [RENDERER_V4],
@@ -274,6 +308,24 @@ def _flattened_runtime(*, conn=None):
         return LessonRuntime(
             conn, assignment=T._build_assignment(), manifest=_flattened_manifest(),
             asset_cache=_FlattenedAssetCache(), forwarder=T._FakeForwarder(),
+            manifest_checksum=T._manifest_checksum(),
+        )
+
+
+def _flattened_v2_runtime(*, conn=None):
+    conn = conn or T._FakeConn(features={
+        "lesson": True, "renderer": [RENDERER_V4],
+        "lessonRendererV4": {"flattenedMjpegCinematic": True, "sdAssetPack": True},
+    })
+    conn.device_id = "robot-v4"
+    conn.config = {"lesson": {
+        "renderer_v4_enabled": True, "rollout_device_allowlist": ["robot-v4"],
+        "asset_delivery_mode": "sd_pack", "frame_ack_timeout_sec": 60,
+    }}
+    with mock.patch("core.lesson.runtime.uuid.uuid4", return_value=conn.session_id):
+        return LessonRuntime(
+            conn, assignment=T._build_assignment(), manifest=_flattened_v2_manifest(),
+            asset_cache=_FlattenedV2AssetCache(), forwarder=T._FakeForwarder(),
             manifest_checksum=T._manifest_checksum(),
         )
 
@@ -1570,7 +1622,9 @@ class FlattenedCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         event = "frameZeroReady" if kind == "prepare" else "phaseReady" if kind == "start" else "commandApplied"
         cinematic_ack = {
             "event": event, "command": kind,
-            "phaseId": command["phaseId"],
+            ("phaseId" if "phaseId" in command else "cueId"): (
+                command["phaseId"] if "phaseId" in command else command["cueId"]
+            ),
             "commandSequenceId": command.get("commandSequenceId", body.get("commandSequenceId")),
             "accepted": True,
         }
@@ -1656,6 +1710,29 @@ class FlattenedCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(self._ack(rt, cancel, 5))
         self.assertEqual(rt.state, S_COMPLETED)
         self.assertIsNone(rt._cinematic_phase)
+
+    async def test_v4_v2_ack_uses_cue_identity_and_rejects_phase_or_stale_cue(self):
+        rt = _flattened_v2_runtime()
+        await rt.start()
+        prepare = self._frames(rt)[0]
+        command = prepare["body"]["cinematicPhase"]
+        self.assertEqual(command["cueId"], "barn-opening")
+        self.assertNotIn("phaseId", command)
+
+        wrong_kind = self._ack(rt, prepare, 1)
+        wrong_kind["body"]["cinematicPhase"]["phaseId"] = wrong_kind["body"]["cinematicPhase"].pop("cueId")
+        await rt.on_lesson_ack(wrong_kind)
+        self.assertEqual(len(self._frames(rt)), 1)
+
+        stale = self._ack(rt, prepare, 1)
+        stale["body"]["cinematicPhase"]["cueId"] = "hay-opening"
+        await rt.on_lesson_ack(stale)
+        self.assertEqual(len(self._frames(rt)), 1)
+
+        await rt.on_lesson_ack(self._ack(rt, prepare, 1))
+        start = self._frames(rt)[-1]
+        self.assertEqual(start["type"], "lesson_start")
+        self.assertEqual(start["body"]["cinematicPhase"]["cueId"], "barn-opening")
 
 
 class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):

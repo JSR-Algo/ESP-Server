@@ -261,6 +261,27 @@ def test_renderer_v4_flattened_mp4_preserves_exact_identity_and_physical_path():
     assert sent["localPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/flattenedCinematic.opening"
     assert sent["sdPath"] == sent["localPath"]
 
+
+def test_renderer_v4_v2_cue_preserves_semantic_identity_and_playback_mode():
+    render_pack = _pack("flattenedCinematic.barn-listen")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64,
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    })
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert {key: sent[key] for key in ("cueId", "effect", "stepKey", "playbackMode")} == {
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+    }
+
 @pytest.mark.parametrize(
     ("mutate", "secret"),
     [

@@ -51,6 +51,7 @@ from core.lesson.cinematic_contract import (
 )
 from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
+    cinematic_identity_key,
     RENDERER_V4,
     project_flattened_cinematic_phase,
     validate_flattened_cinematic_manifest,
@@ -944,21 +945,24 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
             continue
         source = phase["asset"]
         metadata = source.get("metadata")
-        phase_id = phase.get("phaseId")
-        if not isinstance(metadata, dict) or not isinstance(phase_id, str):
+        version = phase.get("templateVersion")
+        identity_field = "phaseId" if version == 1 else "cueId" if version == 2 else None
+        entry_id = phase.get(identity_field) if identity_field else None
+        if not isinstance(metadata, dict) or not isinstance(entry_id, str):
             continue
-        assets.append({
-            "key": f"flattenedCinematic.{phase_id}",
+        common = {
+            "key": f"flattenedCinematic.{entry_id}",
             "path": source.get("path"),
             "url": source.get("url"),
             "sha256": source.get("sha256"),
             "size": source.get("bytes"),
             "critical": True,
             "layer": "flattenedCinematic",
-            "role": phase_id,
+            "role": entry_id,
             "mediaType": source.get("mediaType"),
             "derivativeId": source.get("derivativeId"),
-            "phaseId": phase_id,
+        }
+        compatibility = {
             "compatibilityMetadata": {
                 "codec": metadata.get("codec"),
                 "width": source.get("width"),
@@ -968,6 +972,17 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                 "frameCount": metadata.get("frameCount"),
                 "hasAudio": metadata.get("hasAudio"),
             },
+        }
+        if version == 1:
+            assets.append({**common, "phaseId": entry_id, **compatibility})
+            continue
+        assets.append({
+            **common,
+            "cueId": entry_id,
+            "effect": phase.get("effect"),
+            "stepKey": phase.get("stepKey"),
+            "playbackMode": phase.get("playbackMode"),
+            **compatibility,
         })
     return assets
 
@@ -1433,6 +1448,13 @@ class LessonRuntime:
             return None
         return command
 
+    def _cinematic_identity_payload(self) -> Dict[str, str]:
+        phase = self._cinematic_phase
+        if not isinstance(phase, dict):
+            return {}
+        identity = cinematic_identity_key(phase)
+        return {"phaseId" if "phaseId" in phase else "cueId": identity}
+
     def _cinematic_ack_matches(
         self, frame: Dict[str, Any], ack_body: Dict[str, Any]
     ) -> bool:
@@ -1445,9 +1467,12 @@ class LessonRuntime:
         if not isinstance(ack, dict):
             return False
         kind = command.get("command")
-        common = {
-            "event", "command", "phaseId", "commandSequenceId", "accepted"
-        }
+        try:
+            identity_key = cinematic_identity_key(command)
+        except FlattenedCinematicContractError:
+            return False
+        identity_field = "phaseId" if "phaseId" in command else "cueId"
+        common = {"event", "command", identity_field, "commandSequenceId", "accepted"}
         expected_event = "commandApplied"
         expected_keys = common
         if kind == "prepare":
@@ -1460,7 +1485,7 @@ class LessonRuntime:
             set(ack) != expected_keys
             or ack.get("event") != expected_event
             or ack.get("command") != kind
-            or ack.get("phaseId") != command.get("phaseId")
+            or ack.get(identity_field) != identity_key
             or ack.get("commandSequenceId") != command.get("commandSequenceId")
             or ack.get("accepted") is not True
         ):
@@ -1474,6 +1499,7 @@ class LessonRuntime:
             isinstance(pending, dict)
             and pending.get("command") == kind
             and pending.get("commandSequenceId") == command.get("commandSequenceId")
+            and pending.get(identity_field) == identity_key
         )
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
@@ -3222,7 +3248,7 @@ class LessonRuntime:
             if self._cinematic_pending_command is None:
                 await self._emit(
                     "lesson_cinematic_control",
-                    body={"command": "pause", "phaseId": self._cinematic_phase["phaseId"]},
+                    body={"command": "pause", **self._cinematic_identity_payload()},
                 )
             return
         self.state = S_PAUSED
@@ -3240,7 +3266,7 @@ class LessonRuntime:
                     "lesson_cinematic_control",
                     body={
                         "command": "resume",
-                        "phaseId": self._cinematic_phase["phaseId"],
+                        **self._cinematic_identity_payload(),
                         "clockRebaseSequenceId": self._seq + 1,
                     },
                 )
@@ -3331,7 +3357,7 @@ class LessonRuntime:
             if self._cinematic_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {
                     "command": "stop",
-                    "phaseId": self._cinematic_phase["phaseId"],
+                    **self._cinematic_identity_payload(),
                 }
                 self._cinematic_stop_sent = True
             await self._emit("lesson_stop", body=body)
@@ -3348,7 +3374,7 @@ class LessonRuntime:
             "lesson_cinematic_control",
             body={
                 "command": "cancel",
-                "phaseId": (self._cinematic_phase or {}).get("phaseId"),
+                **self._cinematic_identity_payload(),
                 "reason": str(reason or "cancelled")[:64],
             },
         )
@@ -3422,9 +3448,14 @@ class LessonRuntime:
             if command is not None:
                 command_sequence_id = command.get("commandSequenceId", frame_body.get("commandSequenceId"))
                 command["commandSequenceId"] = command_sequence_id
+                identity_payload = (
+                    {"phaseId": command.get("phaseId")}
+                    if "phaseId" in command
+                    else {"cueId": command.get("cueId")}
+                )
                 self._cinematic_pending_command = {
                     "command": command.get("command"),
-                    "phaseId": command.get("phaseId"),
+                    **identity_payload,
                     "commandSequenceId": command_sequence_id,
                     "targetState": {
                         "pause": S_PAUSED,
@@ -3598,7 +3629,7 @@ class LessonRuntime:
             return {
                 "cinematicPhase": {
                     "command": "start",
-                    "phaseId": self._cinematic_phase["phaseId"],
+                    **self._cinematic_identity_payload(),
                 }
             }
         if not self._renderer_v2_enabled():

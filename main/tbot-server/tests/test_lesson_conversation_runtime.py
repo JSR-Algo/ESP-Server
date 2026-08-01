@@ -9,6 +9,7 @@ from core.lesson.conversation_contract import (
     ConversationContractError,
     LessonConversationContract,
     LessonToolIdentity,
+    lesson_conversation_contract_from_backend,
 )
 from core.lesson.conversation_runtime import (
     ConversationState,
@@ -58,6 +59,82 @@ def _contract(**kwargs) -> LessonConversationContract:
     return LessonConversationContract.from_mapping(payload)
 
 
+def _backend_step(step_key: str, index: int, count: int, *, terminal: bool) -> dict[str, object]:
+    target = "barn" if step_key == "barn" else "hay"
+    effects = [
+        "teach", "listen", "thinking", "correct", "retry-level-1",
+        "retry-level-2", "retry-level-3", "celebrate",
+    ]
+    cues = [{
+        "cueId": f"{step_key}-{effect}",
+        "effect": effect,
+        "playbackMode": "loop" if effect in {"listen", "thinking"} else "once",
+    } for effect in effects]
+    if not terminal:
+        cues.append({
+            "cueId": f"{step_key}-to-hay-word-transition",
+            "effect": "word-transition",
+            "playbackMode": "once",
+        })
+    return {
+        "stepKey": step_key,
+        "targetWord": target,
+        "vietnameseMeanings": ["nhà kho"] if target == "barn" else ["cỏ khô"],
+        "relatedConcepts": ["farm"],
+        "questionSeeds": [f"Can you say {target}?"],
+        "teachingCopy": {
+            "intro": f"This is {target}.",
+            "explanation": f"Learn {target}.",
+            "prompt": f"Say {target}.",
+        },
+        "expectedAnswer": target,
+        "progress": {"index": index, "count": count},
+        "pronunciation": {
+            "slowModel": target,
+            "approvedSegments": [target],
+            "vietnameseL1Guidance": ["Nói chậm và rõ."],
+        },
+        "contextTurns": ["one", "two"],
+        "cues": cues,
+    }
+
+
+def _backend_manifest() -> dict[str, object]:
+    steps = [
+        _backend_step("barn", 1, 2, terminal=False),
+        _backend_step("hay", 2, 2, terminal=True),
+    ]
+    phases = [
+        {"templateId": "flattenedMjpegCinematic", "templateVersion": 2,
+         "cueId": "barn-opening", "effect": "opening", "stepKey": "barn", "playbackMode": "once",
+         "timing": {}, "asset": {}},
+        {"templateId": "flattenedMjpegCinematic", "templateVersion": 2,
+         "cueId": "barn-greet", "effect": "greet", "stepKey": "barn", "playbackMode": "loop",
+         "timing": {}, "asset": {}},
+    ]
+    for index, step in enumerate(steps):
+        for cue in step["cues"]:
+            phases.append({
+                "templateId": "flattenedMjpegCinematic", "templateVersion": 2,
+                **cue,
+                "stepKey": steps[index + 1]["stepKey"] if cue["effect"] == "word-transition" else step["stepKey"],
+                "timing": {}, "asset": {},
+            })
+    return {
+        "manifestVersion": "teebot-lesson-renderer.v4",
+        "protocolVersion": "teebot-lesson-renderer.v4",
+        "lessonId": "farm-english",
+        "lessonVersion": 4,
+        "conversation": {
+            "presetId": "tvideoJourney",
+            "presetVersion": 1,
+            "maxContextualTurns": 2,
+            "steps": steps,
+        },
+        "cinematicPhases": phases,
+    }
+
+
 def _runtime() -> LessonConversationRuntime:
     ids = iter(("attempt-a", "attempt-b", "attempt-c"))
     return LessonConversationRuntime(_contract(), attempt_id_factory=lambda: next(ids))
@@ -93,6 +170,77 @@ def test_contract_is_exact_deeply_immutable_and_supports_either_pronunciation_un
     assert LessonConversationContract.from_mapping(_payload(phonemes=True)).pronunciation.phonemes
     with pytest.raises(FrozenInstanceError):
         contract.target_word = "pear"  # type: ignore[misc]
+
+
+def test_backend_conversation_adapter_preserves_raw_cues_and_terminal_transition_rule() -> None:
+    manifest = _backend_manifest()
+    barn = lesson_conversation_contract_from_backend(
+        manifest, lesson_session_id="session-7a", step_key="barn"
+    )
+    hay = lesson_conversation_contract_from_backend(
+        manifest, lesson_session_id="session-7a", step_key="hay"
+    )
+
+    assert barn.cue_map["retry_level_2"].cue_id == "barn-retry-level-2"
+    assert barn.cue_map["word_transition"].cue_id == "barn-to-hay-word-transition"
+    assert hay.progress_index == hay.progress_count == 2
+    assert "word_transition" not in hay.cue_map
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest["conversation"]["steps"][0]["cues"].pop(),
+        lambda manifest: manifest["conversation"]["steps"][1]["cues"].append({
+            "cueId": "hay-word-transition", "effect": "word-transition", "playbackMode": "once",
+        }),
+        lambda manifest: manifest["conversation"]["steps"][0]["cues"][0].update(effect="listen"),
+        lambda manifest: manifest["conversation"]["steps"][0]["cues"][0].update(extra=True),
+        lambda manifest: manifest["cinematicPhases"].pop(),
+    ],
+)
+def test_backend_conversation_adapter_rejects_missing_extra_stale_or_terminal_cues(mutate) -> None:
+    manifest = _backend_manifest()
+    mutate(manifest)
+    with pytest.raises(ConversationContractError):
+        lesson_conversation_contract_from_backend(
+            manifest, lesson_session_id="session-7a", step_key="barn"
+        )
+
+
+def test_terminal_step_continue_completes_without_nonexistent_transition_cue() -> None:
+    contract = lesson_conversation_contract_from_backend(
+        _backend_manifest(), lesson_session_id="session-7a", step_key="hay"
+    )
+    runtime = LessonConversationRuntime(contract, attempt_id_factory=lambda: "attempt-terminal")
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    runtime.pronunciation_outcome(_identity(runtime), "correct")
+
+    continued = runtime.continue_lesson(
+        _identity(runtime, cue_id="hay-celebrate"), effect="show_celebration"
+    )
+
+    assert continued.accepted
+    assert continued.next_intent == "complete_lesson"
+    assert continued.cue_id is None
+
+
+def test_terminal_attempted_review_continue_needs_no_transition_visual() -> None:
+    contract = lesson_conversation_contract_from_backend(
+        _backend_manifest(), lesson_session_id="session-7a", step_key="hay"
+    )
+    runtime = LessonConversationRuntime(contract, attempt_id_factory=lambda: "attempt-terminal")
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "target")
+    for _ in range(4):
+        runtime.pronunciation_outcome(_identity(runtime), "retry")
+
+    continued = runtime.continue_lesson(_identity(runtime), effect=None)
+
+    assert continued.accepted
+    assert continued.next_intent == "complete_lesson"
+    assert continued.cue_id is None
 
 
 @pytest.mark.parametrize(

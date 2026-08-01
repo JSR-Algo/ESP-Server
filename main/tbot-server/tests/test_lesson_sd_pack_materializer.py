@@ -191,6 +191,37 @@ def _flattened_mp4_manifest():
     }])
 
 
+def _flattened_v2_mp4_manifest():
+    content = b"renderer-v4-cue"
+    key = "flattenedCinematic.barn-listen"
+    url = "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4"
+    return content, _manifest(assets=[{
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key), "localPath": _sd_path(key),
+        "derivativeId": "d" * 64, "cueId": "barn-listen", "effect": "listen",
+        "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    }])
+
+
+@pytest.mark.asyncio
+async def test_renderer_v4_v2_cue_materializes_with_exact_identity(tmp_path):
+    content, manifest = _flattened_v2_mp4_manifest()
+    url = manifest["assets"][0]["onlineUrl"]
+    await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=_Client({url: [content]}), resolver=_public_resolver,
+    )
+
+    pack_path = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json"
+    stored = json.loads(pack_path.read_text(encoding="utf-8"))["assets"][0]
+    assert {key: stored[key] for key in ("cueId", "effect", "stepKey", "playbackMode")} == {
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+    }
+
+
 @pytest.mark.asyncio
 async def test_renderer_v4_one_file_pack_materializes_reuses_and_never_activates_corrupt(tmp_path):
     content, manifest = _flattened_mp4_manifest()

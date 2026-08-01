@@ -36,6 +36,24 @@ _FLATTENED_METADATA_FIELDS = frozenset(
 _FLATTENED_PHASE_IDS = frozenset(
     {"opening", "greet", "teach", "listen", "thinking", "correct", "retry", "celebrate"}
 )
+_FLATTENED_CUE_EFFECTS = frozenset(
+    {
+        "opening", "greet", "teach", "listen", "thinking", "correct",
+        "retry-level-1", "retry-level-2", "retry-level-3", "celebrate",
+        "word-transition",
+    }
+)
+_SAFE_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_FLATTENED_CUE_PLAYBACK_MODE = {
+    effect: "loop" if effect in {"greet", "listen", "thinking"} else "once"
+    for effect in _FLATTENED_CUE_EFFECTS
+}
+_FLATTENED_CUE_DURATION_MS = {
+    "opening": 9500, "greet": 1200, "teach": 2600, "listen": 1300,
+    "thinking": 1300, "correct": 600, "retry-level-1": 1200,
+    "retry-level-2": 1400, "retry-level-3": 1600, "celebrate": 3000,
+    "word-transition": 1100,
+}
 
 
 class FirmwareSyncPackError(ValueError):
@@ -181,14 +199,38 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     if not isinstance(asset, dict) or asset.get("mediaType") != "video/mp4":
         _refuse()
     derivative_id = asset.get("derivativeId")
-    phase_id = asset.get("phaseId")
-    if (
-        not isinstance(derivative_id, str)
-        or _LOWER_SHA256_RE.fullmatch(derivative_id) is None
-        or phase_id not in _FLATTENED_PHASE_IDS
-        or asset.get("key") != f"flattenedCinematic.{phase_id}"
-    ):
+    if not isinstance(derivative_id, str) or _LOWER_SHA256_RE.fullmatch(derivative_id) is None:
         _refuse()
+    has_phase = "phaseId" in asset
+    has_cue = any(field in asset for field in ("cueId", "effect", "stepKey", "playbackMode"))
+    if has_phase == has_cue:
+        _refuse()
+    if has_phase:
+        phase_id = asset.get("phaseId")
+        if phase_id not in _FLATTENED_PHASE_IDS or asset.get("key") != f"flattenedCinematic.{phase_id}":
+            _refuse()
+        identity = {"phaseId": phase_id}
+    else:
+        cue_id = asset.get("cueId")
+        step_key = asset.get("stepKey")
+        effect = asset.get("effect")
+        playback_mode = asset.get("playbackMode")
+        if (
+            not isinstance(cue_id, str)
+            or _SAFE_SLUG_RE.fullmatch(cue_id) is None
+            or not isinstance(step_key, str)
+            or _SAFE_SLUG_RE.fullmatch(step_key) is None
+            or effect not in _FLATTENED_CUE_EFFECTS
+            or playback_mode != _FLATTENED_CUE_PLAYBACK_MODE.get(effect)
+            or asset.get("key") != f"flattenedCinematic.{cue_id}"
+        ):
+            _refuse()
+        identity = {
+            "cueId": cue_id,
+            "effect": effect,
+            "stepKey": step_key,
+            "playbackMode": playback_mode,
+        }
     metadata = asset.get("compatibilityMetadata")
     if not isinstance(metadata, dict) or set(metadata) != _FLATTENED_METADATA_FIELDS:
         _refuse()
@@ -205,10 +247,12 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
         or duration_ms != frame_count * 100
     ):
         _refuse()
+    if not has_phase and duration_ms != _FLATTENED_CUE_DURATION_MS[effect]:
+        _refuse()
     _validate_online_url(_matching_alias(asset, "onlineUrl", "url"))
     return {
         "derivativeId": derivative_id,
-        "phaseId": phase_id,
+        **identity,
         "compatibilityMetadata": copy.deepcopy(metadata),
     }
 
@@ -228,7 +272,7 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     _validate_source_local_path(local_path, cache_key, basename)
     _validate_online_url(online_url)
     if media_type.lower().startswith("video/"):
-        if "derivativeId" in asset or "phaseId" in asset:
+        if "derivativeId" in asset or "phaseId" in asset or "cueId" in asset:
             validate_renderer_v4_flattened_mp4(asset)
         else:
             validate_renderer_v3_shared_mp4(asset)

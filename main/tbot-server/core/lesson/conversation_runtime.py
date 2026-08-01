@@ -370,7 +370,10 @@ class LessonConversationRuntime:
         self._state = ConversationState.COMPLETE
         self._outcome = "attempted"
         self._review_needed = True
-        return self._decision(intent="praise_effort_continue", cue_role="word_transition")
+        return self._decision(
+            intent="praise_effort_complete" if self._contract.is_terminal_step else "praise_effort_continue",
+            cue_role=None if self._contract.is_terminal_step else "word_transition",
+        )
 
     def context_turn(self, identity: LessonToolIdentity | None) -> ConversationDecision:
         rejected = self._identity_rejection(identity)
@@ -473,6 +476,26 @@ class LessonConversationRuntime:
             return self._reject("CONTINUE_ALREADY_APPLIED")
         if not (self._mastered or (self._outcome == "attempted" and self._review_needed)):
             return self._reject("CONTINUE_NOT_ALLOWED")
+        if self._contract.is_terminal_step:
+            pending = next(
+                (cue for cue in self._contract.cues if cue.cue_id == self._pending_cue_id),
+                None,
+            )
+            if identity is None or (
+                pending is not None and identity.cue_id != pending.cue_id
+            ) or (
+                pending is None and identity.cue_id is not None
+            ):
+                return self._reject("ILLEGAL_CUE")
+            expected_effect = pending.effect if pending is not None else None
+            if effect != expected_effect or effect != self._pending_effect:
+                return self._reject("ILLEGAL_EFFECT")
+            if next_step_key is not None:
+                return self._reject("MODEL_STEP_SELECTION_FORBIDDEN")
+            self._continue_applied = True
+            self._consume(identity)
+            self._state = ConversationState.COMPLETE
+            return self._decision(intent="complete_lesson")
         pending = next(
             (cue for cue in self._contract.cues if cue.cue_id == self._pending_cue_id),
             None,
