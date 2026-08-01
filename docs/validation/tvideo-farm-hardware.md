@@ -6,7 +6,9 @@ Recorded: 2026-08-01 16:01:54 +0700 (Asia/Ho_Chi_Minh)
 
 This document records software-only evidence available before the attended
 ESP32-S3 N16R8 run. It does not claim hardware readiness, production rollout,
-Google Live success, or firmware performance on the board.
+Google Live success with real credentials, or firmware performance on the
+board. Status remains **PENDING_ATTENDED_HARDWARE** until attended hardware
+evidence is captured.
 
 ## Source identities
 
@@ -98,6 +100,23 @@ hay-correct
 hay-celebrate
 ```
 
+The authoritative Google Live tool audit proof is exact:
+
+| Field | Required value |
+|---|---|
+| Audit frame type | `google_live_validation_tool_audit` |
+| Audit feature | `googleLiveValidationToolAuditV1` |
+| Protocol | `teebot-lesson-renderer.v4` |
+| Authoritative tools | `lesson_child_response`, `lesson_pronunciation_outcome`, `lesson_context_turn`, `lesson_visual_reaction`, `lesson_continue` |
+
+The passing harness must observe 18 accepted audit records: 10
+`lesson_visual_reaction`, 3 `lesson_pronunciation_outcome`, 2
+`lesson_child_response`, 2 `lesson_continue`, and 1 `lesson_context_turn`.
+Every audit identity must match the current lesson session and step, and each
+refreshed identity must advance monotonically. Rejected audits, wrong audit
+features, unknown tool names, stale sessions, cross-step identities, cue/effect
+mismatches, or missing identity fields are hard failures.
+
 The validator rejects missing frames, wrong cue/effect pairs, wrong cinematic
 frame types, missing robot-facing binary audio, non-increasing
 `commandSequenceId` values, envelope/command sequence mismatches, lesson-session
@@ -110,10 +129,24 @@ response. Any binary output arriving after that stop but before the new
 change exactly once from `barn` to `hay` while assignment/session/lesson
 identity remains stable.
 
+The cinematic duplicate checks are strict. For every `lesson_prepare` and
+`lesson_cinematic_control` frame, the envelope/body and `body.cinematicPhase`
+copies of `cueId`, `effect`, `stepKey`, `playbackMode`, `command`, and
+`commandSequenceId` must exist, match each other, and match the expected
+cue/effect/step. Missing duplicates, duplicate mismatches, wrong playback mode,
+wrong frame type, wrong protocol version, or wrong `stepId` fail the run.
+
 Reports contain fixture IDs, fixture hashes, packet/transition/interruption
 counts, validation codes, and latency metadata. They do not persist raw audio,
 transcripts, prompts, utterances, filesystem paths, model prose, cue IDs, step
 keys, or unhashed session identities.
+
+Validation audit identities are ephemeral websocket-only proof. The server sends
+them only on the robot websocket and only after an admitted runtime decision; it
+does not log the audit frame, session sentinel, attempt sentinel, raw tool args,
+or child response class. The JSON report records aggregate audit counts and
+validation codes, not lesson session IDs, attempt IDs, turn identities, raw
+transcripts, prompts, or model prose.
 
 Committed speech fixture identities:
 
@@ -141,6 +174,14 @@ python3 scripts/google_live_robot_soak.py \
 It may return `FAKE_PASS` without credentials, but it does not open Google Live,
 does not contact hardware, and does not satisfy the attended hardware gate.
 
+The audit emitter fails closed outside the attended local soak shape. It is
+disabled unless all conditions are true: `validation_tool_audit_enabled: true`,
+`validation_tool_audit_mode: local_soak`, websocket hello feature
+`googleLiveValidationToolAuditV1: true`, exactly one
+`validation_tool_audit_client_ids` entry matching the websocket `client_id`, and
+exactly one `validation_tool_audit_device_ids` entry matching the websocket
+`device_id`.
+
 ## Rollout remains dark
 
 The checked-in ESP configuration remains:
@@ -159,6 +200,13 @@ lesson:
 `081b4fb0ba803e7f31bc112e175f9efb0c45a2e4c43ca4f102cdde3b34e5205e`.
 Task 13 does not edit this file, environment defaults, device allowlists, or
 production deployment settings.
+
+Runtime rollout and storage HIL gates are also singleton allowlists. Renderer v4
+admission requires `renderer_v4_enabled: true`, renderer-v4 negotiation and
+capability, and exactly one `rollout_device_allowlist` entry matching the
+normalized connected `device_id`. Storage HIL admission requires exactly one
+normalized MAC in `storage_hil_device_allowlist`; malformed or multiple entries
+fail closed before hardware evidence can be claimed.
 
 ## Required attended ESP32-S3 N16R8 checklist
 

@@ -364,11 +364,21 @@ async def test_visual_tool_uses_cinematic_sequence_fencing_and_duplicate_is_noop
     await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
     command = _frames(runtime)[-1]
     assert command["type"] == "lesson_cinematic_control"
-    assert command["body"] == {
-        "command": "start",
-        "cueId": "barn-listen",
-        "commandSequenceId": command["sequence"],
-    }
+    assert command["protocolVersion"] == RENDERER_V4
+    assert command["stepId"] == "barn"
+    phase = command["body"]["cinematicPhase"]
+    for field in (
+        "command",
+        "cueId",
+        "effect",
+        "stepKey",
+        "playbackMode",
+        "commandSequenceId",
+    ):
+        assert command["body"][field] == phase[field]
+    assert phase["command"] == "start"
+    assert phase["cueId"] == "barn-listen"
+    assert phase["commandSequenceId"] == command["sequence"]
     await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
     assert len(_frames(runtime)) == 2
 
@@ -799,12 +809,29 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
     assert listen.accepted
     listen_prepare = _frames(runtime)[-1]
     assert listen_prepare["body"]["cinematicPhase"]["cueId"] == "barn-listen"
+    assert listen_prepare["protocolVersion"] == RENDERER_V4
+    assert listen_prepare["stepId"] == "barn"
+    for field in ("command", "cueId", "effect", "stepKey", "playbackMode"):
+        assert listen_prepare["body"][field] == listen_prepare["body"]["cinematicPhase"][field]
+    assert (
+        listen_prepare["body"]["commandSequenceId"]
+        == listen_prepare["body"]["cinematicPhase"]["commandSequenceId"]
+        == listen_prepare["sequence"]
+    )
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
 
     await runtime.on_lesson_ack(_ack(runtime, listen_prepare, 1, cue_id="hay-listen"))
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
     await runtime.on_lesson_ack(_ack(runtime, listen_prepare, 1))
     listen_start = _frames(runtime)[-1]
+    assert listen_start["stepId"] == "barn"
+    for field in ("command", "cueId", "effect", "stepKey", "playbackMode"):
+        assert listen_start["body"][field] == listen_start["body"]["cinematicPhase"][field]
+    assert (
+        listen_start["body"]["commandSequenceId"]
+        == listen_start["body"]["cinematicPhase"]["commandSequenceId"]
+        == listen_start["sequence"]
+    )
     await runtime.on_lesson_ack(_ack(runtime, listen_start, 2, cue_id="hay-listen"))
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
     await runtime.on_lesson_ack(_ack(runtime, listen_start, 2))

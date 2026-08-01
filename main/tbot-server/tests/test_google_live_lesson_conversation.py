@@ -1,6 +1,7 @@
-import unittest
 import asyncio
+import json
 import logging
+import unittest
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,10 @@ from plugins_func.functions.lesson_conversation import (
     LESSON_CONVERSATION_TOOL_SPECS,
     _google_live_lesson_tool_admission,
     lesson_child_response,
+    lesson_context_turn,
+    lesson_continue,
+    lesson_pronunciation_outcome,
+    lesson_visual_reaction,
 )
 from plugins_func.register import Action, ActionResponse
 from scripts import google_live_robot_soak
@@ -110,6 +115,14 @@ class _Client:
         self.responses.append(text)
 
 
+class _WebSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+
 class _Handler:
     def __init__(self, response=None):
         self.calls = []
@@ -127,6 +140,78 @@ class _Handler:
     async def handle_llm_function_call(self, _conn, payload):
         self.calls.append(payload)
         return self.response
+
+
+class _CanonicalLessonHandler:
+    _TOOLS = {
+        "lesson_child_response": lesson_child_response,
+        "lesson_pronunciation_outcome": lesson_pronunciation_outcome,
+        "lesson_context_turn": lesson_context_turn,
+        "lesson_visual_reaction": lesson_visual_reaction,
+        "lesson_continue": lesson_continue,
+    }
+
+    async def handle_llm_function_call(self, conn, payload):
+        return await self._TOOLS[payload["name"]](conn, **payload["arguments"])
+
+
+class _AcceptedDecision:
+    def to_mapping(self):
+        return {
+            "accepted": True,
+            "code": "ACCEPTED",
+            "state": "LISTENING",
+            "next_intent": "continue",
+            "cue_id": "barn-listen",
+            "effect": "show_listening_scene",
+            "coaching_level": 0,
+            "outcome": None,
+            "review_needed": False,
+            "guidance": {},
+        }
+
+
+class _CanonicalAuditRuntime:
+    def __init__(self):
+        self.turn_sequence_id = 1
+
+    def _decision(self, identity):
+        self.turn_sequence_id = identity.turn_sequence_id + 1
+        self.identity = identity
+        return _AcceptedDecision()
+
+    async def conversation_child_response(self, identity, _response_class):
+        return self._decision(identity)
+
+    async def conversation_pronunciation_outcome(self, identity, _outcome):
+        return self._decision(identity)
+
+    async def conversation_context_turn(self, identity):
+        return self._decision(identity)
+
+    async def conversation_visual_reaction(
+        self,
+        identity,
+        _cue_role,
+        *,
+        effect,
+    ):
+        self.effect = effect
+        return self._decision(identity)
+
+    async def conversation_continue_from_tool(self, identity):
+        return self._decision(identity)
+
+    def conversation_tool_context(self):
+        return {
+            "identity": {
+                "lessonSessionId": self.identity.lesson_session_id,
+                "turnSequenceId": self.turn_sequence_id,
+                "attemptId": self.identity.attempt_id,
+                "stepKey": self.identity.step_key,
+                "cueId": "barn-listen",
+            }
+        }
 
 
 class LessonConversationSchemaTest(unittest.TestCase):
@@ -1115,6 +1200,381 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(response["accepted"], True)
         self.assertEqual(response["nextIntent"], "bridge_vietnamese")
         self.assertNotIn("result", response)
+
+    async def test_validation_tool_audit_emits_only_after_admitted_runtime_decision(self):
+        response = ActionResponse(
+            action=Action.REQLLM,
+            result={
+                "accepted": True,
+                "code": "ACCEPTED",
+                "cueId": "barn-thinking",
+                "effect": "show_thinking_scene",
+                "context": {
+                    "identity": {
+                        "lessonSessionId": "lesson-session",
+                        "turnSequenceId": 3,
+                        "attemptId": "attempt-2",
+                        "stepKey": "barn",
+                        "cueId": "barn-thinking",
+                    }
+                },
+            },
+        )
+        conn = _Conn(_Handler(response))
+        conn.client_id = "soak-harness-client"
+        conn.features = {"googleLiveValidationToolAuditV1": True}
+        conn.websocket = _WebSocket()
+        conn.config["google_live"].update(
+            {
+                "validation_tool_audit_enabled": True,
+                "validation_tool_audit_mode": "local_soak",
+                "validation_tool_audit_client_ids": ["soak-harness-client"],
+                "validation_tool_audit_device_ids": ["robot-1"],
+            }
+        )
+        provider = GoogleLiveProvider(conn)
+        conn.voice_provider = provider
+        provider._client = _Client()
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "response_generation": 0,
+                "calls": [
+                    {
+                        "id": "audit-call",
+                        "name": "lesson_child_response",
+                        "args": {
+                            "lessonSessionId": "lesson-session",
+                            "turnSequenceId": 2,
+                            "attemptId": "attempt-1",
+                            "stepKey": "barn",
+                            "responseClass": "target",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(len(conn.websocket.sent), 1)
+        audit = json.loads(conn.websocket.sent[0])
+        self.assertEqual(
+            set(audit),
+            {
+                "type",
+                "feature",
+                "protocolVersion",
+                "toolName",
+                "accepted",
+                "code",
+                "identity",
+                "cueId",
+                "effect",
+                "refreshedIdentity",
+            },
+        )
+        self.assertEqual(audit["type"], "google_live_validation_tool_audit")
+        self.assertEqual(audit["feature"], "googleLiveValidationToolAuditV1")
+        self.assertEqual(audit["protocolVersion"], "teebot-lesson-renderer.v4")
+        self.assertEqual(audit["toolName"], "lesson_child_response")
+        self.assertEqual(
+            audit["identity"],
+            {
+                "lessonSessionId": "lesson-session",
+                "turnSequenceId": 2,
+                "attemptId": "attempt-1",
+                "stepKey": "barn",
+            },
+        )
+        self.assertEqual(audit["refreshedIdentity"]["attemptId"], "attempt-2")
+        serialized = json.dumps(audit)
+        self.assertNotIn("responseClass", serialized)
+        self.assertNotIn("target", serialized)
+        self.assertNotIn("args", serialized)
+
+    async def test_validation_tool_audit_fails_closed_for_general_clients(self):
+        cases = [
+            (False, "local_soak", True, "soak-harness-client", "robot-1", ["soak-harness-client"], ["robot-1"]),
+            (True, "disabled", True, "soak-harness-client", "robot-1", ["soak-harness-client"], ["robot-1"]),
+            (True, "local_soak", False, "soak-harness-client", "robot-1", ["soak-harness-client"], ["robot-1"]),
+            (True, "local_soak", True, "untrusted-client", "robot-1", ["soak-harness-client"], ["robot-1"]),
+            (True, "local_soak", True, "soak-harness-client", "other-robot", ["soak-harness-client"], ["robot-1"]),
+            (True, "local_soak", True, "soak-harness-client", "robot-1", ["soak-harness-client", "other-client"], ["robot-1"]),
+            (True, "local_soak", True, "soak-harness-client", "robot-1", ["soak-harness-client"], ["robot-1", "other-robot"]),
+            (True, "local_soak", True, "", "", [""], [""]),
+        ]
+        for enabled, mode, feature, client_id, device_id, client_ids, device_ids in cases:
+            with self.subTest(
+                enabled=enabled,
+                mode=mode,
+                feature=feature,
+                client_id=client_id,
+                device_id=device_id,
+            ):
+                conn = _Conn(_Handler())
+                conn.client_id = client_id
+                conn.device_id = device_id
+                conn.features = {"googleLiveValidationToolAuditV1": feature}
+                conn.websocket = _WebSocket()
+                conn.config["google_live"].update(
+                    {
+                        "validation_tool_audit_enabled": enabled,
+                        "validation_tool_audit_mode": mode,
+                        "validation_tool_audit_client_ids": client_ids,
+                        "validation_tool_audit_device_ids": device_ids,
+                    }
+                )
+                provider = GoogleLiveProvider(conn)
+                conn.voice_provider = provider
+                provider._client = _Client()
+
+                await provider._handle_tool_call_event(
+                    {
+                        "type": "tool_call",
+                        "response_generation": 0,
+                        "calls": [
+                            {
+                                "id": "no-audit",
+                                "name": "lesson_context_turn",
+                                "args": {
+                                    "lessonSessionId": "lesson-session",
+                                    "turnSequenceId": 2,
+                                    "attemptId": "attempt-1",
+                                    "stepKey": "barn",
+                                },
+                            }
+                        ],
+                    }
+                )
+
+                self.assertEqual(conn.websocket.sent, [])
+
+    async def test_validation_tool_audit_covers_all_five_admitted_lesson_tools(self):
+        conn = _Conn(_CanonicalLessonHandler())
+        conn.lesson_runtime = _CanonicalAuditRuntime()
+        conn.client_id = "soak-harness-client"
+        conn.features = {"googleLiveValidationToolAuditV1": True}
+        conn.websocket = _WebSocket()
+        conn.config["google_live"].update(
+            {
+                "validation_tool_audit_enabled": True,
+                "validation_tool_audit_mode": "local_soak",
+                "validation_tool_audit_client_ids": ["soak-harness-client"],
+                "validation_tool_audit_device_ids": ["robot-1"],
+            }
+        )
+        provider = GoogleLiveProvider(conn)
+        conn.voice_provider = provider
+        provider._client = _Client()
+
+        common = {
+            "lessonSessionId": "lesson-session",
+            "attemptId": "attempt-1",
+            "stepKey": "barn",
+        }
+        tool_args = {
+            "lesson_child_response": {**common, "responseClass": "target"},
+            "lesson_pronunciation_outcome": {**common, "outcome": "correct"},
+            "lesson_context_turn": dict(common),
+            "lesson_visual_reaction": {
+                **common,
+                "cueId": "barn-listen",
+                "cueRole": "listen",
+                "effect": "show_listening_scene",
+            },
+            "lesson_continue": dict(common),
+        }
+        ordered_tools = sorted(LESSON_TOOL_NAMES)
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "response_generation": 0,
+                "calls": [
+                    {
+                        "id": f"audit-{name}",
+                        "name": name,
+                        "args": {**tool_args[name], "turnSequenceId": index},
+                    }
+                    for index, name in enumerate(ordered_tools, start=1)
+                ],
+            }
+        )
+
+        audits = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertEqual(
+            {audit["toolName"] for audit in audits},
+            LESSON_TOOL_NAMES,
+        )
+        self.assertEqual(len(audits), len(LESSON_TOOL_NAMES))
+        self.assertTrue(all(audit["accepted"] for audit in audits))
+
+    async def test_validation_tool_audit_requires_authoritative_runtime_context(self):
+        for runtime, args in (
+            (
+                None,
+                {
+                    "lessonSessionId": "lesson-session",
+                    "turnSequenceId": 1,
+                    "attemptId": "attempt-1",
+                    "stepKey": "barn",
+                },
+            ),
+            (
+                _CanonicalAuditRuntime(),
+                {
+                    "lessonSessionId": "lesson-session",
+                    "turnSequenceId": 1,
+                    "attemptId": "attempt-1",
+                },
+            ),
+        ):
+            with self.subTest(runtime=type(runtime).__name__):
+                conn = _Conn(_CanonicalLessonHandler())
+                conn.lesson_runtime = runtime
+                conn.client_id = "soak-harness-client"
+                conn.features = {"googleLiveValidationToolAuditV1": True}
+                conn.websocket = _WebSocket()
+                conn.config["google_live"].update(
+                    {
+                        "validation_tool_audit_enabled": True,
+                        "validation_tool_audit_mode": "local_soak",
+                        "validation_tool_audit_client_ids": ["soak-harness-client"],
+                        "validation_tool_audit_device_ids": ["robot-1"],
+                    }
+                )
+                provider = GoogleLiveProvider(conn)
+                conn.voice_provider = provider
+                provider._client = _Client()
+
+                await provider._handle_tool_call_event(
+                    {
+                        "type": "tool_call",
+                        "response_generation": 0,
+                        "calls": [
+                            {
+                                "id": "no-authoritative-audit",
+                                "name": "lesson_context_turn",
+                                "args": args,
+                            }
+                        ],
+                    }
+                )
+
+                self.assertEqual(conn.websocket.sent, [])
+
+    async def test_validation_tool_audit_rejects_non_lesson_and_unadmitted_calls(self):
+        for session_mode, response_generation in (
+            (SessionMode.DORMANT, 0),
+            (SessionMode.LESSON, None),
+            (SessionMode.LESSON, 7),
+        ):
+            with self.subTest(
+                session_mode=session_mode,
+                response_generation=response_generation,
+            ):
+                conn = _Conn(_Handler())
+                conn.session_mode = session_mode
+                conn.client_id = "soak-harness-client"
+                conn.features = {"googleLiveValidationToolAuditV1": True}
+                conn.websocket = _WebSocket()
+                conn.config["google_live"].update(
+                    {
+                        "validation_tool_audit_enabled": True,
+                        "validation_tool_audit_mode": "local_soak",
+                        "validation_tool_audit_client_ids": ["soak-harness-client"],
+                        "validation_tool_audit_device_ids": ["robot-1"],
+                    }
+                )
+                provider = GoogleLiveProvider(conn)
+                conn.voice_provider = provider
+                provider._client = _Client()
+                provider._response_generation = 8 if response_generation == 7 else 0
+                event = {
+                    "type": "tool_call",
+                    "calls": [
+                        {
+                            "id": "unadmitted-audit",
+                            "name": "lesson_context_turn",
+                            "args": {
+                                "lessonSessionId": "lesson-session",
+                                "turnSequenceId": 2,
+                                "attemptId": "attempt-1",
+                                "stepKey": "barn",
+                            },
+                        }
+                    ],
+                }
+                if response_generation is not None:
+                    event["response_generation"] = response_generation
+
+                await provider._handle_tool_call_event(event)
+
+                self.assertEqual(conn.websocket.sent, [])
+
+    async def test_validation_tool_audit_is_ephemeral_and_not_logged(
+        self,
+    ):
+        response = ActionResponse(
+            action=Action.REQLLM,
+            response="private-response-sentinel",
+            result={
+                "accepted": True,
+                "code": "ACCEPTED",
+                "cueId": None,
+                "effect": None,
+                "context": {
+                    "identity": {
+                        "lessonSessionId": "private-session-sentinel",
+                        "turnSequenceId": 3,
+                        "attemptId": "private-attempt-sentinel",
+                        "stepKey": "barn",
+                    }
+                },
+            },
+        )
+        conn = _Conn(_Handler(response))
+        conn.logger = _CaplogLogger("tbot.lesson.audit.privacy")
+        conn.client_id = "soak-harness-client"
+        conn.features = {"googleLiveValidationToolAuditV1": True}
+        conn.websocket = _WebSocket()
+        conn.config["google_live"].update(
+            {
+                "validation_tool_audit_enabled": True,
+                "validation_tool_audit_mode": "local_soak",
+                "validation_tool_audit_client_ids": ["soak-harness-client"],
+                "validation_tool_audit_device_ids": ["robot-1"],
+            }
+        )
+        provider = GoogleLiveProvider(conn)
+        conn.voice_provider = provider
+        provider._client = _Client()
+
+        with self.assertLogs("tbot.lesson.audit.privacy", level="INFO") as captured:
+            await provider._handle_tool_call_event(
+                {
+                    "type": "tool_call",
+                    "response_generation": 0,
+                    "calls": [
+                        {
+                            "id": "audit-private",
+                            "name": "lesson_context_turn",
+                            "args": {
+                                "lessonSessionId": "private-session-sentinel",
+                                "turnSequenceId": 2,
+                                "attemptId": "private-attempt-sentinel",
+                                "stepKey": "barn",
+                            },
+                        }
+                    ],
+                }
+            )
+
+        logs = "\n".join(captured.output)
+        self.assertNotIn("google_live_validation_tool_audit", logs)
+        self.assertNotIn("private-session-sentinel", logs)
+        self.assertNotIn("private-attempt-sentinel", logs)
+        self.assertNotIn("private-response-sentinel", logs)
 
     async def test_lesson_mode_still_blocks_non_lesson_tools(self):
         handler = _Handler()

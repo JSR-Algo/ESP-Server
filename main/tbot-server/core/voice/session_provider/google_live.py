@@ -5313,6 +5313,105 @@ class GoogleLiveProvider(VoiceSessionProvider):
         text = msg_json.get("text")
         return msg_json.get("state"), text if isinstance(text, str) else None
 
+    def _validation_tool_audit_enabled(self):
+        if (
+            normalize_session_mode(
+                getattr(self.conn, "session_mode", SessionMode.DORMANT)
+            )
+            != SessionMode.LESSON
+            and not self._lesson_runtime_active()
+        ):
+            return False
+        config = self._get_live_config()
+        if config.get("validation_tool_audit_enabled") is not True:
+            return False
+        if config.get("validation_tool_audit_mode") != "local_soak":
+            return False
+        features = getattr(self.conn, "features", None)
+        if not isinstance(features, Mapping) or features.get(
+            "googleLiveValidationToolAuditV1"
+        ) is not True:
+            return False
+        client_ids = config.get("validation_tool_audit_client_ids")
+        device_ids = config.get("validation_tool_audit_device_ids")
+        if not isinstance(client_ids, (list, tuple)) or len(client_ids) != 1:
+            return False
+        if not isinstance(device_ids, (list, tuple)) or len(device_ids) != 1:
+            return False
+        allowed_client_id = client_ids[0]
+        allowed_device_id = device_ids[0]
+        if not isinstance(allowed_client_id, str) or not allowed_client_id:
+            return False
+        if not isinstance(allowed_device_id, str) or not allowed_device_id:
+            return False
+        return (
+            getattr(self.conn, "client_id", None) == allowed_client_id
+            and getattr(self.conn, "device_id", None) == allowed_device_id
+        )
+
+    @staticmethod
+    def _validation_tool_identity(source):
+        if not isinstance(source, Mapping):
+            return None
+        lesson_session_id = source.get("lessonSessionId")
+        turn_sequence_id = source.get("turnSequenceId")
+        attempt_id = source.get("attemptId")
+        step_key = source.get("stepKey")
+        if (
+            not isinstance(lesson_session_id, str)
+            or not lesson_session_id
+            or not isinstance(turn_sequence_id, int)
+            or turn_sequence_id < 1
+            or not isinstance(attempt_id, str)
+            or not attempt_id
+            or not isinstance(step_key, str)
+            or not step_key
+        ):
+            return None
+        identity = {
+            "lessonSessionId": lesson_session_id,
+            "turnSequenceId": turn_sequence_id,
+            "attemptId": attempt_id,
+            "stepKey": step_key,
+        }
+        cue_id = source.get("cueId")
+        if cue_id is not None:
+            identity["cueId"] = cue_id
+        return identity
+
+    async def _emit_validation_tool_audit(self, name, args, response_payload):
+        if name not in LESSON_CONVERSATION_TOOLS:
+            return
+        if not self._validation_tool_audit_enabled():
+            return
+        if not isinstance(args, Mapping) or not isinstance(response_payload, Mapping):
+            return
+        context = response_payload.get("context")
+        refreshed = context.get("identity") if isinstance(context, Mapping) else None
+        identity = self._validation_tool_identity(args)
+        refreshed_identity = self._validation_tool_identity(refreshed)
+        if identity is None or refreshed_identity is None:
+            return
+        websocket = getattr(self.conn, "websocket", None)
+        if websocket is None:
+            return
+        payload = {
+            "type": "google_live_validation_tool_audit",
+            "feature": "googleLiveValidationToolAuditV1",
+            "protocolVersion": "teebot-lesson-renderer.v4",
+            "toolName": name,
+            "accepted": response_payload.get("accepted") is True,
+            "code": str(response_payload.get("code") or ""),
+            "identity": identity,
+            "cueId": response_payload.get("cueId"),
+            "effect": response_payload.get("effect"),
+            "refreshedIdentity": refreshed_identity,
+        }
+        try:
+            await websocket.send(json.dumps(payload))
+        except Exception:
+            return
+
     async def _handle_tool_call_event(self, event):
         calls = event.get("calls") if isinstance(event, Mapping) else None
         if not calls:
@@ -5420,6 +5519,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     latency_ms,
                 )
                 continue
+            await self._emit_validation_tool_audit(name, args, response_payload)
             ok = not (
                 isinstance(response_payload, Mapping)
                 and response_payload.get("ok") is False
@@ -5531,12 +5631,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         try:
             try:
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live tool dispatch name={} args_type={} args={}",
-                    name,
-                    type(args).__name__,
-                    dict(args) if hasattr(args, "items") else args,
-                )
+                if name in LESSON_CONVERSATION_TOOLS:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live lesson tool dispatch name={} argument_keys=[{}]",
+                        name,
+                        ",".join(sorted(str(key) for key in args)),
+                    )
+                else:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live tool dispatch name={} args_type={} args={}",
+                        name,
+                        type(args).__name__,
+                        dict(args) if hasattr(args, "items") else args,
+                    )
             except Exception:
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live tool dispatch name={} args_type={} args=<unprintable>",
@@ -5549,12 +5656,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             try:
                 action_name = getattr(getattr(result, "action", None), "name", "?")
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live tool returned name={} action={} response={!r}",
-                    name,
-                    action_name,
-                    getattr(result, "response", None),
-                )
+                if name in LESSON_CONVERSATION_TOOLS:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live lesson tool returned name={} action={}",
+                        name,
+                        action_name,
+                    )
+                else:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live tool returned name={} action={} response={!r}",
+                        name,
+                        action_name,
+                        getattr(result, "response", None),
+                    )
             except Exception:
                 pass
         except Exception as exc:

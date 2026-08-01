@@ -2314,10 +2314,20 @@ class LessonRuntime:
         ):
             self._conversation_fallback_ack_sequence = next_sequence
         try:
+            cue = self._conversation_cues.get(command["cueId"])
+            if not isinstance(cue, dict):
+                raise RuntimeError("conversation cue disappeared before start")
             sequence = await self._emit(
                 "lesson_cinematic_control",
                 step_id=self._step_id,
-                body={"command": "start", "cueId": command["cueId"]},
+                body={
+                    "command": "start",
+                    **copy.deepcopy(cue),
+                    "cinematicPhase": {
+                        "command": "start",
+                        **copy.deepcopy(cue),
+                    },
+                },
             )
         except asyncio.CancelledError:
             self._retire_conversation_start_send_transaction(pending, next_sequence)
@@ -4667,6 +4677,16 @@ class LessonRuntime:
             cinematic = frame_body.get("cinematicPhase")
             if isinstance(cinematic, dict) and isinstance(cinematic.get("command"), str):
                 cinematic.setdefault("commandSequenceId", seq)
+                for key in (
+                    "command",
+                    "cueId",
+                    "effect",
+                    "stepKey",
+                    "playbackMode",
+                    "commandSequenceId",
+                ):
+                    if key in cinematic:
+                        frame_body.setdefault(key, cinematic[key])
             if frame_type == "lesson_cinematic_control":
                 frame_body.setdefault("commandSequenceId", seq)
                 if frame_body.get("command") == "resume":

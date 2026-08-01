@@ -80,6 +80,39 @@ LOG_TRANSCRIPT_SOURCE_USER_RE = re.compile(r"transcript source=user")
 DEFAULT_FIRST_PROMPT = "Hãy đếm số tiếng Việt từ một đến năm mươi, chậm rãi và rõ ràng."
 DEFAULT_INTERRUPT_PROMPT = "Đổi đề tài. Hãy trả lời ngắn về thời tiết Hà Nội hôm nay."
 DEFAULT_IDLE_PROMPT = "Hãy kể một câu chuyện ngắn bằng tiếng Việt trong khoảng hai phút."
+TVIDEO_FARM_PROTOCOL_VERSION = "teebot-lesson-renderer.v4"
+TVIDEO_FARM_TOOL_AUDIT_TYPE = "google_live_validation_tool_audit"
+TVIDEO_FARM_TOOL_AUDIT_FEATURE = "googleLiveValidationToolAuditV1"
+TVIDEO_FARM_LESSON_TOOLS = frozenset(
+    {
+        "lesson_child_response",
+        "lesson_pronunciation_outcome",
+        "lesson_context_turn",
+        "lesson_visual_reaction",
+        "lesson_continue",
+    }
+)
+TVIDEO_FARM_EXPECTED_TOOL_PLAN = {
+    "lesson_start": ("lesson_visual_reaction",),
+    "target_answer": ("lesson_child_response", "lesson_visual_reaction"),
+    "meaning_bridge": (
+        "lesson_pronunciation_outcome",
+        "lesson_visual_reaction",
+    ),
+    "related_concept": ("lesson_context_turn", "lesson_visual_reaction"),
+    "retry_coaching": (
+        "lesson_pronunciation_outcome",
+        "lesson_visual_reaction",
+    ),
+    "correction_bargein": ("lesson_continue", "lesson_visual_reaction"),
+    "hay_listen": ("lesson_visual_reaction",),
+    "hay_thinking": ("lesson_child_response", "lesson_visual_reaction"),
+    "hay_correct": (
+        "lesson_pronunciation_outcome",
+        "lesson_visual_reaction",
+    ),
+    "hay_celebrate": ("lesson_continue", "lesson_visual_reaction"),
+}
 TVIDEO_FARM_EXPECTED_PROGRESS = (
     {
         "label": "lesson_start",
@@ -409,10 +442,12 @@ def _tvideo_farm_cinematic(payload: dict) -> dict | None:
         return None
     return {
         "frame_type": payload.get("type"),
+        "protocol_version": payload.get("protocolVersion"),
         "command": phase.get("command") or body.get("command"),
         "cue_id": phase.get("cueId"),
         "effect": phase.get("effect"),
         "step_key": phase.get("stepKey") or payload.get("stepId"),
+        "playback_mode": phase.get("playbackMode") or body.get("playbackMode"),
         "command_sequence_id": phase.get("commandSequenceId") or body.get("commandSequenceId"),
         "envelope_sequence": payload.get("sequence"),
         "assignment_id": payload.get("assignmentId"),
@@ -421,6 +456,160 @@ def _tvideo_farm_cinematic(payload: dict) -> dict | None:
         "lesson_version": payload.get("lessonVersion"),
         "payload": payload,
     }
+
+
+def _expected_tvideo_playback_mode(effect: str) -> str:
+    return "loop" if effect in {"listen", "thinking"} else "once"
+
+
+def _tvideo_farm_duplicate_identity_errors(payload: dict, expected: dict) -> list[str]:
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    phase = body.get("cinematicPhase") if isinstance(body.get("cinematicPhase"), dict) else {}
+    errors = []
+
+    if payload.get("protocolVersion") != TVIDEO_FARM_PROTOCOL_VERSION:
+        errors.append("wrong_protocol_version")
+    if payload.get("stepId") != expected["step_key"]:
+        errors.append("wrong_step")
+
+    duplicate_fields = {
+        "cueId": expected["cue_id"],
+        "effect": expected["effect"],
+        "stepKey": expected["step_key"],
+        "playbackMode": _expected_tvideo_playback_mode(expected["effect"]),
+    }
+    for field, expected_value in duplicate_fields.items():
+        body_value = body.get(field)
+        phase_value = phase.get(field)
+        if body_value is None or phase_value is None:
+            errors.append("missing_playback_mode" if field == "playbackMode" else "missing_cinematic_duplicate")
+            continue
+        if body_value != phase_value:
+            errors.append("cinematic_duplicate_mismatch")
+        if phase_value != expected_value:
+            if field == "playbackMode":
+                errors.append("wrong_playback_mode")
+            elif field == "effect":
+                errors.append("wrong_effect")
+            elif field == "cueId":
+                errors.append("wrong_cue")
+            elif field == "stepKey":
+                errors.append("wrong_step")
+
+    body_sequence = body.get("commandSequenceId")
+    phase_sequence = phase.get("commandSequenceId")
+    if body_sequence is None or phase_sequence is None:
+        errors.append("missing_command_sequence")
+    elif body_sequence != phase_sequence:
+        errors.append("cinematic_duplicate_mismatch")
+
+    body_command = body.get("command")
+    phase_command = phase.get("command")
+    if body_command is None or phase_command is None:
+        errors.append("missing_cinematic_duplicate")
+    elif body_command != phase_command:
+        errors.append("cinematic_duplicate_mismatch")
+
+    return errors
+
+
+def _expected_tvideo_tool_effect(effect: str) -> str:
+    return {
+        "listen": "show_listening_scene",
+        "thinking": "show_thinking_scene",
+        "correct": "show_correct_reaction",
+        "retry-level-1": "show_effort_reaction",
+        "word-transition": "show_word_transition",
+        "celebrate": "show_celebration",
+    }[effect]
+
+
+def _tvideo_farm_tool_audit_errors(
+    payload: dict,
+    lesson_identity: dict | None,
+    expected: dict,
+    audit_state: dict,
+) -> list[str]:
+    if payload.get("type") != TVIDEO_FARM_TOOL_AUDIT_TYPE:
+        return []
+    errors = []
+    if payload.get("feature") != TVIDEO_FARM_TOOL_AUDIT_FEATURE:
+        errors.append("wrong_tool_audit_feature")
+    if payload.get("protocolVersion") != TVIDEO_FARM_PROTOCOL_VERSION:
+        errors.append("wrong_protocol_version")
+    if payload.get("accepted") is not True:
+        errors.append("tool_audit_rejected")
+    if not str(payload.get("code") or ""):
+        errors.append("missing_tool_audit_code")
+    tool_name = payload.get("toolName")
+    if tool_name not in TVIDEO_FARM_LESSON_TOOLS:
+        errors.append("wrong_tool_audit_name")
+    identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+    refreshed = (
+        payload.get("refreshedIdentity")
+        if isinstance(payload.get("refreshedIdentity"), dict)
+        else {}
+    )
+    required_identity = {
+        "lessonSessionId",
+        "turnSequenceId",
+        "attemptId",
+        "stepKey",
+    }
+    if not required_identity.issubset(identity) or not required_identity.issubset(
+        refreshed
+    ):
+        errors.append("missing_tool_audit_identity")
+    if lesson_identity is not None:
+        expected_session = lesson_identity.get("session_id")
+        if identity.get("lessonSessionId") != expected_session:
+            errors.append("tool_audit_identity_mismatch")
+    elif identity.get("lessonSessionId") is None:
+        errors.append("tool_audit_identity_mismatch")
+    if refreshed.get("lessonSessionId") != identity.get("lessonSessionId"):
+        errors.append("tool_audit_identity_mismatch")
+    if identity.get("stepKey") != expected["step_key"]:
+        errors.append("tool_audit_identity_mismatch")
+    if refreshed.get("stepKey") != expected["step_key"]:
+        errors.append("tool_audit_identity_mismatch")
+    origin_turn = identity.get("turnSequenceId")
+    refreshed_turn = refreshed.get("turnSequenceId")
+    if (
+        not isinstance(origin_turn, int)
+        or not isinstance(refreshed_turn, int)
+        or refreshed_turn < origin_turn
+    ):
+        errors.append("tool_audit_identity_mismatch")
+    previous = audit_state.get("last_refreshed_identity")
+    if isinstance(previous, dict):
+        if identity.get("lessonSessionId") != previous.get("lessonSessionId"):
+            errors.append("tool_audit_identity_mismatch")
+        previous_turn = previous.get("turnSequenceId")
+        if (
+            not isinstance(previous_turn, int)
+            or not isinstance(origin_turn, int)
+            or origin_turn < previous_turn
+        ):
+            errors.append("tool_audit_identity_mismatch")
+        previous_step = previous.get("stepKey")
+        if identity.get("stepKey") != previous_step and not (
+            previous_step == "barn" and identity.get("stepKey") == "hay"
+        ):
+            errors.append("tool_audit_identity_mismatch")
+    cue_id = payload.get("cueId")
+    if cue_id is not None and cue_id != expected["cue_id"]:
+        errors.append("tool_audit_cue_mismatch")
+    effect = payload.get("effect")
+    if effect is not None and effect != _expected_tvideo_tool_effect(
+        expected["effect"]
+    ):
+        errors.append("tool_audit_effect_mismatch")
+    audit_state["last_refreshed_identity"] = dict(refreshed)
+    audit_state.setdefault("turn_tool_names", []).append(tool_name)
+    audit_state.setdefault("records", []).append(
+        {"toolName": tool_name, "accepted": payload.get("accepted") is True}
+    )
+    return errors
 
 
 def _tvideo_farm_ack(frame: dict, inbound_sequence: int) -> dict:
@@ -467,6 +656,7 @@ async def _observe_tvideo_farm_turn(
     previous_output_open,
     output_decoder,
     output_frame_size,
+    audit_state,
 ):
     deadline = time.monotonic() + timeout
     tts_started = False
@@ -509,8 +699,20 @@ async def _observe_tvideo_farm_turn(
         except json.JSONDecodeError:
             continue
 
+        if payload.get("type") == TVIDEO_FARM_TOOL_AUDIT_TYPE:
+            errors.extend(
+                _tvideo_farm_tool_audit_errors(
+                    payload,
+                    lesson_identity,
+                    expected,
+                    audit_state,
+                )
+            )
+            continue
+
         cinematic = _tvideo_farm_cinematic(payload)
         if cinematic is not None:
+            errors.extend(_tvideo_farm_duplicate_identity_errors(payload, expected))
             if requires_interruption and not interruption_stopped:
                 errors.append("missing_interruption_stop")
             expected_command = "prepare" if not events else "start"
@@ -584,6 +786,9 @@ async def _observe_tvideo_farm_turn(
         errors.append("missing_interruption_stop")
     if late_output_chunks:
         errors.append("late_output_after_interruption")
+    observed_tool_names = tuple(audit_state.pop("turn_tool_names", []))
+    if observed_tool_names != TVIDEO_FARM_EXPECTED_TOOL_PLAN[expected["label"]]:
+        errors.append("tool_audit_sequence_mismatch")
 
     event = events[-1] if events else None
     if expected["cue_id"] == "hay-listen" and event and event["step_key"] != "hay":
@@ -1111,6 +1316,7 @@ async def _run_tvideo_farm_scenario(args):
     previous_output_open = False
     bargein_audio_sent_while_output_active = False
     observed_step_keys = []
+    audit_state = {"records": []}
     import opuslib_next
 
     output_decoder = opuslib_next.Decoder(fixture["sample_rate"], 1)
@@ -1122,7 +1328,9 @@ async def _run_tvideo_farm_scenario(args):
         open_timeout=args.open_timeout_sec,
         max_size=None,
     ) as websocket:
-        await websocket.send(json.dumps(_hello_message()))
+        hello = _hello_message()
+        hello["features"] = {TVIDEO_FARM_TOOL_AUDIT_FEATURE: True}
+        await websocket.send(json.dumps(hello))
         hello_payload, _, _ = await _recv_until(
             websocket,
             lambda payload: payload.get("type") == "hello",
@@ -1155,6 +1363,7 @@ async def _run_tvideo_farm_scenario(args):
                 previous_output_open,
                 output_decoder,
                 output_frame_size,
+                audit_state,
             )
             validation_errors.extend(errors)
             output_binary_chunks += wire_metrics["output_binary_chunks"]
@@ -1181,6 +1390,11 @@ async def _run_tvideo_farm_scenario(args):
     if not bargein_audio_sent_while_output_active:
         validation_errors.append("bargein_not_sent_while_output_active")
     lesson_session_consistent = "lesson_session_mismatch" not in validation_errors
+    tool_audit_counts = Counter(
+        record["toolName"] for record in audit_state["records"]
+    )
+    if set(tool_audit_counts) != TVIDEO_FARM_LESSON_TOOLS:
+        validation_errors.append("missing_required_tool_audit")
     passed = len(records) == len(TVIDEO_FARM_EXPECTED_PROGRESS) and not validation_errors
     return {
         "scenario": "tvideo-farm",
@@ -1195,6 +1409,8 @@ async def _run_tvideo_farm_scenario(args):
         "conversation_identity_changes": conversation_identity_changes,
         "bargein_audio_sent_while_output_active": bargein_audio_sent_while_output_active,
         "lesson_session_consistent": lesson_session_consistent,
+        "tool_audit_count": len(audit_state["records"]),
+        "tool_audit_counts": dict(sorted(tool_audit_counts.items())),
         "duration_sec": round(time.time() - started_at, 1),
         "turns": records,
         "validation_errors": sorted(set(validation_errors)),

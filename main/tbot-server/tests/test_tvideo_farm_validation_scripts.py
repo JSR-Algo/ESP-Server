@@ -271,30 +271,40 @@ def _tvideo_farm_frame(
     *,
     command: str = "start",
     effect: str | None = None,
+    protocol_version: str = "teebot-lesson-renderer.v4",
+    step_id: str | None = None,
+    playback_mode: str | None = None,
 ) -> str:
     step_key = cue_id.split("-", 1)[0]
     resolved_effect = effect or cue_id.removeprefix(f"{step_key}-")
     if cue_id == "barn-to-hay-word-transition" and effect is None:
         resolved_effect = "word-transition"
+    resolved_playback = playback_mode or (
+        "loop" if resolved_effect in {"listen", "thinking"} else "once"
+    )
     return json.dumps(
         {
             "type": frame_type,
-            "protocolVersion": "teebot-lesson-renderer.v4",
+            "protocolVersion": protocol_version,
             "assignmentId": "assignment-1",
             "sessionId": "lesson-session-1",
             "lessonId": "farm-english",
             "lessonVersion": 4,
             "sequence": sequence,
-            "stepId": step_key,
+            "stepId": step_id or step_key,
             "body": {
                 "command": command,
                 "cueId": cue_id,
+                "effect": resolved_effect,
+                "stepKey": step_key,
+                "playbackMode": resolved_playback,
                 "commandSequenceId": sequence,
                 "cinematicPhase": {
                     "command": command,
                     "cueId": cue_id,
                     "stepKey": step_key,
                     "effect": resolved_effect,
+                    "playbackMode": resolved_playback,
                     "commandSequenceId": sequence,
                 },
             },
@@ -316,7 +326,31 @@ def _passing_tvideo_farm_messages() -> list[str | bytes]:
         "hay-celebrate",
     ]
     messages = [json.dumps({"type": "hello"})]
+    audit_turn = 1
     for index, cue_id in enumerate(cues, start=1):
+        label = google_live_robot_soak.TVIDEO_FARM_EXPECTED_PROGRESS[index - 1][
+            "label"
+        ]
+        step_key = cue_id.split("-", 1)[0]
+        effect = cue_id.removeprefix(f"{step_key}-")
+        if cue_id == "barn-to-hay-word-transition":
+            effect = "word-transition"
+        for tool_name in google_live_robot_soak.TVIDEO_FARM_EXPECTED_TOOL_PLAN[
+            label
+        ]:
+            messages.append(
+                _tool_audit_frame(
+                    tool_name=tool_name,
+                    cue_id=cue_id,
+                    effect=google_live_robot_soak._expected_tvideo_tool_effect(
+                        effect
+                    ),
+                    step_key=step_key,
+                    origin_turn=audit_turn,
+                    refreshed_turn=audit_turn + 1,
+                )
+            )
+            audit_turn += 1
         if cue_id == "barn-to-hay-word-transition":
             messages.append(json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}))
         messages.append(_tvideo_farm_frame("lesson_prepare", cue_id, index * 2 - 1, command="prepare"))
@@ -391,6 +425,68 @@ def _replace_output_with_corrupt_binary(messages) -> None:
     messages[messages.index(_valid_output_opus_packet())] = b"not-opus"
 
 
+def _mutate_frame(messages, cue_id: str, command: str, mutator) -> None:
+    index = _find_frame_index(messages, cue_id, command)
+    payload = json.loads(messages[index])
+    mutator(payload)
+    messages[index] = json.dumps(payload)
+
+
+def _tool_audit_frame(
+    *,
+    tool_name="lesson_visual_reaction",
+    cue_id="barn-listen",
+    effect="show_listening_scene",
+    step_key="barn",
+    origin_turn=1,
+    refreshed_turn=2,
+    accepted=True,
+    stale=False,
+    feature="googleLiveValidationToolAuditV1",
+) -> str:
+    lesson_session_id = "stale-session" if stale else "lesson-session-1"
+    return json.dumps(
+        {
+            "type": "google_live_validation_tool_audit",
+            "feature": feature,
+            "protocolVersion": "teebot-lesson-renderer.v4",
+            "identity": {
+                "lessonSessionId": lesson_session_id,
+                "turnSequenceId": origin_turn,
+                "attemptId": f"{lesson_session_id}:{step_key}:{origin_turn}",
+                "stepKey": step_key,
+            },
+            "toolName": tool_name,
+            "accepted": accepted,
+            "code": "ACCEPTED" if accepted else "REJECTED",
+            "cueId": cue_id,
+            "effect": effect,
+            "refreshedIdentity": {
+                "lessonSessionId": lesson_session_id,
+                "turnSequenceId": refreshed_turn,
+                "attemptId": f"{lesson_session_id}:{step_key}:{refreshed_turn}",
+                "stepKey": step_key,
+                "cueId": cue_id,
+            },
+        }
+    )
+
+
+def _insert_rejected_tool_audit(messages) -> None:
+    messages.insert(_find_frame_index(messages, "barn-listen", "prepare"), _tool_audit_frame(accepted=False))
+
+
+def _insert_stale_accepted_tool_audit(messages) -> None:
+    messages.insert(_find_frame_index(messages, "barn-listen", "start") + 1, _tool_audit_frame(stale=True))
+
+
+def _insert_wrong_feature_tool_audit(messages) -> None:
+    messages.insert(
+        _find_frame_index(messages, "barn-listen", "start") + 1,
+        _tool_audit_frame(feature="legacyAuditFeature"),
+    )
+
+
 class _TVideoFarmFakeWebSocket:
     def __init__(self, messages: list[str | bytes]):
         self.messages = list(messages)
@@ -426,7 +522,7 @@ def _tvideo_farm_args(**overrides) -> SimpleNamespace:
         "websocket_url": "ws://fake/tbot/v1",
         "device_mac": "robot-1",
         "device_id": "robot-1",
-        "client_id": "client-1",
+        "client_id": "soak-harness-client",
         "audio_source": "synthetic",
         "event_timeout_sec": 0.2,
         "open_timeout_sec": 0.2,
@@ -466,6 +562,24 @@ def test_tvideo_farm_live_audio_runner_sends_binary_fixtures_and_validates_progr
     assert report["conversation_identity_changes"] == 1
     assert report["bargein_audio_sent_while_output_active"] is True
     assert report["lesson_session_consistent"] is True
+    assert report["tool_audit_count"] == 18
+    assert report["tool_audit_counts"] == {
+        "lesson_child_response": 2,
+        "lesson_context_turn": 1,
+        "lesson_continue": 2,
+        "lesson_pronunciation_outcome": 3,
+        "lesson_visual_reaction": 10,
+    }
+    serialized_report = json.dumps(report)
+    for private_value in (
+        "lesson-session-1",
+        "attemptId",
+        "lessonSessionId",
+        "turnSequenceId",
+        "cueId",
+        "stepKey",
+    ):
+        assert private_value not in serialized_report
     assert [turn["input_fixture_id"] for turn in report["turns"]] == [
         "tvideo-farm-synthetic-lesson-start-v1",
         "tvideo-farm-synthetic-target-answer-v1",
@@ -492,7 +606,7 @@ def test_tvideo_farm_live_audio_runner_sends_binary_fixtures_and_validates_progr
             "channels": 1,
             "frame_duration": 60,
         },
-        "features": {},
+        "features": {"googleLiveValidationToolAuditV1": True},
     }
     acknowledgements = sent_json[1:]
     assert len(acknowledgements) == 20
@@ -607,6 +721,66 @@ def test_tvideo_farm_live_audio_runner_sends_binary_fixtures_and_validates_progr
         (_remove_command_sequence, "missing_command_sequence"),
         (_replace_lesson_session, "lesson_session_mismatch"),
         (_replace_output_with_corrupt_binary, "invalid_output_opus"),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-listen",
+                "prepare",
+                _tvideo_farm_frame(
+                    "lesson_prepare",
+                    "barn-listen",
+                    1,
+                    command="prepare",
+                    protocol_version="teebot-lesson-renderer.v3",
+                ),
+            ),
+            "wrong_protocol_version",
+        ),
+        (
+            lambda messages: _replace_frame(
+                messages,
+                "barn-listen",
+                "prepare",
+                _tvideo_farm_frame(
+                    "lesson_prepare",
+                    "barn-listen",
+                    1,
+                    command="prepare",
+                    step_id="hay",
+                ),
+            ),
+            "wrong_step",
+        ),
+        (
+            lambda messages: _mutate_frame(
+                messages,
+                "barn-thinking",
+                "start",
+                lambda payload: payload["body"].pop("playbackMode"),
+            ),
+            "missing_playback_mode",
+        ),
+        (
+            lambda messages: _mutate_frame(
+                messages,
+                "barn-thinking",
+                "start",
+                lambda payload: payload["body"]["cinematicPhase"].__setitem__("playbackMode", "once"),
+            ),
+            "cinematic_duplicate_mismatch",
+        ),
+        (
+            lambda messages: _mutate_frame(
+                messages,
+                "barn-thinking",
+                "start",
+                lambda payload: payload["body"].__setitem__("cueId", "hay-listen"),
+            ),
+            "cinematic_duplicate_mismatch",
+        ),
+        (_insert_rejected_tool_audit, "tool_audit_rejected"),
+        (_insert_stale_accepted_tool_audit, "tool_audit_identity_mismatch"),
+        (_insert_wrong_feature_tool_audit, "wrong_tool_audit_feature"),
     ],
 )
 def test_tvideo_farm_live_audio_runner_rejects_broken_authoritative_transcripts(
