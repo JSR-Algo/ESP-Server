@@ -16,6 +16,7 @@ from core.lesson.conversation_contract import LessonToolIdentity
 from core.lesson.errors import LESSON_FRAME_ACK_TIMEOUT, LessonError
 from core.lesson.runtime import (
     LessonRuntime,
+    MAX_RETIRED_CONVERSATION_ACK_SEQUENCES,
     RENDERER_V4,
     S_COMPLETED,
     S_FAILED,
@@ -849,7 +850,7 @@ async def test_stale_visual_cleanup_preserves_new_visual_ack_timeout(
     assert runtime._frame_ack_timeout_task is new_timeout
 
     if completion == "ack":
-        await runtime.on_lesson_ack(_ack(runtime, new_frame, 1))
+        await runtime.on_lesson_ack(_ack(runtime, new_frame, 2))
         assert new_sequence not in runtime._outstanding
         assert runtime._conversation_pending_visual is None
         assert runtime._frame_ack_timeout_task is None
@@ -940,6 +941,223 @@ async def test_runtime_replacement_after_visual_retry_closes_retry_authority() -
     await runtime.on_lesson_ack(_ack(runtime, retry, 1))
     assert runtime.conn.lesson_runtime is replacement
     assert runtime.state == S_RUNNING
+
+
+@pytest.mark.asyncio
+async def test_exact_late_original_ack_advances_inbound_before_new_visual_ack() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    original = _frames(runtime)[-1]
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    current = _frames(runtime)[-1]
+
+    await runtime.on_lesson_ack(_ack(runtime, original, 1))
+    await runtime.on_lesson_ack(_ack(runtime, current, 2))
+
+    assert runtime._last_inbound_sequence == 2
+    assert current["sequence"] not in runtime._outstanding
+    assert runtime._conversation_visual_ack == (
+        runtime.conversation.attempt_id,
+        "barn-listen",
+    )
+    assert all(frame["type"] != "lesson_error" for frame in _frames(runtime))
+
+
+@pytest.mark.asyncio
+async def test_exact_late_retry_ack_advances_inbound_before_new_visual_ack() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    _original, retry, _timeout_gates = await _emit_conversation_visual_retry(runtime)
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    current = _frames(runtime)[-1]
+
+    await runtime.on_lesson_ack(_ack(runtime, retry, 1))
+    await runtime.on_lesson_ack(_ack(runtime, current, 2))
+
+    assert runtime._last_inbound_sequence == 2
+    assert current["sequence"] not in runtime._outstanding
+    assert runtime._conversation_visual_ack == (
+        runtime.conversation.attempt_id,
+        "barn-listen",
+    )
+    assert all(frame["type"] != "lesson_error" for frame in _frames(runtime))
+
+
+@pytest.mark.asyncio
+async def test_forged_retired_ack_does_not_consume_inbound_or_poison_new_visual() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    retired = _frames(runtime)[-1]
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    current = _frames(runtime)[-1]
+
+    await runtime.on_lesson_ack(_ack(runtime, retired, 1, cue_id="hay-listen"))
+    assert runtime._last_inbound_sequence == 0
+    await runtime.on_lesson_ack(_ack(runtime, current, 1))
+
+    assert runtime._last_inbound_sequence == 1
+    assert current["sequence"] not in runtime._outstanding
+    assert all(frame["type"] != "lesson_error" for frame in _frames(runtime))
+
+
+@pytest.mark.asyncio
+async def test_retired_conversation_ack_tombstones_are_bounded_and_clear_on_close() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    for sequence in range(MAX_RETIRED_CONVERSATION_ACK_SEQUENCES + 3):
+        runtime._retire_conversation_ack_sequence(
+            sequence,
+            {
+                "type": "lesson_cinematic_control",
+                "stepId": "barn",
+                "body": {
+                    "command": "start",
+                    "cueId": "barn-listen",
+                    "commandSequenceId": sequence,
+                },
+            },
+        )
+
+    assert (
+        len(runtime._retired_conversation_ack_sequences)
+        == MAX_RETIRED_CONVERSATION_ACK_SEQUENCES
+    )
+    assert 0 not in runtime._retired_conversation_ack_sequences
+    await runtime.close()
+    assert runtime._retired_conversation_ack_sequences == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retry_error",
+    [ConnectionError("retry disconnected"), asyncio.CancelledError()],
+    ids=["connection_error", "cancelled"],
+)
+async def test_current_visual_retry_send_failure_is_consumed_and_fails_closed(
+    retry_error: BaseException,
+) -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.conn.config["lesson"]["frame_ack_max_retries"] = 1
+    timeout_gates: list[asyncio.Event] = []
+    default_send = runtime._send
+    send_count = 0
+
+    async def controlled_sleep(_seconds: float) -> None:
+        gate = asyncio.Event()
+        timeout_gates.append(gate)
+        await gate.wait()
+
+    async def fail_retry_send(payload: str) -> None:
+        nonlocal send_count
+        send_count += 1
+        if send_count == 2:
+            raise retry_error
+        await default_send(payload)
+
+    runtime._sleep = controlled_sleep
+    runtime._send = fail_retry_send
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    await _wait_for_count(timeout_gates, 1)
+    retry_task = runtime._frame_ack_timeout_task
+    timeout_gates[0].set()
+
+    assert retry_task is not None
+    await retry_task
+
+    assert runtime.state == S_FAILED
+    assert runtime.last_error is not None
+    assert runtime.last_error.code == LESSON_FRAME_ACK_TIMEOUT
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    assert runtime._frame_ack_retry_task is None
+    assert runtime._frame_ack_retry_command_sequence is None
+
+
+@pytest.mark.asyncio
+async def test_stale_visual_retry_send_cancellation_is_consumed_without_failure() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.conn.config["lesson"]["frame_ack_max_retries"] = 1
+    first_timeout = asyncio.Event()
+    retry_timeout = asyncio.Event()
+    retry_send_started = asyncio.Event()
+    never_release = asyncio.Event()
+    default_send = runtime._send
+    sleep_count = 0
+    send_count = 0
+
+    async def controlled_sleep(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        await (first_timeout if sleep_count == 1 else retry_timeout).wait()
+
+    async def block_retry_send(payload: str) -> None:
+        nonlocal send_count
+        send_count += 1
+        if send_count == 2:
+            retry_send_started.set()
+            await never_release.wait()
+            return
+        await default_send(payload)
+
+    runtime._sleep = controlled_sleep
+    runtime._send = block_retry_send
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    retry_task = runtime._frame_ack_timeout_task
+    first_timeout.set()
+    await retry_send_started.wait()
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+    assert retry_task is not None
+    retry_task.cancel()
+
+    await retry_task
+
+    assert runtime.state == S_RUNNING
+    assert runtime.last_error is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    assert runtime._frame_ack_retry_task is None
+    assert runtime._frame_ack_retry_command_sequence is None
 
 
 @pytest.mark.asyncio

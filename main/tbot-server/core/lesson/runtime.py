@@ -105,6 +105,7 @@ VISUAL_DEGRADED_REASONS = frozenset(
 )
 VISUAL_REJECTED_REASONS = VISUAL_DEGRADED_REASONS | frozenset({"superseded"})
 MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
+MAX_RETIRED_CONVERSATION_ACK_SEQUENCES = 128
 PARENT_RUNTIME_PHASES = frozenset(
     {
         "preparing",
@@ -1079,9 +1080,12 @@ class LessonRuntime:
         self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
         self._frame_ack_timeout_sequence: Optional[int] = None
+        self._frame_ack_retry_task: Optional[asyncio.Task] = None
+        self._frame_ack_retry_command_sequence: Optional[int] = None
         self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
         self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
         self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
+        self._retired_conversation_ack_sequences: Dict[int, Dict[str, Any]] = {}
         self._visual_generation = 1
         self._current_visual_request: Optional[Dict[str, Any]] = None
         self._visual_transition_task: Optional[asyncio.Task] = None
@@ -1273,7 +1277,9 @@ class LessonRuntime:
         if visual_transition_task is not None and not visual_transition_task.done():
             visual_transition_task.cancel()
         self._retire_conversation_visual()
+        self._cancel_frame_ack_retry()
         self._cancel_frame_ack_timeout()
+        self._retired_conversation_ack_sequences.clear()
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
         self._cancel_child_response_timeout()
@@ -1699,8 +1705,40 @@ class LessonRuntime:
                 ack_sequences.add(ack_sequence)
             self._cinematic_pending_command = None
         for ack_sequence in ack_sequences:
-            self._outstanding.pop(ack_sequence, None)
+            frame = self._outstanding.pop(ack_sequence, None)
+            if isinstance(frame, dict):
+                self._retire_conversation_ack_sequence(ack_sequence, frame)
             self._cancel_frame_ack_timeout(ack_sequence)
+        self._cancel_frame_ack_retry(sequence)
+
+    def _retire_conversation_ack_sequence(
+        self, sequence: int, frame: Dict[str, Any]
+    ) -> None:
+        command = self._cinematic_frame_command(frame)
+        if frame.get("type") != "lesson_cinematic_control" or command is None:
+            return
+        self._retired_conversation_ack_sequences[sequence] = {
+            "protocolVersion": self.negotiated_version,
+            "assignmentId": self.assignment_id,
+            "sessionId": self.session_id,
+            "lessonId": self.lesson_id,
+            "lessonVersion": self.lesson_version,
+            "stepId": frame.get("stepId"),
+            "command": {
+                key: copy.deepcopy(command.get(key))
+                for key in (
+                    "command",
+                    "phaseId" if "phaseId" in command else "cueId",
+                    "commandSequenceId",
+                )
+            },
+        }
+        while (
+            len(self._retired_conversation_ack_sequences)
+            > MAX_RETIRED_CONVERSATION_ACK_SEQUENCES
+        ):
+            oldest = next(iter(self._retired_conversation_ack_sequences))
+            self._retired_conversation_ack_sequences.pop(oldest, None)
 
     def _retire_conversation_visual(self) -> None:
         pending = self._conversation_pending_visual
@@ -1802,6 +1840,18 @@ class LessonRuntime:
         acked = _coerce_ack_seq(acked)
         frame = self._outstanding.get(acked) if acked is not None else None
         if frame is None:
+            retired = (
+                self._retired_conversation_ack_sequences.get(acked)
+                if acked is not None
+                else None
+            )
+            if isinstance(retired, dict) and self._retired_conversation_ack_matches(
+                msg_json, body, acked, retired
+            ):
+                accepted = await self._accept_inbound(msg_json.get("sequence"))
+                if accepted in {"ok", "duplicate"}:
+                    self._retired_conversation_ack_sequences.pop(acked, None)
+                return
             if acked is None:
                 await self._accept_inbound(msg_json.get("sequence"))
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).
@@ -1885,6 +1935,25 @@ class LessonRuntime:
         command = self._cinematic_frame_command(frame)
         if command is None:
             return True
+        if not self._cinematic_ack_payload_matches(command, ack_body):
+            return False
+        kind = command.get("command")
+        try:
+            identity_key = cinematic_identity_key(command)
+        except FlattenedCinematicContractError:
+            return False
+        identity_field = "phaseId" if "phaseId" in command else "cueId"
+        pending = self._cinematic_pending_command
+        return bool(
+            isinstance(pending, dict)
+            and pending.get("command") == kind
+            and pending.get("commandSequenceId") == command.get("commandSequenceId")
+            and pending.get(identity_field) == identity_key
+        )
+
+    def _cinematic_ack_payload_matches(
+        self, command: Dict[str, Any], ack_body: Dict[str, Any]
+    ) -> bool:
         ack = ack_body.get("cinematicPhase")
         if not isinstance(ack, dict):
             return False
@@ -1916,12 +1985,35 @@ class LessonRuntime:
             return False
         if kind == "start" and ack.get("phaseReady") is not True:
             return False
-        pending = self._cinematic_pending_command
+        return True
+
+    def _retired_conversation_ack_matches(
+        self,
+        msg_json: Dict[str, Any],
+        body: Dict[str, Any],
+        acked: int,
+        retired: Dict[str, Any],
+    ) -> bool:
+        command = retired.get("command")
         return bool(
-            isinstance(pending, dict)
-            and pending.get("command") == kind
-            and pending.get("commandSequenceId") == command.get("commandSequenceId")
-            and pending.get(identity_field) == identity_key
+            isinstance(command, dict)
+            and msg_json.get("type") == "lesson_ack"
+            and msg_json.get("protocolVersion") == retired.get("protocolVersion")
+            and msg_json.get("assignmentId") == retired.get("assignmentId")
+            and msg_json.get("sessionId") == retired.get("sessionId")
+            and msg_json.get("stepId") == retired.get("stepId")
+            and (
+                "lessonId" not in msg_json
+                or msg_json.get("lessonId") == retired.get("lessonId")
+            )
+            and (
+                "lessonVersion" not in msg_json
+                or msg_json.get("lessonVersion") == retired.get("lessonVersion")
+            )
+            and type(msg_json.get("sequence")) is int
+            and type(body.get("acks")) is int
+            and body.get("acks") == acked
+            and self._cinematic_ack_payload_matches(command, body)
         )
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
@@ -3122,6 +3214,7 @@ class LessonRuntime:
             if seq not in self._outstanding or self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
                 return
             frame = self._outstanding.pop(seq, None) or {}
+            self._retire_conversation_ack_sequence(seq, frame)
             retry_count = int(frame.get("retryCount") or 0)
             if retry_count < self._frame_ack_max_retries():
                 self._log(
@@ -3133,12 +3226,51 @@ class LessonRuntime:
                         f"stepId={step_id or ''}"
                     ),
                 )
-                await self._emit(
-                    frame_type,
-                    step_id=step_id,
-                    body=copy.deepcopy(frame.get("body") or {}),
-                    frame_ack_retry_count=retry_count + 1,
+                command = self._cinematic_frame_command(frame)
+                pending_visual = self._conversation_pending_visual
+                retry_token = self._conversation_authority_token()
+                retry_command_sequence = (
+                    command.get("commandSequenceId")
+                    if isinstance(command, dict)
+                    and isinstance(pending_visual, dict)
+                    and command.get("commandSequenceId")
+                    == pending_visual.get("sequence")
+                    else None
                 )
+                retry_task = asyncio.current_task()
+                if type(retry_command_sequence) is int:
+                    self._frame_ack_retry_task = retry_task
+                    self._frame_ack_retry_command_sequence = retry_command_sequence
+                try:
+                    await self._emit(
+                        frame_type,
+                        step_id=step_id,
+                        body=copy.deepcopy(frame.get("body") or {}),
+                        frame_ack_retry_count=retry_count + 1,
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    retry_is_current = (
+                        type(retry_command_sequence) is int
+                        and retry_token is not None
+                        and self._conversation_token_is_current(retry_token)
+                        and isinstance(self._conversation_pending_visual, dict)
+                        and self._conversation_pending_visual.get("sequence")
+                        == retry_command_sequence
+                    )
+                    if retry_is_current:
+                        self._retire_conversation_visual()
+                        await self._fail_frame_ack_retry_send(
+                            frame_type, step_id, seq, exc
+                        )
+                    elif retry_command_sequence is None and self._is_active_runtime():
+                        await self._fail_frame_ack_retry_send(
+                            frame_type, step_id, seq, exc
+                        )
+                    return
+                finally:
+                    if self._frame_ack_retry_task is retry_task:
+                        self._frame_ack_retry_task = None
+                        self._frame_ack_retry_command_sequence = None
                 return
             self.last_error = LessonError(
                 LESSON_FRAME_ACK_TIMEOUT,
@@ -3154,12 +3286,70 @@ class LessonRuntime:
         self._frame_ack_timeout_sequence = seq
         self._frame_ack_timeout_task = asyncio.create_task(_timeout())
 
+    async def _fail_frame_ack_retry_send(
+        self,
+        frame_type: str,
+        step_id: Optional[str],
+        sequence: int,
+        exc: BaseException,
+    ) -> None:
+        self.last_error = LessonError(
+            LESSON_FRAME_ACK_TIMEOUT,
+            f"failed to resend {frame_type} after ACK timeout",
+            retryable=True,
+            context={
+                "frameType": frame_type,
+                "stepId": step_id,
+                "ackedSequence": sequence,
+                "stage": "retrySend",
+                "errorType": type(exc).__name__,
+            },
+        )
+        self.state = S_FAILED
+        self._log(
+            "error",
+            f"FRAME_ACK_RETRY_SEND_FAILED type={frame_type} seq={sequence} "
+            f"stepId={step_id or ''} error={type(exc).__name__}",
+        )
+        try:
+            await self._emit_error(self.last_error)
+        except (Exception, asyncio.CancelledError) as notify_exc:
+            self._log(
+                "warning",
+                "lesson retry-send error notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+        try:
+            await self._notify_lesson_terminal("frame_ack_retry_send_failed")
+        except (Exception, asyncio.CancelledError) as notify_exc:
+            self._log(
+                "warning",
+                "lesson retry-send terminal notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+
     def _cancel_frame_ack_timeout(self, sequence: Optional[int] = None) -> None:
         if sequence is not None and self._frame_ack_timeout_sequence != sequence:
             return
         task = self._frame_ack_timeout_task
         self._frame_ack_timeout_task = None
         self._frame_ack_timeout_sequence = None
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+
+    def _cancel_frame_ack_retry(self, command_sequence: Optional[int] = None) -> None:
+        if (
+            command_sequence is not None
+            and self._frame_ack_retry_command_sequence != command_sequence
+        ):
+            return
+        task = self._frame_ack_retry_task
+        self._frame_ack_retry_task = None
+        self._frame_ack_retry_command_sequence = None
         if (
             task is not None
             and task is not asyncio.current_task()
@@ -3947,7 +4137,9 @@ class LessonRuntime:
         try:
             await self._send(payload)
         except BaseException:
-            self._outstanding.pop(seq, None)
+            failed_frame = self._outstanding.pop(seq, None)
+            if isinstance(failed_frame, dict):
+                self._retire_conversation_ack_sequence(seq, failed_frame)
             pending = self._cinematic_pending_command
             if isinstance(pending, dict) and pending.get("ackSequence") == seq:
                 self._cinematic_pending_command = None
