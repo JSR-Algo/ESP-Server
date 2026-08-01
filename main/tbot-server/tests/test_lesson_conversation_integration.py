@@ -625,6 +625,133 @@ async def test_visual_send_unbound_race_rejects_without_overwriting_stale_conver
 
 
 @pytest.mark.asyncio
+async def test_visual_start_send_connection_error_fails_closed_and_resolves_fallback() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    directive = await runtime.conversation_live_interruption("timeout")
+    assert directive.accepted
+    prepare = _frames(runtime)[-1]
+    fallback_future = runtime._conversation_fallback_ack_future
+
+    async def fail_start_send(_payload: str) -> None:
+        raise ConnectionError("firmware disconnected before cinematic start")
+
+    runtime._send = fail_start_send
+    await runtime.on_lesson_ack(_ack(runtime, prepare, 3))
+
+    assert runtime.state == S_FAILED
+    assert runtime.last_error is not None
+    assert runtime.last_error.code == "CINEMATIC_START_SEND_FAILED"
+    assert runtime.last_error.context == {
+        "stepId": "barn",
+        "cueId": _frame_command(prepare)["cueId"],
+        "stage": "startSend",
+        "errorType": "ConnectionError",
+    }
+    assert fallback_future is not None and fallback_future.result() is False
+    assert runtime._conversation_fallback_window_id is None
+    assert runtime._conversation_fallback_turn_sequence_id is None
+    assert runtime._conversation_fallback_ack_future is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+
+
+@pytest.mark.asyncio
+async def test_visual_start_send_cancellation_cleans_transaction_then_reraises() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    prepare = _frames(runtime)[-1]
+    start_send_started = asyncio.Event()
+
+    async def block_start_send(_payload: str) -> None:
+        start_send_started.set()
+        await asyncio.Event().wait()
+
+    runtime._send = block_start_send
+    ack_task = asyncio.create_task(runtime.on_lesson_ack(_ack(runtime, prepare, 1)))
+    await start_send_started.wait()
+    ack_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ack_task
+
+    assert runtime.state == S_RUNNING
+    assert runtime.last_error is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+
+
+@pytest.mark.asyncio
+async def test_replacement_during_visual_start_send_preserves_newer_visual_state() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    old_prepare = _frames(runtime)[-1]
+    old_start_send_started = asyncio.Event()
+    release_old_start_send = asyncio.Event()
+    blocked_old_start = False
+
+    async def block_old_start_send(payload: str) -> None:
+        nonlocal blocked_old_start
+        frame = json.loads(payload)
+        if (
+            not blocked_old_start
+            and frame["type"] == "lesson_cinematic_control"
+            and frame["body"].get("command") == "start"
+        ):
+            blocked_old_start = True
+            old_start_send_started.set()
+            await release_old_start_send.wait()
+            raise ConnectionError("old cinematic start lost its connection")
+        await runtime.conn.websocket.send(payload)
+
+    runtime._send = block_old_start_send
+    old_ack_task = asyncio.create_task(
+        runtime.on_lesson_ack(_ack(runtime, old_prepare, 1))
+    )
+    await old_start_send_started.wait()
+    old_start_sequence = runtime._conversation_pending_visual["sequence"]
+    assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    newer_pending = runtime._conversation_pending_visual
+    newer_command = runtime._cinematic_pending_command
+    newer_timeout = runtime._frame_ack_timeout_task
+    assert newer_pending is not None
+    assert newer_pending["sequence"] != old_start_sequence
+
+    release_old_start_send.set()
+    await old_ack_task
+
+    assert runtime.state == S_RUNNING
+    assert runtime.last_error is None
+    assert runtime._conversation_pending_visual is newer_pending
+    assert runtime._cinematic_pending_command is newer_command
+    assert newer_pending["sequence"] in runtime._outstanding
+    assert runtime._frame_ack_timeout_task is newer_timeout
+    assert runtime._frame_ack_timeout_sequence == newer_pending["sequence"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_continue_race_rejects_without_progress_or_fsm_mutation() -> None:
     runtime = _runtime()
     await _activate(runtime, step_index=1)
@@ -1471,6 +1598,62 @@ async def test_current_visual_retry_send_failure_is_consumed_and_fails_closed(
     assert runtime.state == S_FAILED
     assert runtime.last_error is not None
     assert runtime.last_error.code == LESSON_FRAME_ACK_TIMEOUT
+    assert runtime._conversation_pending_visual is None
+    assert runtime._cinematic_pending_command is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    assert runtime._frame_ack_retry_task is None
+    assert runtime._frame_ack_retry_command_sequence is None
+
+
+@pytest.mark.asyncio
+async def test_visual_start_retry_send_failure_retires_start_authority() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.conn.config["lesson"]["frame_ack_max_retries"] = 1
+    assert (
+        await runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    ).accepted
+    prepare = _frames(runtime)[-1]
+    await asyncio.sleep(0)
+    timeout_gate = asyncio.Event()
+    default_send = runtime._send
+    start_send_count = 0
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await timeout_gate.wait()
+
+    async def fail_start_retry(payload: str) -> None:
+        nonlocal start_send_count
+        frame = json.loads(payload)
+        if (
+            frame["type"] == "lesson_cinematic_control"
+            and frame["body"].get("command") == "start"
+        ):
+            start_send_count += 1
+            if start_send_count == 2:
+                raise ConnectionError("start retry disconnected")
+        await default_send(payload)
+
+    runtime._sleep = controlled_sleep
+    runtime._send = fail_start_retry
+    await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
+    start = _frames(runtime)[-1]
+    retry_task = runtime._frame_ack_timeout_task
+    timeout_gate.set()
+
+    assert retry_task is not None
+    await retry_task
+
+    assert start_send_count == 2
+    assert runtime.state == S_FAILED
+    assert runtime.last_error is not None
+    assert runtime.last_error.code == LESSON_FRAME_ACK_TIMEOUT
+    assert runtime.last_error.context["stage"] == "retrySend"
+    assert runtime.last_error.context["ackedSequence"] == start["sequence"]
     assert runtime._conversation_pending_visual is None
     assert runtime._cinematic_pending_command is None
     assert runtime._outstanding == {}

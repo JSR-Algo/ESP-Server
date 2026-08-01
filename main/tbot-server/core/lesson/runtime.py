@@ -108,6 +108,7 @@ VISUAL_DEGRADED_REASONS = frozenset(
 VISUAL_REJECTED_REASONS = VISUAL_DEGRADED_REASONS | frozenset({"superseded"})
 MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
 MAX_RETIRED_CONVERSATION_ACK_SEQUENCES = 128
+CINEMATIC_START_SEND_FAILED = "CINEMATIC_START_SEND_FAILED"
 PARENT_RUNTIME_PHASES = frozenset(
     {
         "preparing",
@@ -2181,6 +2182,77 @@ class LessonRuntime:
         if type(sequence) is int:
             self._retire_conversation_visual_sequence(sequence)
 
+    def _retire_conversation_start_send_transaction(
+        self,
+        pending: dict[str, Any],
+        sequence: int,
+    ) -> bool:
+        current = self._conversation_pending_visual
+        if (
+            current is not pending
+            or current.get("stage") != "start"
+            or current.get("sequence") != sequence
+        ):
+            return False
+        cue_id = current.get("cueId")
+        attempt_id = current.get("attemptId")
+        self._conversation_pending_visual = None
+        self._retire_conversation_visual_sequence(sequence)
+        if (
+            self._conversation_fallback_ack_sequence == sequence
+            and self._conversation_fallback_ack_cue_id == cue_id
+            and self._conversation_fallback_ack_attempt_id == attempt_id
+        ):
+            self._conversation_fallback_window_id = None
+            self._conversation_fallback_turn_sequence_id = None
+            self._clear_conversation_fallback_ack()
+        return True
+
+    async def _fail_conversation_start_send(
+        self,
+        *,
+        cue_id: str,
+        step_id: str | None,
+        exc: BaseException,
+    ) -> None:
+        self.last_error = LessonError(
+            CINEMATIC_START_SEND_FAILED,
+            "failed to send cinematic start after prepare acknowledgement",
+            retryable=True,
+            context={
+                "stepId": step_id,
+                "cueId": cue_id,
+                "stage": "startSend",
+                "errorType": type(exc).__name__,
+            },
+        )
+        self.state = S_FAILED
+        self._log(
+            "error",
+            f"CINEMATIC_START_SEND_FAILED stepId={step_id or ''} "
+            f"cueId={cue_id} error={type(exc).__name__}",
+        )
+        try:
+            await self._emit_error(self.last_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as notify_exc:
+            self._log(
+                "warning",
+                "cinematic start-send error notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+        try:
+            await self._notify_lesson_terminal("cinematic_start_send_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as notify_exc:
+            self._log(
+                "warning",
+                "cinematic start-send terminal notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+
     async def _on_conversation_visual_acked(self, frame: Dict[str, Any]) -> None:
         pending = self._conversation_pending_visual
         command = self._cinematic_frame_command(frame)
@@ -2241,13 +2313,28 @@ class LessonRuntime:
             and self._conversation_fallback_ack_cue_id == command.get("cueId")
         ):
             self._conversation_fallback_ack_sequence = next_sequence
-        sequence = await self._emit(
-            "lesson_cinematic_control",
-            step_id=self._step_id,
-            body={"command": "start", "cueId": command["cueId"]},
-        )
+        try:
+            sequence = await self._emit(
+                "lesson_cinematic_control",
+                step_id=self._step_id,
+                body={"command": "start", "cueId": command["cueId"]},
+            )
+        except asyncio.CancelledError:
+            self._retire_conversation_start_send_transaction(pending, next_sequence)
+            raise
+        except Exception as exc:
+            retired = self._retire_conversation_start_send_transaction(
+                pending, next_sequence
+            )
+            if retired and self._conversation_token_is_current(token):
+                await self._fail_conversation_start_send(
+                    cue_id=command["cueId"],
+                    step_id=pending.get("stepId"),
+                    exc=exc,
+                )
+            return False
         if sequence != next_sequence or not self._conversation_token_is_current(token):
-            self._retire_conversation_visual()
+            self._retire_conversation_start_send_transaction(pending, next_sequence)
             return False
         return True
 
