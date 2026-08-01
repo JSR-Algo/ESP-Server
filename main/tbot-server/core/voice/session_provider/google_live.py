@@ -2534,6 +2534,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         ):
             return
 
+        if self._lesson_conversation_tool_path_active():
+            await self._handle_lesson_live_interruption("transport")
+            return
+
         reconnect_result = await self._try_reconnect_with_lease(exc)
         if reconnect_result is not False:
             return
@@ -3916,6 +3920,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if not self._waiting_model_release_due():
                 return
+            if self._lesson_conversation_tool_path_active():
+                handled = await self._handle_lesson_live_interruption("timeout")
+                if handled:
+                    self._interaction.transition(InteractionState.IDLE)
+                    self._waiting_model_since = None
+                    self.conn.client_abort = False
+                    return
             self._consecutive_waiting_model_timeouts += 1
             if await self._reopen_silent_live_session_after_timeouts(timeout):
                 return
@@ -5736,7 +5747,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._safe_error_message(exc),
                 )
         if self._should_hard_reconnect_on_interrupt() and self._receive_task is not None:
-            await self._hard_reconnect_after_interrupt(reason)
+            if self._lesson_conversation_tool_path_active():
+                await self._handle_lesson_live_interruption("interrupted")
+            else:
+                await self._hard_reconnect_after_interrupt(reason)
         if reason in {"audio_input", "loud_input"}:
             self._schedule_forced_interrupt_input_flush(reason)
         self.conn.logger.bind(tag="GoogleLive").info(
@@ -5774,6 +5788,75 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "Google Live lesson_conversation_interrupt_failed error={}",
                 self._safe_error_message(exc),
             )
+
+    async def _handle_lesson_live_interruption(self, reason):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        fallback = getattr(runtime, "conversation_live_interruption", None)
+        if not callable(fallback):
+            return False
+        try:
+            directive = await fallback(reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "lesson_live_fallback_failed diagnostic=RUNTIME_EXCEPTION error_class={}",
+                type(exc).__name__,
+            )
+            return False
+        accepted = bool(getattr(directive, "accepted", False))
+        code = str(getattr(directive, "code", "INVALID_DIRECTIVE"))
+        window_id = getattr(directive, "window_id", None)
+        reconnect_allowed = bool(getattr(directive, "reconnect_allowed", False))
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "lesson_live_fallback diagnostic={} reason={} reconnect_allowed={}",
+            code,
+            reason,
+            reconnect_allowed,
+        )
+        if not accepted:
+            return False
+        if reconnect_allowed:
+            reconnected = await self._attempt_lesson_reconnect_once(reason)
+            if reconnected:
+                reset = getattr(runtime, "conversation_live_reconnect_succeeded", None)
+                if callable(reset) and isinstance(window_id, str):
+                    reset(window_id)
+                await self._publish_current_lesson_context()
+                return True
+        prompt = getattr(directive, "prompt", "")
+        sender = getattr(self._client, "send_text", None)
+        if isinstance(prompt, str) and prompt.strip() and callable(sender):
+            await sender(prompt)
+        return True
+
+    async def _attempt_lesson_reconnect_once(self, reason):
+        if self._closing or self._fallback_provider is not None or self._reconnecting:
+            return False
+        self._reconnecting = True
+        self._interaction.transition(InteractionState.RECONNECTING)
+        try:
+            await self._close_live_resources()
+            await self._record_reconnect_attempt()
+            await self._open_live_session()
+            self.conn.voice_provider = self
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
+                reason,
+            )
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._close_live_resources()
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
+                reason,
+                self._classify_error(exc),
+            )
+            return False
+        finally:
+            self._reconnecting = False
 
     def _should_hard_reconnect_on_interrupt(self):
         config = self._get_live_config()

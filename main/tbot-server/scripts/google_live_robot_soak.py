@@ -90,6 +90,37 @@ LOG_RECONNECT_RE = re.compile(r"reconnect attempt (\d+) succeeded")
 LOG_FALLBACK_RE = re.compile(r"fallback_triggered")
 
 
+def _safe_soak_config(args):
+    """Serialize test controls without utterances, audio paths, or model prose."""
+    safe_names = (
+        "mode",
+        "audio_source",
+        "duration",
+        "trials",
+        "env",
+        "skip_firmware_timing",
+        "bargein_cycles",
+        "idle_cycles",
+        "event_timeout_sec",
+        "speak_for_sec",
+        "idle_duration_sec",
+        "open_timeout_sec",
+        "interrupt_timeout_sec",
+        "settle_timeout_sec",
+        "bargein_latency_budget_ms",
+        "ac1_goaway_budget",
+        "dry_run",
+    )
+    config = {
+        name: getattr(args, name)
+        for name in safe_names
+        if hasattr(args, name)
+    }
+    config["inject_audio"] = bool(getattr(args, "inject_audio", None))
+    config["inject_text"] = bool(getattr(args, "inject_text", None))
+    return config
+
+
 class LogTail:
     """Cheap server.log tail: capture file offset at start, read on demand."""
 
@@ -622,7 +653,7 @@ def _dry_run_report(args):
         "started_at": started_at,
         "duration_sec": round(time.time() - started_at, 3),
         "dry_run": True,
-        "config": vars(args),
+        "config": _safe_soak_config(args),
         "cycles": cycles,
         "ac_results": ac_results,
         "error_distribution": {"dry_run": n},
@@ -714,7 +745,7 @@ async def run_soak(args):
         "started_at": started_at,
         "duration_sec": round(time.time() - started_at, 1),
         "dry_run": False,
-        "config": vars(args),
+        "config": _safe_soak_config(args),
         "cycles": cycles,
         "ac_results": ac_results,
         "error_distribution": error_distribution,
@@ -767,7 +798,13 @@ def main():
                         help="per-cycle max wall-clock in seconds (spec §8 default 600)")
     # Audio injection (spec §8)
     parser.add_argument("--inject-audio", dest="inject_audio", default=None,
-                        help="pre-recorded VN WAV for interrupt utterance (re-sampled to 24kHz Opus)")
+                        help="synthetic or consenting-adult WAV; never use child recordings")
+    parser.add_argument(
+        "--audio-source",
+        choices=["synthetic", "adult"],
+        default="synthetic",
+        help="privacy provenance for injected audio; child audio is forbidden",
+    )
     parser.add_argument("--inject-text", dest="inject_text", default=None,
                         help="text injection for interrupt (default: use --interrupt-prompt)")
     # Prompts

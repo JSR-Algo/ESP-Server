@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from core.lesson.conversation_contract import (
     CueSpec,
@@ -23,6 +23,45 @@ class ConversationState(str, Enum):
     COACHING = "COACHING"
     REACTING = "REACTING"
     COMPLETE = "COMPLETE"
+
+
+@dataclass(frozen=True)
+class SpeakingEvidence:
+    outcome: Literal["mastered", "attempted", "comprehended"]
+    attempt_count: int
+    final_coaching_level: int
+    elapsed_ms: int
+    step_key: str
+    lesson_version: int
+
+    def __post_init__(self) -> None:
+        if self.outcome not in {"mastered", "attempted", "comprehended"}:
+            raise ValueError("unsupported evidence outcome")
+        for name in (
+            "attempt_count",
+            "final_coaching_level",
+            "elapsed_ms",
+            "lesson_version",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise TypeError(f"{name} must be a non-negative integer")
+        if self.attempt_count < 1 or self.lesson_version < 1:
+            raise ValueError("attempt_count and lesson_version must be positive")
+        if self.final_coaching_level > 3:
+            raise ValueError("final_coaching_level must be between 0 and 3")
+        if not isinstance(self.step_key, str) or not self.step_key.strip():
+            raise TypeError("step_key must be a non-empty string")
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "attempt_count": self.attempt_count,
+            "final_coaching_level": self.final_coaching_level,
+            "elapsed_ms": self.elapsed_ms,
+            "step_key": self.step_key,
+            "lesson_version": self.lesson_version,
+        }
 
 
 @dataclass(frozen=True)
@@ -220,6 +259,10 @@ class LessonConversationRuntime:
     @property
     def continue_applied(self) -> bool:
         return self._continue_applied
+
+    @property
+    def coaching_level(self) -> int:
+        return self._coaching_level
 
     @property
     def guidance(self) -> ModelGuidanceFacts:
@@ -439,6 +482,47 @@ class LessonConversationRuntime:
         return self._decision(
             intent="praise_effort_complete" if self._contract.is_terminal_step else "praise_effort_continue",
             cue_role=None if self._contract.is_terminal_step else "word_transition",
+        )
+
+    def live_fallback(
+        self,
+        identity: LessonToolIdentity | None,
+        *,
+        reason: str,
+    ) -> ConversationDecision:
+        rejected = self._identity_rejection(identity)
+        if rejected:
+            return rejected
+        if reason not in {"timeout", "interrupted", "transport"}:
+            return self._reject("UNSUPPORTED_LIVE_FALLBACK_REASON")
+        if self._state is ConversationState.COMPLETE or self._mastered:
+            return self._reject("LIVE_FALLBACK_NOT_AVAILABLE")
+        assert identity is not None
+        self._consume(identity, retired=True)
+        self._state = ConversationState.LISTENING
+        self._speaking_evidence = False
+        self._outcome = "supporting"
+        return self._decision(intent="curated_fallback_prompt", cue_role="thinking")
+
+    def build_speaking_evidence(
+        self,
+        *,
+        lesson_version: int,
+        elapsed_ms: int,
+    ) -> SpeakingEvidence | None:
+        if self._mastered and self._outcome == "mastered":
+            outcome: Literal["mastered", "attempted", "comprehended"] = "mastered"
+        elif self._outcome == "attempted" and self._review_needed:
+            outcome = "attempted"
+        else:
+            return None
+        return SpeakingEvidence(
+            outcome=outcome,
+            attempt_count=self._attempt_count,
+            final_coaching_level=self._coaching_level,
+            elapsed_ms=elapsed_ms,
+            step_key=self._contract.step_key,
+            lesson_version=lesson_version,
         )
 
     def context_turn(self, identity: LessonToolIdentity | None) -> ConversationDecision:

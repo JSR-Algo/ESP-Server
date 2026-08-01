@@ -779,6 +779,122 @@ async def test_terminal_attempted_review_continue_completes_without_transition_c
 
 
 @pytest.mark.asyncio
+async def test_private_safe_mastered_evidence_is_forwarded_exactly_once() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime._conversation_started_at = 10.0
+    runtime._clock = lambda: 14.321
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+    await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
+    await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_correct_reaction"
+    )
+    await _visual_and_ack(runtime, "celebrate", "show_celebration", 4)
+    await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_celebration"
+    )
+    transition = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
+    )
+    assert transition.accepted
+    frame = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, frame, 5))
+    await runtime.on_lesson_ack(_ack(runtime, frame, 6))
+
+    completed = [
+        event
+        for batch in runtime.forwarder.batches
+        for event in batch["events"]
+        if event.get("type") == "step_completed" and event.get("stepId") == "barn"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["detail"] == {
+        "evidence": {
+            "outcome": "mastered",
+            "attempt_count": 1,
+            "final_coaching_level": 0,
+            "elapsed_ms": 4321,
+            "step_key": "barn",
+            "lesson_version": 4,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    before = copy.deepcopy(runtime.forwarder.batches)
+
+    stale = LessonToolIdentity("other-session", 2, runtime.conversation.attempt_id, "barn")
+    assert (await runtime.conversation_child_response(stale, "target")).accepted is False
+    directive = await runtime.conversation_live_interruption("timeout")
+    assert directive.accepted
+    assert directive.reconnect_allowed
+    assert directive.prompt.endswith("barn.")
+    assert runtime.conversation.mastered is False
+    assert runtime.forwarder.batches == before
+    thinking = _frames(runtime)[-1]
+    assert thinking["body"]["cueId"] == "barn-thinking"
+    assert runtime._conversation_visual_ack is None
+    bounded = await runtime.conversation_live_interruption("timeout")
+    assert bounded.accepted
+    assert bounded.reconnect_allowed is False
+    assert len(_frames(runtime)) == 2
+    runtime.conn.lesson_runtime = object()
+    stale_window = await runtime.conversation_live_interruption("timeout")
+    assert stale_window.accepted is False
+    assert stale_window.code == "RUNTIME_NOT_AUTHORITATIVE"
+    runtime.conn.lesson_runtime = runtime
+    assert runtime.conversation_live_reconnect_succeeded(directive.window_id)
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    assert runtime._conversation_visual_ack == (
+        runtime.conversation.attempt_id,
+        "barn-thinking",
+    )
+    next_window = await runtime.conversation_live_interruption("transport")
+    assert next_window.accepted
+    assert next_window.reconnect_allowed
+    assert next_window.window_id != directive.window_id
+
+
+@pytest.mark.asyncio
+async def test_attempted_evidence_is_structured_once_without_child_or_model_content() -> None:
+    runtime = _runtime()
+    await _activate(runtime, step_index=1)
+    runtime._steps_completed = 1
+    runtime._conversation_started_at = 20.0
+    runtime._clock = lambda: 25.0
+    await _drive_attempted_review(runtime)
+    assert (await runtime.conversation_continue(_identity(runtime), effect=None)).accepted
+
+    completed = [
+        event
+        for batch in runtime.forwarder.batches
+        for event in batch["events"]
+        if event.get("type") == "step_completed" and event.get("stepId") == "hay"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["detail"] == {
+        "evidence": {
+            "outcome": "attempted",
+            "attempt_count": 1,
+            "final_coaching_level": 3,
+            "elapsed_ms": 5000,
+            "step_key": "hay",
+            "lesson_version": 4,
+        }
+    }
+    serialized = json.dumps(runtime.forwarder.batches, ensure_ascii=False).lower()
+    for forbidden in ("audio_bytes", "transcript", "utterance", "model_prose", "responseclass"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
 async def test_interrupt_during_blocked_visual_send_retires_old_turn_without_rollback() -> None:
     runtime = _runtime()
     await _activate(runtime)

@@ -228,6 +228,42 @@ If Google Live init or runtime path fails:
 - required AEC failures hard-fail instead of degrading, because echo isolation is
   part of the production safety boundary
 
+### TVideo lesson reconnect and curated fallback
+
+Validated renderer-v4 TVideo conversations use a narrower failure policy than
+general chat:
+
+- a Live timeout or transport interruption asks the authoritative lesson FSM for
+  the `thinking` cue; firmware visual state changes only after the existing
+  cinematic command is accepted and ACKed
+- the provider makes at most one reconnect attempt for that interruption window
+- a successful reconnect closes the window, republishes the current lesson
+  identity, and permits one attempt in a later independent window
+- a failed or repeated reconnect uses one short deterministic prompt composed
+  only from the validated `targetWord` guidance
+- fallback never calls pronunciation mastery and never advances progress; only
+  an accepted pronunciation outcome can produce `mastered` evidence
+- diagnostics contain typed codes, reason classes, and attempt counts only; they
+  do not contain child speech, transcripts, or generated model prose
+
+Conversation progress stores exactly one structured evidence object per
+completed step:
+
+```json
+{
+  "outcome": "mastered",
+  "attempt_count": 1,
+  "final_coaching_level": 0,
+  "elapsed_ms": 4321,
+  "step_key": "barn",
+  "lesson_version": 4
+}
+```
+
+The only outcomes are `mastered`, `attempted`, and explicitly enabled
+`comprehended`. Raw audio bytes, transcript text, utterance text, and model prose
+must never be attached to evidence, progress, telemetry, soak reports, or logs.
+
 ## Rollback
 
 Fast rollback:
@@ -289,6 +325,18 @@ Optional live smoke:
 
 - `docs/google-live-smoke.md`
 - `scripts/google_live_smoke.py`
+
+Robot soak audio must be synthetic or recorded from a consenting adult. The
+report stores only the provenance label and whether injection was enabled, not
+the audio path, injected text, prompt text, transcript, or audio bytes:
+
+```bash
+python scripts/google_live_robot_soak.py \
+  --mode bargein_latency \
+  --audio-source synthetic \
+  --inject-audio data/synthetic_stop_vn.wav \
+  --report /tmp/google-live-soak.json
+```
 
 Physical interrupt/course audit for the production robot should use one strict
 preset so latency, transcript accuracy, AEC-forwarding, and full lesson-prompt

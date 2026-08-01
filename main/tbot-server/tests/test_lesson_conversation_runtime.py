@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from core.lesson import conversation_runtime
 from core.lesson.conversation_contract import (
     ConversationContractError,
     LessonConversationContract,
@@ -138,6 +139,61 @@ def _backend_manifest() -> dict[str, object]:
 def _runtime() -> LessonConversationRuntime:
     ids = iter(("attempt-a", "attempt-b", "attempt-c"))
     return LessonConversationRuntime(_contract(), attempt_id_factory=lambda: next(ids))
+
+
+def test_speaking_evidence_has_exact_private_safe_fields_and_types() -> None:
+    SpeakingEvidence = conversation_runtime.SpeakingEvidence
+    evidence = SpeakingEvidence(
+        outcome="mastered",
+        attempt_count=1,
+        final_coaching_level=2,
+        elapsed_ms=4321,
+        step_key="farm.apple",
+        lesson_version=3,
+    )
+
+    assert evidence.to_mapping() == {
+        "outcome": "mastered",
+        "attempt_count": 1,
+        "final_coaching_level": 2,
+        "elapsed_ms": 4321,
+        "step_key": "farm.apple",
+        "lesson_version": 3,
+    }
+    with pytest.raises((TypeError, ValueError)):
+        SpeakingEvidence("correct", 1, 0, 1, "farm.apple", 3)  # type: ignore[arg-type]
+    with pytest.raises((TypeError, ValueError)):
+        SpeakingEvidence("mastered", True, 0, 1, "farm.apple", 3)  # type: ignore[arg-type]
+    with pytest.raises((TypeError, ValueError)):
+        SpeakingEvidence("mastered", 1, 4, 1, "farm.apple", 3)
+
+
+def test_evidence_requires_authoritative_terminal_outcome_and_fallback_cannot_master() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    assert runtime.build_speaking_evidence(lesson_version=3, elapsed_ms=10) is None
+
+    fallback = runtime.live_fallback(_identity(runtime), reason="timeout")
+    assert fallback.accepted
+    assert fallback.cue_id == "farm.apple.thinking"
+    assert fallback.next_intent == "curated_fallback_prompt"
+    assert runtime.mastered is False
+    assert runtime.build_speaking_evidence(lesson_version=3, elapsed_ms=20) is None
+
+
+def test_comprehension_does_not_emit_evidence_without_an_explicit_contract_policy() -> None:
+    runtime = _runtime()
+    runtime.open_attempt()
+    runtime.child_response(_identity(runtime), "meaning_vi")
+
+    assert runtime.build_speaking_evidence(lesson_version=3, elapsed_ms=25) is None
+    with pytest.raises(TypeError):
+        runtime.build_speaking_evidence(  # type: ignore[call-arg]
+            lesson_version=3,
+            elapsed_ms=25,
+            allow_comprehension=True,
+        )
+    assert runtime.mastered is False
 
 
 def _identity(runtime: LessonConversationRuntime, *, cue_id: str | None = None) -> LessonToolIdentity:

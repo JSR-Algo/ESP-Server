@@ -16,6 +16,7 @@ from plugins_func.functions.lesson_conversation import (
     lesson_child_response,
 )
 from plugins_func.register import Action, ActionResponse
+from scripts import google_live_robot_soak
 
 
 LESSON_TOOL_NAMES = {
@@ -129,6 +130,29 @@ class _Handler:
 
 
 class LessonConversationSchemaTest(unittest.TestCase):
+    def test_soak_report_keeps_only_synthetic_or_adult_audio_metadata(self):
+        args = SimpleNamespace(
+            mode="bargein_latency",
+            audio_source="adult",
+            inject_audio="/private/adult-voice.wav",
+            inject_text="secret utterance",
+            first_prompt="model prose",
+            interrupt_prompt="child words",
+            trials=3,
+            dry_run=True,
+        )
+
+        config = google_live_robot_soak._safe_soak_config(args)
+
+        self.assertEqual(config["audio_source"], "adult")
+        self.assertIs(config["inject_audio"], True)
+        self.assertIs(config["inject_text"], True)
+        serialized = str(config)
+        self.assertNotIn("adult-voice.wav", serialized)
+        self.assertNotIn("secret utterance", serialized)
+        self.assertNotIn("model prose", serialized)
+        self.assertNotIn("child words", serialized)
+
     def test_exact_five_tool_schemas_are_closed_and_identity_bound(self):
         self.assertEqual(set(LESSON_CONVERSATION_TOOL_SPECS), LESSON_TOOL_NAMES)
         common = {"lessonSessionId", "turnSequenceId", "attemptId", "stepKey"}
@@ -452,6 +476,86 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_live_failure_reconnects_once_per_window_then_uses_curated_fallback(self):
+        class FallbackRuntime:
+            def __init__(self):
+                self.calls = 0
+                self.succeeded = []
+
+            def conversation_tool_path_active(self):
+                return True
+
+            async def conversation_live_interruption(self, reason):
+                self.calls += 1
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="attempt-1:turn-2",
+                    reconnect_allowed=self.calls == 1,
+                    prompt="Mình cùng thử nhé. This is a barn. Say barn.",
+                    reason=reason,
+                )
+
+            def conversation_live_reconnect_succeeded(self, window_id):
+                self.succeeded.append(window_id)
+                return True
+
+            def conversation_tool_context(self):
+                return {"identity": {"attemptId": "attempt-1"}, "allowedTools": []}
+
+        conn = _Conn()
+        runtime = FallbackRuntime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
+        attempts = []
+
+        async def failed_once(reason):
+            attempts.append(reason)
+            return False
+
+        provider._attempt_lesson_reconnect_once = failed_once
+        first = await provider._handle_lesson_live_interruption("timeout")
+        second = await provider._handle_lesson_live_interruption("timeout")
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(attempts, ["timeout"])
+        self.assertIn("Say barn.", provider._client.responses[-1])
+        self.assertNotIn("master", provider._client.responses[-1].lower())
+
+    async def test_lesson_reconnect_success_resets_authoritative_window(self):
+        class Runtime:
+            def __init__(self):
+                self.reset = []
+
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=True,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            def conversation_live_reconnect_succeeded(self, window_id):
+                self.reset.append(window_id)
+                return True
+
+            def conversation_tool_context(self):
+                return {"identity": {"attemptId": "attempt-1"}, "allowedTools": []}
+
+        conn = _Conn()
+        runtime = Runtime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
+        provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=True)
+
+        self.assertTrue(await provider._handle_lesson_live_interruption("interrupted"))
+        self.assertEqual(runtime.reset, ["window-1"])
+
     async def test_v4_transcripts_before_and_after_tool_do_not_enter_legacy_router(self):
         handler = _Handler()
         conn = _Conn(handler=handler)

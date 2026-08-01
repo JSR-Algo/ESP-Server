@@ -65,6 +65,7 @@ from core.lesson.conversation_runtime import (
     ConversationDecision,
     ConversationState,
     LessonConversationRuntime,
+    SpeakingEvidence,
     inactive_conversation_decision,
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
@@ -143,6 +144,16 @@ class VisualAckResult:
     sequence: Optional[int]
     visual_generation: int
     timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class ConversationLiveFallbackDirective:
+    accepted: bool
+    code: str
+    reason: str
+    window_id: str | None
+    reconnect_allowed: bool
+    prompt: str
 
 
 def _set_lesson_start_status(conn: Any, code: str, message: str = "", *, reason: str = "") -> None:
@@ -1126,6 +1137,9 @@ class LessonRuntime:
         self._conversation_pending_visual: Optional[Dict[str, Any]] = None
         self._conversation_visual_ack: Optional[tuple[str, str]] = None
         self._conversation_progress_forwarded: set[str] = set()
+        self._conversation_started_at: Optional[float] = None
+        self._conversation_fallback_window_id: Optional[str] = None
+        self._clock = time.monotonic
         self.conversation: Optional[LessonConversationRuntime] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
@@ -1422,6 +1436,8 @@ class LessonRuntime:
         self.conversation = None
         self._conversation_pending_visual = None
         self._conversation_visual_ack = None
+        self._conversation_started_at = None
+        self._conversation_fallback_window_id = None
         if (
             not self._conversation_contract_valid
             or self.negotiated_version != RENDERER_V4
@@ -1450,6 +1466,7 @@ class LessonRuntime:
         )
         conversation.open_attempt()
         self.conversation = conversation
+        self._conversation_started_at = self._clock()
 
     def conversation_tool_context(self) -> Optional[Dict[str, Any]]:
         conversation = self.conversation
@@ -1732,6 +1749,103 @@ class LessonRuntime:
             self._conversation_visual_ack = None
         return decision
 
+    def _curated_conversation_fallback_prompt(self) -> str:
+        conversation = self.conversation
+        if conversation is None:
+            return ""
+        guidance = conversation.guidance
+        target = guidance.target_word.strip()
+        return f"Mình cùng thử nhé. Say {target}." if target else ""
+
+    async def conversation_live_interruption(
+        self,
+        reason: str,
+    ) -> ConversationLiveFallbackDirective:
+        authority = self._conversation_guard()
+        if isinstance(authority, ConversationDecision):
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code=authority.code,
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        existing_window = self._conversation_fallback_window_id
+        if existing_window is not None:
+            return ConversationLiveFallbackDirective(
+                accepted=True,
+                code="LIVE_FALLBACK_RECONNECT_BOUNDED",
+                reason=reason,
+                window_id=existing_window,
+                reconnect_allowed=False,
+                prompt=self._curated_conversation_fallback_prompt(),
+            )
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code=guarded.code,
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        conversation, _token = guarded
+        snapshot = conversation.snapshot()
+        visual_ack = self._conversation_visual_ack
+        decision = conversation.live_fallback(conversation.identity(), reason=reason)
+        token = self._conversation_authority_token()
+        if not decision.accepted or token is None:
+            if decision.accepted:
+                conversation.restore_authoritative_snapshot(snapshot)
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code=decision.code if not decision.accepted else "RUNTIME_NOT_AUTHORITATIVE",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        self._conversation_visual_ack = None
+        try:
+            emitted = await self._emit_conversation_cue(decision, token=token)
+        except asyncio.CancelledError:
+            if self._conversation_snapshot_owner_matches(conversation, token):
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+            raise
+        except Exception:
+            emitted = False
+        if not emitted:
+            if self._conversation_snapshot_owner_matches(conversation, token):
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code="VISUAL_EMIT_FAILED",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        window_id = f"{conversation.attempt_id}:{conversation.turn_sequence_id}"
+        self._conversation_fallback_window_id = window_id
+        return ConversationLiveFallbackDirective(
+            accepted=True,
+            code="LIVE_FALLBACK_READY",
+            reason=reason,
+            window_id=window_id,
+            reconnect_allowed=True,
+            prompt=self._curated_conversation_fallback_prompt(),
+        )
+
+    def conversation_live_reconnect_succeeded(self, window_id: str) -> bool:
+        if window_id != self._conversation_fallback_window_id:
+            return False
+        self._conversation_fallback_window_id = None
+        return True
+
     async def conversation_continue(
         self,
         identity: LessonToolIdentity | None,
@@ -1898,6 +2012,18 @@ class LessonRuntime:
         step_id = self._step_id
         if step_id in self._conversation_progress_forwarded:
             return True
+        started_at = self._conversation_started_at
+        elapsed_ms = (
+            max(0, int(round((self._clock() - started_at) * 1000)))
+            if isinstance(started_at, (int, float))
+            else 0
+        )
+        evidence: SpeakingEvidence | None = self.conversation.build_speaking_evidence(
+            lesson_version=self.lesson_version,
+            elapsed_ms=elapsed_ms,
+        )
+        if evidence is None:
+            return False
         self._conversation_progress_forwarded.add(step_id)
         self._forward(
             {
@@ -1906,12 +2032,7 @@ class LessonRuntime:
                 "stepId": step_id,
                 "stepType": (self._step or {}).get("type"),
                 "result": "success" if self.conversation.mastered else "miss",
-                "detail": {
-                    "responseClass": (
-                        "mastered" if self.conversation.mastered else "attempted"
-                    ),
-                    "conversation": "tvideoJourney.v1",
-                },
+                "detail": {"evidence": evidence.to_mapping()},
             }
         )
         self._step_completed = True
