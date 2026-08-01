@@ -99,6 +99,35 @@ _VISUAL_ROLES = MappingProxyType(
     }
 )
 
+_INACTIVE_GUIDANCE = ModelGuidanceFacts(
+    target_word="",
+    meanings_vi=(),
+    related_concepts=(),
+    teaching_copy="",
+    expected_answer="",
+    pronunciation=PronunciationGuidance(
+        slow_model="",
+        segments=None,
+        phonemes=None,
+        l1_guidance_vi="",
+    ),
+)
+
+
+def inactive_conversation_decision() -> ConversationDecision:
+    return ConversationDecision(
+        accepted=False,
+        code="CONVERSATION_NOT_ACTIVE",
+        state=ConversationState.COMPLETE,
+        next_intent="retain_authoritative_state",
+        cue_id=None,
+        effect=None,
+        coaching_level=0,
+        outcome=None,
+        review_needed=False,
+        guidance=_INACTIVE_GUIDANCE,
+    )
+
 
 class LessonConversationRuntime:
     """Own all semantic progress for a single validated lesson step."""

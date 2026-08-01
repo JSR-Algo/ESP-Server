@@ -61,7 +61,11 @@ from core.lesson.conversation_contract import (
     LessonToolIdentity,
     lesson_conversation_contract_from_backend,
 )
-from core.lesson.conversation_runtime import ConversationDecision, LessonConversationRuntime
+from core.lesson.conversation_runtime import (
+    ConversationDecision,
+    LessonConversationRuntime,
+    inactive_conversation_decision,
+)
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
@@ -1268,6 +1272,7 @@ class LessonRuntime:
         self._visual_transition_task = None
         if visual_transition_task is not None and not visual_transition_task.done():
             visual_transition_task.cancel()
+        self._retire_conversation_visual()
         self._cancel_frame_ack_timeout()
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
@@ -1486,7 +1491,9 @@ class LessonRuntime:
         )
 
     def _conversation_guard(self) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
-        conversation = self._require_conversation()
+        conversation = self.conversation
+        if conversation is None:
+            return inactive_conversation_decision()
         token = self._conversation_authority_token()
         if token is None:
             return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
@@ -1567,11 +1574,21 @@ class LessonRuntime:
             if token is None:
                 conversation.restore_authoritative_snapshot(snapshot)
                 return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
-            if not await self._emit_conversation_cue(
-                decision,
-                token=token,
-                advances_step=cue_role == "word_transition",
-            ):
+            try:
+                emitted = await self._emit_conversation_cue(
+                    decision,
+                    token=token,
+                    advances_step=cue_role == "word_transition",
+                )
+            except asyncio.CancelledError:
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                raise
+            except Exception:
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                return conversation.reject("VISUAL_EMIT_FAILED")
+            if not emitted:
                 if self._conversation_snapshot_owner_matches(conversation, token):
                     conversation.restore_authoritative_snapshot(snapshot)
                 return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
@@ -1637,11 +1654,6 @@ class LessonRuntime:
                 return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
         return decision
 
-    def _require_conversation(self) -> LessonConversationRuntime:
-        if self.conversation is None:
-            raise RuntimeError("conversation is not active for this lesson step")
-        return self.conversation
-
     async def _emit_conversation_cue(
         self,
         decision: ConversationDecision,
@@ -1679,11 +1691,16 @@ class LessonRuntime:
         return True
 
     def _retire_conversation_visual_sequence(self, sequence: int) -> None:
-        self._outstanding.pop(sequence, None)
+        ack_sequences = {sequence}
         command = self._cinematic_pending_command
         if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
+            ack_sequence = command.get("ackSequence")
+            if type(ack_sequence) is int:
+                ack_sequences.add(ack_sequence)
             self._cinematic_pending_command = None
-        self._cancel_frame_ack_timeout(sequence)
+        for ack_sequence in ack_sequences:
+            self._outstanding.pop(ack_sequence, None)
+            self._cancel_frame_ack_timeout(ack_sequence)
 
     def _retire_conversation_visual(self) -> None:
         pending = self._conversation_pending_visual
@@ -3885,6 +3902,8 @@ class LessonRuntime:
                     "command": command.get("command"),
                     **identity_payload,
                     "commandSequenceId": command_sequence_id,
+                    # Retries keep commandSequenceId stable but get a new ACK envelope.
+                    "ackSequence": seq,
                     "targetState": {
                         "pause": S_PAUSED,
                         "resume": S_RUNNING,
@@ -3925,7 +3944,15 @@ class LessonRuntime:
             "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
         }:
             self._start_frame_ack_timeout(frame_type, seq, step_id)
-        await self._send(payload)
+        try:
+            await self._send(payload)
+        except BaseException:
+            self._outstanding.pop(seq, None)
+            pending = self._cinematic_pending_command
+            if isinstance(pending, dict) and pending.get("ackSequence") == seq:
+                self._cinematic_pending_command = None
+            self._cancel_frame_ack_timeout(seq)
+            raise
         return seq
 
     def _frame_payload_size(self, frame_type: str, *, step_id: Optional[str], body: Dict[str, Any]) -> int:

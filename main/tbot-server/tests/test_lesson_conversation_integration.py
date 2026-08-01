@@ -226,6 +226,11 @@ async def _visual_and_ack(
     return frame
 
 
+async def _wait_for_count(items: list, count: int) -> None:
+    while len(items) < count:
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> None:
     runtime = _runtime()
@@ -394,6 +399,42 @@ async def test_every_public_conversation_boundary_uses_the_same_authority_guard(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["pre_bind", "post_step", "replacement"])
+async def test_every_public_conversation_boundary_rejects_when_no_conversation_is_bound(
+    mode: str,
+) -> None:
+    runtime = _runtime()
+    if mode != "pre_bind":
+        await _activate(runtime)
+        runtime.conversation = None
+    if mode == "replacement":
+        runtime.conn.lesson_runtime = object()
+    frames = _frames(runtime)
+    outstanding = copy.deepcopy(runtime._outstanding)
+    forwarded = runtime.forwarder.batches[:]
+    calls = (
+        lambda: runtime.conversation_child_response(None, "target"),
+        lambda: runtime.conversation_pronunciation_outcome(None, "correct"),
+        lambda: runtime.conversation_context_turn(None),
+        lambda: runtime.conversation_visual_reaction(
+            None, "listen", effect="show_listening_scene"
+        ),
+        lambda: runtime.conversation_interrupt(None),
+        lambda: runtime.conversation_continue(None, effect=None),
+    )
+
+    for call in calls:
+        decision = await call()
+        assert not decision.accepted
+        assert decision.code == "CONVERSATION_NOT_ACTIVE"
+        assert _frames(runtime) == frames
+        assert runtime._outstanding == outstanding
+        assert runtime._conversation_pending_visual is None
+        assert runtime._frame_ack_timeout_task is None
+        assert runtime.forwarder.batches == forwarded
+
+
+@pytest.mark.asyncio
 async def test_visual_send_race_rolls_back_fsm_and_cinematic_authority() -> None:
     runtime = _runtime()
     await _activate(runtime)
@@ -412,6 +453,105 @@ async def test_visual_send_race_rolls_back_fsm_and_cinematic_authority() -> None
     assert runtime._conversation_pending_visual is None
     assert runtime._cinematic_pending_command is None
     assert runtime._outstanding == {}
+
+
+@pytest.mark.asyncio
+async def test_visual_send_connection_error_rolls_back_transaction() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    snapshot = runtime.conversation.snapshot()
+
+    async def fail_send(_payload: str) -> None:
+        raise ConnectionError("firmware disconnected")
+
+    runtime._send = fail_send
+    decision = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+
+    assert decision.code == "VISUAL_EMIT_FAILED"
+    assert runtime.conversation.snapshot() == snapshot
+    assert runtime._outstanding == {}
+    assert runtime._cinematic_pending_command is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_before_cancel", [False, True])
+async def test_visual_send_cancellation_cleans_transaction_without_stale_rollback(
+    interrupt_before_cancel: bool,
+) -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    initial_snapshot = runtime.conversation.snapshot()
+    send_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_send(_payload: str) -> None:
+        send_started.set()
+        await never_release.wait()
+
+    runtime._send = blocked_send
+    visual_task = asyncio.create_task(
+        runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    )
+    await send_started.wait()
+    expected_snapshot = initial_snapshot
+    if interrupt_before_cancel:
+        assert (await runtime.conversation_interrupt(_identity(runtime))).accepted
+        expected_snapshot = runtime.conversation.snapshot()
+
+    visual_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await visual_task
+
+    assert runtime.conversation.snapshot() == expected_snapshot
+    assert runtime._outstanding == {}
+    assert runtime._cinematic_pending_command is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+
+
+@pytest.mark.asyncio
+async def test_visual_send_unbound_race_rejects_without_overwriting_stale_conversation() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    conversation = runtime.conversation
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def blocked_send(_payload: str) -> None:
+        send_started.set()
+        await release_send.wait()
+
+    runtime._send = blocked_send
+    visual_task = asyncio.create_task(
+        runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    )
+    await send_started.wait()
+    stale_snapshot = conversation.snapshot()
+    runtime.conversation = None
+    release_send.set()
+
+    decision = await visual_task
+
+    assert decision.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert conversation.snapshot() == stale_snapshot
+    assert runtime._outstanding == {}
+    assert runtime._cinematic_pending_command is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    assert (
+        await runtime.conversation_interrupt(None)
+    ).code == "CONVERSATION_NOT_ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -720,6 +860,86 @@ async def test_stale_visual_cleanup_preserves_new_visual_ack_timeout(
         assert runtime.state == S_FAILED
         assert runtime.last_error is not None
         assert runtime.last_error.code == LESSON_FRAME_ACK_TIMEOUT
+
+
+async def _emit_conversation_visual_retry(
+    runtime: LessonRuntime,
+) -> tuple[dict, dict, list[asyncio.Event]]:
+    runtime.conn.config["lesson"]["frame_ack_max_retries"] = 1
+    timeout_gates: list[asyncio.Event] = []
+
+    async def controlled_sleep(_seconds: float) -> None:
+        gate = asyncio.Event()
+        timeout_gates.append(gate)
+        await gate.wait()
+
+    runtime._sleep = controlled_sleep
+    visual = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+    assert visual.accepted
+    await _wait_for_count(timeout_gates, 1)
+    original = _frames(runtime)[-1]
+    timeout_gates[0].set()
+    while len(_frames(runtime)) < 2:
+        await asyncio.sleep(0)
+    await _wait_for_count(timeout_gates, 2)
+    retry = _frames(runtime)[-1]
+    assert retry["sequence"] != original["sequence"]
+    assert retry["body"]["commandSequenceId"] == original["body"]["commandSequenceId"]
+    assert runtime._cinematic_pending_command["ackSequence"] == retry["sequence"]
+    return original, retry, timeout_gates
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_visual_retry_retires_retry_envelope_and_timeout() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    original, retry, timeout_gates = await _emit_conversation_visual_retry(runtime)
+    retry_timeout = runtime._frame_ack_timeout_task
+
+    interrupted = await runtime.conversation_interrupt(_identity(runtime))
+
+    assert interrupted.accepted
+    assert original["sequence"] not in runtime._outstanding
+    assert retry["sequence"] not in runtime._outstanding
+    assert runtime._cinematic_pending_command is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    timeout_gates[1].set()
+    if retry_timeout is not None:
+        await asyncio.gather(retry_timeout, return_exceptions=True)
+    assert runtime.state == S_RUNNING
+    await runtime.on_lesson_ack(_ack(runtime, retry, 1))
+    assert runtime.state == S_RUNNING
+    assert runtime._conversation_visual_ack is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_replacement_after_visual_retry_closes_retry_authority() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    _original, retry, timeout_gates = await _emit_conversation_visual_retry(runtime)
+    retry_timeout = runtime._frame_ack_timeout_task
+    replacement = object()
+    runtime.conn.lesson_runtime = replacement
+
+    await runtime.close()
+
+    assert runtime.conn.lesson_runtime is replacement
+    assert retry["sequence"] not in runtime._outstanding
+    assert runtime._cinematic_pending_command is None
+    assert runtime._conversation_pending_visual is None
+    assert runtime._frame_ack_timeout_task is None
+    assert runtime._frame_ack_timeout_sequence is None
+    timeout_gates[1].set()
+    if retry_timeout is not None:
+        await asyncio.gather(retry_timeout, return_exceptions=True)
+    assert runtime.state == S_RUNNING
+    await runtime.on_lesson_ack(_ack(runtime, retry, 1))
+    assert runtime.conn.lesson_runtime is replacement
+    assert runtime.state == S_RUNNING
 
 
 @pytest.mark.asyncio
