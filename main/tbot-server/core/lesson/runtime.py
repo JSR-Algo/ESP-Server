@@ -56,6 +56,12 @@ from core.lesson.flattened_cinematic_contract import (
     project_flattened_cinematic_phase,
     validate_flattened_cinematic_manifest,
 )
+from core.lesson.conversation_contract import (
+    ConversationContractError,
+    LessonToolIdentity,
+    lesson_conversation_contract_from_backend,
+)
+from core.lesson.conversation_runtime import ConversationDecision, LessonConversationRuntime
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
@@ -1104,6 +1110,13 @@ class LessonRuntime:
         self._cinematic_cancel_sent = False
         self._cinematic_pending_command: Optional[Dict[str, Any]] = None
         self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
+        self._conversation_cues: Dict[str, Dict[str, Any]] = {}
+        self._conversation_contract_valid = False
+        self._conversation_attempt_serial = 0
+        self._conversation_pending_visual: Optional[Dict[str, Any]] = None
+        self._conversation_opening_decision: Optional[ConversationDecision] = None
+        self._conversation_progress_forwarded: set[str] = set()
+        self.conversation: Optional[LessonConversationRuntime] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1209,11 +1222,20 @@ class LessonRuntime:
                     lesson_version=self.lesson_version,
                     manifest_checksum=self.manifest_checksum,
                 )
-                self._cinematic_phase = (
-                    project_cinematic_phase(phases[0], pack)
-                    if manifest_version == RENDERER_V3
-                    else project_flattened_cinematic_phase(phases[0], pack)
-                )
+                if manifest_version == RENDERER_V3:
+                    self._cinematic_phase = project_cinematic_phase(phases[0], pack)
+                else:
+                    projected = [
+                        project_flattened_cinematic_phase(phase, pack) for phase in phases
+                    ]
+                    self._cinematic_phase = projected[0]
+                    self._conversation_cues = {
+                        cue["cueId"]: cue
+                        for cue in projected
+                        if cue.get("templateVersion") == 2
+                        and isinstance(cue.get("cueId"), str)
+                    }
+                    self._conversation_contract_valid = self._validate_conversation_contracts()
             except (CinematicContractError, FlattenedCinematicContractError) as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error
@@ -1337,6 +1359,211 @@ class LessonRuntime:
 
     def _cinematic_enabled(self) -> bool:
         return self._renderer_v3_enabled() or self._renderer_v4_enabled()
+
+    def _validate_conversation_contracts(self) -> bool:
+        conversation = self.manifest.get("conversation")
+        steps = conversation.get("steps") if isinstance(conversation, dict) else None
+        if not isinstance(steps, list) or not steps:
+            return False
+        try:
+            for step in steps:
+                step_key = step.get("stepKey") if isinstance(step, dict) else None
+                if not isinstance(step_key, str):
+                    return False
+                lesson_conversation_contract_from_backend(
+                    self.manifest,
+                    lesson_session_id=self.session_id,
+                    step_key=step_key,
+                )
+        except ConversationContractError as exc:
+            self._log("warning", f"conversation contract disabled code={exc.code}")
+            return False
+        return True
+
+    def _bind_conversation_for_current_step(self) -> None:
+        self.conversation = None
+        self._conversation_pending_visual = None
+        self._conversation_opening_decision = None
+        if (
+            not self._conversation_contract_valid
+            or self.negotiated_version != RENDERER_V4
+            or not isinstance(self._step_id, str)
+        ):
+            return
+        try:
+            contract = lesson_conversation_contract_from_backend(
+                self.manifest,
+                lesson_session_id=self.session_id,
+                step_key=self._step_id,
+            )
+        except ConversationContractError:
+            return
+
+        def next_attempt_id() -> str:
+            self._conversation_attempt_serial += 1
+            return (
+                f"{self.session_id}:{contract.step_key}:"
+                f"{self._conversation_attempt_serial}"
+            )
+
+        conversation = LessonConversationRuntime(
+            contract,
+            attempt_id_factory=next_attempt_id,
+        )
+        self._conversation_opening_decision = conversation.open_attempt()
+        self.conversation = conversation
+
+    async def conversation_child_response(
+        self, identity: LessonToolIdentity | None, response_class: str
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        return conversation.child_response(identity, response_class)
+
+    async def conversation_pronunciation_outcome(
+        self, identity: LessonToolIdentity | None, outcome: str
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        return conversation.pronunciation_outcome(identity, outcome)
+
+    async def conversation_context_turn(
+        self, identity: LessonToolIdentity | None
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        return conversation.context_turn(identity)
+
+    async def conversation_visual_reaction(
+        self,
+        identity: LessonToolIdentity | None,
+        cue_role: str,
+        *,
+        effect: str | None,
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        decision = conversation.visual_reaction(identity, cue_role, effect=effect)
+        if decision.accepted:
+            await self._emit_conversation_cue(decision)
+        return decision
+
+    async def conversation_interrupt(
+        self, identity: LessonToolIdentity | None
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        decision = conversation.interrupt(identity)
+        if decision.accepted:
+            self._retire_conversation_visual()
+            await self._emit_conversation_cue(decision)
+        return decision
+
+    async def conversation_continue(
+        self,
+        identity: LessonToolIdentity | None,
+        *,
+        effect: str | None,
+        next_step_key: str | None = None,
+    ) -> ConversationDecision:
+        conversation = self._require_conversation()
+        decision = conversation.continue_lesson(
+            identity,
+            effect=effect,
+            next_step_key=next_step_key,
+        )
+        if not decision.accepted:
+            return decision
+        if decision.next_intent == "complete_lesson":
+            self._retire_conversation_visual()
+            await self._complete_conversation_step()
+        else:
+            await self._emit_conversation_cue(decision, advances_step=True)
+        return decision
+
+    def _require_conversation(self) -> LessonConversationRuntime:
+        if self.conversation is None:
+            raise RuntimeError("conversation is not active for this lesson step")
+        return self.conversation
+
+    async def _emit_conversation_cue(
+        self,
+        decision: ConversationDecision,
+        *,
+        advances_step: bool = False,
+    ) -> None:
+        cue_id = decision.cue_id
+        cue = self._conversation_cues.get(cue_id) if isinstance(cue_id, str) else None
+        if (
+            not decision.accepted
+            or not isinstance(cue, dict)
+            or cue.get("stepKey") != self._step_id
+            and not advances_step
+        ):
+            return
+        self._retire_conversation_visual()
+        sequence = await self._emit(
+            "lesson_cinematic_control",
+            step_id=self._step_id,
+            body={"command": "start", **copy.deepcopy(cue)},
+        )
+        self._conversation_pending_visual = {
+            "sequence": sequence,
+            "cueId": cue_id,
+            "stepId": self._step_id,
+            "attemptId": self.conversation.attempt_id if self.conversation else None,
+            "advancesStep": advances_step,
+        }
+
+    def _retire_conversation_visual(self) -> None:
+        pending = self._conversation_pending_visual
+        self._conversation_pending_visual = None
+        if not isinstance(pending, dict):
+            return
+        sequence = pending.get("sequence")
+        if type(sequence) is int:
+            self._outstanding.pop(sequence, None)
+        command = self._cinematic_pending_command
+        if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
+            self._cinematic_pending_command = None
+        self._cancel_frame_ack_timeout()
+
+    async def _on_conversation_visual_acked(self, frame: Dict[str, Any]) -> None:
+        pending = self._conversation_pending_visual
+        command = self._cinematic_frame_command(frame)
+        if not isinstance(pending, dict) or not isinstance(command, dict):
+            return
+        if (
+            command.get("commandSequenceId") != pending.get("sequence")
+            or command.get("cueId") != pending.get("cueId")
+            or pending.get("stepId") != self._step_id
+            or self.conversation is None
+            or pending.get("attemptId") != self.conversation.attempt_id
+        ):
+            return
+        self._conversation_pending_visual = None
+        if pending.get("advancesStep") is True:
+            await self._complete_conversation_step()
+
+    async def _complete_conversation_step(self) -> None:
+        if self.conversation is None or not isinstance(self._step_id, str):
+            return
+        step_id = self._step_id
+        if step_id in self._conversation_progress_forwarded:
+            return
+        self._conversation_progress_forwarded.add(step_id)
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": step_id,
+                "stepType": (self._step or {}).get("type"),
+                "result": "success" if self.conversation.mastered else "miss",
+                "detail": {
+                    "responseClass": (
+                        "mastered" if self.conversation.mastered else "attempted"
+                    ),
+                    "conversation": "tvideoJourney.v1",
+                },
+            }
+        )
+        self._step_completed = True
+        await self._maybe_finish_step()
 
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
@@ -1686,6 +1913,9 @@ class LessonRuntime:
         body = msg_json.get("body") or {}
         event = body.get("event")
         step_id = msg_json.get("stepId")
+        if self.conversation is not None and step_id == self._step_id:
+            self._log("info", f"firmware progress ignored for conversational step stepId={step_id}")
+            return
         if (
             event == "step_completed"
             and isinstance(step_id, str)
@@ -1743,6 +1973,8 @@ class LessonRuntime:
                 await self._maybe_finish_step()
 
     async def on_child_response(self, text: Any, *, source: str = "voice_transcript") -> bool:
+        if self.conversation is not None:
+            return False
         response = str(text or "").strip()
         if not _has_observable_child_response_value(response):
             return False
@@ -2069,7 +2301,9 @@ class LessonRuntime:
             await self._emit_step()
         elif ftype == "lesson_cinematic_control":
             command = (frame.get("body") or {}).get("command")
-            if command == "pause":
+            if command == "start":
+                await self._on_conversation_visual_acked(frame)
+            elif command == "pause":
                 self.state = S_PAUSED
                 self._cancel_visual_waiters(increment_generation=False, reason="paused")
                 self._forward_phase("paused")
@@ -2179,6 +2413,12 @@ class LessonRuntime:
         if not continuation_is_current():
             return
         self._step_visuals_ready = True
+        if self.conversation is not None:
+            opening = self._conversation_opening_decision
+            self._conversation_opening_decision = None
+            if opening is not None:
+                await self._emit_conversation_cue(opening)
+            return
         prompt_handed_off = await self._speak_step_prompt(self._step)
         if not continuation_is_current():
             return
@@ -2442,6 +2682,7 @@ class LessonRuntime:
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
         self._safe_speaking_session = None
+        self._bind_conversation_for_current_step()
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
