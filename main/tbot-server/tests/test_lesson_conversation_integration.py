@@ -838,6 +838,11 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     assert directive.prompt.endswith("barn.")
     assert runtime.conversation.mastered is False
     assert runtime.forwarder.batches == before
+    unsupported = await runtime.conversation_live_interruption("not-allowed")
+    assert unsupported.accepted is False
+    assert unsupported.code == "UNSUPPORTED_LIVE_FALLBACK_REASON"
+    assert unsupported.reconnect_allowed is False
+    assert unsupported.prompt == ""
     thinking = _frames(runtime)[-1]
     assert thinking["body"]["cueId"] == "barn-thinking"
     assert runtime._conversation_visual_ack is None
@@ -848,7 +853,12 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     await runtime.on_lesson_ack(_ack(runtime, thinking, 2, cue_id="hay-thinking"))
     assert not ack_wait.done()
     await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
-    assert await ack_wait is True
+    authorization = await ack_wait
+    assert isinstance(authorization, str)
+    assert runtime.claim_conversation_live_fallback_prompt(
+        directive.window_id,
+        authorization,
+    ) is True
     bounded = await runtime.conversation_live_interruption("timeout")
     assert bounded.accepted
     assert bounded.reconnect_allowed is False
@@ -868,6 +878,76 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     assert next_window.accepted
     assert next_window.reconnect_allowed
     assert next_window.window_id != directive.window_id
+
+
+@pytest.mark.asyncio
+async def test_fallback_ack_timeout_closes_window_and_late_ack_cannot_revive_prompt() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    directive = await runtime.conversation_live_interruption("timeout")
+    thinking = _frames(runtime)[-1]
+
+    first = await runtime.wait_conversation_live_fallback_ack(
+        directive.window_id,
+        timeout_sec=0.01,
+    )
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    second = await runtime.wait_conversation_live_fallback_ack(
+        directive.window_id,
+        timeout_sec=0.01,
+    )
+
+    assert first is None
+    assert second is None
+    assert runtime._conversation_fallback_ack_future is None
+    assert runtime.claim_conversation_live_fallback_prompt(
+        directive.window_id,
+        "late-authorization",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_ack_authorization_revalidates_turn_and_is_one_shot_before_prompt() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    directive = await runtime.conversation_live_interruption("timeout")
+    thinking = _frames(runtime)[-1]
+    waiting = asyncio.create_task(
+        runtime.wait_conversation_live_fallback_ack(
+            directive.window_id,
+            timeout_sec=0.2,
+        )
+    )
+    await asyncio.sleep(0)
+
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    await runtime.conversation_child_response(_identity(runtime), "meaning_vi")
+    stale_authorization = await waiting
+
+    assert stale_authorization is None
+    assert runtime.claim_conversation_live_fallback_prompt(
+        directive.window_id,
+        "stale-token",
+    ) is False
+
+    fresh = await runtime.conversation_live_interruption("transport")
+    fresh_thinking = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, fresh_thinking, 3))
+    authorization = await runtime.wait_conversation_live_fallback_ack(
+        fresh.window_id,
+        timeout_sec=0.2,
+    )
+    assert isinstance(authorization, str)
+    assert runtime.claim_conversation_live_fallback_prompt(
+        fresh.window_id,
+        authorization,
+    ) is True
+    assert runtime.claim_conversation_live_fallback_prompt(
+        fresh.window_id,
+        authorization,
+    ) is False
 
 
 @pytest.mark.asyncio

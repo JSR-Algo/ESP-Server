@@ -5837,17 +5837,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not callable(wait_for_ack) or not isinstance(window_id, str):
             return False
         try:
-            acked = bool(
-                await wait_for_ack(
-                    window_id,
-                    timeout_sec=self._lesson_live_fallback_ack_timeout_sec(),
-                )
+            authorization = await wait_for_ack(
+                window_id,
+                timeout_sec=self._lesson_live_fallback_ack_timeout_sec(),
             )
         except asyncio.CancelledError:
             raise
         except Exception:
             return False
-        if not acked:
+        if not isinstance(authorization, str) or not authorization:
+            return False
+        claim_prompt = getattr(
+            runtime,
+            "claim_conversation_live_fallback_prompt",
+            None,
+        )
+        if not callable(claim_prompt) or not bool(
+            claim_prompt(window_id, authorization)
+        ):
             return False
         prompt = getattr(directive, "prompt", "")
         sender = getattr(self._client, "send_text", None)

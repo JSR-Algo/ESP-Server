@@ -1144,6 +1144,9 @@ class LessonRuntime:
         self._conversation_fallback_ack_sequence: Optional[int] = None
         self._conversation_fallback_ack_cue_id: Optional[str] = None
         self._conversation_fallback_ack_attempt_id: Optional[str] = None
+        self._conversation_fallback_ack_expired = False
+        self._conversation_fallback_prompt_authorization: Optional[str] = None
+        self._conversation_fallback_prompt_claimed = False
         self._clock = time.monotonic
         self.conversation: Optional[LessonConversationRuntime] = None
 
@@ -1291,6 +1294,7 @@ class LessonRuntime:
 
     async def close(self) -> None:
         self._closed = True
+        self._clear_conversation_fallback_ack()
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
         visual_transition_task = self._visual_transition_task
         self._visual_transition_task = None
@@ -1675,6 +1679,7 @@ class LessonRuntime:
         decision = conversation.child_response(identity, response_class)
         if decision.accepted:
             self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
         return decision
 
     async def conversation_pronunciation_outcome(
@@ -1687,6 +1692,7 @@ class LessonRuntime:
         decision = conversation.pronunciation_outcome(identity, outcome)
         if decision.accepted:
             self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
         return decision
 
     async def conversation_context_turn(
@@ -1699,6 +1705,7 @@ class LessonRuntime:
         decision = conversation.context_turn(identity)
         if decision.accepted:
             self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
         return decision
 
     async def conversation_visual_reaction(
@@ -1741,6 +1748,7 @@ class LessonRuntime:
                 if self._conversation_snapshot_owner_matches(conversation, token):
                     conversation.restore_authoritative_snapshot(snapshot)
                 return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+            self._invalidate_conversation_fallback_after_turn_change()
         return decision
 
     async def conversation_interrupt(
@@ -1754,6 +1762,7 @@ class LessonRuntime:
         if decision.accepted:
             self._retire_conversation_visual()
             self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
         return decision
 
     def _curated_conversation_fallback_prompt(self) -> str:
@@ -1770,13 +1779,63 @@ class LessonRuntime:
         self._conversation_fallback_ack_sequence = None
         self._conversation_fallback_ack_cue_id = None
         self._conversation_fallback_ack_attempt_id = None
+        self._conversation_fallback_ack_expired = False
+        self._conversation_fallback_prompt_authorization = None
+        self._conversation_fallback_prompt_claimed = False
         if future is not None and not future.done():
             future.set_result(False)
+
+    def _expire_conversation_fallback_ack(self) -> None:
+        future = self._conversation_fallback_ack_future
+        self._conversation_fallback_ack_future = None
+        self._conversation_fallback_ack_sequence = None
+        self._conversation_fallback_ack_cue_id = None
+        self._conversation_fallback_ack_attempt_id = None
+        self._conversation_fallback_ack_expired = True
+        self._conversation_fallback_prompt_authorization = None
+        self._conversation_fallback_prompt_claimed = False
+        if future is not None and not future.done():
+            future.set_result(False)
+
+    def _invalidate_conversation_fallback_after_turn_change(self) -> None:
+        conversation = self.conversation
+        if (
+            conversation is not None
+            and self._conversation_fallback_window_id is not None
+            and self._conversation_fallback_turn_sequence_id
+            != conversation.turn_sequence_id
+        ):
+            self._expire_conversation_fallback_ack()
+
+    def _conversation_fallback_prompt_authority_current(self, window_id: str) -> bool:
+        conversation = self.conversation
+        cue_id = self._conversation_fallback_ack_cue_id
+        return bool(
+            conversation is not None
+            and not self._closed
+            and window_id == self._conversation_fallback_window_id
+            and self._conversation_fallback_turn_sequence_id
+            == conversation.turn_sequence_id
+            and not self._conversation_fallback_ack_expired
+            and isinstance(cue_id, str)
+            and self._conversation_fallback_ack_attempt_id == conversation.attempt_id
+            and self._conversation_visual_ack == (conversation.attempt_id, cue_id)
+            and self._conversation_authority_token() is not None
+        )
 
     async def conversation_live_interruption(
         self,
         reason: str,
     ) -> ConversationLiveFallbackDirective:
+        if reason not in {"timeout", "interrupted", "transport"}:
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code="UNSUPPORTED_LIVE_FALLBACK_REASON",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
         authority = self._conversation_guard()
         if isinstance(authority, ConversationDecision):
             return ConversationLiveFallbackDirective(
@@ -1869,24 +1928,56 @@ class LessonRuntime:
         window_id: str,
         *,
         timeout_sec: float,
-    ) -> bool:
+    ) -> str | None:
         if (
             window_id != self._conversation_fallback_window_id
             or self._conversation_fallback_turn_sequence_id is None
+            or self._conversation_fallback_ack_expired
         ):
-            return False
+            return None
         future = self._conversation_fallback_ack_future
         if future is None:
-            return False
+            return None
         try:
-            return bool(
+            acknowledged = bool(
                 await asyncio.wait_for(
                     asyncio.shield(future),
                     timeout=max(0.01, min(float(timeout_sec), 5.0)),
                 )
             )
-        except (asyncio.TimeoutError, TypeError, ValueError):
+        except asyncio.TimeoutError:
+            self._expire_conversation_fallback_ack()
+            return None
+        except (TypeError, ValueError):
+            self._expire_conversation_fallback_ack()
+            return None
+        if (
+            not acknowledged
+            or not self._conversation_fallback_prompt_authority_current(window_id)
+            or self._conversation_fallback_prompt_authorization is not None
+            or self._conversation_fallback_prompt_claimed
+        ):
+            return None
+        authorization = (
+            f"{window_id}:{self._conversation_fallback_ack_sequence}:prompt"
+        )
+        self._conversation_fallback_prompt_authorization = authorization
+        return authorization
+
+    def claim_conversation_live_fallback_prompt(
+        self,
+        window_id: str,
+        authorization: str,
+    ) -> bool:
+        if (
+            self._conversation_fallback_prompt_claimed
+            or authorization != self._conversation_fallback_prompt_authorization
+            or not self._conversation_fallback_prompt_authority_current(window_id)
+        ):
             return False
+        self._conversation_fallback_prompt_authorization = None
+        self._conversation_fallback_prompt_claimed = True
+        return True
 
     def conversation_live_reconnect_succeeded(self, window_id: str) -> bool:
         conversation = self.conversation
@@ -1934,6 +2025,7 @@ class LessonRuntime:
         )
         if not decision.accepted:
             return decision
+        self._invalidate_conversation_fallback_after_turn_change()
         self._conversation_visual_ack = None
         if decision.next_intent == "complete_lesson":
             token = self._conversation_authority_token()
@@ -2055,6 +2147,7 @@ class LessonRuntime:
         self._conversation_visual_ack = (self.conversation.attempt_id, command["cueId"])
         if (
             self._conversation_fallback_window_id is not None
+            and not self._conversation_fallback_ack_expired
             and command.get("commandSequenceId")
             == self._conversation_fallback_ack_sequence
             and command.get("cueId") == self._conversation_fallback_ack_cue_id

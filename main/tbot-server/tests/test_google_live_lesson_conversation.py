@@ -557,6 +557,10 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
             async def wait_conversation_live_fallback_ack(self, window_id, timeout_sec):
                 self.waited = (window_id, timeout_sec)
                 await ack.wait()
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, window_id, authorization):
+                self.claimed = (window_id, authorization)
                 return True
 
         conn = _Conn()
@@ -587,13 +591,46 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
 
             async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
                 self.ack_timeout = timeout_sec
-                return False
+                return None
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
+                raise AssertionError("timeout must not produce an authorization")
 
         conn = _Conn()
         conn.lesson_runtime = Runtime()
         provider = GoogleLiveProvider(conn)
         provider._client = _Client()
         provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=False)
+
+        handled = await provider._handle_lesson_live_interruption("timeout")
+
+        self.assertFalse(handled)
+        self.assertEqual(provider._client.responses, [])
+
+    async def test_turn_advance_after_ack_blocks_final_prompt_claim(self):
+        class Runtime:
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=False,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.turn_advanced_after_ack = True
+                self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
+                return False
+
+        conn = _Conn()
+        conn.lesson_runtime = Runtime()
+        provider = GoogleLiveProvider(conn)
+        provider._client = _Client()
 
         handled = await provider._handle_lesson_live_interruption("timeout")
 
@@ -616,7 +653,11 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
                     reason=reason,
                 )
 
-            async def wait_conversation_live_fallback_ack(self, _window_id, _timeout_sec):
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
                 return True
 
         conn = _Conn()
@@ -656,6 +697,9 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
 
             async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
                 self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
                 return True
 
             def conversation_tool_context(self):

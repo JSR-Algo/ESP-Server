@@ -240,10 +240,15 @@ general chat:
 - a curated prompt is released only after the exact thinking cue, attempt, and
   cinematic command sequence receive an ACK; wrong, stale, or timed-out ACKs
   fail closed
+- the ACK creates a one-shot authorization token that is revalidated and
+  consumed immediately before Live `send_text`; any intervening child/tool turn
+  invalidates it
 - a successful reconnect closes the window, republishes the current lesson
   identity, and permits one attempt in a later independent window
 - a failed window remains bounded for the same authoritative turn; after the
   child starts a genuinely new turn, that new turn owns a fresh reconnect window
+- an ACK timeout expires and removes that window's waiter; a late exact ACK
+  cannot revive the prompt or leak an asyncio task
 - a failed or repeated reconnect uses one short deterministic prompt composed
   only from the validated `targetWord` guidance
 - if reconnect fails and no verified prompt channel remains, the lesson fallback
