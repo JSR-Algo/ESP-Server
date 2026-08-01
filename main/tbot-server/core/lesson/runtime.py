@@ -2097,19 +2097,24 @@ class LessonRuntime:
             return False
         self._retire_conversation_visual()
         sequence = await self._emit(
-            "lesson_cinematic_control",
+            "lesson_prepare",
             step_id=self._step_id,
-            body={"command": "start", **copy.deepcopy(cue)},
+            body={
+                "profile": self.profile,
+                "cinematicPhase": {"command": "prepare", **copy.deepcopy(cue)},
+            },
         )
         if not self._conversation_token_is_current(token):
             self._retire_conversation_visual_sequence(sequence)
             return False
         self._conversation_pending_visual = {
+            "stage": "prepare",
             "sequence": sequence,
             "cueId": cue_id,
             "stepId": self._step_id,
             "attemptId": self.conversation.attempt_id if self.conversation else None,
             "advancesStep": advances_step,
+            "authorityToken": token,
         }
         return True
 
@@ -2132,7 +2137,17 @@ class LessonRuntime:
         self, sequence: int, frame: Dict[str, Any]
     ) -> None:
         command = self._cinematic_frame_command(frame)
-        if frame.get("type") != "lesson_cinematic_control" or command is None:
+        conversation_prepare = bool(
+            frame.get("type") == "lesson_prepare"
+            and isinstance(command, dict)
+            and command.get("command") == "prepare"
+            and command.get("templateVersion") == 2
+            and isinstance(command.get("cueId"), str)
+        )
+        if (
+            frame.get("type") != "lesson_cinematic_control"
+            and not conversation_prepare
+        ) or command is None:
             return
         self._retired_conversation_ack_sequences[sequence] = {
             "protocolVersion": self.negotiated_version,
@@ -2172,7 +2187,8 @@ class LessonRuntime:
         if not isinstance(pending, dict) or not isinstance(command, dict):
             return
         if (
-            command.get("commandSequenceId") != pending.get("sequence")
+            pending.get("stage") != "start"
+            or command.get("commandSequenceId") != pending.get("sequence")
             or command.get("cueId") != pending.get("cueId")
             or pending.get("stepId") != self._step_id
             or self.conversation is None
@@ -2198,6 +2214,42 @@ class LessonRuntime:
             token = self._conversation_authority_token()
             if token is not None:
                 await self._complete_conversation_step(token)
+
+    async def _on_conversation_visual_prepared(self, frame: Dict[str, Any]) -> bool:
+        pending = self._conversation_pending_visual
+        command = self._cinematic_frame_command(frame)
+        if not isinstance(pending, dict) or not isinstance(command, dict):
+            return False
+        token = pending.get("authorityToken")
+        if (
+            pending.get("stage") != "prepare"
+            or command.get("command") != "prepare"
+            or command.get("commandSequenceId") != pending.get("sequence")
+            or command.get("cueId") != pending.get("cueId")
+            or pending.get("stepId") != self._step_id
+            or self.conversation is None
+            or pending.get("attemptId") != self.conversation.attempt_id
+            or not isinstance(token, tuple)
+            or not self._conversation_token_is_current(token)
+        ):
+            return False
+        next_sequence = self._seq + 1
+        pending["stage"] = "start"
+        pending["sequence"] = next_sequence
+        if (
+            self._conversation_fallback_ack_sequence == command.get("commandSequenceId")
+            and self._conversation_fallback_ack_cue_id == command.get("cueId")
+        ):
+            self._conversation_fallback_ack_sequence = next_sequence
+        sequence = await self._emit(
+            "lesson_cinematic_control",
+            step_id=self._step_id,
+            body={"command": "start", "cueId": command["cueId"]},
+        )
+        if sequence != next_sequence or not self._conversation_token_is_current(token):
+            self._retire_conversation_visual()
+            return False
+        return True
 
     async def _complete_conversation_step(self, token: tuple[Any, ...]) -> bool:
         await asyncio.sleep(0)
@@ -3000,6 +3052,20 @@ class LessonRuntime:
             return
         ftype = frame.get("type")
         if ftype == "lesson_prepare":
+            prepare_command = self._cinematic_frame_command(frame)
+            pending_visual = self._conversation_pending_visual
+            if (
+                isinstance(prepare_command, dict)
+                and prepare_command.get("command") == "prepare"
+                and prepare_command.get("templateVersion") == 2
+                and isinstance(prepare_command.get("cueId"), str)
+                and isinstance(pending_visual, dict)
+                and pending_visual.get("stage") == "prepare"
+                and pending_visual.get("sequence")
+                == prepare_command.get("commandSequenceId")
+            ):
+                await self._on_conversation_visual_prepared(frame)
+                return
             if self._use_sd_asset_pack() and not self._ack_reports_asset_pack_ready(ack_body):
                 self.last_error = LessonError(
                     ASSET_PACK_NOT_READY,

@@ -186,8 +186,13 @@ def _frames(runtime: LessonRuntime) -> list[dict]:
     return [json.loads(payload) for payload in runtime.conn.websocket.sent]
 
 
+def _frame_command(frame: dict) -> dict:
+    return frame["body"].get("cinematicPhase", frame["body"])
+
+
 def _ack(runtime: LessonRuntime, frame: dict, inbound_sequence: int, *, cue_id: str | None = None) -> dict:
-    command = frame["body"]
+    command = frame["body"].get("cinematicPhase", frame["body"])
+    event = "frameZeroReady" if command["command"] == "prepare" else "phaseReady"
     return {
         "type": "lesson_ack",
         "protocolVersion": RENDERER_V4,
@@ -201,12 +206,12 @@ def _ack(runtime: LessonRuntime, frame: dict, inbound_sequence: int, *, cue_id: 
         "body": {
             "acks": frame["sequence"],
             "cinematicPhase": {
-                "event": "phaseReady",
-                "command": "start",
+                "event": event,
+                "command": command["command"],
                 "cueId": cue_id or command["cueId"],
                 "commandSequenceId": command["commandSequenceId"],
                 "accepted": True,
-                "phaseReady": True,
+                event: True,
             },
         },
     }
@@ -222,9 +227,24 @@ async def _visual_and_ack(
         _identity(runtime, cue=True), cue_role, effect=effect
     )
     assert decision.accepted
-    frame = _frames(runtime)[-1]
-    await runtime.on_lesson_ack(_ack(runtime, frame, inbound_sequence))
-    return frame
+    prepare = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, prepare, inbound_sequence * 2 - 1))
+    start = _frames(runtime)[-1]
+    assert start["type"] == "lesson_cinematic_control"
+    await runtime.on_lesson_ack(_ack(runtime, start, inbound_sequence * 2))
+    return start
+
+
+async def _visual_and_ack_from_existing_prepare(
+    runtime: LessonRuntime,
+    prepare: dict,
+    inbound_sequence: int,
+) -> dict:
+    await runtime.on_lesson_ack(_ack(runtime, prepare, inbound_sequence * 2 - 1))
+    start = _frames(runtime)[-1]
+    assert start["type"] == "lesson_cinematic_control"
+    await runtime.on_lesson_ack(_ack(runtime, start, inbound_sequence * 2))
+    return start
 
 
 async def _wait_for_count(items: list, count: int) -> None:
@@ -330,15 +350,32 @@ async def test_visual_tool_uses_cinematic_sequence_fencing_and_duplicate_is_noop
         identity, "listen", effect="show_listening_scene"
     )
     assert decision.accepted
+    prepare = _frames(runtime)[-1]
+    assert prepare["type"] == "lesson_prepare"
+    assert prepare["body"]["cinematicPhase"]["command"] == "prepare"
+    assert prepare["body"]["cinematicPhase"]["cueId"] == "barn-listen"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "loop"
+
+    wrong_prepare = _ack(runtime, prepare, 1, cue_id="hay-listen")
+    await runtime.on_lesson_ack(wrong_prepare)
+    assert len(_frames(runtime)) == 1
+    assert prepare["sequence"] in runtime._outstanding
+
+    await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
     command = _frames(runtime)[-1]
     assert command["type"] == "lesson_cinematic_control"
-    assert command["body"]["cueId"] == "barn-listen"
-    assert command["body"]["playbackMode"] == "loop"
+    assert command["body"] == {
+        "command": "start",
+        "cueId": "barn-listen",
+        "commandSequenceId": command["sequence"],
+    }
+    await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
+    assert len(_frames(runtime)) == 2
 
-    stale = _ack(runtime, command, 1, cue_id="hay-listen")
+    stale = _ack(runtime, command, 2, cue_id="hay-listen")
     await runtime.on_lesson_ack(stale)
     assert command["sequence"] in runtime._outstanding
-    await runtime.on_lesson_ack(_ack(runtime, command, 1))
+    await runtime.on_lesson_ack(_ack(runtime, command, 2))
     assert command["sequence"] not in runtime._outstanding
     assert runtime.forwarder.batches == before
 
@@ -348,7 +385,7 @@ async def test_visual_tool_uses_cinematic_sequence_fencing_and_duplicate_is_noop
         effect="show_listening_scene",
     )
     assert not duplicate.accepted
-    assert len(_frames(runtime)) == 1
+    assert len(_frames(runtime)) == 2
 
 
 @pytest.mark.asyncio
@@ -633,13 +670,17 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
         _identity(runtime, cue=True), "listen", effect="show_listening_scene"
     )
     assert listen.accepted
-    listen_frame = _frames(runtime)[-1]
-    assert listen_frame["body"]["cueId"] == "barn-listen"
+    listen_prepare = _frames(runtime)[-1]
+    assert listen_prepare["body"]["cinematicPhase"]["cueId"] == "barn-listen"
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
 
-    await runtime.on_lesson_ack(_ack(runtime, listen_frame, 1, cue_id="hay-listen"))
+    await runtime.on_lesson_ack(_ack(runtime, listen_prepare, 1, cue_id="hay-listen"))
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
-    await runtime.on_lesson_ack(_ack(runtime, listen_frame, 1))
+    await runtime.on_lesson_ack(_ack(runtime, listen_prepare, 1))
+    listen_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, listen_start, 2, cue_id="hay-listen"))
+    assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
+    await runtime.on_lesson_ack(_ack(runtime, listen_start, 2))
 
     heard = await runtime.conversation_child_response(_identity(runtime), "target")
     assert heard.cue_id == "barn-thinking"
@@ -672,10 +713,12 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
         _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
     )
     assert transition.accepted
-    transition_frame = _frames(runtime)[-1]
-    await runtime.on_lesson_ack(_ack(runtime, transition_frame, 5, cue_id="barn-listen"))
+    transition_prepare = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, transition_prepare, 9, cue_id="barn-listen"))
     assert runtime._step_id == "barn"
-    await runtime.on_lesson_ack(_ack(runtime, transition_frame, 5))
+    await runtime.on_lesson_ack(_ack(runtime, transition_prepare, 9))
+    transition_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, transition_start, 10))
     assert runtime._step_id == "hay"
 
 
@@ -693,10 +736,12 @@ async def test_retry_cue_requires_visual_authorization_and_ack() -> None:
         _identity(runtime, cue=True), "retry_level_1", effect="show_effort_reaction"
     )
     assert retry_frame.accepted
-    command = _frames(runtime)[-1]
-    assert command["body"]["cueId"] == "barn-retry-level-1"
+    prepare = _frames(runtime)[-1]
+    assert prepare["body"]["cinematicPhase"]["cueId"] == "barn-retry-level-1"
     assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")).code == "VISUAL_ACK_REQUIRED"
-    await runtime.on_lesson_ack(_ack(runtime, command, 3))
+    await runtime.on_lesson_ack(_ack(runtime, prepare, 5))
+    start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, start, 6))
     assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")).accepted
 
 
@@ -753,9 +798,8 @@ async def test_nonterminal_attempted_review_requires_one_shot_continue_before_tr
         _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
     )
     assert visual.accepted
-    transition = _frames(runtime)[-1]
     inbound_sequence += 1
-    await runtime.on_lesson_ack(_ack(runtime, transition, inbound_sequence))
+    await _visual_and_ack_from_existing_prepare(runtime, _frames(runtime)[-1], inbound_sequence)
     assert runtime._step_id == "hay"
     assert runtime._steps_completed == 1
 
@@ -800,9 +844,7 @@ async def test_private_safe_mastered_evidence_is_forwarded_exactly_once() -> Non
         _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
     )
     assert transition.accepted
-    frame = _frames(runtime)[-1]
-    await runtime.on_lesson_ack(_ack(runtime, frame, 5))
-    await runtime.on_lesson_ack(_ack(runtime, frame, 6))
+    await _visual_and_ack_from_existing_prepare(runtime, _frames(runtime)[-1], 5)
 
     completed = [
         event
@@ -844,15 +886,17 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     assert unsupported.reconnect_allowed is False
     assert unsupported.prompt == ""
     thinking = _frames(runtime)[-1]
-    assert thinking["body"]["cueId"] == "barn-thinking"
+    assert thinking["body"]["cinematicPhase"]["cueId"] == "barn-thinking"
     assert runtime._conversation_visual_ack is None
     ack_wait = asyncio.create_task(
         runtime.wait_conversation_live_fallback_ack(directive.window_id, timeout_sec=0.2)
     )
     await asyncio.sleep(0)
-    await runtime.on_lesson_ack(_ack(runtime, thinking, 2, cue_id="hay-thinking"))
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 3, cue_id="hay-thinking"))
     assert not ack_wait.done()
-    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 3))
+    thinking_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, thinking_start, 4))
     authorization = await ack_wait
     assert isinstance(authorization, str)
     assert runtime.claim_conversation_live_fallback_prompt(
@@ -862,7 +906,7 @@ async def test_stale_cancelled_or_fallback_paths_record_no_evidence() -> None:
     bounded = await runtime.conversation_live_interruption("timeout")
     assert bounded.accepted
     assert bounded.reconnect_allowed is False
-    assert len(_frames(runtime)) == 2
+    assert len(_frames(runtime)) == 4
     runtime.conn.lesson_runtime = object()
     stale_window = await runtime.conversation_live_interruption("timeout")
     assert stale_window.accepted is False
@@ -892,7 +936,9 @@ async def test_fallback_ack_timeout_closes_window_and_late_ack_cannot_revive_pro
         directive.window_id,
         timeout_sec=0.01,
     )
-    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 3))
+    thinking_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, thinking_start, 4))
     second = await runtime.wait_conversation_live_fallback_ack(
         directive.window_id,
         timeout_sec=0.01,
@@ -922,7 +968,9 @@ async def test_ack_authorization_revalidates_turn_and_is_one_shot_before_prompt(
     )
     await asyncio.sleep(0)
 
-    await runtime.on_lesson_ack(_ack(runtime, thinking, 2))
+    await runtime.on_lesson_ack(_ack(runtime, thinking, 3))
+    thinking_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, thinking_start, 4))
     await runtime.conversation_child_response(_identity(runtime), "meaning_vi")
     stale_authorization = await waiting
 
@@ -934,7 +982,9 @@ async def test_ack_authorization_revalidates_turn_and_is_one_shot_before_prompt(
 
     fresh = await runtime.conversation_live_interruption("transport")
     fresh_thinking = _frames(runtime)[-1]
-    await runtime.on_lesson_ack(_ack(runtime, fresh_thinking, 3))
+    await runtime.on_lesson_ack(_ack(runtime, fresh_thinking, 5))
+    fresh_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, fresh_start, 6))
     authorization = await runtime.wait_conversation_live_fallback_ack(
         fresh.window_id,
         timeout_sec=0.2,
@@ -962,7 +1012,7 @@ async def test_live_fallback_recognizes_prior_normal_interrupt_without_double_co
 
     assert directive.accepted
     assert runtime.conversation.turn_sequence_id == before + 2
-    assert _frames(runtime)[-1]["body"]["cueId"] == "barn-thinking"
+    assert _frames(runtime)[-1]["body"]["cinematicPhase"]["cueId"] == "barn-thinking"
 
 
 @pytest.mark.asyncio
@@ -1168,6 +1218,10 @@ async def test_stale_visual_cleanup_preserves_new_visual_ack_timeout(
     if completion == "ack":
         await runtime.on_lesson_ack(_ack(runtime, new_frame, 2))
         assert new_sequence not in runtime._outstanding
+        start_frame = sent[-1]
+        assert start_frame["type"] == "lesson_cinematic_control"
+        assert runtime._conversation_pending_visual["stage"] == "start"
+        await runtime.on_lesson_ack(_ack(runtime, start_frame, 3))
         assert runtime._conversation_pending_visual is None
         assert runtime._frame_ack_timeout_task is None
         assert runtime._frame_ack_timeout_sequence is None
@@ -1203,7 +1257,7 @@ async def _emit_conversation_visual_retry(
     await _wait_for_count(timeout_gates, 2)
     retry = _frames(runtime)[-1]
     assert retry["sequence"] != original["sequence"]
-    assert retry["body"]["commandSequenceId"] == original["body"]["commandSequenceId"]
+    assert _frame_command(retry)["commandSequenceId"] == _frame_command(original)["commandSequenceId"]
     assert runtime._cinematic_pending_command["ackSequence"] == retry["sequence"]
     return original, retry, timeout_gates
 
@@ -1279,8 +1333,10 @@ async def test_exact_late_original_ack_advances_inbound_before_new_visual_ack() 
 
     await runtime.on_lesson_ack(_ack(runtime, original, 1))
     await runtime.on_lesson_ack(_ack(runtime, current, 2))
+    start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, start, 3))
 
-    assert runtime._last_inbound_sequence == 2
+    assert runtime._last_inbound_sequence == 3
     assert current["sequence"] not in runtime._outstanding
     assert runtime._conversation_visual_ack == (
         runtime.conversation.attempt_id,
@@ -1304,8 +1360,10 @@ async def test_exact_late_retry_ack_advances_inbound_before_new_visual_ack() -> 
 
     await runtime.on_lesson_ack(_ack(runtime, retry, 1))
     await runtime.on_lesson_ack(_ack(runtime, current, 2))
+    start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, start, 3))
 
-    assert runtime._last_inbound_sequence == 2
+    assert runtime._last_inbound_sequence == 3
     assert current["sequence"] not in runtime._outstanding
     assert runtime._conversation_visual_ack == (
         runtime.conversation.attempt_id,
@@ -1522,20 +1580,22 @@ async def test_nonterminal_continue_advances_only_after_exact_transition_ack_onc
         _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
     )
     assert visual.accepted
-    transition = _frames(runtime)[-1]
-    assert transition["body"]["cueId"] == "barn-to-hay-word-transition"
+    transition_prepare = _frames(runtime)[-1]
+    assert _frame_command(transition_prepare)["cueId"] == "barn-to-hay-word-transition"
     assert runtime._step_id == "barn"
     assert runtime._steps_completed == 0
 
-    await runtime.on_lesson_ack(_ack(runtime, transition, 5, cue_id="barn-listen"))
+    await runtime.on_lesson_ack(_ack(runtime, transition_prepare, 9, cue_id="barn-listen"))
     assert runtime._step_id == "barn"
-    await runtime.on_lesson_ack(_ack(runtime, transition, 5))
+    await runtime.on_lesson_ack(_ack(runtime, transition_prepare, 9))
+    transition_start = _frames(runtime)[-1]
+    await runtime.on_lesson_ack(_ack(runtime, transition_start, 10))
     assert runtime._step_id == "hay"
     assert runtime._steps_completed == 1
     assert runtime.conversation is not None
     assert runtime.conversation.identity().step_key == "hay"
 
-    await runtime.on_lesson_ack(_ack(runtime, transition, 6))
+    await runtime.on_lesson_ack(_ack(runtime, transition_start, 11))
     assert runtime._steps_completed == 1
 
 

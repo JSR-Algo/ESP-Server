@@ -1,0 +1,867 @@
+{
+  "manifestVersion": "teebot-lesson-renderer.v4",
+  "protocolVersion": "teebot-lesson-renderer.v4",
+  "courseId": "farm-course",
+  "lessonId": "tvideo-farm",
+  "lessonVersion": 4,
+  "locale": "en-US",
+  "ageBand": "4-6",
+  "profile": "espTft",
+  "title": "Farm words",
+  "layerOrder": [
+    "backgroundScene",
+    "teachingObject",
+    "robotOverlay"
+  ],
+  "steps": [
+    {
+      "id": "barn",
+      "type": "listen",
+      "prompt": "Look at the red building beside TeeBot and say barn.",
+      "subject": "barn",
+      "robotState": "listening",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "flyIn",
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.farm",
+            "src": "https://fixtures.example.test/scene.farm.png",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        "teachingObject": {
+          "asset": {
+            "key": "object.farm",
+            "src": "https://fixtures.example.test/object.farm.png",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "robotOverlay": {
+          "asset": {
+            "key": "robotOverlay.teach",
+            "src": "https://fixtures.example.test/robotOverlay.teach.png",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 12
+    },
+    {
+      "id": "hay",
+      "type": "listen",
+      "prompt": "Point to the golden bale and say hay.",
+      "subject": "hay",
+      "robotState": "listening",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.farm",
+            "src": "https://fixtures.example.test/scene.farm.png",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        "teachingObject": {
+          "asset": {
+            "key": "object.farm",
+            "src": "https://fixtures.example.test/object.farm.png",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "robotOverlay": {
+          "asset": {
+            "key": "robotOverlay.teach",
+            "src": "https://fixtures.example.test/robotOverlay.teach.png",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 12
+    }
+  ],
+  "assets": [
+    {
+      "assetId": "scene.farm",
+      "id": "scene.farm",
+      "layer": "backgroundScene",
+      "role": "poster",
+      "mediaType": "image/png",
+      "path": "scene.farm.png",
+      "url": "https://fixtures.example.test/scene.farm.png",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 1000,
+      "dimensions": {
+        "width": 100,
+        "height": 100
+      },
+      "critical": true
+    },
+    {
+      "assetId": "object.farm",
+      "id": "object.farm",
+      "layer": "teachingObject",
+      "role": "primarySubject",
+      "mediaType": "image/png",
+      "path": "object.farm.png",
+      "url": "https://fixtures.example.test/object.farm.png",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 1000,
+      "dimensions": {
+        "width": 100,
+        "height": 100
+      },
+      "critical": true
+    },
+    {
+      "assetId": "robotOverlay.teach",
+      "id": "robotOverlay.teach",
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "image/png",
+      "path": "robotOverlay.teach.png",
+      "url": "https://fixtures.example.test/robotOverlay.teach.png",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bytes": 1000,
+      "dimensions": {
+        "width": 100,
+        "height": 100
+      },
+      "critical": false
+    }
+  ],
+  "cinematicPhases": [
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-opening",
+      "effect": "opening",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 9500
+      },
+      "asset": {
+        "derivativeId": "514dce1c4b7b28318f78df6c6d64f0680707f2a964f929f92df99d74ca6ffe2f",
+        "path": "lessons/derivatives/514dce1c4b7b28318f78df6c6d64f0680707f2a964f929f92df99d74ca6ffe2f/barn-opening.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/514dce1c4b7b28318f78df6c6d64f0680707f2a964f929f92df99d74ca6ffe2f/barn-opening.mp4",
+        "sha256": "2f6d3f45d8ccfbad32528a1ce638cbdee67f79aec61a15fd93485cdaa85ee703",
+        "bytes": 50,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 9500,
+          "frameCount": 95,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-greet",
+      "effect": "greet",
+      "stepKey": "barn",
+      "playbackMode": "loop",
+      "timing": {
+        "durationMs": 1200
+      },
+      "asset": {
+        "derivativeId": "0d8871b7fd36aaab686328bc7bdfaa07c6af6267908f080bbec526dc5664ecba",
+        "path": "lessons/derivatives/0d8871b7fd36aaab686328bc7bdfaa07c6af6267908f080bbec526dc5664ecba/barn-greet.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/0d8871b7fd36aaab686328bc7bdfaa07c6af6267908f080bbec526dc5664ecba/barn-greet.mp4",
+        "sha256": "42d62195a5123685ca9dfc55013ec64f094ac217fe8ade3b65d0fb81cd0b0245",
+        "bytes": 48,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1200,
+          "frameCount": 12,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-teach",
+      "effect": "teach",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 2600
+      },
+      "asset": {
+        "derivativeId": "abca0448c4a1e84b33d125c7033a52ee1970501ee0116e5a51375838d9e155af",
+        "path": "lessons/derivatives/abca0448c4a1e84b33d125c7033a52ee1970501ee0116e5a51375838d9e155af/barn-teach.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/abca0448c4a1e84b33d125c7033a52ee1970501ee0116e5a51375838d9e155af/barn-teach.mp4",
+        "sha256": "c280672dd006459f42e57083edee68b19899fb90b7a8e0e369e0d2065ce13878",
+        "bytes": 48,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 2600,
+          "frameCount": 26,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-listen",
+      "effect": "listen",
+      "stepKey": "barn",
+      "playbackMode": "loop",
+      "timing": {
+        "durationMs": 1300
+      },
+      "asset": {
+        "derivativeId": "5bdeb23d50c3025a21b273896c1fbe2b057be2a9b9714648a53c85e8354849f5",
+        "path": "lessons/derivatives/5bdeb23d50c3025a21b273896c1fbe2b057be2a9b9714648a53c85e8354849f5/barn-listen.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/5bdeb23d50c3025a21b273896c1fbe2b057be2a9b9714648a53c85e8354849f5/barn-listen.mp4",
+        "sha256": "29f98af9189d7a995c86941e244f180476f64f4a2b6046a9d3d3ecf1c6b2a3d7",
+        "bytes": 49,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1300,
+          "frameCount": 13,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-thinking",
+      "effect": "thinking",
+      "stepKey": "barn",
+      "playbackMode": "loop",
+      "timing": {
+        "durationMs": 1300
+      },
+      "asset": {
+        "derivativeId": "b146cf45eaa50c0c76bad6529e5f87d73cc7c3eff17bffead53a423a9ce5f44e",
+        "path": "lessons/derivatives/b146cf45eaa50c0c76bad6529e5f87d73cc7c3eff17bffead53a423a9ce5f44e/barn-thinking.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/b146cf45eaa50c0c76bad6529e5f87d73cc7c3eff17bffead53a423a9ce5f44e/barn-thinking.mp4",
+        "sha256": "0518d130c87fac2beed8f4ff61e71a64d33ff2aa256e4fd059bcb5075cfff629",
+        "bytes": 51,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1300,
+          "frameCount": 13,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-correct",
+      "effect": "correct",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 600
+      },
+      "asset": {
+        "derivativeId": "b0303413fe5ae25d5f9105147b039913759a51703d422656e1439d9320b06017",
+        "path": "lessons/derivatives/b0303413fe5ae25d5f9105147b039913759a51703d422656e1439d9320b06017/barn-correct.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/b0303413fe5ae25d5f9105147b039913759a51703d422656e1439d9320b06017/barn-correct.mp4",
+        "sha256": "d1d7d9eeea37a403adeaf697dcc7b07281f71216c087dfc6b9af823c6b59c74f",
+        "bytes": 50,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 600,
+          "frameCount": 6,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-retry-level-1",
+      "effect": "retry-level-1",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1200
+      },
+      "asset": {
+        "derivativeId": "5fb979ea64f34aecdb5dd6ceea1f2bd9033622f7326f370d5b3a00426a5bd91e",
+        "path": "lessons/derivatives/5fb979ea64f34aecdb5dd6ceea1f2bd9033622f7326f370d5b3a00426a5bd91e/barn-retry-level-1.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/5fb979ea64f34aecdb5dd6ceea1f2bd9033622f7326f370d5b3a00426a5bd91e/barn-retry-level-1.mp4",
+        "sha256": "09fa72b4366dfaf453df2dd50086a21f612e63360acb5478b4983b3a8eda1e2d",
+        "bytes": 56,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1200,
+          "frameCount": 12,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-retry-level-2",
+      "effect": "retry-level-2",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1400
+      },
+      "asset": {
+        "derivativeId": "6b0e6a666a729f3acaf12476b26312f11071d9fae0fdc6842bfe039c64b04239",
+        "path": "lessons/derivatives/6b0e6a666a729f3acaf12476b26312f11071d9fae0fdc6842bfe039c64b04239/barn-retry-level-2.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/6b0e6a666a729f3acaf12476b26312f11071d9fae0fdc6842bfe039c64b04239/barn-retry-level-2.mp4",
+        "sha256": "c384581d225840368dbda1f257e130e58003ca9968d126f3bd6432519c1e73ac",
+        "bytes": 56,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1400,
+          "frameCount": 14,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-retry-level-3",
+      "effect": "retry-level-3",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1600
+      },
+      "asset": {
+        "derivativeId": "4f467a95bd8599e22aae678dcd9da19cb87dd5600111922ca8da1cd362540cf6",
+        "path": "lessons/derivatives/4f467a95bd8599e22aae678dcd9da19cb87dd5600111922ca8da1cd362540cf6/barn-retry-level-3.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/4f467a95bd8599e22aae678dcd9da19cb87dd5600111922ca8da1cd362540cf6/barn-retry-level-3.mp4",
+        "sha256": "82c32d30e642d90aae442dd56cab6720a5444ef0872c254b0183f82197b7aa10",
+        "bytes": 56,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1600,
+          "frameCount": 16,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-celebrate",
+      "effect": "celebrate",
+      "stepKey": "barn",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 3000
+      },
+      "asset": {
+        "derivativeId": "f8e299844498d020ee156abbf8281582ee4f4a260aaba731ac8b352848f1f311",
+        "path": "lessons/derivatives/f8e299844498d020ee156abbf8281582ee4f4a260aaba731ac8b352848f1f311/barn-celebrate.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/f8e299844498d020ee156abbf8281582ee4f4a260aaba731ac8b352848f1f311/barn-celebrate.mp4",
+        "sha256": "021354332e6cdd64b06fd5916f499dd0754d4fbe9a47b6a9615d524855aa4953",
+        "bytes": 52,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 3000,
+          "frameCount": 30,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "barn-to-hay-word-transition",
+      "effect": "word-transition",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1100
+      },
+      "asset": {
+        "derivativeId": "5d4d4dc6932829991469a59342fad8832e61dc166f310968fe4347394419b323",
+        "path": "lessons/derivatives/5d4d4dc6932829991469a59342fad8832e61dc166f310968fe4347394419b323/barn-to-hay-word-transition.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/5d4d4dc6932829991469a59342fad8832e61dc166f310968fe4347394419b323/barn-to-hay-word-transition.mp4",
+        "sha256": "872b96fd179425f5eda54045f10ea7336a029b2b5ab911887ef6103928db1f84",
+        "bytes": 65,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1100,
+          "frameCount": 11,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-teach",
+      "effect": "teach",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 2600
+      },
+      "asset": {
+        "derivativeId": "3f93548e30e8a738ebe66a298ede000217f4660989490e9ab4c28d0409230a12",
+        "path": "lessons/derivatives/3f93548e30e8a738ebe66a298ede000217f4660989490e9ab4c28d0409230a12/hay-teach.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/3f93548e30e8a738ebe66a298ede000217f4660989490e9ab4c28d0409230a12/hay-teach.mp4",
+        "sha256": "fc37b0267911362c3f02c6f1161a263bbe2650061e2f1e8ff4c98a4e0101fd1a",
+        "bytes": 47,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 2600,
+          "frameCount": 26,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-listen",
+      "effect": "listen",
+      "stepKey": "hay",
+      "playbackMode": "loop",
+      "timing": {
+        "durationMs": 1300
+      },
+      "asset": {
+        "derivativeId": "d1544045e8611b4cc2242791839fe21aa82806a99d6da9f13831d0d56793d8f6",
+        "path": "lessons/derivatives/d1544045e8611b4cc2242791839fe21aa82806a99d6da9f13831d0d56793d8f6/hay-listen.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/d1544045e8611b4cc2242791839fe21aa82806a99d6da9f13831d0d56793d8f6/hay-listen.mp4",
+        "sha256": "d6263a4b87c3311babf08a2aed15f3b305c3debbaa365ed9d6fe437968e5fc5a",
+        "bytes": 48,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1300,
+          "frameCount": 13,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-thinking",
+      "effect": "thinking",
+      "stepKey": "hay",
+      "playbackMode": "loop",
+      "timing": {
+        "durationMs": 1300
+      },
+      "asset": {
+        "derivativeId": "c4f18a909bd72b76e49b7ced476b8a2b369b30d91274c6e0dad08b53d2abfd5e",
+        "path": "lessons/derivatives/c4f18a909bd72b76e49b7ced476b8a2b369b30d91274c6e0dad08b53d2abfd5e/hay-thinking.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/c4f18a909bd72b76e49b7ced476b8a2b369b30d91274c6e0dad08b53d2abfd5e/hay-thinking.mp4",
+        "sha256": "18db083153c24e033b523a9e3895bd3b41cb5e028d6a9cc3f11cada9b3e40429",
+        "bytes": 50,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1300,
+          "frameCount": 13,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-correct",
+      "effect": "correct",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 600
+      },
+      "asset": {
+        "derivativeId": "c014e24797adb9923250f21e975d39ae3fb23eac329b10ccfaa602ed50fd40cb",
+        "path": "lessons/derivatives/c014e24797adb9923250f21e975d39ae3fb23eac329b10ccfaa602ed50fd40cb/hay-correct.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/c014e24797adb9923250f21e975d39ae3fb23eac329b10ccfaa602ed50fd40cb/hay-correct.mp4",
+        "sha256": "e334216b3e6a226fa1a8bba6b8ca7e55ff240b1b1ea060c6a433cdea46843be0",
+        "bytes": 49,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 600,
+          "frameCount": 6,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-retry-level-1",
+      "effect": "retry-level-1",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1200
+      },
+      "asset": {
+        "derivativeId": "001a7e6c71389afd048cf8bf5e427a3b6c3c43d507fb7c6223b1275546160306",
+        "path": "lessons/derivatives/001a7e6c71389afd048cf8bf5e427a3b6c3c43d507fb7c6223b1275546160306/hay-retry-level-1.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/001a7e6c71389afd048cf8bf5e427a3b6c3c43d507fb7c6223b1275546160306/hay-retry-level-1.mp4",
+        "sha256": "eaa5567c1370ef8f6611982546c965e8c2fa635431c25e6eb44a9213736e3b15",
+        "bytes": 55,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1200,
+          "frameCount": 12,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-retry-level-2",
+      "effect": "retry-level-2",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1400
+      },
+      "asset": {
+        "derivativeId": "4baa9a020a160ec24f859e981b8d257d7f2d09233098b69d9ac74be241f3fe6c",
+        "path": "lessons/derivatives/4baa9a020a160ec24f859e981b8d257d7f2d09233098b69d9ac74be241f3fe6c/hay-retry-level-2.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/4baa9a020a160ec24f859e981b8d257d7f2d09233098b69d9ac74be241f3fe6c/hay-retry-level-2.mp4",
+        "sha256": "fd93bb2cd0f3c564aae4b902b83b0d2aa7e344ba098c32777442dd43954a61c1",
+        "bytes": 55,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1400,
+          "frameCount": 14,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-retry-level-3",
+      "effect": "retry-level-3",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 1600
+      },
+      "asset": {
+        "derivativeId": "49d0c1366e684d856746b5fadc72677a2b85041bb63d4d4b0dc27b24cd681b04",
+        "path": "lessons/derivatives/49d0c1366e684d856746b5fadc72677a2b85041bb63d4d4b0dc27b24cd681b04/hay-retry-level-3.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/49d0c1366e684d856746b5fadc72677a2b85041bb63d4d4b0dc27b24cd681b04/hay-retry-level-3.mp4",
+        "sha256": "4d855a5587eff3b48ab7789dfd8eb01a3bef92c38c6b1d5259bf6b8254d9495e",
+        "bytes": 55,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 1600,
+          "frameCount": 16,
+          "hasAudio": false
+        }
+      }
+    },
+    {
+      "templateId": "flattenedMjpegCinematic",
+      "templateVersion": 2,
+      "cueId": "hay-celebrate",
+      "effect": "celebrate",
+      "stepKey": "hay",
+      "playbackMode": "once",
+      "timing": {
+        "durationMs": 3000
+      },
+      "asset": {
+        "derivativeId": "65c3bae2bd541bf38e941476135e27fc511fe6c9fdcb89fb379cfcf771453fa1",
+        "path": "lessons/derivatives/65c3bae2bd541bf38e941476135e27fc511fe6c9fdcb89fb379cfcf771453fa1/hay-celebrate.mp4",
+        "url": "https://fixtures.example.test/lessons/derivatives/65c3bae2bd541bf38e941476135e27fc511fe6c9fdcb89fb379cfcf771453fa1/hay-celebrate.mp4",
+        "sha256": "7aad461cbbd3b76654ceb7589f649d2c26eec50ad537e93f29b3f3d15819f6d9",
+        "bytes": 51,
+        "mediaType": "video/mp4",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+          "codec": "mjpeg",
+          "fps": 10,
+          "durationMs": 3000,
+          "frameCount": 30,
+          "hasAudio": false
+        }
+      }
+    }
+  ],
+  "features": {
+    "lessonRendererV4": {
+      "flattenedMjpegCinematic": true,
+      "assetSource": "publishedFlattenedDerivative"
+    }
+  },
+  "conversation": {
+    "presetId": "tvideoJourney",
+    "presetVersion": 1,
+    "maxContextualTurns": 2,
+    "steps": [
+      {
+        "stepKey": "barn",
+        "targetWord": "barn",
+        "vietnameseMeanings": [
+          "nhà kho nông trại",
+          "chuồng lớn"
+        ],
+        "relatedConcepts": [
+          "farm building",
+          "hay storage",
+          "animals"
+        ],
+        "questionSeeds": [
+          "Where does the farmer keep hay?",
+          "Which farm building is behind TeeBot?"
+        ],
+        "teachingCopy": {
+          "intro": "Welcome to the farm. This is a barn.",
+          "explanation": "A barn is a large farm building for animals, hay, and tools.",
+          "prompt": "Look at the red building beside TeeBot and say barn."
+        },
+        "expectedAnswer": "barn",
+        "progress": {
+          "index": 1,
+          "count": 2
+        },
+        "pronunciation": {
+          "slowModel": "barn: b - ar - n",
+          "approvedSegments": [
+            "b",
+            "ɑː",
+            "n"
+          ],
+          "vietnameseL1Guidance": [
+            "Mở khẩu hình rộng cho âm giữa; không thêm nguyên âm sau âm n cuối."
+          ]
+        },
+        "contextTurns": [
+          "Child identifies the red farm building.",
+          "TeeBot connects the barn to nearby hay."
+        ],
+        "cues": [
+          {
+            "cueId": "barn-teach",
+            "effect": "teach",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-listen",
+            "effect": "listen",
+            "playbackMode": "loop"
+          },
+          {
+            "cueId": "barn-thinking",
+            "effect": "thinking",
+            "playbackMode": "loop"
+          },
+          {
+            "cueId": "barn-correct",
+            "effect": "correct",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-retry-level-1",
+            "effect": "retry-level-1",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-retry-level-2",
+            "effect": "retry-level-2",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-retry-level-3",
+            "effect": "retry-level-3",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-celebrate",
+            "effect": "celebrate",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "barn-to-hay-word-transition",
+            "effect": "word-transition",
+            "playbackMode": "once"
+          }
+        ]
+      },
+      {
+        "stepKey": "hay",
+        "targetWord": "hay",
+        "vietnameseMeanings": [
+          "cỏ khô",
+          "rơm cỏ khô"
+        ],
+        "relatedConcepts": [
+          "animal food",
+          "hay bale",
+          "barn storage"
+        ],
+        "questionSeeds": [
+          "What are the golden bales near the road?",
+          "What do farm animals eat from the barn?"
+        ],
+        "teachingCopy": {
+          "intro": "Great job. Now look beside the road: this is hay.",
+          "explanation": "Hay is dried grass that farmers store and feed to animals.",
+          "prompt": "Point to the golden bale and say hay."
+        },
+        "expectedAnswer": "hay",
+        "progress": {
+          "index": 2,
+          "count": 2
+        },
+        "pronunciation": {
+          "slowModel": "hay: h - ay",
+          "approvedSegments": [
+            "h",
+            "eɪ"
+          ],
+          "vietnameseL1Guidance": [
+            "Thở nhẹ âm h ở đầu, rồi lướt liền sang âm ay; không tách thành hai tiếng."
+          ]
+        },
+        "contextTurns": [
+          "Child locates the golden bale.",
+          "TeeBot links hay to animal food."
+        ],
+        "cues": [
+          {
+            "cueId": "hay-teach",
+            "effect": "teach",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "hay-listen",
+            "effect": "listen",
+            "playbackMode": "loop"
+          },
+          {
+            "cueId": "hay-thinking",
+            "effect": "thinking",
+            "playbackMode": "loop"
+          },
+          {
+            "cueId": "hay-correct",
+            "effect": "correct",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "hay-retry-level-1",
+            "effect": "retry-level-1",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "hay-retry-level-2",
+            "effect": "retry-level-2",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "hay-retry-level-3",
+            "effect": "retry-level-3",
+            "playbackMode": "once"
+          },
+          {
+            "cueId": "hay-celebrate",
+            "effect": "celebrate",
+            "playbackMode": "once"
+          }
+        ]
+      }
+    ]
+  }
+}
