@@ -169,6 +169,14 @@ class LessonConversationRuntime:
         return self._mastered
 
     @property
+    def outcome(self) -> str | None:
+        return self._outcome
+
+    @property
+    def review_needed(self) -> bool:
+        return self._review_needed
+
+    @property
     def pending_cue_id(self) -> str | None:
         return self._pending_cue_id
 
@@ -482,6 +490,8 @@ class LessonConversationRuntime:
             return self._reject("ILLEGAL_CUE")
         if effect != cue.effect or effect != self._pending_effect:
             return self._reject("ILLEGAL_EFFECT")
+        if cue_role == "word_transition" and not self._continue_applied:
+            return self._reject("CONTINUE_REQUIRED")
         self._consume(identity)
         if cue_role == "word_transition":
             self._pending_cue_id = None

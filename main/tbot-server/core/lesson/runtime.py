@@ -1467,7 +1467,7 @@ class LessonRuntime:
 
     def _conversation_token_is_current(self, token: tuple[Any, ...]) -> bool:
         current = self._conversation_authority_token()
-        return current is not None and current[:5] == token[:5]
+        return current == token
 
     def _conversation_snapshot_owner_matches(
         self,
@@ -1481,6 +1481,7 @@ class LessonRuntime:
             and self._step_id == token[2]
             and self._step_seq == token[3]
             and attempt_id == token[4]
+            and conversation.turn_sequence_id == token[5]
         )
 
     def _conversation_guard(self) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
@@ -1553,21 +1554,26 @@ class LessonRuntime:
         guarded = self._conversation_guard()
         if isinstance(guarded, ConversationDecision):
             return guarded
-        conversation, token = guarded
+        conversation, _token = guarded
         assert isinstance(conversation, LessonConversationRuntime)
         pending = self._conversation_pending_visual
         if isinstance(pending, dict):
             return conversation.reject("VISUAL_ACK_REQUIRED")
         snapshot = conversation.snapshot()
         decision = conversation.visual_reaction(identity, cue_role, effect=effect)
-        if decision.accepted and not await self._emit_conversation_cue(
-            decision,
-            token=token,
-            advances_step=cue_role == "word_transition",
-        ):
-            if self._conversation_snapshot_owner_matches(conversation, token):
+        token = self._conversation_authority_token()
+        if decision.accepted:
+            if token is None:
                 conversation.restore_authoritative_snapshot(snapshot)
-            return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+            if not await self._emit_conversation_cue(
+                decision,
+                token=token,
+                advances_step=cue_role == "word_transition",
+            ):
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
         return decision
 
     async def conversation_interrupt(
@@ -1590,11 +1596,22 @@ class LessonRuntime:
         effect: str | None,
         next_step_key: str | None = None,
     ) -> ConversationDecision:
-        guarded = self._conversation_semantic_guard()
+        guarded = self._conversation_guard()
         if isinstance(guarded, ConversationDecision):
             return guarded
-        conversation, token = guarded
+        conversation, _token = guarded
         assert isinstance(conversation, LessonConversationRuntime)
+        attempted_review = (
+            conversation.outcome == "attempted" and conversation.review_needed
+        )
+        if not attempted_review:
+            pending_cue = conversation.pending_cue_id
+            acknowledged = self._conversation_visual_ack
+            if (
+                not isinstance(pending_cue, str)
+                or acknowledged != (conversation.attempt_id, pending_cue)
+            ):
+                return conversation.reject("VISUAL_ACK_REQUIRED")
         snapshot = conversation.snapshot()
         visual_ack = self._conversation_visual_ack
         decision = conversation.continue_lesson(
@@ -1606,6 +1623,11 @@ class LessonRuntime:
             return decision
         self._conversation_visual_ack = None
         if decision.next_intent == "complete_lesson":
+            token = self._conversation_authority_token()
+            if token is None:
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
             self._retire_conversation_visual()
             if not await self._complete_conversation_step(token):
                 if self._conversation_snapshot_owner_matches(conversation, token):

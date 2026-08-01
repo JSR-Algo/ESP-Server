@@ -523,6 +523,132 @@ async def test_retry_cue_requires_visual_authorization_and_ack() -> None:
     assert (await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")).accepted
 
 
+async def _drive_attempted_review(runtime: LessonRuntime) -> int:
+    inbound_sequence = 1
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", inbound_sequence)
+    await runtime.conversation_child_response(_identity(runtime), "target")
+    inbound_sequence += 1
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", inbound_sequence)
+    effects = (
+        ("retry_level_1", "show_effort_reaction"),
+        ("retry_level_2", "show_slow_model"),
+        ("retry_level_3", "show_pronunciation_guide"),
+    )
+    for cue_role, effect in effects:
+        retry = await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")
+        assert retry.cue_id is not None
+        inbound_sequence += 1
+        await _visual_and_ack(runtime, cue_role, effect, inbound_sequence)
+    attempted = await runtime.conversation_pronunciation_outcome(_identity(runtime), "retry")
+    assert attempted.outcome == "attempted"
+    assert attempted.review_needed is True
+    return inbound_sequence
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_attempted_review_requires_one_shot_continue_before_transition() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    inbound_sequence = await _drive_attempted_review(runtime)
+    frames = _frames(runtime)
+
+    premature = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
+    )
+    assert premature.code == "CONTINUE_REQUIRED"
+    assert _frames(runtime) == frames
+    assert runtime._step_id == "barn"
+
+    continued = await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_word_transition"
+    )
+    assert continued.accepted
+    assert continued.cue_id == "barn-to-hay-word-transition"
+    snapshot = runtime.conversation.snapshot()
+    duplicate = await runtime.conversation_continue(
+        _identity(runtime, cue=True), effect="show_word_transition"
+    )
+    assert duplicate.code == "CONTINUE_ALREADY_APPLIED"
+    assert runtime.conversation.snapshot() == snapshot
+    assert runtime._step_id == "barn"
+
+    visual = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "word_transition", effect="show_word_transition"
+    )
+    assert visual.accepted
+    transition = _frames(runtime)[-1]
+    inbound_sequence += 1
+    await runtime.on_lesson_ack(_ack(runtime, transition, inbound_sequence))
+    assert runtime._step_id == "hay"
+    assert runtime._steps_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_attempted_review_continue_completes_without_transition_cue() -> None:
+    runtime = _runtime()
+    await _activate(runtime, step_index=1)
+    runtime._steps_completed = 1
+    await _drive_attempted_review(runtime)
+    before = len(_frames(runtime))
+
+    continued = await runtime.conversation_continue(_identity(runtime), effect=None)
+
+    assert continued.accepted
+    assert continued.next_intent == "complete_lesson"
+    emitted = _frames(runtime)[before:]
+    assert emitted[-1]["type"] == "lesson_stop"
+    assert all(frame["body"].get("cueId") is None for frame in emitted)
+    assert runtime._steps_completed == 2
+
+
+@pytest.mark.asyncio
+async def test_interrupt_during_blocked_visual_send_retires_old_turn_without_rollback() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def blocked_send(_payload: str) -> None:
+        send_started.set()
+        await release_send.wait()
+
+    runtime._send = blocked_send
+    visual_task = asyncio.create_task(
+        runtime.conversation_visual_reaction(
+            _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+        )
+    )
+    await send_started.wait()
+    interrupted = await runtime.conversation_interrupt(_identity(runtime))
+    interrupted_snapshot = runtime.conversation.snapshot()
+    old_sequence = next(iter(runtime._outstanding))
+    release_send.set()
+    stale_visual = await visual_task
+
+    assert interrupted.accepted
+    assert interrupted.next_intent == "listen_to_child"
+    assert stale_visual.code == "RUNTIME_NOT_AUTHORITATIVE"
+    assert runtime.conversation.snapshot() == interrupted_snapshot
+    assert old_sequence not in runtime._outstanding
+    assert runtime._conversation_pending_visual is None
+    assert runtime.conversation.pending_cue_id == "barn-listen"
+
+    late = {
+        "type": "lesson_ack",
+        "protocolVersion": RENDERER_V4,
+        "assignmentId": runtime.assignment_id,
+        "sessionId": runtime.session_id,
+        "lessonId": runtime.lesson_id,
+        "lessonVersion": runtime.lesson_version,
+        "stepId": "barn",
+        "sequence": 1,
+        "timestamp": 1,
+        "body": {"acks": old_sequence},
+    }
+    await runtime.on_lesson_ack(late)
+    assert runtime.conversation.snapshot() == interrupted_snapshot
+
+
 @pytest.mark.asyncio
 async def test_interrupt_retires_old_visual_and_ignores_late_ack() -> None:
     runtime = _runtime()
