@@ -15,8 +15,14 @@ _GOOGLE_LIVE_LESSON_ADMISSION = ContextVar("google_live_lesson_admission", defau
 
 
 @contextmanager
-def _google_live_lesson_tool_admission(provider: Any, generation: int):
-    reset_token = _GOOGLE_LIVE_LESSON_ADMISSION.set((provider, generation))
+def _google_live_lesson_tool_admission(
+    provider: Any,
+    generation: int,
+    validation_receipt: dict[str, Any] | None = None,
+):
+    reset_token = _GOOGLE_LIVE_LESSON_ADMISSION.set(
+        (provider, generation, validation_receipt)
+    )
     try:
         yield
     finally:
@@ -151,7 +157,11 @@ def _rejected(code: str) -> ActionResponse:
 def _runtime(conn: Any):
     provider = getattr(conn, "voice_provider", None)
     admission = _GOOGLE_LIVE_LESSON_ADMISSION.get()
-    if not isinstance(admission, tuple) or len(admission) != 2 or admission[0] is not provider:
+    if (
+        not isinstance(admission, tuple)
+        or len(admission) not in (2, 3)
+        or admission[0] is not provider
+    ):
         return None, _rejected("MODEL_RESPONSE_NOT_ADMITTED")
     admission_generation = admission[1]
     current = getattr(provider, "current_response_id", None)
@@ -215,6 +225,16 @@ async def _execute(
         return _rejected("INVALID_TOOL_ARGS")
     snapshot = getattr(runtime, "conversation_tool_context", None)
     context = snapshot() if callable(snapshot) else None
+    admission = _GOOGLE_LIVE_LESSON_ADMISSION.get()
+    receipt = admission[2] if isinstance(admission, tuple) and len(admission) == 3 else None
+    refreshed_identity = context.get("identity") if isinstance(context, Mapping) else None
+    if isinstance(receipt, dict) and isinstance(refreshed_identity, Mapping):
+        receipt.update(
+            {
+                "canonicalToolName": tool_name,
+                "refreshedIdentity": dict(refreshed_identity),
+            }
+        )
     return ActionResponse(
         action=Action.REQLLM,
         result=_decision_payload(decision, context),

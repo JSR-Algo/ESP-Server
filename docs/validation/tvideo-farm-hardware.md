@@ -180,7 +180,10 @@ disabled unless all conditions are true: `validation_tool_audit_enabled: true`,
 `googleLiveValidationToolAuditV1: true`, exactly one
 `validation_tool_audit_client_ids` entry matching the websocket `client_id`, and
 exactly one `validation_tool_audit_device_ids` entry matching the websocket
-`device_id`.
+`device_id`. The connection must also be in `LESSON` mode with an active lesson
+runtime, and the audit must carry a canonical admission receipt produced by the
+real lesson-conversation tool path. Generic handler mappings, missing runtime
+context, and refreshed-identity mismatches do not emit an audit frame.
 
 ## Rollout remains dark
 

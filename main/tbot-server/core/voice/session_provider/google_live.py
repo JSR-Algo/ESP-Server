@@ -5314,13 +5314,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return msg_json.get("state"), text if isinstance(text, str) else None
 
     def _validation_tool_audit_enabled(self):
-        if (
-            normalize_session_mode(
-                getattr(self.conn, "session_mode", SessionMode.DORMANT)
-            )
-            != SessionMode.LESSON
-            and not self._lesson_runtime_active()
-        ):
+        if normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        ) != SessionMode.LESSON:
+            return False
+        if not self._lesson_runtime_active():
             return False
         config = self._get_live_config()
         if config.get("validation_tool_audit_enabled") is not True:
@@ -5379,18 +5377,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
             identity["cueId"] = cue_id
         return identity
 
-    async def _emit_validation_tool_audit(self, name, args, response_payload):
+    async def _emit_validation_tool_audit(
+        self,
+        name,
+        args,
+        response_payload,
+        validation_receipt,
+    ):
         if name not in LESSON_CONVERSATION_TOOLS:
             return
         if not self._validation_tool_audit_enabled():
             return
         if not isinstance(args, Mapping) or not isinstance(response_payload, Mapping):
             return
+        if not isinstance(validation_receipt, Mapping):
+            return
+        if validation_receipt.get("canonicalToolName") != name:
+            return
         context = response_payload.get("context")
         refreshed = context.get("identity") if isinstance(context, Mapping) else None
         identity = self._validation_tool_identity(args)
         refreshed_identity = self._validation_tool_identity(refreshed)
+        receipt_identity = self._validation_tool_identity(
+            validation_receipt.get("refreshedIdentity")
+        )
         if identity is None or refreshed_identity is None:
+            return
+        if receipt_identity != refreshed_identity:
             return
         websocket = getattr(self.conn, "websocket", None)
         if websocket is None:
@@ -5503,11 +5516,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._pending_tool_calls.add(call_id)
                 self._cancelled_tool_call_ids.discard(call_id)
             started_at = time.monotonic()
+            validation_receipt = {}
             response_payload = await self._execute_tool_call_with_timeout(
                 name,
                 args,
                 call_id=call_id,
                 lesson_admission_generation=event_generation if in_lesson else None,
+                lesson_validation_receipt=validation_receipt,
             )
             latency_ms = (time.monotonic() - started_at) * 1000
             if call_id is not None and call_id in self._cancelled_tool_call_ids:
@@ -5519,7 +5534,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     latency_ms,
                 )
                 continue
-            await self._emit_validation_tool_audit(name, args, response_payload)
+            await self._emit_validation_tool_audit(
+                name,
+                args,
+                response_payload,
+                validation_receipt,
+            )
             ok = not (
                 isinstance(response_payload, Mapping)
                 and response_payload.get("ok") is False
@@ -5576,6 +5596,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         args,
         call_id=None,
         lesson_admission_generation=None,
+        lesson_validation_receipt=None,
     ):
         try:
             if name in LESSON_CONVERSATION_TOOLS:
@@ -5586,6 +5607,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 with _google_live_lesson_tool_admission(
                     self,
                     lesson_admission_generation,
+                    lesson_validation_receipt,
                 ):
                     return await self._execute_tool_call(name, args, call_id=call_id)
             timeout = self._get_tool_timeout_sec()
