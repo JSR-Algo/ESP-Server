@@ -334,6 +334,27 @@ def test_renderer_v4_v2_metadata_requires_exact_integers(field, value):
     with pytest.raises(FirmwareSyncPackError):
         build_firmware_sync_pack(render_pack)
 
+
+@pytest.mark.parametrize("value", [123, [], None, True])
+def test_renderer_v4_v2_sha256_requires_an_actual_string(value):
+    render_pack = _pack("flattenedCinematic.barn-listen")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64,
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+        "sha256": value,
+    })
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
 @pytest.mark.parametrize(
     ("mutate", "secret"),
     [

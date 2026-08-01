@@ -337,6 +337,28 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             with open(path, "rb") as fh:
                 self.assertEqual(_sha(fh.read()), a.sha256)
 
+    async def test_malformed_sha256_is_a_terminal_cache_error_not_a_python_type_error(self):
+        for malformed in (123, [], None, True):
+            with self.subTest(sha256=malformed):
+                asset = {
+                    "key": "teachingObject.barn",
+                    "path": "barn.png",
+                    "sha256": malformed,
+                    "size": len(BARN),
+                    "critical": True,
+                    "layer": "teachingObject",
+                    "role": "primarySubject",
+                    "mediaType": "image/png",
+                }
+                with self.assertRaises(AssetChecksumMismatch) as exc_info:
+                    await self._cache([asset], client=_client_for([asset])).preload()
+                self.assertFalse(exc_info.exception.retryable)
+
+    def test_asset_state_preserves_existing_uppercase_hex_normalization(self):
+        state = AssetState({"key": "poster", "sha256": "AB" * 32})
+
+        self.assertEqual(state.sha256, "ab" * 32)
+
     async def test_esptft_background_poster_writes_render_safe_derivative(self):
         original = b"\xff\xd8\xfforiginal-camera-jpeg"
         derivative = b"\xff\xd8\xffbaseline-320x240-jpeg"

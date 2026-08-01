@@ -130,6 +130,7 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         "flattened cinematic asset fields are invalid",
     )
     derivative_id = asset.get("derivativeId")
+    sha256 = asset.get("sha256")
     expected_path = f"lessons/derivatives/{derivative_id}/{entry_id}.mp4"
     asset_url = asset.get("url")
     try:
@@ -148,7 +149,8 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or parsed_url.query
         or parsed_url.fragment
         or parsed_url.path.lstrip("/") != expected_path
-        or _SHA256_RE.fullmatch(str(asset.get("sha256") or "")) is None
+        or not isinstance(sha256, str)
+        or _SHA256_RE.fullmatch(sha256) is None
         or not _positive_int(asset.get("bytes"))
         or asset.get("mediaType") != "video/mp4"
         or type(asset.get("width")) is not int

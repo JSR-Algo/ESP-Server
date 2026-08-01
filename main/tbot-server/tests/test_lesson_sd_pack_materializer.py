@@ -510,6 +510,26 @@ async def test_checksum_mismatch_is_terminal_and_sanitized(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", [123, [], None, True])
+async def test_malformed_asset_sha256_is_rejected_as_non_retryable_contract_error(tmp_path, value):
+    manifest = _manifest()
+    manifest["assets"][0]["sha256"] = value
+    client = _Client({})
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            manifest,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "INVALID_ASSET_SHA256"
+    assert exc_info.value.retryable is False
+    assert client.requests == []
+
+
+@pytest.mark.asyncio
 async def test_declared_size_mismatch_rejected(tmp_path):
     bad = _manifest()
     bad["assets"][0]["size"] = len(POSTER) + 1

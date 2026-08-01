@@ -266,7 +266,8 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     }
 
 def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: str) -> tuple[str, str]:
-    if _LOWER_SHA256_RE.fullmatch(asset.get("sha256") or "") is None:
+    sha256 = asset.get("sha256")
+    if not isinstance(sha256, str) or _LOWER_SHA256_RE.fullmatch(sha256) is None:
         _refuse()
     size = asset.get("size")
     if type(size) is not int or size < 0 or size > MAX_SAFE_SIZE:

@@ -279,6 +279,8 @@ def test_v2_manifest_rejects_duplicate_missing_extra_or_mixed_cues(mutate) -> No
         (("templateVersion",), True), (("templateVersion",), 2.0),
         (("timing", "durationMs"), True), (("timing", "durationMs"), 1300.0),
         (("asset", "bytes"), True), (("asset", "bytes"), 1234567.0),
+        (("asset", "sha256"), 123), (("asset", "sha256"), []),
+        (("asset", "sha256"), None), (("asset", "sha256"), True),
         (("asset", "width"), 480.0), (("asset", "height"), True),
         (("asset", "metadata", "fps"), 10.0),
         (("asset", "metadata", "frameCount"), 13.0),

@@ -113,7 +113,8 @@ class AssetState:
             )
         self.key: str = key
         self.path: str = asset.get("path") or ""
-        self.sha256: str = (asset.get("sha256") or "").lower()
+        raw_sha256 = asset.get("sha256")
+        self.sha256: str = raw_sha256.lower() if isinstance(raw_sha256, str) else ""
         self.size: Optional[int] = asset.get("size") if type(asset.get("size")) is int else None
         self.critical: bool = bool(asset.get("critical"))
         self.layer: Optional[str] = asset.get("layer")

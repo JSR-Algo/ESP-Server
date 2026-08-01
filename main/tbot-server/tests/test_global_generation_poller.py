@@ -864,6 +864,26 @@ async def test_sd_path_uses_javascript_encode_uri_component_and_200_byte_boundar
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", [123, [], None, True])
+async def test_malformed_asset_sha256_is_a_stable_non_retryable_poll_rejection(value) -> None:
+    payload = _payload()
+    payload["data"]["index"][0]["assets"][0]["sha256"] = value
+    payload["data"]["indexChecksum"] = hashlib.sha256(
+        canonical_json(payload["data"]["index"])
+    ).hexdigest()
+    checksum = payload["data"]["indexChecksum"]
+    callback_calls: list[dict] = []
+    client = _client(lambda request: _response(payload, etag=f'"lesson-assets-g8-{checksum}"'))
+
+    result = await GlobalGenerationPoller(
+        _config(), FakeStore(), callback_calls.append, http=client, clock=lambda: NOW
+    ).run_once()
+
+    assert result == {"state": "rejected", "errorCode": "cms_invalid_asset_checksum"}
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
 async def test_cache_key_over_200_bytes_fails_with_stable_sanitized_code() -> None:
     lesson_id = "a" * 128
     version = 1_234_567_890
