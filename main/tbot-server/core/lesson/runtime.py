@@ -1797,6 +1797,22 @@ class LessonRuntime:
         if future is not None and not future.done():
             future.set_result(False)
 
+    def _rollback_conversation_fallback_window(
+        self,
+        *,
+        conversation: LessonConversationRuntime,
+        window_id: str,
+        turn_sequence_id: int,
+    ) -> None:
+        if (
+            self.conversation is conversation
+            and self._conversation_fallback_window_id == window_id
+            and self._conversation_fallback_turn_sequence_id == turn_sequence_id
+        ):
+            self._conversation_fallback_window_id = None
+            self._conversation_fallback_turn_sequence_id = None
+            self._clear_conversation_fallback_ack()
+
     def _invalidate_conversation_fallback_after_turn_change(self) -> None:
         conversation = self.conversation
         if (
@@ -1883,6 +1899,7 @@ class LessonRuntime:
             )
         self._conversation_visual_ack = None
         window_id = f"{conversation.attempt_id}:{conversation.turn_sequence_id}"
+        fallback_turn_sequence_id = conversation.turn_sequence_id
         self._conversation_fallback_window_id = window_id
         self._conversation_fallback_turn_sequence_id = conversation.turn_sequence_id
         self._clear_conversation_fallback_ack()
@@ -1893,6 +1910,11 @@ class LessonRuntime:
         try:
             emitted = await self._emit_conversation_cue(decision, token=token)
         except asyncio.CancelledError:
+            self._rollback_conversation_fallback_window(
+                conversation=conversation,
+                window_id=window_id,
+                turn_sequence_id=fallback_turn_sequence_id,
+            )
             if self._conversation_snapshot_owner_matches(conversation, token):
                 conversation.restore_authoritative_snapshot(snapshot)
                 self._conversation_visual_ack = visual_ack
@@ -1900,9 +1922,11 @@ class LessonRuntime:
         except Exception:
             emitted = False
         if not emitted:
-            self._conversation_fallback_window_id = None
-            self._conversation_fallback_turn_sequence_id = None
-            self._clear_conversation_fallback_ack()
+            self._rollback_conversation_fallback_window(
+                conversation=conversation,
+                window_id=window_id,
+                turn_sequence_id=fallback_turn_sequence_id,
+            )
             if self._conversation_snapshot_owner_matches(conversation, token):
                 conversation.restore_authoritative_snapshot(snapshot)
                 self._conversation_visual_ack = visual_ack
@@ -1975,8 +1999,20 @@ class LessonRuntime:
             or not self._conversation_fallback_prompt_authority_current(window_id)
         ):
             return False
-        self._conversation_fallback_prompt_authorization = None
         self._conversation_fallback_prompt_claimed = True
+        return True
+
+    def expire_conversation_live_fallback_prompt(
+        self,
+        window_id: str,
+        authorization: str,
+    ) -> bool:
+        if (
+            window_id != self._conversation_fallback_window_id
+            or authorization != self._conversation_fallback_prompt_authorization
+        ):
+            return False
+        self._expire_conversation_fallback_ack()
         return True
 
     def conversation_live_reconnect_succeeded(self, window_id: str) -> bool:

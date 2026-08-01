@@ -966,6 +966,68 @@ async def test_live_fallback_recognizes_prior_normal_interrupt_without_double_co
 
 
 @pytest.mark.asyncio
+async def test_cancelled_fallback_emit_clears_its_window_and_future_without_leak() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    send_started = asyncio.Event()
+
+    async def blocked_send(_payload: str) -> None:
+        send_started.set()
+        await asyncio.Event().wait()
+
+    runtime._send = blocked_send
+    pending = asyncio.create_task(runtime.conversation_live_interruption("timeout"))
+    await send_started.wait()
+    assert runtime._conversation_fallback_window_id is not None
+    assert runtime._conversation_fallback_ack_future is not None
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert runtime._conversation_fallback_window_id is None
+    assert runtime._conversation_fallback_turn_sequence_id is None
+    assert runtime._conversation_fallback_ack_future is None
+    assert runtime._conversation_fallback_ack_sequence is None
+    assert runtime._conversation_fallback_prompt_authorization is None
+    assert runtime._outstanding == {}
+    assert runtime._frame_ack_timeout_task is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_old_emit_does_not_clear_newer_fallback_window() -> None:
+    runtime = _runtime()
+    await _activate(runtime)
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    send_started = asyncio.Event()
+
+    async def blocked_send(_payload: str) -> None:
+        send_started.set()
+        await asyncio.Event().wait()
+
+    runtime._send = blocked_send
+    old = asyncio.create_task(runtime.conversation_live_interruption("timeout"))
+    await send_started.wait()
+    old_window = runtime._conversation_fallback_window_id
+    runtime.conversation.child_response(_identity(runtime), "meaning_vi")
+    newer_future = asyncio.get_running_loop().create_future()
+    runtime._conversation_fallback_window_id = "newer-window"
+    runtime._conversation_fallback_turn_sequence_id = runtime.conversation.turn_sequence_id
+    runtime._conversation_fallback_ack_future = newer_future
+
+    old.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await old
+
+    assert old_window != "newer-window"
+    assert runtime._conversation_fallback_window_id == "newer-window"
+    assert runtime._conversation_fallback_ack_future is newer_future
+    assert not newer_future.done()
+    newer_future.set_result(False)
+
+
+@pytest.mark.asyncio
 async def test_attempted_evidence_is_structured_once_without_child_or_model_content() -> None:
     runtime = _runtime()
     await _activate(runtime, step_index=1)

@@ -482,6 +482,127 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_reconnect_cannot_resurrect_resources_after_close_begins(self):
+        class ClosingClient(_Client):
+            async def close(self):
+                self.connected = False
+
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        provider._client = ClosingClient()
+        open_started = asyncio.Event()
+        release_open = asyncio.Event()
+        leaked_receive = None
+
+        async def blocked_open():
+            nonlocal leaked_receive
+            open_started.set()
+            await release_open.wait()
+            provider._client = ClosingClient()
+            leaked_receive = asyncio.create_task(asyncio.Event().wait())
+            provider._receive_task = leaked_receive
+            return True
+
+        provider._open_live_session = blocked_open
+        reconnect = asyncio.create_task(provider._attempt_lesson_reconnect_once("transport"))
+        await open_started.wait()
+        closing = asyncio.create_task(provider.close())
+        await asyncio.sleep(0)
+        release_open.set()
+
+        self.assertFalse(await reconnect)
+        await closing
+        self.assertTrue(provider._closing)
+        self.assertIsNone(provider._client)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._receive_task)
+        self.assertIsNotNone(leaked_receive)
+        self.assertTrue(leaked_receive.done())
+
+    async def test_no_sender_expires_authorization_without_claiming_or_false_handled(self):
+        class Runtime:
+            def __init__(self):
+                self.claims = []
+                self.expired = []
+
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=False,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, window_id, authorization):
+                self.claims.append((window_id, authorization))
+                return True
+
+            def expire_conversation_live_fallback_prompt(self, window_id, authorization):
+                self.expired.append((window_id, authorization))
+                return True
+
+        conn = _Conn()
+        runtime = Runtime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._client = object()
+
+        handled = await provider._handle_lesson_live_interruption("timeout")
+
+        self.assertFalse(handled)
+        self.assertEqual(runtime.claims, [])
+        self.assertEqual(runtime.expired, [("window-1", "authorization-1")])
+
+    async def test_prompt_send_failure_expires_claim_and_returns_unhandled(self):
+        class FailingSender:
+            async def send_text(self, _text):
+                raise ConnectionError("transport closed")
+
+        class Runtime:
+            def __init__(self):
+                self.claims = []
+                self.expired = []
+
+            async def conversation_live_interruption(self, reason):
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="window-1",
+                    reconnect_allowed=False,
+                    prompt="Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, window_id, authorization):
+                self.claims.append((window_id, authorization))
+                return True
+
+            def expire_conversation_live_fallback_prompt(self, window_id, authorization):
+                self.expired.append((window_id, authorization))
+                return True
+
+        conn = _Conn()
+        runtime = Runtime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._client = FailingSender()
+
+        handled = await provider._handle_lesson_live_interruption("transport")
+
+        self.assertFalse(handled)
+        self.assertEqual(runtime.claims, [("window-1", "authorization-1")])
+        self.assertEqual(runtime.expired, [("window-1", "authorization-1")])
+
     async def test_hard_lesson_interrupt_uses_only_live_fallback_authority_boundary(self):
         conn = _Conn()
         conn.config["google_live"]["hard_reconnect_on_interrupt"] = True

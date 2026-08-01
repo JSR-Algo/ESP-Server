@@ -145,6 +145,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._reconnecting = False
         self._closing = False
         self._lifecycle_lock = None
+        self._lifecycle_generation = 0
         self._live_open_lock = None
         self._session_generation = 0
         self._response_generation = 0
@@ -219,6 +220,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
+            self._lifecycle_generation += 1
             self._closing = False
             if self._client is not None and self._bridge is not None:
                 self.conn.voice_provider = self
@@ -736,8 +738,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         await self._begin_user_interrupt("explicit_interrupt")
 
     async def close(self):
+        self._closing = True
+        self._lifecycle_generation += 1
         async with self._get_lifecycle_lock():
-            self._closing = True
             await self._close_live_resources()
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
@@ -5847,6 +5850,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if not isinstance(authorization, str) or not authorization:
             return False
+        prompt = getattr(directive, "prompt", "")
+        sender = getattr(self._client, "send_text", None)
+        if not isinstance(prompt, str) or not prompt.strip() or not callable(sender):
+            expire_prompt = getattr(
+                runtime,
+                "expire_conversation_live_fallback_prompt",
+                None,
+            )
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            return False
         claim_prompt = getattr(
             runtime,
             "claim_conversation_live_fallback_prompt",
@@ -5856,15 +5870,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
             claim_prompt(window_id, authorization)
         ):
             return False
-        prompt = getattr(directive, "prompt", "")
-        sender = getattr(self._client, "send_text", None)
-        if isinstance(prompt, str) and prompt.strip() and callable(sender):
-            try:
-                await sender(prompt)
-                return True
-            except Exception:
-                return False
-        return False
+        expire_prompt = getattr(
+            runtime,
+            "expire_conversation_live_fallback_prompt",
+            None,
+        )
+        try:
+            await sender(prompt)
+            return True
+        except asyncio.CancelledError:
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            raise
+        except Exception:
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            return False
 
     def _lesson_live_fallback_ack_timeout_sec(self):
         config = self._get_live_config()
@@ -5875,32 +5896,50 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return max(0.1, min(value, 5.0))
 
     async def _attempt_lesson_reconnect_once(self, reason):
-        if self._closing or self._fallback_provider is not None or self._reconnecting:
-            return False
-        self._reconnecting = True
-        self._interaction.transition(InteractionState.RECONNECTING)
-        try:
-            await self._close_live_resources()
-            await self._record_reconnect_attempt()
-            await self._open_live_session()
-            self.conn.voice_provider = self
-            self.conn.logger.bind(tag="GoogleLive").info(
-                "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
-                reason,
-            )
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._close_live_resources()
-            self.conn.logger.bind(tag="GoogleLive").warning(
-                "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
-                reason,
-                self._classify_error(exc),
-            )
-            return False
-        finally:
-            self._reconnecting = False
+        async with self._get_lifecycle_lock():
+            if self._closing or self._fallback_provider is not None or self._reconnecting:
+                return False
+            lifecycle_generation = self._lifecycle_generation
+
+            def lifecycle_current():
+                return bool(
+                    not self._closing
+                    and self._lifecycle_generation == lifecycle_generation
+                )
+
+            self._reconnecting = True
+            self._interaction.transition(InteractionState.RECONNECTING)
+            try:
+                await self._close_live_resources()
+                if not lifecycle_current():
+                    return False
+                await self._record_reconnect_attempt()
+                if not lifecycle_current():
+                    await self._close_live_resources()
+                    return False
+                await self._open_live_session()
+                if not lifecycle_current():
+                    await self._close_live_resources()
+                    return False
+                self.conn.voice_provider = self
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
+                    reason,
+                )
+                return True
+            except asyncio.CancelledError:
+                await self._close_live_resources()
+                raise
+            except Exception as exc:
+                await self._close_live_resources()
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
+                    reason,
+                    self._classify_error(exc),
+                )
+                return False
+            finally:
+                self._reconnecting = False
 
     def _should_hard_reconnect_on_interrupt(self):
         config = self._get_live_config()
