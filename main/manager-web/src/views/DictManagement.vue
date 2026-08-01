@@ -117,7 +117,7 @@
 
         <!-- UseDictionary dataEdit dialog component -->
         <DictDataDialog :visible.sync="dictDataDialogVisible" :title="dictDataDialogTitle" :dictData="dictDataForm"
-            :dictTypeId="selectedDictType?.id" @save="saveDictData" />
+            :dictTypeId="selectedDictType ? selectedDictType.id : null" @save="saveDictData" />
         <el-footer style="flex-shrink:unset;">
             <version-footer />
         </el-footer>
