@@ -153,6 +153,24 @@ def test_projects_exact_v4_phase_from_attested_one_file_pack() -> None:
     }
 
 
+def test_accepts_cdn_namespace_before_canonical_derivative_path() -> None:
+    phase = _phase()
+    phase["asset"]["url"] = (
+        "https://cdn.example/lesson-derivatives/" + phase["asset"]["path"]
+    )
+
+    validate_flattened_cinematic_manifest({
+        "manifestVersion": "teebot-lesson-renderer.v4",
+        "protocolVersion": "teebot-lesson-renderer.v4",
+        "features": {"lessonRendererV4": {
+            "flattenedMjpegCinematic": True,
+            "assetSource": "publishedFlattenedDerivative",
+        }},
+        "cinematicPhases": [phase],
+    })
+    assert project_flattened_cinematic_phase(phase, _pack())["phaseId"] == "opening"
+
+
 def test_projects_repeated_v2_effects_by_unique_cue_identity() -> None:
     first = _cue("barn-listen")
     second = _cue("hay-listen", step_key="hay")

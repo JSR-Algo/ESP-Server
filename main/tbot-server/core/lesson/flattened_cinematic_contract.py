@@ -137,6 +137,8 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         parsed_url = urlsplit(asset_url) if isinstance(asset_url, str) else None
     except ValueError:
         parsed_url = None
+    url_path = parsed_url.path.lstrip("/") if parsed_url is not None else ""
+    url_path_matches = url_path == expected_path or url_path.endswith("/" + expected_path)
     if (
         not isinstance(derivative_id, str)
         or _SHA256_RE.fullmatch(derivative_id) is None
@@ -148,7 +150,7 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or parsed_url.password
         or parsed_url.query
         or parsed_url.fragment
-        or parsed_url.path.lstrip("/") != expected_path
+        or not url_path_matches
         or not isinstance(sha256, str)
         or _SHA256_RE.fullmatch(sha256) is None
         or not _positive_int(asset.get("bytes"))
