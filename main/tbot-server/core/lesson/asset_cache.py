@@ -524,9 +524,9 @@ class AssetCache:
             return
         for a in self.critical_assets:
             is_video = a.role == "video" or (a.media_type or "").lower().startswith("video/")
-            if is_video and not a.renderer_v3_mp4:
+            if is_video and not (a.renderer_v3_mp4 or a.renderer_v4_mp4):
                 raise AssetProfileUnavailable(
-                    "espTft only accepts validated renderer-v3 shared MP4 assets",
+                    "espTft only accepts validated lesson renderer MP4 assets",
                     context={"assetKey": a.key, "mediaType": a.media_type, "role": a.role},
                 )
 

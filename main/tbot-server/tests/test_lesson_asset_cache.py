@@ -1897,6 +1897,39 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         # NEVER entered PRELOADING / never fetched unplayable bytes.
         self.assertEqual(client.requested, [])
 
+    async def test_esptft_accepts_valid_renderer_v4_flattened_video(self):
+        assets = [
+            {
+                "key": "flattenedCinematic.opening",
+                "path": "opening.mp4",
+                "url": f"{BASE}/opening.mp4",
+                "sha256": _sha(BARN),
+                "size": len(BARN),
+                "critical": True,
+                "layer": "flattenedCinematic",
+                "role": "opening",
+                "mediaType": "video/mp4",
+                "derivativeId": "d" * 64,
+                "phaseId": "opening",
+                "compatibilityMetadata": {
+                    "codec": "mjpeg",
+                    "width": 480,
+                    "height": 320,
+                    "fps": 10,
+                    "durationMs": 9500,
+                    "frameCount": 95,
+                    "hasAudio": False,
+                },
+            }
+        ]
+        client = _client_for(assets)
+        cache = self._cache(assets, client=client)
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(client.requested, [f"{BASE}/opening.mp4"])
+
     async def test_download_pauses_while_realtime_busy_and_resumes(self):
         assets = _critical_assets()
         busy = {"value": True}
