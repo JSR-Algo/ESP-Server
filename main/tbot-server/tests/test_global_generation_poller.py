@@ -83,16 +83,23 @@ def _renderer_v4_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
     return asset
 
 
-def _renderer_v4_v2_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
-    asset = _asset("flattenedCinematic.barn-listen", size=130000, cache_key=cache_key)
+def _renderer_v4_v2_mp4_asset(
+    *,
+    cache_key: str = f"lesson-a/v4-{HASH_B}",
+    cue_id: str = "barn-listen",
+    effect: str = "listen",
+) -> dict:
+    playback_mode = "loop" if effect in {"greet", "listen", "thinking"} else "once"
+    duration_ms = {"listen": 1300, "teach": 2600}[effect]
+    asset = _asset(f"flattenedCinematic.{cue_id}", size=duration_ms * 100, cache_key=cache_key)
     asset.update({
-        "onlineUrl": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
-        "url": "https://cdn.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+        "onlineUrl": f"https://cdn.example/lessons/derivatives/{'d' * 64}/{cue_id}.mp4",
+        "url": f"https://cdn.example/lessons/derivatives/{'d' * 64}/{cue_id}.mp4",
         "mediaType": "video/mp4", "derivativeId": "d" * 64,
-        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+        "cueId": cue_id, "effect": effect, "stepKey": "barn", "playbackMode": playback_mode,
         "compatibilityMetadata": {
             "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
-            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+            "durationMs": duration_ms, "frameCount": duration_ms // 100, "hasAudio": False,
         },
     })
     return asset
@@ -274,6 +281,72 @@ async def test_validated_renderer_v4_v2_cue_passes_through_unchanged() -> None:
 
     assert await poller.run_once() == {"state": "accepted"}
     assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+async def test_accepts_sorted_non_cue_assets_followed_by_authored_renderer_v4_cues() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    pack["assets"] = [
+        _asset("alpha.png", cache_key=pack["cacheKey"]),
+        _asset("zeta.png", cache_key=pack["cacheKey"]),
+        _renderer_v4_v2_mp4_asset(
+            cache_key=pack["cacheKey"], cue_id="barn-teach", effect="teach"
+        ),
+        _renderer_v4_v2_mp4_asset(cache_key=pack["cacheKey"]),
+    ]
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"] == pack["assets"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("unsorted_non_cue", "cms_assets_not_sorted"),
+        ("non_cue_after_cue", "cms_assets_not_sorted"),
+        ("duplicate_cue", "cms_duplicate_asset_key"),
+        ("malformed_cue_identity", "cms_invalid_renderer_v4_mp4"),
+    ],
+)
+async def test_renderer_v4_cue_ordering_retains_strict_asset_rejections(
+    case: str,
+    code: str,
+) -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    cue = _renderer_v4_v2_mp4_asset(cache_key=pack["cacheKey"])
+    if case == "unsorted_non_cue":
+        pack["assets"] = [
+            _asset("zeta.png", cache_key=pack["cacheKey"]),
+            _asset("alpha.png", cache_key=pack["cacheKey"]),
+            cue,
+        ]
+    elif case == "non_cue_after_cue":
+        pack["assets"] = [cue, _asset("zeta.png", cache_key=pack["cacheKey"])]
+    elif case == "duplicate_cue":
+        pack["assets"] = [cue, deepcopy(cue)]
+    else:
+        cue["cueId"] = "other-cue"
+        pack["assets"] = [cue]
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "rejected", "errorCode": code}
 
 
 @pytest.mark.asyncio

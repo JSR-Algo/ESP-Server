@@ -436,7 +436,14 @@ def _validate_pack(value: Any, allowed_origins: set[tuple[str, str, int]]) -> di
     keys = [asset["key"] for asset in assets]
     if len(set(keys)) != len(keys):
         raise _PollRejected("cms_duplicate_asset_key")
-    if keys != sorted(keys, key=_js_sort_key):
+    cue_start = next(
+        (index for index, asset in enumerate(assets) if "cueId" in asset),
+        len(assets),
+    )
+    if (
+        keys[:cue_start] != sorted(keys[:cue_start], key=_js_sort_key)
+        or any("cueId" not in asset for asset in assets[cue_start:])
+    ):
         raise _PollRejected("cms_assets_not_sorted")
     basenames = [asset["encodedKey"].lower() for asset in assets]
     if len(set(basenames)) != len(basenames):
