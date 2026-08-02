@@ -1898,11 +1898,12 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.requested, [])
 
     async def test_esptft_accepts_valid_renderer_v4_flattened_video(self):
+        public_url = "https://cdn.test/lesson-derivatives/opening.mp4"
         assets = [
             {
                 "key": "flattenedCinematic.opening",
                 "path": "opening.mp4",
-                "url": f"{BASE}/opening.mp4",
+                "url": public_url,
                 "sha256": _sha(BARN),
                 "size": len(BARN),
                 "critical": True,
@@ -1922,13 +1923,13 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
                 },
             }
         ]
-        client = _client_for(assets)
+        client = _FakeClient({public_url: [BARN]})
         cache = self._cache(assets, client=client)
 
         ready = await cache.preload()
 
         self.assertTrue(ready)
-        self.assertEqual(client.requested, [f"{BASE}/opening.mp4"])
+        self.assertEqual(client.requested, [public_url])
 
     async def test_download_pauses_while_realtime_busy_and_resumes(self):
         assets = _critical_assets()

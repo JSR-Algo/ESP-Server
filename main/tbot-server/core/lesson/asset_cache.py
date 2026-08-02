@@ -949,7 +949,7 @@ class AssetCache:
     def _resolve_url(self, asset: AssetState) -> str:
         # assetOriginBase (one config value, D-ASSET-HOST) joined to the relative
         # path; fall back to a manifest-provided absolute url when no base is set.
-        if asset.renderer_v3_mp4 and asset.url:
+        if (asset.renderer_v3_mp4 or asset.renderer_v4_mp4) and asset.url:
             return asset.url
         if self.asset_origin_base and asset.path:
             return f"{self.asset_origin_base}/{asset.path.lstrip('/')}"
