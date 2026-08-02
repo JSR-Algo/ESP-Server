@@ -76,11 +76,11 @@ from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     build_firmware_sync_pack,
 )
+from core.lesson.sd_pack_sync import request_sd_pack_sync, sd_pack_sync_timeout_sec
 
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
-SD_ASSET_SYNC_TIMEOUT_SEC = 120
 
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
 # never inline JSON, so 16 KiB is generous for a 3-layer step with prompts/choices.
@@ -5191,6 +5191,10 @@ class LessonRuntime:
 
         async def call_sync_once() -> Any:
             has_tool = getattr(mcp_client, "has_tool", None)
+            timeout = sd_pack_sync_timeout_sec(
+                getattr(self.conn, "config", {}) or {},
+                mcp_pack or pack or {},
+            )
             if sample_request is not None:
                 if callable(has_tool) and has_tool(SAMPLE_SD_ASSET_SYNC_TOOL):
                     return await call_mcp_tool(
@@ -5198,7 +5202,7 @@ class LessonRuntime:
                         mcp_client,
                         SAMPLE_SD_ASSET_SYNC_TOOL,
                         sample_request,
-                        timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                        timeout=timeout,
                     )
                 from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
@@ -5207,7 +5211,7 @@ class LessonRuntime:
                     mcp_client,
                     "self.lesson_assets.sync_sample_to_sd",
                     sample_request,
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    timeout=timeout,
                 )
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
                 return await call_mcp_tool(
@@ -5215,7 +5219,7 @@ class LessonRuntime:
                     mcp_client,
                     SD_ASSET_SYNC_TOOL,
                     {"assetPack": mcp_pack},
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    timeout=timeout,
                 )
             from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
@@ -5224,17 +5228,27 @@ class LessonRuntime:
                 mcp_client,
                 "self.lesson_assets.sync_to_sd",
                 {"assetPack": mcp_pack},
-                timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                timeout=timeout,
             )
 
         async def call_sync() -> Any:
-            busy_check = getattr(self.conn, "is_realtime_busy", None)
-            if not callable(busy_check):
+            async def foreground_operation() -> Any:
+                busy_check = getattr(self.conn, "is_realtime_busy", None)
+                while callable(busy_check) and busy_check():
+                    await asyncio.sleep(0.05)
                 return await call_sync_once()
-            poll = 0.05
-            while busy_check():
-                await asyncio.sleep(poll)
-            return await call_sync_once()
+
+            cache_key = str(
+                (mcp_pack or pack or {}).get("cacheKey")
+                or (sample_request or {}).get("cacheKey")
+                or f"sample:{self.lesson_id}:{self.lesson_version}"
+            )
+            return await request_sd_pack_sync(
+                self.conn,
+                cache_key,
+                foreground_operation,
+                foreground=True,
+            )
 
         sync_started_at = time.monotonic()
         try:

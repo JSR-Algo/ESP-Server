@@ -913,7 +913,7 @@ async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_transfer(
+async def test_background_sync_does_not_cancel_dispatched_transfer_when_voice_turn_starts(
     monkeypatch, tmp_path
 ):
     cache_root = tmp_path / "lesson_assets"
@@ -923,7 +923,7 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     pack_dir.mkdir(parents=True)
     (pack_dir / "poster").write_bytes(b"a")
     transfer_started = asyncio.Event()
-    first_cancelled = asyncio.Event()
+    release_transfer = asyncio.Event()
     attempts = []
     busy = {"value": False}
 
@@ -943,13 +943,8 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
 
     async def fake_call(_conn, _client, pack):
         attempts.append(pack["cacheKey"])
-        if len(attempts) == 1:
-            transfer_started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                first_cancelled.set()
-                raise
+        transfer_started.set()
+        await release_transfer.wait()
         return {
             "ready": True,
             "cacheKey": cache_key,
@@ -962,8 +957,9 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     async def flip_busy():
         await transfer_started.wait()
         busy["value"] = True
-        await first_cancelled.wait()
+        await asyncio.sleep(0)
         busy["value"] = False
+        release_transfer.set()
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     flipper = asyncio.create_task(flip_busy())
@@ -973,42 +969,123 @@ async def test_background_sync_cancels_and_resumes_when_voice_turn_starts_mid_tr
     await flipper
 
     assert result["synced"] == 1
-    assert attempts == [cache_key, cache_key]
+    assert attempts == [cache_key]
 
 
 @pytest.mark.asyncio
-async def test_voice_reopening_cannot_starve_an_sd_pack_sync(monkeypatch):
-    busy = {"value": False}
-    attempts = 0
+async def test_sd_sync_coordinator_prioritizes_foreground_after_active_transfer():
+    conn = type("Conn", (), {})()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    order = []
 
-    async def fake_call(_conn, _client, _pack):
-        nonlocal attempts
-        attempts += 1
-        busy["value"] = True
-        try:
-            await asyncio.sleep(0.01)
-        except asyncio.CancelledError:
-            busy["value"] = False
-            raise
-        busy["value"] = False
+    async def operation(name, *, block=False):
+        order.append(name)
+        if block:
+            first_started.set()
+            await release_first.wait()
+        return name
+
+    first = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(
+            conn, "background-a", lambda: operation("background-a", block=True)
+        )
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(
+            conn, "background-b", lambda: operation("background-b")
+        )
+    )
+    foreground = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(
+            conn,
+            "foreground",
+            lambda: operation("foreground"),
+            foreground=True,
+        )
+    )
+    await asyncio.sleep(0)
+    release_first.set()
+
+    assert await asyncio.gather(first, second, foreground) == [
+        "background-a",
+        "background-b",
+        "foreground",
+    ]
+    assert order == ["background-a", "foreground", "background-b"]
+
+
+@pytest.mark.asyncio
+async def test_sd_sync_coordinator_joins_same_cache_key():
+    conn = type("Conn", (), {})()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
         return {"ready": True}
 
-    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
-
-    result = await asyncio.wait_for(
-        sd_pack_sync._call_sd_pack_sync_with_voice_guard(
-            object(),
-            object(),
-            {"cacheKey": "lesson-a/v1-a"},
-            busy_check=lambda: busy["value"],
-            sleep=asyncio.sleep,
-            poll_interval=0,
-        ),
-        timeout=0.1,
+    first = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "same-key", operation)
     )
+    await started.wait()
+    second = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "same-key", operation)
+    )
+    await asyncio.sleep(0)
+    release.set()
 
-    assert result == {"ready": True}
-    assert attempts == 2
+    assert await asyncio.gather(first, second) == [
+        {"ready": True},
+        {"ready": True},
+    ]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_waiter_does_not_cancel_dispatched_sd_sync():
+    conn = type("Conn", (), {})()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    release = asyncio.Event()
+
+    async def operation():
+        started.set()
+        await release.wait()
+        finished.set()
+        return "done"
+
+    waiter = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "cache-key", operation)
+    )
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)
+
+
+def test_sd_pack_sync_timeout_scales_for_large_pack():
+    pack = {
+        "assets": [
+            {"size": 13_703_853 // 28} for _ in range(27)
+        ]
+        + [{"size": 13_703_853 - (13_703_853 // 28) * 27}]
+    }
+
+    assert sd_pack_sync.sd_pack_sync_timeout_sec({}, pack) >= 1_000
+
+
+def test_sd_pack_sync_timeout_accepts_configured_floor():
+    config = {"lesson": {"sd_sync_timeout_floor_sec": 1_500}}
+
+    assert sd_pack_sync.sd_pack_sync_timeout_sec(config, {"assets": []}) == 1_500
 
 
 def test_cached_asset_packs_ignore_configured_sd_pack_without_valid_ready(tmp_path):

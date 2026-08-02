@@ -2961,6 +2961,13 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }
         conn.mcp_client = _ReadyLessonAssetMcpClient()
         calls = []
+        coordinator_calls = []
+
+        async def capture_coordinator(
+            conn_arg, cache_key, operation, *, foreground=False
+        ):
+            coordinator_calls.append((conn_arg, cache_key, foreground))
+            return await operation()
 
         async def capture_call(conn_arg, mcp_client, tool_name, args, timeout=30):
             calls.append(
@@ -2984,11 +2991,18 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+        asset_cache = _FirmwareSyncAssetCache(ready=True)
+        rt = self._runtime(conn=conn, asset_cache=asset_cache)
 
-        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call):
+        with patch("core.lesson.runtime.call_mcp_tool", new=capture_call), patch(
+            "core.lesson.runtime.request_sd_pack_sync", new=capture_coordinator
+        ):
             await rt.start()
 
+        self.assertEqual(
+            coordinator_calls,
+            [(conn, asset_cache.cache_key, True)],
+        )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["conn"], conn)
         self.assertEqual(calls[0]["mcp_client"], conn.mcp_client)

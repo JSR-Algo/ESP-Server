@@ -2527,6 +2527,18 @@ class ConnectionHandler:
 
                 pending_result = await drain_pending_for_connection(self)
 
+            on_connect_enabled = (
+                os.getenv("LESSON_SD_SYNC_ON_CONNECT_ENABLED", "")
+                .strip()
+                .lower()
+                == "true"
+            )
+            if not on_connect_enabled:
+                return {
+                    "pending": pending_result,
+                    "full": {"skipped": "on_connect_disabled"},
+                }
+
             from core.lesson.sd_pack_sync import sync_cached_lesson_assets_to_sd
 
             full_result = await sync_cached_lesson_assets_to_sd(self)
