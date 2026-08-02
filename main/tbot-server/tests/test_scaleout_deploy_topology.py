@@ -112,6 +112,16 @@ def test_prod_deploy_wires_renderer_flags_defaulting_disabled():
     assert "LESSON_RENDERER_V4_ENABLED" in script
 
 
+def test_prod_compose_uses_voice_safe_lesson_preload_timeout_default():
+    compose = yaml.safe_load(
+        (REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    )
+
+    environment = compose["services"]["tbot-esp32-server"]["environment"]
+
+    assert environment["LESSON_PRELOAD_TIMEOUT_SEC"] == "${LESSON_PRELOAD_TIMEOUT_SEC:-240}"
+
+
 def test_server_healthcheck_proves_both_http_and_websocket_listeners():
     compose = yaml.safe_load((REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text())
     command = compose["services"]["tbot-esp32-server"]["healthcheck"]["test"][-1]

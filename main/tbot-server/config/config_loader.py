@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -495,6 +496,19 @@ def _parse_positive_int_env(name):
         return None
     return value if value > 0 else None
 
+def _parse_positive_float_env(name):
+    raw = _clean_env(name)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return value
+
+
 def _parse_percent_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -546,6 +560,7 @@ def _apply_lesson_env_overrides(config):
     LESSON_ASSET_DELIVERY_MODE -> lesson.asset_delivery_mode.
     LESSON_ASSET_PACK_LOCAL_ROOT -> lesson.asset_pack_local_root.
     LESSON_ASSET_PACK_MOUNT_ROOT -> lesson.asset_pack_mount_root.
+    LESSON_PRELOAD_TIMEOUT_SEC -> lesson.preload_timeout_sec.
     LESSON_STEP_TIMEOUT_FLOOR_SEC -> lesson.step_timeout_floor_sec.
     LESSON_VOICE_RT_P95_DISABLE_MS -> lesson.voice_rt_p95_disable_ms.
     LESSON_MAX_ASSET_BYTES -> lesson.max_asset_bytes.
@@ -569,6 +584,7 @@ def _apply_lesson_env_overrides(config):
     asset_delivery_mode = _clean_env("LESSON_ASSET_DELIVERY_MODE")
     asset_pack_local_root = _clean_env("LESSON_ASSET_PACK_LOCAL_ROOT")
     asset_pack_mount_root = _clean_env("LESSON_ASSET_PACK_MOUNT_ROOT")
+    preload_timeout_sec = _parse_positive_float_env("LESSON_PRELOAD_TIMEOUT_SEC")
     step_timeout_floor = _clean_env("LESSON_STEP_TIMEOUT_FLOOR_SEC")
     voice_rt_p95_disable_ms = _clean_env("LESSON_VOICE_RT_P95_DISABLE_MS")
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
@@ -616,6 +632,7 @@ def _apply_lesson_env_overrides(config):
         and not asset_delivery_mode
         and not asset_pack_local_root
         and not asset_pack_mount_root
+        and preload_timeout_sec is None
         and not step_timeout_floor
         and not voice_rt_p95_disable_ms
         and max_asset_bytes is None
@@ -717,6 +734,8 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["asset_pack_local_root"] = asset_pack_local_root.rstrip("/")
     if asset_pack_mount_root:
         lesson_cfg["asset_pack_mount_root"] = asset_pack_mount_root.rstrip("/")
+    if preload_timeout_sec is not None:
+        lesson_cfg["preload_timeout_sec"] = preload_timeout_sec
     if step_timeout_floor:
         try:
             lesson_cfg["step_timeout_floor_sec"] = max(0.0, float(step_timeout_floor))

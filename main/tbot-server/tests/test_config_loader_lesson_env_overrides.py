@@ -40,6 +40,7 @@ _LESSON_ENV = (
     "LESSON_ASSET_DELIVERY_MODE",
     "LESSON_ASSET_PACK_LOCAL_ROOT",
     "LESSON_ASSET_PACK_MOUNT_ROOT",
+    "LESSON_PRELOAD_TIMEOUT_SEC",
     "LESSON_STEP_TIMEOUT_FLOOR_SEC",
     "LESSON_MAX_ASSET_BYTES",
     "LESSON_MAX_TOTAL_ASSET_BYTES",
@@ -96,6 +97,30 @@ def test_asset_pack_mount_root_override_strips_trailing_slash(monkeypatch):
     config = _apply_lesson_env_overrides({"lesson": {}})
 
     assert config["lesson"]["asset_pack_mount_root"] == "/mnt/sd/tbot/lesson-assets"
+
+
+def test_preload_timeout_override_accepts_positive_finite_seconds(monkeypatch):
+    monkeypatch.setenv("LESSON_PRELOAD_TIMEOUT_SEC", "240")
+
+    config = _apply_lesson_env_overrides({"lesson": {}})
+
+    assert config["lesson"]["preload_timeout_sec"] == 240.0
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "not-a-number"))
+def test_preload_timeout_override_rejects_unsafe_values(monkeypatch, value):
+    monkeypatch.setenv("LESSON_PRELOAD_TIMEOUT_SEC", value)
+
+    with pytest.raises(ValueError, match="LESSON_PRELOAD_TIMEOUT_SEC"):
+        _apply_lesson_env_overrides({"lesson": {}})
+
+
+def test_absent_preload_timeout_override_preserves_file_config():
+    config = _apply_lesson_env_overrides(
+        {"lesson": {"preload_timeout_sec": 180.0}}
+    )
+
+    assert config["lesson"]["preload_timeout_sec"] == 180.0
 
 
 # ── built-in sample-lesson demo flags ────────────────────────────────────────────
