@@ -107,16 +107,32 @@ def _backend_canonical_manifest_candidates():
         candidates.append(os.path.abspath(explicit_manifest))
     if configured_repo:
         candidates.append(os.path.join(os.path.abspath(configured_repo), _BACKEND_CANONICAL_RELATIVE_PATH))
-    candidates.extend(
-        [
-            os.path.join(_LEGACY_BACKEND_REPO_PATH, _BACKEND_CANONICAL_RELATIVE_PATH),
-            os.path.join(
-                _LEGACY_BACKEND_REPO_PATH,
-                "production-lesson-studio",
-                _BACKEND_CANONICAL_RELATIVE_PATH,
-            ),
-        ]
+    backend_roots = []
+    worktree_name = os.path.basename(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     )
+    for robot_repo in _robot_repo_candidates():
+        if os.path.basename(robot_repo) != "robot":
+            continue
+        workspace = os.path.dirname(robot_repo)
+        backend_roots.extend(
+            [
+                os.path.join(workspace, ".worktrees", f"backend-{worktree_name}"),
+                os.path.join(workspace, "tbot-backend"),
+            ]
+        )
+    backend_roots.append(_LEGACY_BACKEND_REPO_PATH)
+    for backend_root in backend_roots:
+        candidates.extend(
+            [
+                os.path.join(backend_root, _BACKEND_CANONICAL_RELATIVE_PATH),
+                os.path.join(
+                    backend_root,
+                    "production-lesson-studio",
+                    _BACKEND_CANONICAL_RELATIVE_PATH,
+                ),
+            ]
+        )
     return list(dict.fromkeys(candidates))
 
 
