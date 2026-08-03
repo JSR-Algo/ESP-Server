@@ -1110,6 +1110,7 @@ class LessonRuntime:
         self._safe_speaking_session: Optional[SafeSpeakingSession] = None
         self._motion_task: Optional[asyncio.Task] = None
         self._motion_generation = 0
+        self._semantic_step_sequence = 0
         self._step_seq: Optional[int] = None
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
@@ -3566,6 +3567,14 @@ class LessonRuntime:
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
         self._safe_speaking_session = None
+        if self._renderer_v4_enabled():
+            self._semantic_step_sequence += 1
+            self._step_seq = self._semantic_step_sequence
+            self._step_acked = True
+            self._step_visuals_ready = True
+            self._bind_conversation_for_current_step()
+            await self._publish_conversation_tool_context()
+            return
         self._bind_conversation_for_current_step()
         await self._publish_conversation_tool_context()
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
@@ -4928,7 +4937,7 @@ class LessonRuntime:
             "ready",
         )
         payload = {key: pack[key] for key in top_level_keys if key in pack}
-        asset_keys = ("key", "state", "checksumOk", "size")
+        asset_keys = ("key", "state", "checksumOk", "size", "mediaType")
         local_root = str(pack.get("localRoot") or "").rstrip("/")
         payload_assets = []
         for asset in pack.get("assets", []):

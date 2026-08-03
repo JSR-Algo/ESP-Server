@@ -253,6 +253,57 @@ async def _wait_for_count(items: list, count: int) -> None:
 
 
 @pytest.mark.asyncio
+async def test_v4_bootstrap_activates_semantic_steps_without_legacy_step_frames() -> None:
+    runtime = _runtime()
+    assert await runtime.preload_only()
+    await runtime.start_protocol(preloaded=True)
+
+    prepare = _frames(runtime)[-1]
+    assert prepare["type"] == "lesson_prepare"
+    prepare_ack = _ack(runtime, prepare, 1)
+    prepare_ack["body"]["assetPack"] = {
+        "ready": True,
+        "cacheKey": runtime.asset_cache.cache_key,
+    }
+    await runtime.on_lesson_ack(prepare_ack)
+
+    start = _frames(runtime)[-1]
+    assert start["type"] == "lesson_start"
+    await runtime.on_lesson_ack(_ack(runtime, start, 2))
+
+    assert [frame["type"] for frame in _frames(runtime)] == [
+        "lesson_prepare",
+        "lesson_start",
+    ]
+    assert runtime.state == S_RUNNING
+    assert runtime._step_id == "barn"
+    assert isinstance(runtime._step_seq, int) and runtime._step_seq > 0
+    assert runtime._step_acked
+    assert runtime._step_visuals_ready
+    assert runtime.conversation_tool_path_active()
+    assert runtime.conversation_tool_context()["identity"]["stepKey"] == "barn"
+
+    decision = await runtime.conversation_visual_reaction(
+        _identity(runtime, cue=True), "listen", effect="show_listening_scene"
+    )
+    assert decision.accepted
+    cue_prepare = _frames(runtime)[-1]
+    assert cue_prepare["type"] == "lesson_prepare"
+    await runtime.on_lesson_ack(_ack(runtime, cue_prepare, 3))
+    cue_start = _frames(runtime)[-1]
+    assert cue_start["type"] == "lesson_cinematic_control"
+    assert _frame_command(cue_start)["command"] == "start"
+    await runtime.on_lesson_ack(_ack(runtime, cue_start, 4))
+
+    runtime._step_completed = True
+    await runtime._maybe_finish_step()
+
+    assert runtime._step_id == "hay"
+    assert runtime.conversation_tool_context()["identity"]["stepKey"] == "hay"
+    assert "lesson_step" not in [frame["type"] for frame in _frames(runtime)]
+
+
+@pytest.mark.asyncio
 async def test_conversation_activates_only_for_exact_v4_tvideo_v2_contract() -> None:
     runtime = _runtime()
     await _activate(runtime)
