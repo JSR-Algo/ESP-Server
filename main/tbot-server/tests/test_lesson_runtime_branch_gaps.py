@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
 from core.lesson.errors import LessonError  # noqa: E402
+from core.lesson.flattened_cinematic_contract import trgb_container_bytes  # noqa: E402
 from core.lesson.runtime import (  # noqa: E402
     LessonRuntime,
     S_COMPLETED,
@@ -270,10 +271,20 @@ def _flattened_v2_manifest():
     })
     cue.pop("phaseId")
     cue["timing"]["durationMs"] = 9500
-    cue["asset"]["metadata"]["durationMs"] = 9500
-    cue["asset"]["metadata"]["frameCount"] = 95
-    cue["asset"]["path"] = f"lessons/derivatives/{'d' * 64}/barn-opening.mp4"
-    cue["asset"]["url"] = f"https://cdn.example.test/lessons/derivatives/{'d' * 64}/barn-opening.mp4"
+    cue["asset"].update({
+        "path": f"lessons/derivatives/{'d' * 64}/barn-opening.trgb",
+        "url": f"https://cdn.example.test/lessons/derivatives/{'d' * 64}/barn-opening.trgb",
+        "bytes": trgb_container_bytes(95),
+        "mediaType": "application/vnd.tbot.rgb565-indexed",
+        "metadata": {
+            "codec": "rgb565le", "containerVersion": 1,
+            "width": 480, "height": 320,
+            "storedWidth": 320, "storedHeight": 480,
+            "orientation": "panelNativeClockwise", "fps": 10,
+            "durationMs": 9500, "frameCount": 95, "frameBytes": 307200,
+            "hasAudio": False,
+        },
+    })
     return manifest
 
 
@@ -281,14 +292,22 @@ class _FlattenedV2AssetCache(_CinematicAssetCache):
     def asset_pack_manifest(self, **kwargs):
         pack = T._FakeAssetCache.asset_pack_manifest(self, **kwargs)
         path = f"{pack['localRoot']}/flattenedCinematic.barn-opening"
+        source = f"lessons/derivatives/{'d' * 64}/barn-opening.trgb"
         pack["assets"] = [{
             "key": "flattenedCinematic.barn-opening", "state": "READY", "checksumOk": True,
-            "localPath": path, "sdPath": path, "sha256": "a" * 64, "size": 1234,
-            "mediaType": "video/mp4", "derivativeId": "d" * 64,
+            "path": source, "url": f"https://cdn.example.test/{source}",
+            "onlineUrl": f"https://cdn.example.test/{source}",
+            "localPath": path, "sdPath": path, "sha256": "a" * 64,
+            "size": trgb_container_bytes(95),
+            "mediaType": "application/vnd.tbot.rgb565-indexed", "derivativeId": "d" * 64,
             "cueId": "barn-opening", "effect": "opening", "stepKey": "barn", "playbackMode": "once",
             "compatibilityMetadata": {
-                "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
-                "durationMs": 9500, "frameCount": 95, "hasAudio": False,
+                "codec": "rgb565le", "containerVersion": 1,
+                "width": 480, "height": 320,
+                "storedWidth": 320, "storedHeight": 480,
+                "orientation": "panelNativeClockwise", "fps": 10,
+                "durationMs": 9500, "frameCount": 95, "frameBytes": 307200,
+                "hasAudio": False,
             },
         }]
         return pack

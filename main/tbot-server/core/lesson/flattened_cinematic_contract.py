@@ -32,6 +32,15 @@ _V2_DURATION_MS = {
     "retry-level-2": 1400, "retry-level-3": 1600, "celebrate": 3000,
     "word-transition": 1100,
 }
+TRGB_MEDIA_TYPE = "application/vnd.tbot.rgb565-indexed"
+TRGB_HEADER_BYTES = 64
+TRGB_INDEX_ENTRY_BYTES = 16
+TRGB_FRAME_BYTES = 307200
+TRGB_DATA_ALIGNMENT = 512
+_V2_METADATA_FIELDS = {
+    "codec", "containerVersion", "width", "height", "storedWidth", "storedHeight",
+    "orientation", "fps", "durationMs", "frameCount", "frameBytes", "hasAudio",
+}
 
 
 class FlattenedCinematicContractError(ValueError):
@@ -47,6 +56,15 @@ def _fail(code: str, message: str) -> NoReturn:
 
 def _positive_int(value: Any) -> bool:
     return type(value) is int and value > 0
+
+
+def trgb_container_bytes(frame_count: int) -> int:
+    """Return renderer-v4 TRGB bytes including the aligned frame index."""
+    index_end = TRGB_HEADER_BYTES + frame_count * TRGB_INDEX_ENTRY_BYTES
+    data_offset = (
+        (index_end + TRGB_DATA_ALIGNMENT - 1) // TRGB_DATA_ALIGNMENT
+    ) * TRGB_DATA_ALIGNMENT
+    return data_offset + frame_count * TRGB_FRAME_BYTES
 
 
 def _exact_dict(value: Any, fields: set[str], message: str) -> dict[str, Any]:
@@ -131,7 +149,8 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     )
     derivative_id = asset.get("derivativeId")
     sha256 = asset.get("sha256")
-    expected_path = f"lessons/derivatives/{derivative_id}/{entry_id}.mp4"
+    extension = "mp4" if version == TEMPLATE_VERSION_V1 else "trgb"
+    expected_path = f"lessons/derivatives/{derivative_id}/{entry_id}.{extension}"
     asset_url = asset.get("url")
     try:
         parsed_url = urlsplit(asset_url) if isinstance(asset_url, str) else None
@@ -154,28 +173,50 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or not isinstance(sha256, str)
         or _SHA256_RE.fullmatch(sha256) is None
         or not _positive_int(asset.get("bytes"))
-        or asset.get("mediaType") != "video/mp4"
+        or asset.get("mediaType")
+        != ("video/mp4" if version == TEMPLATE_VERSION_V1 else TRGB_MEDIA_TYPE)
         or type(asset.get("width")) is not int
         or asset.get("width") != 480
         or type(asset.get("height")) is not int
         or asset.get("height") != 320
     ):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic asset identity is invalid")
-    metadata = _exact_dict(
-        asset.get("metadata"),
-        {"codec", "fps", "durationMs", "frameCount", "hasAudio"},
-        "flattened cinematic metadata fields are invalid",
+    metadata_fields = (
+        {"codec", "fps", "durationMs", "frameCount", "hasAudio"}
+        if version == TEMPLATE_VERSION_V1 else _V2_METADATA_FIELDS
     )
-    if (
-        metadata.get("codec") != "mjpeg"
-        or type(metadata.get("fps")) is not int
+    metadata = _exact_dict(
+        asset.get("metadata"), metadata_fields, "flattened cinematic metadata fields are invalid"
+    )
+    common_metadata_invalid = (
+        type(metadata.get("fps")) is not int
         or metadata.get("fps") != 10
         or type(metadata.get("durationMs")) is not int
         or metadata.get("durationMs") != duration_ms
         or type(metadata.get("frameCount")) is not int
         or metadata.get("frameCount") != duration_ms // 100
         or metadata.get("hasAudio") is not False
-    ):
+    )
+    v1_metadata_invalid = version == TEMPLATE_VERSION_V1 and metadata.get("codec") != "mjpeg"
+    v2_metadata_invalid = version == TEMPLATE_VERSION_V2 and (
+        metadata.get("codec") != "rgb565le"
+        or metadata.get("containerVersion") != 1
+        or metadata.get("width") != 480
+        or metadata.get("height") != 320
+        or metadata.get("storedWidth") != 320
+        or metadata.get("storedHeight") != 480
+        or metadata.get("orientation") != "panelNativeClockwise"
+        or metadata.get("frameBytes") != TRGB_FRAME_BYTES
+        or not _positive_int(metadata.get("frameCount"))
+        or asset.get("bytes") != trgb_container_bytes(metadata.get("frameCount"))
+        or any(
+            type(metadata.get(field)) is not int
+            for field in (
+                "containerVersion", "width", "height", "storedWidth", "storedHeight", "frameBytes"
+            )
+        )
+    )
+    if common_metadata_invalid or v1_metadata_invalid or v2_metadata_invalid:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic media metadata is invalid")
     return asset, metadata, version, entry_id
 
@@ -240,6 +281,48 @@ def validate_flattened_cinematic_manifest(manifest: Any) -> None:
         seen.add(entry_id)
 
 
+def validate_flattened_cinematic_cache_asset(asset: Any) -> None:
+    """Validate the exact renderer-v4 v2 TRGB asset after cache projection."""
+    if not isinstance(asset, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cache asset is invalid")
+    cue_id = asset.get("cueId")
+    metadata = asset.get("compatibilityMetadata")
+    if not isinstance(cue_id, str) or asset.get("key") != f"flattenedCinematic.{cue_id}":
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cache identity is invalid")
+    if not isinstance(metadata, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cache metadata is invalid")
+    source_url = asset.get("onlineUrl") or asset.get("url")
+    try:
+        parsed_source_url = urlsplit(source_url) if isinstance(source_url, str) else None
+    except ValueError:
+        parsed_source_url = None
+    normalized_source_url = (
+        parsed_source_url._replace(query="", fragment="").geturl()
+        if parsed_source_url is not None else None
+    )
+    projected = {
+        "templateId": TEMPLATE_ID,
+        "templateVersion": TEMPLATE_VERSION_V2,
+        "cueId": cue_id,
+        "effect": asset.get("effect"),
+        "stepKey": asset.get("stepKey"),
+        "playbackMode": asset.get("playbackMode"),
+        "timing": {"durationMs": metadata.get("durationMs")},
+        "asset": {
+            "derivativeId": asset.get("derivativeId"),
+            "path": asset.get("path"),
+            "url": normalized_source_url,
+            "sha256": asset.get("sha256"),
+            "bytes": asset.get("size"),
+            "mediaType": asset.get("mediaType"),
+            "width": metadata.get("width"),
+            "height": metadata.get("height"),
+            "metadata": metadata,
+        },
+    }
+    _manifest_asset(projected)
+
+
 def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     """Project one exact v4 phase to one verified local SD file identity."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:
@@ -279,15 +362,19 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         or any(key in packed for key in forbidden_identity)
     ):
         _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "flattened cinematic derivative identity does not match")
-    expected_metadata = {
-        "codec": metadata["codec"],
-        "width": source["width"],
-        "height": source["height"],
-        "fps": metadata["fps"],
-        "durationMs": metadata["durationMs"],
-        "frameCount": metadata["frameCount"],
-        "hasAudio": metadata["hasAudio"],
-    }
+    expected_metadata = (
+        {
+            "codec": metadata["codec"],
+            "width": source["width"],
+            "height": source["height"],
+            "fps": metadata["fps"],
+            "durationMs": metadata["durationMs"],
+            "frameCount": metadata["frameCount"],
+            "hasAudio": metadata["hasAudio"],
+        }
+        if version == TEMPLATE_VERSION_V1
+        else dict(metadata)
+    )
     if (
         packed.get("state") != "READY"
         or packed.get("checksumOk") is not True
@@ -336,5 +423,10 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         "durationMs": phase["timing"]["durationMs"],
         "fps": metadata["fps"],
         "frameCount": metadata["frameCount"],
-        "asset": {"derivativeId": source["derivativeId"], "cueId": entry_id, **common_asset},
+        "asset": {
+            "derivativeId": source["derivativeId"],
+            "cueId": entry_id,
+            **common_asset,
+            "compatibilityMetadata": dict(metadata),
+        },
     }

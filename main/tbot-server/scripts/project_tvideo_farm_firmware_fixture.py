@@ -42,7 +42,7 @@ def build_firmware_fixture(
                 "sdPath": path,
                 "sha256": source["sha256"],
                 "size": source["bytes"],
-                "mediaType": "video/mp4",
+                "mediaType": source["mediaType"],
                 "derivativeId": source["derivativeId"],
                 "cueId": phase["cueId"],
                 "effect": phase["effect"],

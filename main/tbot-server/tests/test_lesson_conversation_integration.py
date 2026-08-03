@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_lesson_runtime as legacy
 from core.lesson.conversation_contract import LessonToolIdentity
 from core.lesson.errors import LESSON_FRAME_ACK_TIMEOUT, LessonError
+from core.lesson.flattened_cinematic_contract import trgb_container_bytes
 from core.lesson.runtime import (
     LessonRuntime,
     MAX_RETIRED_CONVERSATION_ACK_SEQUENCES,
@@ -62,22 +63,30 @@ def _manifest() -> dict:
     for phase in manifest["cinematicPhases"]:
         cue_id = phase["cueId"]
         duration_ms = _DURATIONS[phase["effect"]]
+        frame_count = duration_ms // 100
         derivative_id = (cue_id.encode().hex() + "0" * 64)[:64]
         phase["timing"] = {"durationMs": duration_ms}
         phase["asset"] = {
             "derivativeId": derivative_id,
-            "path": f"lessons/derivatives/{derivative_id}/{cue_id}.mp4",
-            "url": f"https://cdn.example.test/lessons/derivatives/{derivative_id}/{cue_id}.mp4",
+            "path": f"lessons/derivatives/{derivative_id}/{cue_id}.trgb",
+            "url": f"https://cdn.example.test/lessons/derivatives/{derivative_id}/{cue_id}.trgb",
             "sha256": "a" * 64,
-            "bytes": 1234,
-            "mediaType": "video/mp4",
+            "bytes": trgb_container_bytes(frame_count),
+            "mediaType": "application/vnd.tbot.rgb565-indexed",
             "width": 480,
             "height": 320,
             "metadata": {
-                "codec": "mjpeg",
+                "codec": "rgb565le",
+                "containerVersion": 1,
+                "width": 480,
+                "height": 320,
+                "storedWidth": 320,
+                "storedHeight": 480,
+                "orientation": "panelNativeClockwise",
                 "fps": 10,
                 "durationMs": duration_ms,
-                "frameCount": duration_ms // 100,
+                "frameCount": frame_count,
+                "frameBytes": 307200,
                 "hasAudio": False,
             },
         }
@@ -111,17 +120,13 @@ class _ConversationAssetCache(legacy._FakeAssetCache):
                     "sdPath": path,
                     "sha256": asset["sha256"],
                     "size": asset["bytes"],
-                    "mediaType": "video/mp4",
+                    "mediaType": "application/vnd.tbot.rgb565-indexed",
                     "derivativeId": asset["derivativeId"],
                     "cueId": cue_id,
                     "effect": phase["effect"],
                     "stepKey": phase["stepKey"],
                     "playbackMode": phase["playbackMode"],
-                    "compatibilityMetadata": {
-                        **asset["metadata"],
-                        "width": 480,
-                        "height": 320,
-                    },
+                    "compatibilityMetadata": copy.deepcopy(asset["metadata"]),
                 }
             )
         return pack
@@ -417,19 +422,10 @@ async def test_visual_tool_uses_cinematic_sequence_fencing_and_duplicate_is_noop
     assert command["type"] == "lesson_cinematic_control"
     assert command["protocolVersion"] == RENDERER_V4
     assert command["stepId"] == "barn"
-    phase = command["body"]["cinematicPhase"]
-    for field in (
-        "command",
-        "cueId",
-        "effect",
-        "stepKey",
-        "playbackMode",
-        "commandSequenceId",
-    ):
-        assert command["body"][field] == phase[field]
-    assert phase["command"] == "start"
-    assert phase["cueId"] == "barn-listen"
-    assert phase["commandSequenceId"] == command["sequence"]
+    assert set(command["body"]) == {"command", "cueId", "commandSequenceId"}
+    assert command["body"]["command"] == "start"
+    assert command["body"]["cueId"] == "barn-listen"
+    assert command["body"]["commandSequenceId"] == command["sequence"]
     await runtime.on_lesson_ack(_ack(runtime, prepare, 1))
     assert len(_frames(runtime)) == 2
 
@@ -876,13 +872,10 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
     await runtime.on_lesson_ack(_ack(runtime, listen_prepare, 1))
     listen_start = _frames(runtime)[-1]
     assert listen_start["stepId"] == "barn"
-    for field in ("command", "cueId", "effect", "stepKey", "playbackMode"):
-        assert listen_start["body"][field] == listen_start["body"]["cinematicPhase"][field]
-    assert (
-        listen_start["body"]["commandSequenceId"]
-        == listen_start["body"]["cinematicPhase"]["commandSequenceId"]
-        == listen_start["sequence"]
-    )
+    assert set(listen_start["body"]) == {"command", "cueId", "commandSequenceId"}
+    assert listen_start["body"]["command"] == "start"
+    assert listen_start["body"]["cueId"] == "barn-listen"
+    assert listen_start["body"]["commandSequenceId"] == listen_start["sequence"]
     await runtime.on_lesson_ack(_ack(runtime, listen_start, 2, cue_id="hay-listen"))
     assert (await runtime.conversation_child_response(_identity(runtime), "target")).code == "VISUAL_ACK_REQUIRED"
     await runtime.on_lesson_ack(_ack(runtime, listen_start, 2))

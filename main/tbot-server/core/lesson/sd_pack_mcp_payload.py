@@ -7,6 +7,11 @@ import re
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from core.lesson.flattened_cinematic_contract import (
+    TRGB_MEDIA_TYPE,
+    FlattenedCinematicContractError,
+    validate_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 
 FIRMWARE_LESSON_ASSET_ROOT = "/sdcard/tbot/lesson-assets"
@@ -278,14 +283,33 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     if type(asset.get("critical")) is not bool:
         _refuse()
     local_path = _matching_alias(asset, "sdPath", "localPath")
-    online_url = _matching_alias(asset, "onlineUrl", "url")
+    local_fallback_url = _matching_alias(asset, "onlineUrl", "url")
     _validate_source_local_path(local_path, cache_key, basename)
-    _validate_online_url(online_url)
-    if media_type.lower().startswith("video/"):
-        if "derivativeId" in asset or "phaseId" in asset or "cueId" in asset:
+    _validate_online_url(local_fallback_url)
+    online_url = local_fallback_url
+    flattened_identity = "derivativeId" in asset or "phaseId" in asset or "cueId" in asset
+    if flattened_identity:
+        if media_type == TRGB_MEDIA_TYPE:
+            source_url = asset.get("sourceUrl")
+            if source_url is None:
+                source_url = local_fallback_url
+            if not isinstance(source_url, str) or not source_url:
+                _refuse()
+            _validate_online_url(source_url)
+            try:
+                contract_asset = dict(asset)
+                contract_asset["url"] = source_url
+                contract_asset["onlineUrl"] = source_url
+                validate_flattened_cinematic_cache_asset(contract_asset)
+            except FlattenedCinematicContractError:
+                _refuse()
+            online_url = source_url
+        elif media_type.lower().startswith("video/"):
             validate_renderer_v4_flattened_mp4(asset)
         else:
-            validate_renderer_v3_shared_mp4(asset)
+            _refuse()
+    elif media_type.lower().startswith("video/"):
+        validate_renderer_v3_shared_mp4(asset)
     return local_path, online_url
 
 
@@ -324,8 +348,12 @@ def build_firmware_sync_pack(pack: Any) -> dict[str, Any]:
     for index, basename in enumerate(basenames):
         _source_local_path, online_url = normalized_assets[index]
         physical_path = f"{physical_root}/{basename}"
-        result["assets"][index]["localPath"] = physical_path
-        result["assets"][index]["sdPath"] = physical_path
-        result["assets"][index]["onlineUrl"] = online_url
-        result["assets"][index]["url"] = online_url
+        sent_asset = result["assets"][index]
+        sent_asset.pop("localPath", None)
+        sent_asset.pop("url", None)
+        sent_asset["sdPath"] = physical_path
+        sent_asset["onlineUrl"] = online_url
+        sent_asset.pop("sourceUrl", None)
+        if sent_asset.get("mediaType") == TRGB_MEDIA_TYPE:
+            sent_asset.pop("compatibilityMetadata", None)
     return result

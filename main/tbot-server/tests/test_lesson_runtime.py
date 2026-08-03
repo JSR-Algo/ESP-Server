@@ -2734,6 +2734,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIsNone(rt._preload_task)
+
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_start")
         await rt.on_lesson_ack(_ack(2, 2))
         step = self._sent_frames(conn)[-1]
@@ -2757,6 +2758,23 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await rt.on_lesson_ack(_ack(4, 5))
         self.assertEqual(rt.state, "COMPLETED")
+
+    def test_prepare_asset_pack_preserves_media_type_for_firmware_file_limits(self):
+        from core.lesson.runtime import LessonRuntime
+
+        payload = LessonRuntime._prepare_asset_pack_payload({
+            "cacheKey": "lesson/v1-checksum",
+            "localRoot": "sd://sdcard/tbot/lesson-assets/lesson/v1-checksum",
+            "assets": [{
+                "key": "flattenedCinematic.barn-opening",
+                "state": "READY",
+                "checksumOk": True,
+                "size": 2_904_507,
+                "mediaType": "video/mp4",
+            }],
+        })
+
+        self.assertEqual(payload["assets"][0]["mediaType"], "video/mp4")
 
     async def test_sd_asset_pack_prepare_compacts_verbose_live_pack_under_frame_limit(self):
         class _VerboseLiveAssetPackCache(_FirmwareSyncAssetCache):
@@ -2819,7 +2837,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
         self.assertEqual(
             set(sent[0]["body"]["assetPack"]["assets"][0]),
-            {"key", "state", "checksumOk", "size"},
+            {"key", "state", "checksumOk", "size", "mediaType"},
         )
 
     async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):
@@ -3034,8 +3052,10 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(pack["localRoot"].startswith("/sdcard/tbot/lesson-assets/"))
         self.assertTrue(
-            all(asset["localPath"].startswith(pack["localRoot"] + "/") for asset in pack["assets"])
+            all(asset["sdPath"].startswith(pack["localRoot"] + "/") for asset in pack["assets"])
         )
+        self.assertTrue(all("localPath" not in asset for asset in pack["assets"]))
+        self.assertTrue(all("url" not in asset for asset in pack["assets"]))
         prepare = self._sent_frames(conn)[-1]
         self.assertEqual(prepare["type"], "lesson_prepare")
         self.assertTrue(prepare["body"]["assetPack"]["localRoot"].startswith("sd://"))

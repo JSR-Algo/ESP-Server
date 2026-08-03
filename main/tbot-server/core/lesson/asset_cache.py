@@ -44,6 +44,10 @@ from core.lesson.errors import (
     PreloadTimeout,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.flattened_cinematic_contract import (
+    FlattenedCinematicContractError,
+    validate_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -141,7 +145,11 @@ class AssetState:
             validate_renderer_v4_flattened_mp4(asset)
             self.renderer_v4_mp4 = True
         except FirmwareSyncPackError:
-            self.renderer_v4_mp4 = False
+            try:
+                validate_flattened_cinematic_cache_asset(asset)
+                self.renderer_v4_mp4 = True
+            except FlattenedCinematicContractError:
+                self.renderer_v4_mp4 = False
         self.state: str = PENDING
         self.checksum_ok: bool = False
         self.reason: Optional[str] = None
@@ -407,6 +415,7 @@ class AssetCache:
             "key": asset.key,
             "path": asset.path,
             "url": download_url,
+            "sourceUrl": asset.url,
             "sha256": sha256,
             "sourceSha256": asset.sha256 if sha256 != asset.sha256 else None,
             "size": size,

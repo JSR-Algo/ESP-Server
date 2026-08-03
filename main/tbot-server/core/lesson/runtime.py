@@ -986,8 +986,8 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
             "mediaType": source.get("mediaType"),
             "derivativeId": source.get("derivativeId"),
         }
-        compatibility = {
-            "compatibilityMetadata": {
+        compatibility_metadata = (
+            {
                 "codec": metadata.get("codec"),
                 "width": source.get("width"),
                 "height": source.get("height"),
@@ -995,8 +995,11 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                 "durationMs": metadata.get("durationMs"),
                 "frameCount": metadata.get("frameCount"),
                 "hasAudio": metadata.get("hasAudio"),
-            },
-        }
+            }
+            if version == 1
+            else copy.deepcopy(metadata)
+        )
+        compatibility = {"compatibilityMetadata": compatibility_metadata}
         if version == 1:
             assets.append({**common, "phaseId": entry_id, **compatibility})
             continue
@@ -2323,11 +2326,7 @@ class LessonRuntime:
                 step_id=self._step_id,
                 body={
                     "command": "start",
-                    **copy.deepcopy(cue),
-                    "cinematicPhase": {
-                        "command": "start",
-                        **copy.deepcopy(cue),
-                    },
+                    "cueId": cue["cueId"],
                 },
             )
         except asyncio.CancelledError:

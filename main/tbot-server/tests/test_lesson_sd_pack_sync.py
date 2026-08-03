@@ -843,9 +843,11 @@ async def test_raw_mcp_dispatch_uses_physical_copy_and_preserves_render_pack(mon
     assert pack == original
     sent = calls[0][1]["assetPack"]
     assert sent["localRoot"] == f"/sdcard/tbot/lesson-assets/{cache_key}"
-    assert sent["assets"][0]["localPath"].endswith(
+    assert sent["assets"][0]["sdPath"].endswith(
         "/folder%2Fposter%20one.png"
     )
+    assert "localPath" not in sent["assets"][0]
+    assert "url" not in sent["assets"][0]
 
 
 @pytest.mark.asyncio
