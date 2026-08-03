@@ -15,7 +15,7 @@ BUILD_BASE=0
 FAST_GOOGLE_LIVE=0
 FAST_WEB=1
 ONLY="all"
-VUE_APP_NEST_AUTH_DISABLED="${VUE_APP_NEST_AUTH_DISABLED:-false}"
+VUE_APP_NEST_AUTH_DISABLED="${VUE_APP_NEST_AUTH_DISABLED:-true}"
 
 usage() {
   cat <<'USAGE'
@@ -41,8 +41,8 @@ Options:
 
 Environment:
   VUE_APP_NEST_AUTH_DISABLED
-                           Set to true only for the Cloudflare Access-protected
-                           admin release (default: false).
+                           Defaults to true for server-proxy NestJS auth; set
+                           false only for per-user NestJS login.
 USAGE
 }
 

@@ -57,18 +57,23 @@ expectContains(
 );
 expectRegex(
   'Dockerfile-web',
-  /ARG VUE_APP_NEST_AUTH_DISABLED=false[\s\S]*ENV VUE_APP_NEST_AUTH_DISABLED=\$VUE_APP_NEST_AUTH_DISABLED[\s\S]*RUN npm run build/,
-  'the Vue production build must receive the Nest auth bypass flag',
+  /ARG VUE_APP_NEST_AUTH_DISABLED=true[\s\S]*ENV VUE_APP_NEST_AUTH_DISABLED=\$VUE_APP_NEST_AUTH_DISABLED[\s\S]*RUN npm run build/,
+  'the Vue production build must default to proxy-backed Nest auth',
 );
 expectRegex(
   'main/tbot-server/docker-compose_all.yml',
-  /args:[\s\S]*VUE_APP_NEST_AUTH_DISABLED:\s*\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}/,
-  'Compose must expose the bypass build arg with a safe default',
+  /args:[\s\S]*VUE_APP_NEST_AUTH_DISABLED:\s*\$\{VUE_APP_NEST_AUTH_DISABLED:-true\}/,
+  'Compose must default manager-web to proxy-backed Nest auth',
+);
+expectContains(
+  'main/tbot-server/docker-compose_all.yml',
+  'NESTJS_ADMIN_PROXY_KEY=${NESTJS_ADMIN_PROXY_KEY:-}',
+  'Compose must pass the server-only NestJS proxy key into the web container',
 );
 expectRegex(
   'deploy/build-local.sh',
-  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED:-false\}"/,
-  'the VPS release builder must default the Nest auth mode safely',
+  /VUE_APP_NEST_AUTH_DISABLED="\$\{VUE_APP_NEST_AUTH_DISABLED:-true\}"/,
+  'the VPS release builder must default to proxy-backed Nest auth',
 );
 expectRegex(
   'deploy/build-local.sh',
@@ -87,8 +92,8 @@ expectRegex(
 );
 expectRegex(
   '.github/workflows/docker-image.yml',
-  /workflow_dispatch:[\s\S]*nest_auth_disabled:[\s\S]*default:\s*false[\s\S]*VUE_APP_NEST_AUTH_DISABLED=\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.nest_auth_disabled \|\| false \}\}/,
-  'the release workflow must expose an explicit, safe-default Nest auth build input',
+  /workflow_dispatch:[\s\S]*nest_auth_disabled:[\s\S]*default:\s*true[\s\S]*VUE_APP_NEST_AUTH_DISABLED=\$\{\{ github\.event_name != 'workflow_dispatch' \|\| inputs\.nest_auth_disabled \}\}/,
+  'the release workflow must default to proxy-backed auth while allowing manual false rollback',
 );
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');

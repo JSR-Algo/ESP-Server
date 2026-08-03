@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       nest_auth_disabled:
-        description: Build manager-web without Nest bearer auth for the protected admin deployment
+        description: Build manager-web with server-proxy NestJS auth instead of per-user author login
         required: false
         type: boolean
-        default: false
+        default: true
   workflow_run:
     workflows: ["Build Base Image"]
     types:
@@ -102,4 +102,4 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_PROGRESS=plain
-            VUE_APP_NEST_AUTH_DISABLED=${{ github.event_name == 'workflow_dispatch' && inputs.nest_auth_disabled || false }}
+            VUE_APP_NEST_AUTH_DISABLED=${{ github.event_name != 'workflow_dispatch' || inputs.nest_auth_disabled }}

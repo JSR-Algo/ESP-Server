@@ -60,7 +60,7 @@ services:
       context: ../..
       dockerfile: Dockerfile-web
       args:
-        VUE_APP_NEST_AUTH_DISABLED: ${VUE_APP_NEST_AUTH_DISABLED:-false}
+        VUE_APP_NEST_AUTH_DISABLED: ${VUE_APP_NEST_AUTH_DISABLED:-true}
     image: local/tbot-server:web
     container_name: tbot-esp32-server-web
     restart: always
@@ -86,11 +86,12 @@ services:
       - SPRING_DATA_REDIS_PASSWORD=
       - SPRING_DATA_REDIS_PORT=6379
       # Course / Learner / Lesson Monitoring pages proxy to NestJS via /nestjs.
-      # Default: local tbot-backend on the host:3000 (start with ADMIN_AUTH_DISABLED=true for lab use).
+      # Default: local tbot-backend on the host:3000 (start with matching TBOT_ADMIN_PROXY_KEY).
       # Include :port because nginx proxy_pass has no separate port field.
       - NESTJS_UPSTREAM_HOST=${NESTJS_UPSTREAM_HOST:-host.docker.internal:3000}
       - NESTJS_UPSTREAM_SCHEME=${NESTJS_UPSTREAM_SCHEME:-http}
       - NESTJS_TOKEN=${NESTJS_TOKEN:-}
+      - NESTJS_ADMIN_PROXY_KEY=${NESTJS_ADMIN_PROXY_KEY:-}
     volumes:
       # 配置文件目录
       - ./uploadfile:/uploadfile
