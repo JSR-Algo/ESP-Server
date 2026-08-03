@@ -56,6 +56,14 @@ expectContains(
   'docs/docker/nginx.conf',
   'proxy_set_header X-TBOT-Admin-Key "__NESTJS_ADMIN_PROXY_KEY__";',
 );
+expectContains(
+  'main/manager-web/vue.config.js',
+  "const adminProxyKey = browserE2E ? '' : (process.env.NESTJS_ADMIN_PROXY_KEY || '');",
+);
+expectContains(
+  'main/manager-web/vue.config.js',
+  "proxyReq.setHeader('X-TBOT-Admin-Key', adminProxyKey);",
+);
 expectContains('docs/docker/nginx.conf', 'location = /_nestjs_manager_auth {');
 expectContains(
   'docs/docker/nginx.conf',

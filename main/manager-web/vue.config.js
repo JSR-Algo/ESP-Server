@@ -25,6 +25,7 @@ if (!browserE2E) dotenv.config({ path: '.env.development.local', override: true 
 const nestjsTarget = browserE2ETarget || process.env.NESTJS_TARGET || 'http://localhost:3000';
 const espStatusTarget = process.env.ESP_STATUS_TARGET || 'http://127.0.0.1:8003';
 const sharedNestAdminToken = browserE2E ? '' : process.env.NESTJS_ADMIN_TOKEN;
+const adminProxyKey = browserE2E ? '' : (process.env.NESTJS_ADMIN_PROXY_KEY || '');
 
 // 定义CDN资源列表，确保Service Worker也能访问
 const cdnResources = {
@@ -78,6 +79,7 @@ module.exports = defineConfig({
         changeOrigin: true,
         pathRewrite: { '^/nestjs': '' },
         onProxyReq(proxyReq) {
+          proxyReq.setHeader('X-TBOT-Admin-Key', adminProxyKey);
           // Per-user NestJS session token (from the manager-web NestJS login)
           // rides X-Nest-Authorization, because flyio's request layer force-
           // overwrites Authorization with the manager-api token. Promote it to
