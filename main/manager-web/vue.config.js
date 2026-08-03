@@ -70,10 +70,10 @@ module.exports = defineConfig({
       // Course-customization CRUD is owned by the NestJS tbot-backend
       // (/v1/admin/*) — the SAME backend the robot reads lessons from. manager-web
       // reaches it through this server-side proxy (so the browser never makes a
-      // cross-origin call, sidestepping the NestJS backend's lack of CORS). The
-      // NestJS admin bearer token is injected here for dev; set NESTJS_TARGET and
-      // NESTJS_ADMIN_TOKEN in .env.development.local. Per-user NestJS login (and a
-      // prod reverse-proxy route for /nestjs) is a later slice.
+      // cross-origin call, sidestepping the NestJS backend's lack of CORS). Local
+      // dev authorizes this hop server-side with NESTJS_ADMIN_PROXY_KEY. The
+      // NESTJS_ADMIN_TOKEN and per-user NestJS auth paths remain available for
+      // explicit rollback compatibility.
       '/nestjs': {
         target: nestjsTarget,
         changeOrigin: true,
