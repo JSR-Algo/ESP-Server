@@ -1,5 +1,5 @@
 export function isNestAuthDisabled(value = process.env.VUE_APP_NEST_AUTH_DISABLED) {
-  return value === 'true';
+  return value !== 'false';
 }
 
 export function getManagerAuthStatus(response) {

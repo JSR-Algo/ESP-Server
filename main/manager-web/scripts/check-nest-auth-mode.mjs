@@ -13,7 +13,8 @@ import {
 
 assert.equal(isNestAuthDisabled('true'), true);
 assert.equal(isNestAuthDisabled('false'), false);
-assert.equal(isNestAuthDisabled(undefined), false);
+assert.equal(isNestAuthDisabled(undefined), true);
+assert.equal(isNestAuthDisabled(''), true);
 assert.equal(getManagerAuthStatus({ headers: { 'x-tbot-manager-auth-status': '204' } }), 204);
 assert.equal(getManagerAuthStatus({ response: { headers: { 'X-TBOT-Manager-Auth-Status': '401' } } }), 401);
 assert.equal(getManagerAuthStatus({ headers: { get: (name) => name === 'X-TBOT-Manager-Auth-Status' ? '403' : null } }), 403);
