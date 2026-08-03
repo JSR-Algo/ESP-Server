@@ -168,7 +168,7 @@ is_placeholder_value() {
 validate_production_boot_env() {
   [[ -n "${ENV_FILE}" ]] || return 0
 
-  local failed key value
+  local failed key value file_limit pack_limit
   failed=0
 
   for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS LESSON_SD_MAX_FILE_BYTES LESSON_SD_MAX_PACK_BYTES; do
@@ -185,6 +185,17 @@ validate_production_boot_env() {
   fi
   if [[ "$(env_value TBOT_REQUIRE_DEVICE_TOKEN "")" != "true" ]]; then
     printf 'error: TBOT_REQUIRE_DEVICE_TOKEN must be true in env file\n' >&2
+    failed=1
+  fi
+
+  file_limit="$(env_value LESSON_SD_MAX_FILE_BYTES "")"
+  if [[ ! "${file_limit}" =~ ^[0-9]+$ ]] || (( 10#${file_limit} < 29186048 )); then
+    printf 'error: LESSON_SD_MAX_FILE_BYTES must be at least 29186048\n' >&2
+    failed=1
+  fi
+  pack_limit="$(env_value LESSON_SD_MAX_PACK_BYTES "")"
+  if [[ ! "${pack_limit}" =~ ^[0-9]+$ ]] || (( 10#${pack_limit} < 116139166 )); then
+    printf 'error: LESSON_SD_MAX_PACK_BYTES must be at least 116139166\n' >&2
     failed=1
   fi
 
