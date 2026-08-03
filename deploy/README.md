@@ -239,7 +239,11 @@ Knobs that MUST be passed by any manual run so it matches compose:
   (built from `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_DATABASE`/`MYSQL_USER`/`MYSQL_PASSWORD`)
 - `SPRING_DATA_REDIS_HOST` / `SPRING_DATA_REDIS_PORT` / **`SPRING_DATA_REDIS_PASSWORD`**
   (must equal `REDIS_PASSWORD`; Redis must run `--requirepass "$REDIS_PASSWORD"`)
-- `NESTJS_UPSTREAM_HOST` / `NESTJS_TOKEN` (the `/nestjs` course-CMS proxy upstream)
+- `NESTJS_UPSTREAM_HOST` / `NESTJS_UPSTREAM_SCHEME` /
+  `NESTJS_ADMIN_PROXY_KEY` / `NESTJS_TOKEN` (the `/nestjs` course-CMS proxy;
+  the admin proxy key is server-only and must match NestJS
+  `TBOT_ADMIN_PROXY_KEY`, while the token is only for a legacy per-user-login
+  rollback)
 - `LESSON_RUNTIME_ENABLED`, `LESSON_SAMPLE_ENABLED`, `LESSON_RENDERER_V2_ENABLED`,
   `LESSON_ASSET_DELIVERY_MODE`, `LESSON_MOTION_PRESETS_ENABLED`,
   `LESSON_PLAYFUL_INTERACTIONS_ENABLED`, and `LESSON_ROLLOUT_DEVICE_ALLOWLIST`.
@@ -259,7 +263,10 @@ MySQL data and reuses the existing Docker network `tbot`.
 This fallback reads **one** env file (`/opt/tbot/.env`, the same file compose uses)
 so the manual run can never silently diverge from compose. Set every knob there
 (see `deploy/.env.example`), including `REDIS_PASSWORD`, `NESTJS_UPSTREAM_HOST`,
-and any external-MySQL overrides.
+`NESTJS_UPSTREAM_SCHEME`, `NESTJS_ADMIN_PROXY_KEY`, `NESTJS_TOKEN`, and any
+external-MySQL overrides. Keep the admin proxy key server-only and equal to the
+NestJS `TBOT_ADMIN_PROXY_KEY`; keep the legacy token empty unless intentionally
+rolling back to per-user author login.
 
 ```sh
 TAG=<tag>
@@ -291,7 +298,9 @@ REDIS_HOST="${REDIS_HOST:-tbot-esp32-server-redis}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 NESTJS_UPSTREAM_HOST="${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}"
+NESTJS_UPSTREAM_SCHEME="${NESTJS_UPSTREAM_SCHEME:-https}"
 NESTJS_TOKEN="${NESTJS_TOKEN:-}"
+NESTJS_ADMIN_PROXY_KEY="${NESTJS_ADMIN_PROXY_KEY:-}"
 REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
 LESSON_RUNTIME_ENABLED="${LESSON_RUNTIME_ENABLED:-false}"
 LESSON_SAMPLE_ENABLED="${LESSON_SAMPLE_ENABLED:-false}"
@@ -364,7 +373,9 @@ docker run -d --name tbot-esp32-server-web --restart unless-stopped \
   -e "SPRING_DATA_REDIS_PASSWORD=$REDIS_PASSWORD" \
   -e "SPRING_DATA_REDIS_PORT=$REDIS_PORT" \
   -e "NESTJS_UPSTREAM_HOST=$NESTJS_UPSTREAM_HOST" \
+  -e "NESTJS_UPSTREAM_SCHEME=$NESTJS_UPSTREAM_SCHEME" \
   -e "NESTJS_TOKEN=$NESTJS_TOKEN" \
+  -e "NESTJS_ADMIN_PROXY_KEY=$NESTJS_ADMIN_PROXY_KEY" \
   -p "${TBOT_ADMIN_PORT:-8002}:8002" \
   -v "$TBOT_REMOTE_ROOT/uploadfile":/uploadfile \
   "$TBOT_WEB_IMAGE"
