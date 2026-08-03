@@ -634,8 +634,8 @@ export default {
 }
 
 .header-container {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   height: 100%;
   padding: 0 10px;
@@ -669,9 +669,8 @@ export default {
   gap: 25px;
   max-width: 100%;
   min-width: 0;
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  position: static;
+  transform: none;
 }
 
 .header-right {
@@ -679,8 +678,8 @@ export default {
   align-items: center;
   gap: 7px;
   min-width: 0;
+  width: 100%;
   justify-content: flex-end;
-  flex: 1 1 0;
 }
 
 .equipment-management {
@@ -897,6 +896,7 @@ export default {
   }
 
   .header-container {
+    display: flex;
     align-items: flex-start;
     flex-wrap: wrap;
     gap: 8px;
