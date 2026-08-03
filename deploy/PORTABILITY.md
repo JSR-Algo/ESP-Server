@@ -40,10 +40,16 @@ when infra moves. nginx renders `/nestjs` from env at container start (`start.sh
 | Knob | env var | default |
 |---|---|---|
 | backend host | `NESTJS_UPSTREAM_HOST` | `tbot-backend-8wmh.onrender.com` |
-| shared token | `NESTJS_TOKEN` (optional; per-user "Author sign-in" overrides) | empty |
+| admin proxy key | `NESTJS_ADMIN_PROXY_KEY` | — |
 
 - Set in `/opt/tbot/web-runtime.env` (live) or `/opt/tbot/.env` (compose) →
   restart. `start.sh` re-renders nginx; **no rebuild**.
+- Set manager-web `NESTJS_ADMIN_PROXY_KEY` and NestJS
+  `TBOT_ADMIN_PROXY_KEY` to the same random value of at least 32 characters.
+  The browser receives neither key; nginx injects the proxy key only after
+  validating the primary manager bearer as a super-admin.
+- Keep `NESTJS_TOKEN` empty during normal operation. Set it only for a rollback
+  to the legacy per-user author login flow.
 - The backend's own Postgres is managed where that NestJS is deployed (e.g.
   Render `tbot-db`); changing it is a backend-side concern, transparent here.
 - **Server-side gap (TODO):** tbot-server's `server.api_url`
