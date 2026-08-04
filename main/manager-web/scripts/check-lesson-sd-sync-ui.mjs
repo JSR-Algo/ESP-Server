@@ -389,10 +389,10 @@ assert.match(
   'public egress must use a bounded canonical URI bucket shared across hostnames',
 );
 assert.doesNotMatch(nginx, /\$host\|\$uri/, 'attacker-controlled Host must not create new egress buckets');
-assert.match(
+assert.doesNotMatch(
   nginx,
-  /proxy_cache_path\s+\/var\/cache\/nginx\/lesson-generation[^;]*keys_zone=lesson_generation:1m[^;]*;/,
-  'CMS latest reads must have a dedicated shared cache zone',
+  /proxy_cache_path\s+\/var\/cache\/nginx\/lesson-generation/,
+  'public CMS reads must not depend on writable host storage',
 );
 const publicGenerationLocations = [
   ...extractNginxBlocks(nginx, 'location = /public/lesson-assets/generation'),
@@ -409,30 +409,53 @@ assert.equal(latestLocations.length, 2, 'CMS latest route must exist on both pub
 assert.equal(statusLocations.length, 2, 'ESP generation status route must exist on both public hostnames');
 for (const location of latestLocations) {
   for (const requirement of [
-    'proxy_cache lesson_generation',
-    'proxy_cache_key "lesson-assets-latest"',
-    'proxy_cache_valid 200 15s',
-    'proxy_cache_lock on',
-    'proxy_cache_background_update on',
-    'proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504',
     'proxy_ignore_headers Vary',
     'proxy_hide_header Vary',
     'proxy_hide_header Access-Control-Allow-Origin',
     'proxy_hide_header Access-Control-Allow-Credentials',
     'proxy_set_header Origin ""',
     'add_header Access-Control-Allow-Origin "*" always',
-    'proxy_set_header If-None-Match ""',
+    'proxy_set_header If-None-Match $http_if_none_match',
     'proxy_set_header Accept-Encoding "identity"',
   ]) assert.ok(location.includes(requirement), `CMS latest proxy missing ${requirement}`);
+  assert.doesNotMatch(location, /proxy_cache(?:_key)?\s/, 'CMS latest proxy must not write a host disk cache');
 }
 for (const location of statusLocations) {
   assert.doesNotMatch(location, /proxy_cache(?:_key)?\s/, 'ESP status must remain uncached');
 }
 assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8003/);
-assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3003/);
+assert.match(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:8002/);
 assert.doesNotMatch(adminServer, /tbot-backend-8wmh\.onrender\.com|proxy_ssl_/);
+assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3003/);
 assert.doesNotMatch(adminServer, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
 assert.equal((adminServer.match(/if \(\$request_method !~ \^\(GET\|HEAD\)\$\) \{ return 405; \}/g) || []).length, 2, 'admin public proxies must reject mutations');
 assert.ok(!/auth_basic|auth_request/.test(adminServer), 'admin public proxies must bypass interactive and subrequest auth');
+
+const webNginx = read('../../docs/docker/nginx.conf');
+const publicCmsLocation = extractNginxBlocks(webNginx, 'location = /v1/public/lesson-assets/latest');
+assert.equal(publicCmsLocation.length, 1, 'web container must expose one exact public CMS proxy route');
+for (const requirement of [
+  'resolver __NGINX_RESOLVER__ valid=5s ipv6=off',
+  'set $public_cms_host __PUBLIC_CMS_UPSTREAM_HOST__',
+  'proxy_pass __PUBLIC_CMS_UPSTREAM_SCHEME__://$public_cms_host',
+  'proxy_ssl_server_name on',
+  'proxy_ssl_name $public_cms_host',
+  'proxy_set_header Host $public_cms_host',
+  'proxy_set_header If-None-Match $http_if_none_match',
+  'proxy_set_header Authorization ""',
+  'proxy_set_header Cookie ""',
+  'add_header Access-Control-Allow-Origin "*" always',
+]) assert.ok(publicCmsLocation[0].includes(requirement), `web public CMS proxy missing ${requirement}`);
+assert.doesNotMatch(publicCmsLocation[0], /auth_request|proxy_cache(?:_key)?\s/, 'public CMS proxy must bypass manager auth and disk cache');
+
+const startScript = read('../../docs/docker/start.sh');
+for (const requirement of [
+  ': "${PUBLIC_CMS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"',
+  ': "${PUBLIC_CMS_UPSTREAM_SCHEME:=https}"',
+  'NGINX_RESOLVER="$(awk',
+  's|__NGINX_RESOLVER__|${NGINX_RESOLVER}|g',
+  's|__PUBLIC_CMS_UPSTREAM_HOST__|${PUBLIC_CMS_UPSTREAM_HOST}|g',
+  's|__PUBLIC_CMS_UPSTREAM_SCHEME__|${PUBLIC_CMS_UPSTREAM_SCHEME}|g',
+]) assert.ok(startScript.includes(requirement), `start.sh public CMS rendering missing ${requirement}`);
 
 console.log('Lesson generation rollout UI contracts passed');

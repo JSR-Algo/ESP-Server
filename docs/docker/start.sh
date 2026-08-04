@@ -16,6 +16,8 @@ java -jar /app/tbot-esp32-api.jar \
 : "${NESTJS_UPSTREAM_SCHEME:=https}"
 : "${NESTJS_TOKEN:=}"
 : "${NESTJS_ADMIN_PROXY_KEY:=}"
+: "${PUBLIC_CMS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"
+: "${PUBLIC_CMS_UPSTREAM_SCHEME:=https}"
 if [[ -n "${NESTJS_ADMIN_PROXY_KEY}" && ! "${NESTJS_ADMIN_PROXY_KEY}" =~ ^[A-Za-z0-9._~+/=-]{32,}$ ]]; then
   echo "start.sh: NESTJS_ADMIN_PROXY_KEY contains unsupported characters or is too short" >&2
   exit 1
@@ -30,9 +32,17 @@ fi
 NESTJS_AUTH_HEADER_ESCAPED=$(printf '%s' "${NESTJS_AUTH_HEADER}" | sed -e 's/[&|\\]/\\&/g')
 NESTJS_ADMIN_PROXY_KEY_ESCAPED=$(printf '%s' "${NESTJS_ADMIN_PROXY_KEY}" \
   | sed -e 's/[&|\\]/\\&/g')
+# Docker uses 127.0.0.11 on Linux custom networks and a VM-provided resolver on
+# Docker Desktop. Render the resolver advertised to this container instead of
+# assuming either platform.
+NGINX_RESOLVER="$(awk '$1 == "nameserver" && $2 ~ /^[0-9A-Fa-f:.]+$/ { print $2; exit }' /etc/resolv.conf)"
+: "${NGINX_RESOLVER:=127.0.0.11}"
 
 sed -e "s|__NESTJS_UPSTREAM_HOST__|${NESTJS_UPSTREAM_HOST}|g" \
     -e "s|__NESTJS_UPSTREAM_SCHEME__|${NESTJS_UPSTREAM_SCHEME}|g" \
+    -e "s|__PUBLIC_CMS_UPSTREAM_HOST__|${PUBLIC_CMS_UPSTREAM_HOST}|g" \
+    -e "s|__PUBLIC_CMS_UPSTREAM_SCHEME__|${PUBLIC_CMS_UPSTREAM_SCHEME}|g" \
+    -e "s|__NGINX_RESOLVER__|${NGINX_RESOLVER}|g" \
     -e "s|__NESTJS_AUTH_HEADER__|${NESTJS_AUTH_HEADER_ESCAPED}|g" \
     -e "s|__NESTJS_ADMIN_PROXY_KEY__|${NESTJS_ADMIN_PROXY_KEY_ESCAPED}|g" \
     /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
