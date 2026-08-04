@@ -1163,6 +1163,10 @@ class LessonRuntime:
         self._conversation_fallback_prompt_claimed = False
         self._clock = time.monotonic
         self.conversation: LessonConversationRuntime | None = None
+        # Live's own ASR transcript for the child's current speaking turn, held only
+        # long enough to corroborate a model-asserted pronunciation "correct" against
+        # the contract's known-safe target word/meanings — never logged or forwarded.
+        self._conversation_pending_recognized_text: str | None = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1487,6 +1491,7 @@ class LessonRuntime:
         self._conversation_started_at = None
         self._conversation_fallback_window_id = None
         self._conversation_fallback_turn_sequence_id = None
+        self._conversation_pending_recognized_text = None
         self._clear_conversation_fallback_ack()
         if (
             not self._conversation_contract_valid
@@ -1583,6 +1588,31 @@ class LessonRuntime:
                 },
             },
         }
+
+    def record_conversation_recognized_text(self, text: Any) -> None:
+        """Cache Live's own ASR transcript for the child's in-flight speaking turn.
+
+        This is the only place recognized speech is retained, and only transiently:
+        it exists solely to corroborate a model-asserted pronunciation "correct"
+        against the contract's target word/meanings before the runtime trusts it.
+        It is never logged, forwarded, or attached to evidence/progress/telemetry.
+        """
+        if not self.conversation_tool_path_active():
+            return
+        if not isinstance(text, str) or not text.strip():
+            return
+        self._conversation_pending_recognized_text = text
+
+    def _conversation_pronunciation_corroborated(self) -> bool:
+        conversation = self.conversation
+        if conversation is None:
+            return False
+        recognized_text = self._conversation_pending_recognized_text
+        if not isinstance(recognized_text, str) or not recognized_text.strip():
+            return False
+        guidance = conversation.guidance
+        expected = [guidance.target_word, guidance.expected_answer, *guidance.meanings_vi]
+        return _child_response_matches_expected(recognized_text, [value for value in expected if value])
 
     def conversation_tool_path_active(self) -> bool:
         conversation = self.conversation
@@ -1728,8 +1758,16 @@ class LessonRuntime:
         if isinstance(guarded, ConversationDecision):
             return guarded
         conversation, _token = guarded
-        decision = conversation.pronunciation_outcome(identity, outcome)
+        # The model asserts "correct" itself via the tool call; never trust that
+        # assertion without independent corroboration against Live's own ASR
+        # transcript matched to the contract's target word/meanings. Missing or
+        # mismatched evidence must fail gentle (uncertain), never false-accept.
+        effective_outcome = outcome
+        if outcome == "correct" and not self._conversation_pronunciation_corroborated():
+            effective_outcome = "uncertain"
+        decision = conversation.pronunciation_outcome(identity, effective_outcome)
         if decision.accepted:
+            self._conversation_pending_recognized_text = None
             self._conversation_visual_ack = None
             self._invalidate_conversation_fallback_after_turn_change()
         return decision

@@ -1525,6 +1525,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._lesson_conversation_tool_path_active():
             self._lesson_child_audio_pending_transcript = False
             self._cancel_lesson_child_transcript_timeout_task()
+            self._record_lesson_conversation_recognized_text(transcript_text)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_conversation_transcript_ignored source=user chars={}",
                 len(str(transcript_text or "")),
@@ -4723,6 +4724,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._lesson_conversation_tool_path_active():
             self._lesson_child_audio_pending_transcript = False
             self._cancel_lesson_child_transcript_timeout_task()
+            self._record_lesson_conversation_recognized_text(transcript_text)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_conversation_transcript_barge_in_ignored chars={}",
                 len(str(transcript_text or "")),
@@ -4797,6 +4799,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception:
             return False
         return isinstance(context, Mapping) and isinstance(context.get("identity"), Mapping)
+
+    def _record_lesson_conversation_recognized_text(self, transcript_text):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        record = getattr(runtime, "record_conversation_recognized_text", None)
+        if not callable(record):
+            return
+        try:
+            record(transcript_text)
+        except Exception:
+            pass
 
     def _get_user_audio_window_sec(self, reason):
         config = self._get_live_config()

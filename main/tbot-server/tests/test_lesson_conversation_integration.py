@@ -186,6 +186,11 @@ def _identity(runtime: LessonRuntime, *, cue: bool = False) -> LessonToolIdentit
     return conversation.identity(cue_id=conversation.pending_cue_id if cue else None)
 
 
+def _corroborate(runtime: LessonRuntime) -> None:
+    """Simulate Live's own ASR transcript confirming the child said the target word."""
+    runtime.record_conversation_recognized_text(runtime.conversation.current_target)
+
+
 def _frames(runtime: LessonRuntime) -> list[dict]:
     return [json.loads(payload) for payload in runtime.conn.websocket.sent]
 
@@ -815,6 +820,7 @@ async def test_terminal_continue_race_rejects_without_progress_or_fsm_mutation()
     await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
     await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    _corroborate(runtime)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
     await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
     await runtime.conversation_continue(
@@ -885,6 +891,7 @@ async def test_semantics_wait_for_visual_tool_and_exact_hardware_ack() -> None:
 
     thinking = await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
     assert thinking["body"]["cueId"] == "barn-thinking"
+    _corroborate(runtime)
     correct = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
     assert correct.cue_id == "barn-correct"
     assert (await runtime.conversation_continue(_identity(runtime, cue=True), effect="show_correct_reaction")).code == "VISUAL_ACK_REQUIRED"
@@ -1028,6 +1035,7 @@ async def test_private_safe_mastered_evidence_is_forwarded_exactly_once() -> Non
     await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
     await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    _corroborate(runtime)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
     await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
     await runtime.conversation_continue(
@@ -1818,6 +1826,7 @@ async def test_nonterminal_continue_advances_only_after_exact_transition_ack_onc
     await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
     await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    _corroborate(runtime)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
     await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
     await runtime.conversation_continue(
@@ -1860,6 +1869,7 @@ async def test_terminal_continue_completes_without_fake_transition() -> None:
     await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
     await runtime.conversation_child_response(_identity(runtime), "target")
     await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+    _corroborate(runtime)
     await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
     await _visual_and_ack(runtime, "correct", "show_correct_reaction", 3)
     await runtime.conversation_continue(
@@ -1876,3 +1886,156 @@ async def test_terminal_continue_completes_without_fake_transition() -> None:
     assert all(frame["body"].get("cueId") != "word-transition" for frame in emitted)
     assert emitted[-1]["type"] == "lesson_stop"
     assert runtime._steps_completed == 2
+
+
+async def _reach_listening_with_speaking_evidence(runtime: LessonRuntime) -> None:
+    await _visual_and_ack(runtime, "listen", "show_listening_scene", 1)
+    await runtime.conversation_child_response(_identity(runtime), "target")
+    await _visual_and_ack(runtime, "thinking", "show_thinking_scene", 2)
+
+
+@pytest.mark.asyncio
+async def test_forged_correct_tool_call_without_matching_transcript_fails_gentle() -> None:
+    """A model-asserted 'correct' outcome for the wrong utterance must never master."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("cat")
+
+    decision = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+
+    assert decision.accepted
+    assert decision.outcome == "trying"
+    assert decision.cue_id == "barn-retry-level-1"
+    assert not runtime.conversation.mastered
+    assert runtime.conversation.outcome != "mastered"
+
+
+@pytest.mark.asyncio
+async def test_correct_target_word_transcript_corroborates_and_masters() -> None:
+    """Live's own ASR transcript matching the contract's target word masters the step."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("barn")
+
+    decision = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+
+    assert decision.accepted
+    assert decision.outcome == "mastered"
+    assert decision.cue_id == "barn-correct"
+    assert runtime.conversation.mastered
+
+
+@pytest.mark.asyncio
+async def test_vietnamese_meaning_transcript_also_corroborates_correct() -> None:
+    """A transcript matching the Vietnamese meaning also satisfies the corroboration guard."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("nha kho")
+
+    decision = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+
+    assert decision.accepted
+    assert decision.outcome == "mastered"
+    assert runtime.conversation.mastered
+
+
+@pytest.mark.asyncio
+async def test_silence_or_uncertain_outcome_never_masters_regardless_of_transcript() -> None:
+    """An 'uncertain' tool outcome must fail gentle even if a transcript happens to be cached."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("barn")
+
+    decision = await runtime.conversation_pronunciation_outcome(_identity(runtime), "uncertain")
+
+    assert decision.accepted
+    assert decision.outcome == "trying"
+    assert decision.cue_id == "barn-retry-level-1"
+    assert not runtime.conversation.mastered
+
+
+@pytest.mark.asyncio
+async def test_no_transcript_available_downgrades_correct_to_gentle_retry() -> None:
+    """No corroborating transcript at all must downgrade 'correct' to uncertain, never master."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    assert runtime._conversation_pending_recognized_text is None
+
+    decision = await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+
+    assert decision.accepted
+    assert decision.outcome == "trying"
+    assert decision.cue_id == "barn-retry-level-1"
+    assert not runtime.conversation.mastered
+
+
+@pytest.mark.asyncio
+async def test_stale_and_reordered_identity_still_rejected_ahead_of_corroboration() -> None:
+    """Cue-fencing must reject stale/duplicate/reordered identities before corroboration ever runs."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("barn")
+    good_identity = _identity(runtime)
+
+    stale_identity = LessonToolIdentity(
+        good_identity.lesson_session_id,
+        good_identity.turn_sequence_id - 1,
+        good_identity.attempt_id,
+        good_identity.step_key,
+    )
+    stale_decision = await runtime.conversation_pronunciation_outcome(stale_identity, "correct")
+    assert stale_decision.code == "STALE_IDENTITY"
+    assert not runtime.conversation.mastered
+
+    reordered_identity = LessonToolIdentity(
+        good_identity.lesson_session_id,
+        good_identity.turn_sequence_id + 1,
+        good_identity.attempt_id,
+        good_identity.step_key,
+    )
+    reordered_decision = await runtime.conversation_pronunciation_outcome(reordered_identity, "correct")
+    assert reordered_decision.code == "REORDERED_IDENTITY"
+    assert not runtime.conversation.mastered
+
+    accepted = await runtime.conversation_pronunciation_outcome(good_identity, "correct")
+    assert accepted.accepted
+    assert accepted.outcome == "mastered"
+
+    duplicate_decision = await runtime.conversation_pronunciation_outcome(good_identity, "correct")
+    assert not duplicate_decision.accepted
+    assert duplicate_decision.code != "OK"
+    assert runtime.conversation.mastered
+
+
+@pytest.mark.asyncio
+async def test_recognized_text_is_cleared_on_step_rebind_and_never_leaks_across_steps() -> None:
+    """The transient transcript cache must not survive a step (re)bind or an accepted turn."""
+    runtime = _runtime()
+    await _activate(runtime)
+    await _reach_listening_with_speaking_evidence(runtime)
+    runtime.record_conversation_recognized_text("barn")
+    assert runtime._conversation_pending_recognized_text == "barn"
+
+    await runtime.conversation_pronunciation_outcome(_identity(runtime), "correct")
+    assert runtime._conversation_pending_recognized_text is None
+
+    runtime._bind_conversation_for_current_step()
+    assert runtime._conversation_pending_recognized_text is None
+
+
+@pytest.mark.asyncio
+async def test_recognized_text_ignored_when_conversation_tool_path_inactive() -> None:
+    """record_conversation_recognized_text must no-op outside the active v4 tool path."""
+    runtime = _runtime()
+    await _activate(runtime)
+    runtime.state = S_PAUSED
+
+    runtime.record_conversation_recognized_text("barn")
+
+    assert runtime._conversation_pending_recognized_text is None
