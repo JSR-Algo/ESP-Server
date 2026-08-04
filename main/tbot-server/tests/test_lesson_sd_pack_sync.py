@@ -208,6 +208,51 @@ def test_cached_asset_packs_preserve_renderer_v4_v2_cue_identity(tmp_path):
         "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
     }
 
+
+def test_cached_asset_packs_preserve_pathless_admin_proxy_trgb_identity(tmp_path):
+    checksum = "6" * 64
+    cache_key = f"lesson-a/v7-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    frame_count = 13
+    content = b"x" * 3994112
+    digest = hashlib.sha256(content).hexdigest()
+    derivative_id = "d" * 64
+    key = "flattenedCinematic.barn-listen"
+    url = (
+        "https://admin.tjbot.vn/lesson-derivatives/lessons/derivatives/"
+        f"{derivative_id}/barn-listen.trgb"
+    )
+    store.put_bytes(content, digest)
+    manifest = {
+        "lessonId": "lesson-a", "lessonVersion": 7, "profile": "espTft",
+        "manifestChecksum": checksum, "cacheKey": cache_key,
+        "assets": [{
+            "key": key, "sha256": digest, "size": len(content),
+            "mediaType": "application/vnd.tbot.rgb565-indexed", "critical": True,
+            "onlineUrl": url, "sdPath": _rich_sd_path(cache_key, key),
+            "derivativeId": derivative_id, "cueId": "barn-listen", "effect": "listen",
+            "stepKey": "barn", "playbackMode": "loop",
+            "compatibilityMetadata": {
+                "codec": "rgb565le", "containerVersion": 1,
+                "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+                "orientation": "panelNativeClockwise", "fps": 10,
+                "durationMs": 1300, "frameCount": frame_count, "frameBytes": 307200,
+                "hasAudio": False,
+            },
+        }],
+    }
+    store.commit_pack(cache_key, {key: digest}, manifest=manifest)
+
+    packs = list(sd_pack_sync.cached_asset_packs({"lesson": {"asset_pack_mount_root": str(pack_root)}}))
+
+    asset = packs[0]["assets"][0]
+    assert asset["cueId"] == "barn-listen"
+    assert asset["path"] == f"lessons/derivatives/{derivative_id}/barn-listen.trgb"
+    sent = sd_pack_sync.build_firmware_sync_pack(packs[0])["assets"][0]
+    assert sent["cueId"] == "barn-listen"
+    assert "compatibilityMetadata" not in sent
+
 def test_cached_asset_packs_use_pack_mount_root_when_cache_root_is_absent(tmp_path):
     checksum = "0123456789abcdef" * 4
     cache_key = f"lesson-a/v3-{checksum}"
@@ -551,6 +596,40 @@ def test_normalize_firmware_sync_result_error_code_matches_backend_regex():
             assert _BACKEND_ERROR_CODE_RE.fullmatch(result["errorCode"])
         else:
             assert "errorCode" not in result
+
+
+@pytest.mark.asyncio
+async def test_invalid_firmware_pack_request_is_reported_as_terminal_error_code(monkeypatch):
+    from core.api.device_mcp_admin_handler import (
+        MCPLessonAssetSyncInvalidRequestError,
+    )
+
+    cache_key = f"lesson-invalid/v1-{'a' * 64}"
+
+    class Client:
+        async def is_ready(self):
+            return True
+
+    class Conn:
+        config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+        mcp_client = Client()
+
+    monkeypatch.setattr(
+        sd_pack_sync,
+        "cached_asset_packs",
+        lambda _config: iter([{"cacheKey": cache_key, "assets": []}]),
+    )
+
+    async def reject_invalid(*_args, **_kwargs):
+        raise MCPLessonAssetSyncInvalidRequestError()
+
+    monkeypatch.setattr(sd_pack_sync, "_call_sd_pack_sync_with_voice_guard", reject_invalid)
+
+    result = await sd_pack_sync.sync_cached_lesson_assets_to_sd(
+        Conn(), only_cache_keys={cache_key}
+    )
+
+    assert result["resultsByCacheKey"][cache_key]["errorCode"] == "invalid_request"
 
 @pytest.mark.asyncio
 async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
@@ -1050,6 +1129,38 @@ async def test_sd_sync_coordinator_joins_same_cache_key():
 
 
 @pytest.mark.asyncio
+async def test_cancelling_one_joined_waiter_after_dispatch_preserves_shared_result():
+    conn = type("Conn", (), {})()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return "done"
+
+    first = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "same-key", operation)
+    )
+    await started.wait()
+    second = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "same-key", operation)
+    )
+    await asyncio.sleep(0)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+
+    assert await second == "done"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelling_waiter_does_not_cancel_dispatched_sd_sync():
     conn = type("Conn", (), {})()
     started = asyncio.Event()
@@ -1073,21 +1184,128 @@ async def test_cancelling_waiter_does_not_cancel_dispatched_sd_sync():
     await asyncio.wait_for(finished.wait(), timeout=1)
 
 
-def test_sd_pack_sync_timeout_scales_for_large_pack():
+@pytest.mark.asyncio
+async def test_cancelling_queued_request_removes_it_before_dispatch():
+    conn = type("Conn", (), {})()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    ghost_calls = []
+
+    async def first_operation():
+        first_started.set()
+        await release_first.wait()
+        return "first"
+
+    async def ghost_operation():
+        ghost_calls.append("dispatched")
+        return "ghost"
+
+    first = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "active", first_operation)
+    )
+    await first_started.wait()
+    queued = asyncio.create_task(
+        sd_pack_sync.request_sd_pack_sync(conn, "cancelled", ghost_operation)
+    )
+    await asyncio.sleep(0)
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    release_first.set()
+
+    assert await first == "first"
+    await asyncio.sleep(0)
+    assert ghost_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_quarantines_device_and_only_same_pack_can_probe_after_backoff():
+    now = [100.0]
+    coordinator = sd_pack_sync.SdPackSyncCoordinator(
+        clock=lambda: now[0],
+        recovery_backoff_sec=30.0,
+    )
+    calls = []
+
+    async def timed_out():
+        calls.append("farm-v8")
+        raise TimeoutError()
+
+    with pytest.raises(TimeoutError):
+        await coordinator.request("farm-v8", timed_out)
+
+    async def must_not_dispatch():
+        calls.append("other-pack")
+        return {"ready": True}
+
+    with pytest.raises(sd_pack_sync.SdPackSyncRecoveryPendingError):
+        await coordinator.request("other-pack", must_not_dispatch)
+    with pytest.raises(sd_pack_sync.SdPackSyncRecoveryPendingError):
+        await coordinator.request("farm-v8", must_not_dispatch)
+    assert calls == ["farm-v8"]
+
+    now[0] += 30.0
+    assert await coordinator.request("farm-v8", must_not_dispatch) == {"ready": True}
+    assert calls == ["farm-v8", "other-pack"]
+
+
+@pytest.mark.asyncio
+async def test_storage_busy_probe_restarts_backoff_without_dispatching_other_pack():
+    now = [10.0]
+    coordinator = sd_pack_sync.SdPackSyncCoordinator(
+        clock=lambda: now[0],
+        recovery_backoff_sec=5.0,
+    )
+    calls = []
+
+    async def storage_busy():
+        calls.append("farm-v8")
+        return json.dumps({"ready": False, "errorCode": "storage_busy"})
+
+    result = await coordinator.request("farm-v8", storage_busy)
+    assert json.loads(result)["errorCode"] == "storage_busy"
+
+    now[0] += 5.0
+    with pytest.raises(sd_pack_sync.SdPackSyncRecoveryPendingError):
+        await coordinator.request("other-pack", storage_busy)
+    assert calls == ["farm-v8"]
+
+
+def test_sd_pack_sync_timeout_covers_farm_v8_at_realistic_minimum_throughput():
+    total_bytes = 116_429_246
+    asset_count = 27
     pack = {
         "assets": [
-            {"size": 13_703_853 // 28} for _ in range(27)
+            {"size": total_bytes // asset_count} for _ in range(asset_count - 1)
         ]
-        + [{"size": 13_703_853 - (13_703_853 // 28) * 27}]
+        + [{"size": total_bytes - (total_bytes // asset_count) * (asset_count - 1)}]
     }
 
-    assert sd_pack_sync.sd_pack_sync_timeout_sec({}, pack) >= 1_000
+    timeout = sd_pack_sync.sd_pack_sync_timeout_sec({}, pack)
+
+    assert timeout == 7_353
+    assert type(timeout) is int
 
 
 def test_sd_pack_sync_timeout_accepts_configured_floor():
     config = {"lesson": {"sd_sync_timeout_floor_sec": 1_500}}
 
-    assert sd_pack_sync.sd_pack_sync_timeout_sec(config, {"assets": []}) == 1_500
+    timeout = sd_pack_sync.sd_pack_sync_timeout_sec(config, {"assets": []})
+
+    assert timeout == 1_500
+    assert type(timeout) is int
+
+
+def test_sd_pack_sync_timeout_caps_unsafe_configuration():
+    config = {
+        "lesson": {
+            "sd_sync_timeout_floor_sec": 99_999,
+            "sd_sync_timeout_ceiling_sec": 99_999,
+        }
+    }
+
+    assert sd_pack_sync.sd_pack_sync_timeout_sec(config, {"assets": []}) == 21_600
 
 
 def test_cached_asset_packs_ignore_configured_sd_pack_without_valid_ready(tmp_path):

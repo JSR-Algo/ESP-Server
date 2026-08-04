@@ -22,6 +22,7 @@ ClassicPipelineProvider / connection_module the routing suite uses.
 
 import asyncio
 import unittest
+from contextvars import ContextVar
 
 # Importing this module runs _install_connection_import_stubs() at import time,
 # which installs the sys.modules stubs and imports core.connection cleanly.
@@ -198,6 +199,91 @@ class _FakeRegistry:
 
 
 class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
+    def test_lesson_sd_sync_ignores_only_start_lesson_control_dispatch_busy_state(self):
+        handler = _build_handler()
+        provider = _FakeStateProvider(InteractionState.INTERRUPTING)
+        provider._response_generation = 3
+        provider._interaction.response_id = 5
+        handler.voice_provider = provider
+        handler._lesson_start_tool_dispatch_context = ContextVar(
+            "test_lesson_start_dispatch", default=None
+        )
+        handler._lesson_start_tool_dispatch_context.set(
+            {
+                "providerId": id(provider),
+                "responseGeneration": 3,
+                "responseId": 5,
+            }
+        )
+
+        self.assertTrue(handler.is_realtime_busy())
+        self.assertFalse(handler.is_lesson_sd_sync_busy())
+
+        handler.voice_provider._interaction.state = InteractionState.WAITING_MODEL
+        self.assertFalse(handler.is_lesson_sd_sync_busy())
+
+        handler.voice_provider._interaction.state = InteractionState.MODEL_SPEAKING
+        self.assertTrue(handler.is_lesson_sd_sync_busy())
+
+    def test_lesson_sd_sync_still_blocks_actual_audio_during_start_lesson_dispatch(self):
+        handler = _build_handler()
+        provider = _FakeStateProvider(InteractionState.INTERRUPTING)
+        provider._response_generation = 3
+        provider._interaction.response_id = 5
+        handler.voice_provider = provider
+        handler._lesson_start_tool_dispatch_context = ContextVar(
+            "test_lesson_start_audio", default=None
+        )
+        handler._lesson_start_tool_dispatch_context.set(
+            {
+                "providerId": id(provider),
+                "responseGeneration": 3,
+                "responseId": 5,
+            }
+        )
+
+        for signal, value in (
+            ("client_is_speaking", True),
+            ("client_have_voice", True),
+            ("_lesson_asset_audio_inflight", 1),
+        ):
+            setattr(handler, signal, value)
+            self.assertTrue(handler.is_lesson_sd_sync_busy(), signal)
+            self.assertTrue(
+                handler.is_lesson_sd_sync_busy(start_lesson_dispatch=True),
+                signal,
+            )
+            setattr(handler, signal, False if isinstance(value, bool) else 0)
+
+        handler.voice_provider._interaction.state = InteractionState.MODEL_SPEAKING
+        self.assertTrue(
+            handler.is_lesson_sd_sync_busy(start_lesson_dispatch=True)
+        )
+        handler.voice_provider._interaction.state = InteractionState.INTERRUPTING
+        handler._lesson_start_tool_dispatch_context.set(None)
+        self.assertTrue(handler.is_lesson_sd_sync_busy())
+
+    def test_lesson_sd_sync_rejects_start_lesson_token_after_response_generation_changes(self):
+        handler = _build_handler()
+        provider = _FakeStateProvider(InteractionState.WAITING_MODEL)
+        provider._response_generation = 7
+        provider._interaction.response_id = 11
+        handler.voice_provider = provider
+        admission = {
+            "providerId": id(provider),
+            "responseGeneration": 7,
+            "responseId": 11,
+        }
+
+        self.assertFalse(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+
+        provider._interaction.response_id = 12
+        self.assertTrue(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+
     # ---- Route 0: lesson control frames bypass early bind wait -----------
     async def test_route_message_lesson_control_bypasses_pending_bind_gate(self):
         handler = _build_handler()

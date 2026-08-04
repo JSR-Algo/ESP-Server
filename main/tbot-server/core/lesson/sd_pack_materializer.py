@@ -23,15 +23,20 @@ from httpcore._backends.auto import AutoBackend
 
 from config.logger import setup_logging
 from core.lesson.cache_key_contract import CacheEvictionRefused, validate_cache_key
-from core.lesson.shared_asset_store import (
-    PACK_COMMIT_REPLAYED,
-    PackReplayMismatchError,
-    SharedAssetStore,
+from core.lesson.flattened_cinematic_contract import (
+    TRGB_MEDIA_TYPE,
+    FlattenedCinematicContractError,
+    validate_pathless_flattened_cinematic_cache_asset,
 )
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
     validate_renderer_v4_flattened_mp4,
+)
+from core.lesson.shared_asset_store import (
+    PACK_COMMIT_REPLAYED,
+    PackReplayMismatchError,
+    SharedAssetStore,
 )
 
 CHUNK_SIZE = 64 * 1024
@@ -490,7 +495,12 @@ def _validate_asset(
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     renderer_v3_fields: dict[str, Any] = {}
-    if media_type.lower().startswith("video/"):
+    if media_type == TRGB_MEDIA_TYPE:
+        try:
+            renderer_v3_fields = validate_pathless_flattened_cinematic_cache_asset(dict(item))
+        except FlattenedCinematicContractError:
+            raise _bad("INVALID_RENDERER_V4_MP4", "Invalid renderer-v4 flattened TRGB") from None
+    elif media_type.lower().startswith("video/"):
         if "derivativeId" in item or "phaseId" in item or "cueId" in item:
             try:
                 renderer_v3_fields = validate_renderer_v4_flattened_mp4(dict(item))
@@ -800,7 +810,16 @@ def _replay_status(store: SharedAssetStore, manifest: Mapping[str, Any]) -> str:
         return "mismatch"
     assets = stored.get("assets") if isinstance(stored, dict) else None
     if isinstance(assets, dict):
-        return "historical"
+        incoming_assets = manifest.get("assets")
+        if not isinstance(incoming_assets, list):
+            return "mismatch"
+        historical_digests = {str(key): str(value) for key, value in assets.items()}
+        incoming_digests = {
+            str(asset.get("key")): str(asset.get("sha256"))
+            for asset in incoming_assets
+            if isinstance(asset, Mapping)
+        }
+        return "historical" if historical_digests == incoming_digests else "mismatch"
     if not isinstance(assets, list):
         return "mismatch"
     stored_projection = _replay_manifest_projection(stored)
@@ -834,10 +853,20 @@ def _replay_asset_projection(asset: Mapping[str, Any]) -> dict[str, Any]:
                     "critical": asset.get("critical"),
                     "sdPath": asset.get("sdPath"),
     }
-    if asset.get("mediaType") == "video/mp4":
+    if asset.get("mediaType") in {"video/mp4", TRGB_MEDIA_TYPE}:
         projection["onlineUrl"] = asset.get("onlineUrl")
         projection["compatibilityMetadata"] = asset.get("compatibilityMetadata")
-        if asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
+        if asset.get("mediaType") == TRGB_MEDIA_TYPE:
+            projection["path"] = asset.get("path")
+        if asset.get("cueId") is not None:
+            projection.update({
+                "derivativeId": asset.get("derivativeId"),
+                "cueId": asset.get("cueId"),
+                "effect": asset.get("effect"),
+                "stepKey": asset.get("stepKey"),
+                "playbackMode": asset.get("playbackMode"),
+            })
+        elif asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
             projection.update({
                 "derivativeId": asset.get("derivativeId"),
                 "phaseId": asset.get("phaseId"),

@@ -12,6 +12,16 @@ from core.lesson.sd_pack_mcp_payload import (
 CHECKSUM = "0123456789abcdef" * 4
 CACHE_KEY = f"pip-farm-3m/v1-{CHECKSUM}"
 MOUNT_ROOT = "/sdcard/tbot/lesson-assets"
+_FIRMWARE_ASSET_ALLOWLIST = {
+    "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
+    "mediaType", "critical", "layer", "role", "state", "checksumOk",
+    "localPath", "sdPath", "cueId", "effect", "stepKey", "playbackMode",
+    "derivativeId", "phaseId", "compatibilityMetadata",
+}
+_NORMALIZED_BASE_FIELDS = {
+    "key", "path", "onlineUrl", "sha256", "size", "mediaType", "critical",
+    "state", "checksumOk", "sdPath",
+}
 
 
 def _pack(key="backgroundScene.poster"):
@@ -214,7 +224,20 @@ def test_static_cached_asset_keeps_local_fallback_url_and_omits_distinct_source_
     assert asset["sourceUrl"] == source_url
 
 
-def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_without_credentials():
+def test_base_image_drops_stale_renderer_v4_compatibility_metadata():
+    render_pack = _pack()
+    render_pack["assets"][0]["compatibilityMetadata"] = {
+        "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+        "durationMs": 1000, "frameCount": 10, "hasAudio": False,
+    }
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert set(sent) == _NORMALIZED_BASE_FIELDS
+    assert "compatibilityMetadata" not in sent
+
+
+def test_renderer_v3_mp4_strips_fields_rejected_by_generic_firmware_validator():
     render_pack = _pack("scene.opening@v3")
     asset = render_pack["assets"][0]
     asset.update({
@@ -240,14 +263,45 @@ def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_withou
     sent = build_firmware_sync_pack(render_pack)["assets"][0]
 
     assert sent["mediaType"] == "video/mp4"
-    assert sent["sharedAssetKey"] == "scene.opening"
-    assert sent["sharedAssetVersion"] == 3
-    assert sent["compatibilityMetadata"] == asset["compatibilityMetadata"]
-    assert sent["visualRefs"] == asset["visualRefs"]
+    unsupported_fields = {
+        "sharedAssetKey",
+        "sharedAssetVersion",
+        "compatibilityMetadata",
+        "visualRefs",
+    }
+    assert unsupported_fields.isdisjoint(sent)
     assert sent["sdPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/scene.opening%40v3"
     assert "localPath" not in sent
     assert "authorization" not in {key.lower() for key in sent}
     assert "cookie" not in {key.lower() for key in sent}
+
+
+def test_renderer_v3_mp4_drops_stale_renderer_v4_effect():
+    render_pack = _pack("scene.opening@v3")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/visuals/scene.opening/v3.mp4",
+        "onlineUrl": "https://assets.example/visuals/scene.opening/v3.mp4",
+        "mediaType": "video/mp4",
+        "sharedAssetKey": "scene.opening",
+        "sharedAssetVersion": 3,
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "fps": 10, "durationMs": 1000, "frameCount": 10,
+            "hasAudio": False, "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "chromaKey": None,
+        },
+        "visualRefs": [
+            {"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"},
+        ],
+        "effect": "opening",
+        "sdPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/scene.opening%40v3",
+        "localPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/scene.opening%40v3",
+    })
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert set(sent) == _NORMALIZED_BASE_FIELDS
+    assert "effect" not in sent
 
 
 @pytest.mark.parametrize("suffix", ["", "?variant=robot&expires=2000000000#opening"])
@@ -308,6 +362,88 @@ def test_renderer_v4_flattened_mp4_preserves_exact_identity_and_physical_path():
     assert "url" not in sent
 
 
+def test_renderer_v4_mp4_rejects_stale_legacy_shared_identity():
+    render_pack = _pack("flattenedCinematic.opening")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64, "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+        "sharedAssetKey": "scene.opening",
+        "sharedAssetVersion": 3,
+        "visualRefs": [
+            {"stepKey": "s1", "phase": "opening", "slot": "backgroundScene.opening"},
+        ],
+    })
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
+def test_built_asset_field_sets_exactly_match_generic_firmware_contract():
+    base = build_firmware_sync_pack(_pack())["assets"][0]
+
+    v4_pack = _pack("flattenedCinematic.opening")
+    v4_pack["assets"][0].update({
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/opening.mp4",
+        "mediaType": "video/mp4", "derivativeId": "d" * 64, "phaseId": "opening",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+    })
+    v4 = build_firmware_sync_pack(v4_pack)["assets"][0]
+    trgb = build_firmware_sync_pack(_trgb_cue_pack()[0])["assets"][0]
+
+    assert set(base) == _NORMALIZED_BASE_FIELDS
+    assert set(v4) == _NORMALIZED_BASE_FIELDS | {
+        "derivativeId", "phaseId", "compatibilityMetadata",
+    }
+    assert set(trgb) == _NORMALIZED_BASE_FIELDS | {
+        "derivativeId", "cueId", "effect", "stepKey", "playbackMode",
+    }
+    assert all(
+        set(asset) <= _FIRMWARE_ASSET_ALLOWLIST
+        for asset in (base, v4, trgb)
+    )
+
+
+def test_w01_shaped_shared_image_pack_projects_every_asset_to_firmware_allowlist():
+    render_pack = _pack("backgroundScene.farm@v1")
+    first = render_pack["assets"][0]
+    first.update({
+        "sharedAssetKey": "backgroundScene.farm",
+        "sharedAssetVersion": 1,
+        "sdPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/backgroundScene.farm%40v1",
+        "localPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/backgroundScene.farm%40v1",
+    })
+    second = copy.deepcopy(first)
+    second.update({
+        "key": "teachingObject.barn@v1",
+        "path": "assets/barn.png",
+        "url": "https://assets.example/barn.png",
+        "onlineUrl": "https://assets.example/barn.png",
+        "sharedAssetKey": "teachingObject.barn",
+        "sdPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/teachingObject.barn%40v1",
+        "localPath": f"sd://tbot/lesson-assets/{CACHE_KEY}/teachingObject.barn%40v1",
+    })
+    render_pack["assets"].append(second)
+
+    sent_assets = build_firmware_sync_pack(render_pack)["assets"]
+
+    assert len(sent_assets) == 2
+    extras_by_asset = [
+        set(asset) - _FIRMWARE_ASSET_ALLOWLIST for asset in sent_assets
+    ]
+    assert extras_by_asset == [set(), set()]
+    assert all(set(asset) == _NORMALIZED_BASE_FIELDS for asset in sent_assets)
+
+
 def test_renderer_v4_v2_cue_omits_trgb_compatibility_metadata_from_mcp_only():
     render_pack, asset = _trgb_cue_pack()
     compatibility_metadata = copy.deepcopy(asset["compatibilityMetadata"])
@@ -322,6 +458,25 @@ def test_renderer_v4_v2_cue_omits_trgb_compatibility_metadata_from_mcp_only():
     assert asset["compatibilityMetadata"] == compatibility_metadata
     assert "localPath" not in sent
     assert "url" not in sent
+
+
+def test_pathless_admin_proxy_trgb_asset_builds_firmware_pack():
+    render_pack, asset = _trgb_cue_pack()
+    asset.pop("path")
+    proxy_url = (
+        "https://admin.tjbot.vn/lesson-derivatives/lessons/derivatives/"
+        + "d" * 64 + "/barn-listen.trgb"
+    )
+    asset["url"] = proxy_url
+    asset["onlineUrl"] = proxy_url
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["cueId"] == "barn-listen"
+    assert sent["path"] == "lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb"
+    assert sent["onlineUrl"] == proxy_url
+    assert "compatibilityMetadata" not in sent
+    assert "path" not in asset
 
 
 @pytest.mark.parametrize(

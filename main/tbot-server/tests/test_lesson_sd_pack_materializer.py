@@ -10,10 +10,12 @@ from urllib.parse import quote
 import pytest
 from aiohttp import web
 
+from core.lesson.flattened_cinematic_contract import TRGB_MEDIA_TYPE, trgb_container_bytes
 from core.lesson.sd_pack_materializer import (
     _METRICS,
     MaterializationError,
     _PinnedAddressAsyncNetworkBackend,
+    _validate_asset,
     materialize_lesson_sd_pack,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
@@ -205,6 +207,98 @@ def _flattened_v2_mp4_manifest():
             "durationMs": 1300, "frameCount": 13, "hasAudio": False,
         },
     }])
+
+
+def _live_v35_trgb_asset(cue_id, effect, step_key, duration_ms):
+    frame_count = duration_ms // 100
+    derivative_id = hashlib.sha256(cue_id.encode()).hexdigest()
+    key = f"flattenedCinematic.{cue_id}"
+    public_url = (
+        "https://admin.tjbot.vn/lesson-derivatives/lessons/derivatives/"
+        f"{derivative_id}/{cue_id}.trgb"
+    )
+    return {
+        "key": key,
+        "sha256": hashlib.sha256((cue_id + "-trgb").encode()).hexdigest(),
+        "size": trgb_container_bytes(frame_count),
+        "mediaType": TRGB_MEDIA_TYPE,
+        "critical": True,
+        "onlineUrl": public_url,
+        "url": public_url,
+        "sdPath": _sd_path(key),
+        "localPath": _sd_path(key),
+        "derivativeId": derivative_id,
+        "cueId": cue_id,
+        "effect": effect,
+        "stepKey": step_key,
+        "playbackMode": "loop" if effect in {"greet", "listen", "thinking"} else "once",
+        "compatibilityMetadata": {
+            "codec": "rgb565le", "containerVersion": 1,
+            "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+            "orientation": "panelNativeClockwise", "fps": 10,
+            "durationMs": duration_ms, "frameCount": frame_count, "frameBytes": 307200,
+            "hasAudio": False,
+        },
+    }
+
+
+def test_generation_35_pathless_public_trgb_pack_validates_all_19_cues():
+    cue_specs = [
+        ("barn-opening", "opening", "barn", 9500),
+        ("barn-greet", "greet", "barn", 1200),
+        ("barn-teach", "teach", "barn", 2600),
+        ("barn-listen", "listen", "barn", 1300),
+        ("barn-thinking", "thinking", "barn", 1300),
+        ("barn-correct", "correct", "barn", 600),
+        ("barn-retry-level-1", "retry-level-1", "barn", 1200),
+        ("barn-retry-level-2", "retry-level-2", "barn", 1400),
+        ("barn-retry-level-3", "retry-level-3", "barn", 1600),
+        ("barn-celebrate", "celebrate", "barn", 3000),
+        ("barn-to-hay-word-transition", "word-transition", "hay", 1100),
+        ("hay-teach", "teach", "hay", 2600),
+        ("hay-listen", "listen", "hay", 1300),
+        ("hay-thinking", "thinking", "hay", 1300),
+        ("hay-correct", "correct", "hay", 600),
+        ("hay-retry-level-1", "retry-level-1", "hay", 1200),
+        ("hay-retry-level-2", "retry-level-2", "hay", 1400),
+        ("hay-retry-level-3", "retry-level-3", "hay", 1600),
+        ("hay-celebrate", "celebrate", "hay", 3000),
+    ]
+
+    validated = [
+        _validate_asset(
+            _live_v35_trgb_asset(*spec), CACHE_KEY, 64 * 1024 * 1024,
+            {"https://admin.tjbot.vn"}, False,
+        )
+        for spec in cue_specs
+    ]
+
+    assert len(validated) == 19
+    assert all(asset["mediaType"] == TRGB_MEDIA_TYPE for asset in validated)
+    assert [asset["cueId"] for asset in validated] == [spec[0] for spec in cue_specs]
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda asset: asset.update(size=asset["size"] - 1),
+    lambda asset: asset.update(sha256="f" * 63),
+    lambda asset: asset.update(
+        onlineUrl=asset["onlineUrl"].replace("/barn-listen.trgb", "/wrong.trgb"),
+        url=asset["url"].replace("/barn-listen.trgb", "/wrong.trgb"),
+    ),
+    lambda asset: asset.update(
+        onlineUrl=asset["onlineUrl"].replace("admin.tjbot.vn", "cdn.example"),
+        url=asset["url"].replace("admin.tjbot.vn", "cdn.example"),
+    ),
+])
+def test_generation_35_trgb_identity_fails_closed(mutation):
+    asset = _live_v35_trgb_asset("barn-listen", "listen", "barn", 1300)
+    mutation(asset)
+
+    with pytest.raises(MaterializationError):
+        _validate_asset(
+            asset, CACHE_KEY, 64 * 1024 * 1024,
+            {"https://admin.tjbot.vn", "https://cdn.example"}, False,
+        )
 
 
 @pytest.mark.asyncio
@@ -1108,6 +1202,41 @@ async def test_historical_digest_manifest_is_not_replayed_as_rich_pack(tmp_path)
         )
     )
     assert isinstance(rich["assets"], list)
+
+
+@pytest.mark.asyncio
+async def test_historical_digest_mismatch_is_rejected_before_download(tmp_path):
+    store = SharedAssetStore(
+        tmp_path / "sd" / "tbot",
+        pack_root=tmp_path / "sd" / "tbot" / "lesson-assets",
+    )
+    store.put_bytes(POSTER, POSTER_SHA)
+    store.put_bytes(BARN, BARN_SHA)
+    store.commit_pack(
+        CACHE_KEY,
+        {
+            "backgroundScene.poster": POSTER_SHA,
+            "teachingObject.barn": BARN_SHA,
+        },
+    )
+    changed = deepcopy(_manifest())
+    changed_poster = b"replacement-poster"
+    changed["assets"][0].update({
+        "sha256": _sha(changed_poster),
+        "size": len(changed_poster),
+    })
+    client = _Client({})
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            changed,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "PACK_REPLAY_MISMATCH"
+    assert client.requests == []
 
 
 @pytest.mark.asyncio

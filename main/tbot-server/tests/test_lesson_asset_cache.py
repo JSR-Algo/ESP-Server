@@ -13,15 +13,15 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 from core.lesson import asset_cache as asset_cache_module
-from core.lesson.asset_cache import AssetCache, AssetState, DOWNLOADING, EVICTED, FAILED, READY
+from core.lesson.asset_cache import DOWNLOADING, EVICTED, FAILED, READY, AssetCache, AssetState
 from core.lesson.errors import AssetChecksumMismatch, AssetProfileUnavailable, PreloadTimeout
 from core.lesson.flattened_cinematic_contract import trgb_container_bytes
-from core.lesson.shared_asset_store import SharedAssetStore
 from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
+from core.lesson.shared_asset_store import SharedAssetStore
 
 
 def _sha(content: bytes) -> str:
@@ -254,6 +254,83 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             **kw,
         )
 
+    def _renderer_v4_cinematic_asset(
+        self,
+        *,
+        cue_id="barn-opening",
+        effect="opening",
+        step_key="barn",
+        playback_mode="once",
+        duration_ms=9500,
+        frame_count=95,
+        content=b"source-cinematic-mp4",
+    ):
+        return {
+            "key": f"flattenedCinematic.{cue_id}",
+            "path": "lessons/derivatives/" + "d" * 64 + f"/{cue_id}.mp4",
+            "url": "https://cdn.test/lessons/derivatives/" + "d" * 64 + f"/{cue_id}.mp4",
+            "sha256": _sha(content),
+            "size": len(content),
+            "critical": True,
+            "layer": "flattenedCinematic",
+            "role": cue_id,
+            "mediaType": "video/mp4",
+            "derivativeId": "d" * 64,
+            "cueId": cue_id,
+            "effect": effect,
+            "stepKey": step_key,
+            "playbackMode": playback_mode,
+            "compatibilityMetadata": {
+                "codec": "mjpeg",
+                "width": 480,
+                "height": 320,
+                "fps": 10,
+                "durationMs": duration_ms,
+                "frameCount": frame_count,
+                "hasAudio": False,
+            },
+        }
+
+    def _commit_ready_pack(
+        self,
+        store,
+        *,
+        cache_key,
+        checksum,
+        assets,
+        pack_contents,
+        source_sha_by_key=None,
+        profile="espTft",
+    ):
+        source_sha_by_key = source_sha_by_key or {}
+        for content in pack_contents.values():
+            store.put_bytes(content, _sha(content))
+        store.commit_pack(
+            cache_key,
+            {key: _sha(content) for key, content in pack_contents.items()},
+            manifest={
+                "lessonId": "w01-d01-barn-say-it",
+                "lessonVersion": 4,
+                "profile": profile,
+                "manifestChecksum": checksum,
+                "cacheKey": cache_key,
+                "ready": True,
+                "assets": [
+                    {
+                        "key": asset["key"],
+                        "sha256": _sha(pack_contents[asset["key"]]),
+                        "sourceSha256": source_sha_by_key.get(asset["key"], asset["sha256"]),
+                        "size": len(pack_contents[asset["key"]]),
+                        "mediaType": asset["mediaType"],
+                        "critical": asset["critical"],
+                        "onlineUrl": asset["url"],
+                        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/{asset['key']}",
+                    }
+                    for asset in assets
+                ],
+            },
+        )
+
     def test_asset_cache_contract_documents_verifier_gate_not_sole_downloader(self):
         source = ASSET_CACHE_SOURCE.read_text(encoding="utf-8")
 
@@ -329,6 +406,32 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         legacy_record = cache._asset_pack_record(state)
         self.assertEqual(legacy_record["phaseId"], "opening")
         self.assertFalse({"cueId", "effect", "stepKey", "playbackMode"} & set(legacy_record))
+
+    def test_pathless_admin_proxy_trgb_is_renderer_v4_and_fans_out(self):
+        derivative_id = "d" * 64
+        url = (
+            "https://admin.tjbot.vn/lesson-derivatives/lessons/derivatives/"
+            f"{derivative_id}/barn-listen.trgb"
+        )
+        asset = {
+            "key": "flattenedCinematic.barn-listen", "url": url,
+            "sha256": "a" * 64, "size": trgb_container_bytes(13), "critical": True,
+            "mediaType": "application/vnd.tbot.rgb565-indexed",
+            "derivativeId": derivative_id, "cueId": "barn-listen", "effect": "listen",
+            "stepKey": "barn", "playbackMode": "loop",
+            "compatibilityMetadata": {
+                "codec": "rgb565le", "containerVersion": 1,
+                "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+                "orientation": "panelNativeClockwise", "fps": 10,
+                "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+                "hasAudio": False,
+            },
+        }
+
+        state = AssetState(asset)
+
+        self.assertTrue(state.renderer_v4_mp4)
+        self.assertEqual(state.cue_id, "barn-listen")
 
     async def test_preload_lifecycle_and_sha256_gate(self):
         assets = _critical_assets()
@@ -1459,6 +1562,392 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             fh.write(b"corrupt-derivative")
         self.assertFalse(cache.is_ready())
         self.assertIsNone(cache.local_pack_url_for_source("backgroundScene.poster.jpg"))
+
+    async def test_preload_hydrates_ready_rich_pack_cinematic_using_sd_size_limits(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x01" * (17 * 1024 * 1024)
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+        key = "flattenedCinematic.barn-opening"
+        asset = {
+            "key": key,
+            "path": "lessons/derivatives/" + "d" * 64 + "/barn-opening.mp4",
+            "url": "https://cdn.test/lessons/derivatives/" + "d" * 64 + "/barn-opening.mp4",
+            "sha256": _sha(source_content),
+            "size": len(source_content),
+            "critical": True,
+            "layer": "flattenedCinematic",
+            "role": "barn-opening",
+            "mediaType": "video/mp4",
+            "derivativeId": "d" * 64,
+            "cueId": "barn-opening",
+            "effect": "opening",
+            "stepKey": "barn",
+            "playbackMode": "once",
+            "compatibilityMetadata": {
+                "codec": "mjpeg",
+                "width": 480,
+                "height": 320,
+                "fps": 10,
+                "durationMs": 9500,
+                "frameCount": 95,
+                "hasAudio": False,
+            },
+        }
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        store.put_bytes(pack_content, _sha(pack_content))
+        store.commit_pack(
+            cache_key,
+            {key: _sha(pack_content)},
+            manifest={
+                "lessonId": "w01-d01-barn-say-it",
+                "lessonVersion": 4,
+                "profile": "espTft",
+                "manifestChecksum": checksum,
+                "cacheKey": cache_key,
+                "ready": True,
+                "assets": [
+                    {
+                        "key": key,
+                        "sha256": _sha(pack_content),
+                        "sourceSha256": _sha(source_content),
+                        "size": len(pack_content),
+                        "mediaType": "video/mp4",
+                        "critical": True,
+                        "onlineUrl": asset["url"],
+                        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/{key}",
+                    }
+                ],
+            },
+        )
+        failing_origin = _FakeClient({}, status=500)
+        cache = self._cache(
+            [asset],
+            client=failing_origin,
+            public_base_url="https://ota.test",
+            lesson_version=4,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+            max_asset_bytes=4 * 1024 * 1024,
+            max_total_asset_bytes=16 * 1024 * 1024,
+        )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertTrue(cache.is_ready())
+        self.assertEqual(failing_origin.requested, [])
+        cinematic = cache._by_key[key]
+        self.assertFalse(os.path.exists(cache._final_path(cinematic)))
+        self.assertIsNone(cache.public_url_for_source(asset["url"]))
+        self.assertEqual(
+            cache.local_pack_url_for_source(asset["url"]),
+            f"sd://tbot/lesson-assets/{cache.cache_key}/{key}",
+        )
+        advertised_pack = cache.asset_pack_manifest(
+            assignment_version=7,
+            lesson_id="w01-d01-barn-say-it",
+            lesson_version=4,
+            manifest_checksum=checksum,
+        )
+        self.assertTrue(advertised_pack["ready"])
+        self.assertEqual(len(advertised_pack["assets"]), 1)
+        self.assertEqual(advertised_pack["assets"][0]["key"], key)
+        self.assertEqual(advertised_pack["assets"][0]["sha256"], _sha(pack_content))
+        self.assertEqual(advertised_pack["assets"][0]["sourceSha256"], _sha(source_content))
+
+    async def test_preload_rejects_ready_rich_pack_over_sd_file_limit_and_falls_back(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x02" * (1024 * 1024)
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+        asset = self._renderer_v4_cinematic_asset(content=source_content)
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        self._commit_ready_pack(
+            store,
+            cache_key=cache_key,
+            checksum=checksum,
+            assets=[asset],
+            pack_contents={asset["key"]: pack_content},
+        )
+        origin = _FakeClient({asset["url"]: [source_content]})
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LESSON_SD_MAX_FILE_BYTES": str(len(pack_content) - 1),
+                "LESSON_SD_MAX_PACK_BYTES": str(128 * 1024 * 1024),
+            },
+        ):
+            cache = self._cache(
+                [asset],
+                client=origin,
+                lesson_version=4,
+                manifest_checksum=checksum,
+                asset_pack_mount_root=sd_mount,
+                shared_asset_store=store,
+            )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(origin.requested, [asset["url"]])
+        with open(cache._final_path(cache.assets[0]), "rb") as fh:
+            self.assertEqual(fh.read(), source_content)
+
+    async def test_preload_rejects_ready_rich_pack_over_sd_total_limit_and_falls_back(self):
+        opening_source = b"opening-source-mp4"
+        listen_source = b"listen-source-mp4"
+        opening = self._renderer_v4_cinematic_asset(content=opening_source)
+        listen = self._renderer_v4_cinematic_asset(
+            cue_id="barn-listen",
+            effect="listen",
+            playback_mode="loop",
+            duration_ms=1300,
+            frame_count=13,
+            content=listen_source,
+        )
+        pack_contents = {
+            opening["key"]: b"\x03" * (9 * 1024 * 1024),
+            listen["key"]: b"\x04" * (9 * 1024 * 1024),
+        }
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        self._commit_ready_pack(
+            store,
+            cache_key=cache_key,
+            checksum=checksum,
+            assets=[opening, listen],
+            pack_contents=pack_contents,
+        )
+        origin = _FakeClient({opening["url"]: [opening_source], listen["url"]: [listen_source]})
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LESSON_SD_MAX_FILE_BYTES": str(32 * 1024 * 1024),
+                "LESSON_SD_MAX_PACK_BYTES": str(sum(map(len, pack_contents.values())) - 1),
+            },
+        ):
+            cache = self._cache(
+                [opening, listen],
+                client=origin,
+                lesson_version=4,
+                manifest_checksum=checksum,
+                asset_pack_mount_root=sd_mount,
+                shared_asset_store=store,
+            )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(origin.requested, [opening["url"], listen["url"]])
+        for asset, content in ((opening, opening_source), (listen, listen_source)):
+            with open(cache._final_path(cache._by_key[asset["key"]]), "rb") as fh:
+                self.assertEqual(fh.read(), content)
+
+    async def test_preload_rejects_ready_rich_pack_cinematic_source_sha_mismatch(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x05" * (1024 * 1024)
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+        asset = self._renderer_v4_cinematic_asset(content=source_content)
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        self._commit_ready_pack(
+            store,
+            cache_key=cache_key,
+            checksum=checksum,
+            assets=[asset],
+            pack_contents={asset["key"]: pack_content},
+            source_sha_by_key={asset["key"]: "f" * 64},
+        )
+        origin = _FakeClient({asset["url"]: [source_content]})
+        cache = self._cache(
+            [asset],
+            client=origin,
+            lesson_version=4,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+        )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(origin.requested, [asset["url"]])
+        with open(cache._final_path(cache.assets[0]), "rb") as fh:
+            self.assertEqual(fh.read(), source_content)
+
+    async def test_preload_treats_blank_sd_limit_env_as_absent_for_ready_pack_hydration(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x06" * (17 * 1024 * 1024)
+        cases = [
+            {"LESSON_SD_MAX_FILE_BYTES": ""},
+            {"LESSON_SD_MAX_FILE_BYTES": " \t "},
+            {"LESSON_SD_MAX_PACK_BYTES": ""},
+            {"LESSON_SD_MAX_PACK_BYTES": " \t "},
+        ]
+        for index, env in enumerate(cases, start=20):
+            with self.subTest(env=env):
+                checksum = f"{index:064x}"
+                cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+                asset = self._renderer_v4_cinematic_asset(content=source_content)
+                sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+                self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+                store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+                self._commit_ready_pack(
+                    store,
+                    cache_key=cache_key,
+                    checksum=checksum,
+                    assets=[asset],
+                    pack_contents={asset["key"]: pack_content},
+                )
+                failing_origin = _FakeClient({}, status=500)
+                with mock.patch.dict(os.environ, env):
+                    cache = self._cache(
+                        [asset],
+                        client=failing_origin,
+                        lesson_version=4,
+                        manifest_checksum=checksum,
+                        asset_pack_mount_root=sd_mount,
+                        shared_asset_store=store,
+                        max_asset_bytes=4 * 1024 * 1024,
+                        max_total_asset_bytes=16 * 1024 * 1024,
+                    )
+
+                ready = await cache.preload()
+
+                self.assertTrue(ready)
+                self.assertEqual(failing_origin.requested, [])
+                self.assertTrue(cache.is_ready())
+                self.assertEqual(
+                    cache.local_pack_url_for_source(asset["url"]),
+                    f"sd://tbot/lesson-assets/{cache.cache_key}/{asset['key']}",
+                )
+
+    async def test_preload_rejects_ready_rich_pack_with_invalid_sd_limit_env_and_falls_back(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x06" * (1024 * 1024)
+        cases = [
+            {"LESSON_SD_MAX_FILE_BYTES": "not-an-int"},
+            {"LESSON_SD_MAX_PACK_BYTES": "0"},
+            {"LESSON_SD_MAX_FILE_BYTES": "-1"},
+        ]
+        for index, env in enumerate(cases, start=1):
+            with self.subTest(env=env):
+                checksum = f"{index:064x}"
+                cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+                asset = self._renderer_v4_cinematic_asset(content=source_content)
+                sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+                self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+                store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+                self._commit_ready_pack(
+                    store,
+                    cache_key=cache_key,
+                    checksum=checksum,
+                    assets=[asset],
+                    pack_contents={asset["key"]: pack_content},
+                )
+                origin = _FakeClient({asset["url"]: [source_content]})
+                with mock.patch.dict(os.environ, env):
+                    cache = self._cache(
+                        [asset],
+                        client=origin,
+                        lesson_version=4,
+                        manifest_checksum=checksum,
+                        asset_pack_mount_root=sd_mount,
+                        shared_asset_store=store,
+                    )
+
+                ready = await cache.preload()
+
+                self.assertTrue(ready)
+                self.assertEqual(origin.requested, [asset["url"]])
+                with open(cache._final_path(cache.assets[0]), "rb") as fh:
+                    self.assertEqual(fh.read(), source_content)
+
+    async def test_preload_rejects_ready_rich_pack_with_oversized_sd_limit_env_and_falls_back(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x07" * (1024 * 1024)
+        max_config_bytes = 2 * 1024 * 1024 * 1024
+        cases = [
+            {"LESSON_SD_MAX_FILE_BYTES": str(max_config_bytes + 1)},
+            {"LESSON_SD_MAX_PACK_BYTES": str(max_config_bytes + 1)},
+        ]
+        for index, env in enumerate(cases, start=1):
+            with self.subTest(env=env):
+                checksum = f"{index + 10:064x}"
+                cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+                asset = self._renderer_v4_cinematic_asset(content=source_content)
+                sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+                self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+                store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+                self._commit_ready_pack(
+                    store,
+                    cache_key=cache_key,
+                    checksum=checksum,
+                    assets=[asset],
+                    pack_contents={asset["key"]: pack_content},
+                )
+                origin = _FakeClient({asset["url"]: [source_content]})
+                with mock.patch.dict(os.environ, env):
+                    cache = self._cache(
+                        [asset],
+                        client=origin,
+                        lesson_version=4,
+                        manifest_checksum=checksum,
+                        asset_pack_mount_root=sd_mount,
+                        shared_asset_store=store,
+                    )
+
+                ready = await cache.preload()
+
+                self.assertTrue(ready)
+                self.assertEqual(origin.requested, [asset["url"]])
+                with open(cache._final_path(cache.assets[0]), "rb") as fh:
+                    self.assertEqual(fh.read(), source_content)
+
+    async def test_preload_rejects_ready_rich_pack_with_profile_mismatch_and_falls_back(self):
+        source_content = b"source-cinematic-mp4"
+        pack_content = b"\x08" * (1024 * 1024)
+        checksum = "0123456789abcdef" * 4
+        cache_key = f"w01-d01-barn-say-it/v4-{checksum}"
+        asset = self._renderer_v4_cinematic_asset(content=source_content)
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        self._commit_ready_pack(
+            store,
+            cache_key=cache_key,
+            checksum=checksum,
+            assets=[asset],
+            pack_contents={asset["key"]: pack_content},
+            profile="esp32",
+        )
+        origin = _FakeClient({asset["url"]: [source_content]})
+        cache = self._cache(
+            [asset],
+            client=origin,
+            lesson_version=4,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+        )
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(origin.requested, [asset["url"]])
+        with open(cache._final_path(cache.assets[0]), "rb") as fh:
+            self.assertEqual(fh.read(), source_content)
 
     async def test_preload_rejects_ready_rich_pack_with_mismatched_checksum(self):
         content = b"thinking-png"

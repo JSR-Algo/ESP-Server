@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 import core.lesson.global_generation_poller as poller_module
+from core.lesson.flattened_cinematic_contract import TRGB_MEDIA_TYPE, trgb_container_bytes
 from core.lesson.global_generation_poller import (
     GlobalGenerationPoller,
     canonical_json,
@@ -105,6 +106,41 @@ def _renderer_v4_v2_mp4_asset(
     return asset
 
 
+def _renderer_v4_v2_trgb_asset(
+    *,
+    cache_key: str = f"lesson-a/v4-{HASH_B}",
+    cue_id: str = "barn-opening",
+    effect: str = "opening",
+) -> dict:
+    playback_mode = "loop" if effect in {"greet", "listen", "thinking"} else "once"
+    duration_ms = {"opening": 9500, "listen": 1300, "teach": 2600}[effect]
+    frame_count = duration_ms // 100
+    derivative_path = f"lessons/derivatives/{'d' * 64}/{cue_id}.trgb"
+    asset = _asset(
+        f"flattenedCinematic.{cue_id}",
+        size=trgb_container_bytes(frame_count),
+        cache_key=cache_key,
+    )
+    asset.update({
+        "onlineUrl": f"https://admin.tjbot.vn/lesson-derivatives/{derivative_path}",
+        "url": f"https://admin.tjbot.vn/lesson-derivatives/{derivative_path}",
+        "mediaType": TRGB_MEDIA_TYPE,
+        "derivativeId": "d" * 64,
+        "cueId": cue_id,
+        "effect": effect,
+        "stepKey": "barn",
+        "playbackMode": playback_mode,
+        "compatibilityMetadata": {
+            "codec": "rgb565le", "containerVersion": 1,
+            "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+            "orientation": "panelNativeClockwise", "fps": 10,
+            "durationMs": duration_ms, "frameCount": frame_count, "frameBytes": 307200,
+            "hasAudio": False,
+        },
+    })
+    return asset
+
+
 def _pack(*, lesson_id: str = "lesson-a", classification: str = "curriculum") -> dict:
     checksum = HASH_B
     cache_key = f"{lesson_id}/v3-{checksum}"
@@ -189,7 +225,9 @@ def _config() -> dict:
     return {
         "lesson": {
             "generation_cms_url": CMS_URL,
-            "asset_allowed_origins": "https://cdn.example",
+            "asset_allowed_origins": (
+                "https://cdn.example,https://admin.tjbot.vn,https://res.cloudinary.com"
+            ),
         }
     }
 
@@ -281,6 +319,79 @@ async def test_validated_renderer_v4_v2_cue_passes_through_unchanged() -> None:
 
     assert await poller.run_once() == {"state": "accepted"}
     assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+async def test_validated_renderer_v4_v2_trgb_cue_passes_through_unchanged() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    pack["assets"] = [_renderer_v4_v2_trgb_asset(cache_key=pack["cacheKey"])]
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"][0] == pack["assets"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutate", [
+    lambda asset: asset.update(extra=True),
+    lambda asset: asset.update(path="lessons/derivatives/" + "d" * 64 + "/barn-opening.trgb"),
+    lambda asset: asset.update(
+        url=asset["url"].replace("barn-opening.trgb", "other.trgb"),
+        onlineUrl=asset["onlineUrl"].replace("barn-opening.trgb", "other.trgb"),
+    ),
+    lambda asset: asset.update(
+        url="https://admin.tjbot.vn/lesson-derivatives/barn-opening.trgb",
+        onlineUrl="https://admin.tjbot.vn/lesson-derivatives/barn-opening.trgb",
+    ),
+    lambda asset: asset.update(
+        url=asset["url"].replace("https://admin.tjbot.vn/lesson-derivatives", "https://res.cloudinary.com"),
+        onlineUrl=asset["onlineUrl"].replace(
+            "https://admin.tjbot.vn/lesson-derivatives", "https://res.cloudinary.com"
+        ),
+    ),
+    lambda asset: asset.update(
+        url=asset["url"].replace("/lesson-derivatives/lessons/", "/lessons/"),
+        onlineUrl=asset["onlineUrl"].replace("/lesson-derivatives/lessons/", "/lessons/"),
+    ),
+    lambda asset: asset.update(
+        url=asset["url"].replace(
+            "lesson-derivatives/lessons/derivatives/",
+            "lessons/derivatives/duplicate/lessons/derivatives/",
+        ),
+        onlineUrl=asset["onlineUrl"].replace(
+            "lesson-derivatives/lessons/derivatives/",
+            "lessons/derivatives/duplicate/lessons/derivatives/",
+        ),
+    ),
+    lambda asset: asset["compatibilityMetadata"].update(codec="mjpeg"),
+    lambda asset: asset["compatibilityMetadata"].update(frameBytes=153600),
+    lambda asset: asset.update(size=asset["size"] - 1),
+])
+async def test_renderer_v4_v2_trgb_cue_rejects_non_exact_contract(mutate) -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 4
+    pack["cacheKey"] = f"lesson-a/v4-{HASH_B}"
+    asset = _renderer_v4_v2_trgb_asset(cache_key=pack["cacheKey"])
+    mutate(asset)
+    pack["assets"] = [asset]
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {
+        "state": "rejected", "errorCode": "cms_invalid_renderer_v4_mp4",
+    }
 
 
 @pytest.mark.asyncio

@@ -134,6 +134,8 @@ async def fanout_sd_pack_sync(
     cache_key: str | None = None,
     device_ids: Any | None = None,
     queue_offline: bool = True,
+    callback_required: bool = True,
+    persist_retry: bool = True,
     store: LessonSdPendingStore | None = None,
     online_index: Any = None,
 ) -> dict[str, Any]:
@@ -149,9 +151,7 @@ async def fanout_sd_pack_sync(
     if target_filter is not None:
         target_filter = list(dict.fromkeys(target_filter))
     connections = connections or {}
-    resolved_connections = await _resolve_online_connections(
-        config or {}, connections, online_index=online_index
-    )
+    resolved_connections = await _resolve_online_connections(config or {}, connections, online_index=online_index)
 
     online_ids = sorted(str(k) for k in resolved_connections if k)
     if target_filter is not None:
@@ -169,11 +169,7 @@ async def fanout_sd_pack_sync(
 
     if not packs:
         requested = target_filter if target_filter is not None else online_ids
-        offline_set = {
-            device_id
-            for device_id in requested
-            if device_id and device_id not in resolved_connections
-        }
+        offline_set = {device_id for device_id in requested if device_id and device_id not in resolved_connections}
         for device_id in requested:
             if not device_id:
                 continue
@@ -228,6 +224,8 @@ async def fanout_sd_pack_sync(
                     cache_keys=pack_keys,
                     only_cache_keys=only_keys,
                     store=selected_store,
+                    callback_required=callback_required,
+                    persist_retry=persist_retry,
                 )
             except Exception as exc:
                 error_code = _stable_error_code(type(exc).__name__) or "SYNC_ERROR"
@@ -330,7 +328,7 @@ async def fanout_sd_pack_sync(
                 retryable=queue_offline,
             )
 
-    if queue_offline:
+    if queue_offline and persist_retry:
         offline_set = {d for d in offline_ids if d}
         for device_id in list(dict.fromkeys([*offline_ids, *retry_ids])):
             if not device_id:
@@ -375,23 +373,29 @@ async def drain_pending_for_connection(
     """If this device has pending work, run SD sync then clear only after callback."""
     selected_store = store or get_pending_store()
     device_id = str(
-        backend_device_id
-        or getattr(conn, "_lesson_sd_backend_device_id", "")
-        or getattr(conn, "device_id", "")
-        or ""
+        backend_device_id or getattr(conn, "_lesson_sd_backend_device_id", "") or getattr(conn, "device_id", "") or ""
     ).strip()
     if not device_id:
         return None
     pending = pending or await selected_store.load(device_id)
     if pending is None and backend_device_id is None:
-        resolved = await _resolve_backend_device_id_for_conn(
-            conn, getattr(conn, "config", {}) or {}
-        )
+        resolved = await _resolve_backend_device_id_for_conn(conn, getattr(conn, "config", {}) or {})
         if resolved and resolved != device_id:
             device_id = resolved
             pending = await selected_store.load(device_id)
     if pending is None:
         return None
+    callback_results = pending.get("callbackResults") or {}
+    if callback_results:
+        callback_retry = await retry_pending_callbacks(
+            getattr(conn, "config", {}) or {},
+            backend_device_id=device_id,
+            pending=pending,
+            store=selected_store,
+        )
+        pending = await selected_store.load(device_id)
+        if pending is None or not pending.get("cacheKeys"):
+            return callback_retry
     keys = normalize_cache_keys(pending["cacheKeys"])
     only = set(keys) if keys else None
     logger.info(
@@ -428,9 +432,7 @@ async def _resolve_backend_device_id_for_conn(conn: Any, config: dict[str, Any])
         from config.device_token_client import resolve_device_identity
 
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-            backend_device_id, _token = await resolve_device_identity(
-                client, base_url, raw_device_id, logger=None
-            )
+            backend_device_id, _token = await resolve_device_identity(client, base_url, raw_device_id, logger=None)
     except Exception:
         return None if _looks_like_mac(raw_device_id) else raw_device_id
     if not backend_device_id:
@@ -465,32 +467,57 @@ async def _sync_callback_and_update_pending(
     cache_keys: Iterable[str],
     only_cache_keys: set[str] | None,
     store: LessonSdPendingStore,
+    callback_required: bool = True,
+    persist_retry: bool = True,
 ) -> dict[str, Any]:
     keys = normalize_cache_keys(cache_keys)
     try:
         result = await sync_cached_lesson_assets_to_sd(conn, only_cache_keys=only_cache_keys)
     except Exception:
-        await store.mark(backend_device_id, keys)
+        if persist_retry:
+            await store.mark(backend_device_id, keys)
         raise
     if isinstance(result, dict) and result.get("skipped"):
         reason = _stable_error_code(result.get("skipped")) or "skipped"
-        await store.mark(backend_device_id, keys)
+        if persist_retry:
+            await store.mark(backend_device_id, keys)
         result["clearedCacheKeys"] = []
         result["retainedCacheKeys"] = keys
         result["errorCode"] = reason
         return result
-    cleared, retained, errors = await _post_per_cache_results(
-        config,
-        backend_device_id=backend_device_id,
-        cache_keys=keys,
-        sync_result=result,
-    )
-    if cleared:
-        await store.clear(backend_device_id, cleared, expected_cache_keys=keys)
-    if retained:
-        await store.mark(backend_device_id, retained)
+    previous_callbacks: dict[str, dict[str, Any]] = {}
+    if callback_required and persist_retry:
+        pending_before_callback = await store.load(backend_device_id)
+        previous_callbacks = dict((pending_before_callback or {}).get("callbackResults") or {})
+    if callback_required:
+        cleared, retained, callback_pending, callback_resolved, errors = await _post_per_cache_results(
+            config,
+            backend_device_id=backend_device_id,
+            cache_keys=keys,
+            sync_result=result,
+        )
+    else:
+        cleared, retained = _classify_robot_results(backend_device_id, keys, result)
+        callback_pending, callback_resolved, errors = [], [], []
+    if persist_retry:
+        # Persist callback work before clearing robot work so a crash cannot lose it.
+        if callback_pending:
+            await store.mark_callbacks(backend_device_id, callback_pending)
+        resolved_previous = {key: previous_callbacks[key] for key in callback_resolved if key in previous_callbacks}
+        if resolved_previous:
+            await store.clear_callbacks(
+                backend_device_id,
+                resolved_previous,
+                expected_results=resolved_previous,
+            )
+        if cleared:
+            await store.clear(backend_device_id, cleared, expected_cache_keys=keys)
+        if retained:
+            await store.mark(backend_device_id, retained)
     result["clearedCacheKeys"] = cleared
     result["retainedCacheKeys"] = retained
+    if callback_pending:
+        result["callbackPendingCacheKeys"] = [item["cacheKey"] for item in callback_pending]
     if errors:
         result["callbackErrors"] = [
             {
@@ -509,7 +536,7 @@ async def _post_sync_results(
     cache_keys: list[str],
     sync_result: dict[str, Any],
 ) -> None:
-    _cleared, _retained, errors = await _post_per_cache_results(
+    _cleared, _retained, _callback_pending, _callback_resolved, errors = await _post_per_cache_results(
         config,
         backend_device_id=backend_device_id,
         cache_keys=cache_keys,
@@ -518,15 +545,18 @@ async def _post_sync_results(
     if errors:
         raise errors[0]
 
+
 async def _post_per_cache_results(
     config: dict[str, Any],
     *,
     backend_device_id: str,
     cache_keys: list[str],
     sync_result: dict[str, Any],
-) -> tuple[list[str], list[str], list[Exception]]:
+) -> tuple[list[str], list[str], list[dict[str, Any]], list[str], list[Exception]]:
     cleared: list[str] = []
     retained: list[str] = []
+    callback_pending: list[dict[str, Any]] = []
+    callback_resolved: list[str] = []
     errors: list[Exception] = []
     per_cache = _results_by_cache_key(sync_result, cache_keys)
     for cache_key in cache_keys:
@@ -535,14 +565,133 @@ async def _post_per_cache_results(
         try:
             await _post_one_sync_result(config, result=result)
         except Exception as exc:
-            retained.append(cache_key)
-            errors.append(exc)
+            if _is_callback_not_found(exc):
+                logger.warning(
+                    "lesson_sd_callback_untracked device_id=%s cache_key=%s status=404",
+                    backend_device_id,
+                    cache_key,
+                )
+                callback_resolved.append(cache_key)
+            elif _is_retryable_callback_error(exc):
+                callback_pending.append(result)
+                errors.append(exc)
+            else:
+                _log_terminal_callback_error(exc, backend_device_id, cache_key)
+                callback_resolved.append(cache_key)
+            if ready_for_clear:
+                cleared.append(cache_key)
+            else:
+                retained.append(cache_key)
             continue
         if ready_for_clear:
             cleared.append(cache_key)
         else:
             retained.append(cache_key)
-    return cleared, normalize_cache_keys(retained), errors
+        callback_resolved.append(cache_key)
+    return (
+        cleared,
+        normalize_cache_keys(retained),
+        callback_pending,
+        normalize_cache_keys(callback_resolved),
+        errors,
+    )
+
+
+def _classify_robot_results(
+    backend_device_id: str,
+    cache_keys: list[str],
+    sync_result: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    cleared: list[str] = []
+    retained: list[str] = []
+    per_cache = _results_by_cache_key(sync_result, cache_keys)
+    for cache_key in cache_keys:
+        result = _dto_from_cache_result(backend_device_id, cache_key, per_cache.get(cache_key))
+        if result["ready"] and result["criticalFailedCount"] == 0:
+            cleared.append(cache_key)
+        else:
+            retained.append(cache_key)
+    return cleared, normalize_cache_keys(retained)
+
+
+async def retry_pending_callbacks(
+    config: dict[str, Any],
+    *,
+    backend_device_id: str,
+    pending: PendingLessonSdWork,
+    store: LessonSdPendingStore,
+) -> dict[str, Any]:
+    callbacks = pending.get("callbackResults") or {}
+    cleared: list[str] = []
+    cleared_results: dict[str, dict[str, Any]] = {}
+    retry: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for cache_key, result in callbacks.items():
+        try:
+            await _post_one_sync_result(config, result=result)
+        except Exception as exc:
+            if _is_callback_not_found(exc):
+                logger.warning(
+                    "lesson_sd_callback_untracked device_id=%s cache_key=%s status=404",
+                    backend_device_id,
+                    cache_key,
+                )
+                cleared.append(cache_key)
+                cleared_results[cache_key] = result
+                continue
+            if _is_retryable_callback_error(exc):
+                retry.append(result)
+                errors.append({"type": type(exc).__name__, "message": _stable_error_message(exc)})
+            else:
+                _log_terminal_callback_error(exc, backend_device_id, cache_key)
+                cleared.append(cache_key)
+                cleared_results[cache_key] = result
+            continue
+        cleared.append(cache_key)
+        cleared_results[cache_key] = result
+    if cleared:
+        await store.clear_callbacks(
+            backend_device_id,
+            cleared,
+            expected_results=cleared_results,
+        )
+    if retry:
+        await store.mark_callbacks(backend_device_id, retry)
+    return {
+        "callbackRetried": len(callbacks),
+        "callbackClearedCacheKeys": normalize_cache_keys(cleared),
+        "callbackRetainedCacheKeys": normalize_cache_keys(str(item.get("cacheKey") or "") for item in retry),
+        "callbackErrors": errors,
+    }
+
+
+def _is_callback_not_found(exc: Exception) -> bool:
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+
+
+def _is_retryable_callback_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    status = exc.response.status_code
+    return status in {408, 429} or status >= 500
+
+
+def _log_terminal_callback_error(
+    exc: Exception,
+    backend_device_id: str,
+    cache_key: str,
+) -> None:
+    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+    logger.warning(
+        "lesson_sd_callback_rejected device_id=%s cache_key=%s status=%s error=%s",
+        backend_device_id,
+        cache_key,
+        status,
+        type(exc).__name__,
+    )
+
 
 async def _post_one_sync_result(config: dict[str, Any], *, result: dict[str, Any]) -> None:
     base_url = _backend_base_url(config)
@@ -599,6 +748,7 @@ def _ordered_device_rows(
             rows.append(row)
     return rows
 
+
 def _device_row(
     device_id: str,
     *,
@@ -625,6 +775,7 @@ def _device_row(
         row["errorCode"] = stable_error
     row["retryable"] = bool(retryable)
     return row
+
 
 def _device_row_from_sync_result(
     device_id: str,
@@ -671,6 +822,7 @@ def _device_row_from_sync_result(
         error_code=error_code,
     )
 
+
 def _retry_cache_keys_for_device(failed: list[dict[str, Any]], device_id: str) -> list[str]:
     for entry in failed:
         if str(entry.get("deviceId") or "") != str(device_id):
@@ -688,6 +840,7 @@ def _results_by_cache_key(sync_result: dict[str, Any], cache_keys: list[str]) ->
     if isinstance(raw, dict):
         return {str(key): value for key, value in raw.items()}
     return dict.fromkeys(cache_keys, sync_result)
+
 
 def _dto_from_cache_result(
     backend_device_id: str,
@@ -714,6 +867,7 @@ def _dto_from_cache_result(
         body["errorCode"] = error_code
     return body
 
+
 def _bounded_count(value: Any) -> int:
     try:
         parsed = int(value or 0)
@@ -721,18 +875,18 @@ def _bounded_count(value: Any) -> int:
         return 0
     return max(0, min(parsed, 1_000_000))
 
+
 def _stable_error_code(value: Any) -> str:
     return normalize_lesson_sd_error_code(value)
+
 
 def _looks_like_mac(value: str) -> bool:
     compact = str(value or "").strip().replace("-", ":")
     parts = compact.split(":")
     if len(parts) != 6:
         return False
-    return all(
-        len(part) == 2 and all(ch in "0123456789abcdefABCDEF" for ch in part)
-        for part in parts
-    )
+    return all(len(part) == 2 and all(ch in "0123456789abcdefABCDEF" for ch in part) for part in parts)
+
 
 def _log_outcome(outcome: str, backend_device_id: str, cache_keys: Iterable[str]) -> None:
     for cache_key in cache_keys:

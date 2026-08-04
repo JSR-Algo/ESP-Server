@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from core.lesson.flattened_cinematic_contract import TRGB_MEDIA_TYPE
+
 FailureHook = Callable[[str, Path], None]
 
 
@@ -382,10 +384,20 @@ class SharedAssetStore:
             "key": asset.get("key"), "sha256": asset.get("sha256"), "size": asset.get("size"),
             "mediaType": asset.get("mediaType"), "critical": asset.get("critical"), "sdPath": asset.get("sdPath"),
         }
-        if asset.get("mediaType") == "video/mp4":
+        media_type = asset.get("mediaType")
+        if media_type in {"video/mp4", TRGB_MEDIA_TYPE}:
             projection["onlineUrl"] = asset.get("onlineUrl")
             projection["compatibilityMetadata"] = asset.get("compatibilityMetadata")
-            if asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
+            if media_type == TRGB_MEDIA_TYPE:
+                projection.update({
+                    "path": asset.get("path"),
+                    "derivativeId": asset.get("derivativeId"),
+                    "cueId": asset.get("cueId"),
+                    "effect": asset.get("effect"),
+                    "stepKey": asset.get("stepKey"),
+                    "playbackMode": asset.get("playbackMode"),
+                })
+            elif asset.get("derivativeId") is not None or asset.get("phaseId") is not None:
                 projection.update({
                     "derivativeId": asset.get("derivativeId"),
                     "phaseId": asset.get("phaseId"),

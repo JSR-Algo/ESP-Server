@@ -1916,6 +1916,85 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(conn.client_abort)
 
+    async def test_lesson_start_intent_marks_only_local_tool_dispatch_as_sd_sync_admissible(self):
+        conn = _Conn()
+        observed_depths = []
+
+        class _AdmissionProbeHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                marker = probe_conn._lesson_start_tool_dispatch_context
+                observed_depths.append(isinstance(marker.get(), dict))
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _AdmissionProbeHandler()
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertTrue(handled)
+        self.assertEqual(observed_depths, [True])
+        self.assertIsNone(conn._lesson_start_tool_dispatch_context.get())
+
+    async def test_native_start_lesson_tool_marks_local_dispatch_as_sd_sync_admissible(self):
+        conn = _Conn()
+        observed_depths = []
+
+        class _AdmissionProbeHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                marker = probe_conn._lesson_start_tool_dispatch_context
+                observed_depths.append(isinstance(marker.get(), dict))
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _AdmissionProbeHandler()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+
+        await provider._handle_tool_call_event(
+            {"calls": [{"id": "start-1", "name": "start_lesson", "args": {}}]}
+        )
+
+        self.assertEqual(observed_depths, [True])
+        self.assertIsNone(conn._lesson_start_tool_dispatch_context.get())
+
+    async def test_start_lesson_admission_is_inherited_only_by_scheduled_lesson_task(self):
+        conn = _Conn()
+        child_observed = asyncio.get_running_loop().create_future()
+
+        class _SchedulingHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                async def lesson_pull():
+                    await asyncio.sleep(0)
+                    marker = getattr(
+                        probe_conn,
+                        "_lesson_start_tool_dispatch_context",
+                        None,
+                    )
+                    child_observed.set_result(
+                        bool(marker is not None and isinstance(marker.get(), dict))
+                    )
+
+                asyncio.create_task(lesson_pull())
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _SchedulingHandler()
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            self.assertTrue(
+                await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+            )
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertTrue(await child_observed)
+        marker = conn._lesson_start_tool_dispatch_context
+        self.assertIsNone(marker.get())
+
     async def test_continuous_background_audio_does_not_start_clean_turn(self):
         conn = _Conn()
         conn.config["google_live"].update(

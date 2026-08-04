@@ -37,6 +37,8 @@ TRGB_HEADER_BYTES = 64
 TRGB_INDEX_ENTRY_BYTES = 16
 TRGB_FRAME_BYTES = 307200
 TRGB_DATA_ALIGNMENT = 512
+TRGB_PUBLIC_PROXY_HOST = "admin.tjbot.vn"
+TRGB_PUBLIC_PROXY_PREFIX = "/lesson-derivatives/lessons/derivatives/"
 _V2_METADATA_FIELDS = {
     "codec", "containerVersion", "width", "height", "storedWidth", "storedHeight",
     "orientation", "fps", "durationMs", "frameCount", "frameBytes", "hasAudio",
@@ -321,6 +323,49 @@ def validate_flattened_cinematic_cache_asset(asset: Any) -> None:
         },
     }
     _manifest_asset(projected)
+
+
+def validate_pathless_flattened_cinematic_cache_asset(asset: Any) -> dict[str, Any]:
+    """Validate the public admin-proxy TRGB projection that intentionally omits path."""
+    if not isinstance(asset, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cache asset is invalid")
+    source_url = asset.get("sourceUrl") or asset.get("onlineUrl") or asset.get("url")
+    try:
+        parsed = urlsplit(source_url) if isinstance(source_url, str) else None
+        port = parsed.port if parsed is not None else None
+    except ValueError:
+        parsed = None
+        port = None
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or parsed.hostname != TRGB_PUBLIC_PROXY_HOST
+        or port not in {None, 443}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(TRGB_PUBLIC_PROXY_PREFIX)
+    ):
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic public URL is invalid")
+    canonical_path = parsed.path.removeprefix("/lesson-derivatives/")
+    declared_path = asset.get("path")
+    if declared_path not in {None, "", canonical_path}:
+        _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic path is invalid")
+    projected = dict(asset)
+    projected["path"] = canonical_path
+    projected["url"] = source_url
+    projected["onlineUrl"] = source_url
+    validate_flattened_cinematic_cache_asset(projected)
+    return {
+        "path": canonical_path,
+        "derivativeId": asset.get("derivativeId"),
+        "cueId": asset.get("cueId"),
+        "effect": asset.get("effect"),
+        "stepKey": asset.get("stepKey"),
+        "playbackMode": asset.get("playbackMode"),
+        "compatibilityMetadata": dict(asset["compatibilityMetadata"]),
+    }
 
 
 def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:

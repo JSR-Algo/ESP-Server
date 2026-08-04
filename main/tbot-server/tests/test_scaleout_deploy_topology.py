@@ -146,6 +146,31 @@ def test_deploy_and_rollback_refuse_real_current_directory_before_atomic_switch(
         assert "mv -Tf" in script
 
 
+def test_deploy_snapshots_env_before_upload_and_records_rollback_marker():
+    script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(encoding="utf-8")
+
+    backup = script.index(".env.rollback-")
+    marker = script.index("env-backup-path")
+    upload = script.index('run_scp "${ENV_FILE}"')
+
+    assert backup < marker < upload
+    assert "date -u +%Y%m%dT%H%M%SZ" in script
+    assert "install -m 600" in script
+
+
+def test_rollback_restores_recorded_env_before_switching_release():
+    script = (REPO_ROOT / "deploy" / "rollback-vps.sh").read_text(encoding="utf-8")
+
+    marker = script.index("env-backup-path")
+    validation = script.index("invalid or unavailable env rollback backup")
+    restore = script.index("install -m 600")
+    switch = script.index("ln -s ${REMOTE_RELEASE_Q}")
+    compose = script.index("docker compose --env-file")
+
+    assert marker < validation < restore < switch < compose
+    assert ".env.rollback-" in script
+
+
 def test_release_package_includes_haproxy_config_required_by_compose():
     script = (REPO_ROOT / "deploy" / "package-release.sh").read_text(encoding="utf-8")
 
@@ -164,6 +189,21 @@ def test_release_package_fallback_preserves_asset_materialization_limits():
         "LESSON_SD_MAX_PACK_BYTES=134217728",
     ):
         assert expected in script
+
+
+def test_profile_sync_public_key_is_present_in_checked_in_and_generated_env_examples():
+    env_example = (REPO_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
+    package_script = (REPO_ROOT / "deploy" / "package-release.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy_script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(
+        encoding="utf-8"
+    )
+
+    expected = "TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY=REPLACE_WITH_PROFILE_SYNC_JWT_PUBLIC_KEY"
+    assert expected in env_example
+    assert expected in package_script
+    assert "JWT_PUBLIC_KEY TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET" in deploy_script
 
 
 def test_manual_fallback_preserves_redis_and_sd_pack_runtime_contract():
@@ -326,6 +366,7 @@ def test_deploy_vps_preflight_rejects_sd_limits_below_farm_v7_minimum(
         "NODE_ENV": "production",
         "TBOT_REQUIRE_DEVICE_TOKEN": "true",
         "JWT_PUBLIC_KEY": "public-key",
+        "TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY": "profile-public-key",
         "TBOT_DEVICE_MINT_SECRET": "mint-secret",
         "TBOT_SERVER_AUTH_KEY": "server-secret",
         "LESSON_ASSET_ORIGIN_BASE": "https://assets.example.com",
@@ -365,6 +406,7 @@ def test_deploy_vps_preflight_accepts_farm_v7_minimum_env_overrides(tmp_path):
                 "NODE_ENV=production",
                 "TBOT_REQUIRE_DEVICE_TOKEN=true",
                 "JWT_PUBLIC_KEY=public-key",
+                "TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY=profile-public-key",
                 "TBOT_DEVICE_MINT_SECRET=mint-secret",
                 "TBOT_SERVER_AUTH_KEY=server-secret",
                 "LESSON_ASSET_ORIGIN_BASE=https://assets.example.com",
@@ -469,6 +511,7 @@ def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides,
         "NODE_ENV": "production",
         "TBOT_REQUIRE_DEVICE_TOKEN": "true",
         "JWT_PUBLIC_KEY": "public-key",
+        "TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY": "profile-public-key",
         "TBOT_DEVICE_MINT_SECRET": "mint-secret",
         "TBOT_SERVER_AUTH_KEY": "server-secret",
         "LESSON_ASSET_ORIGIN_BASE": "https://assets.example.com",

@@ -8,6 +8,7 @@ import pytest
 from aiohttp.test_utils import make_mocked_request
 
 from core import http_server as http_module
+from core.api import lesson_sd_fanout_handler as lesson_sd_fanout_handler_module
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.http_server import SimpleHttpServer
 from core.lesson.global_generation_status import (
@@ -35,8 +36,12 @@ class _HeaderMapping:
         return self.value if name == "Client-Id" else default
 
 class _Request:
-    def __init__(self, headers=None):
+    def __init__(self, headers=None, body=None):
         self.headers = headers or {}
+        self.body = body
+
+    async def json(self):
+        return self.body
 
 
 def _config(**server_overrides):
@@ -1128,3 +1133,164 @@ async def test_lesson_sd_pending_status_reports_resolved_backend_ids_only(monkey
     assert body["data"]["onlineDeviceIds"] == ["uuid-1"]
     assert "AA:BB:CC:DD:EE:01" not in response.text
     assert "AA:BB:CC:DD:EE:02" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "generation_env"),
+    [
+        (
+            {"lesson": {"generation_cms_url": "https://cms.example/latest"}},
+            None,
+        ),
+        ({}, "https://cms.example/latest"),
+    ],
+)
+async def test_lesson_sd_fanout_rejects_tracked_legacy_in_global_generation_mode(
+    monkeypatch, config, generation_env
+):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    if generation_env is None:
+        monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+    else:
+        monkeypatch.setenv("LESSON_GENERATION_CMS_URL", generation_env)
+    calls = []
+
+    async def fanout(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"packs": 1, "queued": [], "failed": []}
+
+    monkeypatch.setattr(lesson_sd_fanout_handler_module, "fanout_sd_pack_sync", fanout)
+    handler = LessonSdFanoutHandler(config, {})
+
+    response = await handler.handle_post(
+        _Request(
+            headers={"X-Mint-Secret": "mint"},
+            body={"cacheKey": "lesson/v1-checksum", "callbackMode": "required"},
+        )
+    )
+
+    assert response.status == 409
+    assert json.loads(response.text)["error"] == "LEGACY_FANOUT_DISABLED"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lesson_sd_fanout_allows_exact_no_callback_hil_in_global_mode(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    monkeypatch.setenv("LESSON_GENERATION_CMS_URL", "https://cms.example/latest")
+    calls = []
+
+    async def fanout(*_args, callback_required=True, persist_retry=True, **kwargs):
+        calls.append(
+            {
+                **kwargs,
+                "callback_required": callback_required,
+                "persist_retry": persist_retry,
+            }
+        )
+        return {"packs": 1, "queued": [], "failed": []}
+
+    monkeypatch.setattr(lesson_sd_fanout_handler_module, "fanout_sd_pack_sync", fanout)
+    handler = LessonSdFanoutHandler({}, {})
+
+    response = await handler.handle_post(
+        _Request(
+            headers={"X-Mint-Secret": "mint"},
+            body={"cacheKey": "lesson/v1-checksum", "callbackMode": "none"},
+        )
+    )
+
+    assert response.status == 200
+    assert calls == [
+        {
+            "lesson_id": None,
+            "cache_key": "lesson/v1-checksum",
+            "device_ids": None,
+            "queue_offline": False,
+            "store": handler.pending_store,
+            "online_index": None,
+            "callback_required": False,
+            "persist_retry": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lesson_sd_fanout_requires_exact_cache_key_in_production(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+    calls = []
+
+    async def fanout(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"packs": 1, "queued": [], "failed": []}
+
+    monkeypatch.setattr(lesson_sd_fanout_handler_module, "fanout_sd_pack_sync", fanout)
+    handler = LessonSdFanoutHandler({}, {})
+
+    response = await handler.handle_post(
+        _Request(
+            headers={"X-Mint-Secret": "mint"},
+            body={"lessonId": "lesson", "callbackMode": "required"},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "EXACT_CACHE_KEY_REQUIRED"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lesson_sd_fanout_no_callback_rejects_offline_queue(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+    calls = []
+
+    async def fanout(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"packs": 1, "queued": [], "failed": []}
+
+    monkeypatch.setattr(lesson_sd_fanout_handler_module, "fanout_sd_pack_sync", fanout)
+    handler = LessonSdFanoutHandler({}, {})
+
+    response = await handler.handle_post(
+        _Request(
+            headers={"X-Mint-Secret": "mint"},
+            body={
+                "cacheKey": "lesson/v1-checksum",
+                "callbackMode": "none",
+                "queueOffline": True,
+            },
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "QUEUE_OFFLINE_NOT_ALLOWED"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lesson_sd_fanout_no_callback_requires_exact_cache_key(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+    calls = []
+
+    async def fanout(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"packs": 1, "queued": [], "failed": []}
+
+    monkeypatch.setattr(lesson_sd_fanout_handler_module, "fanout_sd_pack_sync", fanout)
+    handler = LessonSdFanoutHandler({}, {})
+
+    response = await handler.handle_post(
+        _Request(
+            headers={"X-Mint-Secret": "mint"},
+            body={"lessonId": "lesson", "callbackMode": "none"},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "EXACT_CACHE_KEY_REQUIRED"
+    assert calls == []

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from core.lesson import sd_pack_fanout
@@ -68,6 +69,134 @@ async def test_worker_does_not_mutate_pending_when_invoked_drain_raises(monkeypa
     assert result == {"checked": 1, "retried": 0, "skippedOffline": 0}
     assert (await store.load("uuid-1"))["cacheKeys"] == ["lesson-a/v1"]
     assert (await store.load("uuid-1"))["attemptCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_callback_only_without_online_robot_or_mcp(monkeypatch):
+    clock = Clock()
+    store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
+    callback = {
+        "deviceId": "uuid-1",
+        "cacheKey": "lesson-a/v1",
+        "downloadedCount": 1,
+        "skippedCount": 0,
+        "reusedCount": 0,
+        "failedCount": 0,
+        "criticalFailedCount": 0,
+        "ready": True,
+    }
+    await store.mark_callbacks("uuid-1", [callback])
+    clock.epoch += 3
+    callback_calls = []
+
+    async def post_callback(_config, *, result):
+        callback_calls.append(result)
+
+    async def robot_drain(*_args, **_kwargs):
+        raise AssertionError("callback-only retry must not invoke robot MCP sync")
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_callback)
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.drain_pending_for_connection", robot_drain)
+
+    worker = LessonSdRetryWorker(store, LessonSdOnlineIndex(), batch_size=10)
+    result = await worker.run_once()
+
+    assert result == {"checked": 1, "retried": 1, "skippedOffline": 0}
+    assert callback_calls == [callback]
+    assert await store.load("uuid-1") is None
+
+
+@pytest.mark.asyncio
+async def test_worker_attempts_mixed_callback_once_before_robot_work(monkeypatch):
+    clock = Clock()
+    store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
+    callback = {
+        "deviceId": "uuid-1",
+        "cacheKey": "lesson-a/v1",
+        "failedCount": 1,
+        "criticalFailedCount": 1,
+        "ready": False,
+    }
+    await store.mark("uuid-1", {"lesson-a/v1"})
+    await store.mark_callbacks("uuid-1", [callback])
+    clock.epoch += 5
+    callback_calls = []
+    drain_calls = []
+
+    async def post_callback(_config, *, result):
+        callback_calls.append(result["cacheKey"])
+        raise RuntimeError("backend unavailable")
+
+    async def robot_drain(_conn, *, store=None, pending=None, backend_device_id=None):
+        drain_calls.append((backend_device_id, pending))
+        return {"synced": 0}
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_callback)
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.drain_pending_for_connection", robot_drain)
+    index = LessonSdOnlineIndex()
+    index.upsert("uuid-1", SimpleNamespace(name="robot"))
+
+    result = await LessonSdRetryWorker(store, index, batch_size=10).run_once()
+
+    assert result == {"checked": 1, "retried": 1, "skippedOffline": 0}
+    assert callback_calls == ["lesson-a/v1"]
+    assert len(drain_calls) == 1
+    assert drain_calls[0][1]["cacheKeys"] == ["lesson-a/v1"]
+    assert "callbackResults" not in drain_calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_mixed_retry_clears_stale_callback_after_new_robot_result_succeeds(
+    monkeypatch,
+):
+    clock = Clock()
+    store = InMemoryLessonSdPendingStore(clock=clock, random=lambda: 0.0)
+    old_callback = {
+        "deviceId": "uuid-1",
+        "cacheKey": "lesson-a/v1",
+        "downloadedCount": 0,
+        "skippedCount": 0,
+        "reusedCount": 0,
+        "failedCount": 1,
+        "criticalFailedCount": 1,
+        "ready": False,
+    }
+    await store.mark("uuid-1", {"lesson-a/v1"})
+    await store.mark_callbacks("uuid-1", [old_callback])
+    clock.epoch += 5
+    callback_ready_values = []
+
+    async def post_callback(_config, *, result):
+        callback_ready_values.append(result["ready"])
+        if len(callback_ready_values) == 1:
+            request = httpx.Request("POST", "https://backend.test/device-result")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("unavailable", request=request, response=response)
+
+    async def ready_sync(*_args, **_kwargs):
+        return {"ready": True, "criticalFailedCount": 0, "downloadedCount": 1}
+
+    async def robot_drain(conn, *, store=None, pending=None, backend_device_id=None):
+        return await sd_pack_fanout._sync_callback_and_update_pending(
+            conn,
+            conn.config,
+            backend_device_id=backend_device_id,
+            cache_keys=pending["cacheKeys"],
+            only_cache_keys=set(pending["cacheKeys"]),
+            store=store,
+        )
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_callback)
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", ready_sync)
+    monkeypatch.setattr("core.lesson.sd_pack_retry_worker.drain_pending_for_connection", robot_drain)
+    index = LessonSdOnlineIndex()
+    index.upsert("uuid-1", SimpleNamespace(config={}))
+
+    result = await LessonSdRetryWorker(store, index, batch_size=10).run_once()
+
+    assert result == {"checked": 1, "retried": 1, "skippedOffline": 0}
+    assert callback_ready_values == [False, True]
+    assert await store.load("uuid-1") is None
 
 
 @pytest.mark.asyncio
@@ -188,6 +317,7 @@ async def test_worker_start_stop_has_single_lifecycle_task():
 
     await worker.stop()
     assert first.done()
+
 
 @pytest.mark.asyncio
 async def test_worker_loop_survives_claim_due_failure_and_retries_next_tick(monkeypatch, caplog):

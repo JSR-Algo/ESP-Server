@@ -65,6 +65,9 @@ class FakeRedis:
     async def zcard(self, key):
         return len(self.zsets.get(key, {}))
 
+    async def zscore(self, key, member):
+        return self.zsets.get(key, {}).get(member)
+
 class RedisApiOnlyFake:
     def __init__(self):
         self.values = {}
@@ -113,6 +116,9 @@ class RedisApiOnlyFake:
             return members[start:]
         return members[start : start + num]
 
+    async def zscore(self, key, member):
+        return self._zsets.get(key, {}).get(member)
+
 class EvalRedisFake(RedisApiOnlyFake):
     def __init__(self, *, cluster_enabled=0):
         super().__init__()
@@ -128,6 +134,58 @@ class EvalRedisFake(RedisApiOnlyFake):
         keys = args[:numkeys]
         argv = args[numkeys:]
         self.eval_calls.append((numkeys, keys, argv))
+        if "lesson-sd-mark-callbacks" in script:
+            value_key, due_key, created_key = keys
+            device_id = argv[0]
+            additions = json.loads(argv[1])
+            work = json.loads(argv[2])
+            existing = await self.get(value_key)
+            if existing:
+                current = json.loads(existing)
+                work["cacheKeys"] = current.get("cacheKeys", [])
+                work["callbackResults"] = {
+                    **current.get("callbackResults", {}),
+                    **additions,
+                }
+                work["createdAt"] = current.get("createdAt") or work["createdAt"]
+                work["attemptCount"] = int(current.get("attemptCount") or 0) + 1
+            encoded = json.dumps(work, separators=(",", ":"))
+            await self.set(value_key, encoded, ex=int(argv[5]))
+            current_due = float((await self.zscore(due_key, device_id)) or 0.0)
+            await self.zadd(due_key, {device_id: max(current_due, float(argv[3]))})
+            await self.zadd(created_key, {device_id: float(argv[4])})
+            await self.expire(due_key, int(argv[5]))
+            await self.expire(created_key, int(argv[5]))
+            return encoded
+        if "lesson-sd-clear-callbacks" in script:
+            value_key, due_key, created_key = keys
+            device_id = argv[0]
+            clear = set(json.loads(argv[1]))
+            expected = json.loads(argv[2])
+            existing = await self.get(value_key)
+            if not existing:
+                await self.zrem(due_key, device_id)
+                await self.zrem(created_key, device_id)
+                return 0
+            current = json.loads(existing)
+            remaining = {
+                key: result
+                for key, result in current.get("callbackResults", {}).items()
+                if key not in clear or (key in expected and result != expected[key])
+            }
+            if remaining:
+                current["callbackResults"] = remaining
+            else:
+                current.pop("callbackResults", None)
+            if not current.get("cacheKeys") and not remaining:
+                await self.delete(value_key)
+                await self.zrem(due_key, device_id)
+                await self.zrem(created_key, device_id)
+            else:
+                await self.set(value_key, json.dumps(current, separators=(",", ":")), ex=int(argv[3]))
+                await self.expire(due_key, int(argv[3]))
+                await self.expire(created_key, int(argv[3]))
+            return 1
         if "return encoded" in script:
             value_key, due_key, created_key = keys
             device_id = argv[0]
@@ -137,6 +195,8 @@ class EvalRedisFake(RedisApiOnlyFake):
             if existing:
                 current = json.loads(existing)
                 work["cacheKeys"] = sorted({*current.get("cacheKeys", []), *cache_keys})
+                if current.get("callbackResults"):
+                    work["callbackResults"] = current["callbackResults"]
                 work["createdAt"] = current.get("createdAt") or work["createdAt"]
                 work["attemptCount"] = int(current.get("attemptCount") or 0) + 1
             encoded = json.dumps(work, separators=(",", ":"))
@@ -176,9 +236,15 @@ class EvalRedisFake(RedisApiOnlyFake):
         remaining = [key for key in current_keys if key not in clear]
         if not remaining:
             if not expected or current_keys == expected:
-                await self.delete(value_key)
-                await self.zrem(due_key, device_id)
-                await self.zrem(created_key, device_id)
+                if current.get("callbackResults"):
+                    current["cacheKeys"] = []
+                    await self.set(value_key, json.dumps(current, separators=(",", ":")), ex=int(argv[3]))
+                    await self.expire(due_key, int(argv[3]))
+                    await self.expire(created_key, int(argv[3]))
+                else:
+                    await self.delete(value_key)
+                    await self.zrem(due_key, device_id)
+                    await self.zrem(created_key, device_id)
         else:
             current["cacheKeys"] = remaining
             await self.set(value_key, json.dumps(current, separators=(",", ":")), ex=int(argv[3]))
@@ -193,6 +259,132 @@ class Clock:
 
     def __call__(self):
         return self.epoch
+
+
+CALLBACK_RESULT_A = {
+    "cacheKey": "lesson-a/v1",
+    "deviceId": "dev-1",
+    "ready": True,
+    "fileCount": 12,
+}
+
+CALLBACK_RESULT_B = {
+    "cacheKey": "lesson-b/v1",
+    "deviceId": "dev-1",
+    "ready": False,
+    "errorCode": "ASSET_MISSING",
+}
+
+
+@pytest.mark.asyncio
+async def test_memory_callback_results_are_keyed_and_removed_independently_from_robot_work():
+    store = InMemoryLessonSdPendingStore(
+        clock=Clock(1_700_000_000),
+        random=lambda: 0.0,
+    )
+    await store.mark("dev-1", {"lesson-a/v1"})
+
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A, CALLBACK_RESULT_B])
+    await store.clear("dev-1", {"lesson-a/v1"})
+
+    pending = await store.load("dev-1")
+    assert pending["cacheKeys"] == []
+    assert pending["callbackResults"] == {
+        "lesson-a/v1": CALLBACK_RESULT_A,
+        "lesson-b/v1": CALLBACK_RESULT_B,
+    }
+
+    await store.clear_callbacks("dev-1", {"lesson-a/v1"})
+    assert (await store.load("dev-1"))["callbackResults"] == {
+        "lesson-b/v1": CALLBACK_RESULT_B,
+    }
+    await store.clear_callbacks("dev-1", {"lesson-b/v1"})
+    assert await store.load("dev-1") is None
+
+
+@pytest.mark.asyncio
+async def test_clear_callbacks_cas_preserves_newer_result_for_same_cache_key():
+    store = InMemoryLessonSdPendingStore(random=lambda: 0.0)
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+    newer = {**CALLBACK_RESULT_A, "downloadedCount": 9}
+    await store.mark_callbacks("dev-1", [newer])
+
+    await store.clear_callbacks(
+        "dev-1",
+        {"lesson-a/v1"},
+        expected_results={"lesson-a/v1": CALLBACK_RESULT_A},
+    )
+
+    assert (await store.load("dev-1"))["callbackResults"] == {
+        "lesson-a/v1": newer
+    }
+
+
+@pytest.mark.asyncio
+async def test_mark_callbacks_does_not_shorten_active_claim_lease():
+    clock = Clock(1_700_000_000)
+    store = InMemoryLessonSdPendingStore(
+        clock=clock,
+        random=lambda: 0.0,
+        lease_sec=60,
+    )
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+    clock.epoch += 2
+    assert await store.claim_due(limit=1) == ["dev-1"]
+    leased_until = (await store.load("dev-1"))["nextAttemptAt"]
+
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+
+    assert (await store.load("dev-1"))["nextAttemptAt"] == leased_until
+    assert await store.claim_due(limit=1) == []
+
+
+@pytest.mark.asyncio
+async def test_redis_loads_legacy_work_without_adding_empty_callback_results():
+    redis = FakeRedis()
+    redis.values["ns:lesson-sd-pending:dev-1"] = json.dumps(
+        {
+            "cacheKeys": ["lesson-a/v1"],
+            "attemptCount": 2,
+            "createdAt": "2023-11-14T22:13:20Z",
+            "nextAttemptAt": "2023-11-14T22:13:22Z",
+        }
+    )
+    store = RedisLessonSdPendingStore(redis, namespace="ns")
+
+    assert await store.load("dev-1") == {
+        "cacheKeys": ["lesson-a/v1"],
+        "attemptCount": 2,
+        "createdAt": "2023-11-14T22:13:20Z",
+        "nextAttemptAt": "2023-11-14T22:13:22Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_redis_robot_mark_and_clear_preserve_callback_results_without_lua():
+    redis = FakeRedis()
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(
+        redis,
+        namespace="ns",
+        ttl_sec=123,
+        clock=clock,
+        random=lambda: 0.0,
+    )
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+    await store.mark("dev-1", {"lesson-b/v1"})
+    await store.clear("dev-1", {"lesson-b/v1"})
+
+    assert await store.load("dev-1") == {
+        "cacheKeys": [],
+        "callbackResults": {"lesson-a/v1": CALLBACK_RESULT_A},
+        "attemptCount": 2,
+        "createdAt": "2023-11-14T22:13:20Z",
+        "nextAttemptAt": "2023-11-14T22:13:22Z",
+    }
+
+    await store.clear_callbacks("dev-1", {"lesson-a/v1"})
+    assert await store.load("dev-1") is None
 
 
 @pytest.mark.asyncio
@@ -365,3 +557,59 @@ async def test_redis_lua_scripts_cover_mark_claim_partial_and_final_clear():
     )
     assert redis.eval_calls[1][1] == ("ns:lesson-sd-pending:due",)
     assert redis.info_calls == ["cluster"]
+
+
+@pytest.mark.asyncio
+async def test_redis_lua_robot_operations_preserve_callback_results():
+    redis = EvalRedisFake(cluster_enabled=0)
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(
+        redis,
+        namespace="ns",
+        ttl_sec=123,
+        clock=clock,
+        random=lambda: 0.0,
+    )
+
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+    clock.epoch += 2
+    await store.mark("dev-1", {"lesson-b/v1"})
+    await store.clear("dev-1", {"lesson-b/v1"})
+
+    pending = await store.load("dev-1")
+    assert pending["cacheKeys"] == []
+    assert pending["callbackResults"] == {"lesson-a/v1": CALLBACK_RESULT_A}
+
+    await store.clear_callbacks("dev-1", {"lesson-a/v1"})
+    assert await store.load("dev-1") is None
+    assert [call[0] for call in redis.eval_calls] == [3, 3, 3, 3]
+
+
+@pytest.mark.asyncio
+async def test_redis_lua_callback_cas_and_requeue_preserve_active_lease():
+    redis = EvalRedisFake(cluster_enabled=0)
+    clock = Clock(1_700_000_000)
+    store = RedisLessonSdPendingStore(
+        redis,
+        namespace="ns",
+        lease_sec=60,
+        clock=clock,
+        random=lambda: 0.0,
+    )
+    await store.mark_callbacks("dev-1", [CALLBACK_RESULT_A])
+    clock.epoch += 2
+    assert await store.claim_due(limit=1) == ["dev-1"]
+    lease_score = redis._zsets["ns:lesson-sd-pending:due"]["dev-1"]
+
+    newer = {**CALLBACK_RESULT_A, "downloadedCount": 9}
+    await store.mark_callbacks("dev-1", [newer])
+    await store.clear_callbacks(
+        "dev-1",
+        {"lesson-a/v1"},
+        expected_results={"lesson-a/v1": CALLBACK_RESULT_A},
+    )
+
+    assert redis._zsets["ns:lesson-sd-pending:due"]["dev-1"] == lease_score
+    assert (await store.load("dev-1"))["callbackResults"] == {
+        "lesson-a/v1": newer
+    }

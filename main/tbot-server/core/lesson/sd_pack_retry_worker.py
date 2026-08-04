@@ -9,7 +9,7 @@ from contextlib import suppress
 from typing import Any
 
 from config.device_token_client import resolve_device_identity
-from core.lesson.sd_pack_fanout import drain_pending_for_connection
+from core.lesson.sd_pack_fanout import drain_pending_for_connection, retry_pending_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +132,28 @@ class LessonSdRetryWorker:
         checked = retried = skipped = 0
         for backend_device_id in due_ids:
             checked += 1
+            pending = await self.store.load(backend_device_id)
+            if pending is None:
+                continue
+            callback_results = pending.get("callbackResults") or {}
+            if callback_results:
+                callback_result = await retry_pending_callbacks(
+                    {"lesson": {"api_base": self.online_index.api_base}},
+                    backend_device_id=backend_device_id,
+                    pending=pending,
+                    store=self.store,
+                )
+                pending = await self.store.load(backend_device_id)
+                if pending is None or not pending.get("cacheKeys"):
+                    if not callback_result.get("callbackRetainedCacheKeys"):
+                        retried += 1
+                    continue
+                # The callback was already attempted in this iteration; drain only robot work.
+                pending = dict(pending)
+                pending.pop("callbackResults", None)
             conn = self.online_index.get(backend_device_id)
             if conn is None or not self._is_still_online(conn):
                 skipped += 1
-                continue
-            pending = await self.store.load(backend_device_id)
-            if pending is None:
                 continue
             try:
                 await drain_pending_for_connection(
