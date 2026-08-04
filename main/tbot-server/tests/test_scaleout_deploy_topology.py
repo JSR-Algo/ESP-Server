@@ -386,8 +386,7 @@ def test_deploy_vps_preflight_rejects_sd_limits_below_farm_v7_minimum(
         ],
         cwd=REPO_ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 
@@ -432,8 +431,7 @@ def test_deploy_vps_preflight_accepts_farm_v7_minimum_env_overrides(tmp_path):
         ],
         cwd=REPO_ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 
@@ -481,8 +479,7 @@ def test_deploy_vps_preflight_accepts_multiline_single_quoted_public_key(tmp_pat
         ],
         cwd=REPO_ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 

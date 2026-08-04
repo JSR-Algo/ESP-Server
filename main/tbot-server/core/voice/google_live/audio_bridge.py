@@ -17,7 +17,7 @@ import time
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
-from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS
+from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS  # noqa: E402
 
 
 EMOTION_EMOJI = {

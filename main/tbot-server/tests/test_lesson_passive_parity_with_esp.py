@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as runtime_fixtures
 import test_lesson_runtime_branch_gaps as cinematic_fixtures
+
 from core.lesson.flattened_cinematic_contract import project_flattened_cinematic_phase
 
 

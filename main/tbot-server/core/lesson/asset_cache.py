@@ -149,10 +149,10 @@ class AssetState:
         self.visual_refs: Any = asset.get("visualRefs")
         self.derivative_id: Optional[str] = asset.get("derivativeId")
         self.phase_id: Optional[str] = asset.get("phaseId")
-        self.cue_id: Optional[str] = asset.get("cueId")
-        self.effect: Optional[str] = asset.get("effect")
-        self.step_key: Optional[str] = asset.get("stepKey")
-        self.playback_mode: Optional[str] = asset.get("playbackMode")
+        self.cue_id: str | None = asset.get("cueId")
+        self.effect: str | None = asset.get("effect")
+        self.step_key: str | None = asset.get("stepKey")
+        self.playback_mode: str | None = asset.get("playbackMode")
         try:
             validate_renderer_v3_shared_mp4(asset)
             self.renderer_v3_mp4 = True

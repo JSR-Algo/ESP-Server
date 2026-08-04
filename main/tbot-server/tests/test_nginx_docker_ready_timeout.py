@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 TESTS_DIR = Path(__file__).resolve().parent
 DOCKER_READY_MODULES = [
     TESTS_DIR / "test_nginx_generation_cache_runtime.py",

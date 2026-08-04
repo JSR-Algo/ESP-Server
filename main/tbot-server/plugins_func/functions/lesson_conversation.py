@@ -10,7 +10,6 @@ from typing import Any
 from core.lesson.conversation_contract import ConversationContractError, LessonToolIdentity
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
-
 _GOOGLE_LIVE_LESSON_ADMISSION = ContextVar("google_live_lesson_admission", default=None)
 
 

@@ -12,11 +12,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as legacy
+from test_lesson_conversation_runtime import _backend_manifest
+
 from core.lesson.conversation_contract import LessonToolIdentity
 from core.lesson.errors import LESSON_FRAME_ACK_TIMEOUT, LessonError
 from core.lesson.flattened_cinematic_contract import trgb_container_bytes
 from core.lesson.runtime import (
-    LessonRuntime,
     MAX_RETIRED_CONVERSATION_ACK_SEQUENCES,
     RENDERER_V4,
     S_COMPLETED,
@@ -24,10 +25,8 @@ from core.lesson.runtime import (
     S_IDLE,
     S_PAUSED,
     S_RUNNING,
+    LessonRuntime,
 )
-
-from test_lesson_conversation_runtime import _backend_manifest
-
 
 _DURATIONS = {
     "opening": 9500,

@@ -23,7 +23,6 @@ from plugins_func.functions.lesson_conversation import (
 from plugins_func.register import Action, ActionResponse
 from scripts import google_live_robot_soak
 
-
 LESSON_TOOL_NAMES = {
     "lesson_child_response",
     "lesson_pronunciation_outcome",
@@ -98,7 +97,7 @@ class _Conn:
     def clear_queues(self):
         pass
 
-    def clearSpeakStatus(self):
+    def clearSpeakStatus(self):  # noqa: N802 - mirrors the production connection API.
         pass
 
 

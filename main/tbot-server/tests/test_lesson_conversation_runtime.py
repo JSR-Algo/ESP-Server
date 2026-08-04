@@ -142,7 +142,7 @@ def _runtime() -> LessonConversationRuntime:
 
 
 def test_speaking_evidence_has_exact_private_safe_fields_and_types() -> None:
-    SpeakingEvidence = conversation_runtime.SpeakingEvidence
+    SpeakingEvidence = conversation_runtime.SpeakingEvidence  # noqa: N806 - class alias under test.
     evidence = SpeakingEvidence(
         outcome="mastered",
         attempt_count=1,

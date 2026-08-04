@@ -1102,13 +1102,13 @@ class LessonRuntime:
         self._preload_task: Optional[asyncio.Task] = None
         self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
-        self._frame_ack_timeout_sequence: Optional[int] = None
-        self._frame_ack_retry_task: Optional[asyncio.Task] = None
-        self._frame_ack_retry_command_sequence: Optional[int] = None
+        self._frame_ack_timeout_sequence: int | None = None
+        self._frame_ack_retry_task: asyncio.Task | None = None
+        self._frame_ack_retry_command_sequence: int | None = None
         self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
         self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
         self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
-        self._retired_conversation_ack_sequences: Dict[int, Dict[str, Any]] = {}
+        self._retired_conversation_ack_sequences: dict[int, dict[str, Any]] = {}
         self._visual_generation = 1
         self._current_visual_request: Optional[Dict[str, Any]] = None
         self._visual_transition_task: Optional[asyncio.Task] = None
@@ -1143,26 +1143,26 @@ class LessonRuntime:
         self._cinematic_cancel_sent = False
         self._cinematic_pending_command: Optional[Dict[str, Any]] = None
         self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
-        self._conversation_cues: Dict[str, Dict[str, Any]] = {}
+        self._conversation_cues: dict[str, dict[str, Any]] = {}
         self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
-        self._conversation_pending_visual: Optional[Dict[str, Any]] = None
-        self._conversation_visual_ack: Optional[tuple[str, str]] = None
+        self._conversation_pending_visual: dict[str, Any] | None = None
+        self._conversation_visual_ack: tuple[str, str] | None = None
         self._conversation_progress_forwarded: set[str] = set()
-        self._conversation_started_at: Optional[float] = None
-        self._conversation_fallback_window_id: Optional[str] = None
-        self._conversation_fallback_turn_sequence_id: Optional[int] = None
-        self._conversation_fallback_ack_future: Optional[asyncio.Future[bool]] = None
-        self._conversation_fallback_ack_sequence: Optional[int] = None
-        self._conversation_fallback_ack_cue_id: Optional[str] = None
-        self._conversation_fallback_ack_attempt_id: Optional[str] = None
+        self._conversation_started_at: float | None = None
+        self._conversation_fallback_window_id: str | None = None
+        self._conversation_fallback_turn_sequence_id: int | None = None
+        self._conversation_fallback_ack_future: asyncio.Future[bool] | None = None
+        self._conversation_fallback_ack_sequence: int | None = None
+        self._conversation_fallback_ack_cue_id: str | None = None
+        self._conversation_fallback_ack_attempt_id: str | None = None
         self._conversation_fallback_ack_expired = False
-        self._conversation_fallback_prompt_authorization: Optional[str] = None
+        self._conversation_fallback_prompt_authorization: str | None = None
         self._conversation_fallback_prompt_claimed = False
         self._clock = time.monotonic
-        self.conversation: Optional[LessonConversationRuntime] = None
+        self.conversation: LessonConversationRuntime | None = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1245,7 +1245,7 @@ class LessonRuntime:
                 validate_flattened_cinematic_manifest(self.manifest)
             except FlattenedCinematicContractError as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
-                raise self.last_error
+                raise self.last_error from exc
             self._conversation_contract_valid = self._validate_conversation_contracts()
             if self.manifest.get("conversation") is not None and not self._conversation_contract_valid:
                 self.last_error = LessonError(
@@ -1518,7 +1518,7 @@ class LessonRuntime:
         self.conversation = conversation
         self._conversation_started_at = self._clock()
 
-    def conversation_tool_context(self) -> Optional[Dict[str, Any]]:
+    def conversation_tool_context(self) -> dict[str, Any] | None:
         conversation = self.conversation
         if conversation is None or conversation.attempt_id is None:
             return None
@@ -1636,7 +1636,7 @@ class LessonRuntime:
             return inactive_conversation_decision()
         return await self.conversation_interrupt(conversation.identity())
 
-    def _conversation_authority_token(self) -> Optional[tuple[Any, ...]]:
+    def _conversation_authority_token(self) -> tuple[Any, ...] | None:
         conversation = self.conversation
         if (
             conversation is None
@@ -2173,7 +2173,7 @@ class LessonRuntime:
         self._cancel_frame_ack_retry(sequence)
 
     def _retire_conversation_ack_sequence(
-        self, sequence: int, frame: Dict[str, Any]
+        self, sequence: int, frame: dict[str, Any]
     ) -> None:
         command = self._cinematic_frame_command(frame)
         conversation_prepare = bool(
@@ -2291,7 +2291,7 @@ class LessonRuntime:
                 f"{type(notify_exc).__name__}",
             )
 
-    async def _on_conversation_visual_acked(self, frame: Dict[str, Any]) -> None:
+    async def _on_conversation_visual_acked(self, frame: dict[str, Any]) -> None:
         pending = self._conversation_pending_visual
         command = self._cinematic_frame_command(frame)
         if not isinstance(pending, dict) or not isinstance(command, dict):
@@ -2325,7 +2325,7 @@ class LessonRuntime:
             if token is not None:
                 await self._complete_conversation_step(token)
 
-    async def _on_conversation_visual_prepared(self, frame: Dict[str, Any]) -> bool:
+    async def _on_conversation_visual_prepared(self, frame: dict[str, Any]) -> bool:
         pending = self._conversation_pending_visual
         command = self._cinematic_frame_command(frame)
         if not isinstance(pending, dict) or not isinstance(command, dict):
@@ -2540,7 +2540,7 @@ class LessonRuntime:
             return None
         return command
 
-    def _cinematic_identity_payload(self) -> Dict[str, str]:
+    def _cinematic_identity_payload(self) -> dict[str, str]:
         phase = self._cinematic_phase
         if not isinstance(phase, dict):
             return {}
@@ -2572,7 +2572,7 @@ class LessonRuntime:
         )
 
     def _cinematic_ack_payload_matches(
-        self, command: Dict[str, Any], ack_body: Dict[str, Any]
+        self, command: dict[str, Any], ack_body: dict[str, Any]
     ) -> bool:
         ack = ack_body.get("cinematicPhase")
         if not isinstance(ack, dict):
@@ -2609,10 +2609,10 @@ class LessonRuntime:
 
     def _retired_conversation_ack_matches(
         self,
-        msg_json: Dict[str, Any],
-        body: Dict[str, Any],
+        msg_json: dict[str, Any],
+        body: dict[str, Any],
         acked: int,
-        retired: Dict[str, Any],
+        retired: dict[str, Any],
     ) -> bool:
         command = retired.get("command")
         return bool(
@@ -4126,7 +4126,7 @@ class LessonRuntime:
     async def _fail_frame_ack_retry_send(
         self,
         frame_type: str,
-        step_id: Optional[str],
+        step_id: str | None,
         sequence: int,
         exc: BaseException,
     ) -> None:
@@ -4165,7 +4165,7 @@ class LessonRuntime:
                 f"{type(notify_exc).__name__}",
             )
 
-    def _cancel_frame_ack_timeout(self, sequence: Optional[int] = None) -> None:
+    def _cancel_frame_ack_timeout(self, sequence: int | None = None) -> None:
         if sequence is not None and self._frame_ack_timeout_sequence != sequence:
             return
         task = self._frame_ack_timeout_task
@@ -4178,7 +4178,7 @@ class LessonRuntime:
         ):
             task.cancel()
 
-    def _cancel_frame_ack_retry(self, command_sequence: Optional[int] = None) -> None:
+    def _cancel_frame_ack_retry(self, command_sequence: int | None = None) -> None:
         if (
             command_sequence is not None
             and self._frame_ack_retry_command_sequence != command_sequence
