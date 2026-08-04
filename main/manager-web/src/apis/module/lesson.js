@@ -82,6 +82,95 @@ function validNullableChecksum(value) {
   return value === null || (typeof value === 'string' && CHECKSUM_PATTERN.test(value));
 }
 
+const DEVICE_AVAILABILITY = new Set(['available', 'already_assigned', 'busy']);
+const ACTIVE_ASSIGNMENT_STATES = new Set(['ASSIGNED', 'PRELOADING', 'READY', 'RUNNING', 'PAUSED']);
+
+function normalizeEligibleDevice(raw) {
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+  if (!r || typeof r.deviceId !== 'string' || !r.deviceId
+    || !DEVICE_AVAILABILITY.has(r.availability)) {
+    throw new Error('INVALID_ELIGIBLE_DEVICES_RESPONSE');
+  }
+  const current = r.currentAssignment;
+  let currentAssignment = null;
+  if (current !== null && current !== undefined) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)
+      || typeof current.assignmentId !== 'string' || !current.assignmentId
+      || typeof current.childId !== 'string' || !current.childId
+      || typeof current.lessonId !== 'string' || !current.lessonId
+      || !validPositiveSafeInteger(Number(current.lessonVersion))
+      || !ACTIVE_ASSIGNMENT_STATES.has(current.state)
+      || !validPositiveSafeInteger(Number(current.assignmentVersion))) {
+      throw new Error('INVALID_ELIGIBLE_DEVICES_RESPONSE');
+    }
+    currentAssignment = {
+      assignmentId: current.assignmentId,
+      childId: current.childId,
+      lessonId: current.lessonId,
+      lessonTitle: typeof current.lessonTitle === 'string' ? current.lessonTitle : '',
+      lessonVersion: Number(current.lessonVersion),
+      state: current.state,
+      assignmentVersion: Number(current.assignmentVersion),
+      createdAt: current.createdAt || null,
+    };
+  }
+  if (r.availability === 'available' && currentAssignment) {
+    throw new Error('INVALID_ELIGIBLE_DEVICES_RESPONSE');
+  }
+  if (r.availability !== 'available' && !currentAssignment) {
+    throw new Error('INVALID_ELIGIBLE_DEVICES_RESPONSE');
+  }
+  return {
+    deviceId: r.deviceId,
+    serialNumber: r.serialNumber || '',
+    displayName: r.displayName || r.serialNumber || r.deviceId,
+    firmwareVersion: r.firmwareVersion || '',
+    availability: r.availability,
+    currentAssignment,
+  };
+}
+
+export function normalizeEligibleDevicesResponse(raw) {
+  const payload = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  if (!Array.isArray(payload.devices)) {
+    throw new Error('INVALID_ELIGIBLE_DEVICES_RESPONSE');
+  }
+  return payload.devices.map(normalizeEligibleDevice);
+}
+
+export function normalizeAssignmentResponse(raw) {
+  const payload = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const assignment = payload.assignment;
+  if (!assignment || typeof assignment !== 'object' || Array.isArray(assignment)
+    || typeof assignment.assignmentId !== 'string' || !assignment.assignmentId
+    || !validPositiveSafeInteger(Number(assignment.assignmentVersion))
+    || typeof assignment.deviceId !== 'string' || !assignment.deviceId
+    || typeof assignment.childId !== 'string' || !assignment.childId
+    || typeof assignment.lessonId !== 'string' || !assignment.lessonId
+    || !validPositiveSafeInteger(Number(assignment.lessonVersion))
+    || assignment.profile !== 'espTft'
+    || !ACTIVE_ASSIGNMENT_STATES.has(assignment.state)
+    || !validNullableTimestamp(assignment.createdAt ?? null)
+    || typeof payload.created !== 'boolean') {
+    throw new Error('INVALID_ASSIGNMENT_RESPONSE');
+  }
+  return {
+    assignment: {
+      assignmentId: assignment.assignmentId,
+      assignmentVersion: Number(assignment.assignmentVersion || 0),
+      deviceId: assignment.deviceId,
+      childId: assignment.childId,
+      lessonId: assignment.lessonId,
+      lessonTitle: assignment.lessonTitle || '',
+      lessonVersion: Number(assignment.lessonVersion),
+      profile: assignment.profile,
+      state: assignment.state || '',
+      createdAt: assignment.createdAt || null,
+    },
+    created: payload.created,
+  };
+}
+
 export function normalizeLessonAssetGenerationStatus(buildPayload, cmsPayload, espPayload) {
   const build = buildPayload && buildPayload.data ? buildPayload.data : buildPayload;
   const cms = cmsPayload && cmsPayload.data ? cmsPayload.data : cmsPayload;
@@ -326,6 +415,30 @@ export default {
     });
   },
 
+  eligibleDevices({ childId, lessonId, lessonVersion }, onSuccess, onError) {
+    const qs = [
+      `childId=${encodeURIComponent(childId)}`,
+      `lessonId=${encodeURIComponent(lessonId)}`,
+      `lessonVersion=${encodeURIComponent(String(lessonVersion))}`,
+    ].join('&');
+    nestRequest({
+      url: `${getNestUrl()}/lesson-assignments/eligible-devices?${qs}`,
+      method: 'GET',
+      onSuccess: (payload) => onSuccess(normalizeEligibleDevicesResponse(payload)),
+      onError,
+    });
+  },
+
+  createAssignment(data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lesson-assignments`,
+      method: 'POST',
+      data,
+      onSuccess: (payload) => onSuccess(normalizeAssignmentResponse(payload)),
+      onError,
+    });
+  },
+
   // POST /v1/admin/courses/:courseId/lessons { lessonKey, title, locale, ageBand }
   createLesson(courseId, data, onSuccess, onError) {
     nestRequest({
@@ -398,7 +511,22 @@ export default {
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/new-version`,
       method: 'POST',
-      onSuccess: (p) => onSuccess(normalizeLesson(p)),
+      onSuccess: (payload) => {
+        const raw = payload && !Array.isArray(payload) && typeof payload === 'object' ? payload : {};
+        const rawLessonId = raw.id ?? raw.lesson_id ?? raw.lessonId;
+        const rawLessonVersion = raw.lesson_version ?? raw.lessonVersion;
+        if (typeof rawLessonId !== 'string' || !rawLessonId.trim()
+          || raw.status !== 'draft'
+          || !Number.isSafeInteger(rawLessonVersion) || rawLessonVersion < 1) {
+          if (onError) onError('Next-version response violated the backend contract.', {
+            status: 200,
+            contract: true,
+            code: 'INVALID_NEXT_VERSION_RESPONSE',
+          });
+          return;
+        }
+        if (onSuccess) onSuccess(normalizeLesson(raw));
+      },
       onError,
     });
   },

@@ -18,6 +18,9 @@
       </div>
       <div class="right-operations" v-if="lesson">
         <el-button v-if="isDraft" size="small" @click="openRename">{{ $t('lesson.rename') }}</el-button>
+        <el-button v-if="lesson.status === 'published'" data-testid="create-next-version" type="primary" size="small" @click="createNextVersion" :loading="creatingNextVersion" :disabled="creatingNextVersion">
+          {{ $t('lesson.createNextVersion') }}
+        </el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
         <el-button v-if="lessonCapabilities.exactEspTftPreview" size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
@@ -669,6 +672,7 @@ export default {
       previewing: false,
       previewProofVersion: -1,
       publishing: false,
+      creatingNextVersion: false,
       publishPreparing: false,
       publishReviewVisible: false,
       publishReviewSnapshot: null,
@@ -1125,6 +1129,34 @@ export default {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
       return 'warning';
+    },
+    createNextVersion() {
+      if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
+      const publishedLessonId = this.lesson.lessonId;
+      const publishedLessonVersion = Number(this.lesson.lessonVersion);
+      this.creatingNextVersion = true;
+      Api.lesson.createNextVersion(
+        publishedLessonId,
+        (draft) => {
+          this.creatingNextVersion = false;
+          if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
+            || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
+            || !Number.isSafeInteger(draft.lessonVersion) || draft.lessonVersion <= publishedLessonVersion) {
+            this.$message.error(this.$t('lesson.nextVersionInvalid'));
+            return;
+          }
+          this.$message.success(this.$t('lesson.nextVersionCreated'));
+          this.$router.replace({
+            path: this.$route.path,
+            query: { ...this.$route.query, lessonId: draft.lessonId },
+          });
+        },
+        (message) => {
+          this.creatingNextVersion = false;
+          this.$message.error(message || this.$t('lesson.nextVersionFailed'));
+        },
+      );
+      return true;
     },
     formatTVideoJourneyError(message, response) {
       const body = response && (response.data || (response.response && response.response.data));

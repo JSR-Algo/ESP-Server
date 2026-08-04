@@ -1,0 +1,163 @@
+/**
+ * check-course-taxonomy-browser.mjs
+ *
+ * Real-browser proof that the lesson metadata form warns an author when the
+ * age band they chose leaves the assignment age gate UNENFORCED.
+ *
+ * The backend gate fails open on a band with no parseable leading integer
+ * (`assertChildMeetsAgeBand` -> `if (minAge === null) return;`), so a typo like
+ * 'K-2' silently removes the age restriction. check-course-taxonomy.cjs pins
+ * the parse + template wiring statically; this drives the mounted component in
+ * Chromium and asserts the warning actually RENDERS and clears reactively.
+ *
+ * Mutations that would turn this red:
+ *  - Removing the v-if warning from CourseLessons.vue -> unenforcedVisible false.
+ *  - Making ageBandSeverity return 'custom' for unparseable bands -> severity assert fails.
+ *  - Reverting the create-dialog default to '6-8'/'en' -> defaults assert fails.
+ */
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import WebSocket from 'ws';
+
+const managerRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
+const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.ico': 'image/x-icon' };
+let temp; let server; let chrome; let socket;
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null) return;
+  child.kill('SIGTERM');
+  await Promise.race([new Promise((r) => child.once('exit', r)), new Promise((r) => setTimeout(r, 1500))]);
+  if (child.exitCode === null) child.kill('SIGKILL');
+}
+async function waitForFile(path) {
+  for (let i = 0; i < 200; i += 1) {
+    if (existsSync(path)) return readFileSync(path, 'utf8');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`timeout: ${path}`);
+}
+
+try {
+  temp = await mkdtemp(join(tmpdir(), 'tbot-course-taxonomy-'));
+  const buildDir = join(temp, 'build');
+  const profileDir = join(temp, 'chrome');
+  await mkdir(profileDir, { recursive: true });
+
+  const build = spawnSync(
+    process.execPath,
+    [
+      join(managerRoot, 'node_modules/@vue/cli-service/bin/vue-cli-service.js'),
+      'build', '--dest', buildDir, '--no-clean',
+      join(managerRoot, 'tests/browser/course-taxonomy-main.js'),
+    ],
+    { cwd: managerRoot, encoding: 'utf8', timeout: 180000 },
+  );
+  assert.equal(build.status, 0, `mounted harness build failed:\n${build.stdout}\n${build.stderr}`);
+
+  server = createServer((request, response) => {
+    const requestPath = request.url.split('?')[0];
+    const path = normalize(join(buildDir, requestPath === '/' ? 'index.html' : requestPath));
+    if (!path.startsWith(buildDir)) { response.writeHead(403).end(); return; }
+    try {
+      const body = readFileSync(path);
+      response.writeHead(200, { 'content-type': mime[extname(path)] || 'application/octet-stream' }).end(body);
+    } catch { response.writeHead(404).end(); }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  const chromeBin = [
+    process.env.CHROME_BIN,
+    join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean).find(existsSync);
+  assert.ok(chromeBin, 'Chromium is required');
+
+  chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
+  const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
+  const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((r) => r.json());
+  socket = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+
+  let id = 0;
+  const pending = new Map();
+  const runtimeErrors = [];
+  socket.on('message', (raw) => {
+    const message = JSON.parse(raw);
+    if (message.method === 'Runtime.exceptionThrown') {
+      runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
+    }
+    if (message.id && pending.has(message.id)) {
+      const p = pending.get(message.id);
+      pending.delete(message.id);
+      message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result);
+    }
+  });
+  const cdp = (method, params = {}) => new Promise((resolve, reject) => {
+    const commandId = ++id;
+    pending.set(commandId, { resolve, reject });
+    socket.send(JSON.stringify({ id: commandId, method, params }));
+  });
+  const evaluate = async (expression) => {
+    const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+    return result.result.value;
+  };
+
+  await cdp('Page.enable');
+  await cdp('Runtime.enable');
+  await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
+  for (let i = 0; i < 200 && !(await evaluate('Boolean(window.__COURSE_TAXONOMY_READY__)')); i += 1) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(await evaluate('Boolean(window.__COURSE_TAXONOMY_READY__)'), 'harness did not become ready');
+
+  // 1. The create dialog must default to values that exist in the seeded content.
+  const defaults = await evaluate('window.__OPEN_CREATE__()');
+  assert.equal(defaults.ageBand, '4-6', `create dialog must default to the seeded band, got ${defaults.ageBand}`);
+  assert.equal(defaults.locale, 'en-US', `create dialog must default to the seeded locale, got ${defaults.locale}`);
+
+  // 2. A canonical band is enforced and shows no warning.
+  const canonical = await evaluate("window.__SET_AGE_BAND__('4-6')");
+  assert.equal(canonical.severity, 'ok');
+  assert.equal(canonical.minimum, 4);
+  assert.equal(canonical.unenforcedVisible, false, 'canonical band must not warn');
+
+  // 3. An unparseable band must RENDER the child-safety warning.
+  for (const band of ['K-2', 'all ages', 'mẫu giáo', '']) {
+    const unenforced = await evaluate(`window.__SET_AGE_BAND__(${JSON.stringify(band)})`);
+    assert.equal(unenforced.severity, 'unenforced', `${band} must be classified unenforced`);
+    assert.equal(unenforced.minimum, null, `${band} must have no parseable minimum`);
+    assert.equal(
+      unenforced.unenforcedVisible,
+      true,
+      `${band} leaves the assignment age gate unenforced and MUST render the warning`,
+    );
+    assert.match(
+      unenforced.warningText,
+      /NOT be enforced|KHÔNG được áp dụng/,
+      `${band} warning must state the gate will not be enforced`,
+    );
+  }
+
+  // 4. The warning clears reactively once a valid band is chosen again.
+  // '5-7' is parseable but NOT in AGE_BANDS -> 'custom' (an author's own band).
+  const recovered = await evaluate("window.__SET_AGE_BAND__('5-7')");
+  assert.equal(recovered.severity, 'custom', 'parseable non-canonical band is custom, not unenforced');
+  assert.equal(recovered.minimum, 5);
+  assert.equal(recovered.unenforcedVisible, false, 'warning must clear when a parseable band is chosen');
+  assert.equal(recovered.customVisible, true, 'custom band must explain the minimum it enforces');
+
+  assert.deepEqual(runtimeErrors, [], `page runtime errors: ${runtimeErrors.join('\n')}`);
+  console.log('check-course-taxonomy-browser: OK');
+} finally {
+  if (socket) socket.close();
+  await stopChild(chrome);
+  if (server) await new Promise((resolve) => server.close(resolve));
+  if (temp) await rm(temp, { recursive: true, force: true });
+}

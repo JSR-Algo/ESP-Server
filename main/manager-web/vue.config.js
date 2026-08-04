@@ -139,22 +139,35 @@ module.exports = defineConfig({
     config.optimization.minimize(true);
   },
   configureWebpack: config => {
+    config.resolve = config.resolve || {};
+    config.resolve.fallback = {
+      ...(config.resolve.fallback || {}),
+      crypto: false
+    };
+
     if (process.env.NODE_ENV === 'production') {
       // 开启多线程编译
-      config.optimization = {
-        minimize: true,
-        minimizer: [
-          new TerserPlugin({
-            parallel: true,
-            terserOptions: {
-              compress: {
-                drop_console: true,
-                drop_debugger: true,
-                pure_funcs: ['console.log']
-              }
+      config.optimization.minimize = true;
+      config.optimization.minimizer = [
+        new TerserPlugin({
+          parallel: true,
+          terserOptions: {
+            compress: {
+              drop_console: true,
+              drop_debugger: true,
+              pure_funcs: ['console.log']
             }
-          })
-        ]
+          }
+        })
+      ];
+      // Apply performance budgets to the admin application, not copied firmware
+      // payloads or demo content that users fetch explicitly on demand.
+      config.performance = {
+        hints: 'warning',
+        maxAssetSize: 1024 * 1024,
+        maxEntrypointSize: 2 * 1024 * 1024,
+        assetFilter: filename => /^(?:js|css|img|fonts)\//.test(filename) &&
+          !filename.endsWith('.gz')
       };
       config.plugins.push(
         new CompressionPlugin({
@@ -170,9 +183,10 @@ module.exports = defineConfig({
         new InjectManifest({
           swSrc: path.resolve(__dirname, 'src/service-worker.js'),
           swDest: 'service-worker.js',
-          // The generator ships tens of megabytes of optional firmware assets.
-          // Keep those on-demand while precaching the admin shell and lazy routes.
-          exclude: [/\.map$/, /asset-manifest\.json$/, /^generator\//],
+          // Firmware payloads and demo media are optional, on-demand resources.
+          // Precache only the admin shell, lazy routes, and lightweight demo assets.
+          exclude: [/\.map$/, /asset-manifest\.json$/, /^generator\//,
+            /^tvideo-demo\/.*\.(?:mp4|mov|webm|zip)$/],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5MB
           // 自定义Service Worker注入点
           injectionPoint: 'self.__WB_MANIFEST',

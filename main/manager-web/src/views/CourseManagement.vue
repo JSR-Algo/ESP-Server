@@ -85,6 +85,17 @@
           <strong>{{ needsAttentionCount }}</strong>
         </div>
       </div>
+      <el-alert
+        v-if="qualityFailed"
+        data-testid="course-quality-unavailable"
+        type="warning"
+        :title="$t('course.qualityLoadFail')"
+        :closable="false"
+        show-icon
+        class="quality-alert"
+      >
+        <el-button type="text" size="mini" @click="fetchQuality">{{ $t('course.refresh') }}</el-button>
+      </el-alert>
       <el-card class="content-area" shadow="never">
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="courseKey" :label="$t('course.colKey')" min-width="160" />
@@ -110,6 +121,7 @@
                 </el-tag>
                 <span class="muted small">{{ riskLabel(qualityFor(scope.row).riskLevel) }}</span>
               </div>
+              <span v-else-if="qualityFailed" class="muted small">{{ $t('course.qualityUnavailable') }}</span>
               <span v-else class="muted small">{{ $t('course.noQuality') }}</span>
             </template>
           </el-table-column>
@@ -160,10 +172,39 @@
           <el-input v-model="form.title" />
         </el-form-item>
         <el-form-item :label="$t('course.colLocale')" required>
-          <el-input v-model="form.locale" placeholder="en" />
+          <el-select
+            v-model="form.locale"
+            data-testid="course-locale"
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="defaultLocale"
+            style="width: 100%"
+          >
+            <el-option v-for="l in locales" :key="l" :label="l" :value="l" />
+          </el-select>
         </el-form-item>
         <el-form-item :label="$t('course.colAgeBand')" required>
-          <el-input v-model="form.ageBand" placeholder="6-8" />
+          <el-select
+            v-model="form.ageBand"
+            data-testid="course-age-band"
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="defaultAgeBand"
+            style="width: 100%"
+          >
+            <el-option v-for="b in ageBands" :key="b" :label="b" :value="b" />
+          </el-select>
+          <el-alert
+            v-if="ageBandSeverity === 'unenforced'"
+            data-testid="course-age-band-unenforced"
+            type="error"
+            :title="$t('lesson.ageBandUnenforced')"
+            :closable="false"
+            show-icon
+            class="age-band-alert"
+          />
         </el-form-item>
       </el-form>
       <span slot="footer">
@@ -195,6 +236,21 @@
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
+import {
+  AGE_BANDS,
+  DEFAULT_AGE_BAND,
+  DEFAULT_LOCALE,
+  LOCALES,
+  ageBandSeverity,
+} from '@/utils/courseTaxonomy.mjs';
+
+const blankCourseForm = () => ({
+  courseId: '',
+  courseKey: '',
+  title: '',
+  locale: DEFAULT_LOCALE,
+  ageBand: DEFAULT_AGE_BAND,
+});
 
 export default {
   name: 'CourseManagement',
@@ -213,21 +269,34 @@ export default {
       qualityWindow: 30,
       qualityRows: [],
       qualityLoading: false,
+      qualityFailed: false,
+      qualitySequence: 0,
       cloneVisible: false,
       cloning: false,
       cloneSource: {},
       cloneForm: { courseKey: '', title: '' },
-      form: { courseId: '', courseKey: '', title: '', locale: 'en', ageBand: '6-8' },
+      form: blankCourseForm(),
+      ageBands: AGE_BANDS,
+      locales: LOCALES,
+      defaultAgeBand: DEFAULT_AGE_BAND,
+      defaultLocale: DEFAULT_LOCALE,
     };
   },
   computed: {
+    ageBandSeverity() {
+      return ageBandSeverity(this.form.ageBand);
+    },
     filteredList() {
       const kw = this.courseKeyword.trim().toLowerCase();
       return this.list.filter((c) => {
         if (this.kindFilter === 'template' && !c.isTemplate) return false;
         if (this.kindFilter === 'custom' && c.isTemplate) return false;
         if (kw && ![c.courseKey, c.title, c.locale, c.ageBand, c.status].some((v) => String(v || '').toLowerCase().includes(kw))) return false;
-        if (this.riskFilter !== 'all') {
+        // When the insights fetch failed there are no risk levels to match, so
+        // applying the filter would silently empty the whole course list and
+        // read as "no courses exist". Fall back to showing every course; the
+        // quality banner explains why the filter is inert.
+        if (this.riskFilter !== 'all' && !this.qualityFailed) {
           const q = this.qualityFor(c);
           if (!q.courseId || q.riskLevel !== this.riskFilter) return false;
         }
@@ -250,11 +319,14 @@ export default {
     publishedCount() {
       return this.list.filter((c) => c.status === 'published').length;
     },
+    // An insights outage must read as "unknown", never as a healthy 0.
     avgQuality() {
+      if (this.qualityFailed) return '—';
       if (!this.qualityRows.length) return 0;
       return Math.round(this.qualityRows.reduce((sum, row) => sum + row.qualityScore, 0) / this.qualityRows.length);
     },
     needsAttentionCount() {
+      if (this.qualityFailed) return '—';
       return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
     },
   },
@@ -294,17 +366,30 @@ export default {
         },
       );
     },
+    // Quality is supplementary to the course list, so a failure must not block
+    // the page — but it must not masquerade as "this course has no quality
+    // data" either. `qualityFailed` drives an explicit banner + a distinct
+    // per-row label so an insights outage is never read as a healthy zero.
+    // `qualitySequence` drops out-of-order responses: the window selector
+    // refetches on every change, and a slow 90-day response landing after a
+    // fast 7-day one would otherwise paint stale scores.
     fetchQuality() {
+      const sequence = ++this.qualitySequence;
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
         { windowDays: this.qualityWindow },
         (rows) => {
+          if (sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
+          this.qualityFailed = false;
           this.qualityRows = rows;
         },
-        () => {
+        (msg) => {
+          if (sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
+          this.qualityFailed = true;
           this.qualityRows = [];
+          this.$message.warning(msg || this.$t('course.qualityLoadFail'));
         },
       );
     },
@@ -374,7 +459,7 @@ export default {
     },
     openCreate() {
       this.editing = false;
-      this.form = { courseId: '', courseKey: '', title: '', locale: 'en', ageBand: '6-8' };
+      this.form = blankCourseForm();
       this.dialogVisible = true;
     },
     openEdit(row) {
@@ -389,7 +474,7 @@ export default {
       this.dialogVisible = true;
     },
     resetForm() {
-      this.form = { courseId: '', courseKey: '', title: '', locale: 'en', ageBand: '6-8' };
+      this.form = blankCourseForm();
     },
     submit() {
       const f = this.form;
@@ -525,6 +610,12 @@ export default {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.age-band-alert {
+  margin-top: 8px;
+}
+.quality-alert {
+  margin-bottom: 12px;
 }
 .danger-text {
   color: #f56c6c;

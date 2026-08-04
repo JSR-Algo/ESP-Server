@@ -123,6 +123,14 @@
                 {{ $t('lesson.monitor') }}
               </el-button>
               <el-button
+                v-if="scope.row.status === 'published'"
+                type="text"
+                size="small"
+                @click="openAssignmentDialog(scope.row)"
+              >
+                {{ $t('lesson.assignToChild') }}
+              </el-button>
+              <el-button
                 v-if="scope.row.status === 'draft'"
                 type="text"
                 size="small"
@@ -149,10 +157,46 @@
           <el-input v-model="form.title" />
         </el-form-item>
         <el-form-item :label="$t('course.colLocale')" required>
-          <el-input v-model="form.locale" placeholder="en" />
+          <el-select
+            v-model="form.locale"
+            data-testid="lesson-locale"
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="defaultLocale"
+            style="width: 100%"
+          >
+            <el-option v-for="l in locales" :key="l" :label="l" :value="l" />
+          </el-select>
         </el-form-item>
         <el-form-item :label="$t('course.colAgeBand')" required>
-          <el-input v-model="form.ageBand" placeholder="6-8" />
+          <el-select
+            v-model="form.ageBand"
+            data-testid="lesson-age-band"
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="defaultAgeBand"
+            style="width: 100%"
+          >
+            <el-option v-for="b in ageBands" :key="b" :label="b" :value="b" />
+          </el-select>
+          <!-- The assignment age gate fails open on an unparseable band, so the
+               only place this can surface is here, before the lesson is saved. -->
+          <el-alert
+            v-if="ageBandSeverity === 'unenforced'"
+            data-testid="lesson-age-band-unenforced"
+            type="error"
+            :title="$t('lesson.ageBandUnenforced')"
+            :closable="false"
+            show-icon
+            class="age-band-alert"
+          />
+          <span
+            v-else-if="ageBandSeverity === 'custom'"
+            data-testid="lesson-age-band-custom"
+            class="muted small form-help"
+          >{{ $t('lesson.ageBandCustom', { min: ageBandMinimum }) }}</span>
         </el-form-item>
         <el-form-item :label="$t('lesson.colPersonalityTags')">
           <el-input v-model="form.topicTags" :placeholder="$t('lesson.topicTagsPlaceholder')" />
@@ -172,22 +216,137 @@
         <el-button type="primary" size="small" :loading="saving" @click="submit">{{ $t('course.save') }}</el-button>
       </span>
     </el-dialog>
+
+    <el-dialog
+      :title="$t('lesson.assignDialogTitle')"
+      :visible.sync="assignmentDialog.visible"
+      width="720px"
+      @closed="resetAssignmentDialog"
+    >
+      <div v-if="assignmentDialog.lesson" class="assignment-dialog">
+        <div class="assignment-lesson">
+          <strong>{{ assignmentDialog.lesson.title || assignmentDialog.lesson.lessonKey }}</strong>
+          <span class="muted small">{{ assignmentDialog.lesson.lessonKey }} · v{{ assignmentDialog.lesson.lessonVersion }}</span>
+        </div>
+        <el-select
+          v-model="assignmentDialog.childId"
+          filterable
+          remote
+          clearable
+          :remote-method="searchAssignmentLearners"
+          :loading="assignmentDialog.loadingLearners"
+          :disabled="assignmentDialog.submitting"
+          :placeholder="$t('lesson.assignChildPlaceholder')"
+          style="width: 100%"
+          @change="handleAssignmentChildChange"
+        >
+          <el-option
+            v-for="learner in assignmentDialog.learners"
+            :key="learner.childId"
+            :label="learner.childName || learner.childId"
+            :value="learner.childId"
+          />
+        </el-select>
+        <el-alert
+          v-if="assignmentDialog.statusMessage"
+          :type="assignmentDialog.statusType"
+          :title="assignmentDialog.statusMessage"
+          :closable="false"
+          show-icon
+          class="assignment-alert"
+        >
+          <el-button v-if="assignmentDialog.statusType === 'warning'" type="text" size="mini" @click="openMonitoring(assignmentDialog.lesson)">
+            {{ $t('lesson.monitor') }}
+          </el-button>
+        </el-alert>
+        <el-table
+          v-loading="assignmentDialog.loadingDevices"
+          :data="assignmentDialog.devices"
+          stripe
+          class="assignment-devices"
+          style="width: 100%"
+        >
+          <el-table-column prop="displayName" :label="$t('lesson.assignDevice')" min-width="170" show-overflow-tooltip />
+          <el-table-column prop="serialNumber" :label="$t('lesson.assignSerial')" min-width="130" show-overflow-tooltip />
+          <el-table-column :label="$t('lesson.assignAvailability')" width="150">
+            <template slot-scope="scope">
+              <el-tag :type="availabilityType(scope.row.availability)" size="small">
+                {{ availabilityLabel(scope.row.availability) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column :label="$t('lesson.assignCurrent')" min-width="220">
+            <template slot-scope="scope">
+              <span v-if="scope.row.currentAssignment">
+                {{ scope.row.currentAssignment.lessonTitle || scope.row.currentAssignment.lessonId }}
+                <span class="muted small">· {{ scope.row.currentAssignment.state }}</span>
+              </span>
+              <span v-else class="muted small">{{ $t('lesson.assignNoCurrent') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column :label="$t('lesson.colActions')" width="120" align="right">
+            <template slot-scope="scope">
+              <el-button
+                type="primary"
+                size="mini"
+                :disabled="scope.row.availability === 'busy' || assignmentDialog.submitting"
+                :loading="assignmentDialog.submittingDeviceId === scope.row.deviceId"
+                @click="createLessonAssignment(scope.row)"
+              >
+                {{ scope.row.availability === 'already_assigned' ? $t('lesson.assignReuse') : $t('lesson.assign') }}
+              </el-button>
+            </template>
+          </el-table-column>
+          <template slot="empty">
+            <span class="muted">{{ assignmentDialog.childId ? $t('lesson.assignNoDevices') : $t('lesson.assignChooseChild') }}</span>
+          </template>
+        </el-table>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
+import { isUncertainNestError } from '@/apis/nestHttp';
+import {
+  AGE_BANDS,
+  DEFAULT_AGE_BAND,
+  DEFAULT_LOCALE,
+  LOCALES,
+  ageBandMinimum,
+  ageBandSeverity,
+} from '@/utils/courseTaxonomy.mjs';
 
 const blankForm = () => ({
   lessonId: '',
   lessonKey: '',
   title: '',
-  locale: 'en',
-  ageBand: '6-8',
+  locale: DEFAULT_LOCALE,
+  ageBand: DEFAULT_AGE_BAND,
   topicTags: '',
   difficultyBand: '',
   estimatedDurationSec: null,
+});
+
+const blankAssignmentDialog = () => ({
+  visible: false,
+  lesson: null,
+  learners: [],
+  childId: '',
+  devices: [],
+  loadingLearners: false,
+  loadingDevices: false,
+  submitting: false,
+  submittingDeviceId: '',
+  statusMessage: '',
+  statusType: 'info',
+  dialogSessionId: 0,
+  learnerRequestToken: 0,
+  deviceRequestToken: 0,
+  submitRequestId: 0,
+  submitContext: null,
 });
 
 export default {
@@ -211,9 +370,20 @@ export default {
       },
       statuses: ['draft', 'published', 'archived'],
       difficultyOptions: ['beginner', 'basic', 'intermediate', 'advanced'],
+      ageBands: AGE_BANDS,
+      locales: LOCALES,
+      defaultAgeBand: DEFAULT_AGE_BAND,
+      defaultLocale: DEFAULT_LOCALE,
+      assignmentDialog: blankAssignmentDialog(),
     };
   },
   computed: {
+    ageBandSeverity() {
+      return ageBandSeverity(this.form.ageBand);
+    },
+    ageBandMinimum() {
+      return ageBandMinimum(this.form.ageBand);
+    },
     courseId() {
       return this.$route.query.courseId;
     },
@@ -324,6 +494,223 @@ export default {
         path: '/lesson-monitoring',
         query: { lessonId: row.lessonId, lesson: row.title || row.lessonKey },
       });
+    },
+    openAssignmentDialog(row) {
+      this.resetAssignmentDialog();
+      this.assignmentDialog.visible = true;
+      this.assignmentDialog.lesson = row;
+      this.searchAssignmentLearners('');
+    },
+    resetAssignmentDialog() {
+      const previous = this.assignmentDialog || {};
+      const nextDialog = blankAssignmentDialog();
+      nextDialog.dialogSessionId = Number(previous.dialogSessionId || 0) + 1;
+      nextDialog.learnerRequestToken = Number(previous.learnerRequestToken || 0) + 1;
+      nextDialog.deviceRequestToken = Number(previous.deviceRequestToken || 0) + 1;
+      nextDialog.submitRequestId = Number(previous.submitRequestId || 0) + 1;
+      this.assignmentDialog = nextDialog;
+    },
+    setAssignmentStatus(type, key) {
+      this.assignmentDialog.statusType = type;
+      this.assignmentDialog.statusMessage = key ? this.$t(key) : '';
+    },
+    isAssignmentSubmitCurrent(context) {
+      return Boolean(
+        context
+        && this.assignmentDialog.visible
+        && this.assignmentDialog.submitContext
+        && this.assignmentDialog.submitContext.requestId === context.requestId
+        && this.assignmentDialog.submitContext.childId === context.childId
+        && this.assignmentDialog.submitContext.lessonKey === context.lessonKey
+        && this.assignmentDialog.submitContext.lessonVersion === context.lessonVersion
+        && this.assignmentDialog.submitContext.deviceId === context.deviceId
+        && this.assignmentDialog.submitContext.dialogSessionId === context.dialogSessionId
+      );
+    },
+    isAssignmentEligibilityCurrent(context) {
+      return Boolean(
+        context
+        && this.assignmentDialog.visible
+        && this.assignmentDialog.dialogSessionId === context.dialogSessionId
+        && this.assignmentDialog.childId === context.childId
+        && this.assignmentDialog.lesson
+        && this.assignmentDialog.lesson.lessonKey === context.lessonKey
+        && this.assignmentDialog.lesson.lessonVersion === context.lessonVersion,
+      );
+    },
+    isAssignmentResponseExact(context, assignment) {
+      return Boolean(
+        context
+        && assignment
+        && assignment.deviceId === context.deviceId
+        && assignment.childId === context.childId
+        && assignment.lessonId === context.lessonKey
+        && Number(assignment.lessonVersion) === Number(context.lessonVersion)
+        && assignment.profile === 'espTft'
+        && ['ASSIGNED', 'PRELOADING', 'READY', 'RUNNING', 'PAUSED'].includes(assignment.state),
+      );
+    },
+    releaseAssignmentSubmit(context) {
+      if (!this.isAssignmentSubmitCurrent(context)) return false;
+      this.assignmentDialog.submitting = false;
+      this.assignmentDialog.submittingDeviceId = '';
+      this.assignmentDialog.submitContext = null;
+      return true;
+    },
+    searchAssignmentLearners(keyword) {
+      const token = ++this.assignmentDialog.learnerRequestToken;
+      const dialogSessionId = this.assignmentDialog.dialogSessionId;
+      this.assignmentDialog.loadingLearners = true;
+      Api.courseInsights.listLearners(
+        { keyword, limit: 20 },
+        (learners) => {
+          if (!this.assignmentDialog.visible
+            || dialogSessionId !== this.assignmentDialog.dialogSessionId
+            || token !== this.assignmentDialog.learnerRequestToken) return;
+          this.assignmentDialog.loadingLearners = false;
+          this.assignmentDialog.learners = learners;
+        },
+        (msg) => {
+          if (!this.assignmentDialog.visible
+            || dialogSessionId !== this.assignmentDialog.dialogSessionId
+            || token !== this.assignmentDialog.learnerRequestToken) return;
+          this.assignmentDialog.loadingLearners = false;
+          this.$message.error(msg || this.$t('lesson.assignLearnersLoadFail'));
+        },
+      );
+    },
+    handleAssignmentChildChange() {
+      if (this.assignmentDialog.submitting) return;
+      this.assignmentDialog.devices = [];
+      this.assignmentDialog.submitting = false;
+      this.assignmentDialog.submittingDeviceId = '';
+      this.setAssignmentStatus('info', '');
+      if (this.assignmentDialog.childId) {
+        this.refreshAssignmentEligibility();
+      }
+    },
+    refreshAssignmentEligibility(done, context) {
+      const row = context
+        ? { lessonKey: context.lessonKey, lessonVersion: context.lessonVersion }
+        : this.assignmentDialog.lesson;
+      const childId = context ? context.childId : this.assignmentDialog.childId;
+      if (!row || !childId || (context && !this.isAssignmentSubmitCurrent(context))) {
+        if (done) done([]);
+        return;
+      }
+      const eligibilityContext = context || {
+        dialogSessionId: this.assignmentDialog.dialogSessionId,
+        childId,
+        lessonKey: row.lessonKey,
+        lessonVersion: row.lessonVersion,
+      };
+      const token = ++this.assignmentDialog.deviceRequestToken;
+      this.assignmentDialog.loadingDevices = true;
+      Api.lesson.eligibleDevices(
+        { childId, lessonId: row.lessonKey, lessonVersion: row.lessonVersion },
+        (devices) => {
+          if (token !== this.assignmentDialog.deviceRequestToken) return;
+          if (context && !this.isAssignmentSubmitCurrent(context)) return;
+          if (!context && !this.isAssignmentEligibilityCurrent(eligibilityContext)) return;
+          this.assignmentDialog.loadingDevices = false;
+          this.assignmentDialog.devices = devices;
+          if (done) done(devices);
+        },
+        (msg) => {
+          if (token !== this.assignmentDialog.deviceRequestToken) return;
+          if (context && !this.isAssignmentSubmitCurrent(context)) return;
+          if (!context && !this.isAssignmentEligibilityCurrent(eligibilityContext)) return;
+          this.assignmentDialog.loadingDevices = false;
+          this.setAssignmentStatus('error', 'lesson.assignEligibilityLoadFail');
+          this.$message.error(msg || this.$t('lesson.assignEligibilityLoadFail'));
+          if (done) done([]);
+        },
+      );
+    },
+    availabilityType(availability) {
+      if (availability === 'available') return 'success';
+      if (availability === 'already_assigned') return 'warning';
+      return 'danger';
+    },
+    availabilityLabel(availability) {
+      if (availability === 'available') return this.$t('lesson.assignAvailable');
+      if (availability === 'already_assigned') return this.$t('lesson.assignAlready');
+      return this.$t('lesson.assignBusy');
+    },
+    createLessonAssignment(device) {
+      if (this.assignmentDialog.submitting || device.availability === 'busy') return;
+      const row = this.assignmentDialog.lesson;
+      const childId = this.assignmentDialog.childId;
+      if (!row || !childId) return;
+      const submitContext = {
+        requestId: this.assignmentDialog.submitRequestId + 1,
+        childId,
+        lessonKey: row.lessonKey,
+        lessonVersion: row.lessonVersion,
+        deviceId: device.deviceId,
+        dialogSessionId: this.assignmentDialog.dialogSessionId,
+      };
+      this.assignmentDialog.submitRequestId = submitContext.requestId;
+      this.assignmentDialog.submitContext = submitContext;
+      this.assignmentDialog.submitting = true;
+      this.assignmentDialog.submittingDeviceId = device.deviceId;
+      this.setAssignmentStatus('info', '');
+      Api.lesson.createAssignment(
+        {
+          deviceId: submitContext.deviceId,
+          lessonId: submitContext.lessonKey,
+          lessonVersion: submitContext.lessonVersion,
+          childId: submitContext.childId,
+          profile: 'espTft',
+        },
+        ({ created, assignment }) => {
+          if (!this.isAssignmentSubmitCurrent(submitContext)) return;
+          if (!this.isAssignmentResponseExact(submitContext, assignment)) {
+            this.releaseAssignmentSubmit(submitContext);
+            this.setAssignmentStatus('error', 'lesson.assignUncertainRetry');
+            this.refreshAssignmentEligibility();
+            return;
+          }
+          if (!this.releaseAssignmentSubmit(submitContext)) return;
+          if (created === false) {
+            this.setAssignmentStatus('success', 'lesson.assignAlreadySuccess');
+          } else {
+            this.setAssignmentStatus('success', 'lesson.assignCreatedSuccess');
+          }
+          this.refreshAssignmentEligibility();
+        },
+        (msg, error) => {
+          if (!this.isAssignmentSubmitCurrent(submitContext)) return;
+          const status = Number(error && (error.status ?? (error.response && error.response.status)));
+          if (status === 409) {
+            this.setAssignmentStatus('warning', 'lesson.assignConflict');
+            this.refreshAssignmentEligibility(() => {
+              this.releaseAssignmentSubmit(submitContext);
+            }, submitContext);
+            return;
+          }
+          if (isUncertainNestError(error)) {
+            this.reconcileAssignmentAfterUncertainCreate(submitContext);
+            return;
+          }
+          this.releaseAssignmentSubmit(submitContext);
+          this.setAssignmentStatus('error', '');
+          this.$message.error(msg || this.$t('lesson.assignFailed'));
+        },
+      );
+    },
+    reconcileAssignmentAfterUncertainCreate(context) {
+      if (!this.isAssignmentSubmitCurrent(context)) return;
+      this.refreshAssignmentEligibility((devices) => {
+        if (!this.isAssignmentSubmitCurrent(context)) return;
+        const reconciled = devices.find((candidate) => candidate.deviceId === context.deviceId);
+        this.releaseAssignmentSubmit(context);
+        if (reconciled && reconciled.availability === 'already_assigned') {
+          this.setAssignmentStatus('success', 'lesson.assignAlreadySuccess');
+          return;
+        }
+        this.setAssignmentStatus('error', 'lesson.assignUncertainRetry');
+      }, context);
     },
     openCreate() {
       this.editingMetadata = false;
@@ -486,6 +873,24 @@ export default {
 }
 .form-help {
   margin-left: 8px;
+}
+.age-band-alert {
+  margin-top: 8px;
+}
+.assignment-dialog {
+  display: grid;
+  gap: 12px;
+}
+.assignment-lesson {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.assignment-alert {
+  margin: 2px 0;
+}
+.assignment-devices {
+  margin-top: 4px;
 }
 .danger-text {
   color: #f56c6c;
