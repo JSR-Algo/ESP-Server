@@ -121,11 +121,38 @@ env_value() {
   local fallback="$2"
   local value=""
   if [[ -n "${ENV_FILE}" && -r "${ENV_FILE}" ]]; then
-    value="$(awk -F= -v key="${key}" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
-    value="${value%\"}"
-    value="${value#\"}"
-    value="${value%\'}"
-    value="${value#\'}"
+    value="$(awk -v key="${key}" '
+      index($0, key "=") == 1 {
+        raw = substr($0, length(key) + 2)
+        single_quote = sprintf("%c", 39)
+        double_quote = sprintf("%c", 34)
+        quote = substr(raw, 1, 1)
+        if (quote != single_quote && quote != double_quote) {
+          print raw
+          exit
+        }
+        raw = substr(raw, 2)
+        if (length(raw) > 0 && substr(raw, length(raw), 1) == quote) {
+          print substr(raw, 1, length(raw) - 1)
+          exit
+        }
+        value = raw
+        while ((getline line) > 0) {
+          closed = length(line) > 0 && substr(line, length(line), 1) == quote
+          if (closed) {
+            line = substr(line, 1, length(line) - 1)
+          }
+          if (length(line) > 0) {
+            value = length(value) > 0 ? value "\n" line : line
+          }
+          if (closed) {
+            print value
+            exit
+          }
+        }
+        exit
+      }
+    ' "${ENV_FILE}")"
   fi
   printf '%s' "${value:-${fallback}}"
 }

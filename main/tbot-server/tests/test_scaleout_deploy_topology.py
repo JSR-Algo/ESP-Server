@@ -440,6 +440,55 @@ def test_deploy_vps_preflight_accepts_farm_v7_minimum_env_overrides(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_deploy_vps_preflight_accepts_multiline_single_quoted_public_key(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TBOT_REMOTE_ROOT=/opt/tbot",
+                "TBOT_PUBLIC_WEBSOCKET_URL=wss://esp.tjbot.vn/tbot/v1/",
+                "TBOT_BACKEND_API_URL=https://backend.example.com/v1",
+                "NODE_ENV=production",
+                "TBOT_REQUIRE_DEVICE_TOKEN=true",
+                "JWT_PUBLIC_KEY=public-key",
+                "TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY='",
+                "-----BEGIN PUBLIC KEY-----",
+                "c2FuaXRpemVkLXRlc3Qta2V5",
+                "-----END PUBLIC KEY-----",
+                "'",
+                "TBOT_DEVICE_MINT_SECRET=mint-secret",
+                "TBOT_SERVER_AUTH_KEY=server-secret",
+                "LESSON_ASSET_ORIGIN_BASE=https://assets.example.com",
+                "LESSON_ASSET_ALLOWED_ORIGINS=https://assets.example.com",
+                "LESSON_SD_MAX_FILE_BYTES=29186048",
+                "LESSON_SD_MAX_PACK_BYTES=116139166",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    release_dir = tmp_path / "releases" / "test"
+    release_dir.mkdir(parents=True)
+    (release_dir / "release.json").write_text("{}\n", encoding="utf-8")
+    (release_dir / "checksums.sha256").write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash", str(REPO_ROOT / "deploy" / "deploy-vps.sh"),
+            "--host", "127.0.0.1", "--user", "root", "--tag", "test",
+            "--env-file", str(env_file), "--release-root", str(tmp_path / "releases"),
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "overrides, expected_error",
     [
