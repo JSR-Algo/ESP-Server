@@ -106,6 +106,8 @@ expectContains('deploy/redeploy-web.sh', 'PUBLIC_CMS_UPSTREAM_HOST');
 expectContains('deploy/redeploy-web.sh', 'PUBLIC_CMS_UPSTREAM_SCHEME');
 expectContains('deploy/redeploy-web.sh', 'TBOT_ALLOW_SPLIT_CMS_AUTHORITY');
 expectContains('deploy/redeploy-web.sh', 'configure_cms_authority');
+expectContains('deploy/redeploy-web.sh', 'NESTJS_AUTH_HEALTH_PATH="/nestjs/v1/admin/lesson-rollout-capabilities"');
+expectContains('deploy/redeploy-web.sh', '[[ "${auth_status}" == "401" ]]');
 expectContains('deploy/docker-compose.prod.yml', 'PUBLIC_CMS_UPSTREAM_HOST: ${PUBLIC_CMS_UPSTREAM_HOST:-${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}}');
 expectContains('deploy/docker-compose.prod.yml', 'PUBLIC_CMS_UPSTREAM_SCHEME: ${PUBLIC_CMS_UPSTREAM_SCHEME:-${NESTJS_UPSTREAM_SCHEME:-https}}');
 expectContains('deploy/docker-compose.prod.yml', 'TBOT_ALLOW_SPLIT_CMS_AUTHORITY: ${TBOT_ALLOW_SPLIT_CMS_AUTHORITY:-false}');

@@ -22,6 +22,7 @@ HEALTH_RETRIES="30"
 HEALTH_INTERVAL="2"
 CONTAINER="tbot-esp32-server-web"
 NETWORK="tbot"
+NESTJS_AUTH_HEALTH_PATH="/nestjs/v1/admin/lesson-rollout-capabilities"
 
 usage() {
   cat <<'USAGE'
@@ -212,12 +213,18 @@ run_web() {
 }
 
 healthcheck() {
-  # Admin app answers on :8002. Any HTTP response (incl. 401) means it is up.
+  # Nginx starts before the local manager API. Require the protected NestJS
+  # route to return its expected unauthenticated 401 so auth_request is ready.
   local i
+  local auth_status
   for ((i = 1; i <= HEALTH_RETRIES; i++)); do
     if curl --silent --show-error --output /dev/null --max-time 5 \
         "http://127.0.0.1:${ADMIN_PORT}/"; then
-      return 0
+      auth_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+        --max-time 5 "http://127.0.0.1:${ADMIN_PORT}${NESTJS_AUTH_HEALTH_PATH}" || true)"
+      if [[ "${auth_status}" == "401" ]]; then
+        return 0
+      fi
     fi
     sleep "${HEALTH_INTERVAL}"
   done
