@@ -59,7 +59,7 @@
           @mouseleave="startVolumeSliderHideTimer"
           ref="volumeSlider"
         >
-          <div class="volume-slider-track">
+          <div class="volume-slider-track" :style="{ '--volume': volume }">
             <input
               type="range"
               v-model="volume"
@@ -78,169 +78,145 @@
   </div>
 </template>
 
-<script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-
-const props = defineProps({
-  audioUrl: String
-})
-
-// Audio element ref
-const audioRef = ref(null)
-const volumeButton = ref(null)
-const volumeSlider = ref(null)
-
-// PlayStatus
-const isPlaying = ref(false)
-const currentTime = ref(0)
-const duration = ref(0)
-const progress = ref(0)
-
-// VolumeStatus
-const volume = ref(0.7)
-const isMuted = ref(false)
-const showVolumeSlider = ref(false)
-let volumeSliderHideTimer = null
-
-// Format time as MM:SS
-const formatTime = (seconds) => {
-  const sec = Math.floor(seconds || 0)
-  return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`
-}
-
-const formattedCurrentTime = computed(() => formatTime(currentTime.value))
-const formattedDuration = computed(() => formatTime(duration.value))
-
-// By volumeStatusReturn corresponding icon path
-const volumeIconPath = computed(() => {
-  if (isMuted.value || volume.value === 0) {
-    return 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z'
+<script>
+export default {
+  name: 'AudioPlayer',
+  props: {
+    audioUrl: String
+  },
+  data() {
+    return {
+      isPlaying: false,
+      currentTime: 0,
+      duration: 0,
+      progress: 0,
+      volume: 0.7,
+      isMuted: false,
+      showVolumeSlider: false,
+      volumeSliderHideTimer: null,
+      isDragging: false
+    }
+  },
+  computed: {
+    formattedCurrentTime() {
+      return this.formatTime(this.currentTime)
+    },
+    formattedDuration() {
+      return this.formatTime(this.duration)
+    },
+    volumeIconPath() {
+      if (this.isMuted || this.volume === 0) {
+        return 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z'
+      }
+      return 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'
+    }
+  },
+  mounted() {
+    if (this.$refs.audioRef) {
+      this.$refs.audioRef.volume = this.volume
+    }
+    window.addEventListener('resize', this.updateSliderPosition)
+  },
+  beforeDestroy() {
+    window.removeEventListener('resize', this.updateSliderPosition)
+    this.cancelVolumeSliderHideTimer()
+    this.stopDrag()
+  },
+  methods: {
+    formatTime(seconds) {
+      const sec = Math.floor(seconds || 0)
+      return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`
+    },
+    togglePlay() {
+      const audio = this.$refs.audioRef
+      if (!audio) return
+      if (this.isPlaying) audio.pause()
+      else audio.play()
+      this.isPlaying = !this.isPlaying
+    },
+    updateDuration() {
+      const audio = this.$refs.audioRef
+      if (audio) this.duration = audio.duration
+    },
+    updateProgress() {
+      const audio = this.$refs.audioRef
+      if (audio && audio.duration) {
+        this.currentTime = audio.currentTime
+        this.progress = (this.currentTime / this.duration) * 100
+      }
+    },
+    handleProgressClick(event) {
+      const rect = event.currentTarget.getBoundingClientRect()
+      this.seekToPercentage(((event.clientX - rect.left) / rect.width) * 100)
+    },
+    toggleMute() {
+      const audio = this.$refs.audioRef
+      if (!audio) return
+      this.isMuted = !this.isMuted
+      audio.muted = this.isMuted
+      if (!this.isMuted && this.volume === 0) {
+        this.volume = 0.5
+        audio.volume = 0.5
+      }
+    },
+    handleVolumeChange(event) {
+      const audio = this.$refs.audioRef
+      if (!audio) return
+      const newVolume = parseFloat(event.target.value)
+      audio.volume = newVolume
+      this.isMuted = newVolume === 0
+    },
+    startDrag(event) {
+      this.isDragging = true
+      document.addEventListener('mousemove', this.handleDrag)
+      document.addEventListener('mouseup', this.stopDrag)
+      event.preventDefault()
+    },
+    handleDrag(event) {
+      if (!this.isDragging) return
+      const progressBar = this.$el.querySelector('.progress-bar')
+      if (!progressBar) return
+      const rect = progressBar.getBoundingClientRect()
+      this.seekToPercentage(((event.clientX - rect.left) / rect.width) * 100)
+    },
+    stopDrag() {
+      this.isDragging = false
+      document.removeEventListener('mousemove', this.handleDrag)
+      document.removeEventListener('mouseup', this.stopDrag)
+    },
+    seekToPercentage(percentage) {
+      const audio = this.$refs.audioRef
+      if (!audio) return
+      const clampedPercentage = Math.min(Math.max(percentage, 0), 100)
+      this.progress = clampedPercentage
+      audio.currentTime = (clampedPercentage / 100) * this.duration
+    },
+    startVolumeSliderHideTimer() {
+      this.cancelVolumeSliderHideTimer()
+      this.volumeSliderHideTimer = setTimeout(() => {
+        this.showVolumeSlider = false
+      }, 300)
+    },
+    cancelVolumeSliderHideTimer() {
+      clearTimeout(this.volumeSliderHideTimer)
+      this.volumeSliderHideTimer = null
+    },
+    updateSliderPosition() {
+      this.$nextTick(() => {
+        const button = this.$refs.volumeButton
+        const slider = this.$refs.volumeSlider
+        if (!button || !slider) return
+        const buttonRect = button.getBoundingClientRect()
+        slider.style.left = `${buttonRect.left + window.scrollX + 5}px`
+        slider.style.top = `${buttonRect.top + window.scrollY - 85}px`
+      })
+    },
+    handleVolumeMouseEnter() {
+      this.showVolumeSlider = true
+      this.updateSliderPosition()
+    }
   }
-  return 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'
-})
-
-// Playback control
-const togglePlay = () => {
-  if (isPlaying.value) {
-    audioRef.value.pause()
-  } else {
-    audioRef.value.play()
-  }
-  isPlaying.value = !isPlaying.value
 }
-
-const updateDuration = () => {
-  if (audioRef.value) {
-    duration.value = audioRef.value.duration
-  }
-}
-
-const updateProgress = () => {
-  if (audioRef.value?.duration) {
-    currentTime.value = audioRef.value.currentTime
-    progress.value = (currentTime.value / duration.value) * 100
-  }
-}
-
-const handleProgressClick = (e) => {
-  const rect = e.currentTarget.getBoundingClientRect()
-  const percentage = ((e.clientX - rect.left) / rect.width) * 100
-  seekToPercentage(percentage)
-}
-
-// Volume control
-const toggleMute = () => {
-  isMuted.value = !isMuted.value
-  audioRef.value.muted = isMuted.value
-
-  // If unmuting and volume is0, restore default volume
-  if (!isMuted.value && volume.value === 0) {
-    volume.value = 0.5
-    audioRef.value.volume = 0.5
-  }
-}
-
-const handleVolumeChange = (e) => {
-  const newVolume = parseFloat(e.target.value)
-  audioRef.value.volume = newVolume
-  isMuted.value = newVolume === 0
-}
-
-// Progress bar drag feature
-let isDragging = false
-
-const startDrag = (e) => {
-  isDragging = true
-  document.addEventListener('mousemove', handleDrag)
-  document.addEventListener('mouseup', stopDrag)
-  e.preventDefault()
-}
-
-const handleDrag = (e) => {
-  if (!isDragging) return
-
-  const rect = document.querySelector('.progress-bar').getBoundingClientRect()
-  const percentage = ((e.clientX - rect.left) / rect.width) * 100
-  seekToPercentage(percentage)
-}
-
-const stopDrag = () => {
-  isDragging = false
-  document.removeEventListener('mousemove', handleDrag)
-  document.removeEventListener('mouseup', stopDrag)
-}
-
-const seekToPercentage = (percentage) => {
-  const clampedPercentage = Math.min(Math.max(percentage, 0), 100)
-  progress.value = clampedPercentage
-  audioRef.value.currentTime = (clampedPercentage / 100) * duration.value
-}
-
-// Volume slider display/Hide control
-const startVolumeSliderHideTimer = () => {
-  volumeSliderHideTimer = setTimeout(() => {
-    showVolumeSlider.value = false
-  }, 300)
-}
-
-const cancelVolumeSliderHideTimer = () => {
-  clearTimeout(volumeSliderHideTimer)
-}
-
-// Volume slider positioning
-const updateSliderPosition = () => {
-  nextTick(() => {
-    if (!volumeButton.value || !volumeSlider.value) return
-
-    const buttonRect = volumeButton.value.getBoundingClientRect()
-    const slider = volumeSlider.value
-
-    // Calculate position relative to viewport
-    const left = buttonRect.left + window.scrollX
-    const top = buttonRect.top + window.scrollY
-
-    // Position at button center, vertically centered
-    slider.style.left = `${left + 5}px`
-    slider.style.top = `${top - 85}px`
-  })
-}
-
-const handleVolumeMouseEnter = () => {
-  showVolumeSlider.value = true
-  updateSliderPosition()
-}
-
-// Initialize
-onMounted(() => {
-  if (audioRef.value) {
-    audioRef.value.volume = volume.value
-  }
-  window.addEventListener('resize', updateSliderPosition)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', updateSliderPosition)
-})
 </script>
 
 <style scoped>
@@ -373,7 +349,7 @@ onUnmounted(() => {
   left: 0;
   bottom: 0;
   width: 2px;
-  height: calc(100% * v-bind(volume));
+  height: calc(100% * var(--volume, 0.7));
   background: #4167ed;
 }
 </style>

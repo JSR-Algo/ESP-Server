@@ -1482,6 +1482,7 @@ let lessonSafetyReleases = 0;
 function lessonUpdateSafetySpy() {
   return { release() { lessonSafetyReleases += 1; } };
 }
+function resetTVideoJourneyState() {}
 let terminalAssetRead;
 let terminalAssetReads = [];
 let testSharedAssetReadEpoch = 0;
@@ -1508,6 +1509,7 @@ const destroyedParent = {
   invalidatePreview,
   lessonAssetGenerationPollTimer: null,
   clearLessonAssetGenerationPoll,
+  resetTVideoJourneyState,
   lessonUpdateSafety: lessonUpdateSafetySpy(),
   onAssetsLoaded() { throw new Error('destroyed editor must not apply reconciled assets'); },
 };
@@ -1559,6 +1561,7 @@ const reconciliationParent = {
   onAssetsLoaded() { reconciliationAssetApplies += 1; },
   lessonAssetGenerationPollTimer: null,
   clearLessonAssetGenerationPoll,
+  resetTVideoJourneyState,
   lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 terminalAssetRead = null;
@@ -1581,6 +1584,7 @@ const destroyedSimulation = {
   validSimulationEvidence: simulationProofContext.validSimulationEvidence,
   lessonAssetGenerationPollTimer: null,
   clearLessonAssetGenerationPoll,
+  resetTVideoJourneyState,
   lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 beforeDestroyEditor.call(destroyedSimulation);
@@ -1602,6 +1606,7 @@ const destroyedPreview = {
   validManifestPreviewResponse() { return true; },
   lessonAssetGenerationPollTimer: null,
   clearLessonAssetGenerationPoll,
+  resetTVideoJourneyState,
   lessonUpdateSafety: lessonUpdateSafetySpy(),
   $message: { error() { previewMessages += 1; } },
 };
@@ -1672,6 +1677,7 @@ const destroyedSharedRefresh = {
   doPreview(success, failure) { sharedCallbacks.push(success, failure); },
   lessonAssetGenerationPollTimer: null,
   clearLessonAssetGenerationPoll,
+  resetTVideoJourneyState,
   lessonUpdateSafety: lessonUpdateSafetySpy(),
 };
 refreshSharedVisualTruth.call(destroyedSharedRefresh, () => { sharedSuccesses += 1; }, () => { sharedFailures += 1; });

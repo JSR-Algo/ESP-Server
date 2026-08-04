@@ -1,12 +1,10 @@
-import Fly from 'flyio/dist/npm/fly';
+import axios from 'axios';
 import store from '../store/index';
 import Constant from '../utils/constant';
 import { goToPage, isNotNull, showDanger, showWarning } from '../utils/index';
 import i18n from '../i18n/index';
 
-const fly = new Fly()
-// Set timeout
-fly.config.timeout = 30000
+const httpClient = axios.create({ timeout: 30000 })
 
 /**
  * RequestService wrapper
@@ -43,7 +41,9 @@ function sendRequest() {
             }
 
             // Print requestInfo
-            fly.request(this._url, this._data, {
+            httpClient.request({
+                url: this._url,
+                data: this._data,
                 method: this._method,
                 headers: this._header,
                 responseType: this._responseType
@@ -56,9 +56,10 @@ function sendRequest() {
                 if (this._sucCallback) {
                     this._sucCallback(res)
                 }
-            }).catch((res) => {
+            }).catch((error) => {
                 // Print failedResponse
-                console.log('catch', res)
+                const res = error.response || { status: 0, data: {} }
+                console.log('catch', error)
                 httpHandlerError(res, this._failCallback, this._networkFailCallback)
             })
             return this

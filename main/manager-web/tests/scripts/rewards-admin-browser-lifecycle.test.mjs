@@ -322,6 +322,38 @@ test('lifecycle cleanup terminates a detached process group and runs container c
   assert.equal(cleanupCalls, 1);
 });
 
+test('lifecycle cleanup does not abort when process-group liveness probe is denied', async () => {
+  let cleanupCalls = 0;
+  const lifecycle = createProcessLifecycle({
+    cleanupContainer: async () => { cleanupCalls += 1; },
+    cleanupTimeoutMs: 500,
+  });
+  const child = lifecycle.spawnTracked(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  const realKill = process.kill;
+  let deniedProbe = false;
+  process.kill = (pid, signal) => {
+    if (!deniedProbe && pid === -child.pid && signal === 0) {
+      deniedProbe = true;
+      const error = new Error('kill EPERM');
+      error.code = 'EPERM';
+      throw error;
+    }
+    return realKill(pid, signal);
+  };
+  try {
+    await lifecycle.cleanup();
+  } finally {
+    process.kill = realKill;
+  }
+  await sleep(20);
+
+  assert.equal(deniedProbe, true);
+  assert.notEqual(child.exitCode ?? child.signalCode, null);
+  assert.equal(cleanupCalls, 1);
+});
+
 test('owned command direct exit settles once and leaves no tracked process', async () => {
   const lifecycle = createProcessLifecycle({ cleanupContainer: async () => undefined });
   const result = await lifecycle.runTrackedCommand(process.execPath, ['-e', 'process.exit(0)'], {

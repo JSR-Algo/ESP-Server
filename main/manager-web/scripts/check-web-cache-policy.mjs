@@ -56,8 +56,8 @@ expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/manifest\.json\s*{[\s\S]
 expectRegex('docs/docker/nginx.conf', /location\s+~\*\s+\^\/\(js\|css\|img\|fonts\)\/[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m, 'hashed static assets should be cached immutably');
 expectRegex(
   'docs/docker/nginx.conf',
-  /location\s+~\s+"\^\/lesson-derivatives\/lessons\/derivatives\/\(\[0-9a-f\]\{64\}\)\/\(\[a-z\]\[a-z0-9-\]\{0,63\}\\\.mp4\)\$"[\s\S]*alias\s+\/uploadfile\/lesson-derivatives\/lessons\/derivatives\/\$1\/\$2;[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m,
-  'verified flattened cue MP4s must use a quoted nginx regex and immutable shared-volume caching',
+  /location\s+~\s+"\^\/lesson-derivatives\/lessons\/derivatives\/\(\[0-9a-f\]\{64\}\)\/\(\[a-z\]\[a-z0-9-\]\{0,63\}\\\.\(\?:mp4\|trgb\)\)\$"[\s\S]*alias\s+\/uploadfile\/lesson-derivatives\/lessons\/derivatives\/\$1\/\$2;[\s\S]*video\/mp4\s+mp4;[\s\S]*application\/vnd\.tbot\.rgb565-indexed\s+trgb;[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m,
+  'verified preview MP4s and device TRGB derivatives must use a quoted nginx regex, correct media types, and immutable shared-volume caching',
 );
 expectRegex('docs/docker/nginx.conf', /location\s+\/\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"[\s\S]*try_files\s+\$uri\s+\$uri\/\s+\/index\.html;/m, 'SPA fallback must serve fresh shell');
 expectRegex(

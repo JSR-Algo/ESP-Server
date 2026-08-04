@@ -70,7 +70,7 @@ export const register = () => {
                         'https://unpkg.com/vue-router@3.6.5/dist/vue-router.min.js',
                         'https://unpkg.com/vuex@3.6.2/dist/vuex.min.js',
                         'https://unpkg.com/element-ui@2.15.14/lib/index.js',
-                        'https://unpkg.com/axios@0.27.2/dist/axios.min.js',
+                        'https://unpkg.com/axios@1.19.0/dist/axios.min.js',
                         'https://unpkg.com/opus-decoder@0.7.7/dist/opus-decoder.min.js'
                       ];
                       

@@ -268,6 +268,7 @@ const staleStudioContext = {
   validationResult: { valid: true },
   previewManifest: { manifest: true },
   stepPayloadWithoutVisualRefs: (payload) => payload,
+  flattenedStepMutationChangesSource: () => false,
   $set(target, key, value) { target[key] = value; },
   $delete(target, key) { delete target[key]; },
   fetchCount: 0,
@@ -547,12 +548,16 @@ function verifyVisualSaveNavigationEpochContract() {
 
   let authoritativeReloadOptions = null;
   let invalidations = 0;
+  let flattenedInvalidations = 0;
+  let flattenedReloads = 0;
   context.lessonLoadRequestId = 20;
   context.lessonVisualSaveRequestId += 1;
   context.savingLessonVisuals = false;
   context.pendingLessonVisualPair = null;
   context.lessonVisualReconciliationRequired = false;
   context.invalidatePreview = () => { invalidations += 1; };
+  context.invalidateFlattenedDerivativeStatus = () => { flattenedInvalidations += 1; };
+  context.loadFlattenedDerivativeStatus = () => { flattenedReloads += 1; };
   context.fetchSteps = (options) => { authoritativeReloadOptions = options; };
   applyLessonVisualSelection.call(context, {
     objectAssetVersionId: 'object-v3',
@@ -560,6 +565,8 @@ function verifyVisualSaveNavigationEpochContract() {
   });
   calls[1][2]({});
   assert.equal(invalidations, 1, 'a current visual PUT success must invalidate preview before authoritative reload');
+  assert.equal(flattenedInvalidations, 1, 'a current visual PUT success must invalidate flattened derivative status');
+  assert.equal(flattenedReloads, 0, 'a current visual PUT success must wait for authoritative reload before refreshing flattened derivative status');
   assert.ok(authoritativeReloadOptions, 'a current visual PUT success must request authoritative steps');
 
   context.lessonLoadRequestId = 22;
