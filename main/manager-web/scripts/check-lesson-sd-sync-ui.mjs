@@ -450,8 +450,7 @@ assert.doesNotMatch(publicCmsLocation[0], /auth_request|proxy_cache(?:_key)?\s/,
 
 const startScript = read('../../docs/docker/start.sh');
 for (const requirement of [
-  ': "${PUBLIC_CMS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"',
-  ': "${PUBLIC_CMS_UPSTREAM_SCHEME:=https}"',
+  'configure_cms_authority',
   'NGINX_RESOLVER="$(awk',
   's|__NGINX_RESOLVER__|${NGINX_RESOLVER}|g',
   's|__PUBLIC_CMS_UPSTREAM_HOST__|${PUBLIC_CMS_UPSTREAM_HOST}|g',

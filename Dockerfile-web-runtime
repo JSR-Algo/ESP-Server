@@ -20,5 +20,6 @@ COPY main/manager-api/target/tbot-esp32-api.jar /app/tbot-esp32-api.jar
 EXPOSE 8002
 
 COPY docs/docker/start.sh /start.sh
+COPY docs/docker/cms-authority.sh /cms-authority.sh
 RUN chmod +x /start.sh
 CMD ["/start.sh"]

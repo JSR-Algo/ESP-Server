@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const repoRoot = path.resolve(process.cwd(), '../..');
 
@@ -49,6 +50,12 @@ function extractNginxLocation(config, marker) {
 }
 
 expectContains('docs/docker/start.sh', ': "${NESTJS_ADMIN_PROXY_KEY:=}"');
+expectContains('docs/docker/start.sh', 'source /cms-authority.sh');
+expectContains('docs/docker/start.sh', 'configure_cms_authority');
+const startScript = read('docs/docker/start.sh');
+if (startScript.indexOf('configure_cms_authority') > startScript.indexOf('java -jar')) {
+  throw new Error('CMS authority must fail closed before the local manager API starts');
+}
 expectContains('docs/docker/start.sh', 'NESTJS_ADMIN_PROXY_KEY_ESCAPED=');
 expectContains('docs/docker/start.sh', '__NESTJS_ADMIN_PROXY_KEY__');
 expectContains('docs/docker/start.sh', 'NESTJS_ADMIN_PROXY_KEY contains unsupported characters');
@@ -95,7 +102,53 @@ expectContains(
 expectContains('deploy/.env.example', 'NESTJS_ADMIN_PROXY_KEY=');
 expectContains('deploy/.env.example', 'NESTJS_UPSTREAM_SCHEME=');
 expectContains('deploy/redeploy-web.sh', 'NESTJS_ADMIN_PROXY_KEY');
+expectContains('deploy/redeploy-web.sh', 'PUBLIC_CMS_UPSTREAM_HOST');
+expectContains('deploy/redeploy-web.sh', 'PUBLIC_CMS_UPSTREAM_SCHEME');
+expectContains('deploy/redeploy-web.sh', 'TBOT_ALLOW_SPLIT_CMS_AUTHORITY');
+expectContains('deploy/redeploy-web.sh', 'configure_cms_authority');
+expectContains('deploy/docker-compose.prod.yml', 'PUBLIC_CMS_UPSTREAM_HOST: ${PUBLIC_CMS_UPSTREAM_HOST:-${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}}');
+expectContains('deploy/docker-compose.prod.yml', 'PUBLIC_CMS_UPSTREAM_SCHEME: ${PUBLIC_CMS_UPSTREAM_SCHEME:-${NESTJS_UPSTREAM_SCHEME:-https}}');
+expectContains('deploy/docker-compose.prod.yml', 'TBOT_ALLOW_SPLIT_CMS_AUTHORITY: ${TBOT_ALLOW_SPLIT_CMS_AUTHORITY:-false}');
+expectContains('deploy/.env.example', 'PUBLIC_CMS_UPSTREAM_HOST=');
+expectContains('deploy/.env.example', 'PUBLIC_CMS_UPSTREAM_SCHEME=');
+expectContains('deploy/.env.example', 'TBOT_ALLOW_SPLIT_CMS_AUTHORITY=false');
 expectNotContains('Dockerfile-web', 'NESTJS_ADMIN_PROXY_KEY');
 expectNotContains('main/manager-web/src', 'NESTJS_ADMIN_PROXY_KEY');
+
+const authorityScript = path.join(repoRoot, 'docs/docker/cms-authority.sh');
+const runAuthorityCheck = (env) => spawnSync(
+  'bash',
+  ['-c', `source "${authorityScript}"; configure_cms_authority`],
+  { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' },
+);
+const aligned = runAuthorityCheck({
+  NESTJS_UPSTREAM_HOST: 'tbot-backend-8wmh.onrender.com',
+  NESTJS_UPSTREAM_SCHEME: 'https',
+  PUBLIC_CMS_UPSTREAM_HOST: 'tbot-backend-8wmh.onrender.com',
+  PUBLIC_CMS_UPSTREAM_SCHEME: 'https',
+});
+if (aligned.status !== 0) throw new Error(`aligned CMS authority rejected: ${aligned.stderr}`);
+const inherited = runAuthorityCheck({
+  NESTJS_UPSTREAM_HOST: 'backend:3000',
+  NESTJS_UPSTREAM_SCHEME: 'http',
+});
+if (inherited.status !== 0) throw new Error(`inherited CMS authority rejected: ${inherited.stderr}`);
+const split = runAuthorityCheck({
+  NESTJS_UPSTREAM_HOST: 'backend:3000',
+  NESTJS_UPSTREAM_SCHEME: 'http',
+  PUBLIC_CMS_UPSTREAM_HOST: 'tbot-backend-8wmh.onrender.com',
+  PUBLIC_CMS_UPSTREAM_SCHEME: 'https',
+});
+if (split.status === 0 || !split.stderr.includes('CMS authority mismatch')) {
+  throw new Error('split CMS authority must fail closed with a diagnostic');
+}
+const emergency = runAuthorityCheck({
+  NESTJS_UPSTREAM_HOST: 'backend:3000',
+  NESTJS_UPSTREAM_SCHEME: 'http',
+  PUBLIC_CMS_UPSTREAM_HOST: 'tbot-backend-8wmh.onrender.com',
+  PUBLIC_CMS_UPSTREAM_SCHEME: 'https',
+  TBOT_ALLOW_SPLIT_CMS_AUTHORITY: 'true',
+});
+if (emergency.status !== 0) throw new Error(`explicit emergency split rejected: ${emergency.stderr}`);
 
 console.log('admin proxy key wiring contract OK');

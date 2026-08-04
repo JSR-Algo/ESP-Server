@@ -118,6 +118,9 @@ services:
       # producing "SSL_do_handshake() failed (wrong version number)" and a 502 on
       # every /nestjs/ route (all Courses / Lesson admin pages).
       NESTJS_UPSTREAM_SCHEME: ${NESTJS_UPSTREAM_SCHEME:-https}
+      PUBLIC_CMS_UPSTREAM_HOST: ${PUBLIC_CMS_UPSTREAM_HOST:-${NESTJS_UPSTREAM_HOST:-tbot-backend-8wmh.onrender.com}}
+      PUBLIC_CMS_UPSTREAM_SCHEME: ${PUBLIC_CMS_UPSTREAM_SCHEME:-${NESTJS_UPSTREAM_SCHEME:-https}}
+      TBOT_ALLOW_SPLIT_CMS_AUTHORITY: ${TBOT_ALLOW_SPLIT_CMS_AUTHORITY:-false}
       NESTJS_TOKEN: ${NESTJS_TOKEN:-}
       NESTJS_ADMIN_PROXY_KEY: ${NESTJS_ADMIN_PROXY_KEY:-}
       # Backend-signed child-profile projection requests. The private key remains

@@ -59,5 +59,6 @@ EXPOSE 8002
 
 # 启动脚本
 COPY docs/docker/start.sh /start.sh
+COPY docs/docker/cms-authority.sh /cms-authority.sh
 RUN chmod +x /start.sh
 CMD ["/start.sh"]

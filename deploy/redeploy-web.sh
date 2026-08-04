@@ -11,6 +11,7 @@ set -euo pipefail
 # stop + rename old container -> run new -> healthcheck :8002 -> rollback on fail.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../docs/docker/cms-authority.sh"
 
 ENV_FILE="/opt/tbot/.env"
 TAG=""
@@ -128,6 +129,10 @@ NESTJS_UPSTREAM_HOST="$(env_value NESTJS_UPSTREAM_HOST)"; NESTJS_UPSTREAM_HOST="
 NESTJS_UPSTREAM_SCHEME="$(env_value NESTJS_UPSTREAM_SCHEME)"; NESTJS_UPSTREAM_SCHEME="${NESTJS_UPSTREAM_SCHEME:-https}"
 NESTJS_TOKEN="$(env_value NESTJS_TOKEN)"
 NESTJS_ADMIN_PROXY_KEY="$(env_value NESTJS_ADMIN_PROXY_KEY)"
+PUBLIC_CMS_UPSTREAM_HOST="$(env_value PUBLIC_CMS_UPSTREAM_HOST)"
+PUBLIC_CMS_UPSTREAM_SCHEME="$(env_value PUBLIC_CMS_UPSTREAM_SCHEME)"
+TBOT_ALLOW_SPLIT_CMS_AUTHORITY="$(env_value TBOT_ALLOW_SPLIT_CMS_AUTHORITY)"
+configure_cms_authority || die "CMS authority configuration is not production-safe"
 
 REMOTE_ROOT="$(env_value TBOT_REMOTE_ROOT)"; REMOTE_ROOT="${REMOTE_ROOT:-/opt/tbot}"
 
@@ -198,6 +203,9 @@ run_web() {
     -e "NESTJS_UPSTREAM_SCHEME=${NESTJS_UPSTREAM_SCHEME}" \
     -e "NESTJS_TOKEN=${NESTJS_TOKEN}" \
     -e "NESTJS_ADMIN_PROXY_KEY=${NESTJS_ADMIN_PROXY_KEY}" \
+    -e "PUBLIC_CMS_UPSTREAM_HOST=${PUBLIC_CMS_UPSTREAM_HOST}" \
+    -e "PUBLIC_CMS_UPSTREAM_SCHEME=${PUBLIC_CMS_UPSTREAM_SCHEME}" \
+    -e "TBOT_ALLOW_SPLIT_CMS_AUTHORITY=${TBOT_ALLOW_SPLIT_CMS_AUTHORITY}" \
     -p "${ADMIN_PORT}:8002" \
     -v "${REMOTE_ROOT}/uploadfile":/uploadfile \
     "$2" >/dev/null

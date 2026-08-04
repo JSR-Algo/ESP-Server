@@ -1,4 +1,7 @@
 #!/bin/bash
+source /cms-authority.sh
+configure_cms_authority || exit 1
+
 # 启动Java后端（docker内监听8003端口）
 java -jar /app/tbot-esp32-api.jar \
   --server.port=8003 \
@@ -12,12 +15,8 @@ java -jar /app/tbot-esp32-api.jar \
 # Render the /nestjs reverse-proxy upstream + optional shared token into the nginx
 # config from env (configurable bridge: to repoint the course backend later, change
 # NESTJS_UPSTREAM_HOST / NESTJS_TOKEN in the container env and restart -- no rebuild).
-: "${NESTJS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"
-: "${NESTJS_UPSTREAM_SCHEME:=https}"
 : "${NESTJS_TOKEN:=}"
 : "${NESTJS_ADMIN_PROXY_KEY:=}"
-: "${PUBLIC_CMS_UPSTREAM_HOST:=tbot-backend-8wmh.onrender.com}"
-: "${PUBLIC_CMS_UPSTREAM_SCHEME:=https}"
 if [[ -n "${NESTJS_ADMIN_PROXY_KEY}" && ! "${NESTJS_ADMIN_PROXY_KEY}" =~ ^[A-Za-z0-9._~+/=-]{32,}$ ]]; then
   echo "start.sh: NESTJS_ADMIN_PROXY_KEY contains unsupported characters or is too short" >&2
   exit 1
