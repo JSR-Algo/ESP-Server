@@ -994,6 +994,7 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "renderer_v4_enabled",
     "rollout_device_allowlist",
     "storage_hil_device_allowlist",
+    "esp_build_identity_approved",
 )
 
 

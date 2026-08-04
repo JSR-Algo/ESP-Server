@@ -580,6 +580,36 @@ async def test_manager_config_preserves_local_storage_hil_allowlist(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_manager_config_preserves_local_approved_esp_build_identities(monkeypatch):
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+
+    async def server_config():
+        return {"server": {"auth": {"enabled": False}}, "lesson": {}}
+
+    monkeypatch.setattr(config_loader, "get_server_config", server_config)
+    identity = {
+        "schemaVersion": 1,
+        "hilProfile": "production",
+        "projectName": "xiaozhi",
+        "projectVersion": "2.2.89",
+        "idfVersion": "8e48797f",
+        "secureVersion": 0,
+        "elfSha256": "a" * 64,
+        "appSha256": "b" * 64,
+        "buildId": f"tbot-esp-v1:{'a' * 64}",
+    }
+
+    config = await config_loader.get_config_from_api_async(
+        {
+            "manager-api": {"url": "http://m", "secret": "s"},
+            "lesson": {"esp_build_identity_approved": [identity]},
+        }
+    )
+
+    assert config["lesson"]["esp_build_identity_approved"] == [identity]
+
+
+@pytest.mark.asyncio
 async def test_load_config_async_paths_and_cache(monkeypatch):
     calls = []
     monkeypatch.setattr(config_loader, "get_project_dir", lambda: "/project/")
