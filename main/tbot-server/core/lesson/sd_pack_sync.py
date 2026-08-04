@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
@@ -17,6 +18,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from core.lesson.flattened_cinematic_contract import (
+    TRGB_MEDIA_TYPE,
+    FlattenedCinematicContractError,
+    validate_pathless_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     build_firmware_sync_pack,
@@ -28,10 +34,11 @@ from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
 SD_PACK_SYNC_TIMEOUT_FLOOR_SEC = 120
-SD_PACK_SYNC_TIMEOUT_CEILING_SEC = 1800
+SD_PACK_SYNC_TIMEOUT_CEILING_SEC = 6 * 60 * 60
 SD_PACK_SYNC_BASE_SEC = 30
 SD_PACK_SYNC_PER_ASSET_SEC = 8
 SD_PACK_SYNC_BYTES_PER_SEC = 16 * 1024
+SD_PACK_SYNC_RECOVERY_BACKOFF_SEC = 30
 DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -45,16 +52,30 @@ class _QueuedSdSync:
     operation: Callable[[], Awaitable[Any]]
     future: asyncio.Future[Any]
     foreground: bool
+    started: bool = False
+
+
+class SdPackSyncRecoveryPendingError(RuntimeError):
+    """The previous firmware storage mutation has an unknown completion state."""
 
 
 class SdPackSyncCoordinator:
     """Serialize firmware SD mutations while prioritizing lesson-start work."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        recovery_backoff_sec: float = SD_PACK_SYNC_RECOVERY_BACKOFF_SEC,
+    ) -> None:
         self._foreground: deque[_QueuedSdSync] = deque()
         self._background: deque[_QueuedSdSync] = deque()
         self._by_cache_key: dict[str, _QueuedSdSync] = {}
         self._worker: asyncio.Task[None] | None = None
+        self._clock = clock
+        self._recovery_backoff_sec = max(0.0, float(recovery_backoff_sec))
+        self._uncertain_cache_key: str | None = None
+        self._recover_after = 0.0
 
     async def request(
         self,
@@ -63,6 +84,7 @@ class SdPackSyncCoordinator:
         *,
         foreground: bool = False,
     ) -> Any:
+        self._check_recovery_admission(cache_key)
         queued = self._by_cache_key.get(cache_key)
         if queued is None:
             loop = asyncio.get_running_loop()
@@ -77,7 +99,12 @@ class SdPackSyncCoordinator:
             self._foreground.append(queued)
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
-        return await asyncio.shield(queued.future)
+        try:
+            return await asyncio.shield(queued.future)
+        except asyncio.CancelledError:
+            if not queued.started:
+                self._remove_queued(queued)
+            raise
 
     async def _run(self) -> None:
         while self._foreground or self._background:
@@ -86,17 +113,74 @@ class SdPackSyncCoordinator:
                 if self._foreground
                 else self._background.popleft()
             )
+            queued.started = True
             try:
                 result = await queued.operation()
             except Exception as exc:
+                if _sd_sync_completion_unknown(exc):
+                    self._enter_recovery(queued.cache_key)
                 if not queued.future.done():
                     queued.future.set_exception(exc)
             else:
+                if _sd_sync_storage_busy(result):
+                    self._enter_recovery(queued.cache_key)
+                elif self._uncertain_cache_key == queued.cache_key:
+                    self._uncertain_cache_key = None
+                    self._recover_after = 0.0
                 if not queued.future.done():
                     queued.future.set_result(result)
             finally:
                 if self._by_cache_key.get(queued.cache_key) is queued:
                     self._by_cache_key.pop(queued.cache_key, None)
+
+    def _remove_queued(self, queued: _QueuedSdSync) -> None:
+        for queue in (self._foreground, self._background):
+            with suppress(ValueError):
+                queue.remove(queued)
+        if self._by_cache_key.get(queued.cache_key) is queued:
+            self._by_cache_key.pop(queued.cache_key, None)
+        if not queued.future.done():
+            queued.future.cancel()
+
+    def _check_recovery_admission(self, cache_key: str) -> None:
+        uncertain = self._uncertain_cache_key
+        if uncertain is None:
+            return
+        if self._clock() < self._recover_after or cache_key != uncertain:
+            raise SdPackSyncRecoveryPendingError("sd_sync_recovery_pending")
+
+    def _enter_recovery(self, cache_key: str) -> None:
+        self._uncertain_cache_key = cache_key
+        self._recover_after = self._clock() + self._recovery_backoff_sec
+        pending_error = SdPackSyncRecoveryPendingError("sd_sync_recovery_pending")
+        for queue in (self._foreground, self._background):
+            while queue:
+                pending = queue.popleft()
+                if self._by_cache_key.get(pending.cache_key) is pending:
+                    self._by_cache_key.pop(pending.cache_key, None)
+                if not pending.future.done():
+                    pending.future.set_exception(pending_error)
+
+
+def _sd_sync_completion_unknown(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    message = str(exc).strip().lower().replace("-", "_").replace(" ", "_")
+    return "storage_busy" in message
+
+
+def _sd_sync_storage_busy(result: Any) -> bool:
+    candidate = result
+    if isinstance(candidate, str):
+        try:
+            candidate = json.loads(candidate)
+        except json.JSONDecodeError:
+            return "storage_busy" in candidate.lower().replace("-", "_").replace(" ", "_")
+    if not isinstance(candidate, dict):
+        return False
+    error_code = str(candidate.get("errorCode") or candidate.get("error") or "")
+    normalized = error_code.lower().replace("-", "_").replace(" ", "_")
+    return "storage_busy" in normalized
 
 
 def _consume_unobserved_exception(future: asyncio.Future[Any]) -> None:
@@ -126,19 +210,25 @@ async def request_sd_pack_sync(
     )
 
 
-def sd_pack_sync_timeout_sec(config: dict[str, Any], pack: dict[str, Any]) -> float:
+def sd_pack_sync_timeout_sec(config: dict[str, Any], pack: dict[str, Any]) -> int:
     lesson_cfg = _lesson_config(config)
-    floor = _positive_float(
-        lesson_cfg.get("sd_sync_timeout_floor_sec")
-        or os.getenv("LESSON_SD_SYNC_TIMEOUT_SEC"),
-        SD_PACK_SYNC_TIMEOUT_FLOOR_SEC,
-    )
-    ceiling = max(
-        floor,
+    floor = min(
+        SD_PACK_SYNC_TIMEOUT_CEILING_SEC,
         _positive_float(
-            lesson_cfg.get("sd_sync_timeout_ceiling_sec")
-            or os.getenv("LESSON_SD_SYNC_TIMEOUT_MAX_SEC"),
-            SD_PACK_SYNC_TIMEOUT_CEILING_SEC,
+            lesson_cfg.get("sd_sync_timeout_floor_sec")
+            or os.getenv("LESSON_SD_SYNC_TIMEOUT_SEC"),
+            SD_PACK_SYNC_TIMEOUT_FLOOR_SEC,
+        ),
+    )
+    ceiling = min(
+        SD_PACK_SYNC_TIMEOUT_CEILING_SEC,
+        max(
+            floor,
+            _positive_float(
+                lesson_cfg.get("sd_sync_timeout_ceiling_sec")
+                or os.getenv("LESSON_SD_SYNC_TIMEOUT_MAX_SEC"),
+                SD_PACK_SYNC_TIMEOUT_CEILING_SEC,
+            ),
         ),
     )
     assets = pack.get("assets") if isinstance(pack, dict) else None
@@ -153,7 +243,7 @@ def sd_pack_sync_timeout_sec(config: dict[str, Any], pack: dict[str, Any]) -> fl
         + len(asset_list) * SD_PACK_SYNC_PER_ASSET_SEC
         + total_bytes / SD_PACK_SYNC_BYTES_PER_SEC
     )
-    return min(ceiling, max(floor, math.ceil(estimated)))
+    return int(min(ceiling, max(floor, math.ceil(estimated))))
 
 
 def _positive_float(value: Any, default: float) -> float:
@@ -288,6 +378,22 @@ async def sync_cached_lesson_assets_to_sd(
         except Exception as exc:
             failed += 1
             cache_key = str(pack.get("cacheKey") or "")
+            from core.api.device_mcp_admin_handler import (
+                MCPLessonAssetSyncInvalidRequestError,
+                MCPLessonAssetSyncStorageBusyError,
+            )
+
+            error_code = (
+                "invalid_request"
+                if isinstance(exc, MCPLessonAssetSyncInvalidRequestError)
+                else "storage_busy"
+                if isinstance(exc, MCPLessonAssetSyncStorageBusyError)
+                else "sd_sync_recovery_pending"
+                if isinstance(exc, SdPackSyncRecoveryPendingError)
+                else "sd_sync_result_unknown"
+                if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                else type(exc).__name__
+            )
             results_by_cache_key[cache_key] = normalize_firmware_sync_result(
                 cache_key,
                 {
@@ -296,7 +402,7 @@ async def sync_cached_lesson_assets_to_sd(
                     "skippedCount": 0,
                     "failedCount": 1,
                     "criticalFailedCount": 1,
-                    "errorCode": type(exc).__name__,
+                    "errorCode": error_code,
                 },
             )
             if _is_unknown_sd_pack_sync_tool_error(exc):
@@ -438,7 +544,12 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
     except OSError:
         return None
     rich_identity: dict[str, Any] = {}
-    if media_type == "video/mp4":
+    if media_type == TRGB_MEDIA_TYPE:
+        try:
+            rich_identity = validate_pathless_flattened_cinematic_cache_asset(dict(item))
+        except FlattenedCinematicContractError:
+            return None
+    elif media_type == "video/mp4":
         try:
             if "derivativeId" in item or "phaseId" in item or "cueId" in item:
                 rich_identity = validate_renderer_v4_flattened_mp4(dict(item))

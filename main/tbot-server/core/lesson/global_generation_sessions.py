@@ -23,6 +23,7 @@ GLOBAL_SESSIONS_SEQUENCE_KEY = "lesson-assets:global-sessions:v1:sequence"
 _MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$|^(?:[0-9a-f]{2}-){5}[0-9a-f]{2}$")
 _RETRY_DELAYS = (5, 10, 20, 40, 80, 160, 300)
 _TERMINAL_RESULT_STATES = frozenset({"invalid", "invalid_result", "unsupported"})
+_TERMINAL_PACK_ERROR_CODES = frozenset({"invalid_request"})
 _RETRYABLE_SKIP_STATES = frozenset(
     {"client_unavailable", "mcp_client_not_ready", "mcp_not_ready", "no_client", "skipped"}
 )
@@ -101,9 +102,25 @@ class _Session:
     connection_generation: int
     connection: Any
     retry_attempt: int = 0
+    retry_cache_keys: tuple[str, ...] | None = None
     retry_task: asyncio.Task | None = None
     heartbeat_task: asyncio.Task | None = None
     active: bool = True
+
+
+class _StableSyncConfigConnection:
+    def __init__(self, connection: Any, config: Mapping[str, Any]) -> None:
+        object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "config", config)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"_connection", "config"}:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._connection, name, value)
 
 
 class GlobalGenerationSessionsError(RuntimeError):
@@ -278,6 +295,7 @@ class GlobalGenerationSessions:
             tasks = []
             for session in sessions:
                 session.retry_attempt = 0
+                session.retry_cache_keys = None
                 if session.retry_task is not None and not session.retry_task.done():
                     session.retry_task.cancel()
                     tasks.append(session.retry_task)
@@ -395,7 +413,7 @@ class GlobalGenerationSessions:
             await self._set_status(session, status="retrying")
             return {"state": "retrying", "errorCode": "session_fence_unavailable"}
         try:
-            result = self._sync(session.connection, only_cache_keys=set(pack_keys))
+            result = self._sync(_stable_sync_connection(session.connection), only_cache_keys=set(pack_keys))
             if inspect.isawaitable(result):
                 result = await result
         except asyncio.CancelledError:
@@ -413,6 +431,7 @@ class GlobalGenerationSessions:
 
         state, error_code = _sync_result_outcome(result, pack_keys)
         if state == "current":
+            session.retry_cache_keys = None
             updated = await self._set_status(
                 session,
                 status="current",
@@ -423,6 +442,9 @@ class GlobalGenerationSessions:
                 session.retry_attempt = 0
                 return {"state": "current"}
             return {"state": "retrying", "errorCode": "session_fence_unavailable"}
+        session.retry_cache_keys = (
+            _retry_cache_keys(result, pack_keys) if state == "retrying" else None
+        )
         await self._set_status(session, status=state)
         return {"state": state, "errorCode": error_code}
 
@@ -507,7 +529,10 @@ class GlobalGenerationSessions:
                     session,
                     accepted_generation=generation,
                     checksum=checksum,
-                    pack_keys=tuple(pack["cacheKey"] for pack in packs),
+                    pack_keys=(
+                        session.retry_cache_keys
+                        or tuple(pack["cacheKey"] for pack in packs)
+                    ),
                 )
                 if result["state"] != "retrying":
                     return
@@ -752,6 +777,9 @@ def _sync_result_outcome(result: Any, expected: tuple[str, ...]) -> tuple[str, s
         if item_state in _TERMINAL_RESULT_STATES:
             code = "sync_unsupported" if item_state == "unsupported" else "sync_result_invalid"
             return "failed", code
+        item_error_code = str(item.get("errorCode", "")).strip().lower()
+        if item_error_code in _TERMINAL_PACK_ERROR_CODES:
+            return "failed", "sync_result_invalid"
         if item_state in _RETRYABLE_SKIP_STATES:
             return "retrying", "sync_skipped"
         ready = item.get("ready")
@@ -761,6 +789,39 @@ def _sync_result_outcome(result: Any, expected: tuple[str, ...]) -> tuple[str, s
         if ready is not True or critical_failed != 0:
             return "retrying", "sync_result_incomplete"
     return "current", None
+
+
+def _retry_cache_keys(result: Any, expected: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(result, Mapping):
+        return expected
+    results = result.get("resultsByCacheKey")
+    if not isinstance(results, Mapping):
+        return expected
+    pending = []
+    for key in expected:
+        item = results.get(key)
+        if not isinstance(item, Mapping):
+            pending.append(key)
+            continue
+        item_state = str(item.get("state", item.get("status", ""))).strip().lower()
+        if (
+            item.get("ready") is True
+            and item.get("criticalFailedCount") == 0
+            and not item.get("skipped")
+            and item_state not in _TERMINAL_RESULT_STATES
+            and item_state not in _RETRYABLE_SKIP_STATES
+        ):
+            continue
+        pending.append(key)
+    return tuple(pending) or expected
+
+
+def _stable_sync_connection(connection: Any) -> Any:
+    server = getattr(connection, "server", None)
+    config = getattr(server, "config", None)
+    if isinstance(config, Mapping) and config is not getattr(connection, "config", None):
+        return _StableSyncConfigConnection(connection, config)
+    return connection
 
 
 def _session_row(

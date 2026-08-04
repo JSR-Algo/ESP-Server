@@ -1,6 +1,7 @@
 import asyncio
 import re
 
+import httpx
 import pytest
 
 from core.lesson import sd_pack_fanout, sd_pack_sync
@@ -12,11 +13,10 @@ CHECKSUM_B = "b" * 64
 CACHE_KEY_A = f"lesson-a/v1-{CHECKSUM_A}"
 CACHE_KEY_B = f"lesson-b/v1-{CHECKSUM_B}"
 
+
 @pytest.fixture(autouse=True)
 def _clear_pending(monkeypatch):
-    sd_pack_fanout.set_pending_store_for_tests(
-        InMemoryLessonSdPendingStore(random=lambda: 0.0)
-    )
+    sd_pack_fanout.set_pending_store_for_tests(InMemoryLessonSdPendingStore(random=lambda: 0.0))
 
     async def callback_ok(*_args, **_kwargs):
         return None
@@ -43,6 +43,12 @@ def _successful_attestation(pack, *, downloaded_count=1, skipped_count=0):
         "failedCount": 0,
         "criticalFailedCount": 0,
     }
+
+
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://backend.test/device-result")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(str(status), request=request, response=response)
 
 
 @pytest.mark.asyncio
@@ -175,9 +181,7 @@ async def test_fanout_queues_failed_online_for_reconnect_retry(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_fanout_returns_one_contract_device_row_per_requested_device(
-    monkeypatch, tmp_path
-):
+async def test_fanout_returns_one_contract_device_row_per_requested_device(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     _write_pack(tmp_path, CACHE_KEY_B)
     config = {
@@ -356,9 +360,7 @@ async def test_fanout_preserves_and_aggregates_reused_counts(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
-    monkeypatch, tmp_path
-):
+async def test_fanout_callback_failure_keeps_robot_complete_and_queues_callback_only(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     _write_pack(tmp_path, CACHE_KEY_B)
     config = {
@@ -384,7 +386,7 @@ async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
 
     async def post_one(*_args, **kwargs):
         if kwargs["result"]["cacheKey"] == CACHE_KEY_B:
-            raise RuntimeError("backend down")
+            raise _http_status_error(503)
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
@@ -399,29 +401,23 @@ async def test_fanout_callback_retained_key_returns_retry_wait_device_row(
     assert result["devices"] == [
         {
             "deviceId": "dev-1",
-            "state": "RETRY_WAIT",
+            "state": "COMPLETE",
             "downloadedCount": 2,
             "skippedCount": 0,
             "reusedCount": 0,
             "failedCount": 0,
             "criticalFailedCount": 0,
-            "errorCode": "callback_error",
-            "retryable": True,
+            "retryable": False,
         }
     ]
-    assert _BACKEND_ERROR_CODE_RE.fullmatch(result["devices"][0]["errorCode"])
-    assert result["queued"] == [
-        {
-            "deviceId": "dev-1",
-            "cacheKeys": [CACHE_KEY_B],
-            "reason": "retry-after-fail",
-        }
-    ]
+    assert result["queued"] == []
+    pending = (await sd_pack_fanout.pending_snapshot())["dev-1"]
+    assert pending["cacheKeys"] == []
+    assert list(pending["callbackResults"]) == [CACHE_KEY_B]
+
 
 @pytest.mark.asyncio
-async def test_fanout_device_row_error_code_is_backend_safe_and_capped(
-    monkeypatch, tmp_path
-):
+async def test_fanout_device_row_error_code_is_backend_safe_and_capped(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     config = {
         "lesson": {
@@ -499,7 +495,7 @@ async def test_drain_pending_on_reconnect(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_drain_pending_callback_failure_remains_pending_and_replays(monkeypatch, tmp_path):
+async def test_drain_pending_callback_failure_retries_callback_without_robot_replay(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     config = {
         "lesson": {
@@ -521,33 +517,243 @@ async def test_drain_pending_callback_failure_remains_pending_and_replays(monkey
             )()
 
     callback_calls = []
+    mcp_calls = []
 
     async def fake_call(conn, mcp_client, pack):
+        mcp_calls.append(pack["cacheKey"])
         return _successful_attestation(pack)
 
     async def callback_fail_once(*_args, **kwargs):
         callback_calls.append([kwargs["result"]["cacheKey"]])
         if len(callback_calls) == 1:
-            raise RuntimeError("backend down")
+            raise _http_status_error(503)
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_fail_once)
 
     first = await sd_pack_fanout.drain_pending_for_connection(Conn())
-    assert first["callbackErrors"][0]["type"] == "RuntimeError"
-    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
-        CACHE_KEY_A
-    ]
+    assert first["callbackErrors"][0]["type"] == "HTTPStatusError"
+    pending = (await sd_pack_fanout.pending_snapshot())["dev-1"]
+    assert pending["cacheKeys"] == []
+    assert list(pending["callbackResults"]) == [CACHE_KEY_A]
 
     await sd_pack_fanout.drain_pending_for_connection(Conn())
     assert callback_calls == [[CACHE_KEY_A], [CACHE_KEY_A]]
+    assert mcp_calls == [CACHE_KEY_A]
     assert await sd_pack_fanout.pop_pending("dev-1") is None
 
 
 @pytest.mark.asyncio
-async def test_drain_pending_clears_only_ready_callback_success_and_retains_failed_key(
-    monkeypatch, tmp_path
-):
+async def test_ready_callback_404_is_terminal_and_does_not_replay_robot(monkeypatch, tmp_path):
+    _write_pack(tmp_path, CACHE_KEY_A)
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+    store = InMemoryLessonSdPendingStore(random=lambda: 0.0)
+    await store.mark("dev-1", {CACHE_KEY_A})
+    mcp_calls = []
+
+    class Conn:
+        device_id = "dev-1"
+        mcp_client = type("M", (), {"is_ready": lambda self: asyncio.sleep(0, result=True)})()
+
+        def __init__(self):
+            self.config = config
+
+    async def fake_call(_conn, _mcp_client, pack):
+        mcp_calls.append(pack["cacheKey"])
+        return _successful_attestation(pack)
+
+    async def callback_not_found(*_args, **_kwargs):
+        request = httpx.Request("POST", "https://backend.test/device-result")
+        response = httpx.Response(404, request=request, json={"code": "not_found"})
+        raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_not_found)
+
+    result = await sd_pack_fanout.drain_pending_for_connection(Conn(), store=store)
+
+    assert mcp_calls == [CACHE_KEY_A]
+    assert result["clearedCacheKeys"] == [CACHE_KEY_A]
+    assert result["retainedCacheKeys"] == []
+    assert await store.load("dev-1") is None
+    assert await sd_pack_fanout.drain_pending_for_connection(Conn(), store=store) is None
+    assert mcp_calls == [CACHE_KEY_A]
+
+
+@pytest.mark.asyncio
+async def test_ready_callback_503_persists_callback_only_not_robot_work(monkeypatch, tmp_path):
+    _write_pack(tmp_path, CACHE_KEY_A)
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+    store = InMemoryLessonSdPendingStore(random=lambda: 0.0)
+    await store.mark("dev-1", {CACHE_KEY_A})
+
+    class Conn:
+        device_id = "dev-1"
+        mcp_client = type("M", (), {"is_ready": lambda self: asyncio.sleep(0, result=True)})()
+
+        def __init__(self):
+            self.config = config
+
+    async def fake_call(_conn, _mcp_client, pack):
+        return _successful_attestation(pack)
+
+    async def callback_unavailable(*_args, **_kwargs):
+        request = httpx.Request("POST", "https://backend.test/device-result")
+        response = httpx.Response(503, request=request)
+        raise httpx.HTTPStatusError("unavailable", request=request, response=response)
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_unavailable)
+
+    result = await sd_pack_fanout.drain_pending_for_connection(Conn(), store=store)
+    pending = await store.load("dev-1")
+
+    assert result["clearedCacheKeys"] == [CACHE_KEY_A]
+    assert result["retainedCacheKeys"] == []
+    assert pending["cacheKeys"] == []
+    assert list(pending["callbackResults"]) == [CACHE_KEY_A]
+    assert pending["callbackResults"][CACHE_KEY_A]["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_ready_callback_timeout_is_classified_as_callback_only_retry(monkeypatch):
+    async def callback_timeout(*_args, **_kwargs):
+        raise httpx.ReadTimeout("backend timed out")
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_timeout)
+
+    cleared, retained, callback_pending, callback_resolved, errors = await sd_pack_fanout._post_per_cache_results(
+        {},
+        backend_device_id="dev-1",
+        cache_keys=[CACHE_KEY_A],
+        sync_result={"ready": True, "criticalFailedCount": 0},
+    )
+
+    assert cleared == [CACHE_KEY_A]
+    assert retained == []
+    assert [item["cacheKey"] for item in callback_pending] == [CACHE_KEY_A]
+    assert callback_resolved == []
+    assert [type(error).__name__ for error in errors] == ["ReadTimeout"]
+
+
+@pytest.mark.asyncio
+async def test_ready_callback_401_is_terminal_and_not_queued(monkeypatch):
+    async def callback_unauthorized(*_args, **_kwargs):
+        raise _http_status_error(401)
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_unauthorized)
+
+    cleared, retained, callback_pending, callback_resolved, errors = await sd_pack_fanout._post_per_cache_results(
+        {},
+        backend_device_id="dev-1",
+        cache_keys=[CACHE_KEY_A],
+        sync_result={"ready": True, "criticalFailedCount": 0},
+    )
+
+    assert cleared == [CACHE_KEY_A]
+    assert retained == []
+    assert callback_pending == []
+    assert callback_resolved == [CACHE_KEY_A]
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_callback_retry_is_durable_before_robot_pending_is_cleared(monkeypatch):
+    events = []
+
+    class Store:
+        async def load(self, _device_id):
+            return None
+
+        async def mark_callbacks(self, device_id, results):
+            events.append(("mark_callbacks", device_id, results[0]["cacheKey"]))
+
+        async def clear(self, device_id, cache_keys, *, expected_cache_keys=None):
+            events.append(("clear_robot", device_id, list(cache_keys)))
+
+        async def mark(self, *_args, **_kwargs):
+            raise AssertionError("ready robot result must not be requeued")
+
+    async def ready_sync(*_args, **_kwargs):
+        return {"ready": True, "criticalFailedCount": 0}
+
+    async def callback_unavailable(*_args, **_kwargs):
+        raise _http_status_error(503)
+
+    monkeypatch.setattr(sd_pack_fanout, "sync_cached_lesson_assets_to_sd", ready_sync)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_unavailable)
+
+    await sd_pack_fanout._sync_callback_and_update_pending(
+        object(),
+        {},
+        backend_device_id="dev-1",
+        cache_keys=[CACHE_KEY_A],
+        only_cache_keys={CACHE_KEY_A},
+        store=Store(),
+    )
+
+    assert events == [
+        ("mark_callbacks", "dev-1", CACHE_KEY_A),
+        ("clear_robot", "dev-1", [CACHE_KEY_A]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_callback_hil_sync_never_creates_pending_work(monkeypatch, tmp_path):
+    _write_pack(tmp_path, CACHE_KEY_A)
+    config = {
+        "lesson": {
+            "asset_delivery_mode": "sd_pack",
+            "asset_cache_root": str(tmp_path),
+            "asset_public_base_url": "https://esp.example",
+        }
+    }
+    store = InMemoryLessonSdPendingStore(random=lambda: 0.0)
+
+    class Conn:
+        device_id = "dev-1"
+        mcp_client = type("M", (), {"is_ready": lambda self: asyncio.sleep(0, result=True)})()
+
+        def __init__(self):
+            self.config = config
+
+    async def fake_call(_conn, _mcp_client, pack):
+        return _successful_attestation(pack)
+
+    async def callback_forbidden(*_args, **_kwargs):
+        raise AssertionError("HIL no-callback mode must not call the backend")
+
+    monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", callback_forbidden)
+
+    result = await sd_pack_fanout.fanout_sd_pack_sync(
+        config,
+        {"dev-1": Conn()},
+        cache_key=CACHE_KEY_A,
+        queue_offline=False,
+        callback_required=False,
+        persist_retry=False,
+        store=store,
+    )
+
+    assert len(result["synced"]) == 1
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_clears_only_ready_callback_success_and_retains_failed_key(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     for index in range(3):
         _write_pack(tmp_path, CACHE_KEY_A, name=f"optional-{index}.asset")
@@ -574,9 +780,7 @@ async def test_drain_pending_clears_only_ready_callback_success_and_retains_fail
 
     async def fake_call(_conn, _mcp_client, pack):
         if pack["cacheKey"] == CACHE_KEY_A:
-            return _successful_attestation(
-                pack, downloaded_count=3, skipped_count=1
-            )
+            return _successful_attestation(pack, downloaded_count=3, skipped_count=1)
         return {
             "ready": False,
             "downloadedCount": 0,
@@ -603,9 +807,8 @@ async def test_drain_pending_clears_only_ready_callback_success_and_retains_fail
     assert callbacks[1]["criticalFailedCount"] == 1
     assert callbacks[1]["errorCode"] == "firmware_failed"
     assert _BACKEND_ERROR_CODE_RE.fullmatch(callbacks[1]["errorCode"])
-    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
-        CACHE_KEY_B
-    ]
+    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [CACHE_KEY_B]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -655,9 +858,7 @@ async def test_drain_pending_skipped_sync_retains_without_callback_and_one_attem
 
 
 @pytest.mark.asyncio
-async def test_drain_pending_partial_callback_failure_retains_only_failed_callback_key(
-    monkeypatch, tmp_path
-):
+async def test_drain_pending_partial_callback_failure_retains_only_callback_dto(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     _write_pack(tmp_path, CACHE_KEY_B)
     config = {
@@ -684,22 +885,22 @@ async def test_drain_pending_partial_callback_failure_retains_only_failed_callba
 
     async def post_one(*_args, **kwargs):
         if kwargs["result"]["cacheKey"] == CACHE_KEY_B:
-            raise RuntimeError("backend down")
+            raise _http_status_error(503)
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
 
     result = await sd_pack_fanout.drain_pending_for_connection(Conn())
-    assert result["callbackErrors"][0]["type"] == "RuntimeError"
+    assert result["callbackErrors"][0]["type"] == "HTTPStatusError"
 
     pending = (await sd_pack_fanout.pending_snapshot())["dev-1"]
-    assert pending["cacheKeys"] == [CACHE_KEY_B]
+    assert pending["cacheKeys"] == []
+    assert list(pending["callbackResults"]) == [CACHE_KEY_B]
     assert pending["attemptCount"] == 2
 
+
 @pytest.mark.asyncio
-async def test_immediate_fanout_partial_callback_failure_does_not_readd_cleared_key(
-    monkeypatch, tmp_path
-):
+async def test_immediate_fanout_partial_callback_failure_queues_callback_only(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     _write_pack(tmp_path, CACHE_KEY_B)
     config = {
@@ -725,7 +926,7 @@ async def test_immediate_fanout_partial_callback_failure_does_not_readd_cleared_
 
     async def post_one(*_args, **kwargs):
         if kwargs["result"]["cacheKey"] == CACHE_KEY_B:
-            raise RuntimeError("backend down")
+            raise _http_status_error(503)
 
     monkeypatch.setattr(sd_pack_sync, "call_sd_pack_sync_tool", fake_call)
     monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", post_one)
@@ -736,17 +937,11 @@ async def test_immediate_fanout_partial_callback_failure_does_not_readd_cleared_
         lesson_id="lesson",
     )
 
-    assert result["queued"] == [
-        {
-            "deviceId": "dev-1",
-            "cacheKeys": [CACHE_KEY_B],
-            "reason": "retry-after-fail",
-        }
-    ]
-    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["cacheKeys"] == [
-        CACHE_KEY_B
-    ]
-    assert (await sd_pack_fanout.pending_snapshot())["dev-1"]["attemptCount"] == 1
+    assert result["queued"] == []
+    pending = (await sd_pack_fanout.pending_snapshot())["dev-1"]
+    assert pending["cacheKeys"] == []
+    assert list(pending["callbackResults"]) == [CACHE_KEY_B]
+    assert pending["attemptCount"] == 1
 
 
 @pytest.mark.asyncio
@@ -776,9 +971,7 @@ async def test_drain_pending_exception_remarks_with_future_backoff(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fanout_identity_resolution_failure_is_offline_not_raw_online(
-    monkeypatch, tmp_path
-):
+async def test_fanout_identity_resolution_failure_is_offline_not_raw_online(monkeypatch, tmp_path):
     _write_pack(tmp_path, CACHE_KEY_A)
     config = {
         "server": {"api_url": "http://backend.test/v1"},

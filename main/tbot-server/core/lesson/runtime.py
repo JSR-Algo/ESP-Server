@@ -82,6 +82,13 @@ TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 
+
+class _SdSyncRealtimeBusyTimeoutError(Exception):
+    def __init__(self, timeout_sec: float, state: str) -> None:
+        self.timeout_sec = timeout_sec
+        self.state = state
+        super().__init__(f"realtime busy for {timeout_sec:.3f}s state={state}")
+
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
 # never inline JSON, so 16 KiB is generous for a 3-layer step with prompts/choices.
 MAX_LESSON_FRAME_BYTES = 16 * 1024
@@ -1137,6 +1144,8 @@ class LessonRuntime:
         self._cinematic_pending_command: Optional[Dict[str, Any]] = None
         self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
         self._conversation_cues: Dict[str, Dict[str, Any]] = {}
+        self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
         self._conversation_pending_visual: Optional[Dict[str, Any]] = None
@@ -1280,13 +1289,38 @@ class LessonRuntime:
                     projected = [
                         project_flattened_cinematic_phase(phase, pack) for phase in phases
                     ]
-                    self._cinematic_phase = projected[0]
+                    self._cinematic_cues_by_key = {
+                        (cue["stepKey"], cue["effect"]): cue
+                        for cue in projected
+                        if cue.get("templateVersion") == 2
+                        and isinstance(cue.get("stepKey"), str)
+                        and isinstance(cue.get("effect"), str)
+                    }
+                    first_step_key = (
+                        self._steps[0].get("id")
+                        if self._steps and isinstance(self._steps[0], dict)
+                        else None
+                    )
+                    opening = next(
+                        (
+                            cue
+                            for cue in projected
+                            if cue.get("effect") == "opening"
+                            and cue.get("stepKey") == first_step_key
+                        ),
+                        next(
+                            (cue for cue in projected if cue.get("effect") == "opening"),
+                            projected[0],
+                        ),
+                    )
+                    self._cinematic_phase = opening
                     self._conversation_cues = {
                         cue["cueId"]: cue
                         for cue in projected
                         if cue.get("templateVersion") == 2
                         and isinstance(cue.get("cueId"), str)
                     }
+                    self._validate_safe_speaking_cinematic_routes()
             except (CinematicContractError, FlattenedCinematicContractError) as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error
@@ -2866,10 +2900,19 @@ class LessonRuntime:
         internal_probe = str(source or "") == "internal_dev_endpoint"
         if not self._child_response_window_open and not internal_probe:
             return False
-        if self._renderer_v2_enabled():
-            await self._apply_authored_visual_then_motion("thinking", None)
-            if not self._is_active_runtime() or self.state != S_RUNNING:
+        step_id = self._step_id
+        step_seq = self._step_seq
+        if not self._child_response_window_still_current(step_id, step_seq):
+            return False
+        self._cancel_child_response_timeout()
+        self._close_child_response_window()
+        if self._renderer_v4_enabled() and self._conversation_cues:
+            if not await self._apply_authored_cinematic_effect("thinking"):
                 return False
+        elif self._renderer_v2_enabled():
+            await self._apply_authored_visual_then_motion("thinking", None)
+        if not self._child_response_window_still_current(step_id, step_seq):
+            return False
 
         expected_responses = _coerce_expected_child_responses(self._step)
         response_intent = _classify_child_response_intent(response, expected_responses)
@@ -2986,6 +3029,109 @@ class LessonRuntime:
             )
         return self._safe_speaking_session
 
+    def _cinematic_cue(
+        self, effect: str, *, step_key: str | None = None
+    ) -> dict[str, Any] | None:
+        key = step_key if isinstance(step_key, str) and step_key else self._step_id
+        if not isinstance(key, str):
+            return None
+        return self._cinematic_cues_by_key.get((key, effect))
+
+    def _validate_safe_speaking_cinematic_routes(self) -> None:
+        safe_steps = [
+            step
+            for step in self._steps
+            if isinstance(step.get("interaction"), dict)
+            and step["interaction"].get("template") == "safeSpeaking"
+        ]
+        required = {
+            "listen",
+            "thinking",
+            "retry-level-1",
+            "retry-level-2",
+            "retry-level-3",
+            "correct",
+            "celebrate",
+        }
+        missing: list[str] = []
+        for index, step in enumerate(safe_steps):
+            step_key = step.get("id")
+            if not isinstance(step_key, str):
+                continue
+            effects = required | ({"opening", "greet"} if index == 0 else set())
+            missing.extend(
+                f"{step_key}-{effect}"
+                for effect in sorted(effects)
+                if self._cinematic_cue(effect, step_key=step_key) is None
+            )
+        if missing:
+            self.last_error = LessonError(
+                "CINEMATIC_PHASE_ROUTE_MISSING",
+                f"missing authored cinematic cues: {', '.join(missing)}",
+                retryable=False,
+            )
+            raise self.last_error
+
+    async def _apply_authored_cinematic_effect(self, effect: str) -> bool:
+        cue = self._cinematic_cue(effect)
+        if not isinstance(cue, dict) or self._authored_cinematic_pending is not None:
+            return False
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        sequence = self._seq + 1
+        self._cinematic_phase = cue
+        pending = {
+            "stage": "prepare",
+            "sequence": sequence,
+            "cueId": cue["cueId"],
+            "stepId": self._step_id,
+            "future": future,
+        }
+        self._authored_cinematic_pending = pending
+        try:
+            emitted = await self._emit(
+                "lesson_prepare",
+                step_id=self._step_id,
+                body={
+                    "profile": self.profile,
+                    "cinematicPhase": {"command": "prepare", **copy.deepcopy(cue)},
+                },
+            )
+            if emitted != sequence:
+                self._authored_cinematic_pending = None
+                return False
+            return await future
+        except BaseException:
+            if self._authored_cinematic_pending is pending:
+                self._authored_cinematic_pending = None
+            if not future.done():
+                future.cancel()
+            raise
+
+    def _retire_authored_cinematic_pending(self, *, result: bool = False) -> bool:
+        pending = self._authored_cinematic_pending
+        self._authored_cinematic_pending = None
+        if not isinstance(pending, dict):
+            return False
+        future = pending.get("future")
+        if isinstance(future, asyncio.Future) and not future.done():
+            future.set_result(result)
+        return True
+
+    def _queue_authored_cinematic_sequence(self, effects: list[str]) -> None:
+        previous = self._visual_transition_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        step_id = self._step_id
+        step_seq = self._step_seq
+
+        async def run() -> None:
+            for effect in effects:
+                if not await self._apply_authored_cinematic_effect(effect):
+                    return
+            await self._continue_after_step_visuals(step_id, step_seq)
+
+        self._visual_transition_task = asyncio.create_task(run())
+
     async def _handle_safe_speaking_branch(self, branch: str) -> bool:
         self._cancel_child_response_timeout()
         self._close_child_response_window()
@@ -2996,7 +3142,15 @@ class LessonRuntime:
             "supported": "correct",
             "modeled": "retry",
         }.get(decision.outcome, "incorrect")
-        if self._renderer_v2_enabled():
+        if self._renderer_v4_enabled() and self._conversation_cues:
+            if decision.outcome in {"correct", "supported"}:
+                await self._apply_authored_cinematic_effect("correct")
+            elif decision.outcome == "brave_try":
+                await self._apply_authored_cinematic_effect("retry-level-1")
+            else:
+                level = max(1, min(3, self._safe_speaking().attempts))
+                await self._apply_authored_cinematic_effect(f"retry-level-{level}")
+        elif self._renderer_v2_enabled():
             await self._apply_authored_visual_then_motion(
                 visual_state, decision.motion_slot
             )
@@ -3019,6 +3173,12 @@ class LessonRuntime:
         self._forward_story_progress()
         self._step_completed = True
         await self._wait_lesson_prompt_idle()
+        if (
+            self._renderer_v4_enabled()
+            and self._conversation_cues
+            and decision.outcome in {"correct", "supported"}
+        ):
+            await self._apply_authored_cinematic_effect("celebrate")
         await self._maybe_finish_step()
         return True
 
@@ -3150,6 +3310,36 @@ class LessonRuntime:
         ftype = frame.get("type")
         if ftype == "lesson_prepare":
             prepare_command = self._cinematic_frame_command(frame)
+            authored_pending = self._authored_cinematic_pending
+            if (
+                isinstance(prepare_command, dict)
+                and prepare_command.get("command") == "prepare"
+                and isinstance(authored_pending, dict)
+                and authored_pending.get("stage") == "prepare"
+                and authored_pending.get("sequence")
+                == prepare_command.get("commandSequenceId")
+                and authored_pending.get("cueId") == prepare_command.get("cueId")
+                and authored_pending.get("stepId") == self._step_id
+            ):
+                authored_pending["stage"] = "start"
+                authored_pending["sequence"] = self._seq + 1
+                try:
+                    await self._emit(
+                        "lesson_cinematic_control",
+                        step_id=self._step_id,
+                        body={"command": "start", "cueId": prepare_command["cueId"]},
+                    )
+                except asyncio.CancelledError:
+                    self._retire_authored_cinematic_pending()
+                    raise
+                except Exception as exc:
+                    self._retire_authored_cinematic_pending()
+                    await self._fail_conversation_start_send(
+                        cue_id=prepare_command["cueId"],
+                        step_id=self._step_id,
+                        exc=exc,
+                    )
+                return
             pending_visual = self._conversation_pending_visual
             if (
                 isinstance(prepare_command, dict)
@@ -3189,7 +3379,20 @@ class LessonRuntime:
         elif ftype == "lesson_cinematic_control":
             command = (frame.get("body") or {}).get("command")
             if command == "start":
-                await self._on_conversation_visual_acked(frame)
+                authored_pending = self._authored_cinematic_pending
+                frame_command = self._cinematic_frame_command(frame)
+                if (
+                    isinstance(authored_pending, dict)
+                    and authored_pending.get("stage") == "start"
+                    and isinstance(frame_command, dict)
+                    and authored_pending.get("sequence")
+                    == frame_command.get("commandSequenceId")
+                    and authored_pending.get("cueId") == frame_command.get("cueId")
+                    and authored_pending.get("stepId") == self._step_id
+                ):
+                    self._retire_authored_cinematic_pending(result=True)
+                else:
+                    await self._on_conversation_visual_acked(frame)
             elif command == "pause":
                 self.state = S_PAUSED
                 self._cancel_visual_waiters(increment_generation=False, reason="paused")
@@ -3344,6 +3547,8 @@ class LessonRuntime:
                 f"ignoring non-terminal lesson notify reason={reason} state={self.state}",
             )
             return
+        if self.state in (S_FAILED, S_COMPLETED):
+            self._retire_authored_cinematic_pending()
         if self.state == S_PAUSED:
             self._cancel_visual_waiters(increment_generation=False, reason="paused")
         elif self._visual_ack_waiters:
@@ -3522,13 +3727,20 @@ class LessonRuntime:
             await self._notify_lesson_terminal("sd_asset_pack_not_ready")
             return False
         if not await self._sync_sd_asset_pack_to_robot():
-            self.last_error = LessonError(
-                ASSET_PACK_NOT_READY,
-                "robot did not attest the exact SD asset pack for this lesson",
-                retryable=True,
-            )
+            if not (
+                self.last_error is not None
+                and self.last_error.code == "SD_SYNC_REALTIME_BUSY_TIMEOUT"
+            ):
+                self.last_error = LessonError(
+                    ASSET_PACK_NOT_READY,
+                    "robot did not attest the exact SD asset pack for this lesson",
+                    retryable=True,
+                )
             self.state = S_FAILED
-            self._log("warning", "robot SD sync not attested; refusing online fallback")
+            self._log(
+                "warning",
+                f"robot SD sync not attested code={self.last_error.code}; refusing online fallback",
+            )
             await self._emit_error(self.last_error)
             await self._notify_lesson_terminal("sd_asset_pack_sync_failed")
             return False
@@ -3573,6 +3785,12 @@ class LessonRuntime:
             self._step_visuals_ready = True
             self._bind_conversation_for_current_step()
             await self._publish_conversation_tool_context()
+            if self.conversation is None and self._uses_safe_speaking():
+                self._step_visuals_ready = False
+                effects = ["listen"]
+                if self._step_index == 0 and self._cinematic_cue("greet") is not None:
+                    effects.insert(0, "greet")
+                self._queue_authored_cinematic_sequence(effects)
             return
         self._bind_conversation_for_current_step()
         await self._publish_conversation_tool_context()
@@ -3882,6 +4100,15 @@ class LessonRuntime:
                         self._frame_ack_retry_task = None
                         self._frame_ack_retry_command_sequence = None
                 return
+            command = self._cinematic_frame_command(frame)
+            authored_pending = self._authored_cinematic_pending
+            if (
+                isinstance(command, dict)
+                and isinstance(authored_pending, dict)
+                and command.get("commandSequenceId") == authored_pending.get("sequence")
+                and command.get("cueId") == authored_pending.get("cueId")
+            ):
+                self._retire_authored_cinematic_pending()
             self.last_error = LessonError(
                 LESSON_FRAME_ACK_TIMEOUT,
                 f"no lesson_ack for {frame_type} within timeout",
@@ -4167,6 +4394,8 @@ class LessonRuntime:
             return False
 
     def _close_child_response_window(self) -> None:
+        if not self._child_response_window_open:
+            return
         self._child_response_window_open = False
         provider = getattr(self.conn, "voice_provider", None)
         closer = getattr(provider, "close_lesson_child_response_window", None)
@@ -4627,6 +4856,7 @@ class LessonRuntime:
     def _clear_cinematic_state(self) -> None:
         self._cinematic_pending_command = None
         self._cinematic_deferred_step_ack = None
+        self._retire_authored_cinematic_pending()
         self._cinematic_phase = None
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:
@@ -5148,9 +5378,9 @@ class LessonRuntime:
         if mcp_client is None:
             features = getattr(self.conn, "features", {}) or {}
             return not bool(features.get("mcp"))
+        lesson_cfg = _lesson_config(getattr(self.conn, "config", {}) or {})
         is_ready = getattr(mcp_client, "is_ready", None)
         if callable(is_ready):
-            lesson_cfg = _lesson_config(getattr(self.conn, "config", {}) or {})
             ready_timeout = _finite_float_or_default(
                 lesson_cfg.get("sd_sync_ready_timeout_sec", 8.0), 8.0
             )
@@ -5239,11 +5469,80 @@ class LessonRuntime:
                 timeout=timeout,
             )
 
+        busy_timeout = max(
+            0.05,
+            _finite_float_or_default(
+                lesson_cfg.get("sd_sync_foreground_busy_timeout_sec", 15.0),
+                15.0,
+            ),
+        )
+        busy_poll = max(
+            0.001,
+            min(
+                1.0,
+                _finite_float_or_default(
+                    lesson_cfg.get("sd_sync_foreground_busy_poll_sec", 0.05),
+                    0.05,
+                ),
+            ),
+        )
+        admission_reader = getattr(
+            self.conn, "lesson_start_sd_sync_admission_token", None
+        )
+        try:
+            start_lesson_admission = (
+                admission_reader() if callable(admission_reader) else None
+            )
+        except Exception:
+            start_lesson_admission = None
+        if start_lesson_admission is None:
+            active_reader = getattr(
+                self.conn, "lesson_start_sd_sync_admission_active", None
+            )
+            try:
+                if callable(active_reader) and active_reader():
+                    start_lesson_admission = True
+            except Exception:
+                start_lesson_admission = None
+
+        def realtime_busy_timeout_error() -> _SdSyncRealtimeBusyTimeoutError:
+            state_reader = getattr(self.conn, "_realtime_interaction_state", None)
+            state = "unknown"
+            if callable(state_reader):
+                try:
+                    state = str(state_reader() or "unknown")
+                except Exception:
+                    state = "unknown"
+            return _SdSyncRealtimeBusyTimeoutError(busy_timeout, state)
+
         async def call_sync() -> Any:
+            foreground_started = asyncio.Event()
+            deadline = time.monotonic() + busy_timeout
+
             async def foreground_operation() -> Any:
-                busy_check = getattr(self.conn, "is_realtime_busy", None)
+                lesson_busy_check = getattr(
+                    self.conn, "is_lesson_sd_sync_busy", None
+                )
+                if callable(lesson_busy_check) and start_lesson_admission is True:
+                    def busy_check() -> bool:
+                        return lesson_busy_check(start_lesson_dispatch=True)
+                elif callable(lesson_busy_check) and start_lesson_admission is not None:
+                    def busy_check() -> bool:
+                        return lesson_busy_check(
+                            start_lesson_admission=start_lesson_admission
+                        )
+                elif callable(lesson_busy_check):
+                    busy_check = lesson_busy_check
+                else:
+                    busy_check = getattr(self.conn, "is_realtime_busy", None)
+                foreground_started.set()
                 while callable(busy_check) and busy_check():
-                    await asyncio.sleep(0.05)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise realtime_busy_timeout_error()
+                    await asyncio.sleep(min(busy_poll, remaining))
+                if time.monotonic() >= deadline:
+                    raise realtime_busy_timeout_error()
                 return await call_sync_once()
 
             cache_key = str(
@@ -5251,16 +5550,51 @@ class LessonRuntime:
                 or (sample_request or {}).get("cacheKey")
                 or f"sample:{self.lesson_id}:{self.lesson_version}"
             )
-            return await request_sd_pack_sync(
-                self.conn,
-                cache_key,
-                foreground_operation,
-                foreground=True,
+            request_task = asyncio.create_task(
+                request_sd_pack_sync(
+                    self.conn,
+                    cache_key,
+                    foreground_operation,
+                    foreground=True,
+                )
             )
+            started_task = asyncio.create_task(foreground_started.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {request_task, started_task},
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if request_task in done:
+                    return await request_task
+                if started_task in done:
+                    return await request_task
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+                raise realtime_busy_timeout_error()
+            except asyncio.CancelledError:
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+                raise
+            finally:
+                started_task.cancel()
+                await asyncio.gather(started_task, return_exceptions=True)
 
         sync_started_at = time.monotonic()
         try:
             result = await call_sync()
+        except _SdSyncRealtimeBusyTimeoutError as exc:
+            self.last_error = LessonError(
+                "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+                "realtime voice did not become idle before lesson SD sync",
+                retryable=True,
+            )
+            self._log(
+                "warning",
+                "robot SD sync realtime busy timeout "
+                f"timeoutSec={exc.timeout_sec:.3f} state={exc.state}",
+            )
+            return False
         except Exception as exc:
             reset = getattr(self.conn, "request_lesson_preload_reset", None)
             if "MCP tools disabled during lesson" not in str(exc) or not callable(reset):
@@ -5275,6 +5609,18 @@ class LessonRuntime:
                 if not recovered:
                     return False
                 result = await call_sync()
+            except _SdSyncRealtimeBusyTimeoutError as retry_exc:
+                self.last_error = LessonError(
+                    "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+                    "realtime voice did not become idle before lesson SD sync",
+                    retryable=True,
+                )
+                self._log(
+                    "warning",
+                    "robot SD sync realtime busy timeout "
+                    f"timeoutSec={retry_exc.timeout_sec:.3f} state={retry_exc.state}",
+                )
+                return False
             except Exception as retry_exc:
                 self._log(
                     "warning",

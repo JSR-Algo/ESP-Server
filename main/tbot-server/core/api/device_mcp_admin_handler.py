@@ -56,6 +56,20 @@ class MCPUnknownToolError(RuntimeError):
         super().__init__("mcp-unknown-tool")
 
 
+class MCPLessonAssetSyncInvalidRequestError(RuntimeError):
+    """Privacy-safe proof that firmware rejected an invalid SD sync pack."""
+
+    def __init__(self):
+        super().__init__("lesson-asset-sync-invalid-request")
+
+
+class MCPLessonAssetSyncStorageBusyError(RuntimeError):
+    """Privacy-safe proof that firmware storage ownership remains unavailable."""
+
+    def __init__(self):
+        super().__init__("lesson-asset-sync-storage-busy")
+
+
 class MCPAmbiguousClientIdentityError(RuntimeError):
     """An internal route matched more than one active firmware client identity."""
 
@@ -85,6 +99,34 @@ def _is_correlated_unknown_tool_result(raw_result, tool_name: str) -> bool:
         marker in normalized
         for marker in ("unknown tool", "tool not found", "unlisted tool")
     )
+
+
+def _is_lesson_asset_sync_invalid_request(result_or_error, tool_name: str) -> bool:
+    if tool_name != "self.lesson_assets.sync_to_sd":
+        return False
+    message: object
+    if isinstance(result_or_error, BaseException):
+        message = str(result_or_error).removeprefix("MCP error:").strip()
+    elif isinstance(result_or_error, dict) and result_or_error.get("isError") is True:
+        raw_error = result_or_error.get("error")
+        message = raw_error.get("message") if isinstance(raw_error, dict) else raw_error
+    else:
+        return False
+    return str(message or "").strip().casefold() == "lesson asset sync request invalid"
+
+
+def _is_lesson_asset_sync_storage_busy(result_or_error, tool_name: str) -> bool:
+    if tool_name != "self.lesson_assets.sync_to_sd":
+        return False
+    message: object
+    if isinstance(result_or_error, BaseException):
+        message = str(result_or_error).removeprefix("MCP error:").strip()
+    elif isinstance(result_or_error, dict) and result_or_error.get("isError") is True:
+        raw_error = result_or_error.get("error")
+        message = raw_error.get("message") if isinstance(raw_error, dict) else raw_error
+    else:
+        return False
+    return str(message or "").strip().casefold() == "lesson asset storage busy"
 
 
 def _local_cleanup_registered_call(
@@ -373,14 +415,22 @@ async def _call_raw_mcp_tool(
 
     try:
         raw_result = await asyncio.wait_for(dispatch(), timeout=timeout)
-    except BaseException:
+    except BaseException as exc:
         await _cleanup_registered_call(mcp_client, tool_call_id, result_future)
+        if _is_lesson_asset_sync_invalid_request(exc, tool_name):
+            raise MCPLessonAssetSyncInvalidRequestError() from None
+        if _is_lesson_asset_sync_storage_busy(exc, tool_name):
+            raise MCPLessonAssetSyncStorageBusyError() from None
         raise
 
     if isinstance(raw_result, dict):
         if raw_result.get("isError") is True:
             if _is_correlated_unknown_tool_result(raw_result, tool_name):
                 raise MCPUnknownToolError() from None
+            if _is_lesson_asset_sync_invalid_request(raw_result, tool_name):
+                raise MCPLessonAssetSyncInvalidRequestError() from None
+            if _is_lesson_asset_sync_storage_busy(raw_result, tool_name):
+                raise MCPLessonAssetSyncStorageBusyError() from None
             raise RuntimeError("mcp-tool-call-failed")
         content = raw_result.get("content")
         if isinstance(content, list) and content and isinstance(content[0], dict) and "text" in content[0]:

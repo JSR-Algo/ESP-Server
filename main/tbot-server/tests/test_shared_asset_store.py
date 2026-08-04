@@ -1,8 +1,8 @@
+import errno
 import hashlib
 import json
 import multiprocessing
 import os
-import errno
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -67,6 +67,35 @@ def _rich_flattened_manifest(cache_key: str, digest: str, size: int) -> dict:
         "compatibilityMetadata": {
             "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
             "durationMs": 9000, "frameCount": 90, "hasAudio": False,
+        },
+    })
+    return manifest
+
+
+def _rich_trgb_manifest(cache_key: str, digest: str, size: int) -> dict:
+    manifest = _rich_manifest(cache_key, digest, size)
+    derivative_id = "d" * 64
+    cue_id = "barn-listen"
+    manifest["assets"][0].update({
+        "key": f"flattenedCinematic.{cue_id}",
+        "mediaType": "application/vnd.tbot.rgb565-indexed",
+        "onlineUrl": (
+            "https://admin.tjbot.vn/lesson-derivatives/lessons/derivatives/"
+            f"{derivative_id}/{cue_id}.trgb"
+        ),
+        "path": f"lessons/derivatives/{derivative_id}/{cue_id}.trgb",
+        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/flattenedCinematic.{cue_id}",
+        "derivativeId": derivative_id,
+        "cueId": cue_id,
+        "effect": "listen",
+        "stepKey": "barn",
+        "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "rgb565le", "containerVersion": 1,
+            "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+            "orientation": "panelNativeClockwise", "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+            "hasAudio": False,
         },
     })
     return manifest
@@ -184,6 +213,52 @@ def test_ready_renderer_v4_pack_rejects_changed_flattened_identity(tmp_path, fie
             {"flattenedCinematic.opening": digest},
             manifest=changed,
         )
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda asset: asset.update(onlineUrl=asset["onlineUrl"].replace("admin.tjbot.vn", "evil.example")),
+    lambda asset: asset.update(derivativeId="e" * 64),
+    lambda asset: asset.update(path=asset["path"].replace("barn-listen.trgb", "wrong.trgb")),
+    lambda asset: asset.update(cueId="barn-thinking"),
+    lambda asset: asset.update(effect="thinking"),
+    lambda asset: asset.update(stepKey="hay"),
+    lambda asset: asset.update(playbackMode="once"),
+    lambda asset: asset["compatibilityMetadata"].update(frameCount=12),
+])
+def test_ready_trgb_pack_replay_rejects_changed_rich_identity(tmp_path, mutate):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"trgb"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v7-{'a' * 64}"
+    key = "flattenedCinematic.barn-listen"
+    store.put_bytes(content, digest)
+    manifest = _rich_trgb_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {key: digest}, manifest=manifest)
+    changed = deepcopy(manifest)
+    mutate(changed["assets"][0])
+
+    with pytest.raises(PackReplayMismatchError):
+        store.commit_pack(cache_key, {key: digest}, manifest=changed)
+
+
+def test_ready_trgb_pack_replays_only_exact_rich_identity(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    content = b"trgb"
+    digest = _sha(content)
+    cache_key = f"lesson-a/v7-{'a' * 64}"
+    key = "flattenedCinematic.barn-listen"
+    store.put_bytes(content, digest)
+    manifest = _rich_trgb_manifest(cache_key, digest, len(content))
+    store.commit_pack(cache_key, {key: digest}, manifest=manifest)
+
+    _pack, status = store.commit_pack(
+        cache_key,
+        {key: digest},
+        manifest=deepcopy(manifest),
+        return_status=True,
+    )
+
+    assert status == PACK_COMMIT_REPLAYED
 
 
 def _hold_atomic_write(root, started, release):

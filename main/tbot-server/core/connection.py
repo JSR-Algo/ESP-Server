@@ -2343,6 +2343,59 @@ class ConnectionHandler:
             return True
         return False
 
+    def lesson_start_sd_sync_admission_token(self):
+        marker = getattr(self, "_lesson_start_tool_dispatch_context", None)
+        try:
+            admission = marker.get() if marker is not None else None
+        except Exception:
+            return None
+        return dict(admission) if isinstance(admission, dict) else None
+
+    def lesson_start_sd_sync_admission_active(self) -> bool:
+        return self.lesson_start_sd_sync_admission_token() is not None
+
+    def _lesson_start_sd_sync_admission_state(self, admission):
+        if not isinstance(admission, dict):
+            return None
+        provider = self.voice_provider
+        for candidate in (provider, getattr(provider, "_fallback_provider", None)):
+            if candidate is None or admission.get("providerId") != id(candidate):
+                continue
+            controller = getattr(candidate, "_interaction", None)
+            if controller is None:
+                return None
+            if admission.get("responseId") != getattr(controller, "response_id", None):
+                return None
+            if admission.get("responseGeneration") != getattr(
+                candidate, "_response_generation", None
+            ):
+                return None
+            state = getattr(controller, "state", None)
+            return getattr(state, "value", state)
+        return None
+
+    def is_lesson_sd_sync_busy(
+        self,
+        *,
+        start_lesson_dispatch: bool | None = None,
+        start_lesson_admission=None,
+    ) -> bool:
+        """Allow start_lesson control dispatch to preload without weakening voice safety."""
+        if getattr(self, "client_is_speaking", False):
+            return True
+        if getattr(self, "client_have_voice", False):
+            return True
+        if getattr(self, "_lesson_asset_audio_inflight", 0) > 0:
+            return True
+        admission = start_lesson_admission
+        if admission is None and start_lesson_dispatch is not False:
+            admission = self.lesson_start_sd_sync_admission_token()
+        admission_state = self._lesson_start_sd_sync_admission_state(admission)
+        if admission_state in ("INTERRUPTING", "WAITING_MODEL"):
+            return False
+        state = self._realtime_interaction_state()
+        return state is not None and state not in ("IDLE", "LISTENING")
+
     async def _lesson_pull_on_connect(self):
         """Side task: fetch + drive the device's current lesson assignment.
 

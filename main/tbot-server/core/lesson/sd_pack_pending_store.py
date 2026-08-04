@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypedDict
 
@@ -31,6 +32,7 @@ if existing then
   end
   table.sort(merged)
   work.cacheKeys = merged
+  work.callbackResults = current.callbackResults
   work.createdAt = current.createdAt or work.createdAt
   work.attemptCount = tonumber(current.attemptCount or 0) + 1
 end
@@ -60,7 +62,7 @@ for _, key in ipairs(cjson.decode(ARGV[3]) or {}) do
   expected[key] = true
 end
 local current_count = 0
-local matches_expected = expected_count > 0
+local matches_expected = expected_count == 0
 for _, key in ipairs(current.cacheKeys or {}) do
   current_count = current_count + 1
   if expected_count > 0 and not expected[key] then matches_expected = false end
@@ -71,13 +73,91 @@ for _, key in ipairs(current.cacheKeys or {}) do
   if not clear[key] then table.insert(remaining, key) end
 end
 if #remaining == 0 then
-  if matches_expected then
+  local has_callbacks = false
+  for _, _ in pairs(current.callbackResults or {}) do has_callbacks = true; break end
+  if matches_expected and not has_callbacks then
     redis.call('DEL', KEYS[1])
     redis.call('ZREM', KEYS[2], ARGV[1])
     redis.call('ZREM', KEYS[3], ARGV[1])
+  elseif matches_expected and has_callbacks then
+    current.cacheKeys = remaining
+    redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[4]))
+    redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+    redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
   end
 else
   current.cacheKeys = remaining
+  redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[4]))
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+  redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
+end
+return 1
+"""
+
+_MARK_CALLBACKS_LUA = """
+-- lesson-sd-mark-callbacks
+local existing = redis.call('GET', KEYS[1])
+local work = cjson.decode(ARGV[3])
+local additions = cjson.decode(ARGV[2])
+if existing then
+  local current = cjson.decode(existing)
+  local merged = {}
+  for key, result in pairs(current.callbackResults or {}) do merged[key] = result end
+  for key, result in pairs(additions or {}) do merged[key] = result end
+  work.cacheKeys = current.cacheKeys or {}
+  work.callbackResults = merged
+  work.createdAt = current.createdAt or work.createdAt
+  work.attemptCount = tonumber(current.attemptCount or 0) + 1
+end
+local encoded = cjson.encode(work)
+local due_score = tonumber(ARGV[4])
+local current_due_score = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if current_due_score and tonumber(current_due_score) > due_score then
+  due_score = tonumber(current_due_score)
+end
+redis.call('SET', KEYS[1], encoded, 'EX', tonumber(ARGV[6]))
+redis.call('ZADD', KEYS[2], due_score, ARGV[1])
+redis.call('ZADD', KEYS[3], tonumber(ARGV[5]), ARGV[1])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[6]))
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[6]))
+return encoded
+"""
+
+_CLEAR_CALLBACKS_LUA = """
+-- lesson-sd-clear-callbacks
+local existing = redis.call('GET', KEYS[1])
+if not existing then
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  redis.call('ZREM', KEYS[3], ARGV[1])
+  return 0
+end
+local current = cjson.decode(existing)
+local clear = {}
+for _, key in ipairs(cjson.decode(ARGV[2]) or {}) do clear[key] = true end
+local expected = cjson.decode(ARGV[3]) or {}
+local function callback_equal(left, right)
+  if tostring(left.deviceId or '') ~= tostring(right.deviceId or '') then return false end
+  if tostring(left.cacheKey or '') ~= tostring(right.cacheKey or '') then return false end
+  if tostring(left.errorCode or '') ~= tostring(right.errorCode or '') then return false end
+  if (left.ready == true) ~= (right.ready == true) then return false end
+  for _, field in ipairs({'downloadedCount', 'skippedCount', 'reusedCount', 'failedCount', 'criticalFailedCount'}) do
+    if tonumber(left[field] or 0) ~= tonumber(right[field] or 0) then return false end
+  end
+  return true
+end
+local remaining = {}
+local remaining_count = 0
+for key, result in pairs(current.callbackResults or {}) do
+  local should_clear = clear[key] == true
+  if should_clear and expected[key] then should_clear = callback_equal(result, expected[key]) end
+  if not should_clear then remaining[key] = result; remaining_count = remaining_count + 1 end
+end
+if remaining_count == 0 then current.callbackResults = nil else current.callbackResults = remaining end
+if #(current.cacheKeys or {}) == 0 and remaining_count == 0 then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  redis.call('ZREM', KEYS[3], ARGV[1])
+else
   redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[4]))
   redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
   redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
@@ -101,15 +181,24 @@ return claimed
 """
 
 
-class PendingLessonSdWork(TypedDict):
+class _RequiredPendingLessonSdWork(TypedDict):
     cacheKeys: list[str]
     attemptCount: int
     createdAt: str
     nextAttemptAt: str
 
 
+class PendingLessonSdWork(_RequiredPendingLessonSdWork, total=False):
+    callbackResults: dict[str, dict[str, Any]]
+
+
 class LessonSdPendingStore(Protocol):
     async def mark(self, device_id: str, cache_keys: Iterable[str] | None = None) -> None: ...
+    async def mark_callbacks(
+        self,
+        device_id: str,
+        results: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    ) -> None: ...
     async def load(self, device_id: str) -> PendingLessonSdWork | None: ...
     async def due(self, *, limit: int) -> list[str]: ...
     async def claim_due(self, *, limit: int) -> list[str]: ...
@@ -119,6 +208,13 @@ class LessonSdPendingStore(Protocol):
         cache_keys: Iterable[str],
         *,
         expected_cache_keys: Iterable[str] | None = None,
+    ) -> None: ...
+    async def clear_callbacks(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_results: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
     ) -> None: ...
     async def snapshot(self) -> dict[str, PendingLessonSdWork]: ...
 
@@ -140,6 +236,35 @@ def normalize_cache_keys(cache_keys: Iterable[str] | None) -> list[str]:
     if cache_keys is None:
         return []
     return sorted({str(key).strip() for key in cache_keys if str(key).strip()})
+
+
+def normalize_callback_results(
+    results: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    if results is None:
+        return {}
+    candidates: Iterable[tuple[Any, Any]]
+    if isinstance(results, Mapping) and "cacheKey" not in results:
+        candidates = results.items()
+    elif isinstance(results, Mapping):
+        candidates = [(results.get("cacheKey"), results)]
+    else:
+        candidates = [
+            (result.get("cacheKey"), result)
+            for result in results
+            if isinstance(result, Mapping)
+        ]
+    normalized: dict[str, dict[str, Any]] = {}
+    for fallback_key, result in candidates:
+        if not isinstance(result, Mapping):
+            continue
+        cache_key = str(result.get("cacheKey") or fallback_key or "").strip()
+        if not cache_key:
+            continue
+        item = copy.deepcopy(dict(result))
+        item["cacheKey"] = cache_key
+        normalized[cache_key] = item
+    return dict(sorted(normalized.items()))
 
 
 def _retry_delay(attempt_count: int, random_fn: Callable[[], float]) -> float:
@@ -178,15 +303,48 @@ class InMemoryLessonSdPendingStore:
         keys = normalize_cache_keys(cache_keys)
         async with self._lock:
             existing = self._items.get(device_id)
+            existing_work: Mapping[str, Any] = existing if existing is not None else {}
             now = self._clock()
-            attempt_count = int((existing or {}).get("attemptCount") or 0) + 1
-            created_at = (existing or {}).get("createdAt") or utc_iso(now)
-            merged = normalize_cache_keys([*((existing or {}).get("cacheKeys") or []), *keys])
-            self._items[device_id] = {
+            attempt_count = int(existing_work.get("attemptCount") or 0) + 1
+            created_at = existing_work.get("createdAt") or utc_iso(now)
+            merged = normalize_cache_keys([*(existing_work.get("cacheKeys") or []), *keys])
+            work: PendingLessonSdWork = {
                 "cacheKeys": merged,
                 "attemptCount": attempt_count,
                 "createdAt": created_at,
                 "nextAttemptAt": utc_iso(now + _retry_delay(attempt_count, self._random)),
+            }
+            callbacks = existing_work.get("callbackResults")
+            if callbacks:
+                work["callbackResults"] = copy.deepcopy(callbacks)
+            self._items[device_id] = work
+
+    async def mark_callbacks(
+        self,
+        device_id: str,
+        results: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    ) -> None:
+        device_id = _normalize_device_id(device_id)
+        additions = normalize_callback_results(results)
+        if not device_id or not additions:
+            return
+        async with self._lock:
+            existing = self._items.get(device_id)
+            existing_work: Mapping[str, Any] = existing if existing is not None else {}
+            now = self._clock()
+            attempt_count = int(existing_work.get("attemptCount") or 0) + 1
+            callbacks = normalize_callback_results(existing_work.get("callbackResults") or {})
+            callbacks.update(additions)
+            next_attempt = max(
+                now + _retry_delay(attempt_count, self._random),
+                epoch_from_iso(existing_work.get("nextAttemptAt") or ""),
+            )
+            self._items[device_id] = {
+                "cacheKeys": list(existing_work.get("cacheKeys") or []),
+                "callbackResults": dict(sorted(callbacks.items())),
+                "attemptCount": attempt_count,
+                "createdAt": existing_work.get("createdAt") or utc_iso(now),
+                "nextAttemptAt": utc_iso(next_attempt),
             }
 
     async def load(self, device_id: str) -> PendingLessonSdWork | None:
@@ -247,8 +405,39 @@ class InMemoryLessonSdPendingStore:
             remaining = [key for key in existing["cacheKeys"] if key not in keys]
             if remaining:
                 existing["cacheKeys"] = remaining
-            elif not expected or expected_matches:
+            elif (not expected or expected_matches) and not existing.get("callbackResults"):
                 self._items.pop(device_id, None)
+            elif not expected or expected_matches:
+                existing["cacheKeys"] = []
+
+    async def clear_callbacks(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_results: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
+    ) -> None:
+        device_id = _normalize_device_id(device_id)
+        keys = set(normalize_cache_keys(cache_keys))
+        if not device_id or not keys:
+            return
+        async with self._lock:
+            existing = self._items.get(device_id)
+            if existing is None:
+                return
+            callbacks = existing.get("callbackResults") or {}
+            expected = normalize_callback_results(expected_results)
+            remaining = {
+                key: value
+                for key, value in callbacks.items()
+                if key not in keys or (key in expected and value != expected[key])
+            }
+            if remaining:
+                existing["callbackResults"] = remaining
+            else:
+                existing.pop("callbackResults", None)
+                if not existing["cacheKeys"]:
+                    self._items.pop(device_id, None)
 
     async def snapshot(self) -> dict[str, PendingLessonSdWork]:
         async with self._lock:
@@ -285,22 +474,52 @@ class RedisLessonSdPendingStore:
         if not device_id:
             return
         existing = await self.load(device_id)
+        existing_work: Mapping[str, Any] = existing if existing is not None else {}
         now = self._clock()
-        attempt_count = int((existing or {}).get("attemptCount") or 0) + 1
-        created_at = (existing or {}).get("createdAt") or utc_iso(now)
-        merged = normalize_cache_keys([*((existing or {}).get("cacheKeys") or []), *normalize_cache_keys(cache_keys)])
+        attempt_count = int(existing_work.get("attemptCount") or 0) + 1
+        created_at = existing_work.get("createdAt") or utc_iso(now)
+        merged = normalize_cache_keys([*(existing_work.get("cacheKeys") or []), *normalize_cache_keys(cache_keys)])
         work: PendingLessonSdWork = {
             "cacheKeys": merged,
             "attemptCount": attempt_count,
             "createdAt": created_at,
             "nextAttemptAt": utc_iso(now + _retry_delay(attempt_count, self._random)),
         }
+        callbacks = existing_work.get("callbackResults")
+        if callbacks:
+            work["callbackResults"] = copy.deepcopy(callbacks)
         if not await self._eval_mark(device_id, normalize_cache_keys(cache_keys), work):
-            await self.redis.set(self._key(device_id), json.dumps(work, separators=(",", ":")), ex=self.ttl_sec)
-            await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(work["nextAttemptAt"])})
-            await self.redis.zadd(self._created_key(), {device_id: epoch_from_iso(work["createdAt"])})
-            await self.redis.expire(self._due_key(), self.ttl_sec)
-            await self.redis.expire(self._created_key(), self.ttl_sec)
+            await self._persist(device_id, work)
+
+    async def mark_callbacks(
+        self,
+        device_id: str,
+        results: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    ) -> None:
+        device_id = _normalize_device_id(device_id)
+        additions = normalize_callback_results(results)
+        if not device_id or not additions:
+            return
+        existing = await self.load(device_id)
+        existing_work: Mapping[str, Any] = existing if existing is not None else {}
+        now = self._clock()
+        attempt_count = int(existing_work.get("attemptCount") or 0) + 1
+        callbacks = normalize_callback_results(existing_work.get("callbackResults") or {})
+        callbacks.update(additions)
+        next_attempt = max(
+            now + _retry_delay(attempt_count, self._random),
+            epoch_from_iso(existing_work.get("nextAttemptAt") or ""),
+            await self._due_score(device_id),
+        )
+        work: PendingLessonSdWork = {
+            "cacheKeys": list(existing_work.get("cacheKeys") or []),
+            "callbackResults": dict(sorted(callbacks.items())),
+            "attemptCount": attempt_count,
+            "createdAt": existing_work.get("createdAt") or utc_iso(now),
+            "nextAttemptAt": utc_iso(next_attempt),
+        }
+        if not await self._eval_mark_callbacks(device_id, additions, work):
+            await self._persist(device_id, work)
 
     async def load(self, device_id: str) -> PendingLessonSdWork | None:
         device_id = _normalize_device_id(device_id)
@@ -374,16 +593,46 @@ class RedisLessonSdPendingStore:
         if not remaining:
             if expected and not expected_matches:
                 return
-            await self.redis.delete(self._key(device_id))
-            await self.redis.zrem(self._due_key(), device_id)
-            await self.redis.zrem(self._created_key(), device_id)
+            if existing.get("callbackResults"):
+                existing["cacheKeys"] = []
+                await self._persist(device_id, existing)
+                return
+            await self._delete(device_id)
             return
         existing["cacheKeys"] = remaining
-        await self.redis.set(self._key(device_id), json.dumps(existing, separators=(",", ":")), ex=self.ttl_sec)
-        await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(existing["nextAttemptAt"])})
-        await self.redis.zadd(self._created_key(), {device_id: epoch_from_iso(existing["createdAt"])})
-        await self.redis.expire(self._due_key(), self.ttl_sec)
-        await self.redis.expire(self._created_key(), self.ttl_sec)
+        await self._persist(device_id, existing)
+
+    async def clear_callbacks(
+        self,
+        device_id: str,
+        cache_keys: Iterable[str],
+        *,
+        expected_results: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
+    ) -> None:
+        device_id = _normalize_device_id(device_id)
+        keys = set(normalize_cache_keys(cache_keys))
+        if not device_id or not keys:
+            return
+        expected = normalize_callback_results(expected_results)
+        if await self._eval_clear_callbacks(device_id, keys, expected):
+            return
+        existing = await self.load(device_id)
+        if existing is None:
+            return
+        callbacks = existing.get("callbackResults") or {}
+        remaining = {
+            key: value
+            for key, value in callbacks.items()
+            if key not in keys or (key in expected and value != expected[key])
+        }
+        if remaining:
+            existing["callbackResults"] = remaining
+        else:
+            existing.pop("callbackResults", None)
+        if not existing["cacheKeys"] and not remaining:
+            await self._delete(device_id)
+            return
+        await self._persist(device_id, existing)
 
     async def snapshot(self) -> dict[str, PendingLessonSdWork]:
         members = await self.redis.zrangebyscore(
@@ -399,7 +648,8 @@ class RedisLessonSdPendingStore:
 
     def metrics(self) -> dict[str, int]:
         try:
-            return _run_coro_sync(self._metrics_async())
+            result: dict[str, int] = _run_coro_sync(self._metrics_async())
+            return result
         except Exception as exc:
             logger.warning("lesson SD pending Redis metrics unavailable: %s", type(exc).__name__)
         return {"lesson_sd_pending_age_seconds": 0}
@@ -434,6 +684,32 @@ class RedisLessonSdPendingStore:
 
     def _created_key(self) -> str:
         return f"{self.namespace}:lesson-sd-pending:created"
+
+    async def _persist(self, device_id: str, work: PendingLessonSdWork) -> None:
+        await self.redis.set(
+            self._key(device_id),
+            json.dumps(work, separators=(",", ":")),
+            ex=self.ttl_sec,
+        )
+        await self.redis.zadd(self._due_key(), {device_id: epoch_from_iso(work["nextAttemptAt"])})
+        await self.redis.zadd(self._created_key(), {device_id: epoch_from_iso(work["createdAt"])})
+        await self.redis.expire(self._due_key(), self.ttl_sec)
+        await self.redis.expire(self._created_key(), self.ttl_sec)
+
+    async def _due_score(self, device_id: str) -> float:
+        zscore = getattr(self.redis, "zscore", None)
+        if not callable(zscore):
+            return 0.0
+        try:
+            value = await zscore(self._due_key(), device_id)
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def _delete(self, device_id: str) -> None:
+        await self.redis.delete(self._key(device_id))
+        await self.redis.zrem(self._due_key(), device_id)
+        await self.redis.zrem(self._created_key(), device_id)
 
     async def _eval_mark(
         self,
@@ -480,6 +756,54 @@ class RedisLessonSdPendingStore:
             device_id,
             json.dumps(sorted(cache_keys), separators=(",", ":")),
             json.dumps(expected_cache_keys, separators=(",", ":")),
+            str(self.ttl_sec),
+        )
+        return True
+
+    async def _eval_mark_callbacks(
+        self,
+        device_id: str,
+        additions: dict[str, dict[str, Any]],
+        work: PendingLessonSdWork,
+    ) -> bool:
+        eval_fn = getattr(self.redis, "eval", None)
+        if not callable(eval_fn):
+            return False
+        await self._ensure_standalone_for_lua()
+        await eval_fn(
+            _MARK_CALLBACKS_LUA,
+            3,
+            self._key(device_id),
+            self._due_key(),
+            self._created_key(),
+            device_id,
+            json.dumps(additions, separators=(",", ":")),
+            json.dumps(work, separators=(",", ":")),
+            str(epoch_from_iso(work["nextAttemptAt"])),
+            str(epoch_from_iso(work["createdAt"])),
+            str(self.ttl_sec),
+        )
+        return True
+
+    async def _eval_clear_callbacks(
+        self,
+        device_id: str,
+        cache_keys: set[str],
+        expected_results: dict[str, dict[str, Any]],
+    ) -> bool:
+        eval_fn = getattr(self.redis, "eval", None)
+        if not callable(eval_fn):
+            return False
+        await self._ensure_standalone_for_lua()
+        await eval_fn(
+            _CLEAR_CALLBACKS_LUA,
+            3,
+            self._key(device_id),
+            self._due_key(),
+            self._created_key(),
+            device_id,
+            json.dumps(sorted(cache_keys), separators=(",", ":")),
+            json.dumps(expected_results, separators=(",", ":")),
             str(self.ttl_sec),
         )
         return True
@@ -554,12 +878,16 @@ def _normalize_device_id(device_id: str) -> str:
 
 
 def _copy_work(work: PendingLessonSdWork) -> PendingLessonSdWork:
-    return {
+    copied: PendingLessonSdWork = {
         "cacheKeys": list(work["cacheKeys"]),
         "attemptCount": int(work["attemptCount"]),
         "createdAt": str(work["createdAt"]),
         "nextAttemptAt": str(work["nextAttemptAt"]),
     }
+    callbacks = work.get("callbackResults")
+    if callbacks:
+        copied["callbackResults"] = copy.deepcopy(callbacks)
+    return copied
 
 
 def _sanitize_work(value: dict[str, Any]) -> PendingLessonSdWork:
@@ -569,12 +897,16 @@ def _sanitize_work(value: dict[str, Any]) -> PendingLessonSdWork:
         attempt_count = int(value.get("attemptCount") or 0)
     except (TypeError, ValueError):
         attempt_count = 0
-    return {
+    work: PendingLessonSdWork = {
         "cacheKeys": normalize_cache_keys(value.get("cacheKeys") or []),
         "attemptCount": max(0, attempt_count),
         "createdAt": created_at,
         "nextAttemptAt": next_attempt_at,
     }
+    callbacks = normalize_callback_results(value.get("callbackResults") or {})
+    if callbacks:
+        work["callbackResults"] = callbacks
+    return work
 
 
 def _decode_member(member: Any) -> str:
@@ -594,11 +926,11 @@ def _redis_cluster_enabled(info: Any) -> bool:
         return False
     if not isinstance(info, dict):
         return False
-    value = info.get("cluster_enabled")
+    cluster_enabled = info.get("cluster_enabled")
     cluster = info.get("cluster")
-    if value is None and isinstance(cluster, dict):
-        value = cluster.get("cluster_enabled")
-    return str(value).strip().lower() in {"1", "true", "yes"}
+    if cluster_enabled is None and isinstance(cluster, dict):
+        cluster_enabled = cluster.get("cluster_enabled")
+    return str(cluster_enabled).strip().lower() in {"1", "true", "yes"}
 
 
 def _run_coro_sync(coro):

@@ -7,6 +7,7 @@ import unicodedata
 from collections import deque
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from core.activity_lease import ActivityOperation
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
@@ -1608,7 +1609,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if func_handler is None:
             return False
         try:
-            result = await func_handler.handle_llm_function_call(self.conn, payload)
+            with self._lesson_start_tool_dispatch_scope():
+                result = await func_handler.handle_llm_function_call(self.conn, payload)
             self._suppress_start_lesson_tool_call_until = (
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
             )
@@ -1636,6 +1638,27 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._safe_error_message(exc),
             )
             return False
+
+    @contextmanager
+    def _lesson_start_tool_dispatch_scope(self):
+        marker = getattr(self.conn, "_lesson_start_tool_dispatch_context", None)
+        if marker is None:
+            marker = ContextVar(
+                f"lesson_start_tool_dispatch_{id(self.conn):x}",
+                default=None,
+            )
+            self.conn._lesson_start_tool_dispatch_context = marker
+        interaction = self._interaction
+        admission = {
+            "providerId": id(self),
+            "responseGeneration": int(self._response_generation),
+            "responseId": int(interaction.response_id),
+        }
+        token = marker.set(admission)
+        try:
+            yield
+        finally:
+            marker.reset(token)
 
     def _log_lesson_start_intent_miss(self, transcript_text):
         text = self._normalize_intent_text(transcript_text)
@@ -5674,10 +5697,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     name,
                     type(args).__name__,
                 )
-            result = await func_handler.handle_llm_function_call(
-                self.conn,
-                {"name": name, "arguments": args},
-            )
+            if name == "start_lesson":
+                with self._lesson_start_tool_dispatch_scope():
+                    result = await func_handler.handle_llm_function_call(
+                        self.conn,
+                        {"name": name, "arguments": args},
+                    )
+            else:
+                result = await func_handler.handle_llm_function_call(
+                    self.conn,
+                    {"name": name, "arguments": args},
+                )
             try:
                 action_name = getattr(getattr(result, "action", None), "name", "?")
                 if name in LESSON_CONVERSATION_TOOLS:

@@ -494,6 +494,76 @@ class DeviceMCPAdminHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-secret", repr(caught.exception))
         self.assertIsNone(caught.exception.__cause__)
 
+    async def test_raw_call_preserves_privacy_safe_lesson_sync_invalid_request_type(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+        tool_name = "self.lesson_assets.sync_to_sd"
+
+        class _Client:
+            async def get_next_id(self):
+                return 43
+
+            async def register_call_result_future(self, _call_id, future):
+                self.future = future
+
+            async def cleanup_call_result(self, _call_id):
+                pass
+
+        client = _Client()
+
+        async def invalid_request_result(_conn, _payload):
+            client.future.set_exception(
+                Exception("MCP error: lesson asset sync request invalid")
+            )
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message",
+            invalid_request_result,
+        ), self.assertRaises(RuntimeError) as caught:
+            await _call_raw_mcp_tool(object(), client, tool_name, {})
+
+        self.assertEqual(
+            type(caught.exception).__name__,
+            "MCPLessonAssetSyncInvalidRequestError",
+        )
+        self.assertEqual(str(caught.exception), "lesson-asset-sync-invalid-request")
+        self.assertIsNone(caught.exception.__cause__)
+
+    async def test_raw_call_preserves_privacy_safe_lesson_sync_storage_busy_type(self):
+        from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+
+        tool_name = "self.lesson_assets.sync_to_sd"
+
+        class _Client:
+            async def get_next_id(self):
+                return 44
+
+            async def register_call_result_future(self, _call_id, future):
+                self.future = future
+
+            async def cleanup_call_result(self, _call_id):
+                pass
+
+        client = _Client()
+
+        async def storage_busy_result(_conn, _payload):
+            client.future.set_result(
+                {"isError": True, "error": "lesson asset storage busy"}
+            )
+
+        with patch(
+            "core.api.device_mcp_admin_handler.send_mcp_message",
+            storage_busy_result,
+        ), self.assertRaises(RuntimeError) as caught:
+            await _call_raw_mcp_tool(object(), client, tool_name, {})
+
+        self.assertEqual(
+            type(caught.exception).__name__,
+            "MCPLessonAssetSyncStorageBusyError",
+        )
+        self.assertEqual(str(caught.exception), "lesson-asset-sync-storage-busy")
+        self.assertIsNone(caught.exception.__cause__)
+
     async def test_raw_call_cancellation_after_registration_cleans_result(self):
         from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 

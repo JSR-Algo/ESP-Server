@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote
@@ -34,6 +35,7 @@ from core.lesson.runtime import (
     _classify_child_response_intent,
 )
 from core.lesson.sample import SampleAssetCache
+from core.lesson.sd_pack_sync import request_sd_pack_sync
 
 
 # ── frozen wire fixture ─────────────────────────────────────────────────────────
@@ -3468,6 +3470,165 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sync_calls), 2)
         self.assertEqual(self._sent_frames(conn)[-1]["type"], "lesson_prepare")
 
+    async def test_sd_asset_pack_recovery_retry_reports_realtime_busy_timeout(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        busy = False
+        resets = 0
+        sync_calls = 0
+
+        async def request_lesson_preload_reset(**_kwargs):
+            nonlocal busy, resets
+            resets += 1
+            busy = True
+            return True
+
+        async def stale_lesson_sync(*_args, **_kwargs):
+            nonlocal sync_calls
+            sync_calls += 1
+            raise RuntimeError("MCP tools disabled during lesson")
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        conn.is_realtime_busy = lambda: busy
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=stale_lesson_sync):
+            await asyncio.wait_for(rt.start(), timeout=0.5)
+
+        self.assertEqual(resets, 1)
+        self.assertEqual(sync_calls, 1)
+        self.assertEqual(rt.state, "FAILED")
+        self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+        frames = self._sent_frames(conn)
+        self.assertEqual(frames[-1]["type"], "lesson_error")
+        self.assertEqual(
+            frames[-1]["body"]["code"],
+            "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+        )
+
+    async def test_sd_asset_pack_foreground_joining_background_times_out_safely(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: True
+        asset_cache = _FirmwareSyncAssetCache(ready=True)
+        rt = self._runtime(conn=conn, asset_cache=asset_cache)
+        background_started = asyncio.Event()
+        release_background = asyncio.Event()
+        mcp_calls = 0
+
+        async def blocking_background_sync():
+            nonlocal mcp_calls
+            mcp_calls += 1
+            background_started.set()
+            await release_background.wait()
+            return {"ready": True}
+
+        background = asyncio.create_task(
+            request_sd_pack_sync(
+                conn,
+                asset_cache.cache_key,
+                blocking_background_sync,
+            )
+        )
+        await background_started.wait()
+        try:
+            started_at = asyncio.get_running_loop().time()
+            await asyncio.wait_for(rt.start(), timeout=0.5)
+
+            self.assertLess(asyncio.get_running_loop().time() - started_at, 0.25)
+            self.assertEqual(mcp_calls, 1)
+            self.assertEqual(rt.state, "FAILED")
+            self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+            frames = self._sent_frames(conn)
+            self.assertEqual(frames[-1]["type"], "lesson_error")
+            self.assertEqual(
+                frames[-1]["body"]["code"],
+                "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+            )
+        finally:
+            release_background.set()
+            self.assertEqual(await background, {"ready": True})
+
+    async def test_sd_asset_pack_timed_out_queue_entry_never_calls_mcp_later(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: False
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+        background_started = asyncio.Event()
+        release_background = asyncio.Event()
+        mcp_calls = 0
+
+        async def blocking_background_sync():
+            background_started.set()
+            await release_background.wait()
+            return "background-complete"
+
+        async def ghost_mcp_call(*_args, **_kwargs):
+            nonlocal mcp_calls
+            mcp_calls += 1
+            return {"ready": True}
+
+        async def coordinator_probe():
+            return "coordinator-usable"
+
+        background = asyncio.create_task(
+            request_sd_pack_sync(
+                conn,
+                "unrelated-background-cache-key",
+                blocking_background_sync,
+            )
+        )
+        await background_started.wait()
+        try:
+            with patch("core.lesson.runtime.call_mcp_tool", new=ghost_mcp_call):
+                await asyncio.wait_for(rt.start(), timeout=0.5)
+
+                self.assertEqual(rt.state, "FAILED")
+                self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+                self.assertEqual(
+                    self._sent_frames(conn)[-1]["body"]["code"],
+                    "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+                )
+                release_background.set()
+                self.assertEqual(await background, "background-complete")
+                self.assertEqual(
+                    await request_sd_pack_sync(
+                        conn,
+                        "coordinator-probe-cache-key",
+                        coordinator_probe,
+                    ),
+                    "coordinator-usable",
+                )
+                self.assertEqual(mcp_calls, 0)
+        finally:
+            release_background.set()
+            if not background.done():
+                await background
+
     async def test_sd_asset_pack_sync_waits_for_voice_idle_before_starting(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {"lesson": {"asset_delivery_mode": "sd_pack", "asset_pack_mount_root": "/sdcard/tbot/lesson-assets"}}
@@ -3501,6 +3662,214 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.wait_for(sync_task, timeout=1))
 
         self.assertEqual(attempts, 1)
+
+    async def test_sd_asset_pack_sync_uses_start_lesson_scoped_busy_guard(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: True
+        conn.is_lesson_sd_sync_busy = lambda: False
+        attempts = 0
+
+        async def scoped_sync(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {
+                "ready": True,
+                "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=scoped_sync):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(attempts, 1)
+
+    async def test_sd_asset_pack_sync_preserves_start_lesson_admission_when_worker_predates_it(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.2,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        admission = ContextVar("queued_start_lesson_admission", default=0)
+        conn.lesson_start_sd_sync_admission_active = lambda: admission.get() > 0
+
+        def lesson_busy(*, start_lesson_dispatch=None):
+            return not bool(start_lesson_dispatch)
+
+        conn.is_lesson_sd_sync_busy = lesson_busy
+        asset_cache = _FirmwareSyncAssetCache(ready=True)
+        rt = self._runtime(conn=conn, asset_cache=asset_cache)
+        background_started = asyncio.Event()
+        release_background = asyncio.Event()
+        attempts = 0
+
+        async def blocking_background_sync():
+            background_started.set()
+            await release_background.wait()
+            return {"ready": True}
+
+        async def scoped_sync(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {
+                "ready": True,
+                "cacheKey": asset_cache.cache_key,
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        background = asyncio.create_task(
+            request_sd_pack_sync(conn, "older-background-pack", blocking_background_sync)
+        )
+        await background_started.wait()
+        token = admission.set(1)
+        try:
+            with patch("core.lesson.runtime.call_mcp_tool", new=scoped_sync):
+                foreground = asyncio.create_task(rt._sync_sd_asset_pack_to_robot())
+                await asyncio.sleep(0.02)
+                release_background.set()
+                self.assertTrue(await asyncio.wait_for(foreground, timeout=0.5))
+        finally:
+            admission.reset(token)
+            release_background.set()
+            await background
+
+        self.assertEqual(attempts, 1)
+
+    async def test_sd_asset_pack_sync_rejects_stale_start_lesson_admission_after_new_turn(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.08,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        current_generation = {"value": "generation-1"}
+        conn.lesson_start_sd_sync_admission_active = lambda: True
+        conn.lesson_start_sd_sync_admission_token = lambda: "generation-1"
+
+        def lesson_busy(
+            *, start_lesson_dispatch=None, start_lesson_admission=None
+        ):
+            if isinstance(start_lesson_dispatch, bool):
+                return False
+            return start_lesson_admission != current_generation["value"]
+
+        conn.is_lesson_sd_sync_busy = lesson_busy
+        asset_cache = _FirmwareSyncAssetCache(ready=True)
+        rt = self._runtime(conn=conn, asset_cache=asset_cache)
+        background_started = asyncio.Event()
+        release_background = asyncio.Event()
+        attempts = 0
+
+        async def blocking_background_sync():
+            background_started.set()
+            await release_background.wait()
+            return {"ready": True}
+
+        async def sync_must_not_start(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return {"ready": True}
+
+        background = asyncio.create_task(
+            request_sd_pack_sync(conn, "older-background-pack", blocking_background_sync)
+        )
+        await background_started.wait()
+        try:
+            with patch("core.lesson.runtime.call_mcp_tool", new=sync_must_not_start):
+                foreground = asyncio.create_task(rt._sync_sd_asset_pack_to_robot())
+                await asyncio.sleep(0.02)
+                current_generation["value"] = "generation-2"
+                release_background.set()
+                self.assertFalse(await asyncio.wait_for(foreground, timeout=0.5))
+        finally:
+            release_background.set()
+            await background
+
+        self.assertEqual(attempts, 0)
+        self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+
+    async def test_sd_asset_pack_sync_permanent_realtime_busy_times_out(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.logger = _CapturingLogger()
+        conn.is_realtime_busy = lambda: True
+        attempts = 0
+
+        async def sync_must_not_start(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AssertionError("MCP sync must wait for realtime admission")
+
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+
+        with patch("core.lesson.runtime.call_mcp_tool", new=sync_must_not_start):
+            result = await asyncio.wait_for(
+                rt._sync_sd_asset_pack_to_robot(),
+                timeout=0.5,
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(attempts, 0)
+        self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+        messages = "\n".join(message for _level, message in conn.logger.events)
+        self.assertIn("robot SD sync realtime busy timeout", messages)
+
+    async def test_sd_asset_pack_start_reports_realtime_busy_timeout_code(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.05,
+                "sd_sync_foreground_busy_poll_sec": 0.005,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: True
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+
+        await asyncio.wait_for(rt.start(), timeout=0.5)
+
+        self.assertEqual(rt.state, "FAILED")
+        self.assertEqual(rt.last_error.code, "SD_SYNC_REALTIME_BUSY_TIMEOUT")
+        frames = self._sent_frames(conn)
+        self.assertEqual(frames[-1]["type"], "lesson_error")
+        self.assertEqual(
+            frames[-1]["body"]["code"],
+            "SD_SYNC_REALTIME_BUSY_TIMEOUT",
+        )
 
     async def test_sd_asset_pack_raw_syncs_unlisted_internal_robot_tool(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])

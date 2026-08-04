@@ -9,12 +9,24 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 NGINX_CONFIG = REPO_ROOT / "deploy/nginx/tjbot.vn.conf"
+DOCKER_INFO_TIMEOUT_SECONDS = 2
 
 
 def _docker_ready() -> bool:
-    return shutil.which("docker") is not None and subprocess.run(
-        ["docker", "info"], capture_output=True, check=False
-    ).returncode == 0
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                check=False,
+                timeout=DOCKER_INFO_TIMEOUT_SECONDS,
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _free_port() -> int:

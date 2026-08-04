@@ -121,11 +121,38 @@ env_value() {
   local fallback="$2"
   local value=""
   if [[ -n "${ENV_FILE}" && -r "${ENV_FILE}" ]]; then
-    value="$(awk -F= -v key="${key}" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
-    value="${value%\"}"
-    value="${value#\"}"
-    value="${value%\'}"
-    value="${value#\'}"
+    value="$(awk -v key="${key}" '
+      index($0, key "=") == 1 {
+        raw = substr($0, length(key) + 2)
+        single_quote = sprintf("%c", 39)
+        double_quote = sprintf("%c", 34)
+        quote = substr(raw, 1, 1)
+        if (quote != single_quote && quote != double_quote) {
+          print raw
+          exit
+        }
+        raw = substr(raw, 2)
+        if (length(raw) > 0 && substr(raw, length(raw), 1) == quote) {
+          print substr(raw, 1, length(raw) - 1)
+          exit
+        }
+        value = raw
+        while ((getline line) > 0) {
+          closed = length(line) > 0 && substr(line, length(line), 1) == quote
+          if (closed) {
+            line = substr(line, 1, length(line) - 1)
+          }
+          if (length(line) > 0) {
+            value = length(value) > 0 ? value "\n" line : line
+          }
+          if (closed) {
+            print value
+            exit
+          }
+        }
+        exit
+      }
+    ' "${ENV_FILE}")"
   fi
   printf '%s' "${value:-${fallback}}"
 }
@@ -171,7 +198,7 @@ validate_production_boot_env() {
   local failed key value file_limit pack_limit
   failed=0
 
-  for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS LESSON_SD_MAX_FILE_BYTES LESSON_SD_MAX_PACK_BYTES; do
+  for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS LESSON_SD_MAX_FILE_BYTES LESSON_SD_MAX_PACK_BYTES; do
     value="$(env_value "${key}" "")"
     if is_placeholder_value "${value}"; then
       printf 'error: %s is required in env file for production boot\n' "${key}" >&2
@@ -429,6 +456,8 @@ fi
 run_ssh "mkdir -p ${REMOTE_RELEASES_Q}"
 run_ssh "rm -rf ${REMOTE_RELEASE_Q} && mkdir -p ${REMOTE_RELEASE_Q}"
 run_scp "${RELEASE_DIR}/." "${USER_NAME}@${HOST}:${REMOTE_RELEASE}/"
+
+run_ssh "test -f ${REMOTE_Q}/.env || { echo 'error: current env is unavailable for rollback snapshot' >&2; exit 1; }; env_backup=${REMOTE_Q}/.env.rollback-\$(date -u +%Y%m%dT%H%M%SZ)-$(remote_quote "${TAG}") && install -m 600 ${REMOTE_Q}/.env \"\$env_backup\" && printf '%s\n' \"\$env_backup\" > ${REMOTE_RELEASE_Q}/env-backup-path"
 
 if [[ -n "${ENV_FILE}" ]]; then
   run_scp "${ENV_FILE}" "${USER_NAME}@${HOST}:${REMOTE_ROOT}/.env"

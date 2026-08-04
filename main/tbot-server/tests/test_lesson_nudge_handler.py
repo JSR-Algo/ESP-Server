@@ -395,6 +395,7 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
             *,
             token=None,
             renderer_capabilities=None,
+            renderer_v2_enabled=False,
             lesson_version=None,
         ):
             self.assertEqual(lesson_id, prep["lessonId"])

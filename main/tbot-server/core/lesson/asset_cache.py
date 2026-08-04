@@ -43,16 +43,17 @@ from core.lesson.errors import (
     AssetProfileUnavailable,
     PreloadTimeout,
 )
-from core.lesson.shared_asset_store import SharedAssetStore
 from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
     validate_flattened_cinematic_cache_asset,
+    validate_pathless_flattened_cinematic_cache_asset,
 )
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
     validate_renderer_v4_flattened_mp4,
 )
+from core.lesson.shared_asset_store import SharedAssetStore
 
 TAG = "LessonAssetCache"
 
@@ -68,11 +69,27 @@ _DEFAULT_POLL_INTERVAL = 0.2
 _SOFT_BUSY_PROGRESS_GRACE_SEC = 0.1
 _DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_TOTAL_ASSET_BYTES = 64 * 1024 * 1024
+_DEFAULT_SD_MAX_ASSET_BYTES = 32 * 1024 * 1024
+_DEFAULT_SD_MAX_TOTAL_ASSET_BYTES = 128 * 1024 * 1024
+_MAX_SD_CONFIG_BYTES = 2 * 1024 * 1024 * 1024
 _ESPTFT_BACKGROUND_MAX_SIZE = (320, 240)
 
 
 def _sha_prefix(value: Optional[str]) -> str:
     return (value or "")[:8]
+
+
+def _sd_env_int_or_default(name: str, default: int) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value > _MAX_SD_CONFIG_BYTES:
+        return None
+    return value
 
 def _normalize_esptft_background_jpeg(content: bytes) -> bytes:
     """Return a small baseline JPEG that firmware can decode inside its SRAM budget."""
@@ -149,7 +166,11 @@ class AssetState:
                 validate_flattened_cinematic_cache_asset(asset)
                 self.renderer_v4_mp4 = True
             except FlattenedCinematicContractError:
-                self.renderer_v4_mp4 = False
+                try:
+                    validate_pathless_flattened_cinematic_cache_asset(asset)
+                    self.renderer_v4_mp4 = True
+                except FlattenedCinematicContractError:
+                    self.renderer_v4_mp4 = False
         self.state: str = PENDING
         self.checksum_ok: bool = False
         self.reason: Optional[str] = None
@@ -242,10 +263,17 @@ class AssetCache:
         self._poll_interval = poll_interval
         self._max_asset_bytes = int(max_asset_bytes or _DEFAULT_MAX_ASSET_BYTES)
         self._max_total_asset_bytes = int(max_total_asset_bytes or _DEFAULT_MAX_TOTAL_ASSET_BYTES)
+        self._sd_max_asset_bytes = _sd_env_int_or_default(
+            "LESSON_SD_MAX_FILE_BYTES", _DEFAULT_SD_MAX_ASSET_BYTES
+        )
+        self._sd_max_total_asset_bytes = _sd_env_int_or_default(
+            "LESSON_SD_MAX_PACK_BYTES", _DEFAULT_SD_MAX_TOTAL_ASSET_BYTES
+        )
         self._downloaded_total_bytes = 0
         self._deadline: Optional[float] = None
         self._soft_busy_since: Optional[float] = None
         self._pack_only_assets: Dict[str, tuple[str, int]] = {}
+        self._hydrated_ready_shared_pack = False
 
         # Skip manifest assets with a falsy key (no id/assetId): they would crash
         # _final_path (None.replace) and collide in _by_key (every None overwrites
@@ -327,7 +355,7 @@ class AssetCache:
             and self._asset_pack_materialized(a)
             for a in required
         ) and (
-            self._materialized_total_bytes(required) <= self._max_total_asset_bytes
+            self._materialized_total_bytes(required) <= self._ready_total_asset_limit()
             and self._asset_pack_ready()
         )
 
@@ -501,8 +529,17 @@ class AssetCache:
                 elif self._pack_only_asset_ready(asset):
                     total += os.path.getsize(self._asset_pack_path(asset))
             except (OSError, ValueError):
-                return self._max_total_asset_bytes + 1
+                return self._ready_total_asset_limit() + 1
         return total
+
+    def _ready_total_asset_limit(self) -> int:
+        if (
+            self._hydrated_ready_shared_pack
+            and self.asset_pack_mount_root
+            and self._sd_max_total_asset_bytes is not None
+        ):
+            return self._sd_max_total_asset_bytes
+        return self._max_total_asset_bytes
 
     def _asset_for_source(self, source: str) -> Optional[AssetState]:
         if source in self._by_source:
@@ -661,7 +698,7 @@ class AssetCache:
                     asset.state = FAILED
                     asset.checksum_ok = False
                     asset.reason = "checksum_mismatch"
-        if total_bytes > self._max_total_asset_bytes:
+        if total_bytes > self._ready_total_asset_limit():
             for asset in self.required_assets:
                 if asset.state == READY:
                     asset.state = FAILED
@@ -673,7 +710,10 @@ class AssetCache:
     def _hydrate_from_ready_shared_pack(self) -> bool:
         """Restore an exact rich READY pack into the separate server cache."""
         self._pack_only_assets = {}
+        self._hydrated_ready_shared_pack = False
         if self._shared_asset_store is None or not self.asset_pack_mount_root:
+            return False
+        if self._sd_max_asset_bytes is None or self._sd_max_total_asset_bytes is None:
             return False
         try:
             if not self._shared_asset_store.is_pack_ready(self.cache_key):
@@ -685,6 +725,7 @@ class AssetCache:
             if (
                 manifest.get("cacheKey") != self.cache_key
                 or manifest.get("lessonId") != self.lesson_key
+                or manifest.get("profile") != self.profile
                 or type(manifest.get("lessonVersion")) is not int
                 or manifest.get("lessonVersion") != self.lesson_version
                 or checksum != self.manifest_checksum
@@ -734,19 +775,22 @@ class AssetCache:
                     )
                     or type(size) is not int
                     or size < 0
-                    or size > self._max_asset_bytes
+                    or size > self._sd_max_asset_bytes
                     or not os.path.isfile(source)
                     or os.path.getsize(source) != size
                     or self._hash_file(source) != digest
                 ):
                     return False
                 total_bytes += size
-                if total_bytes > self._max_total_asset_bytes:
+                if total_bytes > self._sd_max_total_asset_bytes:
                     return False
                 if digest == asset.sha256:
                     sources[asset.key] = source
                 elif (
-                    self._requires_render_safe_derivative(asset)
+                    (
+                        self._requires_render_safe_derivative(asset)
+                        or asset.renderer_v4_mp4
+                    )
                     and source_digest == asset.sha256
                 ):
                     pack_only_assets[asset.key] = (digest, size)
@@ -768,6 +812,7 @@ class AssetCache:
                 finally:
                     self._safe_remove(tmp_path)
             self._pack_only_assets = pack_only_assets
+            self._hydrated_ready_shared_pack = True
             return True
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return False

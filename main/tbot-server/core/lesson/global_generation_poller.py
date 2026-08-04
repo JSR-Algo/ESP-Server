@@ -18,6 +18,11 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 
 from config.logger import setup_logging
+from core.lesson.flattened_cinematic_contract import (
+    TRGB_MEDIA_TYPE,
+    FlattenedCinematicContractError,
+    validate_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -73,6 +78,7 @@ _RENDERER_V4_V1_MP4_FIELDS = frozenset({"compatibilityMetadata", "derivativeId",
 _RENDERER_V4_V2_MP4_FIELDS = frozenset(
     {"compatibilityMetadata", "derivativeId", "cueId", "effect", "stepKey", "playbackMode"}
 )
+_RENDERER_V4_V2_TRGB_FIELDS = _RENDERER_V4_V2_MP4_FIELDS
 _RENDERER_V4_MP4_FIELDS = _RENDERER_V4_V1_MP4_FIELDS | _RENDERER_V4_V2_MP4_FIELDS
 _ALL_ASSET_FIELDS = (
     _ASSET_FIELDS | _SHARED_IDENTITY_FIELDS | _RENDERER_V3_MP4_FIELDS | _RENDERER_V4_MP4_FIELDS
@@ -92,6 +98,9 @@ _RESERVED_BASENAMES = frozenset(
 )
 _RESERVED_SUFFIXES = (".tmp", ".download", ".part", ".backup")
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_TRGB_PROXY_ORIGIN = ("https", "admin.tjbot.vn", 443)
+_TRGB_PROXY_PATH_PREFIX = "/lesson-derivatives/lessons/derivatives/"
+_RENDERER_DERIVATIVE_PATH_PREFIX = "lessons/derivatives/"
 
 
 class _PollRejected(ValueError):  # noqa: N818 - internal control-flow rejection
@@ -511,7 +520,26 @@ def _validate_asset(
     if type(value.get("critical")) is not bool:
         raise _PollRejected("cms_invalid_critical")
     media_type = value["mediaType"]
-    if media_type.lower().startswith("video/"):
+    if media_type == TRGB_MEDIA_TYPE:
+        public_url = value["onlineUrl"]
+        public_path = urlsplit(public_url).path
+        if (
+            _origin(public_url, allowed_schemes={"https"}, allow_fragment=False)
+            != _TRGB_PROXY_ORIGIN
+            or not public_path.startswith(_TRGB_PROXY_PATH_PREFIX)
+            or public_path.count(_RENDERER_DERIVATIVE_PATH_PREFIX) != 1
+        ):
+            raise _PollRejected("cms_invalid_renderer_v4_mp4")
+        canonical_path = public_path.removeprefix("/lesson-derivatives/")
+        try:
+            contract_asset = dict(value)
+            contract_asset["path"] = canonical_path
+            validate_flattened_cinematic_cache_asset(contract_asset)
+        except FlattenedCinematicContractError:
+            raise _PollRejected("cms_invalid_renderer_v4_mp4") from None
+        if fields != _ASSET_FIELDS | _RENDERER_V4_V2_TRGB_FIELDS:
+            raise _PollRejected("cms_invalid_renderer_v4_mp4")
+    elif media_type.lower().startswith("video/"):
         if fields & frozenset({"derivativeId", "phaseId", "cueId"}):
             try:
                 validate_renderer_v4_flattened_mp4(value)

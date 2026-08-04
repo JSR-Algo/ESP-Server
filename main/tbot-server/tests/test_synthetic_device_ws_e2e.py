@@ -215,7 +215,8 @@ class SyntheticDeviceWebSocketEndToEndTest(unittest.IsolatedAsyncioTestCase):
             return assignment
 
         async def _get_manifest(client, base_url, lesson_id, profile, *, token=None,
-                                renderer_capabilities=None, lesson_version=None):
+                                renderer_capabilities=None, renderer_v2_enabled=False,
+                                lesson_version=None):
             self._manifest_pull = (lesson_id, profile, token, lesson_version)
             return manifest, etag
 

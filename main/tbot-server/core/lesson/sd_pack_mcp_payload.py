@@ -11,6 +11,7 @@ from core.lesson.flattened_cinematic_contract import (
     TRGB_MEDIA_TYPE,
     FlattenedCinematicContractError,
     validate_flattened_cinematic_cache_asset,
+    validate_pathless_flattened_cinematic_cache_asset,
 )
 from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 
@@ -58,6 +59,27 @@ _FLATTENED_CUE_DURATION_MS = {
     "thinking": 1300, "correct": 600, "retry-level-1": 1200,
     "retry-level-2": 1400, "retry-level-3": 1600, "celebrate": 3000,
     "word-transition": 1100,
+}
+_FIRMWARE_BASE_ASSET_FIELDS = frozenset({
+    "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
+    "mediaType", "critical", "layer", "role", "state", "checksumOk",
+    "localPath", "sdPath",
+})
+_FIRMWARE_RENDERER_V4_IDENTITY_FIELDS = frozenset({
+    "cueId", "effect", "stepKey", "playbackMode", "derivativeId", "phaseId",
+})
+_FIRMWARE_ASSET_FIELDS = (
+    _FIRMWARE_BASE_ASSET_FIELDS
+    | _FIRMWARE_RENDERER_V4_IDENTITY_FIELDS
+    | {"compatibilityMetadata"}
+)
+_FIRMWARE_ASSET_FIELDS_BY_KIND = {
+    "base": _FIRMWARE_BASE_ASSET_FIELDS,
+    "renderer_v3_mp4": _FIRMWARE_BASE_ASSET_FIELDS,
+    "renderer_v4_mp4": _FIRMWARE_ASSET_FIELDS,
+    "renderer_v4_trgb": (
+        _FIRMWARE_BASE_ASSET_FIELDS | _FIRMWARE_RENDERER_V4_IDENTITY_FIELDS
+    ),
 }
 
 
@@ -203,6 +225,11 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     """Validate the exact one-file renderer-v4 flattened MJPEG transport."""
     if not isinstance(asset, dict) or asset.get("mediaType") != "video/mp4":
         _refuse()
+    if any(
+        field in asset
+        for field in ("sharedAssetKey", "sharedAssetVersion", "visualRefs")
+    ):
+        _refuse()
     derivative_id = asset.get("derivativeId")
     if not isinstance(derivative_id, str) or _LOWER_SHA256_RE.fullmatch(derivative_id) is None:
         _refuse()
@@ -270,7 +297,9 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
         "compatibilityMetadata": copy.deepcopy(metadata),
     }
 
-def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: str) -> tuple[str, str]:
+def _validate_asset_metadata(
+    asset: dict[str, Any], cache_key: str, basename: str
+) -> tuple[str, str, str | None, str]:
     sha256 = asset.get("sha256")
     if not isinstance(sha256, str) or _LOWER_SHA256_RE.fullmatch(sha256) is None:
         _refuse()
@@ -287,9 +316,12 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     _validate_source_local_path(local_path, cache_key, basename)
     _validate_online_url(local_fallback_url)
     online_url = local_fallback_url
+    canonical_path = None
+    asset_kind = "base"
     flattened_identity = "derivativeId" in asset or "phaseId" in asset or "cueId" in asset
     if flattened_identity:
         if media_type == TRGB_MEDIA_TYPE:
+            asset_kind = "renderer_v4_trgb"
             source_url = asset.get("sourceUrl")
             if source_url is None:
                 source_url = local_fallback_url
@@ -300,17 +332,23 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
                 contract_asset = dict(asset)
                 contract_asset["url"] = source_url
                 contract_asset["onlineUrl"] = source_url
-                validate_flattened_cinematic_cache_asset(contract_asset)
+                try:
+                    validate_flattened_cinematic_cache_asset(contract_asset)
+                except FlattenedCinematicContractError:
+                    validated = validate_pathless_flattened_cinematic_cache_asset(contract_asset)
+                    canonical_path = validated["path"]
             except FlattenedCinematicContractError:
                 _refuse()
             online_url = source_url
         elif media_type.lower().startswith("video/"):
+            asset_kind = "renderer_v4_mp4"
             validate_renderer_v4_flattened_mp4(asset)
         else:
             _refuse()
     elif media_type.lower().startswith("video/"):
+        asset_kind = "renderer_v3_mp4"
         validate_renderer_v3_shared_mp4(asset)
-    return local_path, online_url
+    return local_path, online_url, canonical_path, asset_kind
 
 
 def build_firmware_sync_pack(pack: Any) -> dict[str, Any]:
@@ -346,14 +384,17 @@ def build_firmware_sync_pack(pack: Any) -> dict[str, Any]:
     physical_root = f"{FIRMWARE_LESSON_ASSET_ROOT}/{cache_key}"
     result["localRoot"] = physical_root
     for index, basename in enumerate(basenames):
-        _source_local_path, online_url = normalized_assets[index]
+        _source_local_path, online_url, canonical_path, asset_kind = normalized_assets[index]
         physical_path = f"{physical_root}/{basename}"
         sent_asset = result["assets"][index]
         sent_asset.pop("localPath", None)
         sent_asset.pop("url", None)
         sent_asset["sdPath"] = physical_path
         sent_asset["onlineUrl"] = online_url
-        sent_asset.pop("sourceUrl", None)
-        if sent_asset.get("mediaType") == TRGB_MEDIA_TYPE:
-            sent_asset.pop("compatibilityMetadata", None)
+        if canonical_path is not None:
+            sent_asset["path"] = canonical_path
+        allowed_fields = _FIRMWARE_ASSET_FIELDS_BY_KIND[asset_kind]
+        for field in tuple(sent_asset):
+            if field not in allowed_fields:
+                sent_asset.pop(field)
     return result

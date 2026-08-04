@@ -382,6 +382,60 @@ async def test_skipped_item_cannot_mark_generation_observed_despite_ready_fields
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sync_result",
+    [
+        {
+            "resultsByCacheKey": {
+                "a": {
+                    "ready": False,
+                    "criticalFailedCount": 0,
+                    "errorCode": "storage_busy",
+                }
+            }
+        },
+        {
+            "resultsByCacheKey": {
+                "a": {
+                    "ready": False,
+                    "criticalFailedCount": 0,
+                    "errorCode": "sd_sync_recovery_pending",
+                }
+            }
+        },
+    ],
+)
+async def test_unknown_or_storage_busy_sync_stays_retrying_without_false_generation(sync_result):
+    async def sync(_connection, *, only_cache_keys):
+        assert only_cache_keys == {"a"}
+        return sync_result
+
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, sync=sync, sleep=_no_sleep)
+    connection = object()
+    await sessions.register("one", connection)
+
+    result = await sessions.sync_on_connect(
+        connection,
+        accepted_generation=8,
+        checksum=CHECKSUM,
+        packs=[_pack("a")],
+    )
+
+    row = json.loads(next(iter(redis.hashes[GLOBAL_SESSIONS_KEY].values())))
+    assert result == {"state": "retrying", "errorCode": "sync_result_incomplete"}
+    assert row["status"] == "retrying"
+    assert row["observedGeneration"] is None
+    assert await sessions.aggregate(8) == {
+        "connected": 1,
+        "current": 0,
+        "retrying": 1,
+        "failed": 0,
+    }
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
 async def test_aggregate_store_failure_raises_only_sanitized_domain_error():
     class BrokenRedis(FakeRedis):
         async def hgetall(self, key):
@@ -539,6 +593,47 @@ async def test_register_before_ready_retries_and_mcp_ready_prompts_current_sync(
 
 
 @pytest.mark.asyncio
+async def test_fresh_reconnect_uses_stable_server_config_for_generation_sync():
+    calls = []
+
+    async def sync(connection, *, only_cache_keys):
+        lesson = connection.config.get("lesson", {})
+        calls.append(lesson.get("asset_pack_mount_root"))
+        if lesson.get("asset_pack_mount_root") != "/stable/server/packs":
+            return {"packs": 0, "synced": 0, "failed": 0, "resultsByCacheKey": {}}
+        return _ready(*only_cache_keys)
+
+    redis = FakeRedis()
+    sessions = GlobalGenerationSessions(redis, sync=sync, sleep=_no_sleep)
+    connection = SimpleNamespace(
+        config={"lesson": {"asset_delivery_mode": "sd_pack"}},
+        server=SimpleNamespace(
+            config={
+                "lesson": {
+                    "asset_delivery_mode": "sd_pack",
+                    "asset_pack_mount_root": "/stable/server/packs",
+                }
+            }
+        ),
+    )
+    await sessions.register("one", connection)
+
+    result = await sessions.fanout(
+        generation=41,
+        index_checksum=CHECKSUM,
+        packs=[_pack("lesson/v41")],
+    )
+
+    row = json.loads(next(iter(redis.hashes[GLOBAL_SESSIONS_KEY].values())))
+    assert calls == ["/stable/server/packs"]
+    assert result == {"attempted": 1, "current": 1, "retrying": 0, "failed": 0}
+    assert row["status"] == "current"
+    assert row["observedGeneration"] == 41
+    assert row["observedChecksum"] == CHECKSUM
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
 async def test_disconnect_and_new_generation_cancel_session_retry_task():
     redis = FakeRedis()
     cancelled = 0
@@ -564,6 +659,87 @@ async def test_disconnect_and_new_generation_cancel_session_retry_task():
     await sessions.unregister("one", connection)
 
     assert cancelled == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_worker_only_resends_incomplete_pack_keys():
+    redis = FakeRedis()
+    calls = []
+    release_retry = asyncio.Event()
+    retry_started = asyncio.Event()
+
+    async def sleep(_delay):
+        retry_started.set()
+        await release_retry.wait()
+
+    async def sync(_connection, *, only_cache_keys):
+        calls.append(set(only_cache_keys))
+        if len(calls) == 1:
+            return {
+                "resultsByCacheKey": {
+                    "ready": {"ready": True, "criticalFailedCount": 0},
+                    "retry": {"ready": False, "criticalFailedCount": 1},
+                }
+            }
+        return _ready(*only_cache_keys)
+
+    sessions = GlobalGenerationSessions(redis, sync=sync, sleep=sleep)
+    connection = object()
+    await sessions.register("one", connection)
+
+    result = await sessions.fanout(
+        generation=5,
+        index_checksum=CHECKSUM,
+        packs=[_pack("ready"), _pack("retry")],
+    )
+    assert result["retrying"] == 1
+    await retry_started.wait()
+    release_retry.set()
+    for _ in range(20):
+        if len(calls) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert calls == [{"ready", "retry"}, {"retry"}]
+    assert (await sessions.aggregate(5))["current"] == 1
+    await sessions.unregister("one", connection)
+
+
+@pytest.mark.asyncio
+async def test_explicit_invalid_request_is_terminal_and_does_not_start_retry_worker():
+    sleeps = 0
+
+    async def sleep(_delay):
+        nonlocal sleeps
+        sleeps += 1
+
+    async def sync(_connection, *, only_cache_keys):
+        key = next(iter(only_cache_keys))
+        return {
+            "resultsByCacheKey": {
+                key: {
+                    "ready": False,
+                    "criticalFailedCount": 1,
+                    "errorCode": "invalid_request",
+                }
+            }
+        }
+
+    sessions = GlobalGenerationSessions(FakeRedis(), sync=sync, sleep=sleep)
+    connection = object()
+    await sessions.register("one", connection)
+
+    result = await sessions.fanout(
+        generation=5,
+        index_checksum=CHECKSUM,
+        packs=[_pack("invalid")],
+    )
+    await asyncio.sleep(0)
+
+    assert result == {"attempted": 1, "current": 0, "retrying": 0, "failed": 1}
+    assert sleeps == 0
+    assert (await sessions.aggregate(5))["failed"] == 1
+    await sessions.unregister("one", connection)
 
 
 def test_source_does_not_store_raw_ids_in_shared_rows():
