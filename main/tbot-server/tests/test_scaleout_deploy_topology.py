@@ -89,15 +89,15 @@ def test_prod_compose_forwards_production_boot_guard_env_to_server():
     assert "TBOT_DEVICE_MINT_SECRET=REPLACE_WITH_SHARED_DEVICE_MINT_SECRET" in env_example
     assert "JWT_PUBLIC_KEY=REPLACE_WITH_BACKEND_JWT_PUBLIC_KEY" in env_example
     assert "LESSON_ASSET_ALLOWED_ORIGINS=https://res.cloudinary.com" in env_example
-    assert "LESSON_SD_MAX_FILE_BYTES=1048576" in env_example
-    assert "LESSON_SD_MAX_PACK_BYTES=8388608" in env_example
+    assert "LESSON_SD_MAX_FILE_BYTES=33554432" in env_example
+    assert "LESSON_SD_MAX_PACK_BYTES=134217728" in env_example
     assert "TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS" in deploy_script
     assert "LESSON_VOICE_RT_P95_DISABLE_MS=1500" in env_example
     assert "LESSON_ASSET_PACK_LOCAL_ROOT=sd://tbot/lesson-assets" in env_example
     assert "LESSON_ASSET_PACK_MOUNT_ROOT=/opt/tbot-esp32-server/data/lesson-packs" in env_example
 
 
-def test_prod_deploy_wires_renderer_v2_flag_defaulting_disabled():
+def test_prod_deploy_wires_renderer_flags_defaulting_disabled():
     compose = yaml.safe_load((REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8"))
     env_example = (REPO_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
     script = (REPO_ROOT / "deploy" / "deploy-vps.sh").read_text(encoding="utf-8")
@@ -105,8 +105,21 @@ def test_prod_deploy_wires_renderer_v2_flag_defaulting_disabled():
     environment = compose["services"]["tbot-esp32-server"]["environment"]
 
     assert environment["LESSON_RENDERER_V2_ENABLED"] == "${LESSON_RENDERER_V2_ENABLED:-false}"
+    assert environment["LESSON_RENDERER_V4_ENABLED"] == "${LESSON_RENDERER_V4_ENABLED:-false}"
     assert "LESSON_RENDERER_V2_ENABLED=false" in env_example
+    assert "LESSON_RENDERER_V4_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V2_ENABLED" in script
+    assert "LESSON_RENDERER_V4_ENABLED" in script
+
+
+def test_prod_compose_uses_voice_safe_lesson_preload_timeout_default():
+    compose = yaml.safe_load(
+        (REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    )
+
+    environment = compose["services"]["tbot-esp32-server"]["environment"]
+
+    assert environment["LESSON_PRELOAD_TIMEOUT_SEC"] == "${LESSON_PRELOAD_TIMEOUT_SEC:-240}"
 
 
 def test_server_healthcheck_proves_both_http_and_websocket_listeners():
@@ -147,8 +160,8 @@ def test_release_package_fallback_preserves_asset_materialization_limits():
         "LESSON_SD_MAX_FILE_BYTES: ${LESSON_SD_MAX_FILE_BYTES:?set LESSON_SD_MAX_FILE_BYTES}",
         "LESSON_SD_MAX_PACK_BYTES: ${LESSON_SD_MAX_PACK_BYTES:?set LESSON_SD_MAX_PACK_BYTES}",
         "LESSON_ASSET_ALLOWED_ORIGINS=https://res.cloudinary.com",
-        "LESSON_SD_MAX_FILE_BYTES=1048576",
-        "LESSON_SD_MAX_PACK_BYTES=8388608",
+        "LESSON_SD_MAX_FILE_BYTES=33554432",
+        "LESSON_SD_MAX_PACK_BYTES=134217728",
     ):
         assert expected in script
 
@@ -289,6 +302,103 @@ def test_deploy_vps_preflight_rejects_missing_production_boot_env(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "limit_key, limit_value, expected_error",
+    [
+        (
+            "LESSON_SD_MAX_FILE_BYTES",
+            "29186047",
+            "LESSON_SD_MAX_FILE_BYTES must be at least 29186048",
+        ),
+        (
+            "LESSON_SD_MAX_PACK_BYTES",
+            "116139165",
+            "LESSON_SD_MAX_PACK_BYTES must be at least 116139166",
+        ),
+    ],
+)
+def test_deploy_vps_preflight_rejects_sd_limits_below_farm_v7_minimum(
+    tmp_path, limit_key, limit_value, expected_error
+):
+    values = {
+        "TBOT_REMOTE_ROOT": "/opt/tbot",
+        "TBOT_PUBLIC_WEBSOCKET_URL": "wss://esp.tjbot.vn/tbot/v1/",
+        "TBOT_BACKEND_API_URL": "https://backend.example.com/v1",
+        "NODE_ENV": "production",
+        "TBOT_REQUIRE_DEVICE_TOKEN": "true",
+        "JWT_PUBLIC_KEY": "public-key",
+        "TBOT_DEVICE_MINT_SECRET": "mint-secret",
+        "TBOT_SERVER_AUTH_KEY": "server-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://assets.example.com",
+        "LESSON_ASSET_ALLOWED_ORIGINS": "https://assets.example.com",
+        "LESSON_SD_MAX_FILE_BYTES": "29186048",
+        "LESSON_SD_MAX_PACK_BYTES": "116139166",
+    }
+    values[limit_key] = limit_value
+    env_file = tmp_path / ".env"
+    env_file.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n")
+
+    result = subprocess.run(
+        [
+            "bash", str(REPO_ROOT / "deploy" / "deploy-vps.sh"),
+            "--host", "127.0.0.1", "--user", "root", "--tag", "test",
+            "--env-file", str(env_file), "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
+
+
+def test_deploy_vps_preflight_accepts_farm_v7_minimum_env_overrides(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TBOT_REMOTE_ROOT=/opt/tbot",
+                "TBOT_PUBLIC_WEBSOCKET_URL=wss://esp.tjbot.vn/tbot/v1/",
+                "TBOT_BACKEND_API_URL=https://backend.example.com/v1",
+                "NODE_ENV=production",
+                "TBOT_REQUIRE_DEVICE_TOKEN=true",
+                "JWT_PUBLIC_KEY=public-key",
+                "TBOT_DEVICE_MINT_SECRET=mint-secret",
+                "TBOT_SERVER_AUTH_KEY=server-secret",
+                "LESSON_ASSET_ORIGIN_BASE=https://assets.example.com",
+                "LESSON_ASSET_ALLOWED_ORIGINS=https://assets.example.com",
+                "LESSON_SD_MAX_FILE_BYTES=29186048",
+                "LESSON_SD_MAX_PACK_BYTES=116139166",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    release_dir = tmp_path / "releases" / "test"
+    release_dir.mkdir(parents=True)
+    (release_dir / "release.json").write_text("{}\n", encoding="utf-8")
+    (release_dir / "checksums.sha256").write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash", str(REPO_ROOT / "deploy" / "deploy-vps.sh"),
+            "--host", "127.0.0.1", "--user", "root", "--tag", "test",
+            "--env-file", str(env_file), "--release-root", str(tmp_path / "releases"),
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
     "overrides, expected_error",
     [
         ({"LESSON_SAMPLE_ENABLED": "true"}, "LESSON_SAMPLE_ENABLED must be false"),
@@ -307,6 +417,14 @@ def test_deploy_vps_preflight_rejects_missing_production_boot_env(tmp_path):
                 "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
             },
             "renderer v2 cannot be true while LESSON_RUNTIME_ENABLED is false",
+        ),
+        (
+            {
+                "LESSON_RUNTIME_ENABLED": "false",
+                "LESSON_RENDERER_V4_ENABLED": "true",
+                "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "robot-01",
+            },
+            "renderer v4 cannot be true while LESSON_RUNTIME_ENABLED is false",
         ),
         (
             {
@@ -357,6 +475,7 @@ def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides,
         "LESSON_SAMPLE_ENABLED": "false",
         "LESSON_RUNTIME_ENABLED": "false",
         "LESSON_RENDERER_V2_ENABLED": "false",
+        "LESSON_RENDERER_V4_ENABLED": "false",
         "LESSON_MOTION_PRESETS_ENABLED": "false",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED": "false",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "",

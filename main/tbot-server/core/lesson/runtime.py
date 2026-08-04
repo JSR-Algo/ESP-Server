@@ -51,9 +51,22 @@ from core.lesson.cinematic_contract import (
 )
 from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
+    cinematic_identity_key,
     RENDERER_V4,
     project_flattened_cinematic_phase,
     validate_flattened_cinematic_manifest,
+)
+from core.lesson.conversation_contract import (
+    ConversationContractError,
+    LessonToolIdentity,
+    lesson_conversation_contract_from_backend,
+)
+from core.lesson.conversation_runtime import (
+    ConversationDecision,
+    ConversationState,
+    LessonConversationRuntime,
+    SpeakingEvidence,
+    inactive_conversation_decision,
 )
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
@@ -63,11 +76,11 @@ from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     build_firmware_sync_pack,
 )
+from core.lesson.sd_pack_sync import request_sd_pack_sync, sd_pack_sync_timeout_sec
 
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
-SD_ASSET_SYNC_TIMEOUT_SEC = 120
 
 # Keep command frames small. Images/media must travel as URLs or verified SD paths,
 # never inline JSON, so 16 KiB is generous for a 3-layer step with prompts/choices.
@@ -94,6 +107,8 @@ VISUAL_DEGRADED_REASONS = frozenset(
 )
 VISUAL_REJECTED_REASONS = VISUAL_DEGRADED_REASONS | frozenset({"superseded"})
 MAX_RETIRED_VISUAL_ACK_SEQUENCES = 128
+MAX_RETIRED_CONVERSATION_ACK_SEQUENCES = 128
+CINEMATIC_START_SEND_FAILED = "CINEMATIC_START_SEND_FAILED"
 PARENT_RUNTIME_PHASES = frozenset(
     {
         "preparing",
@@ -130,6 +145,16 @@ class VisualAckResult:
     sequence: Optional[int]
     visual_generation: int
     timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class ConversationLiveFallbackDirective:
+    accepted: bool
+    code: str
+    reason: str
+    window_id: str | None
+    reconnect_allowed: bool
+    prompt: str
 
 
 def _set_lesson_start_status(conn: Any, code: str, message: str = "", *, reason: str = "") -> None:
@@ -944,22 +969,25 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
             continue
         source = phase["asset"]
         metadata = source.get("metadata")
-        phase_id = phase.get("phaseId")
-        if not isinstance(metadata, dict) or not isinstance(phase_id, str):
+        version = phase.get("templateVersion")
+        identity_field = "phaseId" if version == 1 else "cueId" if version == 2 else None
+        entry_id = phase.get(identity_field) if identity_field else None
+        if not isinstance(metadata, dict) or not isinstance(entry_id, str):
             continue
-        assets.append({
-            "key": f"flattenedCinematic.{phase_id}",
+        common = {
+            "key": f"flattenedCinematic.{entry_id}",
             "path": source.get("path"),
             "url": source.get("url"),
             "sha256": source.get("sha256"),
             "size": source.get("bytes"),
             "critical": True,
             "layer": "flattenedCinematic",
-            "role": phase_id,
+            "role": entry_id,
             "mediaType": source.get("mediaType"),
             "derivativeId": source.get("derivativeId"),
-            "phaseId": phase_id,
-            "compatibilityMetadata": {
+        }
+        compatibility_metadata = (
+            {
                 "codec": metadata.get("codec"),
                 "width": source.get("width"),
                 "height": source.get("height"),
@@ -967,7 +995,21 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                 "durationMs": metadata.get("durationMs"),
                 "frameCount": metadata.get("frameCount"),
                 "hasAudio": metadata.get("hasAudio"),
-            },
+            }
+            if version == 1
+            else copy.deepcopy(metadata)
+        )
+        compatibility = {"compatibilityMetadata": compatibility_metadata}
+        if version == 1:
+            assets.append({**common, "phaseId": entry_id, **compatibility})
+            continue
+        assets.append({
+            **common,
+            "cueId": entry_id,
+            "effect": phase.get("effect"),
+            "stepKey": phase.get("stepKey"),
+            "playbackMode": phase.get("playbackMode"),
+            **compatibility,
         })
     return assets
 
@@ -1053,9 +1095,13 @@ class LessonRuntime:
         self._preload_task: Optional[asyncio.Task] = None
         self._preload_status_report_tasks: set = set()
         self._frame_ack_timeout_task: Optional[asyncio.Task] = None
+        self._frame_ack_timeout_sequence: Optional[int] = None
+        self._frame_ack_retry_task: Optional[asyncio.Task] = None
+        self._frame_ack_retry_command_sequence: Optional[int] = None
         self._visual_ack_waiters: Dict[int, asyncio.Future] = {}
         self._visual_ack_timeout_tasks: Dict[int, asyncio.Task] = {}
         self._retired_visual_ack_sequences: Dict[int, Dict[str, Any]] = {}
+        self._retired_conversation_ack_sequences: Dict[int, Dict[str, Any]] = {}
         self._visual_generation = 1
         self._current_visual_request: Optional[Dict[str, Any]] = None
         self._visual_transition_task: Optional[asyncio.Task] = None
@@ -1067,6 +1113,7 @@ class LessonRuntime:
         self._safe_speaking_session: Optional[SafeSpeakingSession] = None
         self._motion_task: Optional[asyncio.Task] = None
         self._motion_generation = 0
+        self._semantic_step_sequence = 0
         self._step_seq: Optional[int] = None
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
@@ -1089,6 +1136,24 @@ class LessonRuntime:
         self._cinematic_cancel_sent = False
         self._cinematic_pending_command: Optional[Dict[str, Any]] = None
         self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
+        self._conversation_cues: Dict[str, Dict[str, Any]] = {}
+        self._conversation_contract_valid = False
+        self._conversation_attempt_serial = 0
+        self._conversation_pending_visual: Optional[Dict[str, Any]] = None
+        self._conversation_visual_ack: Optional[tuple[str, str]] = None
+        self._conversation_progress_forwarded: set[str] = set()
+        self._conversation_started_at: Optional[float] = None
+        self._conversation_fallback_window_id: Optional[str] = None
+        self._conversation_fallback_turn_sequence_id: Optional[int] = None
+        self._conversation_fallback_ack_future: Optional[asyncio.Future[bool]] = None
+        self._conversation_fallback_ack_sequence: Optional[int] = None
+        self._conversation_fallback_ack_cue_id: Optional[str] = None
+        self._conversation_fallback_ack_attempt_id: Optional[str] = None
+        self._conversation_fallback_ack_expired = False
+        self._conversation_fallback_prompt_authorization: Optional[str] = None
+        self._conversation_fallback_prompt_claimed = False
+        self._clock = time.monotonic
+        self.conversation: Optional[LessonConversationRuntime] = None
 
         # P5 multi-step playback: the ordered renderable manifest steps + a cursor.
         # The slice ran ONE step; P5 advances through ALL of them in manifest order,
@@ -1166,6 +1231,21 @@ class LessonRuntime:
             self.last_error = LessonError("LESSON_STEP_MISSING", "no renderable step in manifest")
             raise self.last_error
 
+        if manifest_version == RENDERER_V4:
+            try:
+                validate_flattened_cinematic_manifest(self.manifest)
+            except FlattenedCinematicContractError as exc:
+                self.last_error = LessonError(exc.code, exc.message, retryable=False)
+                raise self.last_error
+            self._conversation_contract_valid = self._validate_conversation_contracts()
+            if self.manifest.get("conversation") is not None and not self._conversation_contract_valid:
+                self.last_error = LessonError(
+                    "LESSON_CONVERSATION_CONTRACT_INVALID",
+                    "conversation steps do not exactly match the lesson runtime order",
+                    retryable=False,
+                )
+                raise self.last_error
+
         self.state = S_PRELOADING
         if not self._preparing_phase_forwarded:
             self._preparing_phase_forwarded = True
@@ -1194,11 +1274,19 @@ class LessonRuntime:
                     lesson_version=self.lesson_version,
                     manifest_checksum=self.manifest_checksum,
                 )
-                self._cinematic_phase = (
-                    project_cinematic_phase(phases[0], pack)
-                    if manifest_version == RENDERER_V3
-                    else project_flattened_cinematic_phase(phases[0], pack)
-                )
+                if manifest_version == RENDERER_V3:
+                    self._cinematic_phase = project_cinematic_phase(phases[0], pack)
+                else:
+                    projected = [
+                        project_flattened_cinematic_phase(phase, pack) for phase in phases
+                    ]
+                    self._cinematic_phase = projected[0]
+                    self._conversation_cues = {
+                        cue["cueId"]: cue
+                        for cue in projected
+                        if cue.get("templateVersion") == 2
+                        and isinstance(cue.get("cueId"), str)
+                    }
             except (CinematicContractError, FlattenedCinematicContractError) as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error
@@ -1211,12 +1299,16 @@ class LessonRuntime:
 
     async def close(self) -> None:
         self._closed = True
+        self._clear_conversation_fallback_ack()
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
         visual_transition_task = self._visual_transition_task
         self._visual_transition_task = None
         if visual_transition_task is not None and not visual_transition_task.done():
             visual_transition_task.cancel()
+        self._retire_conversation_visual()
+        self._cancel_frame_ack_retry()
         self._cancel_frame_ack_timeout()
+        self._retired_conversation_ack_sequences.clear()
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
         self._cancel_child_response_timeout()
@@ -1323,6 +1415,975 @@ class LessonRuntime:
     def _cinematic_enabled(self) -> bool:
         return self._renderer_v3_enabled() or self._renderer_v4_enabled()
 
+    def _validate_conversation_contracts(self) -> bool:
+        conversation = self.manifest.get("conversation")
+        steps = conversation.get("steps") if isinstance(conversation, dict) else None
+        if not isinstance(steps, list) or not steps:
+            return False
+        manifest_step_keys = [
+            step.get("id") for step in self._steps if isinstance(step.get("id"), str)
+        ]
+        conversation_step_keys = [
+            step.get("stepKey") for step in steps if isinstance(step, dict)
+        ]
+        if (
+            len(manifest_step_keys) != len(self._steps)
+            or manifest_step_keys != conversation_step_keys
+        ):
+            return False
+        try:
+            for step in steps:
+                step_key = step.get("stepKey") if isinstance(step, dict) else None
+                if not isinstance(step_key, str):
+                    return False
+                lesson_conversation_contract_from_backend(
+                    self.manifest,
+                    lesson_session_id=self.session_id,
+                    step_key=step_key,
+                )
+        except ConversationContractError as exc:
+            self._log("warning", f"conversation contract disabled code={exc.code}")
+            return False
+        return True
+
+    def _bind_conversation_for_current_step(self) -> None:
+        self.conversation = None
+        self._conversation_pending_visual = None
+        self._conversation_visual_ack = None
+        self._conversation_started_at = None
+        self._conversation_fallback_window_id = None
+        self._conversation_fallback_turn_sequence_id = None
+        self._clear_conversation_fallback_ack()
+        if (
+            not self._conversation_contract_valid
+            or self.negotiated_version != RENDERER_V4
+            or not isinstance(self._step_id, str)
+        ):
+            return
+        try:
+            contract = lesson_conversation_contract_from_backend(
+                self.manifest,
+                lesson_session_id=self.session_id,
+                step_key=self._step_id,
+            )
+        except ConversationContractError:
+            return
+
+        def next_attempt_id() -> str:
+            self._conversation_attempt_serial += 1
+            return (
+                f"{self.session_id}:{contract.step_key}:"
+                f"{self._conversation_attempt_serial}"
+            )
+
+        conversation = LessonConversationRuntime(
+            contract,
+            attempt_id_factory=next_attempt_id,
+        )
+        conversation.open_attempt()
+        self.conversation = conversation
+        self._conversation_started_at = self._clock()
+
+    def conversation_tool_context(self) -> Optional[Dict[str, Any]]:
+        conversation = self.conversation
+        if conversation is None or conversation.attempt_id is None:
+            return None
+        pending_cue = conversation.pending_cue_id
+        identity = conversation.identity(cue_id=pending_cue)
+        guidance = conversation.guidance
+        allowed_tools: list[str] = []
+        authoritative = self._conversation_authority_token() is not None
+        visual_pending = isinstance(self._conversation_pending_visual, dict)
+        visual_acked = self._conversation_visual_ack == (
+            conversation.attempt_id,
+            pending_cue,
+        )
+        if authoritative and not visual_pending:
+            if conversation.state is ConversationState.COMPLETE:
+                if conversation.continue_applied:
+                    allowed_tools = ["lesson_visual_reaction"] if pending_cue is not None else []
+                else:
+                    allowed_tools = ["lesson_continue"]
+            elif not visual_acked:
+                if conversation.outcome == "attempted" and conversation.review_needed:
+                    allowed_tools = ["lesson_continue"]
+                elif pending_cue is not None:
+                    allowed_tools = ["lesson_visual_reaction"]
+            elif conversation.state is ConversationState.LISTENING:
+                allowed_tools = (
+                    ["lesson_pronunciation_outcome"]
+                    if conversation.outcome == "speaking_evidence"
+                    else ["lesson_child_response", "lesson_context_turn"]
+                )
+            elif conversation.state is ConversationState.REACTING:
+                allowed_tools = ["lesson_continue"]
+            else:
+                allowed_tools = ["lesson_child_response", "lesson_context_turn"]
+        return {
+            "identity": {
+                "lessonSessionId": identity.lesson_session_id,
+                "turnSequenceId": identity.turn_sequence_id,
+                "attemptId": identity.attempt_id,
+                "stepKey": identity.step_key,
+                "cueId": identity.cue_id,
+            },
+            "nextIntent": conversation.pending_intent,
+            "allowedTools": allowed_tools,
+            "cueId": pending_cue,
+            "effect": conversation.pending_effect,
+            "guidance": {
+                "targetWord": guidance.target_word,
+                "meaningsVi": list(guidance.meanings_vi),
+                "relatedConcepts": list(guidance.related_concepts),
+                "teachingCopy": guidance.teaching_copy,
+                "expectedAnswer": guidance.expected_answer,
+                "pronunciation": {
+                    "slowModel": guidance.pronunciation.slow_model,
+                    "segments": (
+                        list(guidance.pronunciation.segments) if guidance.pronunciation.segments is not None else None
+                    ),
+                    "phonemes": (
+                        list(guidance.pronunciation.phonemes) if guidance.pronunciation.phonemes is not None else None
+                    ),
+                    "l1GuidanceVi": guidance.pronunciation.l1_guidance_vi,
+                },
+            },
+        }
+
+    def conversation_tool_path_active(self) -> bool:
+        conversation = self.conversation
+        return bool(
+            conversation is not None
+            and conversation.attempt_id is not None
+            and self._conversation_contract_valid
+            and self.negotiated_version == RENDERER_V4
+            and not self._closed
+            and getattr(self.conn, "lesson_runtime", None) is self
+            and self.state == S_RUNNING
+        )
+
+    async def _publish_conversation_tool_context(self) -> bool:
+        context = self.conversation_tool_context()
+        publisher = getattr(
+            getattr(self.conn, "voice_provider", None),
+            "publish_lesson_conversation_context",
+            None,
+        )
+        if context is None or not callable(publisher):
+            return False
+        try:
+            return bool(await publisher(context))
+        except Exception as exc:
+            self._log(
+                "warning",
+                f"conversation context publish failed error={type(exc).__name__}",
+            )
+            return False
+
+    async def conversation_continue_from_tool(self, identity: LessonToolIdentity | None) -> ConversationDecision:
+        conversation = self.conversation
+        if conversation is None or not isinstance(identity, LessonToolIdentity):
+            return inactive_conversation_decision()
+        enriched = LessonToolIdentity(
+            lesson_session_id=identity.lesson_session_id,
+            turn_sequence_id=identity.turn_sequence_id,
+            attempt_id=identity.attempt_id,
+            step_key=identity.step_key,
+            cue_id=conversation.pending_cue_id,
+        )
+        return await self.conversation_continue(
+            enriched,
+            effect=conversation.pending_effect,
+        )
+
+    async def conversation_interrupt_current(self) -> ConversationDecision:
+        conversation = self.conversation
+        if conversation is None:
+            return inactive_conversation_decision()
+        return await self.conversation_interrupt(conversation.identity())
+
+    def _conversation_authority_token(self) -> Optional[tuple[Any, ...]]:
+        conversation = self.conversation
+        if (
+            conversation is None
+            or self._closed
+            or getattr(self.conn, "lesson_runtime", None) is not self
+            or self.state != S_RUNNING
+            or not self._step_acked
+            or not self._step_visuals_ready
+            or self._step_completed
+            or self._step_index < 0
+            or self._step_index >= len(self._steps)
+            or self._steps[self._step_index] is not self._step
+            or not isinstance(self._step_id, str)
+            or self._step_id != conversation.identity().step_key
+            or conversation.attempt_id is None
+        ):
+            return None
+        return (
+            id(conversation),
+            self.session_id,
+            self._step_id,
+            self._step_seq,
+            conversation.attempt_id,
+            conversation.turn_sequence_id,
+        )
+
+    def _conversation_token_is_current(self, token: tuple[Any, ...]) -> bool:
+        current = self._conversation_authority_token()
+        return current == token
+
+    def _conversation_snapshot_owner_matches(
+        self,
+        conversation: LessonConversationRuntime,
+        token: tuple[Any, ...],
+    ) -> bool:
+        attempt_id = conversation.attempt_id
+        return (
+            self.conversation is conversation
+            and self.session_id == token[1]
+            and self._step_id == token[2]
+            and self._step_seq == token[3]
+            and attempt_id == token[4]
+            and conversation.turn_sequence_id == token[5]
+        )
+
+    def _conversation_guard(self) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
+        conversation = self.conversation
+        if conversation is None:
+            return inactive_conversation_decision()
+        token = self._conversation_authority_token()
+        if token is None:
+            return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+        return conversation, token
+
+    def _conversation_semantic_guard(
+        self,
+    ) -> tuple[LessonConversationRuntime, tuple[Any, ...]] | ConversationDecision:
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        pending_cue = conversation.pending_cue_id
+        acknowledged = self._conversation_visual_ack
+        if (
+            not isinstance(pending_cue, str)
+            or acknowledged != (conversation.attempt_id, pending_cue)
+        ):
+            return conversation.reject("VISUAL_ACK_REQUIRED")
+        return conversation, token
+
+    async def conversation_child_response(
+        self, identity: LessonToolIdentity | None, response_class: str
+    ) -> ConversationDecision:
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.child_response(identity, response_class)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
+        return decision
+
+    async def conversation_pronunciation_outcome(
+        self, identity: LessonToolIdentity | None, outcome: str
+    ) -> ConversationDecision:
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.pronunciation_outcome(identity, outcome)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
+        return decision
+
+    async def conversation_context_turn(
+        self, identity: LessonToolIdentity | None
+    ) -> ConversationDecision:
+        guarded = self._conversation_semantic_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.context_turn(identity)
+        if decision.accepted:
+            self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
+        return decision
+
+    async def conversation_visual_reaction(
+        self,
+        identity: LessonToolIdentity | None,
+        cue_role: str,
+        *,
+        effect: str | None,
+    ) -> ConversationDecision:
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        pending = self._conversation_pending_visual
+        if isinstance(pending, dict):
+            return conversation.reject("VISUAL_ACK_REQUIRED")
+        snapshot = conversation.snapshot()
+        decision = conversation.visual_reaction(identity, cue_role, effect=effect)
+        token = self._conversation_authority_token()
+        if decision.accepted:
+            if token is None:
+                conversation.restore_authoritative_snapshot(snapshot)
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+            try:
+                emitted = await self._emit_conversation_cue(
+                    decision,
+                    token=token,
+                    advances_step=cue_role == "word_transition",
+                )
+            except asyncio.CancelledError:
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                raise
+            except Exception:
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                return conversation.reject("VISUAL_EMIT_FAILED")
+            if not emitted:
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+            self._invalidate_conversation_fallback_after_turn_change()
+        return decision
+
+    async def conversation_interrupt(
+        self, identity: LessonToolIdentity | None
+    ) -> ConversationDecision:
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        decision = conversation.interrupt(identity)
+        if decision.accepted:
+            self._retire_conversation_visual()
+            self._conversation_visual_ack = None
+            self._invalidate_conversation_fallback_after_turn_change()
+        return decision
+
+    def _curated_conversation_fallback_prompt(self) -> str:
+        conversation = self.conversation
+        if conversation is None:
+            return ""
+        guidance = conversation.guidance
+        target = guidance.target_word.strip()
+        return f"Mình cùng thử nhé. Say {target}." if target else ""
+
+    def _clear_conversation_fallback_ack(self) -> None:
+        future = self._conversation_fallback_ack_future
+        self._conversation_fallback_ack_future = None
+        self._conversation_fallback_ack_sequence = None
+        self._conversation_fallback_ack_cue_id = None
+        self._conversation_fallback_ack_attempt_id = None
+        self._conversation_fallback_ack_expired = False
+        self._conversation_fallback_prompt_authorization = None
+        self._conversation_fallback_prompt_claimed = False
+        if future is not None and not future.done():
+            future.set_result(False)
+
+    def _expire_conversation_fallback_ack(self) -> None:
+        future = self._conversation_fallback_ack_future
+        self._conversation_fallback_ack_future = None
+        self._conversation_fallback_ack_sequence = None
+        self._conversation_fallback_ack_cue_id = None
+        self._conversation_fallback_ack_attempt_id = None
+        self._conversation_fallback_ack_expired = True
+        self._conversation_fallback_prompt_authorization = None
+        self._conversation_fallback_prompt_claimed = False
+        if future is not None and not future.done():
+            future.set_result(False)
+
+    def _rollback_conversation_fallback_window(
+        self,
+        *,
+        conversation: LessonConversationRuntime,
+        window_id: str,
+        turn_sequence_id: int,
+    ) -> None:
+        if (
+            self.conversation is conversation
+            and self._conversation_fallback_window_id == window_id
+            and self._conversation_fallback_turn_sequence_id == turn_sequence_id
+        ):
+            self._conversation_fallback_window_id = None
+            self._conversation_fallback_turn_sequence_id = None
+            self._clear_conversation_fallback_ack()
+
+    def _invalidate_conversation_fallback_after_turn_change(self) -> None:
+        conversation = self.conversation
+        if (
+            conversation is not None
+            and self._conversation_fallback_window_id is not None
+            and self._conversation_fallback_turn_sequence_id
+            != conversation.turn_sequence_id
+        ):
+            self._expire_conversation_fallback_ack()
+
+    def _conversation_fallback_prompt_authority_current(self, window_id: str) -> bool:
+        conversation = self.conversation
+        cue_id = self._conversation_fallback_ack_cue_id
+        return bool(
+            conversation is not None
+            and not self._closed
+            and window_id == self._conversation_fallback_window_id
+            and self._conversation_fallback_turn_sequence_id
+            == conversation.turn_sequence_id
+            and not self._conversation_fallback_ack_expired
+            and isinstance(cue_id, str)
+            and self._conversation_fallback_ack_attempt_id == conversation.attempt_id
+            and self._conversation_visual_ack == (conversation.attempt_id, cue_id)
+            and self._conversation_authority_token() is not None
+        )
+
+    async def conversation_live_interruption(
+        self,
+        reason: str,
+    ) -> ConversationLiveFallbackDirective:
+        if reason not in {"timeout", "interrupted", "transport"}:
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code="UNSUPPORTED_LIVE_FALLBACK_REASON",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        authority = self._conversation_guard()
+        if isinstance(authority, ConversationDecision):
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code=authority.code,
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        existing_window = self._conversation_fallback_window_id
+        conversation, _authority_token = authority
+        same_window = (
+            existing_window is not None
+            and self._conversation_fallback_turn_sequence_id
+            == conversation.turn_sequence_id
+        )
+        if same_window:
+            return ConversationLiveFallbackDirective(
+                accepted=True,
+                code="LIVE_FALLBACK_RECONNECT_BOUNDED",
+                reason=reason,
+                window_id=existing_window,
+                reconnect_allowed=False,
+                prompt=self._curated_conversation_fallback_prompt(),
+            )
+        if existing_window is not None:
+            self._conversation_fallback_window_id = None
+            self._conversation_fallback_turn_sequence_id = None
+            self._clear_conversation_fallback_ack()
+        snapshot = conversation.snapshot()
+        visual_ack = self._conversation_visual_ack
+        decision = conversation.live_fallback(conversation.identity(), reason=reason)
+        token = self._conversation_authority_token()
+        if not decision.accepted or token is None:
+            if decision.accepted:
+                conversation.restore_authoritative_snapshot(snapshot)
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code=decision.code if not decision.accepted else "RUNTIME_NOT_AUTHORITATIVE",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        self._conversation_visual_ack = None
+        window_id = f"{conversation.attempt_id}:{conversation.turn_sequence_id}"
+        fallback_turn_sequence_id = conversation.turn_sequence_id
+        self._conversation_fallback_window_id = window_id
+        self._conversation_fallback_turn_sequence_id = conversation.turn_sequence_id
+        self._clear_conversation_fallback_ack()
+        self._conversation_fallback_ack_future = asyncio.get_running_loop().create_future()
+        self._conversation_fallback_ack_sequence = self._seq + 1
+        self._conversation_fallback_ack_cue_id = decision.cue_id
+        self._conversation_fallback_ack_attempt_id = conversation.attempt_id
+        try:
+            emitted = await self._emit_conversation_cue(decision, token=token)
+        except asyncio.CancelledError:
+            self._rollback_conversation_fallback_window(
+                conversation=conversation,
+                window_id=window_id,
+                turn_sequence_id=fallback_turn_sequence_id,
+            )
+            if self._conversation_snapshot_owner_matches(conversation, token):
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+            raise
+        except Exception:
+            emitted = False
+        if not emitted:
+            self._rollback_conversation_fallback_window(
+                conversation=conversation,
+                window_id=window_id,
+                turn_sequence_id=fallback_turn_sequence_id,
+            )
+            if self._conversation_snapshot_owner_matches(conversation, token):
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+            return ConversationLiveFallbackDirective(
+                accepted=False,
+                code="VISUAL_EMIT_FAILED",
+                reason=reason,
+                window_id=None,
+                reconnect_allowed=False,
+                prompt="",
+            )
+        return ConversationLiveFallbackDirective(
+            accepted=True,
+            code="LIVE_FALLBACK_READY",
+            reason=reason,
+            window_id=window_id,
+            reconnect_allowed=True,
+            prompt=self._curated_conversation_fallback_prompt(),
+        )
+
+    async def wait_conversation_live_fallback_ack(
+        self,
+        window_id: str,
+        *,
+        timeout_sec: float,
+    ) -> str | None:
+        if (
+            window_id != self._conversation_fallback_window_id
+            or self._conversation_fallback_turn_sequence_id is None
+            or self._conversation_fallback_ack_expired
+        ):
+            return None
+        future = self._conversation_fallback_ack_future
+        if future is None:
+            return None
+        try:
+            acknowledged = bool(
+                await asyncio.wait_for(
+                    asyncio.shield(future),
+                    timeout=max(0.01, min(float(timeout_sec), 5.0)),
+                )
+            )
+        except asyncio.TimeoutError:
+            self._expire_conversation_fallback_ack()
+            return None
+        except (TypeError, ValueError):
+            self._expire_conversation_fallback_ack()
+            return None
+        if (
+            not acknowledged
+            or not self._conversation_fallback_prompt_authority_current(window_id)
+            or self._conversation_fallback_prompt_authorization is not None
+            or self._conversation_fallback_prompt_claimed
+        ):
+            return None
+        authorization = (
+            f"{window_id}:{self._conversation_fallback_ack_sequence}:prompt"
+        )
+        self._conversation_fallback_prompt_authorization = authorization
+        return authorization
+
+    def claim_conversation_live_fallback_prompt(
+        self,
+        window_id: str,
+        authorization: str,
+    ) -> bool:
+        if (
+            self._conversation_fallback_prompt_claimed
+            or authorization != self._conversation_fallback_prompt_authorization
+            or not self._conversation_fallback_prompt_authority_current(window_id)
+        ):
+            return False
+        self._conversation_fallback_prompt_claimed = True
+        return True
+
+    def expire_conversation_live_fallback_prompt(
+        self,
+        window_id: str,
+        authorization: str,
+    ) -> bool:
+        if (
+            window_id != self._conversation_fallback_window_id
+            or authorization != self._conversation_fallback_prompt_authorization
+        ):
+            return False
+        self._expire_conversation_fallback_ack()
+        return True
+
+    def conversation_live_reconnect_succeeded(self, window_id: str) -> bool:
+        conversation = self.conversation
+        if (
+            conversation is None
+            or window_id != self._conversation_fallback_window_id
+            or self._conversation_fallback_turn_sequence_id
+            != conversation.turn_sequence_id
+        ):
+            return False
+        self._conversation_fallback_window_id = None
+        self._conversation_fallback_turn_sequence_id = None
+        self._clear_conversation_fallback_ack()
+        return True
+
+    async def conversation_continue(
+        self,
+        identity: LessonToolIdentity | None,
+        *,
+        effect: str | None,
+        next_step_key: str | None = None,
+    ) -> ConversationDecision:
+        guarded = self._conversation_guard()
+        if isinstance(guarded, ConversationDecision):
+            return guarded
+        conversation, _token = guarded
+        assert isinstance(conversation, LessonConversationRuntime)
+        attempted_review = (
+            conversation.outcome == "attempted" and conversation.review_needed
+        )
+        if not attempted_review:
+            pending_cue = conversation.pending_cue_id
+            acknowledged = self._conversation_visual_ack
+            if (
+                not isinstance(pending_cue, str)
+                or acknowledged != (conversation.attempt_id, pending_cue)
+            ):
+                return conversation.reject("VISUAL_ACK_REQUIRED")
+        snapshot = conversation.snapshot()
+        visual_ack = self._conversation_visual_ack
+        decision = conversation.continue_lesson(
+            identity,
+            effect=effect,
+            next_step_key=next_step_key,
+        )
+        if not decision.accepted:
+            return decision
+        self._invalidate_conversation_fallback_after_turn_change()
+        self._conversation_visual_ack = None
+        if decision.next_intent == "complete_lesson":
+            token = self._conversation_authority_token()
+            if token is None:
+                conversation.restore_authoritative_snapshot(snapshot)
+                self._conversation_visual_ack = visual_ack
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+            self._retire_conversation_visual()
+            if not await self._complete_conversation_step(token):
+                if self._conversation_snapshot_owner_matches(conversation, token):
+                    conversation.restore_authoritative_snapshot(snapshot)
+                    self._conversation_visual_ack = visual_ack
+                return conversation.reject("RUNTIME_NOT_AUTHORITATIVE")
+        return decision
+
+    async def _emit_conversation_cue(
+        self,
+        decision: ConversationDecision,
+        *,
+        token: tuple[Any, ...],
+        advances_step: bool = False,
+    ) -> bool:
+        cue_id = decision.cue_id
+        cue = self._conversation_cues.get(cue_id) if isinstance(cue_id, str) else None
+        if (
+            not decision.accepted
+            or not isinstance(cue, dict)
+            or cue.get("stepKey") != self._step_id
+            and not advances_step
+        ):
+            return False
+        if not self._conversation_token_is_current(token):
+            return False
+        self._retire_conversation_visual()
+        sequence = await self._emit(
+            "lesson_prepare",
+            step_id=self._step_id,
+            body={
+                "profile": self.profile,
+                "cinematicPhase": {"command": "prepare", **copy.deepcopy(cue)},
+            },
+        )
+        if not self._conversation_token_is_current(token):
+            self._retire_conversation_visual_sequence(sequence)
+            return False
+        self._conversation_pending_visual = {
+            "stage": "prepare",
+            "sequence": sequence,
+            "cueId": cue_id,
+            "stepId": self._step_id,
+            "attemptId": self.conversation.attempt_id if self.conversation else None,
+            "advancesStep": advances_step,
+            "authorityToken": token,
+        }
+        return True
+
+    def _retire_conversation_visual_sequence(self, sequence: int) -> None:
+        ack_sequences = {sequence}
+        command = self._cinematic_pending_command
+        if isinstance(command, dict) and command.get("commandSequenceId") == sequence:
+            ack_sequence = command.get("ackSequence")
+            if type(ack_sequence) is int:
+                ack_sequences.add(ack_sequence)
+            self._cinematic_pending_command = None
+        for ack_sequence in ack_sequences:
+            frame = self._outstanding.pop(ack_sequence, None)
+            if isinstance(frame, dict):
+                self._retire_conversation_ack_sequence(ack_sequence, frame)
+            self._cancel_frame_ack_timeout(ack_sequence)
+        self._cancel_frame_ack_retry(sequence)
+
+    def _retire_conversation_ack_sequence(
+        self, sequence: int, frame: Dict[str, Any]
+    ) -> None:
+        command = self._cinematic_frame_command(frame)
+        conversation_prepare = bool(
+            frame.get("type") == "lesson_prepare"
+            and isinstance(command, dict)
+            and command.get("command") == "prepare"
+            and command.get("templateVersion") == 2
+            and isinstance(command.get("cueId"), str)
+        )
+        if (
+            frame.get("type") != "lesson_cinematic_control"
+            and not conversation_prepare
+        ) or command is None:
+            return
+        self._retired_conversation_ack_sequences[sequence] = {
+            "protocolVersion": self.negotiated_version,
+            "assignmentId": self.assignment_id,
+            "sessionId": self.session_id,
+            "lessonId": self.lesson_id,
+            "lessonVersion": self.lesson_version,
+            "stepId": frame.get("stepId"),
+            "command": {
+                key: copy.deepcopy(command.get(key))
+                for key in (
+                    "command",
+                    "phaseId" if "phaseId" in command else "cueId",
+                    "commandSequenceId",
+                )
+            },
+        }
+        while (
+            len(self._retired_conversation_ack_sequences)
+            > MAX_RETIRED_CONVERSATION_ACK_SEQUENCES
+        ):
+            oldest = next(iter(self._retired_conversation_ack_sequences))
+            self._retired_conversation_ack_sequences.pop(oldest, None)
+
+    def _retire_conversation_visual(self) -> None:
+        pending = self._conversation_pending_visual
+        self._conversation_pending_visual = None
+        if not isinstance(pending, dict):
+            return
+        sequence = pending.get("sequence")
+        if type(sequence) is int:
+            self._retire_conversation_visual_sequence(sequence)
+
+    def _retire_conversation_start_send_transaction(
+        self,
+        pending: dict[str, Any],
+        sequence: int,
+    ) -> bool:
+        current = self._conversation_pending_visual
+        if (
+            current is not pending
+            or current.get("stage") != "start"
+            or current.get("sequence") != sequence
+        ):
+            return False
+        cue_id = current.get("cueId")
+        attempt_id = current.get("attemptId")
+        self._conversation_pending_visual = None
+        self._retire_conversation_visual_sequence(sequence)
+        if (
+            self._conversation_fallback_ack_sequence == sequence
+            and self._conversation_fallback_ack_cue_id == cue_id
+            and self._conversation_fallback_ack_attempt_id == attempt_id
+        ):
+            self._conversation_fallback_window_id = None
+            self._conversation_fallback_turn_sequence_id = None
+            self._clear_conversation_fallback_ack()
+        return True
+
+    async def _fail_conversation_start_send(
+        self,
+        *,
+        cue_id: str,
+        step_id: str | None,
+        exc: BaseException,
+    ) -> None:
+        self.last_error = LessonError(
+            CINEMATIC_START_SEND_FAILED,
+            "failed to send cinematic start after prepare acknowledgement",
+            retryable=True,
+            context={
+                "stepId": step_id,
+                "cueId": cue_id,
+                "stage": "startSend",
+                "errorType": type(exc).__name__,
+            },
+        )
+        self.state = S_FAILED
+        self._log(
+            "error",
+            f"CINEMATIC_START_SEND_FAILED stepId={step_id or ''} "
+            f"cueId={cue_id} error={type(exc).__name__}",
+        )
+        try:
+            await self._emit_error(self.last_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as notify_exc:
+            self._log(
+                "warning",
+                "cinematic start-send error notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+        try:
+            await self._notify_lesson_terminal("cinematic_start_send_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as notify_exc:
+            self._log(
+                "warning",
+                "cinematic start-send terminal notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+
+    async def _on_conversation_visual_acked(self, frame: Dict[str, Any]) -> None:
+        pending = self._conversation_pending_visual
+        command = self._cinematic_frame_command(frame)
+        if not isinstance(pending, dict) or not isinstance(command, dict):
+            return
+        if (
+            pending.get("stage") != "start"
+            or command.get("commandSequenceId") != pending.get("sequence")
+            or command.get("cueId") != pending.get("cueId")
+            or pending.get("stepId") != self._step_id
+            or self.conversation is None
+            or pending.get("attemptId") != self.conversation.attempt_id
+        ):
+            return
+        self._conversation_pending_visual = None
+        self._conversation_visual_ack = (self.conversation.attempt_id, command["cueId"])
+        if (
+            self._conversation_fallback_window_id is not None
+            and not self._conversation_fallback_ack_expired
+            and command.get("commandSequenceId")
+            == self._conversation_fallback_ack_sequence
+            and command.get("cueId") == self._conversation_fallback_ack_cue_id
+            and self.conversation.attempt_id
+            == self._conversation_fallback_ack_attempt_id
+        ):
+            future = self._conversation_fallback_ack_future
+            if future is not None and not future.done():
+                future.set_result(True)
+        await self._publish_conversation_tool_context()
+        if pending.get("advancesStep") is True:
+            token = self._conversation_authority_token()
+            if token is not None:
+                await self._complete_conversation_step(token)
+
+    async def _on_conversation_visual_prepared(self, frame: Dict[str, Any]) -> bool:
+        pending = self._conversation_pending_visual
+        command = self._cinematic_frame_command(frame)
+        if not isinstance(pending, dict) or not isinstance(command, dict):
+            return False
+        token = pending.get("authorityToken")
+        if (
+            pending.get("stage") != "prepare"
+            or command.get("command") != "prepare"
+            or command.get("commandSequenceId") != pending.get("sequence")
+            or command.get("cueId") != pending.get("cueId")
+            or pending.get("stepId") != self._step_id
+            or self.conversation is None
+            or pending.get("attemptId") != self.conversation.attempt_id
+            or not isinstance(token, tuple)
+            or not self._conversation_token_is_current(token)
+        ):
+            return False
+        next_sequence = self._seq + 1
+        pending["stage"] = "start"
+        pending["sequence"] = next_sequence
+        if (
+            self._conversation_fallback_ack_sequence == command.get("commandSequenceId")
+            and self._conversation_fallback_ack_cue_id == command.get("cueId")
+        ):
+            self._conversation_fallback_ack_sequence = next_sequence
+        try:
+            cue = self._conversation_cues.get(command["cueId"])
+            if not isinstance(cue, dict):
+                raise RuntimeError("conversation cue disappeared before start")
+            sequence = await self._emit(
+                "lesson_cinematic_control",
+                step_id=self._step_id,
+                body={
+                    "command": "start",
+                    "cueId": cue["cueId"],
+                },
+            )
+        except asyncio.CancelledError:
+            self._retire_conversation_start_send_transaction(pending, next_sequence)
+            raise
+        except Exception as exc:
+            retired = self._retire_conversation_start_send_transaction(
+                pending, next_sequence
+            )
+            if retired and self._conversation_token_is_current(token):
+                await self._fail_conversation_start_send(
+                    cue_id=command["cueId"],
+                    step_id=pending.get("stepId"),
+                    exc=exc,
+                )
+            return False
+        if sequence != next_sequence or not self._conversation_token_is_current(token):
+            self._retire_conversation_start_send_transaction(pending, next_sequence)
+            return False
+        return True
+
+    async def _complete_conversation_step(self, token: tuple[Any, ...]) -> bool:
+        await asyncio.sleep(0)
+        if not self._conversation_token_is_current(token):
+            return False
+        if self.conversation is None or not isinstance(self._step_id, str):
+            return False
+        step_id = self._step_id
+        if step_id in self._conversation_progress_forwarded:
+            return True
+        started_at = self._conversation_started_at
+        elapsed_ms = (
+            max(0, int(round((self._clock() - started_at) * 1000)))
+            if isinstance(started_at, (int, float))
+            else 0
+        )
+        evidence: SpeakingEvidence | None = self.conversation.build_speaking_evidence(
+            lesson_version=self.lesson_version,
+            elapsed_ms=elapsed_ms,
+        )
+        if evidence is None:
+            return False
+        self._conversation_progress_forwarded.add(step_id)
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": step_id,
+                "stepType": (self._step or {}).get("type"),
+                "result": "success" if self.conversation.mastered else "miss",
+                "detail": {"evidence": evidence.to_mapping()},
+            }
+        )
+        self._step_completed = True
+        await self._maybe_finish_step()
+        return True
+
     async def replay_pending_terminal_event(self) -> bool:
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
         if not callable(replay):
@@ -1365,6 +2426,18 @@ class LessonRuntime:
         acked = _coerce_ack_seq(acked)
         frame = self._outstanding.get(acked) if acked is not None else None
         if frame is None:
+            retired = (
+                self._retired_conversation_ack_sequences.get(acked)
+                if acked is not None
+                else None
+            )
+            if isinstance(retired, dict) and self._retired_conversation_ack_matches(
+                msg_json, body, acked, retired
+            ):
+                accepted = await self._accept_inbound(msg_json.get("sequence"))
+                if accepted in {"ok", "duplicate"}:
+                    self._retired_conversation_ack_sequences.pop(acked, None)
+                return
             if acked is None:
                 await self._accept_inbound(msg_json.get("sequence"))
             # Stale / unknown ack -> idempotent no-op (re-ack semantics, plan §5.8).
@@ -1401,7 +2474,7 @@ class LessonRuntime:
         command = self._cinematic_frame_command(frame)
         if command is not None:
             self._cinematic_pending_command = None
-        self._cancel_frame_ack_timeout()
+        self._cancel_frame_ack_timeout(acked)
         self._forward_lesson_step_ack_telemetry(frame, body, msg_json.get("sequence"))
         await self._on_frame_acked(frame, body)
 
@@ -1433,6 +2506,13 @@ class LessonRuntime:
             return None
         return command
 
+    def _cinematic_identity_payload(self) -> Dict[str, str]:
+        phase = self._cinematic_phase
+        if not isinstance(phase, dict):
+            return {}
+        identity = cinematic_identity_key(phase)
+        return {"phaseId" if "phaseId" in phase else "cueId": identity}
+
     def _cinematic_ack_matches(
         self, frame: Dict[str, Any], ack_body: Dict[str, Any]
     ) -> bool:
@@ -1441,13 +2521,35 @@ class LessonRuntime:
         command = self._cinematic_frame_command(frame)
         if command is None:
             return True
+        if not self._cinematic_ack_payload_matches(command, ack_body):
+            return False
+        kind = command.get("command")
+        try:
+            identity_key = cinematic_identity_key(command)
+        except FlattenedCinematicContractError:
+            return False
+        identity_field = "phaseId" if "phaseId" in command else "cueId"
+        pending = self._cinematic_pending_command
+        return bool(
+            isinstance(pending, dict)
+            and pending.get("command") == kind
+            and pending.get("commandSequenceId") == command.get("commandSequenceId")
+            and pending.get(identity_field) == identity_key
+        )
+
+    def _cinematic_ack_payload_matches(
+        self, command: Dict[str, Any], ack_body: Dict[str, Any]
+    ) -> bool:
         ack = ack_body.get("cinematicPhase")
         if not isinstance(ack, dict):
             return False
         kind = command.get("command")
-        common = {
-            "event", "command", "phaseId", "commandSequenceId", "accepted"
-        }
+        try:
+            identity_key = cinematic_identity_key(command)
+        except FlattenedCinematicContractError:
+            return False
+        identity_field = "phaseId" if "phaseId" in command else "cueId"
+        common = {"event", "command", identity_field, "commandSequenceId", "accepted"}
         expected_event = "commandApplied"
         expected_keys = common
         if kind == "prepare":
@@ -1460,7 +2562,7 @@ class LessonRuntime:
             set(ack) != expected_keys
             or ack.get("event") != expected_event
             or ack.get("command") != kind
-            or ack.get("phaseId") != command.get("phaseId")
+            or ack.get(identity_field) != identity_key
             or ack.get("commandSequenceId") != command.get("commandSequenceId")
             or ack.get("accepted") is not True
         ):
@@ -1469,11 +2571,35 @@ class LessonRuntime:
             return False
         if kind == "start" and ack.get("phaseReady") is not True:
             return False
-        pending = self._cinematic_pending_command
+        return True
+
+    def _retired_conversation_ack_matches(
+        self,
+        msg_json: Dict[str, Any],
+        body: Dict[str, Any],
+        acked: int,
+        retired: Dict[str, Any],
+    ) -> bool:
+        command = retired.get("command")
         return bool(
-            isinstance(pending, dict)
-            and pending.get("command") == kind
-            and pending.get("commandSequenceId") == command.get("commandSequenceId")
+            isinstance(command, dict)
+            and msg_json.get("type") == "lesson_ack"
+            and msg_json.get("protocolVersion") == retired.get("protocolVersion")
+            and msg_json.get("assignmentId") == retired.get("assignmentId")
+            and msg_json.get("sessionId") == retired.get("sessionId")
+            and msg_json.get("stepId") == retired.get("stepId")
+            and (
+                "lessonId" not in msg_json
+                or msg_json.get("lessonId") == retired.get("lessonId")
+            )
+            and (
+                "lessonVersion" not in msg_json
+                or msg_json.get("lessonVersion") == retired.get("lessonVersion")
+            )
+            and type(msg_json.get("sequence")) is int
+            and type(body.get("acks")) is int
+            and body.get("acks") == acked
+            and self._cinematic_ack_payload_matches(command, body)
         )
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
@@ -1660,6 +2786,9 @@ class LessonRuntime:
         body = msg_json.get("body") or {}
         event = body.get("event")
         step_id = msg_json.get("stepId")
+        if self.conversation is not None and step_id == self._step_id:
+            self._log("info", f"firmware progress ignored for conversational step stepId={step_id}")
+            return
         if (
             event == "step_completed"
             and isinstance(step_id, str)
@@ -1717,6 +2846,8 @@ class LessonRuntime:
                 await self._maybe_finish_step()
 
     async def on_child_response(self, text: Any, *, source: str = "voice_transcript") -> bool:
+        if self.conversation is not None:
+            return False
         response = str(text or "").strip()
         if not _has_observable_child_response_value(response):
             return False
@@ -2018,6 +3149,20 @@ class LessonRuntime:
             return
         ftype = frame.get("type")
         if ftype == "lesson_prepare":
+            prepare_command = self._cinematic_frame_command(frame)
+            pending_visual = self._conversation_pending_visual
+            if (
+                isinstance(prepare_command, dict)
+                and prepare_command.get("command") == "prepare"
+                and prepare_command.get("templateVersion") == 2
+                and isinstance(prepare_command.get("cueId"), str)
+                and isinstance(pending_visual, dict)
+                and pending_visual.get("stage") == "prepare"
+                and pending_visual.get("sequence")
+                == prepare_command.get("commandSequenceId")
+            ):
+                await self._on_conversation_visual_prepared(frame)
+                return
             if self._use_sd_asset_pack() and not self._ack_reports_asset_pack_ready(ack_body):
                 self.last_error = LessonError(
                     ASSET_PACK_NOT_READY,
@@ -2043,7 +3188,9 @@ class LessonRuntime:
             await self._emit_step()
         elif ftype == "lesson_cinematic_control":
             command = (frame.get("body") or {}).get("command")
-            if command == "pause":
+            if command == "start":
+                await self._on_conversation_visual_acked(frame)
+            elif command == "pause":
                 self.state = S_PAUSED
                 self._cancel_visual_waiters(increment_generation=False, reason="paused")
                 self._forward_phase("paused")
@@ -2153,6 +3300,9 @@ class LessonRuntime:
         if not continuation_is_current():
             return
         self._step_visuals_ready = True
+        if self.conversation is not None:
+            await self._publish_conversation_tool_context()
+            return
         prompt_handed_off = await self._speak_step_prompt(self._step)
         if not continuation_is_current():
             return
@@ -2416,6 +3566,16 @@ class LessonRuntime:
         self._child_response_window_open = False
         self._child_response_timeout_count = 0
         self._safe_speaking_session = None
+        if self._renderer_v4_enabled():
+            self._semantic_step_sequence += 1
+            self._step_seq = self._semantic_step_sequence
+            self._step_acked = True
+            self._step_visuals_ready = True
+            self._bind_conversation_for_current_step()
+            await self._publish_conversation_tool_context()
+            return
+        self._bind_conversation_for_current_step()
+        await self._publish_conversation_tool_context()
         raw_timeout_sec = step.get("timeoutSec") or self._default_step_timeout_sec
         try:
             timeout_sec = max(float(raw_timeout_sec), self._min_step_timeout_sec)
@@ -2657,9 +3817,14 @@ class LessonRuntime:
                 await self._sleep(timeout_sec)
             except asyncio.CancelledError:
                 return
+            if self._frame_ack_timeout_sequence != seq:
+                return
+            self._frame_ack_timeout_task = None
+            self._frame_ack_timeout_sequence = None
             if seq not in self._outstanding or self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
                 return
             frame = self._outstanding.pop(seq, None) or {}
+            self._retire_conversation_ack_sequence(seq, frame)
             retry_count = int(frame.get("retryCount") or 0)
             if retry_count < self._frame_ack_max_retries():
                 self._log(
@@ -2671,12 +3836,51 @@ class LessonRuntime:
                         f"stepId={step_id or ''}"
                     ),
                 )
-                await self._emit(
-                    frame_type,
-                    step_id=step_id,
-                    body=copy.deepcopy(frame.get("body") or {}),
-                    frame_ack_retry_count=retry_count + 1,
+                command = self._cinematic_frame_command(frame)
+                pending_visual = self._conversation_pending_visual
+                retry_token = self._conversation_authority_token()
+                retry_command_sequence = (
+                    command.get("commandSequenceId")
+                    if isinstance(command, dict)
+                    and isinstance(pending_visual, dict)
+                    and command.get("commandSequenceId")
+                    == pending_visual.get("sequence")
+                    else None
                 )
+                retry_task = asyncio.current_task()
+                if type(retry_command_sequence) is int:
+                    self._frame_ack_retry_task = retry_task
+                    self._frame_ack_retry_command_sequence = retry_command_sequence
+                try:
+                    await self._emit(
+                        frame_type,
+                        step_id=step_id,
+                        body=copy.deepcopy(frame.get("body") or {}),
+                        frame_ack_retry_count=retry_count + 1,
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    retry_is_current = (
+                        type(retry_command_sequence) is int
+                        and retry_token is not None
+                        and self._conversation_token_is_current(retry_token)
+                        and isinstance(self._conversation_pending_visual, dict)
+                        and self._conversation_pending_visual.get("sequence")
+                        == retry_command_sequence
+                    )
+                    if retry_is_current:
+                        self._retire_conversation_visual()
+                        await self._fail_frame_ack_retry_send(
+                            frame_type, step_id, seq, exc
+                        )
+                    elif retry_command_sequence is None and self._is_active_runtime():
+                        await self._fail_frame_ack_retry_send(
+                            frame_type, step_id, seq, exc
+                        )
+                    return
+                finally:
+                    if self._frame_ack_retry_task is retry_task:
+                        self._frame_ack_retry_task = None
+                        self._frame_ack_retry_command_sequence = None
                 return
             self.last_error = LessonError(
                 LESSON_FRAME_ACK_TIMEOUT,
@@ -2689,12 +3893,79 @@ class LessonRuntime:
             await self._emit_error(self.last_error)
             await self._notify_lesson_terminal("frame_ack_timeout")
 
+        self._frame_ack_timeout_sequence = seq
         self._frame_ack_timeout_task = asyncio.create_task(_timeout())
 
-    def _cancel_frame_ack_timeout(self) -> None:
-        if self._frame_ack_timeout_task is not None and not self._frame_ack_timeout_task.done():
-            self._frame_ack_timeout_task.cancel()
+    async def _fail_frame_ack_retry_send(
+        self,
+        frame_type: str,
+        step_id: Optional[str],
+        sequence: int,
+        exc: BaseException,
+    ) -> None:
+        self.last_error = LessonError(
+            LESSON_FRAME_ACK_TIMEOUT,
+            f"failed to resend {frame_type} after ACK timeout",
+            retryable=True,
+            context={
+                "frameType": frame_type,
+                "stepId": step_id,
+                "ackedSequence": sequence,
+                "stage": "retrySend",
+                "errorType": type(exc).__name__,
+            },
+        )
+        self.state = S_FAILED
+        self._log(
+            "error",
+            f"FRAME_ACK_RETRY_SEND_FAILED type={frame_type} seq={sequence} "
+            f"stepId={step_id or ''} error={type(exc).__name__}",
+        )
+        try:
+            await self._emit_error(self.last_error)
+        except (Exception, asyncio.CancelledError) as notify_exc:
+            self._log(
+                "warning",
+                "lesson retry-send error notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+        try:
+            await self._notify_lesson_terminal("frame_ack_retry_send_failed")
+        except (Exception, asyncio.CancelledError) as notify_exc:
+            self._log(
+                "warning",
+                "lesson retry-send terminal notification failed: "
+                f"{type(notify_exc).__name__}",
+            )
+
+    def _cancel_frame_ack_timeout(self, sequence: Optional[int] = None) -> None:
+        if sequence is not None and self._frame_ack_timeout_sequence != sequence:
+            return
+        task = self._frame_ack_timeout_task
         self._frame_ack_timeout_task = None
+        self._frame_ack_timeout_sequence = None
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+
+    def _cancel_frame_ack_retry(self, command_sequence: Optional[int] = None) -> None:
+        if (
+            command_sequence is not None
+            and self._frame_ack_retry_command_sequence != command_sequence
+        ):
+            return
+        task = self._frame_ack_retry_task
+        self._frame_ack_retry_task = None
+        self._frame_ack_retry_command_sequence = None
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
 
     def _start_child_response_timeout(self) -> None:
         self._cancel_child_response_timeout()
@@ -3222,7 +4493,7 @@ class LessonRuntime:
             if self._cinematic_pending_command is None:
                 await self._emit(
                     "lesson_cinematic_control",
-                    body={"command": "pause", "phaseId": self._cinematic_phase["phaseId"]},
+                    body={"command": "pause", **self._cinematic_identity_payload()},
                 )
             return
         self.state = S_PAUSED
@@ -3240,7 +4511,7 @@ class LessonRuntime:
                     "lesson_cinematic_control",
                     body={
                         "command": "resume",
-                        "phaseId": self._cinematic_phase["phaseId"],
+                        **self._cinematic_identity_payload(),
                         "clockRebaseSequenceId": self._seq + 1,
                     },
                 )
@@ -3331,7 +4602,7 @@ class LessonRuntime:
             if self._cinematic_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {
                     "command": "stop",
-                    "phaseId": self._cinematic_phase["phaseId"],
+                    **self._cinematic_identity_payload(),
                 }
                 self._cinematic_stop_sent = True
             await self._emit("lesson_stop", body=body)
@@ -3348,7 +4619,7 @@ class LessonRuntime:
             "lesson_cinematic_control",
             body={
                 "command": "cancel",
-                "phaseId": (self._cinematic_phase or {}).get("phaseId"),
+                **self._cinematic_identity_payload(),
                 "reason": str(reason or "cancelled")[:64],
             },
         )
@@ -3414,6 +4685,16 @@ class LessonRuntime:
             cinematic = frame_body.get("cinematicPhase")
             if isinstance(cinematic, dict) and isinstance(cinematic.get("command"), str):
                 cinematic.setdefault("commandSequenceId", seq)
+                for key in (
+                    "command",
+                    "cueId",
+                    "effect",
+                    "stepKey",
+                    "playbackMode",
+                    "commandSequenceId",
+                ):
+                    if key in cinematic:
+                        frame_body.setdefault(key, cinematic[key])
             if frame_type == "lesson_cinematic_control":
                 frame_body.setdefault("commandSequenceId", seq)
                 if frame_body.get("command") == "resume":
@@ -3422,10 +4703,17 @@ class LessonRuntime:
             if command is not None:
                 command_sequence_id = command.get("commandSequenceId", frame_body.get("commandSequenceId"))
                 command["commandSequenceId"] = command_sequence_id
+                identity_payload = (
+                    {"phaseId": command.get("phaseId")}
+                    if "phaseId" in command
+                    else {"cueId": command.get("cueId")}
+                )
                 self._cinematic_pending_command = {
                     "command": command.get("command"),
-                    "phaseId": command.get("phaseId"),
+                    **identity_payload,
                     "commandSequenceId": command_sequence_id,
+                    # Retries keep commandSequenceId stable but get a new ACK envelope.
+                    "ackSequence": seq,
                     "targetState": {
                         "pause": S_PAUSED,
                         "resume": S_RUNNING,
@@ -3466,7 +4754,17 @@ class LessonRuntime:
             "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
         }:
             self._start_frame_ack_timeout(frame_type, seq, step_id)
-        await self._send(payload)
+        try:
+            await self._send(payload)
+        except BaseException:
+            failed_frame = self._outstanding.pop(seq, None)
+            if isinstance(failed_frame, dict):
+                self._retire_conversation_ack_sequence(seq, failed_frame)
+            pending = self._cinematic_pending_command
+            if isinstance(pending, dict) and pending.get("ackSequence") == seq:
+                self._cinematic_pending_command = None
+            self._cancel_frame_ack_timeout(seq)
+            raise
         return seq
 
     def _frame_payload_size(self, frame_type: str, *, step_id: Optional[str], body: Dict[str, Any]) -> int:
@@ -3598,7 +4896,7 @@ class LessonRuntime:
             return {
                 "cinematicPhase": {
                     "command": "start",
-                    "phaseId": self._cinematic_phase["phaseId"],
+                    **self._cinematic_identity_payload(),
                 }
             }
         if not self._renderer_v2_enabled():
@@ -3638,7 +4936,7 @@ class LessonRuntime:
             "ready",
         )
         payload = {key: pack[key] for key in top_level_keys if key in pack}
-        asset_keys = ("key", "state", "checksumOk", "size")
+        asset_keys = ("key", "state", "checksumOk", "size", "mediaType")
         local_root = str(pack.get("localRoot") or "").rstrip("/")
         payload_assets = []
         for asset in pack.get("assets", []):
@@ -3901,6 +5199,10 @@ class LessonRuntime:
 
         async def call_sync_once() -> Any:
             has_tool = getattr(mcp_client, "has_tool", None)
+            timeout = sd_pack_sync_timeout_sec(
+                getattr(self.conn, "config", {}) or {},
+                mcp_pack or pack or {},
+            )
             if sample_request is not None:
                 if callable(has_tool) and has_tool(SAMPLE_SD_ASSET_SYNC_TOOL):
                     return await call_mcp_tool(
@@ -3908,7 +5210,7 @@ class LessonRuntime:
                         mcp_client,
                         SAMPLE_SD_ASSET_SYNC_TOOL,
                         sample_request,
-                        timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                        timeout=timeout,
                     )
                 from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
@@ -3917,7 +5219,7 @@ class LessonRuntime:
                     mcp_client,
                     "self.lesson_assets.sync_sample_to_sd",
                     sample_request,
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    timeout=timeout,
                 )
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
                 return await call_mcp_tool(
@@ -3925,7 +5227,7 @@ class LessonRuntime:
                     mcp_client,
                     SD_ASSET_SYNC_TOOL,
                     {"assetPack": mcp_pack},
-                    timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                    timeout=timeout,
                 )
             from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
 
@@ -3934,17 +5236,27 @@ class LessonRuntime:
                 mcp_client,
                 "self.lesson_assets.sync_to_sd",
                 {"assetPack": mcp_pack},
-                timeout=SD_ASSET_SYNC_TIMEOUT_SEC,
+                timeout=timeout,
             )
 
         async def call_sync() -> Any:
-            busy_check = getattr(self.conn, "is_realtime_busy", None)
-            if not callable(busy_check):
+            async def foreground_operation() -> Any:
+                busy_check = getattr(self.conn, "is_realtime_busy", None)
+                while callable(busy_check) and busy_check():
+                    await asyncio.sleep(0.05)
                 return await call_sync_once()
-            poll = 0.05
-            while busy_check():
-                await asyncio.sleep(poll)
-            return await call_sync_once()
+
+            cache_key = str(
+                (mcp_pack or pack or {}).get("cacheKey")
+                or (sample_request or {}).get("cacheKey")
+                or f"sample:{self.lesson_id}:{self.lesson_version}"
+            )
+            return await request_sd_pack_sync(
+                self.conn,
+                cache_key,
+                foreground_operation,
+                foreground=True,
+            )
 
         sync_started_at = time.monotonic()
         try:

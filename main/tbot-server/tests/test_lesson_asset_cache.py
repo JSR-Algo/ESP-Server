@@ -19,7 +19,9 @@ from pathlib import Path
 from core.lesson import asset_cache as asset_cache_module
 from core.lesson.asset_cache import AssetCache, AssetState, DOWNLOADING, EVICTED, FAILED, READY
 from core.lesson.errors import AssetChecksumMismatch, AssetProfileUnavailable, PreloadTimeout
+from core.lesson.flattened_cinematic_contract import trgb_container_bytes
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.sd_pack_mcp_payload import build_firmware_sync_pack
 
 
 def _sha(content: bytes) -> str:
@@ -192,7 +194,6 @@ def _critical_assets():
 
 
 def _client_for(assets, *, corrupt=None, **kw):
-    content = {f"{BASE}/{a['path']}": (corrupt if corrupt and a["key"] == corrupt[0] else None) for a in assets}
     mapping = {}
     for a in assets:
         url = f"{BASE}/{a['path']}"
@@ -268,6 +269,67 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("authoritative sha256 verifier", source)
         self.assertIn("READY gate", source)
 
+    def test_real_asset_cache_preserves_v2_cue_identity_into_firmware_sync_pack(self):
+        content = b"\0" * trgb_container_bytes(13)
+        checksum = "f" * 64
+        asset = {
+            "key": "flattenedCinematic.barn-listen",
+            "path": "lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+            "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+            "sha256": _sha(content), "size": len(content), "critical": True,
+            "layer": "flattenedCinematic", "role": "barn-listen",
+            "mediaType": "application/vnd.tbot.rgb565-indexed",
+            "derivativeId": "d" * 64, "cueId": "barn-listen", "effect": "listen",
+            "stepKey": "barn", "playbackMode": "loop",
+            "compatibilityMetadata": {
+                "codec": "rgb565le", "containerVersion": 1,
+                "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+                "orientation": "panelNativeClockwise", "fps": 10,
+                "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+                "hasAudio": False,
+            },
+        }
+        cache = self._cache(
+            [asset], lesson_version=4, manifest_checksum=checksum,
+            public_base_url="https://esp.example",
+            asset_pack_local_root="/sdcard/tbot/lesson-assets",
+        )
+        state = cache.assets[0]
+        os.makedirs(cache.cache_dir, exist_ok=True)
+        with open(cache._final_path(state), "wb") as handle:
+            handle.write(content)
+        state.state = READY
+        state.checksum_ok = True
+
+        pack = cache.asset_pack_manifest(
+            assignment_version=7, lesson_id="w01-d01-barn-say-it",
+            lesson_version=4, manifest_checksum=checksum,
+        )
+        self.assertEqual(pack["assets"][0]["compatibilityMetadata"], asset["compatibilityMetadata"])
+        self.assertEqual(pack["assets"][0]["sourceUrl"], asset["url"])
+        sent = build_firmware_sync_pack(pack)["assets"][0]
+
+        self.assertEqual(
+            {key: sent[key] for key in ("cueId", "effect", "stepKey", "playbackMode")},
+            {"cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop"},
+        )
+        self.assertTrue(state.renderer_v4_mp4)
+        self.assertNotIn("compatibilityMetadata", sent)
+        self.assertNotIn("sourceUrl", sent)
+        self.assertEqual(
+            sent["sdPath"],
+            f"/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v4-{checksum}/flattenedCinematic.barn-listen",
+        )
+
+        legacy = dict(asset)
+        legacy.update(key="flattenedCinematic.opening", phaseId="opening")
+        for field in ("cueId", "effect", "stepKey", "playbackMode"):
+            legacy.pop(field, None)
+        state.__init__(legacy)
+        legacy_record = cache._asset_pack_record(state)
+        self.assertEqual(legacy_record["phaseId"], "opening")
+        self.assertFalse({"cueId", "effect", "stepKey", "playbackMode"} & set(legacy_record))
+
     async def test_preload_lifecycle_and_sha256_gate(self):
         assets = _critical_assets()
         cache = self._cache(assets, client=_client_for(assets))
@@ -288,6 +350,28 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(os.path.exists(path))
             with open(path, "rb") as fh:
                 self.assertEqual(_sha(fh.read()), a.sha256)
+
+    async def test_malformed_sha256_is_a_terminal_cache_error_not_a_python_type_error(self):
+        for malformed in (123, [], None, True):
+            with self.subTest(sha256=malformed):
+                asset = {
+                    "key": "teachingObject.barn",
+                    "path": "barn.png",
+                    "sha256": malformed,
+                    "size": len(BARN),
+                    "critical": True,
+                    "layer": "teachingObject",
+                    "role": "primarySubject",
+                    "mediaType": "image/png",
+                }
+                with self.assertRaises(AssetChecksumMismatch) as exc_info:
+                    await self._cache([asset], client=_client_for([asset])).preload()
+                self.assertFalse(exc_info.exception.retryable)
+
+    def test_asset_state_preserves_existing_uppercase_hex_normalization(self):
+        state = AssetState({"key": "poster", "sha256": "AB" * 32})
+
+        self.assertEqual(state.sha256, "ab" * 32)
 
     async def test_esptft_background_poster_writes_render_safe_derivative(self):
         original = b"\xff\xd8\xfforiginal-camera-jpeg"
@@ -1826,6 +1910,64 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "ASSET_PROFILE_UNAVAILABLE")
         # NEVER entered PRELOADING / never fetched unplayable bytes.
         self.assertEqual(client.requested, [])
+
+    async def test_esptft_accepts_valid_renderer_v4_flattened_video(self):
+        public_url = "https://cdn.test/lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb"
+        content = b"\0" * trgb_container_bytes(13)
+        assets = [
+            {
+                "key": "flattenedCinematic.barn-listen",
+                "path": "lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+                "url": public_url,
+                "sha256": _sha(content),
+                "size": len(content),
+                "critical": True,
+                "layer": "flattenedCinematic",
+                "role": "barn-listen",
+                "mediaType": "application/vnd.tbot.rgb565-indexed",
+                "derivativeId": "d" * 64,
+                "cueId": "barn-listen",
+                "effect": "listen",
+                "stepKey": "barn",
+                "playbackMode": "loop",
+                "compatibilityMetadata": {
+                    "codec": "rgb565le", "containerVersion": 1,
+                    "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+                    "orientation": "panelNativeClockwise", "fps": 10,
+                    "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+                    "hasAudio": False,
+                },
+            }
+        ]
+        client = _FakeClient({public_url: [content]})
+        cache = self._cache(assets, client=client)
+
+        ready = await cache.preload()
+
+        self.assertTrue(ready)
+        self.assertEqual(client.requested, [public_url])
+        self.assertTrue(cache.assets[0].renderer_v4_mp4)
+
+    def test_renderer_v4_trgb_detection_rejects_mp4_path_with_rgb_media_type(self):
+        asset = {
+            "key": "flattenedCinematic.barn-listen",
+            "path": "lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+            "url": "https://cdn.test/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4",
+            "sha256": "a" * 64, "size": 1, "critical": True,
+            "layer": "flattenedCinematic", "role": "barn-listen",
+            "mediaType": "application/vnd.tbot.rgb565-indexed",
+            "derivativeId": "d" * 64, "cueId": "barn-listen", "effect": "listen",
+            "stepKey": "barn", "playbackMode": "loop",
+            "compatibilityMetadata": {
+                "codec": "rgb565le", "containerVersion": 1,
+                "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+                "orientation": "panelNativeClockwise", "fps": 10,
+                "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+                "hasAudio": False,
+            },
+        }
+
+        self.assertFalse(self._cache([asset]).assets[0].renderer_v4_mp4)
 
     async def test_download_pauses_while_realtime_busy_and_resumes(self):
         assets = _critical_assets()

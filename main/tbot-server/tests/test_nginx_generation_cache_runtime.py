@@ -103,7 +103,7 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
     rendered_config.write_text(
         NGINX_CONFIG.read_text(encoding="utf-8")
         .replace("listen 80;", "listen 80 default_server;", 1)
-        .replace("127.0.0.1:3300", f"host.docker.internal:{upstream_port}")
+        .replace("127.0.0.1:3003", f"host.docker.internal:{upstream_port}")
         .replace("127.0.0.1:8003", f"host.docker.internal:{upstream_port}"),
         encoding="utf-8",
     )

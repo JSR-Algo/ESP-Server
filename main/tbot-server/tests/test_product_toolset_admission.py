@@ -16,6 +16,7 @@ import unittest
 from core.providers.tools.product_toolset import (
     ALWAYS_INCLUDE,
     ALWAYS_INCLUDE_WHEN_LESSON_ENABLED,
+    LESSON_CONVERSATION_TOOLS,
     product_tool_names,
     sample_lesson_config_enabled,
 )
@@ -97,11 +98,11 @@ class StartLessonAdmissionListTest(unittest.TestCase):
         off_names = product_tool_names(_MethodFlagConn(runtime_enabled=False))
         on_names = product_tool_names(_MethodFlagConn(runtime_enabled=True))
 
-        # Toggling LESSON_RUNTIME_ENABLED must add exactly the lesson-gated tool(s) and
-        # nothing else -- pins that start_lesson is gated by this flag and only this flag.
+        # Production runtime admission exposes start plus the semantic conversation
+        # boundary. The sample-only gate still exposes just start_lesson.
         self.assertEqual(
             set(on_names) - set(off_names),
-            set(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED),
+            set(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED) | set(LESSON_CONVERSATION_TOOLS),
         )
         self.assertEqual(set(off_names) - set(on_names), set())
         self.assertIn("start_lesson", ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)

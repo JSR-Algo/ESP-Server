@@ -168,6 +168,7 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
         "LESSON_ASSET_PACK_MOUNT_ROOT",
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
+        "LESSON_RENDERER_V4_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
         "LESSON_GENERATION_CMS_URL",
         "LESSON_GENERATION_POLL_INTERVAL_SEC",

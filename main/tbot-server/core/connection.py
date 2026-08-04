@@ -748,6 +748,7 @@ class ConnectionHandler:
 
     async def release_lesson_mode(self, *, reason: str = "lesson_terminal") -> None:
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
+            await self._deactivate_live_lesson_context()
             await self.enter_dormant_mode(reason=reason)
 
     async def finish_lesson_mode(self, *, reason: str = "lesson_completed") -> None:
@@ -795,7 +796,24 @@ class ConnectionHandler:
                 await self.enter_conversation_mode(reason=reason)
         else:
             await self.enter_dormant_mode(reason=reason)
+        await self._deactivate_live_lesson_context()
         await self._send_lesson_emotion(self._lesson_terminal_emotion(reason))
+
+    async def _deactivate_live_lesson_context(self) -> None:
+        deactivate = getattr(
+            getattr(self, "voice_provider", None),
+            "deactivate_lesson_conversation_context",
+            None,
+        )
+        if not callable(deactivate):
+            return
+        try:
+            await deactivate()
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                "lesson Live context deactivation failed error={}",
+                type(exc).__name__,
+            )
 
     async def _stop_lesson_terminal_speaking_status(self) -> None:
         if not getattr(self, "client_is_speaking", False):
@@ -2508,6 +2526,18 @@ class ConnectionHandler:
                 from core.lesson.sd_pack_fanout import drain_pending_for_connection
 
                 pending_result = await drain_pending_for_connection(self)
+
+            on_connect_enabled = (
+                os.getenv("LESSON_SD_SYNC_ON_CONNECT_ENABLED", "")
+                .strip()
+                .lower()
+                == "true"
+            )
+            if not on_connect_enabled:
+                return {
+                    "pending": pending_result,
+                    "full": {"skipped": "on_connect_disabled"},
+                }
 
             from core.lesson.sd_pack_sync import sync_cached_lesson_assets_to_sd
 

@@ -617,7 +617,8 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
     assert "location = /public/lesson-assets/generation" in nginx
     assert "proxy_pass http://127.0.0.1:8003" in nginx
     assert "location = /v1/public/lesson-assets/latest" in nginx
-    assert "proxy_pass http://127.0.0.1:3300" in nginx
+    assert nginx.count("proxy_pass http://127.0.0.1:3003") == 2
+    assert "proxy_pass http://127.0.0.1:3300" not in nginx
     assert "127.0.0.1:3000" not in nginx
     assert nginx.count('if ($request_method !~ ^(GET|HEAD)$) { return 405; }') >= 2
     for header in ("Authorization", "Cookie", "X-Admin-Key", "Cf-Access-Jwt-Assertion", "Cf-Access-Client-Id", "Cf-Access-Client-Secret"):

@@ -191,6 +191,37 @@ def _flattened_mp4_manifest():
     }])
 
 
+def _flattened_v2_mp4_manifest():
+    content = b"renderer-v4-cue"
+    key = "flattenedCinematic.barn-listen"
+    url = "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.mp4"
+    return content, _manifest(assets=[{
+        "key": key, "sha256": _sha(content), "size": len(content), "mediaType": "video/mp4",
+        "critical": True, "onlineUrl": url, "url": url, "sdPath": _sd_path(key), "localPath": _sd_path(key),
+        "derivativeId": "d" * 64, "cueId": "barn-listen", "effect": "listen",
+        "stepKey": "barn", "playbackMode": "loop",
+        "compatibilityMetadata": {
+            "codec": "mjpeg", "width": 480, "height": 320, "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "hasAudio": False,
+        },
+    }])
+
+
+@pytest.mark.asyncio
+async def test_renderer_v4_v2_cue_materializes_with_exact_identity(tmp_path):
+    content, manifest = _flattened_v2_mp4_manifest()
+    url = manifest["assets"][0]["onlineUrl"]
+    await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=_Client({url: [content]}), resolver=_public_resolver,
+    )
+
+    pack_path = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json"
+    stored = json.loads(pack_path.read_text(encoding="utf-8"))["assets"][0]
+    assert {key: stored[key] for key in ("cueId", "effect", "stepKey", "playbackMode")} == {
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+    }
+
+
 @pytest.mark.asyncio
 async def test_renderer_v4_one_file_pack_materializes_reuses_and_never_activates_corrupt(tmp_path):
     content, manifest = _flattened_mp4_manifest()
@@ -476,6 +507,26 @@ async def test_checksum_mismatch_is_terminal_and_sanitized(tmp_path):
         tmp_path / "sd" / "tbot",
         pack_root=tmp_path / "sd" / "tbot" / "lesson-assets",
     ).is_pack_ready(CACHE_KEY)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [123, [], None, True])
+async def test_malformed_asset_sha256_is_rejected_as_non_retryable_contract_error(tmp_path, value):
+    manifest = _manifest()
+    manifest["assets"][0]["sha256"] = value
+    client = _Client({})
+
+    with pytest.raises(MaterializationError) as exc_info:
+        await materialize_lesson_sd_pack(
+            manifest,
+            config=_config(tmp_path),
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "INVALID_ASSET_SHA256"
+    assert exc_info.value.retryable is False
+    assert client.requests == []
 
 
 @pytest.mark.asyncio

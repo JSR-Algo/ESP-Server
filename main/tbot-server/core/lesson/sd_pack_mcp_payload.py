@@ -7,6 +7,11 @@ import re
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from core.lesson.flattened_cinematic_contract import (
+    TRGB_MEDIA_TYPE,
+    FlattenedCinematicContractError,
+    validate_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 
 FIRMWARE_LESSON_ASSET_ROOT = "/sdcard/tbot/lesson-assets"
@@ -36,6 +41,24 @@ _FLATTENED_METADATA_FIELDS = frozenset(
 _FLATTENED_PHASE_IDS = frozenset(
     {"opening", "greet", "teach", "listen", "thinking", "correct", "retry", "celebrate"}
 )
+_FLATTENED_CUE_EFFECTS = frozenset(
+    {
+        "opening", "greet", "teach", "listen", "thinking", "correct",
+        "retry-level-1", "retry-level-2", "retry-level-3", "celebrate",
+        "word-transition",
+    }
+)
+_SAFE_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_FLATTENED_CUE_PLAYBACK_MODE = {
+    effect: "loop" if effect in {"greet", "listen", "thinking"} else "once"
+    for effect in _FLATTENED_CUE_EFFECTS
+}
+_FLATTENED_CUE_DURATION_MS = {
+    "opening": 9500, "greet": 1200, "teach": 2600, "listen": 1300,
+    "thinking": 1300, "correct": 600, "retry-level-1": 1200,
+    "retry-level-2": 1400, "retry-level-3": 1600, "celebrate": 3000,
+    "word-transition": 1100,
+}
 
 
 class FirmwareSyncPackError(ValueError):
@@ -181,14 +204,44 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     if not isinstance(asset, dict) or asset.get("mediaType") != "video/mp4":
         _refuse()
     derivative_id = asset.get("derivativeId")
-    phase_id = asset.get("phaseId")
-    if (
-        not isinstance(derivative_id, str)
-        or _LOWER_SHA256_RE.fullmatch(derivative_id) is None
-        or phase_id not in _FLATTENED_PHASE_IDS
-        or asset.get("key") != f"flattenedCinematic.{phase_id}"
-    ):
+    if not isinstance(derivative_id, str) or _LOWER_SHA256_RE.fullmatch(derivative_id) is None:
         _refuse()
+    has_phase = "phaseId" in asset
+    has_cue = any(field in asset for field in ("cueId", "effect", "stepKey", "playbackMode"))
+    if has_phase == has_cue:
+        _refuse()
+    if has_phase:
+        phase_id = asset.get("phaseId")
+        if (
+            not isinstance(phase_id, str)
+            or phase_id not in _FLATTENED_PHASE_IDS
+            or asset.get("key") != f"flattenedCinematic.{phase_id}"
+        ):
+            _refuse()
+        identity = {"phaseId": phase_id}
+    else:
+        cue_id = asset.get("cueId")
+        step_key = asset.get("stepKey")
+        effect = asset.get("effect")
+        playback_mode = asset.get("playbackMode")
+        if (
+            not isinstance(cue_id, str)
+            or _SAFE_SLUG_RE.fullmatch(cue_id) is None
+            or not isinstance(step_key, str)
+            or _SAFE_SLUG_RE.fullmatch(step_key) is None
+            or not isinstance(effect, str)
+            or effect not in _FLATTENED_CUE_EFFECTS
+            or not isinstance(playback_mode, str)
+            or playback_mode != _FLATTENED_CUE_PLAYBACK_MODE.get(effect)
+            or asset.get("key") != f"flattenedCinematic.{cue_id}"
+        ):
+            _refuse()
+        identity = {
+            "cueId": cue_id,
+            "effect": effect,
+            "stepKey": step_key,
+            "playbackMode": playback_mode,
+        }
     metadata = asset.get("compatibilityMetadata")
     if not isinstance(metadata, dict) or set(metadata) != _FLATTENED_METADATA_FIELDS:
         _refuse()
@@ -196,8 +249,11 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
     frame_count = metadata.get("frameCount")
     if (
         metadata.get("codec") != "mjpeg"
+        or type(metadata.get("width")) is not int
         or metadata.get("width") != 480
+        or type(metadata.get("height")) is not int
         or metadata.get("height") != 320
+        or type(metadata.get("fps")) is not int
         or metadata.get("fps") != 10
         or metadata.get("hasAudio") is not False
         or not _integer(duration_ms, 1)
@@ -205,15 +261,18 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
         or duration_ms != frame_count * 100
     ):
         _refuse()
+    if not has_phase and duration_ms != _FLATTENED_CUE_DURATION_MS[effect]:
+        _refuse()
     _validate_online_url(_matching_alias(asset, "onlineUrl", "url"))
     return {
         "derivativeId": derivative_id,
-        "phaseId": phase_id,
+        **identity,
         "compatibilityMetadata": copy.deepcopy(metadata),
     }
 
 def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: str) -> tuple[str, str]:
-    if _LOWER_SHA256_RE.fullmatch(asset.get("sha256") or "") is None:
+    sha256 = asset.get("sha256")
+    if not isinstance(sha256, str) or _LOWER_SHA256_RE.fullmatch(sha256) is None:
         _refuse()
     size = asset.get("size")
     if type(size) is not int or size < 0 or size > MAX_SAFE_SIZE:
@@ -224,14 +283,33 @@ def _validate_asset_metadata(asset: dict[str, Any], cache_key: str, basename: st
     if type(asset.get("critical")) is not bool:
         _refuse()
     local_path = _matching_alias(asset, "sdPath", "localPath")
-    online_url = _matching_alias(asset, "onlineUrl", "url")
+    local_fallback_url = _matching_alias(asset, "onlineUrl", "url")
     _validate_source_local_path(local_path, cache_key, basename)
-    _validate_online_url(online_url)
-    if media_type.lower().startswith("video/"):
-        if "derivativeId" in asset or "phaseId" in asset:
+    _validate_online_url(local_fallback_url)
+    online_url = local_fallback_url
+    flattened_identity = "derivativeId" in asset or "phaseId" in asset or "cueId" in asset
+    if flattened_identity:
+        if media_type == TRGB_MEDIA_TYPE:
+            source_url = asset.get("sourceUrl")
+            if source_url is None:
+                source_url = local_fallback_url
+            if not isinstance(source_url, str) or not source_url:
+                _refuse()
+            _validate_online_url(source_url)
+            try:
+                contract_asset = dict(asset)
+                contract_asset["url"] = source_url
+                contract_asset["onlineUrl"] = source_url
+                validate_flattened_cinematic_cache_asset(contract_asset)
+            except FlattenedCinematicContractError:
+                _refuse()
+            online_url = source_url
+        elif media_type.lower().startswith("video/"):
             validate_renderer_v4_flattened_mp4(asset)
         else:
-            validate_renderer_v3_shared_mp4(asset)
+            _refuse()
+    elif media_type.lower().startswith("video/"):
+        validate_renderer_v3_shared_mp4(asset)
     return local_path, online_url
 
 
@@ -270,8 +348,12 @@ def build_firmware_sync_pack(pack: Any) -> dict[str, Any]:
     for index, basename in enumerate(basenames):
         _source_local_path, online_url = normalized_assets[index]
         physical_path = f"{physical_root}/{basename}"
-        result["assets"][index]["localPath"] = physical_path
-        result["assets"][index]["sdPath"] = physical_path
-        result["assets"][index]["onlineUrl"] = online_url
-        result["assets"][index]["url"] = online_url
+        sent_asset = result["assets"][index]
+        sent_asset.pop("localPath", None)
+        sent_asset.pop("url", None)
+        sent_asset["sdPath"] = physical_path
+        sent_asset["onlineUrl"] = online_url
+        sent_asset.pop("sourceUrl", None)
+        if sent_asset.get("mediaType") == TRGB_MEDIA_TYPE:
+            sent_asset.pop("compatibilityMetadata", None)
     return result

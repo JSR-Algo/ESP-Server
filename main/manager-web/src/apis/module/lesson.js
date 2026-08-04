@@ -34,6 +34,22 @@ export function normalizeAuthoringLesson(raw) {
   };
 }
 
+export function normalizeTVideoJourneyResponse(raw) {
+  const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    ...value,
+    state: value.state === 'configured' ? 'configured' : 'not-configured',
+    lessonId: value.lessonId ?? value.lesson_id ?? '',
+    lessonVersion: Number(value.lessonVersion ?? value.lesson_version ?? 0),
+    sourceRevision: Number(value.sourceRevision ?? value.source_revision ?? value.cinematicSourceRevision ?? value.cinematic_source_revision ?? 0),
+    cinematicSourceRevision: Number(value.cinematicSourceRevision ?? value.cinematic_source_revision ?? 0),
+    journey: value.journey || null,
+    set: value.set && typeof value.set === 'object' ? value.set : { state: 'invalid', issues: [] },
+    statuses: Array.isArray(value.statuses) ? value.statuses : [],
+    publishReady: value.publishReady === true || value.publish_ready === true,
+  };
+}
+
 function validSafeCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -214,6 +230,34 @@ export function normalizeVisualAsset(raw) {
 }
 
 export default {
+  getTVideoJourneyPreset(onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/authoring/presets/tvideoJourney/1`,
+      method: 'GET',
+      onSuccess,
+      onError,
+    });
+  },
+
+  getTVideoJourney(lessonId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/authoring/${lessonId}/tvideo-journey`,
+      method: 'GET',
+      onSuccess: (payload) => onSuccess(normalizeTVideoJourneyResponse(payload)),
+      onError,
+    });
+  },
+
+  saveTVideoJourney(lessonId, data, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/authoring/${lessonId}/tvideo-journey`,
+      method: 'PUT',
+      data,
+      onSuccess: (payload) => onSuccess(normalizeTVideoJourneyResponse(payload)),
+      onError,
+    });
+  },
+
   getRolloutCapabilities(onSuccess, onError) {
     nestRequest({
       url: `${getNestUrl()}/lesson-rollout-capabilities`,

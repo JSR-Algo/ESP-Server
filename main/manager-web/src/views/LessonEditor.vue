@@ -47,6 +47,24 @@
         :retrying="lessonAssetGenerationRetrying"
         @retry="retryLessonSdSync"
       />
+      <section v-if="isTVideoJourney" class="tvideo-journey-host">
+        <p v-if="tvideoJourneyLoading" role="status">{{ $t('lesson.tvideoJourney.loading') }}</p>
+        <el-alert v-else-if="!tvideoJourneyPreset || !tvideoJourneyDraft" :title="tvideoJourneyError || $t('lesson.tvideoJourney.loadFailed')" type="error" :closable="false" show-icon />
+        <TVideoJourneyEditor
+          v-else
+          :value="tvideoJourneyDraft"
+          :preset="tvideoJourneyPreset"
+          :response="tvideoJourneyResponse"
+          :assets="tvideoJourneyAssets"
+          :saving="tvideoJourneySaving"
+          :disabled="!isDraft"
+          :error="tvideoJourneyError"
+          :save-message="tvideoJourneySaveMessage"
+          @dirty-change="tvideoJourneyDirty = $event"
+          @reload="loadTVideoJourney"
+          @save="saveTVideoJourney"
+        />
+      </section>
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
         <div class="canonical-demo__copy">
           <span class="eyebrow">SOURCE / ADMIN DEMO</span>
@@ -199,7 +217,7 @@
                 </div>
                 <p class="cinematic-note">Mẫu (template): giữ nguyên <strong>bố cục + hiệu ứng</strong> (robot bay vào / đi tới / chào). Click từng step bên trái để đổi <strong>từ, prompt và vật thể</strong> tương ứng trên video.</p>
               </section>
-              <section class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
+              <section v-if="showLegacyFlattenedDerivativeReadiness" class="preview-surface derivative-readiness" data-testid="flattened-derivative-readiness">
                 <div class="preview-heading">
                   <span class="eyebrow">{{ $t('lesson.flattenedDerivativeTitle') }}</span>
                   <span class="preview-heading__hint">{{ $t('lesson.flattenedDerivativeHint') }}</span>
@@ -574,6 +592,8 @@ import RobotLessonPreview from '@/components/lesson/RobotLessonPreview.vue';
 import SharedVisualImpactDialog from '@/components/lesson/SharedVisualImpactDialog.vue';
 import TvideoTemplatePanel from '@/components/lesson/TvideoTemplatePanel.vue';
 import TvideoVariantBatchPanel from '@/components/lesson/TvideoVariantBatchPanel.vue';
+import TVideoJourneyEditor from '@/components/lesson/TVideoJourneyEditor.vue';
+import { createFarmJourneyDraft } from '@/components/lesson/tvideo-journey';
 import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';
 import {
@@ -627,6 +647,7 @@ export default {
     SharedVisualImpactDialog,
     TvideoTemplatePanel,
     TvideoVariantBatchPanel,
+    TVideoJourneyEditor,
   },
   data() {
     const stepEditor = createLessonStepEditorState();
@@ -687,14 +708,6 @@ export default {
       promptStepKey: '',
       promptEditRevision: 0,
       promptSaveRequestId: 0,
-      selectedStepDrafts: {},
-      selectedAssetDrafts: {},
-      selectedContentDrafts: {},
-      dirtyStepKeys: {},
-      savingStepKeys: {},
-      stepDraftRevisions: {},
-      addingStep: false,
-      reordering: false,
       stepEditRevisions: {},
       savingStep: false,
       deletingStepKey: '',
@@ -743,6 +756,16 @@ export default {
       flattenedDerivativeSourceEpoch: 0,
       flattenedDerivativeCurrentSourceRevision: null,
       flattenedDerivativePollTimer: null,
+      tvideoJourneyPreset: null,
+      tvideoJourneyResponse: { state: 'not-configured', set: { state: 'invalid', issues: [] }, statuses: [], publishReady: false },
+      tvideoJourneyDraft: null,
+      tvideoJourneyAssets: [],
+      tvideoJourneyLoading: false,
+      tvideoJourneySaving: false,
+      tvideoJourneyDirty: false,
+      tvideoJourneyError: '',
+      tvideoJourneySaveMessage: '',
+      tvideoJourneyRequestId: 0,
     };
   },
   computed: {
@@ -793,6 +816,33 @@ export default {
       return this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases.length
         ? 'teebot-lesson-renderer.v4'
         : '';
+    },
+    isTVideoJourney() {
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
+      );
+    },
+    hasAuthoritativeTVideoJourney() {
+      const response = this.tvideoJourneyResponse;
+      const journey = response && response.journey;
+      return Boolean(
+        this.isTVideoJourney
+        && response.lessonId === this.lessonId
+        && response.state === 'configured'
+        && journey
+        && journey.presetId === 'tvideoJourney'
+        && journey.presetVersion === 1
+      );
+    },
+    showLegacyFlattenedDerivativeReadiness() {
+      return !this.isTVideoJourney
+        || (!this.tvideoJourneyLoading && !this.hasAuthoritativeTVideoJourney);
+    },
+    tvideoJourneyPublishReady() {
+      return !this.hasAuthoritativeTVideoJourney
+        || (this.tvideoJourneyResponse && this.tvideoJourneyResponse.publishReady === true);
     },
     flattenedDerivativeReadyPreview() {
       const phases = this.flattenedDerivativeStatus && this.flattenedDerivativeStatus.phases;
@@ -895,6 +945,7 @@ export default {
         || this.renaming
         || this.publishing
         || this.savingLessonVisuals
+        || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key]);
     },
     selectedAuthoring: {
@@ -993,6 +1044,7 @@ export default {
       this.deletingStepKey = '';
       this.addingStep = false;
       this.reordering = false;
+      this.resetTVideoJourneyState();
       this.resetLessonAssetGenerationStatus();
       this.resetFlattenedDerivativeStatus();
       this.fetchAll();
@@ -1049,6 +1101,7 @@ export default {
     this.flattenedDerivativePollTimer = null;
     this.flattenedDerivativeRequestId = Number(this.flattenedDerivativeRequestId || 0) + 1;
     this.flattenedDerivativeSourceEpoch = Number(this.flattenedDerivativeSourceEpoch || 0) + 1;
+    this.resetTVideoJourneyState();
     this.canonicalDemoLoadSequence += 1;
     this.lessonUpdateSafety.release();
   },
@@ -1072,6 +1125,85 @@ export default {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
       return 'warning';
+    },
+    formatTVideoJourneyError(message, response) {
+      const body = response && (response.data || (response.response && response.response.data));
+      const error = body && body.error && typeof body.error === 'object' ? body.error : body;
+      const code = error && (error.code || error.errorCode);
+      const details = error && error.details;
+      const typedDetails = details && typeof details === 'object' ? ` · ${JSON.stringify(details)}` : '';
+      return `${code ? `${code}: ` : ''}${message || this.$t('lesson.tvideoJourney.loadFailed')}${typedDetails}`;
+    },
+    resetTVideoJourneyState() {
+      this.tvideoJourneyRequestId += 1;
+      this.tvideoJourneyPreset = null;
+      this.tvideoJourneyResponse = { state: 'not-configured', set: { state: 'invalid', issues: [] }, statuses: [], publishReady: false };
+      this.tvideoJourneyDraft = null;
+      this.tvideoJourneyAssets = [];
+      this.tvideoJourneyLoading = false;
+      this.tvideoJourneySaving = false;
+      this.tvideoJourneyDirty = false;
+      this.tvideoJourneyError = '';
+      this.tvideoJourneySaveMessage = '';
+    },
+    loadTVideoJourney() {
+      if (!this.isTVideoJourney || this.editorDestroying) return false;
+      const requestId = ++this.tvideoJourneyRequestId;
+      const lessonId = this.lessonId;
+      this.tvideoJourneySaveMessage = '';
+      this.tvideoJourneyLoading = true;
+      this.tvideoJourneyError = '';
+      let preset = null;
+      let response = null;
+      let completed = 0;
+      let failed = false;
+      const current = () => !this.editorDestroying && requestId === this.tvideoJourneyRequestId && lessonId === this.lessonId;
+      const finish = () => {
+        completed += 1;
+        if (completed < 2 || !current()) return;
+        this.tvideoJourneyPreset = preset;
+        this.tvideoJourneyResponse = response;
+        this.tvideoJourneyDraft = response.state === 'configured' && response.journey
+          ? response.journey
+          : createFarmJourneyDraft();
+        this.tvideoJourneyDirty = false;
+        this.tvideoJourneyLoading = false;
+        if (this.hasAuthoritativeTVideoJourney) this.resetFlattenedDerivativeStatus();
+        else this.loadFlattenedDerivativeStatus();
+      };
+      const fail = (message, error) => {
+        if (!current() || failed) return;
+        failed = true;
+        this.tvideoJourneyLoading = false;
+        this.tvideoJourneyError = this.formatTVideoJourneyError(message, error);
+        if (!this.hasAuthoritativeTVideoJourney) this.loadFlattenedDerivativeStatus();
+      };
+      Api.lesson.getTVideoJourneyPreset((value) => { if (current()) { preset = value; finish(); } }, fail);
+      Api.lesson.getTVideoJourney(lessonId, (value) => { if (current()) { response = value; finish(); } }, fail);
+      Api.lesson.listVisualAssets({}, (rows) => { if (current()) this.tvideoJourneyAssets = Array.isArray(rows) ? rows : []; }, () => { if (current()) this.tvideoJourneyAssets = []; });
+      return true;
+    },
+    saveTVideoJourney(dto) {
+      if (!this.isTVideoJourney || !this.isDraft || this.tvideoJourneySaving || this.editorDestroying) return false;
+      const requestId = ++this.tvideoJourneyRequestId;
+      const lessonId = this.lessonId;
+      this.tvideoJourneySaving = true;
+      this.tvideoJourneyError = '';
+      this.tvideoJourneySaveMessage = '';
+      Api.lesson.saveTVideoJourney(lessonId, dto, (response) => {
+        if (this.editorDestroying || requestId !== this.tvideoJourneyRequestId || lessonId !== this.lessonId) return;
+        this.tvideoJourneySaving = false;
+        this.tvideoJourneyResponse = response;
+        this.tvideoJourneyDraft = response.journey;
+        this.tvideoJourneyDirty = false;
+        this.tvideoJourneySaveMessage = this.$t('lesson.tvideoJourney.saved');
+        if (this.hasAuthoritativeTVideoJourney) this.resetFlattenedDerivativeStatus();
+      }, (message, error) => {
+        if (this.editorDestroying || requestId !== this.tvideoJourneyRequestId || lessonId !== this.lessonId) return;
+        this.tvideoJourneySaving = false;
+        this.tvideoJourneyError = this.formatTVideoJourneyError(message, error);
+      });
+      return true;
     },
     flattenedDerivativeTagType(state) {
       if (state === 'ready') return 'success';
@@ -1136,7 +1268,7 @@ export default {
       return true;
     },
     loadFlattenedDerivativeStatus(options = {}) {
-      if (this.editorDestroying || !this.lesson || !this.lessonId
+      if (this.editorDestroying || this.hasAuthoritativeTVideoJourney || !this.lesson || !this.lessonId
         || !Api.lesson || typeof Api.lesson.getFlattenedDerivativeStatus !== 'function') return false;
       const guard = {
         requestId: this.flattenedDerivativeRequestId + 1,
@@ -1372,6 +1504,7 @@ export default {
         || this.sharedImpactReconciling
         || this.savingStep
         || this.savingLessonVisuals
+        || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Boolean(this.pendingLessonVisualPair)
         || this.validating
         || this.previewing
@@ -1519,10 +1652,12 @@ export default {
         (l) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lesson = l;
+          if (l.manifestVersion !== 'teebot-lesson-renderer.v4') this.resetTVideoJourneyState();
           this.loading = false;
           this.loadLessonAssetGenerationStatus();
           this.fetchSteps();
-          this.loadFlattenedDerivativeStatus();
+          if (l.manifestVersion === 'teebot-lesson-renderer.v4') this.loadTVideoJourney();
+          else this.loadFlattenedDerivativeStatus();
         },
         (msg) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
@@ -2573,7 +2708,9 @@ export default {
         && this.simulationEvidence
         && this.simulationProofVersion === this.proofVersion
         && this.validSimulationEvidence(this.simulationEvidence, this.previewManifest)
-        && (typeof flattenedDerivativesReadyForPublish !== 'function'
+        && this.tvideoJourneyPublishReady !== false
+        && (this.hasAuthoritativeTVideoJourney
+          || typeof flattenedDerivativesReadyForPublish !== 'function'
           || flattenedDerivativesReadyForPublish(
             this.flattenedDerivativeManifestVersion,
             this.flattenedDerivativeStatus,

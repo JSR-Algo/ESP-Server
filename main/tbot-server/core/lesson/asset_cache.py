@@ -44,6 +44,10 @@ from core.lesson.errors import (
     PreloadTimeout,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.flattened_cinematic_contract import (
+    FlattenedCinematicContractError,
+    validate_flattened_cinematic_cache_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -91,7 +95,8 @@ class AssetState:
     __slots__ = (
         "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
         "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
-        "derivative_id", "phase_id", "renderer_v3_mp4", "renderer_v4_mp4",
+        "derivative_id", "phase_id", "cue_id", "effect", "step_key", "playback_mode",
+        "renderer_v3_mp4", "renderer_v4_mp4",
         "state", "checksum_ok", "reason",
     )
 
@@ -112,7 +117,8 @@ class AssetState:
             )
         self.key: str = key
         self.path: str = asset.get("path") or ""
-        self.sha256: str = (asset.get("sha256") or "").lower()
+        raw_sha256 = asset.get("sha256")
+        self.sha256: str = raw_sha256.lower() if isinstance(raw_sha256, str) else ""
         self.size: Optional[int] = asset.get("size") if type(asset.get("size")) is int else None
         self.critical: bool = bool(asset.get("critical"))
         self.layer: Optional[str] = asset.get("layer")
@@ -126,6 +132,10 @@ class AssetState:
         self.visual_refs: Any = asset.get("visualRefs")
         self.derivative_id: Optional[str] = asset.get("derivativeId")
         self.phase_id: Optional[str] = asset.get("phaseId")
+        self.cue_id: Optional[str] = asset.get("cueId")
+        self.effect: Optional[str] = asset.get("effect")
+        self.step_key: Optional[str] = asset.get("stepKey")
+        self.playback_mode: Optional[str] = asset.get("playbackMode")
         try:
             validate_renderer_v3_shared_mp4(asset)
             self.renderer_v3_mp4 = True
@@ -135,7 +145,11 @@ class AssetState:
             validate_renderer_v4_flattened_mp4(asset)
             self.renderer_v4_mp4 = True
         except FirmwareSyncPackError:
-            self.renderer_v4_mp4 = False
+            try:
+                validate_flattened_cinematic_cache_asset(asset)
+                self.renderer_v4_mp4 = True
+            except FlattenedCinematicContractError:
+                self.renderer_v4_mp4 = False
         self.state: str = PENDING
         self.checksum_ok: bool = False
         self.reason: Optional[str] = None
@@ -401,6 +415,7 @@ class AssetCache:
             "key": asset.key,
             "path": asset.path,
             "url": download_url,
+            "sourceUrl": asset.url,
             "sha256": sha256,
             "sourceSha256": asset.sha256 if sha256 != asset.sha256 else None,
             "size": size,
@@ -417,6 +432,10 @@ class AssetCache:
             "visualRefs": asset.visual_refs,
             "derivativeId": asset.derivative_id,
             "phaseId": asset.phase_id,
+            "cueId": asset.cue_id,
+            "effect": asset.effect,
+            "stepKey": asset.step_key,
+            "playbackMode": asset.playback_mode,
         }
         return {k: v for k, v in record.items() if v is not None}
 
@@ -514,9 +533,9 @@ class AssetCache:
             return
         for a in self.critical_assets:
             is_video = a.role == "video" or (a.media_type or "").lower().startswith("video/")
-            if is_video and not a.renderer_v3_mp4:
+            if is_video and not (a.renderer_v3_mp4 or a.renderer_v4_mp4):
                 raise AssetProfileUnavailable(
-                    "espTft only accepts validated renderer-v3 shared MP4 assets",
+                    "espTft only accepts validated lesson renderer MP4 assets",
                     context={"assetKey": a.key, "mediaType": a.media_type, "role": a.role},
                 )
 
@@ -939,7 +958,7 @@ class AssetCache:
     def _resolve_url(self, asset: AssetState) -> str:
         # assetOriginBase (one config value, D-ASSET-HOST) joined to the relative
         # path; fall back to a manifest-provided absolute url when no base is set.
-        if asset.renderer_v3_mp4 and asset.url:
+        if (asset.renderer_v3_mp4 or asset.renderer_v4_mp4) and asset.url:
             return asset.url
         if self.asset_origin_base and asset.path:
             return f"{self.asset_origin_base}/{asset.path.lstrip('/')}"

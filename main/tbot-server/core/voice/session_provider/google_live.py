@@ -10,14 +10,13 @@ from contextlib import contextmanager
 
 from core.activity_lease import ActivityOperation
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
-from core.voice.child_safety import ensure_child_safety_block
 from core.voice.output_safety_judge import judge_output_unsafe
 from core.voice.google_live.interaction_controller import (
     GoogleLiveInteractionController,
     InteractionState,
 )
 from core.voice.session_provider.base import VoiceSessionProvider
-from core.providers.tools.product_toolset import product_tool_names
+from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS, product_tool_names
 from core.voice.live_admission import AdmissionDecision, AdmissionReason, LiveAdmissionGate
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 from plugins_func.register import Action
@@ -28,6 +27,12 @@ LESSON_LIVE_TEXT_INSTRUCTION = (
     "Giữ đúng ngôn ngữ từng phần: tiếng Việt đọc tiếng Việt, từ hoặc cụm tiếng Anh "
     "đọc tiếng Anh. Không phản hồi ngữ cảnh trước, không nhắc lại câu trẻ vừa nói, "
     "không dịch, không thêm nội dung, không bỏ sót, không rút gọn: "
+)
+LESSON_CONVERSATION_SYSTEM_INSTRUCTION = (
+    "\n\nDuring an active lesson, coach briefly and naturally. Never say that the child "
+    "is wrong. Allow at most two contextual turns, then guide back to the English "
+    "target. Bridge Vietnamese meaning to English. Use only supplied pronunciation "
+    "outcomes. The lesson tools own progress; never claim mastery or choose the next step."
 )
 LIVE_WAKE_WORD_ALIASES = {
     "hi esp",
@@ -140,6 +145,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._reconnecting = False
         self._closing = False
         self._lifecycle_lock = None
+        self._lifecycle_generation = 0
         self._live_open_lock = None
         self._session_generation = 0
         self._response_generation = 0
@@ -209,9 +215,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._interaction = GoogleLiveInteractionController(conn)
         self._idle_close_task = None
         self._voice_consent_denied = False
+        self._lesson_instruction_generation = None
+        self._lesson_context_signature = None
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
+            self._lifecycle_generation += 1
             self._closing = False
             if self._client is not None and self._bridge is not None:
                 self.conn.voice_provider = self
@@ -636,7 +645,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         ):
             return False
-        if self._lesson_child_audio_pending_transcript:
+        semantic_tool_path = self._lesson_conversation_tool_path_active()
+        if semantic_tool_path:
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+        elif self._lesson_child_audio_pending_transcript:
             self.conn.client_abort = False
             return True
         self._force_lesson_session_mode("lesson_child_audio")
@@ -697,7 +710,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._record_user_stream_audio(frame)
             if self._user_turn_can_finalize():
                 await self._finalize_user_turn_clean()
-                self._lesson_child_audio_pending_transcript = True
+                if not semantic_tool_path:
+                    self._lesson_child_audio_pending_transcript = True
             else:
                 self._schedule_input_flush()
             self.conn.client_abort = False
@@ -724,8 +738,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         await self._begin_user_interrupt("explicit_interrupt")
 
     async def close(self):
+        self._closing = True
+        self._lifecycle_generation += 1
         async with self._get_lifecycle_lock():
-            self._closing = True
             await self._close_live_resources()
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
@@ -956,12 +971,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await client.send_text(f"{self._WAKE_GREETING_LIVE_INSTRUCTION}{greeting}")
             self._touch_live_activity()
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live wake_greeting_sent reason={} chars={} protect_ms={:.0f} "
-                "text_preview={!r}",
+                "Google Live wake_greeting_sent reason={} chars={} protect_ms={:.0f}",
                 reason,
                 len(greeting),
                 protect_sec * 1000,
-                greeting[:40],
             )
             return True
         except Exception as exc:
@@ -1500,16 +1513,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception:
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live user_transcript_suppressed_as_model_echo "
-            "chars={} text_preview={!r}",
+            "Google Live user_transcript_suppressed_as_model_echo chars={}",
             len(transcript_text or ""),
-            str(transcript_text or "")[:40],
         )
         return True
 
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_audio.clear()
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_conversation_transcript_ignored source=user chars={}",
+                len(str(transcript_text or "")),
+            )
+            return True
         if self._suppress_user_transcript_as_model_echo(transcript_text):
             return True
         if await self._dispatch_lesson_child_response(transcript_text):
@@ -1519,8 +1538,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if time.monotonic() < float(self._wake_audio_window_until or 0.0):
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live wake_transcript_ignored_duplicate "
-                    "text_preview={!r} window_ms_left={:.0f}",
-                    str(transcript_text or "")[:40],
+                    "chars={} window_ms_left={:.0f}",
+                    len(str(transcript_text or "")),
                     max(0.0, (self._wake_audio_window_until - time.monotonic()) * 1000),
                 )
                 return True
@@ -1537,8 +1556,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._reset_conversation_live_context("wake_transcript")
             self._schedule_live_prewarm("wake_transcript", delay_sec=0.0)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live wake_transcript_only text_preview={!r}",
-                str(transcript_text or "")[:40],
+                "Google Live wake_transcript_only chars={}",
+                len(str(transcript_text or "")),
             )
             return True
         if await self._dispatch_lesson_start_intent(transcript_text):
@@ -1557,15 +1576,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_start_intent_suppressed reason=duplicate_window "
-                "text_preview={!r}",
-                (transcript_text or "")[:40],
+                "chars={}",
+                len(str(transcript_text or "")),
             )
             return True
         if self._lesson_runtime_active():
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live lesson_start_intent_suppressed reason=lesson_already_active "
-                "text_preview={!r}",
-                (transcript_text or "")[:40],
+                "chars={}",
+                len(str(transcript_text or "")),
             )
             self._suppress_start_lesson_tool_call_until = (
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
@@ -1605,9 +1624,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except Exception:
                 pass
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent tool={} text_preview={!r}",
+                "Google Live lesson_start_intent tool={} chars={}",
                 payload.get("name"),
-                (transcript_text or "")[:40],
+                len(str(transcript_text or "")),
             )
             return True
         except Exception as exc:
@@ -1630,9 +1649,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         try:
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent miss normalized={!r} text_preview={!r}",
-                text[:80],
-                str(transcript_text or "")[:80],
+                "Google Live lesson_start_intent miss normalized_chars={} chars={}",
+                len(text),
+                len(str(transcript_text or "")),
             )
         except Exception:
             pass
@@ -1935,6 +1954,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return True
 
     def _lesson_child_response_route_active(self):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if (
             self._lesson_child_response_window_active()
             or self._lesson_child_response_window_active(
@@ -2054,8 +2075,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not str(transcript_text or "").strip():
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_response_consumed_unhandled text_preview='{}'",
-            str(transcript_text or "").strip()[:80],
+            "Google Live lesson_child_response_consumed_unhandled chars={}",
+            len(str(transcript_text or "").strip()),
         )
         return True
 
@@ -2106,6 +2127,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def _dispatch_lesson_child_response_failure(self, reason):
         """Route a finalized child-audio turn that produced no usable transcript."""
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            return False
         if not self._lesson_child_response_route_active():
             return False
         runtime = getattr(self.conn, "lesson_runtime", None)
@@ -2379,8 +2404,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
     async def _handle_local_stop_word(self, text):
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live local_stop_word detected text_preview={!r}",
-            str(text or "")[:40],
+            "Google Live local_stop_word detected chars={}",
+            len(str(text or "")),
         )
         await self._begin_user_interrupt("local_stop_word")
 
@@ -2511,6 +2536,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             or self._reconnecting
         ):
             return
+
+        if self._lesson_conversation_tool_path_active():
+            handled = await self._handle_lesson_live_interruption("transport")
+            if handled:
+                return
 
         reconnect_result = await self._try_reconnect_with_lease(exc)
         if reconnect_result is not False:
@@ -2732,10 +2762,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._cancelled_response_ids.clear()
         self._pending_tool_calls.clear()
         self._cancelled_tool_call_ids.clear()
-        self._client = self._client_factory(
-            self._get_live_config_with_functions(),
-            self.conn.logger,
+        live_config = self._get_live_config_with_functions()
+        lesson_instruction_in_config = (
+            self._lesson_runtime_active()
+            or normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
         )
+        self._client = self._client_factory(live_config, self.conn.logger)
+        generation_getter = getattr(self._client, "set_response_generation_getter", None)
+        if callable(generation_getter):
+            generation_getter(self.current_response_id)
         self._bridge = GoogleLiveAudioBridge(
             self.conn,
             self._client,
@@ -2751,6 +2786,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         self._ensure_required_aec_ready()
         await self._client.connect()
+        self._lesson_instruction_generation = generation if lesson_instruction_in_config else None
+        self._lesson_context_signature = None
+        await self._publish_current_lesson_context()
         self.conn.google_live_session_started_at = time.monotonic()
         self._touch_live_activity()
         if (
@@ -2868,9 +2906,66 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # system_instruction the model only chats verbally and ignores
         # Vietnamese intents like "tăng âm lượng".
         prompt = self.conn.config.get("prompt") if self.conn else None
+        lesson_active = (
+            self._lesson_runtime_active()
+            or normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
+        )
         if prompt:
-            config["system_prompt"] = self._augment_prompt_with_child_name(prompt)
+            prompt = self._augment_prompt_with_child_name(prompt)
+            if lesson_active:
+                prompt += LESSON_CONVERSATION_SYSTEM_INSTRUCTION
+            config["system_prompt"] = prompt
+        elif lesson_active:
+            config["system_prompt"] = LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip()
         return config
+
+    async def publish_lesson_conversation_context(self, context):
+        if not isinstance(context, Mapping) or self._client is None:
+            return False
+        sender = getattr(self._client, "send_text", None)
+        if not callable(sender):
+            return False
+        serialized = json.dumps(dict(context), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        signature = (self._session_generation, serialized)
+        instruction_needed = self._lesson_instruction_generation != self._session_generation
+        if self._lesson_context_signature == signature and not instruction_needed:
+            return True
+        prefix = "Internal lesson control update. Do not repeat or explain this control message. "
+        if instruction_needed:
+            prefix += LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip() + " "
+        await sender(prefix + "Authoritative lesson context JSON: " + serialized)
+        self._lesson_instruction_generation = self._session_generation
+        self._lesson_context_signature = signature
+        return True
+
+    async def _publish_current_lesson_context(self):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(snapshot):
+            return False
+        try:
+            context = snapshot()
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live lesson_context_snapshot_failed error={}",
+                self._safe_error_message(exc),
+            )
+            return False
+        return await self.publish_lesson_conversation_context(context)
+
+    async def deactivate_lesson_conversation_context(self):
+        sender = getattr(self._client, "send_text", None)
+        try:
+            if callable(sender) and self._lesson_instruction_generation is not None:
+                await sender(
+                    "Internal control update: the lesson has ended. Return to the base "
+                    "general-chat system instruction. Ignore the prior lesson coaching "
+                    "constraint and do not call lesson tools unless a new authoritative "
+                    "lesson context is supplied. Do not repeat this message."
+                )
+        finally:
+            self._lesson_instruction_generation = None
+            self._lesson_context_signature = None
 
     def _handle_session_resumption_update(self, event):
         if not isinstance(event, Mapping):
@@ -3749,13 +3844,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if self._classify_lesson_start_intent(transcript) is None:
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_start_asr_fallback miss text_preview={!r}",
-                    transcript[:40],
+                    "Google Live lesson_start_asr_fallback miss chars={}",
+                    len(transcript),
                 )
                 return
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_asr_fallback transcript text_preview={!r}",
-                transcript[:40],
+                "Google Live lesson_start_asr_fallback transcript chars={}",
+                len(transcript),
             )
             self._start_lesson_asr_fallback_audio.clear()
             await self._dispatch_lesson_start_intent(transcript)
@@ -3829,6 +3924,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if not self._waiting_model_release_due():
                 return
+            if self._lesson_conversation_tool_path_active():
+                handled = await self._handle_lesson_live_interruption("timeout")
+                if handled:
+                    self._interaction.transition(InteractionState.IDLE)
+                    self._waiting_model_since = None
+                    self.conn.client_abort = False
+                    return
             self._consecutive_waiting_model_timeouts += 1
             if await self._reopen_silent_live_session_after_timeouts(timeout):
                 return
@@ -4089,7 +4191,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._waiting_model_since = time.monotonic()
             self._schedule_waiting_model_timeout_task()
             self._clear_user_stream()
-            if self._lesson_child_response_window_active(require_audio_window=False):
+            if (
+                not self._lesson_conversation_tool_path_active()
+                and self._lesson_child_response_window_active(require_audio_window=False)
+            ):
                 self._lesson_child_audio_pending_transcript = True
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live input stream flushed after {:.0f} ms idle",
@@ -4141,6 +4246,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             existing_task.cancel()
 
     def _complete_lesson_child_audio_finalization(self, reason):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if not self._lesson_child_response_window_active(require_audio_window=False):
             return False
         self._cancel_waiting_model_timeout_task()
@@ -4188,6 +4295,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await asyncio.sleep(timeout)
             if self._closing or not self._lesson_child_audio_pending_transcript:
                 return
+            if self._lesson_conversation_tool_path_active():
+                self._lesson_child_audio_pending_transcript = False
+                self._clear_lesson_child_speech_start_frames()
+                return
             if not self._lesson_child_response_window_active(require_audio_window=False):
                 self._lesson_child_audio_pending_transcript = False
                 self._clear_lesson_child_speech_start_frames()
@@ -4213,6 +4324,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await self._handle_runtime_failure(exc)
 
     def _complete_lesson_audio_without_model_wait(self, reason):
+        if self._lesson_conversation_tool_path_active():
+            return False
         if normalize_session_mode(
             getattr(self.conn, "session_mode", SessionMode.DORMANT)
         ) != SessionMode.LESSON:
@@ -4584,6 +4697,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_user_stream()
 
     async def _on_user_transcript_barge_in(self, transcript_text):
+        if self._lesson_conversation_tool_path_active():
+            self._lesson_child_audio_pending_transcript = False
+            self._cancel_lesson_child_transcript_timeout_task()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_conversation_transcript_barge_in_ignored chars={}",
+                len(str(transcript_text or "")),
+            )
+            return
         if await self._dispatch_lesson_child_response(transcript_text):
             # The child answer is the legitimate turn: do not interrupt Live or
             # dispatch chat/music intents.
@@ -4636,6 +4757,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if runtime is None:
             return False
         return str(getattr(runtime, "state", "")).upper() in {"PRELOADING", "RUNNING"}
+
+    def _lesson_conversation_tool_path_active(self):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        active = getattr(runtime, "conversation_tool_path_active", None)
+        if callable(active):
+            try:
+                return bool(active())
+            except Exception:
+                return False
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(snapshot):
+            return False
+        try:
+            context = snapshot()
+        except Exception:
+            return False
+        return isinstance(context, Mapping) and isinstance(context.get("identity"), Mapping)
 
     def _get_user_audio_window_sec(self, reason):
         config = self._get_live_config()
@@ -4773,9 +4911,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         try:
             await func_handler.handle_llm_function_call(self.conn, payload)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live music_control_intent tool={} text_preview={!r}",
+                "Google Live music_control_intent tool={} chars={}",
                 payload.get("name"),
-                (transcript_text or "")[:40],
+                len(str(transcript_text or "")),
             )
             self.conn.logger.bind(tag="GoogleLive").info(
                 "music_state_changed state={} trigger=vietnamese_command",
@@ -5175,38 +5313,129 @@ class GoogleLiveProvider(VoiceSessionProvider):
         text = msg_json.get("text")
         return msg_json.get("state"), text if isinstance(text, str) else None
 
+    def _validation_tool_audit_enabled(self):
+        if normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        ) != SessionMode.LESSON:
+            return False
+        if not self._lesson_runtime_active():
+            return False
+        config = self._get_live_config()
+        if config.get("validation_tool_audit_enabled") is not True:
+            return False
+        if config.get("validation_tool_audit_mode") != "local_soak":
+            return False
+        features = getattr(self.conn, "features", None)
+        if not isinstance(features, Mapping) or features.get(
+            "googleLiveValidationToolAuditV1"
+        ) is not True:
+            return False
+        client_ids = config.get("validation_tool_audit_client_ids")
+        device_ids = config.get("validation_tool_audit_device_ids")
+        if not isinstance(client_ids, (list, tuple)) or len(client_ids) != 1:
+            return False
+        if not isinstance(device_ids, (list, tuple)) or len(device_ids) != 1:
+            return False
+        allowed_client_id = client_ids[0]
+        allowed_device_id = device_ids[0]
+        if not isinstance(allowed_client_id, str) or not allowed_client_id:
+            return False
+        if not isinstance(allowed_device_id, str) or not allowed_device_id:
+            return False
+        return (
+            getattr(self.conn, "client_id", None) == allowed_client_id
+            and getattr(self.conn, "device_id", None) == allowed_device_id
+        )
+
+    @staticmethod
+    def _validation_tool_identity(source):
+        if not isinstance(source, Mapping):
+            return None
+        lesson_session_id = source.get("lessonSessionId")
+        turn_sequence_id = source.get("turnSequenceId")
+        attempt_id = source.get("attemptId")
+        step_key = source.get("stepKey")
+        if (
+            not isinstance(lesson_session_id, str)
+            or not lesson_session_id
+            or not isinstance(turn_sequence_id, int)
+            or turn_sequence_id < 1
+            or not isinstance(attempt_id, str)
+            or not attempt_id
+            or not isinstance(step_key, str)
+            or not step_key
+        ):
+            return None
+        identity = {
+            "lessonSessionId": lesson_session_id,
+            "turnSequenceId": turn_sequence_id,
+            "attemptId": attempt_id,
+            "stepKey": step_key,
+        }
+        cue_id = source.get("cueId")
+        if cue_id is not None:
+            identity["cueId"] = cue_id
+        return identity
+
+    async def _emit_validation_tool_audit(
+        self,
+        name,
+        args,
+        response_payload,
+        validation_receipt,
+    ):
+        if name not in LESSON_CONVERSATION_TOOLS:
+            return
+        if not self._validation_tool_audit_enabled():
+            return
+        if not isinstance(args, Mapping) or not isinstance(response_payload, Mapping):
+            return
+        if response_payload.get("accepted") is not True:
+            return
+        if not isinstance(validation_receipt, Mapping):
+            return
+        if validation_receipt.get("canonicalToolName") != name:
+            return
+        context = response_payload.get("context")
+        refreshed = context.get("identity") if isinstance(context, Mapping) else None
+        identity = self._validation_tool_identity(args)
+        refreshed_identity = self._validation_tool_identity(refreshed)
+        receipt_identity = self._validation_tool_identity(
+            validation_receipt.get("refreshedIdentity")
+        )
+        if identity is None or refreshed_identity is None:
+            return
+        if receipt_identity != refreshed_identity:
+            return
+        websocket = getattr(self.conn, "websocket", None)
+        if websocket is None:
+            return
+        payload = {
+            "type": "google_live_validation_tool_audit",
+            "feature": "googleLiveValidationToolAuditV1",
+            "protocolVersion": "teebot-lesson-renderer.v4",
+            "toolName": name,
+            "accepted": response_payload.get("accepted") is True,
+            "code": str(response_payload.get("code") or ""),
+            "identity": identity,
+            "cueId": response_payload.get("cueId"),
+            "effect": response_payload.get("effect"),
+            "refreshedIdentity": refreshed_identity,
+        }
+        try:
+            await websocket.send(json.dumps(payload))
+        except Exception:
+            return
+
     async def _handle_tool_call_event(self, event):
         calls = event.get("calls") if isinstance(event, Mapping) else None
         if not calls:
             return
-        if normalize_session_mode(
-            getattr(self.conn, "session_mode", SessionMode.DORMANT)
-        ) == SessionMode.LESSON:
-            responses = []
-            for call in calls:
-                call_id = call.get("id") if isinstance(call, Mapping) else None
-                name = call.get("name") if isinstance(call, Mapping) else None
-                responses.append(
-                    {
-                        "id": call_id,
-                        "name": name,
-                        "response": self._tool_error(
-                            "LESSON_MODE_TOOL_BLOCKED",
-                            "Tool calls are blocked while lesson mode owns the child interaction.",
-                        ),
-                    }
-                )
-            try:
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_mode_tool_call_blocked count={} names={}",
-                    len(responses),
-                    ",".join(str(r.get("name") or "") for r in responses),
-                )
-            except Exception:
-                pass
-            if self._client is not None:
-                await self._client.send_tool_response(responses)
-            return
+        in_lesson = (
+            normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
+            or self._lesson_runtime_active()
+        )
+        event_generation = event.get("response_generation")
         try:
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live tool_call received count={} names=[{}]",
@@ -5221,6 +5450,42 @@ class GoogleLiveProvider(VoiceSessionProvider):
         for call in calls:
             call_id = call.get("id") if isinstance(call, Mapping) else None
             name = call.get("name") if isinstance(call, Mapping) else None
+            if in_lesson and name not in LESSON_CONVERSATION_TOOLS:
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "LESSON_MODE_TOOL_BLOCKED",
+                            "Tool calls are blocked while lesson mode owns the child interaction.",
+                        ),
+                    }
+                )
+                continue
+            if in_lesson and not isinstance(event_generation, int):
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "MISSING_ORIGIN_GENERATION",
+                            "Lesson tool call is missing its originating model response generation.",
+                        ),
+                    }
+                )
+                continue
+            if in_lesson and event_generation != self._response_generation:
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "STALE_MODEL_RESPONSE",
+                            "The model response was cancelled before this lesson tool was admitted.",
+                        ),
+                    }
+                )
+                continue
             self.conn.logger.bind(tag="GoogleLive").info(
                 "tool_call_dispatched name={} response_id={}",
                 name,
@@ -5243,14 +5508,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
                 continue
             args = call.get("args") if isinstance(call, Mapping) else {}
+            if in_lesson and isinstance(args, Mapping):
+                args = {
+                    key: value
+                    for key, value in args.items()
+                    if not str(key).startswith("_provider_admission_")
+                }
             if call_id is not None:
                 self._pending_tool_calls.add(call_id)
                 self._cancelled_tool_call_ids.discard(call_id)
             started_at = time.monotonic()
+            validation_receipt = {}
             response_payload = await self._execute_tool_call_with_timeout(
                 name,
                 args,
                 call_id=call_id,
+                lesson_admission_generation=event_generation if in_lesson else None,
+                lesson_validation_receipt=validation_receipt,
             )
             latency_ms = (time.monotonic() - started_at) * 1000
             if call_id is not None and call_id in self._cancelled_tool_call_ids:
@@ -5262,6 +5536,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     latency_ms,
                 )
                 continue
+            await self._emit_validation_tool_audit(
+                name,
+                args,
+                response_payload,
+                validation_receipt,
+            )
             ok = not (
                 isinstance(response_payload, Mapping)
                 and response_payload.get("ok") is False
@@ -5312,8 +5592,26 @@ class GoogleLiveProvider(VoiceSessionProvider):
             ",".join(str(i) for i in ids),
         )
 
-    async def _execute_tool_call_with_timeout(self, name, args, call_id=None):
+    async def _execute_tool_call_with_timeout(
+        self,
+        name,
+        args,
+        call_id=None,
+        lesson_admission_generation=None,
+        lesson_validation_receipt=None,
+    ):
         try:
+            if name in LESSON_CONVERSATION_TOOLS:
+                from plugins_func.functions.lesson_conversation import (
+                    _google_live_lesson_tool_admission,
+                )
+
+                with _google_live_lesson_tool_admission(
+                    self,
+                    lesson_admission_generation,
+                    lesson_validation_receipt,
+                ):
+                    return await self._execute_tool_call(name, args, call_id=call_id)
             timeout = self._get_tool_timeout_sec()
             if timeout is None:
                 return await self._execute_tool_call(name, args, call_id=call_id)
@@ -5357,12 +5655,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         try:
             try:
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live tool dispatch name={} args_type={} args={}",
-                    name,
-                    type(args).__name__,
-                    dict(args) if hasattr(args, "items") else args,
-                )
+                if name in LESSON_CONVERSATION_TOOLS:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live lesson tool dispatch name={} argument_keys=[{}]",
+                        name,
+                        ",".join(sorted(str(key) for key in args)),
+                    )
+                else:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live tool dispatch name={} args_type={} args={}",
+                        name,
+                        type(args).__name__,
+                        dict(args) if hasattr(args, "items") else args,
+                    )
             except Exception:
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live tool dispatch name={} args_type={} args=<unprintable>",
@@ -5375,12 +5680,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             try:
                 action_name = getattr(getattr(result, "action", None), "name", "?")
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live tool returned name={} action={} response={!r}",
-                    name,
-                    action_name,
-                    getattr(result, "response", None),
-                )
+                if name in LESSON_CONVERSATION_TOOLS:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live lesson tool returned name={} action={}",
+                        name,
+                        action_name,
+                    )
+                else:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live tool returned name={} action={} response={!r}",
+                        name,
+                        action_name,
+                        getattr(result, "response", None),
+                    )
             except Exception:
                 pass
         except Exception as exc:
@@ -5439,16 +5751,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
             action = action_response.action
         except AttributeError:
             action = None
-        text = ""
-        if getattr(action_response, "response", None):
-            text = str(action_response.response)
-        elif getattr(action_response, "result", None):
-            text = str(action_response.result)
+        response_value = getattr(action_response, "response", None)
+        result_value = getattr(action_response, "result", None)
+        text = str(response_value or result_value or "")
         action_name = action.name.lower() if action is not None and hasattr(action, "name") else None
         if action is not None and action == Action.ERROR:
             return self._tool_error("TOOL_ERROR", text or "tool error")
         if action is not None and action == Action.NOTFOUND:
             return self._tool_error("TOOL_NOT_FOUND", text or "tool not found")
+        if isinstance(result_value, Mapping):
+            return dict(result_value)
         payload = {"ok": True, "result": text}
         if action_name:
             payload["action"] = action_name
@@ -5511,6 +5823,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             turn_id=self._response_generation,
             response_id=self._response_generation,
         )
+        hard_lesson_interrupt = bool(
+            self._should_hard_reconnect_on_interrupt()
+            and self._receive_task is not None
+            and self._lesson_conversation_tool_path_active()
+        )
+        if not hard_lesson_interrupt:
+            await self._interrupt_lesson_conversation()
         if len(self._cancelled_response_ids) > 20:
             self._cancelled_response_ids = set(
                 sorted(self._cancelled_response_ids)[-10:]
@@ -5576,7 +5895,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._safe_error_message(exc),
                 )
         if self._should_hard_reconnect_on_interrupt() and self._receive_task is not None:
-            await self._hard_reconnect_after_interrupt(reason)
+            if hard_lesson_interrupt:
+                handled = await self._handle_lesson_live_interruption("interrupted")
+                if not handled:
+                    await self._hard_reconnect_after_interrupt(reason)
+            else:
+                await self._hard_reconnect_after_interrupt(reason)
         if reason in {"audio_input", "loud_input"}:
             self._schedule_forced_interrupt_input_flush(reason)
         self.conn.logger.bind(tag="GoogleLive").info(
@@ -5585,6 +5909,175 @@ class GoogleLiveProvider(VoiceSessionProvider):
             previous_response_id,
             self._response_generation,
         )
+
+    async def _interrupt_lesson_conversation(self):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        interrupt = getattr(runtime, "conversation_interrupt_current", None)
+        snapshot = getattr(runtime, "conversation_tool_context", None)
+        if not callable(interrupt) or not callable(snapshot):
+            return
+        try:
+            decision = await interrupt()
+            context = snapshot()
+            identity = context.get("identity") if isinstance(context, Mapping) else None
+            if isinstance(identity, Mapping):
+                self._interaction.bind_lesson_attempt(
+                    lesson_session_id=identity.get("lessonSessionId"),
+                    attempt_id=identity.get("attemptId"),
+                    step_key=identity.get("stepKey"),
+                    turn_sequence_id=identity.get("turnSequenceId"),
+                )
+                await self.publish_lesson_conversation_context(context)
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live lesson_conversation_interrupted accepted={} code={}",
+                bool(getattr(decision, "accepted", False)),
+                getattr(decision, "code", "UNKNOWN"),
+            )
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live lesson_conversation_interrupt_failed error={}",
+                self._safe_error_message(exc),
+            )
+
+    async def _handle_lesson_live_interruption(self, reason):
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        fallback = getattr(runtime, "conversation_live_interruption", None)
+        if not callable(fallback):
+            return False
+        try:
+            directive = await fallback(reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "lesson_live_fallback_failed diagnostic=RUNTIME_EXCEPTION error_class={}",
+                type(exc).__name__,
+            )
+            return False
+        accepted = bool(getattr(directive, "accepted", False))
+        code = str(getattr(directive, "code", "INVALID_DIRECTIVE"))
+        window_id = getattr(directive, "window_id", None)
+        reconnect_allowed = bool(getattr(directive, "reconnect_allowed", False))
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "lesson_live_fallback diagnostic={} reason={} reconnect_allowed={}",
+            code,
+            reason,
+            reconnect_allowed,
+        )
+        if not accepted:
+            return False
+        if reconnect_allowed:
+            reconnected = await self._attempt_lesson_reconnect_once(reason)
+            if reconnected:
+                reset = getattr(runtime, "conversation_live_reconnect_succeeded", None)
+                if callable(reset) and isinstance(window_id, str):
+                    reset(window_id)
+                await self._publish_current_lesson_context()
+                return True
+        wait_for_ack = getattr(runtime, "wait_conversation_live_fallback_ack", None)
+        if not callable(wait_for_ack) or not isinstance(window_id, str):
+            return False
+        try:
+            authorization = await wait_for_ack(
+                window_id,
+                timeout_sec=self._lesson_live_fallback_ack_timeout_sec(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        if not isinstance(authorization, str) or not authorization:
+            return False
+        prompt = getattr(directive, "prompt", "")
+        sender = getattr(self._client, "send_text", None)
+        if not isinstance(prompt, str) or not prompt.strip() or not callable(sender):
+            expire_prompt = getattr(
+                runtime,
+                "expire_conversation_live_fallback_prompt",
+                None,
+            )
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            return False
+        claim_prompt = getattr(
+            runtime,
+            "claim_conversation_live_fallback_prompt",
+            None,
+        )
+        if not callable(claim_prompt) or not bool(
+            claim_prompt(window_id, authorization)
+        ):
+            return False
+        expire_prompt = getattr(
+            runtime,
+            "expire_conversation_live_fallback_prompt",
+            None,
+        )
+        try:
+            await sender(prompt)
+            return True
+        except asyncio.CancelledError:
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            raise
+        except Exception:
+            if callable(expire_prompt):
+                expire_prompt(window_id, authorization)
+            return False
+
+    def _lesson_live_fallback_ack_timeout_sec(self):
+        config = self._get_live_config()
+        try:
+            value = float(config.get("lesson_live_fallback_ack_timeout_sec", 2.0))
+        except (TypeError, ValueError):
+            value = 2.0
+        return max(0.1, min(value, 5.0))
+
+    async def _attempt_lesson_reconnect_once(self, reason):
+        async with self._get_lifecycle_lock():
+            if self._closing or self._fallback_provider is not None or self._reconnecting:
+                return False
+            lifecycle_generation = self._lifecycle_generation
+
+            def lifecycle_current():
+                return bool(
+                    not self._closing
+                    and self._lifecycle_generation == lifecycle_generation
+                )
+
+            self._reconnecting = True
+            self._interaction.transition(InteractionState.RECONNECTING)
+            try:
+                await self._close_live_resources()
+                if not lifecycle_current():
+                    return False
+                await self._record_reconnect_attempt()
+                if not lifecycle_current():
+                    await self._close_live_resources()
+                    return False
+                await self._open_live_session()
+                if not lifecycle_current():
+                    await self._close_live_resources()
+                    return False
+                self.conn.voice_provider = self
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
+                    reason,
+                )
+                return True
+            except asyncio.CancelledError:
+                await self._close_live_resources()
+                raise
+            except Exception as exc:
+                await self._close_live_resources()
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
+                    reason,
+                    self._classify_error(exc),
+                )
+                return False
+            finally:
+                self._reconnecting = False
 
     def _should_hard_reconnect_on_interrupt(self):
         config = self._get_live_config()

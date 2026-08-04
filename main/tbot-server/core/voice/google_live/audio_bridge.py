@@ -17,6 +17,7 @@ import time
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS
 
 
 EMOTION_EMOJI = {
@@ -99,6 +100,7 @@ class GoogleLiveAudioBridge:
         self._aec_reference_resampler_rates = None
         self._aec_reference_resampler_state = None
         self._active_response_id = None
+        self._model_response_generation = None
         self._locally_cancelled_response_ids = set()
         self._input_decoder = None
         self._output_encoder = None
@@ -180,10 +182,9 @@ class GoogleLiveAudioBridge:
             if transcript_text is None:
                 return False
             self.logger.bind(tag="GoogleLive").info(
-                "Google Live transcript source={} chars={} text={!r}",
+                "Google Live transcript source={} chars={}",
                 event.get("source") or "unknown",
                 len(transcript_text),
-                transcript_text[:80],
             )
             if event.get("source") == "user":
                 if await self._maybe_handle_user_transcript_intent(transcript_text):
@@ -215,8 +216,12 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "audio_start":
+            origin_generation = event.get("response_generation")
+            if not isinstance(origin_generation, int):
+                origin_generation = self._response_id_getter()
+            self._model_response_generation = origin_generation
             if self._should_drop_lesson_model_output(event_type):
-                self._active_response_id = self._response_id_getter()
+                self._active_response_id = origin_generation
                 self._mark_active_response_cancelled()
                 return True
             if self._moderation_block_active:
@@ -233,7 +238,9 @@ class GoogleLiveAudioBridge:
                 self._active_response_id = self._response_id_getter()
                 self._mark_active_response_cancelled()
                 return True
-            self._active_response_id = self._response_id_getter()
+            event_generation = event.get("response_generation")
+            self._active_response_id = event_generation if isinstance(event_generation, int) else origin_generation
+            self._model_response_generation = self._active_response_id
             self._locally_cancelled_response_ids.discard(self._active_response_id)
             if len(self._locally_cancelled_response_ids) > 20:
                 self._locally_cancelled_response_ids = set(
@@ -359,12 +366,29 @@ class GoogleLiveAudioBridge:
             return True
 
         if event_type == "tool_call":
-            if self._should_drop_lesson_model_output(event_type):
+            if self._should_drop_lesson_model_output(event_type, event):
                 return True
             if self._should_drop_blocked_model_event(event_type):
                 return True
             if self._tool_call_handler is not None:
                 try:
+                    if isinstance(event, dict):
+                        generation = event.get("response_generation")
+                        if not isinstance(generation, int):
+                            generation = self._model_response_generation
+                        if not isinstance(generation, int):
+                            calls = event.get("calls") or []
+                            if any(
+                                isinstance(call, Mapping) and call.get("name") in LESSON_CONVERSATION_TOOLS
+                                for call in calls
+                            ):
+                                self.logger.bind(tag="GoogleLive").warning(
+                                    "Google Live lesson_tool_call_dropped reason=missing_origin_generation"
+                                )
+                                return True
+                        else:
+                            event["response_generation"] = generation
+                            self._model_response_generation = generation
                     await self._tool_call_handler(event)
                 except Exception as exc:
                     self.logger.bind(tag="GoogleLive").warning(
@@ -383,6 +407,12 @@ class GoogleLiveAudioBridge:
                 return True
             if self._tool_call_cancellation_handler is not None:
                 try:
+                    if isinstance(event, dict):
+                        generation = event.get("response_generation")
+                        if not isinstance(generation, int):
+                            generation = self._model_response_generation
+                        if isinstance(generation, int):
+                            event["response_generation"] = generation
                     await self._tool_call_cancellation_handler(event)
                 except Exception as exc:
                     self.logger.bind(tag="GoogleLive").warning(
@@ -585,13 +615,18 @@ class GoogleLiveAudioBridge:
         self._log_stale_model_event_drop(event_type, "blocked_until_user_turn")
         return True
 
-    def _should_drop_lesson_model_output(self, event_type):
+    def _should_drop_lesson_model_output(self, event_type, event=None):
         try:
             in_lesson = normalize_session_mode(
                 getattr(self.conn, "session_mode", None)
             ) == SessionMode.LESSON
         except Exception:
             in_lesson = False
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        in_lesson = in_lesson or str(getattr(runtime, "state", "")).upper() in {
+            "PRELOADING",
+            "RUNNING",
+        }
         if not in_lesson:
             return False
         if (
@@ -600,6 +635,16 @@ class GoogleLiveAudioBridge:
         ):
             return False
         if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+            return False
+        if event_type == "tool_call" and isinstance(event, Mapping):
+            calls = event.get("calls") or []
+            if any(
+                isinstance(call, Mapping)
+                and call.get("name") in LESSON_CONVERSATION_TOOLS
+                for call in calls
+            ):
+                return False
+        if event_type == "tool_call_cancellation":
             return False
         if event_type not in {
             "transcript",
@@ -702,15 +747,13 @@ class GoogleLiveAudioBridge:
         if self.looks_like_model_echo(transcript_text):
             self.logger.bind(tag="GoogleLive").info(
                 "Google Live transcript_barge_in suppressed_as_model_echo "
-                "chars={} text_preview={!r}",
+                "chars={}",
                 len(transcript_text),
-                transcript_text[:40],
             )
             return
         self.logger.bind(tag="GoogleLive").info(
-            "Google Live transcript_barge_in chars={} text_preview={!r}",
+            "Google Live transcript_barge_in chars={}",
             len(transcript_text),
-            transcript_text[:40],
         )
         try:
             await self._user_transcript_barge_in_handler(transcript_text)

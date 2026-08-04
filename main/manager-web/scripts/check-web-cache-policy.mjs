@@ -26,6 +26,26 @@ function expectRegex(file, regex, reason) {
   }
 }
 
+function expectPublicLatestCmsUpstreams() {
+  const file = 'deploy/nginx/tjbot.vn.conf';
+  const body = readFromRepo(file);
+  const blocks = [...body.matchAll(
+    /location\s*=\s*\/v1\/public\/lesson-assets\/latest\s*\{([\s\S]*?)^    \}/gm,
+  )].map(match => match[1]);
+
+  if (blocks.length !== 2) {
+    throw new Error(`${file} must define exactly two public latest-index locations`);
+  }
+  for (const block of blocks) {
+    if (!block.includes('proxy_pass http://127.0.0.1:3003;')) {
+      throw new Error(`${file} public latest-index locations must proxy to the local CMS`);
+    }
+    if (/onrender\.com|proxy_ssl_/.test(block)) {
+      throw new Error(`${file} public latest-index locations must not retain the Render TLS upstream`);
+    }
+  }
+}
+
 const noStore = 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0';
 const immutable = 'public, max-age=31536000, immutable';
 
@@ -34,6 +54,11 @@ expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/index\.html\s*{[\s\S]*Ca
 expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/service-worker\.js\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"/m, 'service worker must update immediately across deploys');
 expectRegex('docs/docker/nginx.conf', /location\s+=\s+\/manifest\.json\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"/m, 'manifest should not pin stale app metadata');
 expectRegex('docs/docker/nginx.conf', /location\s+~\*\s+\^\/\(js\|css\|img\|fonts\)\/[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m, 'hashed static assets should be cached immutably');
+expectRegex(
+  'docs/docker/nginx.conf',
+  /location\s+~\s+"\^\/lesson-derivatives\/lessons\/derivatives\/\(\[0-9a-f\]\{64\}\)\/\(\[a-z\]\[a-z0-9-\]\{0,63\}\\\.mp4\)\$"[\s\S]*alias\s+\/uploadfile\/lesson-derivatives\/lessons\/derivatives\/\$1\/\$2;[\s\S]*Cache-Control\s+"public, max-age=31536000, immutable"/m,
+  'verified flattened cue MP4s must use a quoted nginx regex and immutable shared-volume caching',
+);
 expectRegex('docs/docker/nginx.conf', /location\s+\/\s*{[\s\S]*Cache-Control\s+"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"[\s\S]*try_files\s+\$uri\s+\$uri\/\s+\/index\.html;/m, 'SPA fallback must serve fresh shell');
 expectRegex(
   'docs/docker/nginx.conf',
@@ -98,6 +123,7 @@ expectRegex(
 
 expectContains('docs/docker/nginx.conf', noStore, 'no-store policy must be explicit');
 expectContains('docs/docker/nginx.conf', immutable, 'immutable policy must be explicit');
+expectPublicLatestCmsUpstreams();
 
 expectContains('main/manager-web/src/registerServiceWorker.js', 'registration.update()', 'registered service worker should proactively check for updates');
 expectContains('main/manager-web/src/utils/serviceWorkerUpdateSafety.mjs', 'SKIP_WAITING', 'new service worker should activate without stale UI waiting');

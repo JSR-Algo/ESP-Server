@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -12,6 +13,10 @@ from config.manage_api_client import (
     get_correct_words,
     get_server_config,
     init_service,
+)
+from core.voice.google_live_credentials import (
+    normalize_google_live_api_key,
+    resolve_google_live_env_api_key,
 )
 
 DEFAULT_GOOGLE_LIVE_VOICE_NAME = "Kore"
@@ -227,6 +232,7 @@ def normalize_voice_config(config):
     # Push that one key onto every Gemini ASR/LLM/TTS/VLLM module so providers do not
     # diverge (ASR had its own AIza key while Live used agent AQ./AIza key).
     _apply_single_agent_gemini_api_key(config)
+    _apply_gemini_tts_env_api_key(config)
     return config
 
 def _apply_base_google_live_policy(config, base_config):
@@ -260,7 +266,6 @@ def _apply_tts_runtime_overrides(config):
     # authenticates the Live WebSocket). Read a dedicated key so the Live token is never
     # mis-inherited for TTS, and map TBOT_TTS_PROVIDER=google|gemini -> GeminiTTS.
     prefer_gemini = provider in ("google", "gemini", "geministts")
-    gemini_tts_key = _clean_env("GEMINI_API_KEY") or _clean_env("TBOT_GEMINI_TTS_API_KEY")
     selected_module = config.get("selected_module")
     if not isinstance(selected_module, Mapping):
         selected_module = {}
@@ -278,16 +283,6 @@ def _apply_tts_runtime_overrides(config):
     edge_config["voice"] = _clean_env("TBOT_EDGE_TTS_VOICE") or edge_config.get("voice") or DEFAULT_EDGE_TTS_VOICE
     edge_config.setdefault("output_dir", "tmp/")
     tts_configs["EdgeTTS"] = edge_config
-
-    # Dedicated TTS env keys are folded into google_live.api_key later by
-    # _apply_single_agent_gemini_api_key — do not keep a second TTS-only secret.
-    if gemini_tts_key:
-        google_live = config.get("google_live")
-        if not isinstance(google_live, Mapping):
-            google_live = {}
-            config["google_live"] = google_live
-        if _looks_like_placeholder_api_key(google_live.get("api_key")):
-            google_live["api_key"] = gemini_tts_key
 
     if force_edge:
         selected_module["TTS"] = "EdgeTTS"
@@ -331,6 +326,8 @@ def _first_usable_gemini_module_api_key(config):
     if not isinstance(config, Mapping):
         return None
     for section in ("ASR", "LLM", "TTS", "VLLM"):
+        if section == "TTS" and _clean_env("TBOT_GEMINI_TTS_API_KEY"):
+            continue
         modules = config.get(section)
         if not isinstance(modules, Mapping):
             continue
@@ -347,19 +344,28 @@ def _first_usable_gemini_module_api_key(config):
 
 
 def _env_gemini_api_key():
-    return (
-        _clean_env("GOOGLE_API_KEY")
-        or _clean_env("TBOT_GOOGLE_LIVE_API_KEY")
-        or _clean_env("GEMINI_API_KEY")
-        or _clean_env("GOOGLE_GEMINI_API_KEY")
-        or _clean_env("TBOT_GEMINI_TTS_API_KEY")
-    )
+    return resolve_google_live_env_api_key()
 
 
 def _is_gemini_provider(name, provider_config):
     provider_type = str(provider_config.get("type") or name or "").casefold()
     name_l = str(name or "").casefold()
     return "gemini" in provider_type or "gemini" in name_l
+
+
+def _apply_gemini_tts_env_api_key(config):
+    tts_key = _clean_env("TBOT_GEMINI_TTS_API_KEY")
+    if not tts_key or not isinstance(config, Mapping):
+        return
+    tts_configs = config.get("TTS")
+    if not isinstance(tts_configs, Mapping):
+        return
+    for name, provider_config in list(tts_configs.items()):
+        if not isinstance(provider_config, Mapping):
+            continue
+        if not _is_gemini_provider(name, provider_config):
+            continue
+        provider_config["api_key"] = tts_key
 
 
 def _resolve_canonical_gemini_api_key(config):
@@ -370,7 +376,7 @@ def _resolve_canonical_gemini_api_key(config):
     if isinstance(google_live, Mapping):
         live_key = google_live.get("api_key")
         if not _looks_like_placeholder_api_key(live_key):
-            return str(live_key).strip()
+            return normalize_google_live_api_key(live_key)
     env_key = _env_gemini_api_key()
     if env_key and not _looks_like_placeholder_api_key(env_key):
         return env_key
@@ -490,6 +496,19 @@ def _parse_positive_int_env(name):
         return None
     return value if value > 0 else None
 
+def _parse_positive_float_env(name):
+    raw = _clean_env(name)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return value
+
+
 def _parse_percent_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -541,6 +560,7 @@ def _apply_lesson_env_overrides(config):
     LESSON_ASSET_DELIVERY_MODE -> lesson.asset_delivery_mode.
     LESSON_ASSET_PACK_LOCAL_ROOT -> lesson.asset_pack_local_root.
     LESSON_ASSET_PACK_MOUNT_ROOT -> lesson.asset_pack_mount_root.
+    LESSON_PRELOAD_TIMEOUT_SEC -> lesson.preload_timeout_sec.
     LESSON_STEP_TIMEOUT_FLOOR_SEC -> lesson.step_timeout_floor_sec.
     LESSON_VOICE_RT_P95_DISABLE_MS -> lesson.voice_rt_p95_disable_ms.
     LESSON_MAX_ASSET_BYTES -> lesson.max_asset_bytes.
@@ -564,6 +584,7 @@ def _apply_lesson_env_overrides(config):
     asset_delivery_mode = _clean_env("LESSON_ASSET_DELIVERY_MODE")
     asset_pack_local_root = _clean_env("LESSON_ASSET_PACK_LOCAL_ROOT")
     asset_pack_mount_root = _clean_env("LESSON_ASSET_PACK_MOUNT_ROOT")
+    preload_timeout_sec = _parse_positive_float_env("LESSON_PRELOAD_TIMEOUT_SEC")
     step_timeout_floor = _clean_env("LESSON_STEP_TIMEOUT_FLOOR_SEC")
     voice_rt_p95_disable_ms = _clean_env("LESSON_VOICE_RT_P95_DISABLE_MS")
     max_asset_bytes = _parse_positive_int_env("LESSON_MAX_ASSET_BYTES")
@@ -611,6 +632,7 @@ def _apply_lesson_env_overrides(config):
         and not asset_delivery_mode
         and not asset_pack_local_root
         and not asset_pack_mount_root
+        and preload_timeout_sec is None
         and not step_timeout_floor
         and not voice_rt_p95_disable_ms
         and max_asset_bytes is None
@@ -712,6 +734,8 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["asset_pack_local_root"] = asset_pack_local_root.rstrip("/")
     if asset_pack_mount_root:
         lesson_cfg["asset_pack_mount_root"] = asset_pack_mount_root.rstrip("/")
+    if preload_timeout_sec is not None:
+        lesson_cfg["preload_timeout_sec"] = preload_timeout_sec
     if step_timeout_floor:
         try:
             lesson_cfg["step_timeout_floor_sec"] = max(0.0, float(step_timeout_floor))
@@ -819,12 +843,7 @@ def _apply_voice_env_overrides(config):
         google_live = {}
         config["google_live"] = google_live
 
-    api_key = (
-        _clean_env("GOOGLE_API_KEY")
-        or _clean_env("TBOT_GOOGLE_LIVE_API_KEY")
-        or _clean_env("GEMINI_API_KEY")
-        or _clean_env("GOOGLE_GEMINI_API_KEY")
-    )
+    api_key = resolve_google_live_env_api_key()
     if api_key:
         google_live["api_key"] = api_key
     model = _clean_env("TBOT_GOOGLE_LIVE_MODEL") or _clean_env("GOOGLE_LIVE_MODEL")

@@ -168,7 +168,7 @@ is_placeholder_value() {
 validate_production_boot_env() {
   [[ -n "${ENV_FILE}" ]] || return 0
 
-  local failed key value
+  local failed key value file_limit pack_limit
   failed=0
 
   for key in NODE_ENV TBOT_REQUIRE_DEVICE_TOKEN JWT_PUBLIC_KEY TBOT_DEVICE_MINT_SECRET TBOT_SERVER_AUTH_KEY LESSON_ASSET_ORIGIN_BASE LESSON_ASSET_ALLOWED_ORIGINS LESSON_SD_MAX_FILE_BYTES LESSON_SD_MAX_PACK_BYTES; do
@@ -188,15 +188,27 @@ validate_production_boot_env() {
     failed=1
   fi
 
-  local lesson_runtime lesson_sample lesson_renderer_v2 lesson_motion lesson_playful rollout_allowlist rollout_count
+  file_limit="$(env_value LESSON_SD_MAX_FILE_BYTES "")"
+  if [[ ! "${file_limit}" =~ ^[0-9]+$ ]] || (( 10#${file_limit} < 29186048 )); then
+    printf 'error: LESSON_SD_MAX_FILE_BYTES must be at least 29186048\n' >&2
+    failed=1
+  fi
+  pack_limit="$(env_value LESSON_SD_MAX_PACK_BYTES "")"
+  if [[ ! "${pack_limit}" =~ ^[0-9]+$ ]] || (( 10#${pack_limit} < 116139166 )); then
+    printf 'error: LESSON_SD_MAX_PACK_BYTES must be at least 116139166\n' >&2
+    failed=1
+  fi
+
+  local lesson_runtime lesson_sample lesson_renderer_v2 lesson_renderer_v4 lesson_motion lesson_playful rollout_allowlist rollout_count
   lesson_runtime="$(env_value LESSON_RUNTIME_ENABLED "false")"
   lesson_sample="$(env_value LESSON_SAMPLE_ENABLED "false")"
   lesson_renderer_v2="$(env_value LESSON_RENDERER_V2_ENABLED "false")"
+  lesson_renderer_v4="$(env_value LESSON_RENDERER_V4_ENABLED "false")"
   lesson_motion="$(env_value LESSON_MOTION_PRESETS_ENABLED "false")"
   lesson_playful="$(env_value LESSON_PLAYFUL_INTERACTIONS_ENABLED "false")"
   rollout_allowlist="$(env_value LESSON_ROLLOUT_DEVICE_ALLOWLIST "")"
 
-  for key in LESSON_RUNTIME_ENABLED LESSON_SAMPLE_ENABLED LESSON_RENDERER_V2_ENABLED LESSON_MOTION_PRESETS_ENABLED LESSON_PLAYFUL_INTERACTIONS_ENABLED; do
+  for key in LESSON_RUNTIME_ENABLED LESSON_SAMPLE_ENABLED LESSON_RENDERER_V2_ENABLED LESSON_RENDERER_V4_ENABLED LESSON_MOTION_PRESETS_ENABLED LESSON_PLAYFUL_INTERACTIONS_ENABLED; do
     value="$(env_value "${key}" "false")"
     if [[ "${value}" != "true" && "${value}" != "false" ]]; then
       printf 'error: %s must be exactly true or false\n' "${key}" >&2
@@ -213,6 +225,10 @@ validate_production_boot_env() {
   fi
   if [[ "${lesson_runtime}" == "false" && "${lesson_renderer_v2}" == "true" ]]; then
     printf 'error: renderer v2 cannot be true while LESSON_RUNTIME_ENABLED is false\n' >&2
+    failed=1
+  fi
+  if [[ "${lesson_runtime}" == "false" && "${lesson_renderer_v4}" == "true" ]]; then
+    printf 'error: renderer v4 cannot be true while LESSON_RUNTIME_ENABLED is false\n' >&2
     failed=1
   fi
   if [[ "${lesson_runtime}" == "true" ]]; then

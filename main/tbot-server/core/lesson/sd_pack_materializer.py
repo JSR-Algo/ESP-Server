@@ -60,6 +60,10 @@ _ASSET_FIELDS = frozenset(
         "visualRefs",
         "derivativeId",
         "phaseId",
+        "cueId",
+        "effect",
+        "stepKey",
+        "playbackMode",
     }
 )
 _METRICS = {
@@ -487,7 +491,7 @@ def _validate_asset(
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     renderer_v3_fields: dict[str, Any] = {}
     if media_type.lower().startswith("video/"):
-        if "derivativeId" in item or "phaseId" in item:
+        if "derivativeId" in item or "phaseId" in item or "cueId" in item:
             try:
                 renderer_v3_fields = validate_renderer_v4_flattened_mp4(dict(item))
             except FirmwareSyncPackError:
@@ -499,7 +503,7 @@ def _validate_asset(
                 raise _bad("INVALID_RENDERER_V3_MP4", "Invalid renderer-v3 shared MP4") from None
     elif any(field in item for field in (
         "sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs",
-        "derivativeId", "phaseId",
+        "derivativeId", "phaseId", "cueId", "effect", "stepKey", "playbackMode",
     )):
         if "compatibilityMetadata" in item or "visualRefs" in item:
             raise _bad("INVALID_RENDERER_V3_MP4", "Renderer-v3 metadata is only valid for shared MP4")

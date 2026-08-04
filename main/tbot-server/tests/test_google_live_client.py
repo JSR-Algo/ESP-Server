@@ -285,6 +285,24 @@ class _ExplodingParts:
 
 
 class GoogleLiveClientTest(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self._credential_env_patch = patch.dict(
+            os.environ,
+            {
+                "GOOGLE_API_KEY": "",
+                "TBOT_GOOGLE_LIVE_API_KEY": "",
+                "GEMINI_API_KEY": "",
+                "GOOGLE_GEMINI_API_KEY": "",
+                "TBOT_GEMINI_TTS_API_KEY": "",
+            },
+        )
+        self._credential_env_patch.start()
+
+    def tearDown(self):
+        self._credential_env_patch.stop()
+        super().tearDown()
+
     @patch.dict(os.environ, {"GOOGLE_API_KEY": " env-key\n"})
     def test_resolve_api_key_from_environment_placeholder(self):
         # Scope GOOGLE_API_KEY to this test (patch.dict restores it) so the env key does
@@ -297,6 +315,46 @@ class GoogleLiveClientTest(unittest.TestCase):
         client = GoogleLiveClient({"api_key": "\n test-\tkey \r"}, _DummyLogger())
 
         self.assertEqual(client._resolve_api_key(), "test-key")
+
+    def test_resolve_api_key_supports_exact_live_env_aliases(self):
+        for env_name in (
+            "GOOGLE_API_KEY",
+            "TBOT_GOOGLE_LIVE_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_GEMINI_API_KEY",
+        ):
+            with self.subTest(env_name=env_name), patch.dict(
+                os.environ, {env_name: f" {env_name.lower()} \n"}
+            ):
+                client = GoogleLiveClient({}, _DummyLogger())
+
+                self.assertEqual(client._resolve_api_key(), env_name.lower())
+
+    def test_resolve_api_key_uses_live_env_alias_precedence(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_API_KEY": "google",
+                "TBOT_GOOGLE_LIVE_API_KEY": "tbot-live",
+                "GEMINI_API_KEY": "gemini",
+                "GOOGLE_GEMINI_API_KEY": "google-gemini",
+            },
+        ):
+            client = GoogleLiveClient({}, _DummyLogger())
+
+            self.assertEqual(client._resolve_api_key(), "google")
+
+    def test_resolve_api_key_supports_only_google_gemini_alias(self):
+        with patch.dict(os.environ, {"GOOGLE_GEMINI_API_KEY": " google-gemini "}):
+            client = GoogleLiveClient({}, _DummyLogger())
+
+            self.assertEqual(client._resolve_api_key(), "google-gemini")
+
+    def test_resolve_api_key_ignores_tts_only_env_alias(self):
+        with patch.dict(os.environ, {"TBOT_GEMINI_TTS_API_KEY": "tts-only"}):
+            client = GoogleLiveClient({}, _DummyLogger())
+
+            self.assertEqual(client._resolve_api_key(), "")
 
     def test_normalize_message_maps_transcript_audio_and_turn_completion(self):
         client = GoogleLiveClient(

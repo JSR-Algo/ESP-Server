@@ -6,10 +6,13 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -24,12 +27,141 @@ from core.lesson.shared_asset_store import SharedAssetStore
 from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
-SD_PACK_SYNC_TIMEOUT_SEC = 120
+SD_PACK_SYNC_TIMEOUT_FLOOR_SEC = 120
+SD_PACK_SYNC_TIMEOUT_CEILING_SEC = 1800
+SD_PACK_SYNC_BASE_SEC = 30
+SD_PACK_SYNC_PER_ASSET_SEC = 8
+SD_PACK_SYNC_BYTES_PER_SEC = 16 * 1024
 DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _ERROR_CODE_MAX_LEN = 64
-_MAX_VOICE_PREEMPTIONS_PER_PACK = 1
+_COORDINATOR_ATTR = "_sd_pack_sync_coordinator"
+
+
+@dataclass
+class _QueuedSdSync:
+    cache_key: str
+    operation: Callable[[], Awaitable[Any]]
+    future: asyncio.Future[Any]
+    foreground: bool
+
+
+class SdPackSyncCoordinator:
+    """Serialize firmware SD mutations while prioritizing lesson-start work."""
+
+    def __init__(self) -> None:
+        self._foreground: deque[_QueuedSdSync] = deque()
+        self._background: deque[_QueuedSdSync] = deque()
+        self._by_cache_key: dict[str, _QueuedSdSync] = {}
+        self._worker: asyncio.Task[None] | None = None
+
+    async def request(
+        self,
+        cache_key: str,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        foreground: bool = False,
+    ) -> Any:
+        queued = self._by_cache_key.get(cache_key)
+        if queued is None:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            future.add_done_callback(_consume_unobserved_exception)
+            queued = _QueuedSdSync(cache_key, operation, future, foreground)
+            self._by_cache_key[cache_key] = queued
+            (self._foreground if foreground else self._background).append(queued)
+        elif foreground and not queued.foreground and queued in self._background:
+            self._background.remove(queued)
+            queued.foreground = True
+            self._foreground.append(queued)
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run())
+        return await asyncio.shield(queued.future)
+
+    async def _run(self) -> None:
+        while self._foreground or self._background:
+            queued = (
+                self._foreground.popleft()
+                if self._foreground
+                else self._background.popleft()
+            )
+            try:
+                result = await queued.operation()
+            except Exception as exc:
+                if not queued.future.done():
+                    queued.future.set_exception(exc)
+            else:
+                if not queued.future.done():
+                    queued.future.set_result(result)
+            finally:
+                if self._by_cache_key.get(queued.cache_key) is queued:
+                    self._by_cache_key.pop(queued.cache_key, None)
+
+
+def _consume_unobserved_exception(future: asyncio.Future[Any]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+def _sd_pack_sync_coordinator(conn: Any) -> SdPackSyncCoordinator:
+    coordinator = getattr(conn, _COORDINATOR_ATTR, None)
+    if coordinator is None:
+        coordinator = SdPackSyncCoordinator()
+        setattr(conn, _COORDINATOR_ATTR, coordinator)
+    return coordinator
+
+
+async def request_sd_pack_sync(
+    conn: Any,
+    cache_key: str,
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    foreground: bool = False,
+) -> Any:
+    return await _sd_pack_sync_coordinator(conn).request(
+        cache_key,
+        operation,
+        foreground=foreground,
+    )
+
+
+def sd_pack_sync_timeout_sec(config: dict[str, Any], pack: dict[str, Any]) -> float:
+    lesson_cfg = _lesson_config(config)
+    floor = _positive_float(
+        lesson_cfg.get("sd_sync_timeout_floor_sec")
+        or os.getenv("LESSON_SD_SYNC_TIMEOUT_SEC"),
+        SD_PACK_SYNC_TIMEOUT_FLOOR_SEC,
+    )
+    ceiling = max(
+        floor,
+        _positive_float(
+            lesson_cfg.get("sd_sync_timeout_ceiling_sec")
+            or os.getenv("LESSON_SD_SYNC_TIMEOUT_MAX_SEC"),
+            SD_PACK_SYNC_TIMEOUT_CEILING_SEC,
+        ),
+    )
+    assets = pack.get("assets") if isinstance(pack, dict) else None
+    asset_list = assets if isinstance(assets, list) else []
+    total_bytes = sum(
+        max(0, int(asset.get("size") or 0))
+        for asset in asset_list
+        if isinstance(asset, dict)
+    )
+    estimated = (
+        SD_PACK_SYNC_BASE_SEC
+        + len(asset_list) * SD_PACK_SYNC_PER_ASSET_SEC
+        + total_bytes / SD_PACK_SYNC_BYTES_PER_SEC
+    )
+    return min(ceiling, max(floor, math.ceil(estimated)))
+
+
+def _positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if math.isfinite(parsed) and parsed > 0 else float(default)
 
 
 def cached_asset_packs(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -196,31 +328,15 @@ async def _call_sd_pack_sync_with_voice_guard(
     sleep: Callable[[float], Awaitable[None]],
     poll_interval: float,
 ) -> Any:
-    """Let voice preempt once, then guarantee the deferred retry can finish."""
-    interval = max(0.001, float(poll_interval))
-    voice_preemptions = 0
-    while True:
-        while busy_check():
-            await sleep(poll_interval)
-        transfer = asyncio.create_task(call_sd_pack_sync_tool(conn, mcp_client, pack))
-        try:
-            while not transfer.done():
-                await asyncio.sleep(0)
-                if (
-                    busy_check()
-                    and voice_preemptions < _MAX_VOICE_PREEMPTIONS_PER_PACK
-                ):
-                    voice_preemptions += 1
-                    transfer.cancel()
-                    await asyncio.gather(transfer, return_exceptions=True)
-                    break
-                await asyncio.wait({transfer}, timeout=interval)
-            else:
-                return await transfer
-        except asyncio.CancelledError:
-            transfer.cancel()
-            await asyncio.gather(transfer, return_exceptions=True)
-            raise
+    """Wait for voice before admission; never cancel a dispatched device call."""
+    while busy_check():
+        await sleep(poll_interval)
+    cache_key = str(pack.get("cacheKey") or "")
+    return await request_sd_pack_sync(
+        conn,
+        cache_key,
+        lambda: call_sd_pack_sync_tool(conn, mcp_client, pack),
+    )
 
 
 async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: dict[str, Any]) -> Any:
@@ -233,7 +349,7 @@ async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: dict[str, Any
         mcp_client,
         SD_PACK_SYNC_TOOL,
         {"assetPack": mcp_pack},
-        timeout=SD_PACK_SYNC_TIMEOUT_SEC,
+        timeout=sd_pack_sync_timeout_sec(getattr(conn, "config", {}) or {}, mcp_pack),
     )
 
 
@@ -324,7 +440,7 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
     rich_identity: dict[str, Any] = {}
     if media_type == "video/mp4":
         try:
-            if "derivativeId" in item or "phaseId" in item:
+            if "derivativeId" in item or "phaseId" in item or "cueId" in item:
                 rich_identity = validate_renderer_v4_flattened_mp4(dict(item))
             else:
                 rich_identity = validate_renderer_v3_shared_mp4(dict(item))

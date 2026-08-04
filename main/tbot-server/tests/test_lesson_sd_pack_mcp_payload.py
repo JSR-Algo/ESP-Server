@@ -2,6 +2,7 @@ import copy
 
 import pytest
 
+from core.lesson.flattened_cinematic_contract import trgb_container_bytes
 from core.lesson.sd_pack_mcp_payload import (
     FIRMWARE_LESSON_ASSET_ROOT,
     FirmwareSyncPackError,
@@ -42,8 +43,34 @@ def _pack(key="backgroundScene.poster"):
     }
 
 
+def _trgb_cue_pack() -> tuple[dict, dict]:
+    render_pack = _pack("flattenedCinematic.barn-listen")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "path": "lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+        "url": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+        "onlineUrl": "https://assets.example/lessons/derivatives/" + "d" * 64 + "/barn-listen.trgb",
+        "mediaType": "application/vnd.tbot.rgb565-indexed",
+        "derivativeId": "d" * 64,
+        "cueId": "barn-listen",
+        "effect": "listen",
+        "stepKey": "barn",
+        "playbackMode": "loop",
+        "size": trgb_container_bytes(13),
+        "compatibilityMetadata": {
+            "codec": "rgb565le", "containerVersion": 1,
+            "width": 480, "height": 320, "storedWidth": 320, "storedHeight": 480,
+            "orientation": "panelNativeClockwise", "fps": 10,
+            "durationMs": 1300, "frameCount": 13, "frameBytes": 307200,
+            "hasAudio": False,
+        },
+    })
+    return render_pack, asset
+
+
 def test_builds_deep_copied_physical_mcp_pack_without_mutating_render_pack():
     render_pack = _pack()
+    render_pack["assets"][0]["sourceUrl"] = "https://assets.example/poster.png"
     before = copy.deepcopy(render_pack)
 
     mcp_pack = build_firmware_sync_pack(render_pack)
@@ -52,12 +79,14 @@ def test_builds_deep_copied_physical_mcp_pack_without_mutating_render_pack():
     assert mcp_pack is not render_pack
     assert mcp_pack["assets"] is not render_pack["assets"]
     assert mcp_pack["localRoot"] == f"{MOUNT_ROOT}/{CACHE_KEY}"
-    assert mcp_pack["assets"][0]["localPath"] == (
+    assert mcp_pack["assets"][0]["sdPath"] == (
         f"{MOUNT_ROOT}/{CACHE_KEY}/backgroundScene.poster"
     )
-    assert mcp_pack["assets"][0]["sdPath"] == mcp_pack["assets"][0]["localPath"]
     assert mcp_pack["assets"][0]["onlineUrl"] == "https://assets.example/poster.png"
-    assert mcp_pack["assets"][0]["url"] == "https://assets.example/poster.png"
+    assert "localPath" not in mcp_pack["assets"][0]
+    assert "url" not in mcp_pack["assets"][0]
+    assert "sourceUrl" not in mcp_pack["assets"][0]
+    assert render_pack == before
     assert render_pack["localRoot"].startswith("sd://")
     assert render_pack["assets"][0]["localPath"].startswith("sd://")
 
@@ -67,7 +96,7 @@ def test_percent_encodes_asset_key_for_one_direct_literal_basename():
 
     mcp_pack = build_firmware_sync_pack(render_pack)
 
-    assert mcp_pack["assets"][0]["localPath"].endswith(
+    assert mcp_pack["assets"][0]["sdPath"].endswith(
         "/folder%2Fposter%20one.png"
     )
 
@@ -118,7 +147,7 @@ def test_rejects_backup_namespace_pair_in_both_orders_without_poisoning_next_tra
         build_firmware_sync_pack(pack)
 
     valid = build_firmware_sync_pack(_pack("poster"))
-    assert valid["assets"][0]["localPath"].endswith("/poster")
+    assert valid["assets"][0]["sdPath"].endswith("/poster")
 
 
 def test_rejects_fat_trailing_dot_alias_pair():
@@ -149,8 +178,8 @@ def test_normalizes_new_only_aliases_and_preserves_signed_url_exactly():
 
     sent = mcp_pack["assets"][0]
     assert sent["onlineUrl"] == "https://assets.example/poster.png?sig=secret&expires=1"
-    assert sent["url"] == sent["onlineUrl"]
-    assert sent["sdPath"] == sent["localPath"]
+    assert "url" not in sent
+    assert "localPath" not in sent
     assert render_pack["assets"][0]["onlineUrl"].endswith("expires=1")
     assert "url" not in render_pack["assets"][0]
 
@@ -164,9 +193,25 @@ def test_normalizes_legacy_only_aliases_without_mutating_input():
 
     sent = mcp_pack["assets"][0]
     assert sent["onlineUrl"] == before["assets"][0]["url"]
-    assert sent["url"] == before["assets"][0]["url"]
-    assert sent["sdPath"] == sent["localPath"]
+    assert "url" not in sent
+    assert "localPath" not in sent
     assert render_pack == before
+
+
+def test_static_cached_asset_keeps_local_fallback_url_and_omits_distinct_source_url():
+    render_pack = _pack()
+    asset = render_pack["assets"][0]
+    local_cache_url = "https://esp.example/tbot/lesson-assets/cache/backgroundScene.poster"
+    source_url = "https://cdn.example/source/poster.png?sig=private-token"
+    asset["url"] = local_cache_url
+    asset["onlineUrl"] = local_cache_url
+    asset["sourceUrl"] = source_url
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["onlineUrl"] == local_cache_url
+    assert "sourceUrl" not in sent
+    assert asset["sourceUrl"] == source_url
 
 
 def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_without_credentials():
@@ -199,8 +244,8 @@ def test_renderer_v3_mp4_preserves_playback_metadata_and_physical_sd_path_withou
     assert sent["sharedAssetVersion"] == 3
     assert sent["compatibilityMetadata"] == asset["compatibilityMetadata"]
     assert sent["visualRefs"] == asset["visualRefs"]
-    assert sent["localPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/scene.opening%40v3"
-    assert sent["sdPath"] == sent["localPath"]
+    assert sent["sdPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/scene.opening%40v3"
+    assert "localPath" not in sent
     assert "authorization" not in {key.lower() for key in sent}
     assert "cookie" not in {key.lower() for key in sent}
 
@@ -229,7 +274,7 @@ def test_renderer_v3_mp4_preserves_exact_public_url_with_optional_query_and_frag
     sent = build_firmware_sync_pack(render_pack)["assets"][0]
 
     assert sent["onlineUrl"] == url
-    assert sent["url"] == url
+    assert "url" not in sent
 
 
 def test_rejects_arbitrary_video_that_lacks_validated_renderer_v3_shared_identity():
@@ -258,8 +303,102 @@ def test_renderer_v4_flattened_mp4_preserves_exact_identity_and_physical_path():
     assert sent["derivativeId"] == "d" * 64
     assert sent["phaseId"] == "opening"
     assert sent["compatibilityMetadata"]["frameCount"] == 90
-    assert sent["localPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/flattenedCinematic.opening"
-    assert sent["sdPath"] == sent["localPath"]
+    assert sent["sdPath"] == f"{MOUNT_ROOT}/{CACHE_KEY}/flattenedCinematic.opening"
+    assert "localPath" not in sent
+    assert "url" not in sent
+
+
+def test_renderer_v4_v2_cue_omits_trgb_compatibility_metadata_from_mcp_only():
+    render_pack, asset = _trgb_cue_pack()
+    compatibility_metadata = copy.deepcopy(asset["compatibilityMetadata"])
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert {key: sent[key] for key in ("cueId", "effect", "stepKey", "playbackMode")} == {
+        "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
+    }
+    assert sent["mediaType"] == "application/vnd.tbot.rgb565-indexed"
+    assert "compatibilityMetadata" not in sent
+    assert asset["compatibilityMetadata"] == compatibility_metadata
+    assert "localPath" not in sent
+    assert "url" not in sent
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("effect", []), ("effect", {}), ("effect", None),
+        ("cueId", []), ("stepKey", {}), ("playbackMode", []),
+    ],
+)
+def test_renderer_v4_v2_malformed_identity_raises_stable_pack_error(field, value):
+    render_pack, asset = _trgb_cue_pack()
+    asset[field] = value
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("containerVersion", 2), ("width", 480.0), ("height", True),
+        ("storedWidth", 480), ("storedHeight", 320),
+        ("orientation", "landscape"), ("fps", 10.0),
+        ("durationMs", 1300.0), ("frameCount", True), ("frameBytes", 153600),
+    ],
+)
+def test_renderer_v4_v2_metadata_requires_exact_integers(field, value):
+    render_pack, asset = _trgb_cue_pack()
+    asset["compatibilityMetadata"][field] = value
+
+    with pytest.raises(FirmwareSyncPackError):
+        build_firmware_sync_pack(render_pack)
+
+
+@pytest.mark.parametrize("value", [123, [], None, True])
+def test_renderer_v4_v2_sha256_requires_an_actual_string(value):
+    render_pack, asset = _trgb_cue_pack()
+    asset["sha256"] = value
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
+def test_renderer_v4_trgb_rejects_mp4_path_with_rgb_media_type():
+    render_pack, asset = _trgb_cue_pack()
+    asset["path"] = asset["path"].replace(".trgb", ".mp4")
+    asset["url"] = asset["url"].replace(".trgb", ".mp4")
+    asset["onlineUrl"] = asset["onlineUrl"].replace(".trgb", ".mp4")
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
+
+def test_renderer_v4_trgb_copies_signed_source_url_to_online_url_without_forwarding_source_field():
+    render_pack, asset = _trgb_cue_pack()
+    signed_source = asset["url"] + "?sig=fixture-token&expires=2000000000"
+    asset["sourceUrl"] = signed_source
+    asset["url"] = "https://esp.example/tbot/lesson-assets/cache/flattenedCinematic.barn-listen"
+    asset["onlineUrl"] = asset["url"]
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert sent["onlineUrl"] == signed_source
+    assert "sourceUrl" not in sent
+    assert "url" not in sent
+    assert asset["sourceUrl"] == signed_source
+
+
+def test_renderer_v4_trgb_rejects_forwarded_source_url_with_wrong_derivative_path():
+    render_pack, asset = _trgb_cue_pack()
+    asset["sourceUrl"] = "https://evil.example/other.trgb?sig=private-token"
+    asset["url"] = "https://esp.example/tbot/lesson-assets/cache/flattenedCinematic.barn-listen"
+    asset["onlineUrl"] = asset["url"]
+
+    with pytest.raises(FirmwareSyncPackError, match="^firmware sync pack invalid$"):
+        build_firmware_sync_pack(render_pack)
+
 
 @pytest.mark.parametrize(
     ("mutate", "secret"),

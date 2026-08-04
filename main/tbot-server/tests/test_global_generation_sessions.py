@@ -964,7 +964,7 @@ def _connection_for_background_sync(global_sessions=None):
 
 
 @pytest.mark.asyncio
-async def test_connection_does_not_drain_legacy_pending_jobs_by_default(monkeypatch):
+async def test_connection_does_not_run_unconditional_full_cache_sync_by_default(monkeypatch):
     calls = []
 
     async def drain(_connection):
@@ -976,13 +976,14 @@ async def test_connection_does_not_drain_legacy_pending_jobs_by_default(monkeypa
 
     monkeypatch.delenv("TBOT_ENABLE_BACKGROUND_WORKERS", raising=False)
     monkeypatch.delenv("LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED", raising=False)
+    monkeypatch.delenv("LESSON_SD_SYNC_ON_CONNECT_ENABLED", raising=False)
     monkeypatch.setattr(sd_pack_fanout, "drain_pending_for_connection", drain)
     monkeypatch.setattr(sd_pack_sync, "sync_cached_lesson_assets_to_sd", sync)
 
     result = await _connection_for_background_sync()._sync_cached_lesson_assets_to_sd()
 
-    assert calls == ["sync"]
-    assert result == {"pending": None, "full": {"state": "done"}}
+    assert calls == []
+    assert result == {"pending": None, "full": {"skipped": "on_connect_disabled"}}
 
 
 @pytest.mark.asyncio
@@ -999,6 +1000,7 @@ async def test_connection_drains_legacy_only_when_both_exact_flags_are_true(monk
 
     monkeypatch.setenv("TBOT_ENABLE_BACKGROUND_WORKERS", " TrUe ")
     monkeypatch.setenv("LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED", "TRUE")
+    monkeypatch.setenv("LESSON_SD_SYNC_ON_CONNECT_ENABLED", "true")
     monkeypatch.setattr(sd_pack_fanout, "drain_pending_for_connection", drain)
     monkeypatch.setattr(sd_pack_sync, "sync_cached_lesson_assets_to_sd", sync)
 

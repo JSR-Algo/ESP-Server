@@ -1,11 +1,12 @@
-import os
-import time
 import asyncio
+import time
 import warnings
+from collections.abc import Mapping
 from contextlib import suppress
-from collections.abc import Iterable, Mapping
 
 from core.voice.child_safety import ensure_child_safety_block
+from core.voice.google_live_credentials import resolve_google_live_api_key
+
 
 # Eager import of google.genai at module load (server startup).
 # First-time import of this SDK costs 80-100 seconds (protobuf + grpc + auth
@@ -56,6 +57,10 @@ class GoogleLiveClient:
         self._audio_started = False
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
+        self._response_generation_getter = None
+
+    def set_response_generation_getter(self, getter):
+        self._response_generation_getter = getter if callable(getter) else None
 
     async def connect(self):
         genai_module = self._import_genai_module()
@@ -157,6 +162,9 @@ class GoogleLiveClient:
         try:
             while self.connected and self._session is not None:
                 received_turn_message = False
+                origin_generation = (
+                    self._response_generation_getter() if self._response_generation_getter is not None else None
+                )
                 message_iterator = self._session.receive().__aiter__()
                 while self.connected:
                     if pending_message_task is None:
@@ -174,6 +182,9 @@ class GoogleLiveClient:
                         break
                     received_turn_message = True
                     for event in self._normalize_message(message):
+                        if isinstance(event, dict) and origin_generation is not None:
+                            event = dict(event)
+                            event.setdefault("response_generation", origin_generation)
                         yield event
                 if not received_turn_message:
                     break
@@ -379,7 +390,10 @@ class GoogleLiveClient:
             if not name:
                 continue
             description = spec.get("description", "") or ""
-            parameters = self._sanitize_schema(spec.get("parameters"))
+            parameters = self._sanitize_schema(
+                spec.get("parameters"),
+                preserve_additional_properties=str(name).startswith("lesson_"),
+            )
             function_declarations.append(
                 self._build_function_declaration(name, description, parameters)
             )
@@ -393,23 +407,37 @@ class GoogleLiveClient:
         if self._types is not None and hasattr(self._types, "FunctionDeclaration"):
             kwargs = {"name": name, "description": description}
             if parameters:
-                kwargs["parameters"] = parameters
+                kwargs["parameters"] = self._sanitize_schema(
+                    parameters,
+                    preserve_additional_properties=False,
+                )
             return self._types.FunctionDeclaration(**kwargs)
         declaration = {"name": name, "description": description}
         if parameters:
             declaration["parameters"] = parameters
         return declaration
 
-    def _sanitize_schema(self, schema):
+    def _sanitize_schema(self, schema, *, preserve_additional_properties=False):
         if isinstance(schema, Mapping):
             sanitized = {}
             for key, value in schema.items():
-                if key in {"additionalProperties", "$schema", "title", "default"}:
+                if key in {"$schema", "title", "default"} or (
+                    key == "additionalProperties" and not preserve_additional_properties
+                ):
                     continue
-                sanitized[key] = self._sanitize_schema(value)
+                sanitized[key] = self._sanitize_schema(
+                    value,
+                    preserve_additional_properties=preserve_additional_properties,
+                )
             return sanitized
         if isinstance(schema, list):
-            return [self._sanitize_schema(value) for value in schema]
+            return [
+                self._sanitize_schema(
+                    value,
+                    preserve_additional_properties=preserve_additional_properties,
+                )
+                for value in schema
+            ]
         return schema
 
     def _build_function_response(self, response):
@@ -578,25 +606,7 @@ class GoogleLiveClient:
         return {"role": "user", "parts": [{"text": text}]}
 
     def _resolve_api_key(self):
-        api_key = self.config.get("api_key") or ""
-        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
-            env_name = api_key[2:-1]
-            # Support ${GOOGLE_API_KEY:-default} style placeholders from YAML.
-            if ":-" in env_name:
-                env_name = env_name.split(":-", 1)[0]
-            api_key = os.environ.get(env_name, "")
-        if not str(api_key or "").strip():
-            for env_name in (
-                "GOOGLE_API_KEY",
-                "TBOT_GOOGLE_LIVE_API_KEY",
-                "GEMINI_API_KEY",
-                "GOOGLE_GEMINI_API_KEY",
-            ):
-                candidate = os.environ.get(env_name, "")
-                if str(candidate or "").strip():
-                    api_key = candidate
-                    break
-        return "".join(str(api_key).split())
+        return resolve_google_live_api_key(self.config.get("api_key"))
 
     def _import_genai_module(self):
         # Return the eagerly-imported module from server startup so that the

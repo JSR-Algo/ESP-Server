@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "file": "tvideo_farm_manifest_v2.json",
+    "fileSha256": "77f196f20c488aa215fc0051dcdbe490a154f651d8edb060c1b098fba7dc846a",
+    "canonicalSha256": "44f1dd88f44acd903c7196b7ad1245e5d2177c18f5dd7de49e137a045bf4d50f"
+  },
+  "staticPayloads": [
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/scene.farm.sunny.png",
+      "sha256": "c64f6138e961ffbe4150b347646700786ef1363a5f4c87720e75050d8f9d06f8",
+      "bytes": 910
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/object.farm.barn.png",
+      "sha256": "946544b1b2e6bf3886a87816a9ac9522776a56e0e09a099c5af85b8a6ec572e0",
+      "bytes": 508
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/object.farm.corn.png",
+      "sha256": "b615c52445a157974c757342ecff0b13bb05228f86fbdaed104c85b079cd7042",
+      "bytes": 666
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/object.farm.cow.png",
+      "sha256": "14963477e15352cb11e3b6c3a11bd14e7e1d5a6fd02813b916977ae9f266c939",
+      "bytes": 585
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/object.farm.hen.png",
+      "sha256": "de76d2e139c610396f278957bbe5bcff29b66e87ae1fea653dd1ea5697f25848",
+      "bytes": 558
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/robotOverlay.teach.png",
+      "sha256": "5b035c5444d0e0361c1c091df92b305c2e22a0737853a5f66fef64eda97947d2",
+      "bytes": 652
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/robotOverlay.listening.png",
+      "sha256": "c1bd664bac47573ae346ceaa39c8f7c9d1a16ce8d16c79b415463b03d31410ec",
+      "bytes": 726
+    },
+    {
+      "path": "tests/fixtures/tvideo_farm_task4_static/robotOverlay.thinking.png",
+      "sha256": "02ebb59f32e878333ce3282c42e7eb370b5787b00f8c644ca2c7a3ba284e3c58",
+      "bytes": 672
+    }
+  ],
+  "generator": {
+    "version": "tvideo-farm-trgb-task4.v1",
+    "fileSha256": "011f81d4cf463b01991af48b02fb59188babe3cccbd87eacd890eb6a3233943f"
+  },
+  "artifact": {
+    "fileSha256": "010e126439872709d158233ad5612109544f5c85de23bc811ed7a2e4177605cf",
+    "canonicalSha256": "ffb61b33ad19eade629e450c2c3a385ed30bf55d8e6668705075a58a60203350",
+    "manifestChecksum": "ffb61b33ad19eade629e450c2c3a385ed30bf55d8e6668705075a58a60203350",
+    "cueCount": 19,
+    "staticAssetCount": 8,
+    "totalAssetCount": 27
+  },
+  "firmwareFixture": {
+    "canonicalSha256": "c821f431b20654608655a6225122904f019002e711bf1abb69c3c7c12d77fa05",
+    "frameCount": 38,
+    "cueCount": 19
+  }
+}
