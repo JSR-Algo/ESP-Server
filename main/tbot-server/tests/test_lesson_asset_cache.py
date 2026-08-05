@@ -1563,6 +1563,84 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cache.is_ready())
         self.assertIsNone(cache.local_pack_url_for_source("backgroundScene.poster.jpg"))
 
+    async def test_preload_preserves_rich_ready_pack_after_source_hydration(self):
+        source_contents = {
+            "teachingObject.barn": b"barn-png",
+            "robotOverlay.thinking": b"thinking-png",
+        }
+        assets = [
+            {
+                "key": key,
+                "path": f"{key}.png",
+                "sha256": _sha(content),
+                "critical": key == "teachingObject.barn",
+                "layer": key.split(".", 1)[0],
+                "role": "pose" if key.startswith("robotOverlay.") else "image",
+                "mediaType": "image/png",
+            }
+            for key, content in source_contents.items()
+        ]
+        checksum = "89abcdef01234567" * 4
+        cache_key = f"w01-d01-barn-say-it/v3-{checksum}"
+        sd_mount = tempfile.mkdtemp(prefix="lesson-sd-")
+        self.addAsyncCleanup(asyncio.to_thread, shutil.rmtree, sd_mount, True)
+        store = SharedAssetStore(os.path.dirname(sd_mount), pack_root=sd_mount)
+        for content in source_contents.values():
+            store.put_bytes(content, _sha(content))
+        store.commit_pack(
+            cache_key,
+            {key: _sha(content) for key, content in source_contents.items()},
+            manifest={
+                "lessonId": "w01-d01-barn-say-it",
+                "lessonVersion": 3,
+                "profile": "espTft",
+                "manifestChecksum": checksum,
+                "cacheKey": cache_key,
+                "ready": True,
+                "assets": [
+                    {
+                        "key": key,
+                        "sha256": _sha(content),
+                        "size": len(content),
+                        "mediaType": "image/png",
+                        "critical": key == "teachingObject.barn",
+                        "onlineUrl": f"{BASE}/{key}.png",
+                        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/{key}",
+                    }
+                    for key, content in source_contents.items()
+                ],
+            },
+        )
+        first_origin = _FakeClient({}, status=500)
+        first = self._cache(
+            assets,
+            client=first_origin,
+            lesson_version=3,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+        )
+
+        self.assertTrue(await first.preload())
+        self.assertEqual(first_origin.requested, [])
+        with open(os.path.join(sd_mount, cache_key, "pack.json"), encoding="utf-8") as fh:
+            preserved = json.load(fh)
+        self.assertIsInstance(preserved["assets"], list)
+        self.assertEqual(preserved["manifestChecksum"], checksum)
+
+        second_origin = _FakeClient({}, status=500)
+        second = self._cache(
+            assets,
+            client=second_origin,
+            lesson_version=3,
+            manifest_checksum=checksum,
+            asset_pack_mount_root=sd_mount,
+            shared_asset_store=store,
+        )
+
+        self.assertTrue(await second.preload())
+        self.assertEqual(second_origin.requested, [])
+
     async def test_preload_hydrates_ready_rich_pack_cinematic_using_sd_size_limits(self):
         source_content = b"source-cinematic-mp4"
         pack_content = b"\x01" * (17 * 1024 * 1024)

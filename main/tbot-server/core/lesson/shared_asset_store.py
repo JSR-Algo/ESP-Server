@@ -135,9 +135,16 @@ class SharedAssetStore:
             normalized: dict[str, str] = {}
             for key, digest in assets.items():
                 normalized[str(key)] = self._validate_digest(digest)
+            existing = self._ready_manifest_unlocked(pack_dir, cache_key)
+            if (
+                not rich_manifest
+                and existing is not None
+                and isinstance(existing.get("assets"), list)
+                and self._manifest_assets(existing) == dict(normalized)
+            ):
+                return pack_dir, PACK_COMMIT_REPLAYED
             manifest = self._pack_manifest(cache_key, normalized, manifest)
             if rich_manifest:
-                existing = self._ready_manifest_unlocked(pack_dir, cache_key)
                 if existing is not None:
                     status = self._existing_ready_status(existing, manifest, normalized)
                     if status == PACK_COMMIT_REPLAYED:
