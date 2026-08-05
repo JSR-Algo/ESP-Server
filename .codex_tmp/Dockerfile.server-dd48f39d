@@ -1,0 +1,6 @@
+FROM local/tbot-server:main-b8a1986a-amd64
+
+COPY main/tbot-server/core/websocket_server.py /opt/tbot-esp32-server/core/websocket_server.py
+COPY main/tbot-server/config/device_token_client.py /opt/tbot-esp32-server/config/device_token_client.py
+
+LABEL org.opencontainers.image.revision="dd48f39daa60015d0bf302aadbafbed4dbe1a4a3"
