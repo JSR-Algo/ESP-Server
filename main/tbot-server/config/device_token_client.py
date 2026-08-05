@@ -17,9 +17,12 @@ Design notes:
 - The shared secret is read from the environment ONLY; it is never logged.
 """
 
+import asyncio
 import os
 import time
 from contextlib import suppress
+
+import httpx
 
 # {mac: (device_uuid, token, cached_at_epoch)} — cache for ~14 min (token TTL 15m).
 _cache = {}
@@ -58,24 +61,33 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
         return cached[0], cached[1]
 
     url = base_url.rstrip("/") + "/internal/devices/mint-token"
-    try:
-        resp = await client.post(
-            url,
-            json={"mac": mac},
-            headers={"X-Mint-Secret": secret, "Authorization": f"Bearer {secret}"},
-            follow_redirects=False,
-        )
-        resp.raise_for_status()
-        data = (resp.json() or {}).get("data") or {}
-        device_uuid = data.get("deviceUuid")
-        token = data.get("token")
-        if device_uuid and token:
-            _cache[mac] = (device_uuid, token, now)
-            _log(logger, "info", f"minted device token for {mac} -> {device_uuid}")
-            return device_uuid, token
-        _log(logger, "warning", f"mint response missing fields for {mac}")
-        return None, None
-    except Exception as exc:
-        # 404 DEVICE_NOT_LINKED / 409 DEVICE_NOT_CLAIMED / network -> fall back.
-        _log(logger, "warning", f"mint failed for {mac}: {type(exc).__name__}: {exc}")
-        return None, None
+    for attempt in range(2):
+        try:
+            resp = await client.post(
+                url,
+                json={"mac": mac},
+                headers={"X-Mint-Secret": secret, "Authorization": f"Bearer {secret}"},
+                follow_redirects=False,
+            )
+            resp.raise_for_status()
+            data = (resp.json() or {}).get("data") or {}
+            device_uuid = data.get("deviceUuid")
+            token = data.get("token")
+            if device_uuid and token:
+                _cache[mac] = (device_uuid, token, time.time())
+                _log(logger, "info", f"minted device token for {mac} -> {device_uuid}")
+                return device_uuid, token
+            _log(logger, "warning", f"mint response missing fields for {mac}")
+            return None, None
+        except (httpx.TransportError, TimeoutError) as exc:
+            if attempt == 0:
+                _log(logger, "warning", f"mint transient failure for {mac}; retrying")
+                await asyncio.sleep(0.25)
+                continue
+            _log(logger, "warning", f"mint failed for {mac}: {type(exc).__name__}: {exc}")
+            return None, None
+        except Exception as exc:
+            # 404 DEVICE_NOT_LINKED / 409 DEVICE_NOT_CLAIMED -> fail closed.
+            _log(logger, "warning", f"mint failed for {mac}: {type(exc).__name__}: {exc}")
+            return None, None
+    return None, None

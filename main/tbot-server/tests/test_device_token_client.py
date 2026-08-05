@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -54,6 +54,17 @@ class _RaisingClient:
             }
         )
         raise OSError("offline")
+
+
+class _TransientClient:
+    def __init__(self):
+        self.calls = 0
+
+    async def post(self, url, *, json, headers, follow_redirects=False):
+        self.calls += 1
+        if self.calls == 1:
+            raise httpx.ReadTimeout("temporary backend stall")
+        return _Response()
 
 
 class _Logger:
@@ -160,6 +171,23 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("missing fields" in message for message in warning_messages))
         self.assertTrue(any("RuntimeError" in message for message in warning_messages))
         self.assertTrue(any("OSError" in message for message in warning_messages))
+
+    async def test_retries_one_transient_mint_transport_failure(self):
+        client = _TransientClient()
+        device_token_client._cache.clear()
+
+        with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), patch(
+            "asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            result = await device_token_client.resolve_device_identity(
+                client,
+                "https://backend",
+                "14:c1:9f:d1:a8:48",
+            )
+
+        self.assertEqual(result, ("device-1", "jwt-1"))
+        self.assertEqual(client.calls, 2)
+        sleep.assert_awaited_once()
 
     async def test_redirect_does_not_replay_mint_secret_to_location(self):
         hits = []
