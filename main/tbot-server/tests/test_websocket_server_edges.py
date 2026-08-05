@@ -96,8 +96,8 @@ async def test_start_uses_websocket_serve_and_http_response(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    def fake_serve(handler, host, port, process_request):
-        calls.append((handler, host, port, process_request))
+    def fake_serve(handler, host, port, process_request, **kwargs):
+        calls.append((handler, host, port, process_request, kwargs))
         return ServeContext()
 
     monkeypatch.setattr(websocket_server.websockets, "serve", fake_serve)
@@ -106,6 +106,7 @@ async def test_start_uses_websocket_serve_and_http_response(monkeypatch):
     server._stop_event.set()
     await task
     assert calls[0][1:3] == ("127.0.0.1", 9001)
+    assert calls[0][4]["ping_interval"] is None
     assert server._server.name == "server"
 
     assert await server._http_response(object(), types.SimpleNamespace(headers={"connection": "upgrade"})) is None

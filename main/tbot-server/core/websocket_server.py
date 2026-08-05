@@ -148,7 +148,14 @@ class WebSocketServer:
 
         self._stop_event = asyncio.Event()
         async with websockets.serve(
-            self._handle_connection, host, port, process_request=self._http_response
+            self._handle_connection,
+            host,
+            port,
+            process_request=self._http_response,
+            # Robots use the JSON ping/pong contract. Protocol keepalive can
+            # falsely close a healthy connection while an attended SD sync is
+            # monopolizing the device's websocket callback for several minutes.
+            ping_interval=None,
         ) as server:
             self._server = server
             await self._stop_event.wait()
