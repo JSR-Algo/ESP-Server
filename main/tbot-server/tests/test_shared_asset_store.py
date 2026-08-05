@@ -144,6 +144,46 @@ def test_legacy_pack_commit_replays_existing_ready_rich_manifest(tmp_path):
     assert preserved["assets"][0]["sdPath"] == manifest["assets"][0]["sdPath"]
 
 
+def test_legacy_subset_commit_preserves_existing_ready_rich_manifest(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    poster = b"poster"
+    cinematic = b"cinematic"
+    poster_digest = _sha(poster)
+    cinematic_digest = _sha(cinematic)
+    cache_key = f"lesson-a/v1-{'a' * 64}"
+    store.put_bytes(poster, poster_digest)
+    store.put_bytes(cinematic, cinematic_digest)
+    manifest = _rich_manifest(cache_key, poster_digest, len(poster))
+    manifest["assets"].append({
+        "key": "flattenedCinematic.opening",
+        "sha256": cinematic_digest,
+        "size": len(cinematic),
+        "mediaType": "application/vnd.tbot.rgb565-indexed",
+        "critical": True,
+        "onlineUrl": "https://assets.example/opening.trgb",
+        "sdPath": f"/sdcard/tbot/lesson-assets/{cache_key}/flattenedCinematic.opening",
+    })
+    pack = store.commit_pack(
+        cache_key,
+        {"poster": poster_digest, "flattenedCinematic.opening": cinematic_digest},
+        manifest=manifest,
+    )
+
+    _pack, status = store.commit_pack(
+        cache_key,
+        {"poster": poster_digest},
+        return_status=True,
+    )
+
+    assert status == PACK_COMMIT_REPLAYED
+    preserved = json.loads((pack / "pack.json").read_text(encoding="utf-8"))
+    assert isinstance(preserved["assets"], list)
+    assert [asset["key"] for asset in preserved["assets"]] == [
+        "poster",
+        "flattenedCinematic.opening",
+    ]
+
+
 @pytest.mark.parametrize("changed_field", ["sha256", "size", "sdPath"])
 def test_ready_rich_pack_replay_rejects_asset_identity_changes(tmp_path, changed_field):
     store = SharedAssetStore(tmp_path / "tbot")

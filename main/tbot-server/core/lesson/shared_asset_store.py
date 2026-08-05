@@ -140,7 +140,10 @@ class SharedAssetStore:
                 not rich_manifest
                 and existing is not None
                 and isinstance(existing.get("assets"), list)
-                and self._manifest_assets(existing) == dict(normalized)
+                and all(
+                    self._manifest_assets(existing).get(key) == digest
+                    for key, digest in normalized.items()
+                )
             ):
                 return pack_dir, PACK_COMMIT_REPLAYED
             manifest = self._pack_manifest(cache_key, normalized, manifest)
