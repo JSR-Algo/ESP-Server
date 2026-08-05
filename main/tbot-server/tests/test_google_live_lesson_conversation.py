@@ -9,6 +9,7 @@ import pytest
 from core.providers.tools.product_toolset import product_tool_names
 from core.providers.tools.server_plugins.plugin_executor import ServerPluginExecutor
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+from core.voice.live_admission import AdmissionDecision
 from core.voice.session_orchestrator import SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 from plugins_func.functions.lesson_conversation import (
@@ -112,6 +113,11 @@ class _Client:
 
     async def send_text(self, text):
         self.responses.append(text)
+
+
+class _ClosingClient(_Client):
+    async def close(self):
+        self.connected = False
 
 
 class _WebSocket:
@@ -1833,6 +1839,269 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [])
         await bridge.close()
+
+    async def test_live_open_failure_during_lesson_recovers_via_ladder_reconnect(self):
+        """A 429/quota-style exception raised while opening Live for audio, with a
+        lesson conversation active, must reach the curated vi-VN fallback ladder
+        (not fall straight to the disabled classic stub, which leaves the child
+        silent). When the ladder's own bounded reconnect succeeds, service is
+        restored transparently -- no fallback speech is needed."""
+
+        class FallbackRuntime:
+            def __init__(self):
+                self.calls = []
+
+            def conversation_tool_path_active(self):
+                return True
+
+            async def conversation_live_interruption(self, reason):
+                self.calls.append(reason)
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="attempt-1:turn-2",
+                    reconnect_allowed=True,
+                    prompt="Mình cùng thử nhé. Say barn.",
+                    reason=reason,
+                )
+
+            def conversation_live_reconnect_succeeded(self, _window_id):
+                return True
+
+        conn = _Conn()
+        runtime = FallbackRuntime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+        provider._client = _ClosingClient()
+        provider._publish_current_lesson_context = lambda: asyncio.sleep(0)
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+        provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=True)
+        classic_calls = []
+
+        async def record_classic(exc):
+            classic_calls.append(str(exc))
+            return False
+
+        provider._activate_classic_fallback = record_classic
+
+        opened = await provider._open_live_for_audio_with_lease()
+
+        self.assertFalse(opened)
+        self.assertEqual(runtime.calls, ["transport"])
+        self.assertEqual(classic_calls, [])
+
+    async def test_live_open_failure_during_lesson_falls_through_when_reconnect_fails(self):
+        """When the ladder's bounded reconnect also fails (guaranteed for a real
+        quota/auth exhaustion), there is genuinely no Live channel left to speak
+        the curated prompt through. The call must fail closed -- no crash, no
+        fabricated speech -- and fall back to the (disabled) classic hook exactly
+        once, same as the pre-fix behavior for the non-lesson path."""
+
+        class FallbackRuntime:
+            def __init__(self):
+                self.calls = []
+
+            def conversation_tool_path_active(self):
+                return True
+
+            async def conversation_live_interruption(self, reason):
+                self.calls.append(reason)
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="attempt-1:turn-2",
+                    reconnect_allowed=True,
+                    prompt="Mình cùng thử nhé. Say barn.",
+                    reason=reason,
+                )
+
+        conn = _Conn()
+        runtime = FallbackRuntime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+        provider._client = _ClosingClient()
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+        provider._attempt_lesson_reconnect_once = lambda _reason: asyncio.sleep(0, result=False)
+        classic_calls = []
+
+        async def record_classic(exc):
+            classic_calls.append(str(exc))
+            return False
+
+        provider._activate_classic_fallback = record_classic
+
+        opened = await provider._open_live_for_audio_with_lease()
+
+        self.assertFalse(opened)
+        self.assertEqual(runtime.calls, ["transport"])
+        self.assertEqual(len(classic_calls), 1)
+
+    async def test_live_open_failure_outside_lesson_still_uses_classic_fallback_path(self):
+        """Without an active lesson conversation, the open-time failure path must
+        keep calling the classic fallback hook exactly as before (no behavior
+        change for the non-lesson conversational flow)."""
+        conn = _Conn()
+        conn.lesson_runtime = None
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+        classic_calls = []
+
+        async def record_classic(exc):
+            classic_calls.append(str(exc))
+            return False
+
+        provider._activate_classic_fallback = record_classic
+
+        opened = await provider._open_live_for_audio_with_lease()
+
+        self.assertFalse(opened)
+        self.assertEqual(len(classic_calls), 1)
+
+    async def test_lesson_text_open_failure_routes_to_curated_fallback_not_silence(self):
+        """Failing to (re)open Live while trying to speak a lesson step prompt
+        (e.g. quota exhausted mid-lesson) must not just log-and-swallow -- the
+        child must hear the curated fallback, matching the audio-open path."""
+
+        class FallbackRuntime:
+            def __init__(self):
+                self.calls = []
+
+            def conversation_tool_path_active(self):
+                return True
+
+            async def conversation_live_interruption(self, reason):
+                self.calls.append(reason)
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_READY",
+                    window_id="attempt-1:turn-2",
+                    reconnect_allowed=False,
+                    prompt="Mình cùng thử nhé. Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                self.ack_timeout = timeout_sec
+                return "authorization-1"
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
+                return True
+
+        conn = _Conn()
+        runtime = FallbackRuntime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+        survivor_client = _Client()
+        provider._client = survivor_client
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+
+        # No pre-existing send_text-capable client -- forces the open path.
+        provider._client = None
+        handled = await provider._ensure_live_open_for_lesson_text()
+        # The reopen attempt fails; the ladder must still have spoken the
+        # curated fallback via whatever client survives the attempt.
+        self.assertFalse(handled)
+        self.assertEqual(runtime.calls, ["transport"])
+
+    async def test_lesson_text_open_failure_outside_lesson_stays_silent_as_before(self):
+        """No behavior change for the non-lesson path: still just logs and
+        returns False, no lesson ladder call."""
+        conn = _Conn()
+        conn.lesson_runtime = None
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+        provider._client = None
+
+        handled = await provider._ensure_live_open_for_lesson_text()
+
+        self.assertFalse(handled)
+
+    async def test_repeated_transient_open_failures_bounded_no_duplicate_fallback_speech(self):
+        """Repeated 429s across successive lesson turns must not accumulate
+        duplicate fallback speech -- each distinct turn window gets exactly one
+        curated prompt, matching the existing curated-fallback dedupe contract."""
+
+        class FallbackRuntime:
+            def __init__(self):
+                self.calls = []
+                self._window = "attempt-1:turn-2"
+
+            def conversation_tool_path_active(self):
+                return True
+
+            async def conversation_live_interruption(self, reason):
+                self.calls.append(reason)
+                return SimpleNamespace(
+                    accepted=True,
+                    code="LIVE_FALLBACK_RECONNECT_BOUNDED",
+                    window_id=self._window,
+                    reconnect_allowed=False,
+                    prompt="Mình cùng thử nhé. Say barn.",
+                    reason=reason,
+                )
+
+            async def wait_conversation_live_fallback_ack(self, _window_id, *, timeout_sec):
+                return "authorization-1" if len(self.calls) == 1 else None
+
+            def claim_conversation_live_fallback_prompt(self, _window_id, _authorization):
+                return len(self.calls) == 1
+
+        conn = _Conn()
+        runtime = FallbackRuntime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+        survivor_client = _ClosingClient()
+
+        async def failing_open():
+            raise RuntimeError("429 Resource has been exhausted (quota)")
+
+        provider._open_live_session = failing_open
+
+        for _ in range(3):
+            survivor_client.connected = True
+            provider._client = survivor_client
+            await provider._open_live_for_audio_with_lease()
+
+        self.assertEqual(runtime.calls, ["transport", "transport", "transport"])
+        self.assertEqual(survivor_client.responses, ["Mình cùng thử nhé. Say barn."])
 
 
 @pytest.mark.asyncio

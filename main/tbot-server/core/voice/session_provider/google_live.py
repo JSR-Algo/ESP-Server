@@ -1166,6 +1166,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._voice_consent_denied = False
             return True
         except Exception as exc:
+            if self._lesson_conversation_tool_path_active():
+                if await self._handle_lesson_live_interruption("transport"):
+                    return False
             await self._close_live_resources(
                 preserve_live_prewarm=preserve_live_prewarm
             )
@@ -2314,6 +2317,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._voice_consent_denied = False
             return self._client is not None and hasattr(self._client, "send_text")
         except Exception as exc:
+            if self._lesson_conversation_tool_path_active():
+                # A curated fallback may already have been spoken through the
+                # ladder above; never let the caller also send its original
+                # text on the same turn, or the child hears two replies.
+                if await self._handle_lesson_live_interruption("transport"):
+                    return False
             await self._close_live_resources()
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live lesson_text_open failed: {}",
