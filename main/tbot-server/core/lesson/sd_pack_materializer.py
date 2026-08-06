@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import ipaddress
 import json
@@ -10,6 +11,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -42,6 +44,23 @@ from core.lesson.shared_asset_store import (
 CHUNK_SIZE = 64 * 1024
 MAX_ASSETS = 64
 MAX_CONFIG_BYTES = 2 * 1024 * 1024 * 1024
+STAGING_PREFIX = ".materialize-"
+# A crashed process leaves its staging directory behind holding partially
+# downloaded bytes. Nothing else reclaims them (cleanup_parts only sweeps
+# ``*.part`` FILES), so on SD storage they accumulate until the card fills.
+DEFAULT_STAGING_STALE_SEC = 6 * 60 * 60
+_ACTIVE_STAGING: set[str] = set()
+_ACTIVE_STAGING_LOCK = threading.RLock()
+_LOCAL_STORAGE_ERRNOS = frozenset(
+    code
+    for code in (
+        getattr(errno, name, None)
+        # Unambiguously local: EIO is deliberately absent because a socket read
+        # can also raise it, and misclassifying a network fault is worse.
+        for name in ("ENOSPC", "EDQUOT", "EROFS", "EFBIG")
+    )
+    if code is not None
+)
 # Leaves room for SharedAssetStore's ".pid.uuid.part" atomic temp suffix under
 # FAT-style 255-byte component limits.
 MAX_ENCODED_BASENAME_BYTES = 200
@@ -213,7 +232,9 @@ async def materialize_lesson_sd_pack(
         own_client = client is None
         http_client = client or _pinned_async_client(pinned_addresses)
         staging_root = _staging_root(config, store)
-        staging = Path(tempfile.mkdtemp(prefix=".materialize-", dir=str(staging_root)))
+        staging = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=str(staging_root)))
+        with _ACTIVE_STAGING_LOCK:
+            _ACTIVE_STAGING.add(str(staging))
         downloaded: dict[str, tuple[Path, str]] = {}
         for asset in normalized["assets"]:
             path, count = await _download_asset(
@@ -276,6 +297,8 @@ async def materialize_lesson_sd_pack(
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
+            with _ACTIVE_STAGING_LOCK:
+                _ACTIVE_STAGING.discard(str(staging))
         if own_client and http_client is not None:
             await http_client.aclose()
 
@@ -361,6 +384,24 @@ async def _download_asset(
                 os.fsync(handle.fileno())
     except MaterializationError:
         raise
+    except OSError as exc:
+        if exc.errno in _LOCAL_STORAGE_ERRNOS:
+            # A full/read-only SD card is not an origin failure: reporting it as
+            # DOWNLOAD_FAILED sends the backend chasing the asset host.
+            raise MaterializationError(
+                "STORAGE_ERROR",
+                500,
+                True,
+                "Failed to write lesson asset to local storage",
+                {"assetKey": asset["key"], "type": type(exc).__name__},
+            ) from exc
+        raise MaterializationError(
+            "DOWNLOAD_FAILED",
+            502,
+            True,
+            "Failed to download lesson asset",
+            {"assetKey": asset["key"], "type": type(exc).__name__},
+        ) from exc
     except Exception as exc:
         raise MaterializationError(
             "DOWNLOAD_FAILED",
@@ -731,7 +772,47 @@ def _staging_root(config: Mapping[str, Any], store: SharedAssetStore) -> Path:
     value = lesson.get("materialize_staging_root")
     root = Path(str(value)).resolve() if value else store.root / ".materialize"
     root.mkdir(parents=True, exist_ok=True)
+    sweep_stale_staging(root)
     return root
+
+
+def _staging_stale_sec() -> float:
+    raw = os.environ.get("LESSON_SD_STAGING_STALE_SEC")
+    try:
+        value = float(str(raw))
+    except (TypeError, ValueError):
+        return float(DEFAULT_STAGING_STALE_SEC)
+    return value if value > 0 else float(DEFAULT_STAGING_STALE_SEC)
+
+
+def sweep_stale_staging(root: Path) -> list[str]:
+    """Remove abandoned staging directories left by a crashed materialize.
+
+    A directory is only removed when no live materialize in THIS process owns
+    it and it has been untouched for the stale window, so a concurrent
+    materialize in another process is never robbed of its downloads.
+    """
+    removed: list[str] = []
+    cutoff = time.time() - _staging_stale_sec()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        if not entry.name.startswith(STAGING_PREFIX):
+            continue
+        with _ACTIVE_STAGING_LOCK:
+            if str(entry) in _ACTIVE_STAGING:
+                continue
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed.append(entry.name)
+    return sorted(removed)
 
 
 def _limit(config: Mapping[str, Any], env_name: str, config_name: str) -> int:

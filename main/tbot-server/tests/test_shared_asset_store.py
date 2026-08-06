@@ -415,7 +415,15 @@ def test_interrupted_atomic_write_leaves_no_visible_asset_and_cleanup_is_safe(tm
         store.put_bytes(content, digest)
 
     assert not store.asset_path(digest).exists()
-    assert list((tmp_path / "tbot").rglob("*.part"))
+    # A fault this process observes reclaims its own temp immediately: on a full
+    # SD card the stranded bytes are exactly the space that just ran out.
+    assert not list((tmp_path / "tbot").rglob("*.part"))
+
+    # A killed process never runs that cleanup, so cleanup_parts still has to
+    # collect a genuinely orphaned temp.
+    orphan = store.shared_root / "ab" / f"abandoned.{os.getpid() + 1}.deadbeef.part"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"partial")
     assert store.cleanup_parts() == 1
     assert store.cleanup_parts() == 0
 
@@ -431,7 +439,13 @@ def test_restart_automatically_cleans_interrupted_parts(tmp_path):
     data = b"partial"
     with pytest.raises(RuntimeError):
         store.put_bytes(data, _sha(data))
-    assert list(root.rglob("*.part"))
+    assert not list(root.rglob("*.part"))
+
+    # Simulate the case no in-process cleanup can cover: the writer was killed
+    # between creating the temp and publishing it.
+    orphan = store.shared_root / "cd" / f"killed.{os.getpid() + 1}.cafebabe.part"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(data)
 
     SharedAssetStore(root)
 

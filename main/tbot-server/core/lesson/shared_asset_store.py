@@ -27,6 +27,14 @@ PACK_COMMIT_REPLAYED = "replayed"
 class PackReplayMismatchError(ValueError):
     pass
 
+
+class PackDeletionRefused(RuntimeError):
+    """A pack became protected between GC candidate selection and deletion."""
+
+    def __init__(self, cache_key: str) -> None:
+        super().__init__(cache_key)
+        self.cache_key = cache_key
+
 class SharedAssetStore:
     """Store verified bytes once and expose versioned lesson pack entries.
 
@@ -201,9 +209,26 @@ class SharedAssetStore:
         *,
         sweep: bool = False,
         protected_cache_keys: set[str] = frozenset(),
+        protection_probe: Callable[[], Any] | None = None,
     ) -> list[str]:
-        """Delete one pack under cross-process GC + per-pack exclusion."""
+        """Delete one pack under cross-process GC + per-pack exclusion.
+
+        ``protected_cache_keys`` is re-checked here — inside the exclusive GC
+        lock — rather than only by the caller's earlier snapshot, and
+        ``protection_probe`` re-reads live protection (activation state) at the
+        same point. Everything that can make a pack current takes the SHARED GC
+        lock, so a probe run under the exclusive lock cannot miss a concurrent
+        activation: it either already landed (and we refuse) or it is still
+        blocked and will re-attest the now-missing pack and fail closed.
+        """
         with self._gc_lock(exclusive=True):
+            protected = {str(key) for key in protected_cache_keys if key}
+            if protection_probe is not None:
+                protected.update(
+                    str(key) for key in (protection_probe() or ()) if key
+                )
+            if cache_key in protected:
+                raise PackDeletionRefused(cache_key)
             with self._pack_lock(cache_key, exclusive=True):
                 pack_dir = self._pack_dir(cache_key)
                 if not pack_dir.exists():
@@ -215,7 +240,7 @@ class SharedAssetStore:
                 self._fsync_dir(pack_dir.parent)
                 shutil.rmtree(tombstone)
             if sweep:
-                return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
+                return self._sweep_unreferenced_cas_unlocked(protected)
         return []
 
     def sweep_unreferenced_cas(self, protected_cache_keys: set[str] = frozenset()) -> list[str]:
@@ -462,7 +487,7 @@ class SharedAssetStore:
                     self._fsync_dir(target.parent)
                     self._notify("after_replace", target)
             finally:
-                self._release_part(temp)
+                self._discard_part(temp)
 
     def _atomic_copy(self, target: Path, source: Path) -> None:
         with self._parts_lock(exclusive=False, blocking=True):
@@ -481,7 +506,7 @@ class SharedAssetStore:
                     self._fsync_dir(target.parent)
                     self._notify("after_replace", target)
             finally:
-                self._release_part(temp)
+                self._discard_part(temp)
 
     def _atomic_link(self, target: Path, source: Path) -> None:
         with self._parts_lock(exclusive=False, blocking=True):
@@ -503,7 +528,18 @@ class SharedAssetStore:
                 self._fsync_dir(target.parent)
                 self._notify("after_replace", target)
             finally:
-                self._release_part(temp)
+                self._discard_part(temp)
+
+    def _discard_part(self, temp: Path) -> None:
+        """Drop a temp that never got published.
+
+        On success ``os.replace`` already moved it, so this is a no-op; on
+        failure — ENOSPC above all — it reclaims bytes immediately instead of
+        stranding them until some later process re-runs ``cleanup_parts``.
+        """
+        with suppress(OSError):
+            temp.unlink()
+        self._release_part(temp)
 
     def _pack_dir(self, cache_key: str) -> Path:
         candidate = (self.pack_root / cache_key).resolve()
