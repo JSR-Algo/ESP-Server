@@ -236,6 +236,11 @@ class WebSocketServer:
             )
             if device_id:
                 handler.device_id = device_id
+                # Bind the socket before registering: from the moment the handler
+                # is reachable in the registry, a supersede must be able to find
+                # the socket to close. ``handle_connection`` re-binds the same
+                # object a moment later.
+                handler.websocket = websocket
                 await self._issue_liveness_lease(handler, device_id)
                 superseded = await self.lesson_connections.replace(device_id, handler)
                 if superseded is not None:
@@ -315,19 +320,44 @@ class WebSocketServer:
     def _scrap_superseded_connection(self, superseded, winner, device_id):
         """A newer socket took the device: retire the old one and say so.
 
-        Ordering matters. ``superseded_by`` is set **synchronously**, before this
-        function returns and therefore before the new connection can emit
-        anything, so the stale handler's lesson runtime is already refusing to
-        write to its dead socket by the time the winner starts. The actual
-        ``close()`` is slow (voice provider teardown, forwarder drain) and is
-        scheduled behind that guard rather than in front of it.
+        Firmware reopens its passive lesson socket on any drop it detects itself
+        (pong timeout, Wi-Fi flap, ``SchedulePassiveLessonReconnect``), so the
+        new socket routinely arrives while the old one is still registered and,
+        server-side, still open. Left alive it keeps a second lesson runtime and
+        a second event forwarder bound to the same assignment.
+
+        Ordering matters. ``superseded_by`` (T2.5) and ``mark_superseded()``
+        (T2.4) both land **synchronously**, before this function returns and
+        therefore before the new connection can emit anything: the stale
+        handler's lesson runtime is already refusing to write to its dead
+        socket, and every other writer on that handler — TTS, ping, admin nudge
+        — now hits a stand-in that refuses too. The actual close is slow (a
+        half-open peer drags the closing handshake to its timeout, then voice
+        provider teardown and forwarder drain follow) and is scheduled behind
+        that guard rather than in front of it.
         """
         from core.lesson.liveness_lease import Disposition, emit_disposition
+
+        # Capture the real socket BEFORE marking: ``mark_superseded`` swaps
+        # ``superseded.websocket`` for a stand-in whose close() is a no-op, so
+        # reading it afterwards would lose the socket that needs closing.
+        websocket = getattr(superseded, "websocket", None)
 
         try:
             superseded.superseded_by = getattr(winner, "session_id", None) or True
         except Exception:  # pragma: no cover - exotic handler object
             pass
+
+        mark = getattr(superseded, "mark_superseded", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    "Superseded connection mark failed device={} errorType={}",
+                    device_id,
+                    type(exc).__name__,
+                )
 
         winner_lease = getattr(winner, "liveness_lease", None)
         emit_disposition(
@@ -340,19 +370,33 @@ class WebSocketServer:
             extra={"winnerSessionId": str(getattr(winner, "session_id", "") or "")},
         )
 
-        close = getattr(superseded, "close", None)
-        if not callable(close):
-            return
         try:
-            task = asyncio.create_task(self._close_superseded(superseded, device_id))
+            task = asyncio.create_task(
+                self._close_superseded(superseded, websocket, device_id)
+            )
         except RuntimeError:  # pragma: no cover - no running loop (sync test call)
             return
         self._connection_tasks.add(task)
         task.add_done_callback(self._connection_tasks.discard)
 
-    async def _close_superseded(self, superseded, device_id):
+    async def _close_superseded(self, superseded, websocket, device_id):
+        # Close the socket first, with an explicit reason: the device gets a
+        # decisive 1001 without waiting on this handler's teardown, and the
+        # handler's own read loop starts unwinding.
+        if websocket is not None:
+            try:
+                await websocket.close(code=1001, reason="superseded by newer connection")
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    "Superseded websocket close failed device={} errorType={}",
+                    device_id,
+                    type(exc).__name__,
+                )
+        close = getattr(superseded, "close", None)
+        if not callable(close):
+            return
         try:
-            await superseded.close(getattr(superseded, "websocket", None))
+            await close(websocket)
         except Exception as exc:
             self.logger.bind(tag=TAG).warning(
                 "Superseded connection close failed device={} errorType={}",

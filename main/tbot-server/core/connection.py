@@ -13,6 +13,7 @@ import traceback
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import websockets
 
 from core.utils.util import (
@@ -120,6 +121,36 @@ def _connection_close_log_metadata(exc) -> str:
         f"close_code={code} close_reason_sha256={reason_hash} "
         f"close_reason_length={len(reason)}"
     )
+
+
+class SupersededConnectionError(ConnectionResetError):
+    """Raised when something tries to write to a socket a newer one replaced."""
+
+
+class _SupersededWebSocket:
+    """Stand-in installed on a handler whose device reconnected on another socket.
+
+    Closing the real socket is asynchronous (a half-open peer drags the closing
+    handshake out to its timeout), but a superseded handler can still be
+    mid-lesson: its runtime holds the connection and writes the next frame
+    through ``conn.websocket``. Swapping this in closes that window at the moment
+    of supersession, so a stale socket can never carry a lesson frame that
+    belongs to the connection which replaced it.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+        self.closed = True
+        self.state = SimpleNamespace(name="CLOSED")
+
+    async def send(self, *_args, **_kwargs):
+        raise SupersededConnectionError(self._reason)
+
+    async def ping(self, *_args, **_kwargs):
+        raise SupersededConnectionError(self._reason)
+
+    async def close(self, *_args, **_kwargs):
+        return None
 
 
 auto_import_modules("plugins_func.functions")
@@ -300,6 +331,9 @@ class ConnectionHandler:
         )  # Keep WebSocket alive for 60-minute Live/lesson sessions.
         self.timeout_task = None
 
+        # Set when another socket from the same device takes this one's place.
+        self.is_superseded = False
+
         # {"mcp":true} IndicateEnableMCPFunction
         self.features = None
 
@@ -309,7 +343,34 @@ class ConnectionHandler:
         # InitializePromptWord Manager
         self.prompt_manager = PromptManager(self.config, self.logger)
 
+    def mark_superseded(self, *, reason: str = "duplicate_device_connection") -> None:
+        """Take this handler off the air: the device is now on another socket.
+
+        Synchronous on purpose — the server calls it while still holding the
+        accept path, so by the time the newer connection is registered nothing
+        owned by this one (lesson runtime, forwarder, TTS sender) can put another
+        byte on the wire. The real socket is closed by the caller afterwards; the
+        read loop then unwinds through the normal teardown.
+        """
+        if self.is_superseded:
+            return
+        self.is_superseded = True
+        self.websocket = _SupersededWebSocket(reason)
+        if self.stop_event is not None:
+            self.stop_event.set()
+        try:
+            self.logger.bind(tag=TAG).info(
+                f"Connection superseded device_id={self.device_id or ''} "
+                f"session_id={self.session_id or ''} reason={reason}"
+            )
+        except Exception:  # pragma: no cover - logging must never break supersession
+            pass
+
     async def handle_connection(self, ws: websockets.ServerConnection):
+        if self.is_superseded:
+            # Superseded between registration and the first read: never start the
+            # loop, and never re-bind the socket over the refusing stand-in.
+            return
         try:
             # Get runningEventLoop (must be in async context)
             self.loop = asyncio.get_running_loop()
@@ -2835,6 +2896,38 @@ class ConnectionHandler:
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Chat and close error: {str(e)}")
 
+    def _lesson_peer_silence_timeout_sec(self):
+        """Inbound-silence budget tolerated while a lesson is driving this socket.
+
+        ``timeout_seconds`` is sized for 60-minute Live sessions, so it cannot
+        tell a silently dead peer from a quiet one — a half-open socket keeps the
+        lesson runtime parked in LISTENING for the rest of that hour (the
+        2026-07-06 stale-WS listening logs). During a lesson the firmware makes a
+        much tighter promise: its passive-lesson channel pings every 2 s and
+        fails its own pong probe at 10 s
+        (``TBOT-Firmware/main/protocols/passive_websocket_liveness.h``), and the
+        one window in which it deliberately goes quiet — hashing an SD asset pack
+        — is refused outright while a lesson runtime is active
+        (``Application::BeginLessonAssetSyncQuiet``). Prolonged silence under a
+        running lesson therefore means gone, not busy.
+
+        Returns ``None`` when the watchdog is disabled (non-positive config).
+        """
+        lesson_cfg = _lesson_config(self.config)
+        raw = lesson_cfg.get("peer_silence_timeout_sec", 60.0)
+        budget = _float_or_none(raw)
+        if budget is None or budget <= 0:
+            return None
+        return budget
+
+    def _lesson_peer_silence_watchdog_armed(self) -> bool:
+        if not self._lesson_runtime_active():
+            return False
+        # The robot stops answering on purpose while it hashes an SD pack; only
+        # the global idle timeout governs that window.
+        sync_task = getattr(self, "sd_pack_sync_task", None)
+        return sync_task is None or sync_task.done()
+
     async def _check_timeout(self):
         """Check connection timeout"""
         try:
@@ -2846,9 +2939,26 @@ class ConnectionHandler:
                 # Check whether timed out (only whenTimestampAlready initialized case)
                 if last_activity_time > 0.0:
                     current_time = time.time() * 1000
-                    if current_time - last_activity_time > self.timeout_seconds * 1000:
+                    idle_ms = current_time - last_activity_time
+                    silence_budget = self._lesson_peer_silence_timeout_sec()
+                    peer_silent = (
+                        silence_budget is not None
+                        and idle_ms > silence_budget * 1000
+                        and self._lesson_peer_silence_watchdog_armed()
+                    )
+                    if peer_silent or idle_ms > self.timeout_seconds * 1000:
                         if not self.stop_event.is_set():
-                            self.logger.bind(tag=TAG).info("Connection timeout, prepare close")
+                            if peer_silent:
+                                self.logger.bind(tag=TAG).warning(
+                                    "lesson_peer_silent device_id={} session_id={} "
+                                    "idle_sec={:.1f} budget_sec={:.1f}; closing socket",
+                                    self.device_id or "",
+                                    self.session_id or "",
+                                    idle_ms / 1000.0,
+                                    silence_budget,
+                                )
+                            else:
+                                self.logger.bind(tag=TAG).info("Connection timeout, prepare close")
                             # Set StopEvent, prevent duplicate processing
                             self.stop_event.set()
                             # Use try-except Wrap close operation, ensure not becauseExceptionBut blocked

@@ -53,6 +53,7 @@ class LessonEventForwarder:
         retry_backoff_multiplier: float = 2.0,
         max_reenqueue_attempts: int = 2,
         dead_letter_limit: int = 100,
+        max_queue_size: int = 512,
         terminal_store: Any = None,
     ) -> None:
         self.device_id = device_id
@@ -66,6 +67,7 @@ class LessonEventForwarder:
         self.retry_backoff_multiplier = max(1.0, float(retry_backoff_multiplier))
         self.max_reenqueue_attempts = max(0, int(max_reenqueue_attempts))
         self.dead_letter_limit = max(1, int(dead_letter_limit))
+        self.max_queue_size = max(1, int(max_queue_size))
         self.dead_letters: List[Dict[str, Any]] = []
         self.dropped_events_total = 0
         self.pending_terminal_batch: Optional[Dict[str, Any]] = None
@@ -76,12 +78,28 @@ class LessonEventForwarder:
         self._closed = False
 
     def enqueue(self, batch: Dict[str, Any]) -> None:
-        """Non-blocking; the worker drains and POSTs. Started lazily on first use."""
+        """Non-blocking; the worker drains and POSTs. Started lazily on first use.
+
+        The queue is bounded: a backend that stops answering must not let a long
+        lesson grow this in memory without limit. Terminal lifecycle batches are
+        always admitted — they are what the reconnect replay is built around —
+        so only ordinary progress can be shed, and shedding is counted in
+        ``dropped_events_total`` rather than being silent.
+        """
         if self._closed:
+            return
+        terminal = self._is_terminal_batch(batch)
+        if not terminal and self._queue.qsize() >= self.max_queue_size:
+            self._dead_letter(batch)
+            self._log(
+                "warning",
+                f"lesson-events queue full (max={self.max_queue_size}); batch dropped",
+                batch,
+            )
             return
         if self._is_started_batch(batch):
             self._remember_started_batch(batch)
-        if self._is_terminal_batch(batch):
+        if terminal:
             batch = self._with_started_event_for_replay(batch)
             self.pending_terminal_batch = batch
             _store_pending_terminal_batch(self.device_id, batch)
