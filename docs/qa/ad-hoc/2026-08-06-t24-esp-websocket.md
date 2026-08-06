@@ -403,6 +403,48 @@ Same repro on the branch tip: `2 passed`. Formal RED→GREEN row in
 
 `tests/test_ws_reconnect_lifecycle.py` — **24 passed**.
 
+### Gate
+
+```
+gate[t24] RED phase @ base ebdc935671968601b31ffa3f0d3999ed78d0d5f5
+gate[t24] GREEN phase @ tip 63f9396e270d34984f902340db15c9b2f4b2b7be
+GATE PASS: t24 VERIFIED (RED@base rc=1, GREEN@tip rc=0). Logged to GATE_LOG.md
+```
+
+### Merge conflict with T2.5, and how it was resolved
+
+T2.5 landed an **overlapping supersession implementation** on main while this
+branch was in gate (`efb4fbe3`). Convergent, not contradictory — both were
+written against the same registry seam:
+
+| | T2.5 | T2.4 (this task) |
+|---|---|---|
+| Registry | `replace()` returns the displaced entry (byte-identical to this branch's) + `is_current()` | `replace()` returns the displaced entry |
+| Synchronous guard | `superseded_by`, checked by `LessonRuntime._default_send` — drops lesson frames | `mark_superseded()` swaps in a stand-in socket — refuses **every** writer (TTS, ping, admin nudge), not just the runtime |
+| Socket | `superseded.close(websocket)` — full handler teardown | explicit `close(1001)` on the raw socket |
+| Extras | liveness lease, SCRAP disposition | task tracked for `drain()` |
+
+**Both kept.** One merged `_scrap_superseded_connection`: capture the real
+socket → stamp `superseded_by` → `mark_superseded()` → emit the SCRAP
+disposition → schedule a close that sends 1001 on the raw socket first (the
+device gets a decisive close without waiting on voice-provider teardown) and
+then runs the full handler teardown. Capturing the socket **before** marking is
+load-bearing: `mark_superseded` swaps in a stand-in whose `close()` is a no-op,
+so reading `superseded.websocket` afterwards would lose the socket that needs
+closing. T2.4's separate `_supersede_tasks` set was dropped in favour of T2.5's
+`_connection_tasks`, which `drain()` already covers.
+
+Post-resolution, run together: `test_ws_reconnect_lifecycle` (24) +
+`test_reconnect_storm` (51, T2.5's) + `test_websocket_server_edges` (7) —
+**82 passed**.
+
+### Re-test on main after merge (`b53d69e6`)
+
+**15 failed, 3554 passed, 7 skipped** (5:27). Same pre-existing baseline set as
+above plus `test_manager_web_lesson_derivatives_runtime` — also a T0.1 baseline
+failure, in `manager-web`, which this task does not touch. No failure in any
+T2.4 scope file.
+
 <!-- VERIFY-RESULTS -->
 
 ---
