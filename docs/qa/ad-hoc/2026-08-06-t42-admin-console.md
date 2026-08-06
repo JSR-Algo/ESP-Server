@@ -148,3 +148,48 @@ GREEN@tip).
 
 The T1.1-routed row ("admin course-quality lesson counts use distinct row ids") is
 resolved by this task and marked RESOLVED in §5.
+
+## Ship checklist
+
+1. **Re-verify at tip.** `main` moved twice during this session (other campaign
+   sessions merging). Branch rebased onto `6326a899` (esp32-server) / `40f4353`
+   (tbot-backend) and re-verified at tip before each merge attempt:
+   both manager-web verify commands PASS, `npm run test:lesson-studio` EXIT=0,
+   ESP console/nudge/retry/token suites 42 passed, backend `typecheck`+`lint` clean,
+   `npm test` 5333 passed / 0 failed.
+2. **Merge to main via the T0.4 gate.** Two gates, one per repo (the change spans
+   `robot/esp32-server` and `tbot-backend`; `gate.sh` takes one repo):
+   - `merge-task.sh t42 robot/esp32-server` → **GATE PASS: t42 VERIFIED**
+     (RED@base rc=1 → GREEN@tip rc=0), no-ff merge `2c2e75cd`, **merge #17**.
+   - `merge-task.sh t42-backend tbot-backend` → **GATE PASS: t42-backend VERIFIED**
+     (RED@base = 5 failing tests → GREEN@tip = 13 passing), no-ff merge `9b8c83f`,
+     **merge #18**. Neither triggered the every-5-merges integration sweep.
+   Both repro scripts are pinned to their merge commit (`SOURCE_REV`), not to the
+   branch, so the integration re-gate can still materialize them after the branch is
+   deleted — the same correction T2.2 applied to `t22.sh`.
+3. **Deploy — DEFERRED to T7.3, by explicit operator decision (asked and confirmed
+   in-session).** T4.1 is still IN_PROGRESS on `manager-web` and T2.1 on
+   `main/tbot-server`, so a per-task `redeploy-web.sh` / `deploy-vps.sh` would bounce
+   production twice for one batched wave of admin changes — the same reasoning
+   recorded for T2.3. Blast radius of deferring is small: everything shipped here is
+   admin-console-only (monitoring view staleness guards, the ESP fallback operator
+   page's device picker, two backend read endpoints). No lesson runtime, wire
+   contract, or robot-facing path is touched, so nothing here changes what a live
+   lesson does. `backup-db.sh`, `deploy-vps.sh`, `smoke-vps.sh`, the post-restart MCP
+   port-pin re-check, the robot (MAC …`ac:20`) reconnect confirmation, and
+   `redeploy-web.sh` + lesson-studio load all move to T7.3.
+4. **Re-test on main.** After both merges, on the main checkouts:
+   - manager-web: `check-lesson-assignment-ui-contracts.mjs` and
+     `check-lesson-sd-sync-ui.mjs` PASS; `npm run test:lesson-studio` EXIT=0.
+   - ESP server: console/nudge/local-sample-demo/generation-retry/device-token
+     suites **42 passed**.
+   - backend: `typecheck` + `lint` clean; `npm test` **5341 passed | 627 skipped,
+     0 failed**; the T4.2 specs 16 passed.
+   - both pinned repros re-run against the main checkouts: `t42` EXIT=0,
+     `t42-backend` EXIT=0 (13 passed).
+   No production smoke was run — nothing was deployed (step 3).
+5. **Remove the worktree.** Both worktrees verified clean and both branches verified
+   merged (`git merge-base --is-ancestor <branch> main`) before removal; local
+   branches deleted. No remote branch existed for either (never pushed;
+   `merge-task.sh` deliberately does not push, and pushing `tbot-backend` main
+   auto-deploys on Render — that stays with T7.2).
