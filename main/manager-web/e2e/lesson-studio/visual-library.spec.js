@@ -1,28 +1,19 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
+const { adminApi, adminAuthHeaders, apiRoot } = require('./helpers/admin-api');
 
-const apiRoot = '/nestjs/v1/admin';
 
-async function api(page, method, path, data) {
-  const token = await page.evaluate(() => localStorage.getItem('nestjs_session_token'));
-  expect(token, 'real Nest Author session token must exist after UI login').toBeTruthy();
-  const response = await page.request.fetch(`${apiRoot}${path}`, {
-    method,
-    data,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Nest-Authorization': `Bearer ${token}`,
-    },
-  });
-  expect(response.ok(), `${method} ${path}: ${response.status()} ${await response.text()}`).toBe(true);
-  const body = await response.json();
-  return body.data;
-}
+const api = (page, method, path, data) => adminApi(page, method, path, data);
+
+// The lesson-wide visuals command binds the pair on every step, so `usages`
+// carries one row per (lesson, step) — the UI dedupes them before display.
+// Assert on lessons, not on an incidental step count.
+const usageLessonIds = (detail) => [...new Set(detail.usages.map((usage) => usage.lessonId))];
 
 async function createVisualVersion(page, assetKey, version) {
   return api(page, 'POST', `/lesson-visual-assets/${encodeURIComponent(assetKey)}/versions`, {
-    category: 'teachingObject',
+    category: version.category || 'teachingObject',
     title: `Disposable ${assetKey}`,
     profile: version.profile,
     storagePath: `fixture://lesson-studio-e2e/${assetKey}/${version.name}.png`,
@@ -46,8 +37,24 @@ async function cloneFixtureCourse(page, sourceCourseId, courseKey, sourceVersion
   const steps = await api(page, 'GET', `/lessons/${lesson.id}/steps`);
   expect(steps.length).toBeGreaterThan(0);
   const stepKey = steps[0].step_key || steps[0].stepKey;
-  await api(page, 'PUT', `/lessons/${lesson.id}/steps/${encodeURIComponent(stepKey)}/visual-refs/teachingObject`, {
-    assetVersionId: sourceVersionId,
+  // Background + teaching object are lesson-wide, not per-step: the only
+  // per-step slot left is robotOverlay (PER_STEP_VISUAL_SLOTS in the backend),
+  // so PUT .../visual-refs/teachingObject now 400s. Bind through the lesson-wide
+  // visuals command, which requires the pair.
+  const background = await createVisualVersion(page, `e2e-visual-bg-${courseKey}`, {
+    category: 'scene',
+    profile: 'espTft',
+    name: 'bg-v1',
+    sha: 'c'.repeat(64),
+    bytes: 2048,
+    // espTft caps a decoded backgroundScene at 153600 bytes (w*h*2), so a full
+    // 480x320 poster is rejected by the budget guard.
+    width: 480,
+    height: 160,
+  });
+  await api(page, 'PUT', `/lessons/${lesson.id}/visuals`, {
+    backgroundAssetVersionId: background.versionId || background.version_id || background.id,
+    objectAssetVersionId: sourceVersionId,
   });
   return { course, lesson, stepKey, steps };
 }
@@ -151,7 +158,7 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   const cloneResult = (await (await cloneResponse).json()).data;
   expect(cloneResult.clonedAssetKey).toMatch(/^clone\./);
   const clonedDetail = await visualDetail(page, cloneResult.clonedAssetKey, cloneResult.clonedVersionId);
-  expect(clonedDetail.usages.map((usage) => usage.lessonId)).toEqual([fixtures.clone.lesson.id]);
+  expect(usageLessonIds(clonedDetail)).toEqual([fixtures.clone.lesson.id]);
 
   await page.reload();
   await expect(page.getByRole('heading', { name: assetKey })).toBeVisible();
@@ -169,9 +176,9 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   const selectedResult = (await (await selectedResponse).json()).data;
   expect(selectedResult.branchedLessonIds).toHaveLength(1);
   let sourceDetail = await visualDetail(page, assetKey, source.id);
-  expect(sourceDetail.usages.map((usage) => usage.lessonId)).toContain(fixtures.published.lesson.id);
+  expect(usageLessonIds(sourceDetail)).toContain(fixtures.published.lesson.id);
   let targetDetail = await visualDetail(page, assetKey, target.id);
-  expect(targetDetail.usages.map((usage) => usage.lessonId)).toEqual(expect.arrayContaining([fixtures.selected.lesson.id, selectedResult.branchedLessonIds[0]]));
+  expect(usageLessonIds(targetDetail)).toEqual(expect.arrayContaining([fixtures.selected.lesson.id, selectedResult.branchedLessonIds[0]]));
 
   await page.reload();
   await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
@@ -185,9 +192,9 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   expect(globalResult.updateDraftLessonIds).toContain(fixtures.global.lesson.id);
   expect(globalResult.branchedLessonIds).toHaveLength(1);
   sourceDetail = await visualDetail(page, assetKey, source.id);
-  expect(sourceDetail.usages.map((usage) => usage.lessonId)).toEqual([fixtures.published.lesson.id]);
+  expect(usageLessonIds(sourceDetail)).toEqual([fixtures.published.lesson.id]);
   targetDetail = await visualDetail(page, assetKey, target.id);
-  expect(targetDetail.usages.map((usage) => usage.lessonId)).toEqual(expect.arrayContaining([
+  expect(usageLessonIds(targetDetail)).toEqual(expect.arrayContaining([
     fixtures.selected.lesson.id,
     fixtures.global.lesson.id,
     selectedResult.branchedLessonIds[0],

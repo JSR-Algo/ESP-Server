@@ -1,22 +1,9 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
+const { nestFetch } = require('./helpers/admin-api');
 
-async function nestApi(page, path, { method = 'GET', body } = {}) {
-  return page.evaluate(async ({ path, method, body }) => {
-    const token = localStorage.getItem('nestjs_session_token');
-    const headers = token ? { 'X-Nest-Authorization': `Bearer ${token}` } : {};
-    let requestBody;
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      requestBody = JSON.stringify(body);
-    }
-    const response = await fetch(`/nestjs/v1/admin${path}`, { method, headers, body: requestBody });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(`${method} ${path} failed (${response.status}): ${JSON.stringify(payload)}`);
-    return payload && Object.prototype.hasOwnProperty.call(payload, 'data') ? payload.data : payload;
-  }, { path, method, body });
-}
+const nestApi = (page, path, options) => nestFetch(page, path, options);
 
 test('real admin previews the exact espTft scene and all response paths', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
@@ -38,6 +25,7 @@ test('real admin previews the exact espTft scene and all response paths', async 
     { slot: 'teachingObject', category: 'teachingObject', assetKey: `e2e.${runId}.object`, sha256: 'b'.repeat(64) },
     { slot: 'robotOverlay', category: 'robotPose', assetKey: `e2e.${runId}.robot`, sha256: 'c'.repeat(64) },
   ];
+  const versionIdBySlot = {};
   for (const visual of visuals) {
     const version = await nestApi(page, `/lesson-visual-assets/${visual.assetKey}/versions`, {
       method: 'POST',
@@ -54,10 +42,21 @@ test('real admin previews the exact espTft scene and all response paths', async 
         publicationState: 'published',
       },
     });
-    await nestApi(page, `/lessons/${lesson.id}/steps/${encodeURIComponent(step.step_key)}/visual-refs/${visual.slot}`, {
-      method: 'PUT', body: { assetVersionId: version.id },
-    });
+    versionIdBySlot[visual.slot] = version.id;
   }
+
+  // Only robotOverlay is a per-step slot (PER_STEP_VISUAL_SLOTS); background and
+  // teaching object are lesson-wide and must go through the visuals command.
+  await nestApi(page, `/lessons/${lesson.id}/visuals`, {
+    method: 'PUT',
+    body: {
+      backgroundAssetVersionId: versionIdBySlot.backgroundScene,
+      objectAssetVersionId: versionIdBySlot.teachingObject,
+    },
+  });
+  await nestApi(page, `/lessons/${lesson.id}/steps/${encodeURIComponent(step.step_key)}/visual-refs/robotOverlay`, {
+    method: 'PUT', body: { assetVersionId: versionIdBySlot.robotOverlay },
+  });
 
   await nestApi(page, `/lessons/${lesson.id}/steps/${encodeURIComponent(step.step_key)}`, {
     method: 'PATCH',
@@ -74,10 +73,16 @@ test('real admin previews the exact espTft scene and all response paths', async 
     },
   });
 
+  // Register before navigating: the editor auto-generates the espTft preview as
+  // soon as steps load, so the 200 can land before any click.
+  const previewResponse = page.waitForResponse((response) =>
+    response.url().includes(`/lessons/${lesson.id}/manifest-preview`) && response.status() === 200);
   await page.goto(`/login#/lesson-editor?lessonId=${lesson.id}`);
   await expect(page.getByRole('heading', { name: `Preview lesson ${runId}` })).toBeVisible();
-  const previewResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${lesson.id}/manifest-preview`) && response.status() === 200);
-  await page.getByRole('button', { name: 'Generate preview' }).click();
+  // "Generate preview" lives in the empty state (v-else on previewManifest), so
+  // it is absent once the auto-preview has succeeded. Click it only if shown.
+  const generatePreview = page.getByRole('button', { name: 'Generate preview' });
+  if (await generatePreview.isVisible().catch(() => false)) await generatePreview.click();
   await previewResponse;
 
   const stage = page.getByTestId('esp-tft-stage');
@@ -96,14 +101,22 @@ test('real admin previews the exact espTft scene and all response paths', async 
     ['Timeout', 'Slave command: listen'],
     ['Brave try', 'Slave command: thinking'],
     ['Completion', 'Slave command: goodbye'],
-    ['Silence', 'Slave command: patient-wait'],
+    // silence resolves through PATH_STATE to the 'listen' visual state, and this
+    // step authors motion.listen, so the authored value wins over DEFAULT_PATHS'
+    // patient-wait. sttUnavailable resolves to 'teach', which the authored map
+    // does not key (it authors `present`), so its calm-idle default stands.
+    ['Silence', 'Slave command: listen'],
     ['STT unavailable', 'Slave command: calm-idle'],
     ['Missing visual', 'Slave command: teach'],
   ];
+  // Scope to the response-path toolbar: labels like "Correct" also name
+  // LessonSimulationPanel preset buttons, so an unscoped lookup is ambiguous.
+  const responsePaths = page.getByLabel('Response paths');
   for (const [label, command] of expectations) {
-    await page.getByRole('button', { name: label, exact: true }).click();
+    await responsePaths.getByRole('button', { name: label, exact: true }).click();
     await expect(page.getByRole('list', { name: 'Robot command timeline' })).toContainText(command);
-    await expect(page.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(responsePaths.getByRole('button', { name: label, exact: true }))
+      .toHaveAttribute('aria-pressed', 'true');
   }
   await expect(stage.locator('.missing-visual')).toContainText('MOON');
   await expect(stage.locator('img.layer-teachingObject')).toHaveCount(0);

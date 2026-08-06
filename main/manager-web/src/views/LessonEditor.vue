@@ -343,9 +343,9 @@
             </el-table-column>
             <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
               <template slot-scope="scope">
-                <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
-                <el-button type="text" size="small" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
-                <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
+                <el-button type="text" size="small" :disabled="stepMutationBlocked || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
+                <el-button type="text" size="small" :disabled="stepMutationBlocked || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
+                <el-button type="text" size="small" class="danger-text" :loading="deletingStepKey === scope.row.stepKey" :disabled="stepMutationBlocked" @click="deleteStep(scope.row)">{{ $t('lesson.deleteStep') }}</el-button>
               </template>
             </el-table-column>
             <template slot="empty"><span class="muted">{{ $t('lesson.noSteps') }}</span></template>
@@ -354,7 +354,7 @@
 
         <!-- Add step (draft only) -->
         <div v-if="isDraft" class="add-row">
-          <el-button type="primary" size="small" icon="el-icon-plus" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
+          <el-button type="primary" size="small" icon="el-icon-plus" :disabled="stepMutationBlocked" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
         </div>
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
       </el-card>
@@ -531,7 +531,7 @@
       </el-form>
       <span slot="footer">
         <el-button size="small" @click="stepDialogVisible = false">{{ $t('lesson.cancel') }}</el-button>
-        <el-button type="primary" size="small" :loading="addingStep" :disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey" @click="addStep">{{ $t('lesson.save') }}</el-button>
+        <el-button type="primary" size="small" :loading="addingStep" :disabled="stepMutationBlocked" @click="addStep">{{ $t('lesson.save') }}</el-button>
       </span>
     </el-dialog>
 
@@ -920,6 +920,21 @@ export default {
       return this.savingLessonVisuals
         || Boolean(this.pendingLessonVisualPair)
         || this.lessonVisualReconciliationRequired;
+    },
+    /**
+     * True while any step mutation is in flight. Must stay a real Boolean: it
+     * feeds el-button's Boolean `disabled` prop, and Vue coerces an empty string
+     * to `true`. `deletingStepKey` idles at `''`, so an inline
+     * `... || deletingStepKey` chain evaluates to `''` and permanently disables
+     * Add step / the step dialog's Save / Delete step.
+     */
+    stepMutationBlocked() {
+      return Boolean(
+        this.lessonVisualStepMutationBlocked
+        || this.addingStep
+        || this.reordering
+        || this.deletingStepKey,
+      );
     },
     selectedStepKey() {
       return this.selectedStep ? this.selectedStep.stepKey : '';
@@ -1881,11 +1896,24 @@ export default {
       );
       return true;
     },
-    resetPromptDraft(step) {
+    /**
+     * Adopts `step`'s prompt as the editor draft. Refuses to discard an unsaved
+     * edit for the step still being edited unless forced: step refetches land
+     * asynchronously (asset selection, visual rebind, conflict check), and an
+     * unconditional reset silently reverted the operator's typing and then
+     * PATCHed the pre-edit prompt back. Only the post-save sync forces it, where
+     * adopting server truth is the intent.
+     */
+    resetPromptDraft(step, { force = false } = {}) {
+      if (!force && this.promptDirty && step && step.stepKey === this.promptStepKey) {
+        this.promptDirty = this.promptDraft !== (step.prompt || '');
+        return false;
+      }
       this.promptStepKey = step ? step.stepKey : '';
       this.promptDraft = step && typeof step.prompt === 'string' ? step.prompt : '';
       this.promptDirty = false;
       this.promptEditRevision += 1;
+      return true;
     },
     shouldApplySavedStepState(guard) {
       return Boolean(
@@ -1908,7 +1936,8 @@ export default {
     },
     syncPromptDraftAfterFetch(step, guard) {
       if (this.shouldApplySavedStepState(guard)) {
-        this.resetPromptDraft(step);
+        // The save just landed, so server truth supersedes the draft.
+        this.resetPromptDraft(step, { force: true });
         return true;
       }
       if (step && step.stepKey === this.promptStepKey) {
@@ -1970,11 +1999,14 @@ export default {
     requestSelectedStepSave() {
       const step = this.selectedStep;
       if (!step || this.stepConflictChecking) return false;
+      // Snapshot before the conflict check: promptDraft is not keyed by step, so
+      // any refetch in that window resets it and the edit would be lost.
+      const promptSnapshot = { stepKey: step.stepKey, prompt: this.promptDraft };
       this.stepConflictChecking = true;
       const release = () => { this.stepConflictChecking = false; };
       this.guardStepSaveConflict(step.stepKey, () => {
         release();
-        this.saveSelectedStep();
+        this.saveSelectedStep(promptSnapshot);
       }, release);
       return true;
     },
@@ -2220,9 +2252,18 @@ export default {
         && payload && payload.stepBody
         && Object.prototype.hasOwnProperty.call(payload.stepBody, 'cinematicPhases');
     },
-    saveSelectedStep() {
+    /**
+     * `promptSnapshot` carries the prompt as it stood when the operator hit Save.
+     * The conflict check re-reads the step list first, and a refetch landing in
+     * that window fires the selectedStepKey watcher -> resetPromptDraft, which
+     * would otherwise make the save silently PATCH the pre-edit prompt back.
+     */
+    saveSelectedStep(promptSnapshot = null) {
       const step = this.selectedStep;
       if (!step || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
+      const promptValue = promptSnapshot && promptSnapshot.stepKey === step.stepKey
+        ? promptSnapshot.prompt
+        : this.promptDraft;
       const authored = this.selectedAuthoring;
       const stepBody = mergeStepBodyForSave(step.stepBody || {}, authored);
       const selectedAsset = this.selectedAssetDrafts[step.stepKey];
@@ -2251,7 +2292,7 @@ export default {
       const stepPayload = this.stepPayloadWithoutVisualRefs({
         ...step,
         ...this.selectedContent,
-        prompt: this.promptDraft,
+        prompt: promptValue,
         stepBody,
       });
       const derivativeSourceChanged = this.flattenedStepMutationChangesSource(stepPayload);

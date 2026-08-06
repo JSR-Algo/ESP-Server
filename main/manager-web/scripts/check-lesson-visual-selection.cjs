@@ -370,8 +370,16 @@ assert.ok((deleteStepSource.match(/this\.deletingStepKey\s*=\s*'';/g) || []).len
 assertSourceIncludes(editorSource, ':loading="deletingStepKey === scope.row.stepKey"', 'active step deletion needs a row loading state');
 assertSourceIncludes(
   editorSource,
-  ':disabled="lessonVisualStepMutationBlocked || addingStep || reordering || deletingStepKey"',
+  ':disabled="stepMutationBlocked"',
   'add-step control must lock during conflicting mutations',
+);
+// The chain must stay behind a Boolean() computed: inlining it ends the
+// expression on `deletingStepKey`, whose idle '' Vue coerces to true, which
+// permanently disabled Add step / the step dialog's Save / Delete step.
+assertSourceIncludes(
+  editorSource,
+  'stepMutationBlocked() {\n      return Boolean(',
+  'step-mutation locking must be a Boolean() computed, not an inline string chain',
 );
 [addStepSource, moveStepSource, deleteStepSource].forEach((mutationSource) => {
   assertSourceIncludes(mutationSource, 'const lessonId = this.lessonId;', 'step mutation must capture its lesson identity');
