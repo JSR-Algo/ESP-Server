@@ -192,7 +192,7 @@ assert.match(
 assert.match(editorSource, /if \(!baselineFingerprint\)\s*\{\s*proceed\(\);/);
 const guardedSaves = editorSource.match(/this\.guardStepSaveConflict\(step\.stepKey,/g) || [];
 assert.strictEqual(guardedSaves.length, 2, 'both step-save entry points must be guarded');
-assert.match(editorSource, /requestSelectedStepSave\(\)\s*\{[\s\S]*?this\.saveSelectedStep\(\);/);
+assert.match(editorSource, /requestSelectedStepSave\(\)\s*\{[\s\S]*?this\.saveSelectedStep\(promptSnapshot\);/);
 assert.match(editorSource, /requestSelectedStepStudioSave\(\)\s*\{[\s\S]*?this\.saveSelectedStepStudio\(\);/);
 // The button must call the guarded wrapper, never the raw save.
 assert.match(editorSource, /@click="requestSelectedStepSave"/);
@@ -243,5 +243,62 @@ function expectBlankForm() {
     },
   };
 }
+
+// The conflict check inserts an async listSteps hop before the PATCH. promptDraft
+// is not keyed by step, so a refetch landing in that window resets it — the save
+// then PATCHed the pre-edit prompt back and the operator's edit vanished. The
+// prompt must be captured at click time and passed through.
+assert.match(
+  editorSource,
+  /const promptSnapshot = \{ stepKey: step\.stepKey, prompt: this\.promptDraft \};[\s\S]*?this\.saveSelectedStep\(promptSnapshot\);/,
+  'requestSelectedStepSave must snapshot promptDraft before the conflict check',
+);
+assert.match(
+  editorSource,
+  /saveSelectedStep\(promptSnapshot = null\)/,
+  'saveSelectedStep must accept the pre-captured prompt',
+);
+assert.match(
+  editorSource,
+  /prompt: promptValue,/,
+  'the step PATCH must send the captured prompt, not a possibly-reset promptDraft',
+);
+assert.ok(
+  !/prompt: this\.promptDraft,\n\s*stepBody,/.test(editorSource),
+  'the step PATCH must not read promptDraft after the conflict check',
+);
+
+// An async step refetch must never discard an unsaved prompt edit for the step
+// being edited; only the post-save sync may force server truth over the draft.
+assert.match(
+  editorSource,
+  /resetPromptDraft\(step, \{ force = false \} = \{\}\) \{\s*\n\s*if \(!force && this\.promptDirty && step && step\.stepKey === this\.promptStepKey\)/,
+  'resetPromptDraft must protect a dirty draft for the step still being edited',
+);
+assert.match(
+  editorSource,
+  /this\.resetPromptDraft\(step, \{ force: true \}\);/,
+  'the post-save sync must force the prompt draft to server truth',
+);
+
+// Vue coerces an empty string on a Boolean prop to `true`, so a `:disabled`
+// chain whose last operand is a string flag (`deletingStepKey` idles at '')
+// evaluates to '' and permanently disables the control. This dead-locked
+// "Add step", the step dialog's "Save", and "Delete step" — no step could be
+// created in the studio at all. Keep such chains behind a Boolean() computed.
+const stringValuedFlags = ['deletingStepKey', 'promptStepKey', 'selectedStepKey'];
+const booleanPropBindings = /:(?:disabled|loading)="([^"]+)"/g;
+for (const [binding, expression] of editorSource.matchAll(booleanPropBindings)) {
+  const lastOperand = expression.split('||').pop().trim();
+  assert.ok(
+    !stringValuedFlags.includes(lastOperand),
+    `${binding}: a Boolean prop must not end in the string flag \`${lastOperand}\` `
+      + '(Vue coerces \'\' to true). Wrap the chain in a Boolean() computed.',
+  );
+}
+assert.ok(
+  /stepMutationBlocked\(\)\s*{\s*return Boolean\(/.test(editorSource),
+  'LessonEditor must gate step-mutation controls through the Boolean() stepMutationBlocked computed',
+);
 
 console.log('lesson step editor state checks passed');

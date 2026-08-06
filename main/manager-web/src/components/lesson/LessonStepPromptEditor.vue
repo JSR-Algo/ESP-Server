@@ -5,6 +5,7 @@
     </label>
     <el-input
       id="lesson-step-prompt"
+      data-testid="lesson-step-prompt"
       type="textarea"
       :value="value"
       :disabled="disabled"

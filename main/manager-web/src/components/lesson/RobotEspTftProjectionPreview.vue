@@ -139,7 +139,7 @@
       <span class="play-note">preview tempo (compressed)</span>
     </div>
 
-    <div class="preview-toolbar">
+    <div class="preview-toolbar" aria-label="Response paths">
       <button
         v-for="path in responsePaths"
         :key="path"

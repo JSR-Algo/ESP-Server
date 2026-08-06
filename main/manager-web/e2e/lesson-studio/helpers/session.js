@@ -31,8 +31,16 @@ async function loginAsLessonAuthor(page) {
   // The web container may start milliseconds before Docker DNS publishes the
   // backend alias. Verify the same-origin proxy has recovered before opening
   // the Author dialog, otherwise a transient 502 looks like bad credentials.
-  await expect.poll(async () => page.request.get('/nestjs/v1/health').then((response) => response.status()))
-    .toBe(200);
+  // nginx guards /nestjs/ with auth_request against the manager bearer, and the
+  // manager token lives in localStorage — so probe from inside the page with the
+  // same header axios sends. `page.request` carries cookies only and always 401s.
+  await expect.poll(async () => page.evaluate(async () => {
+    const stored = JSON.parse(localStorage.getItem('token') || 'null');
+    const response = await fetch('/nestjs/v1/health', {
+      headers: stored && stored.token ? { Authorization: `Bearer ${stored.token}` } : {},
+    });
+    return response.status;
+  })).toBe(200);
 
   await page.goto('/login#/course-management');
 

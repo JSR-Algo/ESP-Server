@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
+const { selectByTestId, selectOption } = require('./helpers/select');
 
 test('admin creates and persists an eight-minute safe-speaking lesson draft', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
@@ -13,8 +14,8 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   const courseDialog = page.getByRole('dialog', { name: 'Create course' });
   await courseDialog.getByPlaceholder('e.g. w02-numbers').fill(courseKey);
   await courseDialog.locator('input').nth(1).fill(`Lesson Studio ${runId}`);
-  await courseDialog.getByPlaceholder('en').fill('en-US');
-  await courseDialog.getByPlaceholder('6-8').fill('6-8');
+  await selectByTestId(page, courseDialog, 'course-locale', 'en-US');
+  await selectByTestId(page, courseDialog, 'course-age-band', '4-6');
   const createCourse = page.waitForResponse((response) =>
     response.url().endsWith('/nestjs/v1/admin/courses') && response.request().method() === 'POST');
   await courseDialog.getByRole('button', { name: 'Save' }).click();
@@ -29,11 +30,10 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   const lessonDialog = page.getByRole('dialog', { name: 'Create lesson' });
   await lessonDialog.getByPlaceholder('e.g. w02-d01-run-say-it').fill(lessonKey);
   await lessonDialog.locator('input').nth(1).fill(`Safe Speaking ${runId}`);
-  await lessonDialog.getByPlaceholder('en').fill('en-US');
-  await lessonDialog.getByPlaceholder('6-8').fill('6-8');
+  await selectByTestId(page, lessonDialog, 'lesson-locale', 'en-US');
+  await selectByTestId(page, lessonDialog, 'lesson-age-band', '4-6');
   await lessonDialog.getByPlaceholder('animals, farm, visual').fill('safeSpeaking, story, visual');
-  await lessonDialog.getByPlaceholder('Difficulty').click();
-  await page.getByRole('listitem').filter({ hasText: /^basic$/ }).click();
+  await selectOption(page, lessonDialog.getByPlaceholder('Difficulty'), 'basic');
   await lessonDialog.getByRole('spinbutton').fill('480');
   const createLesson = page.waitForResponse((response) =>
     response.url().includes('/nestjs/v1/admin/courses/')
@@ -83,6 +83,10 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   expect(validationResponse.status()).toBe(422);
   const validationBody = await validationResponse.json();
   expect(validationBody.code).toBe('ASSET_PROFILE_UNAVAILABLE');
-  await expect(page.getByText(validationBody.message)).toBeVisible();
+  // The failure surfaces twice — the el-message toast and the readiness panel's
+  // server-validation error list — which is the point: the operator cannot miss it.
+  await expect(page.getByText(validationBody.message).first()).toBeVisible();
+  await expect(page.getByTestId('validation-result').getByText(validationBody.message))
+    .toBeVisible();
   assertNoUnexpectedPageErrors();
 });

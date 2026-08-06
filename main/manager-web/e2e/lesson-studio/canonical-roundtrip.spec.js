@@ -4,9 +4,9 @@ const { resolve } = require('path');
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
+const { adminApi, adminAuthHeaders, apiRoot } = require('./helpers/admin-api');
 const { lessonStudioAssetUrl } = require('../../scripts/lesson-studio-e2e-environment.cjs');
 
-const apiRoot = '/nestjs/v1/admin';
 const responseVisualSourceIds = {
   'feedback.correct.star': '00000006-0016-4000-8000-000000000011',
   'feedback.near-miss.spark': '00000006-0016-4000-8000-000000000012',
@@ -28,18 +28,16 @@ function loadCanonicalFixture() {
   };
 }
 
-async function api(page, method, path, data) {
-  const token = await page.evaluate(() => localStorage.getItem('nestjs_session_token'));
-  expect(token, 'real Nest Author session token must exist').toBeTruthy();
-  const response = await page.request.fetch(`${apiRoot}${path}`, {
-    method,
-    data,
-    headers: { 'Content-Type': 'application/json', 'X-Nest-Authorization': `Bearer ${token}` },
-  });
-  expect(response.ok(), `${method} ${path}: ${response.status()} ${await response.text()}`).toBe(true);
-  const body = await response.json();
-  return body.data;
+const api = (page, method, path, data) => adminApi(page, method, path, data);
+// Publishing goes through the immutable-version review dialog: acknowledge the
+// immutability notice, then confirm. It is no longer a plain OK/confirm box.
+async function confirmPublishReview(page) {
+  const reviewDialog = page.getByRole('dialog', { name: /immutable version review/i });
+  await expect(reviewDialog).toBeVisible();
+  await reviewDialog.getByTestId('immutable-ack').click();
+  await reviewDialog.getByRole('button', { name: /publish reviewed version/i }).click();
 }
+
 
 function espTftAssetForKey(assetManifest, assetKey) {
   const matches = assetManifest.espTft.filter((asset) => asset.keys.includes(assetKey));
@@ -124,17 +122,18 @@ async function importCanonicalDraft(page, source, assetManifest, runId) {
     });
     const stepKey = step.step_key || step.stepKey;
     createdSteps.push({ sourceStep, stepKey });
-    const refs = {
-      backgroundScene: source.visuals.backgroundScene,
-      teachingObject: source.teachingObjects[sourceStep.subject] || source.visuals.teachingObject,
-      robotOverlay: source.visuals.robotOverlay,
-    };
-    for (const [slot, assetKey] of Object.entries(refs)) {
-      await api(page, 'PUT', `/lessons/${lesson.id}/steps/${encodeURIComponent(stepKey)}/visual-refs/${slot}`, {
-        assetVersionId: versions.get(assetKey),
-      });
-    }
+    // robotOverlay is the only per-step visual slot the backend still accepts
+    // (PER_STEP_VISUAL_SLOTS); background + teaching object are lesson-wide.
+    await api(page, 'PUT', `/lessons/${lesson.id}/steps/${encodeURIComponent(stepKey)}/visual-refs/robotOverlay`, {
+      assetVersionId: versions.get(source.visuals.robotOverlay),
+    });
   }
+  // One lesson-wide pair for every step, mirroring what the studio's
+  // "Lesson background and object" control does.
+  await api(page, 'PUT', `/lessons/${lesson.id}/visuals`, {
+    backgroundAssetVersionId: versions.get(source.visuals.backgroundScene),
+    objectAssetVersionId: versions.get(source.visuals.teachingObject),
+  });
   const actualKeyBySourceKey = new Map(createdSteps.map(({ stepKey }, index) => [`s${index + 1}`, stepKey]));
   for (const { sourceStep, stepKey } of createdSteps) {
     if (!sourceStep.stepBody.branches) continue;
@@ -380,7 +379,8 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await page.getByRole('button', { name: /validate/i }).click();
   await validateResponse;
   await expect(page.locator('.readiness')).toContainText('READY');
-  await expect(page.locator('.readiness')).toContainText('All pathsTerminate');
+  // budgetRows renders the branch-termination row as label "All paths" + PASS/FAIL.
+  await expect(page.locator('.readiness')).toContainText('All pathsPASS');
 
   const previewResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`) && response.status() === 200);
   await page.getByRole('button', { name: /^preview$/i }).click();
@@ -397,23 +397,45 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
     await durationPreview;
     await page.getByTestId('esp-tft-stage').screenshot({ path: resolve(screenshotDir, `canonical-preview-${minutes}m.png`) });
   }
+  // Scope to the response-path toolbar: labels like "Correct" also name
+  // LessonSimulationPanel preset buttons, so an unscoped lookup is ambiguous.
+  const responsePaths = page.getByLabel('Response paths');
   for (const label of ['Correct', 'Near miss', 'Incorrect', 'Retry', 'Timeout', 'Brave try', 'Completion']) {
-    await page.getByRole('button', { name: label, exact: true }).click();
-    await expect(page.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await responsePaths.getByRole('button', { name: label, exact: true }).click();
+    await expect(responsePaths.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByRole('list', { name: 'Robot command timeline' })).toContainText(`Response path: ${label === 'Near miss' ? 'nearMiss' : label === 'Brave try' ? 'braveTry' : label.toLowerCase()}`);
   }
 
+  // Publish requires validation, preview and simulation evidence all pinned to
+  // the same proofVersion (canPublishCurrentProof). The duration-preset saves
+  // above cleared the validation, so re-validate before simulating.
+  const revalidateResponse = page.waitForResponse((response) =>
+    response.url().endsWith(`/lessons/${fixture.lesson.id}/validate`) && response.status() === 200);
+  await page.getByRole('button', { name: /validate/i }).click();
+  await revalidateResponse;
+
+  const simulateResponse = page.waitForResponse((response) =>
+    response.url().includes(`/lessons/${fixture.lesson.id}/simulate`) && response.status() === 200);
+  await page.getByRole('button', { name: 'Simulate', exact: true }).click();
+  await simulateResponse;
+  await expect(page.locator('.simulation-result')).toContainText('lesson_completed');
+
   const publishResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/publish`) && response.status() === 200);
+  await expect(page.getByRole('button', { name: /^publish$/i })).toBeEnabled();
   await page.getByRole('button', { name: /^publish$/i }).click();
-  await page.getByRole('button', { name: /ok|confirm/i }).last().click();
+  await confirmPublishReview(page);
   const published = (await (await publishResponse).json()).data;
-  await expect(page.locator('.el-alert__title').filter({ hasText: `Published v${published.lessonVersion}` })).toBeVisible();
+  // The confirmation shows twice: the page banner and the review dialog's result alert.
+  await expect(page.locator('.el-alert__title')
+    .filter({ hasText: `Published v${published.lessonVersion}` }).first()).toBeVisible();
 
   const original = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(original.status).toBe('published');
   expect(original.manifest_checksum || original.manifestChecksum).toBe(published.checksum);
   await expect(page.getByRole('button', { name: 'Rename' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Publish' })).toHaveCount(0);
+  // exact: the review dialog's own "Publish reviewed version" button would
+  // otherwise match this substring lookup.
+  await expect(page.getByRole('button', { name: 'Publish', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '+ Add step' })).toHaveCount(0);
   await expect(page.getByTestId('lesson-step-prompt')).toBeDisabled();
   const publishedProjection = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
@@ -423,7 +445,11 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
 
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
   await expect(page.getByRole('row').filter({ hasText: customizedTitle }).first()).toContainText('published');
-  const newVersionButton = page.getByRole('button', { name: 'New version' });
+  // Creating the next editable version moved out of the lesson list and onto the
+  // lesson editor, as "Create editable version" (data-testid create-next-version).
+  await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
+  await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
+  const newVersionButton = page.getByTestId('create-next-version');
   await expect(newVersionButton).toHaveCount(1);
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
@@ -431,13 +457,18 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await page.getByRole('button', { name: /ok|confirm/i }).last().click();
   const nextDraft = (await (await nextDraftResponse).json()).data;
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
-  await expect(page.getByRole('button', { name: 'Publish' })).toBeVisible();
-  const childVisualKey = selectedAssetKey;
-  const childVisualTile = page.locator('.asset-tile').filter({ hasText: childVisualKey });
+  await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();
+  // Must differ from what v1 published (the parent draft already pinned corn
+  // lesson-wide), otherwise this proves nothing about the child diverging.
+  const childVisualKey = `canonical.${runId}.${source.teachingObjects.hen}`;
+  expect(childVisualKey).not.toBe(selectedAssetKey);
+  // The teaching object is a lesson-wide visual now: CinematicLayerPicker commits
+  // straight to PUT /lessons/:id/visuals, so there is no per-step "Save step" hop.
+  const childVisualSave = page.waitForResponse((response) => response.url().endsWith(`/lessons/${nextDraft.id}/visuals`)
+    && response.request().method() === 'PUT' && response.status() === 200);
+  const childVisualTile = page.getByTestId('lesson-object-selector').locator('.asset-tile')
+    .filter({ hasText: childVisualKey });
   await childVisualTile.locator('.asset-tile__select').click();
-  const childVisualSave = page.waitForResponse((response) => response.url().includes(`/lessons/${nextDraft.id}/steps/`)
-    && response.request().method() === 'PATCH' && response.status() === 200);
-  await page.getByRole('button', { name: 'Save step' }).click();
   await childVisualSave;
   const childProjection = await api(page, 'GET', `/lessons/${nextDraft.id}/manifest-preview?profile=espTft`);
   const childPinnedVisuals = pinnedVisualIdentity(childProjection.manifest);
