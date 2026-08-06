@@ -20,6 +20,8 @@ const DEFAULT_AUTHORING_FIELDS = Object.freeze({
 });
 const DURATION_PRESETS = Object.freeze([3, 5, 8]);
 const NAMED_MOTIONS = Object.freeze(['rest', 'teach', 'presentLeft', 'presentRight', 'listen', 'thinking', 'encourage', 'tryAgain', 'celebrate', 'goodbye']);
+// Backend rejects a longer teachingWord.text/displayText with VALIDATION_ERROR.
+const TEACHING_WORD_MAX_VISIBLE_CHARS = 12;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -147,6 +149,49 @@ function collectAssetReferences(steps, assetKey) {
     })
     .map((step) => step.stepKey || step.stepId)
     .filter(Boolean);
+}
+
+/**
+ * Which steps still bind an asset key. Deleting a bundle asset that a step
+ * references leaves the step body pointing at a row the server no longer has,
+ * and the manifest then ships an un-cached src instead of failing validation.
+ */
+function assetDeletionImpact(steps, assetKey) {
+  const key = String(assetKey == null ? '' : assetKey);
+  const stepKeys = key ? collectAssetReferences(steps, key) : [];
+  return { assetKey: key, stepKeys, blocked: stepKeys.length > 0 };
+}
+
+/**
+ * Grapheme count, mirroring the backend's `visibleGraphemeCount`
+ * (`lesson-authoring.logic.ts`). `String.length` counts UTF-16 units, so a
+ * Vietnamese word carrying combining diacritics measures up to 3x its visible
+ * length and an `maxlength` built on it truncates valid input mid-word.
+ */
+function visibleGraphemeCount(value) {
+  const text = String(value == null ? '' : value);
+  const Segmenter = typeof Intl !== 'undefined' && Intl.Segmenter;
+  if (Segmenter) return Array.from(new Segmenter('en', { granularity: 'grapheme' }).segment(text)).length;
+  // NFC keeps decomposed accents from being over-counted; Array.from is the
+  // same conservative fallback the backend uses.
+  return Array.from(typeof text.normalize === 'function' ? text.normalize('NFC') : text).length;
+}
+
+function teachingWordLengthIssue(value) {
+  const visible = visibleGraphemeCount(value);
+  if (visible <= TEACHING_WORD_MAX_VISIBLE_CHARS) return null;
+  return { code: 'teaching-word-too-long', visible, max: TEACHING_WORD_MAX_VISIBLE_CHARS };
+}
+
+/** Trims to the backend's visible-character budget without splitting a grapheme. */
+function clampTeachingWord(value) {
+  const text = String(value == null ? '' : value);
+  if (!teachingWordLengthIssue(text)) return text;
+  const Segmenter = typeof Intl !== 'undefined' && Intl.Segmenter;
+  const graphemes = Segmenter
+    ? Array.from(new Segmenter('en', { granularity: 'grapheme' }).segment(text)).map((part) => part.segment)
+    : Array.from(typeof text.normalize === 'function' ? text.normalize('NFC') : text);
+  return graphemes.slice(0, TEACHING_WORD_MAX_VISIBLE_CHARS).join('');
 }
 
 function stepReferencesAssetInLayer(value, assetKey, layer) {
@@ -413,11 +458,16 @@ function validSimulationEvidence(result, expectedPreview, authoringSteps = []) {
 }
 
 module.exports = {
+  assetDeletionImpact,
   bindClonedAssetToStep,
+  clampTeachingWord,
   DEFAULT_AUTHORING_FIELDS,
   DURATION_PRESETS,
   NAMED_MOTIONS,
+  TEACHING_WORD_MAX_VISIBLE_CHARS,
   buildEngagementTrack,
+  teachingWordLengthIssue,
+  visibleGraphemeCount,
   calculateReadiness,
   collectAssetReferences,
   createAuthoringFields,

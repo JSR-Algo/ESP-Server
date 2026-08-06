@@ -21,7 +21,11 @@ try {
   assert.equal(build.status, 0, `mounted journey harness build failed:\n${build.stdout}\n${build.stderr}`);
   server = createServer((request, response) => { const requestPath = request.url.split('?')[0]; const path = normalize(join(buildDir, requestPath === '/' ? 'index.html' : requestPath)); if (!path.startsWith(buildDir)) { response.writeHead(403).end(); return; } let body; try { body = readFileSync(path); } catch { response.writeHead(404).end(); return; } response.writeHead(200, { 'content-type': mime[extname(path)] || 'application/octet-stream' }).end(body); });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const chromeBin = [process.env.CHROME_BIN, join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell'), '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].filter(Boolean).find(existsSync);
+  // The path stage asserts the lesson's own H.264 background actually decodes
+  // (readyState >= 2), so Chrome proper must come before Playwright's
+  // chrome-headless-shell — that build ships without proprietary codecs and
+  // neither loads the MP4 nor raises `error`, which reads as a bare timeout.
+  const chromeBin = [process.env.CHROME_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell')].filter(Boolean).find(existsSync);
   assert.ok(chromeBin, 'Chromium is required');
   chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
   const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
@@ -40,6 +44,11 @@ try {
   const cdp = (method, params = {}) => new Promise((resolve, reject) => { const id = ++commandId; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); });
   const evaluate = async (expression) => { const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text); return result.result.value; };
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
+  // Report the missing codec directly instead of surfacing it as a media timeout.
+  assert.ok(
+    await evaluate("Boolean(document.createElement('video').canPlayType('video/mp4; codecs=\"avc1.42E01E\"'))"),
+    `${chromeBin} cannot decode the H.264 path background this gate asserts loads. Set CHROME_BIN to a Chrome build with proprietary codecs.`,
+  );
   for (let index = 0; index < 100 && !(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)'), true, `LessonEditor fixture did not mount: ${runtimeErrors.join('; ')}`);
 

@@ -127,6 +127,9 @@ export default {
     subjectHint: { type: String, default: '' },
     mutationSettler: { type: Function, required: true },
     refreshHandler: { type: Function, default: null },
+    // Returns { blocked, stepKeys } for a delete candidate; the editor owns the
+    // step list, so it answers whether anything still references the asset.
+    deletionGuard: { type: Function, default: null },
   },
   data() {
     return {
@@ -262,6 +265,16 @@ export default {
       if (this.$refs.uploader) this.$refs.uploader.clearFiles();
     },
     onDelete(a) {
+      // Deleting an asset a step still binds would leave a dangling src in the
+      // manifest, so name the steps and make the author unbind them first.
+      const impact = typeof this.deletionGuard === 'function' ? this.deletionGuard(a) : null;
+      if (impact && impact.blocked) {
+        this.$message.error(this.$t('lesson.assetDeleteInUse', {
+          assetKey: impact.assetKey,
+          steps: impact.stepKeys.join(', '),
+        }));
+        return;
+      }
       const mutationId = this.beginMutation();
       if (!mutationId) return;
       const settleMutation = this.createMutationSettlement(mutationId);

@@ -1,12 +1,16 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const {
   addChoice,
   buildCreateStepPayload,
   buildSaveStepRequest,
   createLessonStepEditorState,
   createStepDialogState,
+  detectStepSaveConflict,
   removeChoice,
   resolveSaveSuccess,
+  stepConcurrencyFingerprint,
 } = require('../src/components/lesson/lesson-step-editor-state');
 
 const state = createLessonStepEditorState();
@@ -23,6 +27,7 @@ assert.deepStrictEqual(state, {
   dirtyKeys: {},
   savingKeys: {},
   draftRevisions: {},
+  baselineFingerprints: {},
 });
 
 const dialog = createStepDialogState({
@@ -109,6 +114,122 @@ assert.deepStrictEqual(request.payload.stepBody, { existing: true, teachingWord:
 
 assert.deepStrictEqual(resolveSaveSuccess({ currentRevision: 2, savedRevision: 2 }), { clearDraft: true });
 assert.deepStrictEqual(resolveSaveSuccess({ currentRevision: 3, savedRevision: 2 }), { clearDraft: false });
+
+// T4.1 — PATCH /steps/:stepKey carries no version token, so a second editor's
+// save used to land as a silent overwrite. The fingerprint is the concurrency
+// token the wire lacks.
+const serverStep = {
+  stepKey: 's2',
+  stepType: 'listen',
+  prompt: 'Say barn',
+  subject: 'barn',
+  helperText: '',
+  l1TransferHint: '',
+  choices: null,
+  stepBody: { teachingWord: { text: 'BARN' }, durationPreset: 5 },
+  visualRefs: [{ slot: 'teachingObject', assetVersionId: 'asset-v1' }],
+};
+const baselineFingerprint = stepConcurrencyFingerprint(serverStep);
+assert.ok(baselineFingerprint);
+// Key order must not matter: two reads of the same jsonb row must agree.
+assert.strictEqual(
+  stepConcurrencyFingerprint({
+    ...serverStep,
+    stepBody: { durationPreset: 5, teachingWord: { text: 'BARN' } },
+  }),
+  baselineFingerprint,
+);
+// Unrelated response fields must not read as someone else's edit.
+assert.strictEqual(
+  stepConcurrencyFingerprint({ ...serverStep, phase: 'talk', entrance: 'flyIn' }),
+  baselineFingerprint,
+);
+assert.strictEqual(stepConcurrencyFingerprint(null), '');
+assert.strictEqual(stepConcurrencyFingerprint([]), '');
+
+assert.deepStrictEqual(
+  detectStepSaveConflict({ baselineFingerprint, serverStep }),
+  { conflict: false, reason: 'unchanged', currentFingerprint: baselineFingerprint },
+);
+// Another editor changed the body.
+const rivalBody = { ...serverStep, stepBody: { teachingWord: { text: 'COW' }, durationPreset: 5 } };
+const bodyConflict = detectStepSaveConflict({ baselineFingerprint, serverStep: rivalBody });
+assert.strictEqual(bodyConflict.conflict, true);
+assert.strictEqual(bodyConflict.reason, 'step-changed');
+assert.notStrictEqual(bodyConflict.currentFingerprint, baselineFingerprint);
+// Another editor rebound the visual.
+const rivalRefs = { ...serverStep, visualRefs: [{ slot: 'teachingObject', assetVersionId: 'asset-v9' }] };
+assert.strictEqual(detectStepSaveConflict({ baselineFingerprint, serverStep: rivalRefs }).reason, 'step-changed');
+// Another editor changed only the prompt.
+assert.strictEqual(
+  detectStepSaveConflict({ baselineFingerprint, serverStep: { ...serverStep, prompt: 'Say cow' } }).reason,
+  'step-changed',
+);
+// Another editor deleted the step.
+assert.deepStrictEqual(
+  detectStepSaveConflict({ baselineFingerprint, serverStep: undefined }),
+  { conflict: true, reason: 'step-removed', currentFingerprint: '' },
+);
+// No baseline (step never read) must not block the save.
+assert.strictEqual(detectStepSaveConflict({ baselineFingerprint: '', serverStep }).conflict, false);
+assert.strictEqual(detectStepSaveConflict().conflict, false);
+
+// T4.1 — the detector has to gate the operator's save paths, not just exist.
+const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src/views/LessonEditor.vue'), 'utf8');
+// Baselines follow server reads, so the editor's own commits (rebind, visual
+// pair, reorder — each re-fetches) never read back as another editor's change.
+assert.match(editorSource, /this\.rebaselineStepFingerprints\(rows\);/);
+assert.match(
+  editorSource,
+  /rebaselineStepFingerprints\(rows\)\s*\{[\s\S]*?stepConcurrencyFingerprint\(row\)/,
+);
+assert.match(
+  editorSource,
+  /guardStepSaveConflict\(stepKey, proceed, onBlocked\)[\s\S]*?Api\.lesson\.listSteps\([\s\S]*?detectStepSaveConflict\(/,
+  'the guard must re-read server truth immediately before writing',
+);
+// No baseline (step never read) must fall through instead of blocking.
+assert.match(editorSource, /if \(!baselineFingerprint\)\s*\{\s*proceed\(\);/);
+const guardedSaves = editorSource.match(/this\.guardStepSaveConflict\(step\.stepKey,/g) || [];
+assert.strictEqual(guardedSaves.length, 2, 'both step-save entry points must be guarded');
+assert.match(editorSource, /requestSelectedStepSave\(\)\s*\{[\s\S]*?this\.saveSelectedStep\(\);/);
+assert.match(editorSource, /requestSelectedStepStudioSave\(\)\s*\{[\s\S]*?this\.saveSelectedStepStudio\(\);/);
+// The button must call the guarded wrapper, never the raw save.
+assert.match(editorSource, /@click="requestSelectedStepSave"/);
+assert.ok(
+  !/@click="saveSelectedStep"/.test(editorSource),
+  'the step save button must not bypass the concurrency guard',
+);
+// The pre-check must own its own busy flag: the save methods abort on
+// savingStep/savingStepKeys, so reusing those would swallow the save.
+assert.match(editorSource, /stepConflictChecking: false,/);
+assert.match(editorSource, /:disabled="savingStep \|\| stepConflictChecking/);
+assert.match(editorSource, /\|\| this\.stepConflictChecking/, 'proof state must treat the pre-check as unsafe');
+assert.match(editorSource, /lesson\.stepSaveConflictChanged/);
+assert.match(editorSource, /lesson\.stepSaveConflictRemoved/);
+// A failed pre-check must report and stop, never fall through to the write.
+assert.match(editorSource, /lesson\.stepSaveConflictCheckFailed/);
+// Every operator-facing message must exist in both shipped locales.
+const englishMessages = fs.readFileSync(path.join(__dirname, '..', 'src/i18n/en.js'), 'utf8');
+const vietnameseMessages = fs.readFileSync(path.join(__dirname, '..', 'src/i18n/vi.js'), 'utf8');
+for (const key of [
+  'lesson.stepSaveConflictChanged',
+  'lesson.stepSaveConflictRemoved',
+  'lesson.stepSaveConflictCheckFailed',
+  'lesson.assetDeleteInUse',
+  'lesson.unsavedLeaveTitle',
+  'lesson.unsavedLeaveBody',
+  'lesson.unsavedLeaveDiscard',
+  'lesson.unsavedLeaveStay',
+]) {
+  assert.ok(englishMessages.includes(`'${key}':`), `en.js must define ${key}`);
+  assert.ok(vietnameseMessages.includes(`'${key}':`), `vi.js must define ${key}`);
+}
+// Conflict copy must name the step and tell the operator what happened to the draft.
+assert.match(englishMessages, /'lesson\.stepSaveConflictChanged':[^\n]*\{key\}/);
+assert.match(vietnameseMessages, /'lesson\.stepSaveConflictChanged':[^\n]*\{key\}/);
+assert.match(englishMessages, /'lesson\.assetDeleteInUse':[^\n]*\{assetKey\}[^\n]*\{steps\}/);
+assert.match(vietnameseMessages, /'lesson\.assetDeleteInUse':[^\n]*\{assetKey\}[^\n]*\{steps\}/);
 
 function expectBlankForm() {
   return {
