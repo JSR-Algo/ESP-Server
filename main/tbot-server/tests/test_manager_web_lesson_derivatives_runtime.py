@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import re
 import shutil
 import socket
 import subprocess
@@ -11,7 +12,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 NGINX_CONFIG = REPO_ROOT / "docs/docker/nginx.conf"
-DOCKER_INFO_TIMEOUT_SECONDS = 2
+# Docker Desktop answers `docker info` in ~15 s when the VM is cold; a shorter
+# budget silently skips this test on a host that can actually run it.
+DOCKER_INFO_TIMEOUT_SECONDS = 30
 DERIVATIVE_ID = "a" * 64
 
 
@@ -54,14 +57,25 @@ def _request(
 
 def _render_config(destination: Path) -> None:
     rendered = NGINX_CONFIG.read_text(encoding="utf-8")
+    # Must cover every placeholder docs/docker/start.sh renders. A missed one is
+    # not inert: nginx refuses to start on it (`host not found in resolver
+    # "__NGINX_RESOLVER__"`), so the probe below would fail for the wrong reason.
     replacements = {
         "__NESTJS_UPSTREAM_HOST__": "127.0.0.1",
         "__NESTJS_AUTH_HEADER__": "",
         "__NESTJS_UPSTREAM_SCHEME__": "http",
         "__NESTJS_ADMIN_PROXY_KEY__": "",
+        "__PUBLIC_CMS_UPSTREAM_HOST__": "127.0.0.1",
+        "__PUBLIC_CMS_UPSTREAM_SCHEME__": "http",
+        "__NGINX_RESOLVER__": "127.0.0.11",
     }
     for placeholder, value in replacements.items():
         rendered = rendered.replace(placeholder, value)
+    directives = "\n".join(
+        line for line in rendered.splitlines() if not line.lstrip().startswith("#")
+    )
+    unresolved = sorted(set(re.findall(r"__[A-Z0-9_]+__", directives)))
+    assert not unresolved, f"nginx.conf placeholders not rendered by the test: {unresolved}"
     destination.write_text(rendered, encoding="utf-8")
 
 

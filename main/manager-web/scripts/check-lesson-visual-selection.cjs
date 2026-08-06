@@ -452,6 +452,8 @@ function verifyOrderedStepRefreshContract() {
     previewManifest: null,
     previewing: false,
     resetPromptDraft() {},
+    baselinedRows: [],
+    rebaselineStepFingerprints(rows) { this.baselinedRows = rows; },
     $message: { error(message) { messages.push(message); } },
   };
 
@@ -466,6 +468,9 @@ function verifyOrderedStepRefreshContract() {
   calls[0][2]('stale failure');
 
   assert.deepEqual(JSON.parse(JSON.stringify(context.steps)), [{ stepKey: 'step-new', prompt: 'newest' }], 'an older listSteps response must not replace newer steps');
+  // T4.1 — the concurrency baseline must track the newest read only; an older
+  // response rebaselining would make the next save read as a false conflict.
+  assert.deepEqual(JSON.parse(JSON.stringify(context.baselinedRows)), [{ stepKey: 'step-new', prompt: 'newest' }], 'an older listSteps response must not rebaseline step fingerprints');
   assert.deepEqual(JSON.parse(JSON.stringify(context.pendingLessonVisualPair)), { backgroundAssetVersionId: 'new-confirmed' }, 'an older listSteps response must not clear a newer confirmed visual pair');
   assert.equal(context.lessonVisualReconciliationRequired, true, 'an older listSteps response must not clear newer reconciliation state');
   assert.deepEqual(messages, [], 'an older listSteps error must not surface after a newer refresh');

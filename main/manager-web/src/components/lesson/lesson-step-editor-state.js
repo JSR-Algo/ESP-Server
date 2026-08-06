@@ -37,7 +37,52 @@ function createLessonStepEditorState() {
     dirtyKeys: {},
     savingKeys: {},
     draftRevisions: {},
+    // Server truth the open draft was branched from, per step key. PATCH
+    // /steps/:stepKey carries no version token, so this is what turns a second
+    // editor's concurrent save from a silent overwrite into a visible conflict.
+    baselineFingerprints: {},
   };
+}
+
+/** Key-ordered JSON so two reads of the same row always stringify identically. */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value).sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+/** Every authored field PATCH /steps/:stepKey can overwrite. */
+function stepConcurrencyFingerprint(step) {
+  if (!step || typeof step !== 'object' || Array.isArray(step)) return '';
+  return stableStringify({
+    stepKey: step.stepKey || '',
+    stepType: step.stepType || '',
+    prompt: step.prompt || '',
+    subject: step.subject || '',
+    helperText: step.helperText || '',
+    l1TransferHint: step.l1TransferHint || '',
+    choices: step.choices == null ? null : step.choices,
+    stepBody: step.stepBody || {},
+    visualRefs: Array.isArray(step.visualRefs) ? step.visualRefs : [],
+  });
+}
+
+/**
+ * Compares the freshly re-read server step against the truth the draft branched
+ * from. `serverStep` must come from a read issued immediately before the PATCH.
+ */
+function detectStepSaveConflict({ baselineFingerprint, serverStep } = {}) {
+  const currentFingerprint = stepConcurrencyFingerprint(serverStep);
+  if (!baselineFingerprint) return { conflict: false, reason: 'no-baseline', currentFingerprint };
+  if (!currentFingerprint) return { conflict: true, reason: 'step-removed', currentFingerprint };
+  if (currentFingerprint !== baselineFingerprint) {
+    return { conflict: true, reason: 'step-changed', currentFingerprint };
+  }
+  return { conflict: false, reason: 'unchanged', currentFingerprint };
 }
 
 function createStepDialogState({ stepTypes = [], lastSubject = '' } = {}) {
@@ -221,6 +266,8 @@ module.exports = {
   createBlankStepForm,
   createLessonStepEditorState,
   createStepDialogState,
+  detectStepSaveConflict,
   removeChoice,
   resolveSaveSuccess,
+  stepConcurrencyFingerprint,
 };

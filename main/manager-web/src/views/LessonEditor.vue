@@ -97,7 +97,7 @@
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep" :disabled="savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual || !selectedStepDirty" @click="saveSelectedStep">
+            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep || stepConflictChecking" :disabled="savingStep || stepConflictChecking || lessonVisualStepMutationBlocked || rebindingSharedVisual || !selectedStepDirty" @click="requestSelectedStepSave">
               Save step
             </el-button>
           </div>
@@ -369,6 +369,7 @@
         :disabled="savingStep || lessonVisualStepMutationBlocked || rebindingSharedVisual || assetMutating"
         :mutation-settler="settleAssetMutation"
         :refresh-handler="retryFailedAssetReconciliation"
+        :deletion-guard="assetDeletionGuard"
         @assets-loaded="onAssetsLoaded"
         @asset-read-started="onAssetReadStarted"
         @asset-mutated="onAssetMutated"
@@ -600,6 +601,7 @@ import { createFarmJourneyDraft } from '@/components/lesson/tvideo-journey';
 import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';
 import {
+  assetDeletionImpact,
   bindClonedAssetToStep,
   collectAssetReferences,
   mergeAuthoringFields,
@@ -617,8 +619,10 @@ import {
   buildSaveStepRequest,
   createLessonStepEditorState,
   createStepDialogState,
+  detectStepSaveConflict,
   removeChoice as removeStepChoice,
   resolveSaveSuccess,
+  stepConcurrencyFingerprint,
 } from '@/components/lesson/lesson-step-editor-state';
 import Api from '@/apis/api';
 import { isUncertainNestError } from '@/apis/nestHttp';
@@ -712,6 +716,8 @@ export default {
       promptStepKey: '',
       promptEditRevision: 0,
       promptSaveRequestId: 0,
+      // A concurrent-edit pre-check is in flight for the selected step.
+      stepConflictChecking: false,
       stepEditRevisions: {},
       savingStep: false,
       deletingStepKey: '',
@@ -810,6 +816,7 @@ export default {
     dirtyStepKeys() { return this.stepEditor.dirtyKeys; },
     savingStepKeys() { return this.stepEditor.savingKeys; },
     stepDraftRevisions() { return this.stepEditor.draftRevisions; },
+    stepBaselineFingerprints() { return this.stepEditor.baselineFingerprints; },
     lessonId() {
       return this.$route.query.lessonId;
     },
@@ -1082,10 +1089,31 @@ export default {
       if (ev && ev.data && ev.data.type === 'tvideo-ready') this.syncCinematicSoon();
     };
     window.addEventListener('message', this._tvideoReadyHandler);
+    // Step drafts live in component state only — a reload or tab close drops
+    // them with no trace, so make the browser ask first.
+    this._unsavedChangesHandler = (ev) => {
+      if (!this.hasPendingAuthoringChanges) return undefined;
+      ev.preventDefault();
+      ev.returnValue = '';
+      return '';
+    };
+    window.addEventListener('beforeunload', this._unsavedChangesHandler);
+  },
+  beforeRouteLeave(to, from, next) {
+    if (!this.hasPendingAuthoringChanges) {
+      next();
+      return;
+    }
+    this.$confirm(this.$t('lesson.unsavedLeaveBody'), this.$t('lesson.unsavedLeaveTitle'), {
+      confirmButtonText: this.$t('lesson.unsavedLeaveDiscard'),
+      cancelButtonText: this.$t('lesson.unsavedLeaveStay'),
+      type: 'warning',
+    }).then(() => next()).catch(() => next(false));
   },
   beforeDestroy() {
     this.editorDestroying = true;
     if (this._tvideoReadyHandler) window.removeEventListener('message', this._tvideoReadyHandler);
+    if (this._unsavedChangesHandler) window.removeEventListener('beforeunload', this._unsavedChangesHandler);
     this.publishReviewVisible = false;
     this.proofVersion += 1;
     this.previewRequestId += 1;
@@ -1423,6 +1451,10 @@ export default {
         .sort()
         .join('|');
     },
+    // studioSteps, not steps: an unsaved draft that binds the asset counts too.
+    assetDeletionGuard(asset) {
+      return assetDeletionImpact(this.studioSteps, asset && asset.assetKey);
+    },
     onAssetMutated() {
       if (this.editorDestroying) return;
       this.invalidatePreview();
@@ -1531,6 +1563,7 @@ export default {
         || Object.keys(this.selectedStepDrafts || {}).length > 0
         || Object.keys(this.selectedAssetDrafts || {}).length > 0
         || this.stepDialogVisible
+        || this.stepConflictChecking
         || this.renameVisible
         || this.sharedImpactVisible
         || this.sharedImpactReconciling
@@ -1726,6 +1759,7 @@ export default {
         if (!requestIsCurrent()) return;
         const selectedKey = this.selectedStepKey;
         this.steps = rows;
+        this.rebaselineStepFingerprints(rows);
         if (this.lessonVisualReconciliationRequired) {
           this.pendingLessonVisualPair = null;
           this.lessonVisualReconciliationRequired = false;
@@ -1881,6 +1915,79 @@ export default {
         this.promptDirty = this.promptDraft !== (step.prompt || '');
       }
       return false;
+    },
+    // Server truth as of this read. Re-baselining on every read (rather than at
+    // first edit) keeps the editor's own commits — rebind, visual pair, reorder,
+    // each of which re-fetches — from reading back as someone else's change.
+    rebaselineStepFingerprints(rows) {
+      this.stepEditor.baselineFingerprints = (Array.isArray(rows) ? rows : []).reduce((all, row) => {
+        if (row && row.stepKey) all[row.stepKey] = stepConcurrencyFingerprint(row);
+        return all;
+      }, {});
+    },
+    /**
+     * PATCH /steps/:stepKey has no version token, so a second editor's save is
+     * otherwise a silent overwrite. Re-read immediately before writing and stop
+     * on any drift from the truth this draft branched off.
+     */
+    guardStepSaveConflict(stepKey, proceed, onBlocked) {
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
+      const baselineFingerprint = this.stepBaselineFingerprints[stepKey];
+      const block = (message) => {
+        this.$message.error(message);
+        if (typeof onBlocked === 'function') onBlocked(message);
+      };
+      if (!baselineFingerprint) {
+        proceed();
+        return false;
+      }
+      Api.lesson.listSteps(lessonId, (rows) => {
+        if (this.editorDestroying || lessonId !== this.lessonId
+          || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+        const serverStep = (Array.isArray(rows) ? rows : []).find((row) => row && row.stepKey === stepKey);
+        const verdict = detectStepSaveConflict({ baselineFingerprint, serverStep });
+        if (!verdict.conflict) {
+          proceed();
+          return;
+        }
+        // Keep the drafts: re-reading rebaselines, so a deliberate re-save is
+        // an explicit overwrite rather than an accident.
+        block(this.$t(verdict.reason === 'step-removed'
+          ? 'lesson.stepSaveConflictRemoved'
+          : 'lesson.stepSaveConflictChanged', { key: stepKey }));
+        this.invalidatePreview();
+        this.fetchSteps({ preservePrompt: true });
+      }, (msg) => {
+        if (this.editorDestroying || lessonId !== this.lessonId
+          || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+        block(this.$t('lesson.stepSaveConflictCheckFailed', { reason: msg }));
+      });
+      return true;
+    },
+    // Operator entry points. The conflict pre-check is a read, so it must not
+    // reuse savingStep/savingStepKeys — the save methods below abort on those.
+    requestSelectedStepSave() {
+      const step = this.selectedStep;
+      if (!step || this.stepConflictChecking) return false;
+      this.stepConflictChecking = true;
+      const release = () => { this.stepConflictChecking = false; };
+      this.guardStepSaveConflict(step.stepKey, () => {
+        release();
+        this.saveSelectedStep();
+      }, release);
+      return true;
+    },
+    requestSelectedStepStudioSave() {
+      const step = this.selectedStep;
+      if (!step || this.stepConflictChecking) return false;
+      this.stepConflictChecking = true;
+      const release = () => { this.stepConflictChecking = false; };
+      this.guardStepSaveConflict(step.stepKey, () => {
+        release();
+        this.saveSelectedStepStudio();
+      }, release);
+      return true;
     },
     bumpStepEditRevision(stepKey) {
       this.$set(this.stepEditRevisions, stepKey, (this.stepEditRevisions[stepKey] || 0) + 1);

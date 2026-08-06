@@ -9,7 +9,18 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item label="English teaching word">
-          <el-input :value="model.teachingWord.text" :disabled="disabled" maxlength="12" show-word-limit @input="setNested('teachingWord', 'text', $event.toUpperCase())" />
+          <!-- Grapheme-counted, not maxlength: HTML maxlength counts UTF-16
+               units, so a Vietnamese word with combining diacritics gets cut at
+               a third of the 12 visible characters the backend actually allows. -->
+          <el-input
+            :value="model.teachingWord.text"
+            :disabled="disabled"
+            data-testid="teaching-word-input"
+            @input="setTeachingWord($event)"
+          />
+          <span class="word-count" :class="{ 'is-over': teachingWordOver }">
+            {{ teachingWordLength }}/{{ teachingWordMax }}
+          </span>
         </el-form-item>
       </div>
       <div class="form-grid">
@@ -41,7 +52,12 @@
 </template>
 
 <script>
-import { mergeAuthoringFields } from './lesson-builder-logic';
+import {
+  clampTeachingWord,
+  mergeAuthoringFields,
+  TEACHING_WORD_MAX_VISIBLE_CHARS,
+  visibleGraphemeCount,
+} from './lesson-builder-logic';
 
 export default {
   name: 'LessonInteractionPanel',
@@ -51,9 +67,17 @@ export default {
     motions: ['rest', 'teach', 'presentLeft', 'presentRight', 'listen', 'thinking', 'encourage', 'tryAgain', 'celebrate', 'goodbye'],
     motionSlots: ['present', 'listen', 'correct', 'nearMiss', 'incorrect'],
   }),
-  computed: { model() { return mergeAuthoringFields({}, this.value); } },
+  computed: {
+    model() { return mergeAuthoringFields({}, this.value); },
+    teachingWordMax() { return TEACHING_WORD_MAX_VISIBLE_CHARS; },
+    teachingWordLength() { return visibleGraphemeCount(this.model.teachingWord.text); },
+    teachingWordOver() { return this.teachingWordLength > this.teachingWordMax; },
+  },
   methods: {
     humanize(value) { return String(value).replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase()); },
+    setTeachingWord(value) {
+      this.setNested('teachingWord', 'text', clampTeachingWord(String(value).toUpperCase()));
+    },
     set(key, value) { this.$emit('input', mergeAuthoringFields(this.model, { [key]: value })); },
     setNested(group, key, value) { this.$emit('input', mergeAuthoringFields(this.model, { [group]: { [key]: value } })); },
   },
@@ -64,6 +88,8 @@ export default {
 .interaction-panel { background: #fffdf6; border: 1px solid #eadfca; border-radius: 18px; padding: 18px; }
 .panel-title { color: #15312d; font-family: Georgia, serif; font-size: 22px; font-weight: 700; margin-bottom: 14px; }
 .form-grid { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.word-count { color: #909399; display: block; font-size: 12px; text-align: right; }
+.word-count.is-over { color: #f56c6c; }
 .motion-grid { display: grid; gap: 10px; grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 900px) { .form-grid, .motion-grid { grid-template-columns: 1fr; } }
 </style>

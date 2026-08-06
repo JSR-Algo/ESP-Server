@@ -71,11 +71,21 @@ def test_lesson_studio_seed_includes_real_response_visual_sources():
 
 
 def test_nestjs_proxy_recovers_quickly_from_docker_dns_startup_races():
+    # The resolver is rendered at container start (Docker Desktop advertises a
+    # VM resolver instead of the 127.0.0.11 that Linux custom networks use), so
+    # the config carries the placeholder and start.sh supplies the address.
     nginx = (ROOT / "docs/docker/nginx.conf").read_text()
-    assert "resolver 127.0.0.11 valid=5s ipv6=off;" in nginx
+    assert "resolver __NGINX_RESOLVER__ valid=5s ipv6=off;" in nginx
     assert "8.8.8.8" not in nginx
     assert "1.1.1.1" not in nginx
     assert "resolver_timeout 2s;" in nginx
+
+    start = (ROOT / "docs/docker/start.sh").read_text()
+    assert 'NGINX_RESOLVER="$(awk' in start
+    assert "/etc/resolv.conf" in start
+    # Falls back to the Docker embedded DNS server, never a public resolver.
+    assert '"${NGINX_RESOLVER:=127.0.0.11}"' in start
+    assert "s|__NGINX_RESOLVER__|${NGINX_RESOLVER}|g" in start
 
 
 def test_lesson_studio_seed_assets_are_idempotent_and_use_fixed_accounts():

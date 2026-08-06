@@ -3,10 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const {
+  assetDeletionImpact,
   buildEngagementTrack,
   bindClonedAssetToStep,
   calculateReadiness,
+  clampTeachingWord,
   collectAssetReferences,
+  TEACHING_WORD_MAX_VISIBLE_CHARS,
+  teachingWordLengthIssue,
+  visibleGraphemeCount,
   createAuthoringFields,
   createInitialAuthoringFields,
   DURATION_PRESETS,
@@ -446,5 +451,100 @@ assert.strictEqual(unknown.offlineReady, false);
 assert.strictEqual(unknown.allPathsTerminate, false);
 const dimensionEstimate = calculateReadiness({ assets: [{ assetKey: 'rgba', width: 100, height: 50, hasAlpha: true }] });
 assert.strictEqual(dimensionEstimate.estimatedPeakPsram, 20000);
+
+// T4.1 — deleting a bundle asset a step still binds leaves the manifest pointing
+// at a row the server no longer has. The picker must name the blocking steps.
+const deletionSteps = [
+  { stepKey: 's1', stepBody: { teachingObject: { asset: { key: 'teachingObject.barn' } } } },
+  { stepKey: 's2', stepBody: { backgroundScene: { poster: { key: 'backgroundScene.poster' } } } },
+  { stepKey: 's3', stepBody: { teachingObject: { asset: { key: 'teachingObject.barn' } } } },
+];
+const boundImpact = assetDeletionImpact(deletionSteps, 'teachingObject.barn');
+assert.deepStrictEqual(boundImpact, {
+  assetKey: 'teachingObject.barn',
+  stepKeys: ['s1', 's3'],
+  blocked: true,
+});
+assert.deepStrictEqual(assetDeletionImpact(deletionSteps, 'backgroundScene.poster').stepKeys, ['s2']);
+assert.deepStrictEqual(assetDeletionImpact(deletionSteps, 'teachingObject.unused'), {
+  assetKey: 'teachingObject.unused',
+  stepKeys: [],
+  blocked: false,
+});
+assert.deepStrictEqual(assetDeletionImpact(deletionSteps, ''), { assetKey: '', stepKeys: [], blocked: false });
+assert.deepStrictEqual(assetDeletionImpact(null, 'teachingObject.barn'), {
+  assetKey: 'teachingObject.barn',
+  stepKeys: [],
+  blocked: false,
+});
+
+// T4.1 — the backend budgets teachingWord by visible characters. Counting UTF-16
+// units instead truncates Vietnamese words carrying combining diacritics.
+assert.strictEqual(TEACHING_WORD_MAX_VISIBLE_CHARS, 12);
+const decomposedTruong = 'TRƯỜNG'.normalize('NFD');
+assert.ok(decomposedTruong.length > 6, 'fixture must actually be decomposed');
+assert.strictEqual(visibleGraphemeCount(decomposedTruong), 6);
+assert.strictEqual(visibleGraphemeCount('TRƯỜNG'.normalize('NFC')), 6);
+assert.strictEqual(teachingWordLengthIssue(decomposedTruong), null);
+assert.strictEqual(clampTeachingWord(decomposedTruong), decomposedTruong);
+const twelveVisible = 'NGHIÊNGNGẢ'.normalize('NFD');
+assert.strictEqual(visibleGraphemeCount(twelveVisible), 10);
+assert.strictEqual(teachingWordLengthIssue(twelveVisible), null);
+const thirteenVisible = 'ĐƯỜNGSẮTBẮCNAM'.normalize('NFD');
+assert.strictEqual(visibleGraphemeCount(thirteenVisible), 14);
+assert.deepStrictEqual(teachingWordLengthIssue(thirteenVisible), {
+  code: 'teaching-word-too-long', visible: 14, max: 12,
+});
+// Clamping keeps whole graphemes — never a bare combining mark.
+const clamped = clampTeachingWord(thirteenVisible);
+assert.strictEqual(visibleGraphemeCount(clamped), 12);
+assert.strictEqual(clamped, clampTeachingWord(clamped));
+assert.strictEqual(clampTeachingWord(''), '');
+assert.strictEqual(clampTeachingWord(null), '');
+assert.strictEqual(visibleGraphemeCount(null), 0);
+
+// T4.1 — the delete guard has to be wired, not merely exported.
+const assetManagerSource = fs.readFileSync(
+  path.join(__dirname, '..', 'src/components/LessonAssetManager.vue'),
+  'utf8',
+);
+assert.match(assetManagerSource, /deletionGuard:\s*\{\s*type:\s*Function/);
+assert.match(
+  assetManagerSource,
+  /onDelete\(a\)\s*\{[\s\S]*?this\.deletionGuard\(a\)[\s\S]*?impact\.blocked[\s\S]*?lesson\.assetDeleteInUse[\s\S]*?return;/,
+  'onDelete must consult the deletion guard before calling the delete API',
+);
+const editorSourceForDeletion = fs.readFileSync(
+  path.join(__dirname, '..', 'src/views/LessonEditor.vue'),
+  'utf8',
+);
+assert.match(editorSourceForDeletion, /:deletion-guard="assetDeletionGuard"/);
+// studioSteps, not steps: an unsaved draft binding the asset must block too.
+assert.match(
+  editorSourceForDeletion,
+  /assetDeletionGuard\(asset\)\s*\{\s*return assetDeletionImpact\(this\.studioSteps,/,
+);
+
+// T4.1 — unsaved step drafts are component state only; leaving must prompt.
+assert.match(editorSourceForDeletion, /beforeRouteLeave\(to, from, next\)/);
+assert.match(
+  editorSourceForDeletion,
+  /beforeRouteLeave[\s\S]*?if \(!this\.hasPendingAuthoringChanges\)[\s\S]*?next\(\);/,
+);
+assert.match(editorSourceForDeletion, /next\(false\)/, 'cancelling the prompt must stay on the page');
+assert.match(editorSourceForDeletion, /addEventListener\('beforeunload', this\._unsavedChangesHandler\)/);
+assert.match(editorSourceForDeletion, /removeEventListener\('beforeunload', this\._unsavedChangesHandler\)/);
+
+// T4.1 — the panel must count graphemes, not UTF-16 units.
+const interactionPanelSource = fs.readFileSync(
+  path.join(__dirname, '..', 'src/components/lesson/LessonInteractionPanel.vue'),
+  'utf8',
+);
+assert.ok(
+  !/maxlength="12"/.test(interactionPanelSource),
+  'teachingWord must not use an HTML maxlength (UTF-16 units, not visible characters)',
+);
+assert.match(interactionPanelSource, /setTeachingWord\(\$event\)/);
+assert.match(interactionPanelSource, /clampTeachingWord\(String\(value\)\.toUpperCase\(\)\)/);
 
 console.log('lesson builder logic checks passed');
