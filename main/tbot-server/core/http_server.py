@@ -111,6 +111,7 @@ class SimpleHttpServer:
         self.lesson_sd_evict_handler = LessonSdEvictHandler(
             config,
             self.lesson_connections,
+            pending_store=self.lesson_sd_pending_store,
         )
         self.lesson_sd_materialize_handler = LessonSdMaterializeHandler(
             config,

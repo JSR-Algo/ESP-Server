@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypedDict
 
@@ -533,10 +534,29 @@ class RedisLessonSdPendingStore:
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
+            await self._quarantine(device_id, "undecodable")
             return None
         if not isinstance(parsed, dict):
+            await self._quarantine(device_id, "not_an_object")
             return None
         return _sanitize_work(parsed)
+
+    async def _quarantine(self, device_id: str, reason: str) -> None:
+        """Drop a record no reader can interpret.
+
+        Leaving it costs more than losing it: ``claim_due`` only drops members
+        whose value key is ABSENT, so a truncated crash-mid-write value is
+        re-claimed and re-leased every cycle for the whole 30-day TTL while the
+        worker skips it — a pending queue that never drains and never reports.
+        A dropped record is re-created by the next fanout or reconnect drain.
+        """
+        logger.warning(
+            "lesson_sd_pending_quarantined device_id=%s reason=%s",
+            device_id,
+            reason,
+        )
+        with suppress(Exception):
+            await self._delete(device_id)
 
     async def due(self, *, limit: int) -> list[str]:
         limit = max(0, int(limit or 0))

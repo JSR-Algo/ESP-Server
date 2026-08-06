@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any, Dict
 
 from aiohttp import web
@@ -37,10 +38,11 @@ _PUBLIC_REFUSAL_CODES = frozenset(
 
 
 class LessonSdEvictHandler:
-    def __init__(self, config: dict, connections: Any):
+    def __init__(self, config: dict, connections: Any, *, pending_store: Any = None):
         self.config = config if isinstance(config, dict) else {}
         self.connections = connections if connections is not None else {}
         self._shared = LessonNudgeHandler(self.config, self.connections)
+        self._pending_store = pending_store
 
     async def handle_post(self, request: web.Request) -> web.Response:
         auth_error = self._shared._authorize(request)
@@ -84,6 +86,8 @@ class LessonSdEvictHandler:
             normalized = parse_firmware_result(cache_key, normalized)
         except CacheEvictionRefused:
             return _refusal("firmware-refused", status=409)
+        if normalized["status"] == "evicted":
+            await self._cancel_pending_retry(device_id, cache_key)
         if normalized["status"] == "partial_evict_recovery_required":
             return web.json_response(
                 {
@@ -97,6 +101,35 @@ class LessonSdEvictHandler:
                 status=503,
             )
         return web.json_response({"data": normalized}, status=200)
+
+    async def _cancel_pending_retry(self, device_id: str, cache_key: str) -> None:
+        """Drop queued fanout work for a key the robot no longer holds.
+
+        Without this the retry worker re-pushes the pack an operator just
+        evicted: eviction is the only way to reclaim that SD space, and a
+        pending entry silently undoes it on the next drain.
+        """
+        from core.lesson.sd_pack_fanout import (
+            _resolve_backend_device_id_for_conn,
+            get_pending_store,
+        )
+
+        store = self._pending_store or get_pending_store()
+        device_ids = {str(device_id or "").strip()}
+        try:
+            conn = await self._shared._find_connection(device_id)
+        except Exception:
+            conn = None
+        if conn is not None:
+            with suppress(Exception):
+                resolved = await _resolve_backend_device_id_for_conn(conn, self.config)
+                if resolved:
+                    device_ids.add(str(resolved))
+        for resolved_id in sorted(key for key in device_ids if key):
+            with suppress(Exception):
+                await store.clear(resolved_id, [cache_key])
+            with suppress(Exception):
+                await store.clear_callbacks(resolved_id, [cache_key])
 
 
 def _invalid_request() -> web.Response:

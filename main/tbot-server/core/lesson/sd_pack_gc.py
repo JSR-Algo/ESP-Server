@@ -11,11 +11,43 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple
 
-from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.shared_asset_store import PackDeletionRefused, SharedAssetStore
 
 
 DEFAULT_GC_FREE_PERCENT = 20.0
 DEFAULT_PRELOAD_MIN_FREE_PERCENT = 5.0
+ACTIVATION_STATE_FILENAME = "lesson-pack-activation.json"
+
+
+def _no_protected_keys() -> Set[str]:
+    return set()
+
+
+def activation_protected_cache_keys(state_path: Any) -> Set[str]:
+    """Read current/candidate/previous keys without taking any lock.
+
+    ``SdPackActivationState._persist_unlocked`` publishes with ``os.replace``,
+    so an unlocked reader always sees one complete generation. Staying
+    lock-free is what makes this safe to call from inside the exclusive GC
+    lock: activation takes its state lock BEFORE the shared GC lock, so a GC
+    probe that took the state lock would deadlock against it.
+    """
+    try:
+        loaded = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(loaded, dict):
+        return set()
+    keys: Set[str] = set()
+    for slot in ("current", "candidate", "previousKnownGood"):
+        value = loaded.get(slot)
+        if isinstance(value, str) and value:
+            keys.add(value)
+        elif isinstance(value, dict):
+            cache_key = value.get("cacheKey")
+            if isinstance(cache_key, str) and cache_key:
+                keys.add(cache_key)
+    return keys
 
 
 class SdPackGarbageCollector:
@@ -33,6 +65,7 @@ class SdPackGarbageCollector:
         disk_usage: Callable[[Any], Any] = shutil.disk_usage,
         voice_busy: Optional[Callable[[], bool]] = None,
         render_busy: Optional[Callable[[], bool]] = None,
+        protected_keys_provider: Optional[Callable[[], Iterable[str]]] = None,
     ) -> None:
         self.pack_root = Path(pack_root).resolve()
         self.shared_store = shared_asset_store or shared_store
@@ -48,6 +81,25 @@ class SdPackGarbageCollector:
         self._disk_usage = disk_usage
         self._voice_busy = voice_busy or (lambda: False)
         self._render_busy = render_busy or (lambda: False)
+        # Every connection on this server shares one activation record, so the
+        # caller's own runtime keys are not the whole protected set: another
+        # robot's current/candidate pack must survive this robot's GC too.
+        if protected_keys_provider is None and self.shared_store is not None:
+            state_path = self.shared_store.root / ACTIVATION_STATE_FILENAME
+
+            def protected_keys_provider() -> Set[str]:
+                return activation_protected_cache_keys(state_path)
+
+        self._protected_keys_provider = protected_keys_provider or _no_protected_keys
+
+    def _live_protected_cache_keys(self) -> Set[str]:
+        """Raise rather than under-report: an unreadable protection source must
+        stop collection, never license a deletion."""
+        return {
+            str(key)
+            for key in (self._protected_keys_provider() or ())
+            if isinstance(key, str) and key
+        }
 
     def can_preload(self) -> bool:
         return self._free_percent() >= self.preload_min_free_percent
@@ -98,6 +150,10 @@ class SdPackGarbageCollector:
             )
             if isinstance(key, str) and key
         }
+        try:
+            protected |= self._live_protected_cache_keys()
+        except Exception:
+            return {"skipped": "protection_unavailable"}
         candidates = []
         for cache_key, path in self._pack_directories():
             if cache_key in protected or not self._is_ready(cache_key):
@@ -110,18 +166,39 @@ class SdPackGarbageCollector:
             return {"skipped": "no_evictable_pack"}
 
         _mtime, cache_key, path = min(candidates, key=lambda item: (item[0], item[1]))
+        # The candidate scan above is a snapshot. A lesson can win the
+        # activation race for this exact pack before the delete lands, so
+        # protection is re-read at deletion time under the exclusive GC lock.
+        probe_failed = False
+
+        def protection_probe() -> Set[str]:
+            nonlocal probe_failed
+            try:
+                return self._live_protected_cache_keys()
+            except Exception:
+                # Unknown protection is treated as protection: refuse the delete.
+                probe_failed = True
+                raise PackDeletionRefused(cache_key) from None
+
         try:
             if self.shared_store is not None:
                 deleted_cas = self.shared_store.delete_pack(
                     cache_key,
                     sweep=True,
                     protected_cache_keys=protected,
+                    protection_probe=protection_probe,
                 )
             else:
+                if cache_key in protection_probe():
+                    raise PackDeletionRefused(cache_key)
                 tombstone = path.with_name(".{}.gc".format(path.name))
                 os.replace(str(path), str(tombstone))
                 shutil.rmtree(tombstone)
                 deleted_cas = []
+        except PackDeletionRefused:
+            return {
+                "skipped": "protection_unavailable" if probe_failed else "pack_became_protected"
+            }
         except OSError:
             return {"skipped": "delete_failed"}
         return {
