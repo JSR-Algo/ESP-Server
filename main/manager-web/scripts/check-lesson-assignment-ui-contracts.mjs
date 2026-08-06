@@ -361,4 +361,120 @@ function makeContext(api) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Monitoring console (T4.2): the assignment list and the per-assignment event
+// timeline are read while lessons are live, so overlapping reads settle out of
+// order. A superseded response must never repaint the view — a stale repaint is
+// indistinguishable from truth to the operator.
+// ---------------------------------------------------------------------------
+expectContains('src/apis/module/monitoring.js', '/lesson-monitoring/assignments', 'monitoring API must use the admin monitoring path');
+
+// The staleness guards are asserted by behaviour, not by name: a view that has no
+// guard at all still runs here (the predicates fall back to "always current"), and
+// fails on the out-of-order repaint it produces.
+function extractGuardPredicate(sourceText, name) {
+  try {
+    return extractObjectMethod(sourceText, name);
+  } catch {
+    return `function ${name}() { return true; }`;
+  }
+}
+
+const monitoringSource = source('src/views/LessonMonitoring.vue');
+const monitoringApi = {};
+const monitoringMethods = vm.runInNewContext(`(() => ({
+  isListRequestCurrent: ${extractGuardPredicate(monitoringSource, 'isListRequestCurrent')},
+  isEventsRequestCurrent: ${extractGuardPredicate(monitoringSource, 'isEventsRequestCurrent')},
+  fetchList: ${extractObjectMethod(monitoringSource, 'fetchList')},
+  openEvents: ${extractObjectMethod(monitoringSource, 'openEvents')},
+  resetEvents: ${extractObjectMethod(monitoringSource, 'resetEvents')},
+}))()`, { Api: monitoringApi });
+
+function makeMonitoringContext() {
+  const errors = [];
+  return {
+    list: [],
+    loading: false,
+    limit: 200,
+    filters: { keyword: '', deviceId: '', childId: '', lessonId: '', state: '' },
+    listRequestId: 0,
+    eventsRequestId: 0,
+    eventsVisible: false,
+    eventsLoading: false,
+    events: [],
+    eventsSource: {},
+    $t: (key) => key,
+    $message: { error: (message) => errors.push(message) },
+    isListRequestCurrent: monitoringMethods.isListRequestCurrent,
+    isEventsRequestCurrent: monitoringMethods.isEventsRequestCurrent,
+    errors,
+  };
+}
+
+{
+  const listCalls = [];
+  monitoringApi.monitoring = {
+    listAssignments(params, onSuccess, onError) { listCalls.push({ params, onSuccess, onError }); },
+    getAssignmentEvents() {},
+  };
+  const context = makeMonitoringContext();
+
+  context.filters.state = 'RUNNING';
+  monitoringMethods.fetchList.call(context);
+  context.filters.state = 'FAILED';
+  monitoringMethods.fetchList.call(context);
+  if (listCalls[0].params.state !== 'RUNNING' || listCalls[1].params.state !== 'FAILED') {
+    throw new Error('each refresh must send the filters captured at call time');
+  }
+
+  listCalls[1].onSuccess([{ assignmentId: 'fresh', state: 'FAILED' }]);
+  listCalls[0].onSuccess([{ assignmentId: 'stale', state: 'RUNNING' }]);
+  if (context.list.length !== 1 || context.list[0].assignmentId !== 'fresh') {
+    throw new Error('a superseded assignment-list response must not repaint the table');
+  }
+  if (context.loading !== false) throw new Error('the current list response must clear loading');
+
+  monitoringMethods.fetchList.call(context);
+  const superseded = listCalls[2];
+  monitoringMethods.fetchList.call(context);
+  superseded.onError('boom');
+  if (context.errors.length !== 0) {
+    throw new Error('a superseded assignment-list failure must not raise an operator error toast');
+  }
+  if (context.loading !== true) {
+    throw new Error('a superseded failure must not clear the loading state of the in-flight refresh');
+  }
+}
+
+{
+  const eventCalls = [];
+  monitoringApi.monitoring = {
+    listAssignments() {},
+    getAssignmentEvents(assignmentId, onSuccess, onError) { eventCalls.push({ assignmentId, onSuccess, onError }); },
+  };
+  const context = makeMonitoringContext();
+
+  monitoringMethods.openEvents.call(context, { assignmentId: 'asg-a', lessonId: 'lesson-a' });
+  monitoringMethods.resetEvents.call(context);
+  monitoringMethods.openEvents.call(context, { assignmentId: 'asg-b', lessonId: 'lesson-b' });
+  eventCalls[1].onSuccess([{ eventType: 'lesson_started' }]);
+  eventCalls[0].onSuccess([{ eventType: 'lesson_failed' }]);
+  if (context.events.length !== 1 || context.events[0].eventType !== 'lesson_started') {
+    throw new Error('a stale timeline response must not overwrite the timeline of the open assignment');
+  }
+  if (context.eventsSource.assignmentId !== 'asg-b') {
+    throw new Error('the dialog subtitle must track the assignment whose timeline is shown');
+  }
+
+  monitoringMethods.openEvents.call(context, { assignmentId: 'asg-c' });
+  const closedCall = eventCalls[2];
+  context.eventsVisible = false;
+  monitoringMethods.resetEvents.call(context);
+  closedCall.onError('load failed');
+  if (context.errors.length !== 0) {
+    throw new Error('a timeline failure that arrives after close must not raise an error toast');
+  }
+  if (context.eventsLoading !== false) throw new Error('closing the dialog must clear its loading state');
+}
+
 console.log('lesson assignment UI contracts passed');

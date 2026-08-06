@@ -33,6 +33,22 @@ def _secret():
     return os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
 
 
+def cached_device_uuid(mac):
+    """Backend device UUID already minted for ``mac``, or None.
+
+    Read-only view of the mint cache for callers that must not perform network
+    I/O (the operator console renders synchronously). A live lesson connection has
+    already minted on its pull leg, so this is populated in practice; when it is
+    not, the caller must say so rather than offer the MAC as if it were a UUID.
+    """
+    entry = _cache.get(mac)
+    if not entry:
+        return None
+    if (time.time() - entry[2]) >= _CACHE_TTL_S:
+        return None
+    return entry[0]
+
+
 def _log(logger, level, message):
     if logger is None:
         return

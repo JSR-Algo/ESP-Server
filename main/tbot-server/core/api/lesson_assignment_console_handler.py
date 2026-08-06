@@ -19,12 +19,30 @@ class LessonAssignmentConsoleHandler:
             return api_url.rstrip("/")
         return "https://tbot-backend-8wmh.onrender.com/v1"
 
-    def _connected_device_ids(self) -> list[str]:
-        return sorted(str(device_id) for device_id in self.lesson_connections.keys())
+    def _connected_devices(self) -> list[dict[str, str]]:
+        """Connected robots as ``{mac, deviceId}``.
+
+        The websocket registry is keyed by the robot MAC, but every backend
+        assignment route is ``/devices/{uuid}/...`` behind a UUID param pipe — a MAC
+        posted there can only ever 400. So each MAC is resolved through the already
+        populated mint cache and offered as its backend device UUID; a MAC with no
+        resolved UUID is reported as unresolved instead of being handed to the
+        operator as if it were assignable.
+        """
+        try:
+            from config.device_token_client import cached_device_uuid
+        except Exception:  # pragma: no cover - import guard for trimmed builds
+            def cached_device_uuid(_mac):
+                return None
+
+        devices = []
+        for key in sorted(str(device_id) for device_id in self.lesson_connections.keys()):
+            devices.append({"mac": key, "deviceId": cached_device_uuid(key) or ""})
+        return devices
 
     async def handle_get(self, _request):
         api_url = html.escape(self._backend_api_url(), quote=True)
-        devices_json = json.dumps(self._connected_device_ids())
+        devices_json = json.dumps(self._connected_devices())
         return web.Response(
             text=self._html(api_url=api_url, devices_json=devices_json),
             content_type="text/html",
@@ -69,10 +87,11 @@ class LessonAssignmentConsoleHandler:
         <input id="childId" autocomplete="off" placeholder="child uuid">
       </label>
       <label>Device ID
-        <input id="deviceId" list="connectedDevices" autocomplete="off" placeholder="device uuid or current robot id">
+        <input id="deviceId" list="connectedDevices" autocomplete="off" placeholder="backend device uuid">
         <datalist id="connectedDevices"></datalist>
       </label>
     </div>
+    <p class="hint" id="deviceHint"></p>
     <p class="hint">Token stays in this page memory only. It is sent to backend APIs as Authorization and is not stored by the ESP server.</p>
   </section>
   <section>
@@ -96,12 +115,20 @@ class LessonAssignmentConsoleHandler:
 </main>
 <script>
 const connectedDevices = {devices_json};
-connectedDevices.forEach((deviceId) => {{
+const assignableDevices = connectedDevices.filter((device) => device.deviceId);
+const unresolvedDevices = connectedDevices.filter((device) => !device.deviceId);
+assignableDevices.forEach((device) => {{
   const option = document.createElement('option');
-  option.value = deviceId;
+  option.value = device.deviceId;
+  option.label = device.mac;
   document.getElementById('connectedDevices').appendChild(option);
 }});
-if (connectedDevices.length === 1) document.getElementById('deviceId').value = connectedDevices[0];
+// Only a resolved backend UUID may be prefilled: the assignment routes reject a
+// MAC, so prefilling one would make every submit fail for a non-obvious reason.
+if (assignableDevices.length === 1) document.getElementById('deviceId').value = assignableDevices[0].deviceId;
+document.getElementById('deviceHint').textContent = unresolvedDevices.length
+  ? `Connected robots without a resolved backend device UUID: ${{unresolvedDevices.map((device) => device.mac).join(', ')}}. Their MAC is not accepted by the assignment API — look the device UUID up in the backend.`
+  : (assignableDevices.length ? '' : 'No connected robot has a resolved backend device UUID.');
 
 function value(id) {{ return document.getElementById(id).value.trim(); }}
 function setResult(payload, isError = false) {{
