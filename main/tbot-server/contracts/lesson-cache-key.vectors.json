@@ -1,0 +1,1350 @@
+{
+  "contractVersion": 1,
+  "contract": "lesson-cache-key + lesson SD pack path/basename parity (T5.1)",
+  "producer": "tbot-backend/scripts/generate-lesson-contract-vectors.mjs",
+  "consumers": [
+    "tbot-backend  src/lessons/lesson-contract-vectors.spec.ts (vitest, blocking)",
+    "robot/esp32-server main/tbot-server/tests/test_lesson_contract_vectors_parity.py (pytest, blocking)"
+  ],
+  "envelope": {
+    "fields": [
+      "code",
+      "message",
+      "retryable"
+    ],
+    "errorCodePattern": "^[a-z0-9][a-z0-9_]{0,63}$"
+  },
+  "limits": {
+    "slugMaxBytes": 128,
+    "cacheKeyMaxBytes": 205,
+    "versionMaxDigits": 10,
+    "assetBasenameMaxBytes": 200,
+    "sdRoot": "/sdcard/tbot/lesson-assets"
+  },
+  "digestVectors": [
+    {
+      "id": "dg-empty",
+      "input": {
+        "bytes_b64": ""
+      },
+      "expected": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "byte_length": 0
+      }
+    },
+    {
+      "id": "dg-ascii",
+      "input": {
+        "bytes_b64": "dGhlIHF1aWNrIGJyb3duIGZveA=="
+      },
+      "expected": {
+        "sha256": "9ecb36561341d18eb65484e833efea61edc74b84cf5e6ae1b81c63533e25fc8f",
+        "byte_length": 19
+      }
+    },
+    {
+      "id": "dg-json-minimal-separators",
+      "input": {
+        "bytes_b64": "eyJhIjoxLCJiIjpbMiwzXX0="
+      },
+      "expected": {
+        "sha256": "efbd0040190fb0871831e606c581f8a66db79d8e2bb836745a70051306956070",
+        "byte_length": 17
+      }
+    },
+    {
+      "id": "dg-utf8",
+      "input": {
+        "bytes_b64": "YsOkcm4g4oCUIGjDoG5nIHLDoG8="
+      },
+      "expected": {
+        "sha256": "fd3b23b32be32cb5ad2e45085b61a89473f7ae443faabcd194a9c1a0a1e2cc28",
+        "byte_length": 20
+      }
+    },
+    {
+      "id": "dg-emoji",
+      "input": {
+        "bytes_b64": "bGVzc29uIPCfmIDwn5Gp4oCN8J+Suw=="
+      },
+      "expected": {
+        "sha256": "34db2f74db90145a81192811584fd732a979555e27ea908b06a86641ad7baa92",
+        "byte_length": 22
+      }
+    },
+    {
+      "id": "dg-newlines",
+      "input": {
+        "bytes_b64": "bGluZTEKbGluZTINCmxpbmUzCg=="
+      },
+      "expected": {
+        "sha256": "cfa45d078c1486d5cff105b4544a619b4addc6469b26c4b810cad8359c2e5682",
+        "byte_length": 19
+      }
+    },
+    {
+      "id": "dg-1kb-zeros",
+      "input": {
+        "bytes_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+      },
+      "expected": {
+        "sha256": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "byte_length": 1024
+      }
+    }
+  ],
+  "cacheKeyVectors": [
+    {
+      "id": "ck-minimal-slug",
+      "note": "minimal legal slug and version",
+      "input": {
+        "slug": "a",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhIiwibGVzc29uVmVyc2lvbiI6MSwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": "a/v1-1199e66baee9ccba2ee887ced47930abe5cf60fb4f6eba37c557c66458629a88",
+        "sha256": "1199e66baee9ccba2ee887ced47930abe5cf60fb4f6eba37c557c66458629a88",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-demo-lesson",
+      "note": "the seeded demo lesson",
+      "input": {
+        "slug": "w01-d01-barn-say-it",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJ3MDEtZDAxLWJhcm4tc2F5LWl0IiwibGVzc29uVmVyc2lvbiI6MSwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": "w01-d01-barn-say-it/v1-0efb9fa233f09bd609d81bdcd08b82f337cbfe6ef10d87de2cf155b87d83c6ba",
+        "sha256": "0efb9fa233f09bd609d81bdcd08b82f337cbfe6ef10d87de2cf155b87d83c6ba",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-demo-lesson-v3",
+      "note": "republished demo lesson",
+      "input": {
+        "slug": "w01-d01-barn-say-it",
+        "version": 3,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJ3MDEtZDAxLWJhcm4tc2F5LWl0IiwibGVzc29uVmVyc2lvbiI6MywicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": "w01-d01-barn-say-it/v3-5e017c8ea8e69217bde4838fb218f12116157b7890c29ac14433ed45269cdd11",
+        "sha256": "5e017c8ea8e69217bde4838fb218f12116157b7890c29ac14433ed45269cdd11",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-digits-only",
+      "note": "a slug may be digits only",
+      "input": {
+        "slug": "0",
+        "version": 7,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiIwIiwibGVzc29uVmVyc2lvbiI6NywicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": "0/v7-bdc00fc4b3f13b5b0c83f4e3169068697340f3300dfd5accb153c078ee68fb2e",
+        "sha256": "bdc00fc4b3f13b5b0c83f4e3169068697340f3300dfd5accb153c078ee68fb2e",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-multi-hyphen",
+      "note": "multiple single-hyphen groups",
+      "input": {
+        "slug": "a1-b2-c3-d4",
+        "version": 12,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhMS1iMi1jMy1kNCIsImxlc3NvblZlcnNpb24iOjEyLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": "a1-b2-c3-d4/v12-51ea08e434d32d3294c2e5075a50e3c499c05f7e9321ec9e09a613b45caf5808",
+        "sha256": "51ea08e434d32d3294c2e5075a50e3c499c05f7e9321ec9e09a613b45caf5808",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-slug-128b",
+      "note": "slug at the 128-byte cap",
+      "input": {
+        "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImxlc3NvblZlcnNpb24iOjEsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1-705793e7f7ab9bca030e104ecf513816477c87e367d34ad8b8b60e5295c17121",
+        "sha256": "705793e7f7ab9bca030e104ecf513816477c87e367d34ad8b8b60e5295c17121",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-slug-129b",
+      "note": "slug one byte over the cap",
+      "input": {
+        "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "ef4db1cfe9f6e79f8cf896a383b553077d264a22905bba9fcee3aca72277dc18",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-key-205b",
+      "note": "key saturates the 205-byte cap exactly",
+      "input": {
+        "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": 1000000000,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImxlc3NvblZlcnNpb24iOjEwMDAwMDAwMDAsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1000000000-e149fbdf9a3eccbc66b84f75025cb01c7ab1096ad4117d0f9b9b557f7c45cf47",
+        "sha256": "e149fbdf9a3eccbc66b84f75025cb01c7ab1096ad4117d0f9b9b557f7c45cf47",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-version-10-digits",
+      "note": "version at the 10-digit cap",
+      "input": {
+        "slug": "lesson",
+        "version": 9999999999,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjo5OTk5OTk5OTk5LCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": "lesson/v9999999999-e76b59eec3724b67b26113c108f667e85ce50b6ecbc377fb15e8dfba21934c35",
+        "sha256": "e76b59eec3724b67b26113c108f667e85ce50b6ecbc377fb15e8dfba21934c35",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ck-version-11-digits",
+      "note": "version one digit over the cap",
+      "input": {
+        "slug": "lesson",
+        "version": 10000000000,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjoxMDAwMDAwMDAwMCwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "00df6feea1707f502bd3b3555ef3241c2d89ff17e06a83b7832ba9b486dcf6b3",
+        "error_code": "INVALID_LESSON_VERSION"
+      }
+    },
+    {
+      "id": "ck-version-max-safe",
+      "note": "safe integer but far over the digit cap",
+      "input": {
+        "slug": "lesson",
+        "version": 9007199254740991,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjo5MDA3MTk5MjU0NzQwOTkxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "93778761d3a6bf6fc38adf6f8c5c16a16dfb48149282b0215044898010f37e9d",
+        "error_code": "INVALID_LESSON_VERSION"
+      }
+    },
+    {
+      "id": "ck-version-zero",
+      "note": "version zero",
+      "input": {
+        "slug": "lesson",
+        "version": 0,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjowLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "35805eb71516b294e265e905223d13afe585f89ecd0202d7c3dfb4f00d4478ca",
+        "error_code": "INVALID_LESSON_VERSION"
+      }
+    },
+    {
+      "id": "ck-version-negative",
+      "note": "negative version",
+      "input": {
+        "slug": "lesson",
+        "version": -1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjotMSwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "8b6d35c9dd39d7c662d4186f1cf91578f01cdd58f188816a46a1c96db5aba9a5",
+        "error_code": "INVALID_LESSON_VERSION"
+      }
+    },
+    {
+      "id": "ck-version-float",
+      "note": "non-integer version",
+      "input": {
+        "slug": "lesson",
+        "version": 1.5,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJsZXNzb24iLCJsZXNzb25WZXJzaW9uIjoxLjUsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "d4fffd092def4ea852daae2808b9c3684cd64e113d80c2faf7d650d8b0097490",
+        "error_code": "INVALID_LESSON_VERSION"
+      }
+    },
+    {
+      "id": "ck-empty-slug",
+      "note": "empty slug",
+      "input": {
+        "slug": "",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiIiLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "fece291577530c3f10e45a8e7d05c152a8d21eb33d0b01bb913a694e4d20adfa",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-uppercase-slug",
+      "note": "uppercase is not canonical",
+      "input": {
+        "slug": "Barn",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJCYXJuIiwibGVzc29uVmVyc2lvbiI6MSwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "db1a5fddfa00d4299280ffd7b263a0976daa55c77d63230ac513a75c0c4fced9",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-double-hyphen",
+      "note": "double hyphen is not canonical",
+      "input": {
+        "slug": "a--b",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhLS1iIiwibGVzc29uVmVyc2lvbiI6MSwicHJvZmlsZSI6ImVzcFRmdCJ9"
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "9a64fe03bd2c7075d42c532c922206e9aea80f7b640abbf5ad45d7afab449e0e",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-leading-hyphen",
+      "note": "leading hyphen",
+      "input": {
+        "slug": "-a",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiItYSIsImxlc3NvblZlcnNpb24iOjEsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "f82374663aa9ebb770f8f2aaac485dabda21e387061137e0e285bd65f3ec167f",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-trailing-hyphen",
+      "note": "trailing hyphen",
+      "input": {
+        "slug": "a-",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhLSIsImxlc3NvblZlcnNpb24iOjEsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "99376c30f4238022835a3c13828c8f1e9bc8f1aa17abecbcf389c43a9c60b496",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-underscore",
+      "note": "underscore is not a slug separator",
+      "input": {
+        "slug": "a_b",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhX2IiLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "d2a1a4e2831ae44431997eaa6a563ddac07c03c58d1cf89d609ad8fbf3dfd451",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-space",
+      "note": "space in slug",
+      "input": {
+        "slug": "a b",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhIGIiLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "c89f7d6c494a3472b491e1c62ace68b14c8c110fe62119cf1d1f6a3f5b89108b",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-slash",
+      "note": "multi-segment slug (the old sync-controller grammar)",
+      "input": {
+        "slug": "animals/farm",
+        "version": 3,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhbmltYWxzL2Zhcm0iLCJsZXNzb25WZXJzaW9uIjozLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "da2fc0cee68b9e14423a7381c24798380f7b2b72323a0fb424be2af5ccf545ce",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-dot",
+      "note": "dot in slug",
+      "input": {
+        "slug": "a.b",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJhLmIiLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "3a0ceb5941c6a63edc41211d30a2e44c351b58c24090ca9d14c34caac9f19c6e",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-non-ascii",
+      "note": "non-ASCII slug",
+      "input": {
+        "slug": "bärn",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJiw6RybiIsImxlc3NvblZlcnNpb24iOjEsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "c36213ce2d37d632b9e1705a5f076d41b4b17354830d6dfb628ce5978fb2b708",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-trailing-newline",
+      "note": "trailing newline must not satisfy the anchor",
+      "input": {
+        "slug": "barn\n",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJiYXJuXG4iLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "f284f252ef86b21aecae5b15262d5fc291becc34a671c5f2cd509c534680a1c5",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-leading-newline",
+      "note": "leading newline",
+      "input": {
+        "slug": "\nbarn",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJcbmJhcm4iLCJsZXNzb25WZXJzaW9uIjoxLCJwcm9maWxlIjoiZXNwVGZ0In0="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "0fdb5faec9bdd2a3d80d906321ca8948b06dfa34f5a8ef12104700055321cd37",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    },
+    {
+      "id": "ck-emoji",
+      "note": "astral-plane slug",
+      "input": {
+        "slug": "barn😀",
+        "version": 1,
+        "manifest_bytes_b64": "eyJsZXNzb25LZXkiOiJiYXJu8J+YgCIsImxlc3NvblZlcnNpb24iOjEsInByb2ZpbGUiOiJlc3BUZnQifQ=="
+      },
+      "expected": {
+        "cache_key": null,
+        "sha256": "e1bf0f2699a7e54c742f076f7d6553306d458fc1007bb4941a7fdcb4a52a902d",
+        "error_code": "INVALID_LESSON_ID"
+      }
+    }
+  ],
+  "rawKeyVectors": [
+    {
+      "id": "rk-canonical",
+      "note": "canonical key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "error_code": null
+      }
+    },
+    {
+      "id": "rk-leading-zero-version",
+      "note": "leading-zero version",
+      "input": {
+        "cache_key": "lesson/v01-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-zero-version",
+      "note": "v0 is not a published version",
+      "input": {
+        "cache_key": "lesson/v0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-missing-v",
+      "note": "missing the v prefix",
+      "input": {
+        "cache_key": "lesson/1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-uppercase-checksum",
+      "note": "uppercase checksum",
+      "input": {
+        "cache_key": "lesson/v1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-short-checksum",
+      "note": "63-hex checksum",
+      "input": {
+        "cache_key": "lesson/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-long-checksum",
+      "note": "65-hex checksum",
+      "input": {
+        "cache_key": "lesson/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-nonhex-checksum",
+      "note": "non-hex checksum",
+      "input": {
+        "cache_key": "lesson/v1-gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-multi-segment",
+      "note": "multi-segment slug",
+      "input": {
+        "cache_key": "animals/farm/v3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-trailing-slash",
+      "note": "trailing slash",
+      "input": {
+        "cache_key": "lesson/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-trailing-newline",
+      "note": "trailing newline after a valid key",
+      "input": {
+        "cache_key": "lesson/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-leading-space",
+      "note": "leading space",
+      "input": {
+        "cache_key": " lesson/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-empty",
+      "note": "empty key",
+      "input": {
+        "cache_key": ""
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-slug-only",
+      "note": "slug with no version segment",
+      "input": {
+        "cache_key": "lesson"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-206-bytes",
+      "note": "one byte over the 205-byte cap",
+      "input": {
+        "cache_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1000000000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    },
+    {
+      "id": "rk-non-ascii",
+      "note": "non-ASCII key",
+      "input": {
+        "cache_key": "bärn/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "cache_key": null,
+        "error_code": "INVALID_CACHE_KEY"
+      }
+    }
+  ],
+  "assetPathVectors": [
+    {
+      "id": "ab-layer-asset",
+      "note": "canonical teaching-object key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "teachingObject.barn",
+        "asset_key_b64": "dGVhY2hpbmdPYmplY3QuYmFybg==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "teachingObject.barn",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/teachingObject.barn",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-overlay-asset",
+      "note": "robot overlay pose",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "robotOverlay.celebrate",
+        "asset_key_b64": "cm9ib3RPdmVybGF5LmNlbGVicmF0ZQ==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "robotOverlay.celebrate",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/robotOverlay.celebrate",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-background-poster",
+      "note": "background poster",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "backgroundScene.poster",
+        "asset_key_b64": "YmFja2dyb3VuZFNjZW5lLnBvc3Rlcg==",
+        "media_type": "image/jpeg"
+      },
+      "expected": {
+        "encoded_basename": "backgroundScene.poster",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/backgroundScene.poster",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-shared-mp4",
+      "note": "renderer-v3 shared MP4 identity key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "sharedBarnLoop@v4",
+        "asset_key_b64": "c2hhcmVkQmFybkxvb3BAdjQ=",
+        "media_type": "video/mp4"
+      },
+      "expected": {
+        "encoded_basename": "sharedBarnLoop%40v4",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sharedBarnLoop%40v4",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-flattened-cue",
+      "note": "renderer-v4 flattened cue",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "flattenedCinematic.celebrate",
+        "asset_key_b64": "ZmxhdHRlbmVkQ2luZW1hdGljLmNlbGVicmF0ZQ==",
+        "media_type": "video/mp4"
+      },
+      "expected": {
+        "encoded_basename": "flattenedCinematic.celebrate",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/flattenedCinematic.celebrate",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-flattened-trgb",
+      "note": "TRGB device cue",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "flattenedCinematic.opening",
+        "asset_key_b64": "ZmxhdHRlbmVkQ2luZW1hdGljLm9wZW5pbmc=",
+        "media_type": "application/vnd.tbot.rgb565"
+      },
+      "expected": {
+        "encoded_basename": "flattenedCinematic.opening",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/flattenedCinematic.opening",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-tilde",
+      "note": "tilde is unreserved on both sides",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "asset~name",
+        "asset_key_b64": "YXNzZXR+bmFtZQ==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "asset~name",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/asset~name",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-apostrophe",
+      "note": "encodeURIComponent keeps ' literal; quote() does not",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "robot'pose",
+        "asset_key_b64": "cm9ib3QncG9zZQ==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "robot%27pose",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/robot%27pose",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-parens",
+      "note": "encodeURIComponent keeps () literal; quote() does not",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "robot(1)",
+        "asset_key_b64": "cm9ib3QoMSk=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "robot%281%29",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/robot%281%29",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-bang",
+      "note": "encodeURIComponent keeps ! literal; quote() does not",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "robot!bang",
+        "asset_key_b64": "cm9ib3QhYmFuZw==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "robot%21bang",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/robot%21bang",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-star",
+      "note": "encodeURIComponent keeps * literal; quote() does not",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "robot*star",
+        "asset_key_b64": "cm9ib3Qqc3Rhcg==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "robot%2Astar",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/robot%2Astar",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-space",
+      "note": "space percent-encodes identically on both sides",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "a b",
+        "asset_key_b64": "YSBi",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "a%20b",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a%20b",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-slash",
+      "note": "slash must not escape the pack directory",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "a/b",
+        "asset_key_b64": "YS9i",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "a%2Fb",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a%2Fb",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-backslash",
+      "note": "backslash",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "a\\b",
+        "asset_key_b64": "YVxi",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "a%5Cb",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a%5Cb",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-percent",
+      "note": "a literal percent must be re-encoded",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "a%b",
+        "asset_key_b64": "YSVi",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "a%25b",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a%25b",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-non-ascii",
+      "note": "UTF-8 multi-byte key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "bärn-key",
+        "asset_key_b64": "YsOkcm4ta2V5",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "b%C3%A4rn-key",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b%C3%A4rn-key",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-emoji",
+      "note": "astral-plane key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "emoji-😀",
+        "asset_key_b64": "ZW1vamkt8J+YgA==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "emoji-%F0%9F%98%80",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/emoji-%F0%9F%98%80",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-200b",
+      "note": "encoded basename at the 200-byte cap",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sd_path": "/sdcard/tbot/lesson-assets/w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "error_code": null
+      }
+    },
+    {
+      "id": "ab-201b",
+      "note": "one byte over the cap",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-255b",
+      "note": "the old TS 255-byte cap",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-expands-over-cap",
+      "note": "70 chars expand to 420 encoded bytes",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää",
+        "asset_key_b64": "w6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6TDpMOkw6Q=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-pack-json",
+      "note": "clobbers the pack store manifest",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "pack.json",
+        "asset_key_b64": "cGFjay5qc29u",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-ready",
+      "note": "clobbers the pack store READY marker",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "READY",
+        "asset_key_b64": "UkVBRFk=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-current-json",
+      "note": "reserved firmware control file",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "current.json",
+        "asset_key_b64": "Y3VycmVudC5qc29u",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-activation-json",
+      "note": "reserved firmware control file",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "activation.json",
+        "asset_key_b64": "YWN0aXZhdGlvbi5qc29u",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-device-con",
+      "note": "reserved FAT device basename",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "con",
+        "asset_key_b64": "Y29u",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-device-com1-ext",
+      "note": "reserved FAT device basename with extension",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "COM1.png",
+        "asset_key_b64": "Q09NMS5wbmc=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-suffix-part",
+      "note": "reserved atomic-write suffix",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "asset.part",
+        "asset_key_b64": "YXNzZXQucGFydA==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-suffix-tmp",
+      "note": "reserved temp suffix",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "asset.tmp",
+        "asset_key_b64": "YXNzZXQudG1w",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-trailing-dot",
+      "note": "FAT drops a trailing dot",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "trailing.",
+        "asset_key_b64": "dHJhaWxpbmcu",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-dot",
+      "note": "current directory",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": ".",
+        "asset_key_b64": "Lg==",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-dotdot",
+      "note": "parent directory",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "..",
+        "asset_key_b64": "Li4=",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-empty",
+      "note": "empty asset key",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "",
+        "asset_key_b64": "",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-control-char",
+      "note": "control character",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "a\u0001b",
+        "asset_key_b64": "YQFi",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    },
+    {
+      "id": "ab-del-char",
+      "note": "DEL character",
+      "input": {
+        "cache_key": "w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asset_key": "ab",
+        "asset_key_b64": "YX9i",
+        "media_type": "image/png"
+      },
+      "expected": {
+        "encoded_basename": null,
+        "sd_path": null,
+        "error_code": "INVALID_ASSET_KEY"
+      }
+    }
+  ],
+  "profileVectors": [
+    {
+      "id": "pf-esptft",
+      "input": {
+        "profile": "espTft"
+      },
+      "expected": {
+        "error_code": null
+      }
+    },
+    {
+      "id": "pf-esptft-lower",
+      "input": {
+        "profile": "esptft"
+      },
+      "expected": {
+        "error_code": "INVALID_PROFILE"
+      }
+    },
+    {
+      "id": "pf-mobile",
+      "input": {
+        "profile": "mobile"
+      },
+      "expected": {
+        "error_code": "INVALID_PROFILE"
+      }
+    },
+    {
+      "id": "pf-empty",
+      "input": {
+        "profile": ""
+      },
+      "expected": {
+        "error_code": "INVALID_PROFILE"
+      }
+    }
+  ],
+  "errorNamespaceVectors": [
+    {
+      "code": "INVALID_MANIFEST",
+      "backend_ingress_code": "invalid_manifest"
+    },
+    {
+      "code": "UNKNOWN_FIELD",
+      "backend_ingress_code": "unknown_field"
+    },
+    {
+      "code": "MISSING_FIELD",
+      "backend_ingress_code": "missing_field"
+    },
+    {
+      "code": "INVALID_LESSON_ID",
+      "backend_ingress_code": "invalid_lesson_id"
+    },
+    {
+      "code": "INVALID_LESSON_VERSION",
+      "backend_ingress_code": "invalid_lesson_version"
+    },
+    {
+      "code": "INVALID_PROFILE",
+      "backend_ingress_code": "invalid_profile"
+    },
+    {
+      "code": "INVALID_MANIFEST_CHECKSUM",
+      "backend_ingress_code": "invalid_manifest_checksum"
+    },
+    {
+      "code": "INVALID_CACHE_KEY",
+      "backend_ingress_code": "invalid_cache_key"
+    },
+    {
+      "code": "CACHE_KEY_MISMATCH",
+      "backend_ingress_code": "cache_key_mismatch"
+    },
+    {
+      "code": "INVALID_ASSETS",
+      "backend_ingress_code": "invalid_assets"
+    },
+    {
+      "code": "INVALID_ASSET",
+      "backend_ingress_code": "invalid_asset"
+    },
+    {
+      "code": "INVALID_ASSET_KEY",
+      "backend_ingress_code": "invalid_asset_key"
+    },
+    {
+      "code": "INVALID_ASSET_SHA256",
+      "backend_ingress_code": "invalid_asset_sha256"
+    },
+    {
+      "code": "INVALID_ASSET_SIZE",
+      "backend_ingress_code": "invalid_asset_size"
+    },
+    {
+      "code": "INVALID_MEDIA_TYPE",
+      "backend_ingress_code": "invalid_media_type"
+    },
+    {
+      "code": "INVALID_CRITICAL",
+      "backend_ingress_code": "invalid_critical"
+    },
+    {
+      "code": "INVALID_SD_PATH",
+      "backend_ingress_code": "invalid_sd_path"
+    },
+    {
+      "code": "ALIAS_CONFLICT",
+      "backend_ingress_code": "alias_conflict"
+    },
+    {
+      "code": "DUPLICATE_ASSET_KEY",
+      "backend_ingress_code": "duplicate_asset_key"
+    },
+    {
+      "code": "BASENAME_COLLISION",
+      "backend_ingress_code": "basename_collision"
+    },
+    {
+      "code": "DISALLOWED_ORIGIN",
+      "backend_ingress_code": "disallowed_origin"
+    },
+    {
+      "code": "INVALID_RENDERER_V3_MP4",
+      "backend_ingress_code": "invalid_renderer_v3_mp4"
+    },
+    {
+      "code": "INVALID_RENDERER_V4_MP4",
+      "backend_ingress_code": "invalid_renderer_v4_mp4"
+    },
+    {
+      "code": "INVALID_SHARED_ASSET_IDENTITY",
+      "backend_ingress_code": "invalid_shared_asset_identity"
+    },
+    {
+      "code": "FILE_TOO_LARGE",
+      "backend_ingress_code": "file_too_large"
+    },
+    {
+      "code": "PACK_TOO_LARGE",
+      "backend_ingress_code": "pack_too_large"
+    },
+    {
+      "code": "INVALID_LIMIT",
+      "backend_ingress_code": "invalid_limit"
+    },
+    {
+      "code": "STORAGE_NOT_CONFIGURED",
+      "backend_ingress_code": "storage_not_configured"
+    },
+    {
+      "code": "REQUEST_ENTITY_TOO_LARGE",
+      "backend_ingress_code": "request_entity_too_large"
+    },
+    {
+      "code": "INVALID_REQUEST",
+      "backend_ingress_code": "invalid_request"
+    }
+  ],
+  "fuzz": {
+    "algorithm": "lcg32(seed=0x5eed1234, a=1103515245, c=12345); len=next()%12; char=alphabet[next()%len(alphabet)]",
+    "seed": 1575031860,
+    "count": 10000,
+    "separator_b64": "Cg==",
+    "alphabet_b64": "YWJ6MDktXy5+IScoKSogL1wlOj88Pnwiw6TkuJY=",
+    "corpusSha256": "6c490dd28646a885aeb7ee6a5342959e0ad0d81611701cc146d6e25473deb6bf",
+    "outcomeSha256": "a46c982e443c46d46b587fd81839a977d8e325a216383f649c13b91ab85868d8"
+  }
+}

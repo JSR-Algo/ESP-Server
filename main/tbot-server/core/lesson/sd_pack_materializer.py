@@ -24,7 +24,15 @@ import httpx
 from httpcore._backends.auto import AutoBackend
 
 from config.logger import setup_logging
-from core.lesson.cache_key_contract import CacheEvictionRefused, validate_cache_key
+from core.lesson.cache_key_contract import (
+    CACHE_KEY_VERSION_MAX_DIGITS,
+    AssetBasenameRefused,
+    CacheEvictionRefused,
+    compose_asset_sd_path,
+    compose_cache_key,
+    encode_asset_basename,
+    validate_cache_key,
+)
 from core.lesson.flattened_cinematic_contract import (
     TRGB_MEDIA_TYPE,
     FlattenedCinematicContractError,
@@ -61,9 +69,6 @@ _LOCAL_STORAGE_ERRNOS = frozenset(
     )
     if code is not None
 )
-# Leaves room for SharedAssetStore's ".pid.uuid.part" atomic temp suffix under
-# FAT-style 255-byte component limits.
-MAX_ENCODED_BASENAME_BYTES = 200
 _TOP_LEVEL_FIELDS = frozenset(
     {"lessonId", "lessonVersion", "profile", "manifestChecksum", "cacheKey", "assets"}
 )
@@ -181,7 +186,15 @@ class MaterializationError(Exception):
         self.details = dict(self.details or {})
 
     def to_response(self) -> dict[str, Any]:
+        """Canonical lesson error envelope `{code, message, retryable}`.
+
+        T5.1: this endpoint historically keyed the code as `error` only, while
+        every other lesson surface (LessonError.to_body, backend AppError) uses
+        `code`. Both keys are emitted with the SAME value — additive, so any
+        already-deployed reader of `error` keeps working.
+        """
         return {
+            "code": self.code,
             "error": self.code,
             "message": self.message,
             "retryable": self.retryable,
@@ -336,7 +349,7 @@ async def _download_asset(
     current_total: int,
     manifest: Mapping[str, Any],
 ) -> tuple[Path, int]:
-    target = staging / quote(asset["key"], safe="")
+    target = staging / encode_asset_basename(asset["key"])
     hasher = hashlib.sha256()
     count = 0
     try:
@@ -439,7 +452,10 @@ def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -
     checksum = _sha256_value(manifest.get("manifestChecksum"), "INVALID_MANIFEST_CHECKSUM")
     if profile != "espTft":
         raise _bad("INVALID_PROFILE", "Manifest profile must be espTft")
-    expected_cache_key = f"{lesson_id}/v{version}-{checksum}"
+    try:
+        expected_cache_key = compose_cache_key(lesson_id, version, checksum)
+    except CacheEvictionRefused:  # pragma: no cover - components validated above
+        raise _bad("INVALID_CACHE_KEY", "Invalid canonical cache key") from None
     try:
         cache_key = validate_cache_key(manifest.get("cacheKey"))
     except CacheEvictionRefused:
@@ -462,7 +478,7 @@ def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -
         if asset["key"] in seen_keys:
             raise _bad("DUPLICATE_ASSET_KEY", "Duplicate asset key")
         seen_keys.add(asset["key"])
-        encoded_lower = quote(asset["key"], safe="").lower()
+        encoded_lower = encode_asset_basename(asset["key"]).lower()
         if encoded_lower in seen_basenames:
             raise _bad("BASENAME_COLLISION", "Asset names collide on FAT storage")
         seen_basenames.add(encoded_lower)
@@ -498,15 +514,10 @@ def _validate_asset(
         raise _bad("INVALID_ASSET", "Asset must be an object")
     _reject_field_delta(set(item.keys()), _ASSET_FIELDS)
     key = item.get("key")
-    if not isinstance(key, str) or not key:
-        raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
-    if key in (".", "..") or any(ord(ch) < 32 for ch in key):
-        raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
-    encoded = quote(key, safe="")
-    if len(encoded.encode("ascii")) > MAX_ENCODED_BASENAME_BYTES:
-        raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
-    if not encoded or encoded in (".", "..") or "/" in encoded or "\\" in encoded:
-        raise _bad("INVALID_ASSET_KEY", "Invalid asset key")
+    try:
+        encoded = encode_asset_basename(key)
+    except AssetBasenameRefused:
+        raise _bad("INVALID_ASSET_KEY", "Invalid asset key") from None
     digest = _sha256_value(item.get("sha256"), "INVALID_ASSET_SHA256")
     size = item.get("size")
     if type(size) is not int or size < 0:
@@ -532,7 +543,7 @@ def _validate_asset(
         production,
         allow_fragment=media_type == "video/mp4",
     )
-    expected_sd_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
+    expected_sd_path = compose_asset_sd_path(cache_key, key)
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     renderer_v3_fields: dict[str, Any] = {}
@@ -714,16 +725,22 @@ async def _default_resolver(host: str) -> list[str]:
 def _safe_lesson_id(value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise _bad("INVALID_LESSON_ID", "Invalid lessonId")
-    probe = f"{value}/v1-{'0' * 64}"
     try:
-        validate_cache_key(probe)
+        compose_cache_key(value, 1, "0" * 64)
     except CacheEvictionRefused:
         raise _bad("INVALID_LESSON_ID", "Invalid lessonId") from None
     return value
 
 
 def _safe_version(value: Any) -> int:
-    if type(value) is not int or value <= 0:
+    # The canonical key grammar caps the version at CACHE_KEY_VERSION_MAX_DIGITS
+    # digits. Rejecting here (rather than letting compose_cache_key raise) keeps
+    # the failure on the INVALID_LESSON_VERSION code the backend already maps.
+    if (
+        type(value) is not int
+        or value <= 0
+        or len(str(value)) > CACHE_KEY_VERSION_MAX_DIGITS
+    ):
         raise _bad("INVALID_LESSON_VERSION", "Invalid lessonVersion")
     return value
 

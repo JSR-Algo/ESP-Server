@@ -29,6 +29,7 @@ class LessonSdMaterializeHandler:
         except web.HTTPRequestEntityTooLarge:
             return web.json_response(
                 {
+                    "code": "REQUEST_ENTITY_TOO_LARGE",
                     "error": "REQUEST_ENTITY_TOO_LARGE",
                     "message": "Request body is too large",
                     "retryable": False,
@@ -39,6 +40,7 @@ class LessonSdMaterializeHandler:
         except (json.JSONDecodeError, ValueError, TypeError):
             return web.json_response(
                 {
+                    "code": "INVALID_REQUEST",
                     "error": "INVALID_REQUEST",
                     "message": "Body must be a canonical lesson asset manifest",
                     "retryable": False,

@@ -1462,7 +1462,10 @@ async def test_materialize_handler_returns_sanitized_materialization_errors(monk
         response = await handler.handle_post(_Request())
 
     assert response.status == 400
+    # T5.1: the canonical lesson error envelope is {code,message,retryable};
+    # `error` stays as an additive alias for already-deployed readers.
     assert _json_response(response) == {
+        "code": "DISALLOWED_ORIGIN",
         "error": "DISALLOWED_ORIGIN",
         "message": "Asset URL origin is not allowed",
         "retryable": False,
