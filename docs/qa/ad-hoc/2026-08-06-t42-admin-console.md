@@ -187,7 +187,43 @@ resolved by this task and marked RESOLVED in §5.
      0 failed**; the T4.2 specs 16 passed.
    - both pinned repros re-run against the main checkouts: `t42` EXIT=0,
      `t42-backend` EXIT=0 (13 passed).
+   - **full ESP server suite on main** (`python3 -m pytest` in `main/tbot-server`):
+     **13 failed / 3587 passed / 7 skipped**. None of the 13 are T4.2's: the failing
+     files are `scaleout_deploy_topology` (3), `tvideo_farm_cross_repo_fixture` (4),
+     `http_server` nginx proxies (2), `nginx_generation_cache_runtime` (1),
+     `google_live_client` (1), `flattened_cinematic_contract` (1) and
+     `benchmark_google_live_audio_runtime` (1) — none import
+     `config/device_token_client` or the console handler. Proven, not assumed: the
+     same four files re-run at `6326a899` (the commit immediately BEFORE the T4.2
+     merge) produce the identical 9 failures. The set differs from the T0.1 baseline
+     (12 failed / 3454 passed) because of merges that landed between T0.1 and here,
+     not because of this task.
    No production smoke was run — nothing was deployed (step 3).
+
+## Post-merge close-out
+
+- **Repro robustness.** `t42-backend.sh` originally hard-failed when the throwaway
+  PostgreSQL database was absent, which would have made every future integration
+  re-gate report T4.2 as a regression on any box that had not run it before. A
+  missing database is an unprovisioned box, not a regression: the repro now creates
+  the empty database (the spec builds and drops its own schema) and hard-fails only
+  when the server itself is unreachable — so a skipped postgres suite still cannot
+  be mistaken for a passing fix. Proven by dropping `tbot_t42_insights` and re-running
+  from scratch: `provisioned empty test database: tbot_t42_insights`, 13 passed,
+  exit 0. The pinned assertions (`SOURCE_REV`) are untouched, so the gate verdict
+  still stands on the same specs.
+- **Security finding routed to T6.4 (HIGH), not fixed here.**
+  `LessonAssignmentConsoleHandler._html` interpolates the device list into an inline
+  `<script>` with `json.dumps`, which does not escape `</`; the registry key is the
+  raw `device-id` websocket header and nothing validates it as a MAC. Confirmed by
+  execution — a device registering
+  `device-id: x</script><img src=x onerror=alert(1)>` gets a literal `</script>` into
+  the operator page. **Pre-existing**: the previous
+  `json.dumps(self._connected_device_ids())` had the identical hole, and T4.2 changed
+  the payload shape without changing the escaping. Injection review of the ESP
+  `core/api/*` handlers is T6.4's stated remit, so it is routed there (§5) rather
+  than widening a merged task's scope; the fix is one line
+  (`.replace("</", "<\\/")`) plus a sweep of the sibling handlers.
 5. **Remove the worktree.** Both worktrees verified clean and both branches verified
    merged (`git merge-base --is-ancestor <branch> main`) before removal; local
    branches deleted. No remote branch existed for either (never pushed;
