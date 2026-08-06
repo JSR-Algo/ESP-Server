@@ -15,6 +15,7 @@ from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
+from core.lesson import runtime_counters as lesson_runtime_counters
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.vision_handler import VisionHandler
 from core.lesson.esp_build_identity import (
@@ -486,6 +487,8 @@ class SimpleHttpServer:
             "counters": {
                 "forwarder.dropped_events_total": forwarder_dropped_total,
                 "safety_forwarder.dropped_events_total": safety_forwarder_dropped_total,
+                # T6.2: process-level reconnect-storm signals (T2.4 finding).
+                **lesson_runtime_counters.snapshot(),
             },
             "devices": devices,
         }

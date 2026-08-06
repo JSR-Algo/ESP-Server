@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
+from core.lesson.log_context import with_lesson_log_context
 
 TAG = __name__
 
@@ -34,7 +35,10 @@ async def _dispatch(conn: Any, msg_json: Dict[str, Any], method: str) -> None:
         if logger is not None:
             try:
                 logger.bind(tag=TAG).debug(
-                    f"Dropped {msg_json.get('type')} with no active lesson runtime"
+                    with_lesson_log_context(
+                        f"Dropped {msg_json.get('type')} with no active lesson runtime",
+                        conn,
+                    )
                 )
             except Exception:
                 pass
@@ -54,8 +58,11 @@ async def _dispatch(conn: Any, msg_json: Dict[str, Any], method: str) -> None:
         if logger is not None:
             try:
                 logger.bind(tag=TAG).warning(
-                    f"lesson {method} handler raised; degrading lesson only "
-                    f"(type={msg_json.get('type')})",
+                    with_lesson_log_context(
+                        f"lesson {method} handler raised; degrading lesson only "
+                        f"(type={msg_json.get('type')})",
+                        conn,
+                    ),
                     exc_info=True,
                 )
             except Exception:

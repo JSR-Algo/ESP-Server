@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 # module attribute, and the real coroutine is bound in production. (conftest does
 # NOT stub config.manage_api_client — it only filters warnings.)
 from config import manage_api_client as _backend_api
+from core.lesson.log_context import with_lesson_log_context
 
 TAG = "LessonForwarder"
 
@@ -397,16 +398,7 @@ def _session_lifecycle_key(batch: Dict[str, Any]) -> Optional[Tuple[str, str]]:
 
 
 def _with_lesson_log_context(message: str, batch: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(batch, dict):
-        return message
-    fields = []
-    assignment_id = batch.get("assignmentId")
-    if isinstance(assignment_id, str) and assignment_id and "assignment_id=" not in message:
-        fields.append(f"assignment_id={assignment_id}")
-    session_id = batch.get("sessionId")
-    if isinstance(session_id, str) and session_id and "session_id=" not in message:
-        fields.append(f"session_id={session_id}")
-    return f"{message} {' '.join(fields)}" if fields else message
+    return with_lesson_log_context(message, batch if isinstance(batch, dict) else None)
 
 
 def _store_pending_terminal_batch(device_id: str, batch: Dict[str, Any]) -> None:

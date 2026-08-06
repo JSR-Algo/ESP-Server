@@ -71,6 +71,7 @@ from core.lesson.conversation_runtime import (
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
+from core.lesson.log_context import with_lesson_log_context
 from core.lesson.motion_presets import dispatch_motion_preset
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
@@ -6026,12 +6027,9 @@ class LessonRuntime:
             pass
 
     def _with_log_context(self, message: str) -> str:
-        fields = []
-        if self.assignment_id and "assignment_id=" not in message:
-            fields.append(f"assignment_id={self.assignment_id}")
-        if self.session_id and "session_id=" not in message:
-            fields.append(f"session_id={self.session_id}")
-        return f"{message} {' '.join(fields)}" if fields else message
+        return with_lesson_log_context(
+            message, assignment_id=self.assignment_id, session_id=self.session_id
+        )
 
 
 async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
@@ -6084,16 +6082,17 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     def _log(level: str, message: str) -> None:
         if logger is None:
             return
-        fields = []
         assignment_for_log = _log_context.get("assignment")
-        if isinstance(assignment_for_log, dict) and "assignment_id=" not in message:
-            assignment_id_for_log = assignment_for_log.get("assignmentId")
-            if isinstance(assignment_id_for_log, str) and assignment_id_for_log:
-                fields.append(f"assignment_id={assignment_id_for_log}")
-        session_id_for_log = getattr(conn, "session_id", None)
-        if isinstance(session_id_for_log, str) and session_id_for_log and "session_id=" not in message:
-            fields.append(f"session_id={session_id_for_log}")
-        contextual_message = f"{message} {' '.join(fields)}" if fields else message
+        contextual_message = with_lesson_log_context(
+            message,
+            assignment_id=(
+                assignment_for_log.get("assignmentId")
+                if isinstance(assignment_for_log, dict)
+                else None
+            ),
+            session_id=getattr(conn, "session_id", None),
+            device_id=device_id,
+        )
         try:
             getattr(logger.bind(tag=TAG), level)(contextual_message)
         except Exception:
@@ -6848,7 +6847,11 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
     except (OSError, TypeError) as exc:
         logger = getattr(conn, "logger", None)
         if logger is not None:
-            logger.warning(f"lesson SD GC unavailable: {type(exc).__name__}")
+            logger.warning(
+                with_lesson_log_context(
+                    f"lesson SD GC unavailable: {type(exc).__name__}", conn
+                )
+            )
         return None
 
 

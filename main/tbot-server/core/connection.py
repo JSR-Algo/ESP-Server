@@ -30,6 +30,8 @@ from core.utils.modules_initialize import (
     initialize_asr,
 )
 from core.handle.reportHandle import report, enqueue_tool_report
+from core.lesson.log_context import with_lesson_log_context
+from core.lesson import runtime_counters as lesson_runtime_counters
 from core.providers.tts.default import DefaultTTS
 from concurrent.futures import ThreadPoolExecutor
 from core.utils.dialogue import Message, Dialogue
@@ -883,7 +885,9 @@ class ConnectionHandler:
             await deactivate()
         except Exception as exc:
             self.logger.bind(tag=TAG).warning(
-                "lesson Live context deactivation failed error={}",
+                with_lesson_log_context(
+                    "lesson Live context deactivation failed error={}", self
+                ),
                 type(exc).__name__,
             )
 
@@ -904,7 +908,9 @@ class ConnectionHandler:
                 )
             except Exception as e:  # pragma: no cover - best-effort terminal clear
                 try:
-                    self.logger.bind(tag=TAG).warning(f"send lesson tts stop failed: {e}")
+                    self.logger.bind(tag=TAG).warning(
+                        with_lesson_log_context(f"send lesson tts stop failed: {e}", self)
+                    )
                 except Exception:
                     pass
         self.clearSpeakStatus()
@@ -936,7 +942,9 @@ class ConnectionHandler:
             )
         except Exception as e:  # pragma: no cover - best-effort face push
             try:
-                self.logger.bind(tag=TAG).warning(f"send lesson emotion failed: {e}")
+                self.logger.bind(tag=TAG).warning(
+                    with_lesson_log_context(f"send lesson emotion failed: {e}", self)
+                )
             except Exception:
                 pass
 
@@ -1410,11 +1418,15 @@ class ConnectionHandler:
                 loop = self.loop or asyncio.get_running_loop()
                 self.tts = await loop.run_in_executor(None, self._initialize_tts)
                 await self.tts.open_audio_channels(self)
-                self.logger.bind(tag=TAG).info("lesson_tts_initialized")
+                self.logger.bind(tag=TAG).info(
+                    with_lesson_log_context("lesson_tts_initialized", self)
+                )
                 return getattr(self.tts, "tts_text_queue", None) is not None
             except Exception as exc:
                 self.logger.bind(tag=TAG).warning(
-                    f"lesson_tts_initialize_failed: {type(exc).__name__}"
+                    with_lesson_log_context(
+                        f"lesson_tts_initialize_failed: {type(exc).__name__}", self
+                    )
                 )
                 return False
 
@@ -2318,7 +2330,9 @@ class ConnectionHandler:
             except Exception as cleanup_error:
                 try:
                     self.logger.bind(tag=TAG).error(
-                        f"Error auto-disabling lesson runtime: {cleanup_error}"
+                        with_lesson_log_context(
+                            f"Error auto-disabling lesson runtime: {cleanup_error}", self
+                        )
                     )
                 except Exception:
                     pass
@@ -2342,7 +2356,10 @@ class ConnectionHandler:
                 )
         try:
             self.logger.bind(tag=TAG).error(
-                "LESSON_RUNTIME_ENABLED auto-disabled (voice-latency-during-preload alarm)"
+                with_lesson_log_context(
+                    "LESSON_RUNTIME_ENABLED auto-disabled (voice-latency-during-preload alarm)",
+                    self,
+                )
             )
         except Exception:
             pass
@@ -2497,7 +2514,9 @@ class ConnectionHandler:
             return await maybe_start_lesson_on_connect(self)
         except Exception as exc:  # pragma: no cover - lesson runtime must never break voice connect
             self.logger.bind(tag=TAG).warning(
-                f"lesson pull-on-connect failed: {type(exc).__name__}: {exc}"
+                with_lesson_log_context(
+                    f"lesson pull-on-connect failed: {type(exc).__name__}: {exc}", self
+                )
             )
             return None
 
@@ -2633,7 +2652,9 @@ class ConnectionHandler:
                 await runtime.close()
             except Exception as exc:
                 self.logger.bind(tag=TAG).error(
-                    f"Error cleaning lesson runtime: {type(exc).__name__}"
+                    with_lesson_log_context(
+                        f"Error cleaning lesson runtime: {type(exc).__name__}", runtime
+                    )
                 )
 
         forwarder = self.safety_event_forwarder
@@ -2688,7 +2709,9 @@ class ConnectionHandler:
             return {"pending": pending_result, "full": full_result}
         except Exception as exc:  # pragma: no cover - background sync must not break voice
             self.logger.bind(tag=TAG).warning(
-                f"cached lesson SD sync failed errorType={type(exc).__name__}"
+                with_lesson_log_context(
+                    f"cached lesson SD sync failed errorType={type(exc).__name__}", self
+                )
             )
             return {"state": "failed", "errorCode": "cached_sd_sync_failed"}
 
@@ -2972,9 +2995,15 @@ class ConnectionHandler:
                     if peer_silent or idle_ms > self.timeout_seconds * 1000:
                         if not self.stop_event.is_set():
                             if peer_silent:
+                                lesson_runtime_counters.increment(
+                                    lesson_runtime_counters.PEER_SILENCE_CLOSED
+                                )
                                 self.logger.bind(tag=TAG).warning(
-                                    "lesson_peer_silent device_id={} session_id={} "
-                                    "idle_sec={:.1f} budget_sec={:.1f}; closing socket",
+                                    with_lesson_log_context(
+                                        "lesson_peer_silent device_id={} session_id={} "
+                                        "idle_sec={:.1f} budget_sec={:.1f}; closing socket",
+                                        self,
+                                    ),
                                     self.device_id or "",
                                     self.session_id or "",
                                     idle_ms / 1000.0,
