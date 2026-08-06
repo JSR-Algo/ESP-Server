@@ -28,7 +28,7 @@ event queue (§4.6) and per-connection fault isolation in the HTTP fan-out
 endpoints (§4.5).
 
 Repro: `lesson-prod/repros/t24.sh` (+ `lesson-prod/repros/t24/`).
-Regression suite: `main/tbot-server/tests/test_ws_reconnect_lifecycle.py` (23 tests).
+Regression suite: `main/tbot-server/tests/test_ws_reconnect_lifecycle.py` (25 tests).
 
 ---
 
@@ -78,15 +78,18 @@ reconnect, not an edge case.
 (`None` for a first bind or a no-op rebind). The registry still owns only the
 mapping; socket lifecycle stays with the caller.
 
-`core/websocket_server.py` — `_handle_connection` supersedes whatever came back:
+`core/websocket_server.py` — `_handle_connection` supersedes whatever came back.
+(Named `_supersede_connection` / `_close_superseded_connection` on the branch;
+they merged into T2.5's `_scrap_superseded_connection` / `_close_superseded` —
+see the merge section below for what shipped. The behaviour described here is
+what is on main.)
 
-* `_supersede_connection()` calls `displaced.mark_superseded()` **synchronously**,
-  so by the time the new handler is registered nothing owned by the old one can
-  put another byte on the wire;
-* the socket close is scheduled as a task (`_close_superseded_connection`, code
-  `1001`, reason `superseded by newer connection`) because a half-open peer drags
-  the closing handshake out to its timeout, which must not delay the socket that
-  is actually alive. Supersede tasks are tracked and drained by `drain()`.
+* `mark_superseded()` is called **synchronously**, so by the time the new handler
+  is registered nothing owned by the old one can put another byte on the wire;
+* the socket close is scheduled as a task (code `1001`, reason `superseded by
+  newer connection`) because a half-open peer drags the closing handshake out to
+  its timeout, which must not delay the socket that is actually alive. The task
+  is tracked in `_connection_tasks`, which `drain()` already covers.
 
 `core/connection.py` — `ConnectionHandler.mark_superseded()` sets `is_superseded`,
 sets `stop_event`, and swaps `self.websocket` for `_SupersededWebSocket`, whose
@@ -186,15 +189,28 @@ Detection budget for a dead peer mid-lesson: **≤ 70 s** (60 s budget + the loo
 | 1 | Disconnect at every lifecycle stage × resume behaviour | **PASS (matrix in §5)** | `ReconnectMatrixTeardownTest`, `ReconnectMatrixResumeTest` |
 | 2 | Duplicate connection: old socket superseded, closed, can never receive lesson messages | **FIXED (D1)** | §2 |
 | 3 | Half-open TCP: heartbeat detects within budget; state not stuck LISTENING | **FIXED (D2)** | §3 |
-| 4 | Server restart mid-lesson: pending store restores what the contract promises | **PASS** | §4.4 |
+| 4 | Server restart mid-lesson: pending store restores what the contract promises | **PASS (existing tests)** | §4.4 |
 | 5 | Send to closed/stale socket → handled, no unhandled exception in broadcast paths | **FIXED** | §4.5 |
 | 6 | Slow consumer: backpressure or bounded queue, no unbounded memory | **FIXED** | §4.6 |
 | 7 | Frame-size budget enforced for the largest real step | **PASS (pre-existing)** | §4.7 |
-| 8 | Out-of-order resume (old hello after new session) rejected by epoch/handshake | **PASS (D1 closes the remaining hole)** | §4.8 |
+| 8 | Out-of-order resume (old hello after new session) rejected by epoch/handshake | **FIXED (D1) — now test-backed; "by epoch" corrected, see §4.8** | §4.8 |
 | 9 | Idle timeout tuned: no false disconnect during the longest legal quiet step | **FIXED (D2)** | §3 |
 | 10 | Forwarder retries: no duplicate progress POSTs after a WS flap | **FIXED (D1) + PASS** | §4.10 |
 
-### 4.4 Server restart mid-lesson
+### 4.4 Server restart mid-lesson — covering tests
+
+Two existing tests already exercise the restart shape, so this box is test-backed
+rather than read-backed:
+
+* `test_lesson_forwarder.py::test_stored_terminal_replay_uses_injected_store_after_process_dict_is_empty`
+  — stores a terminal batch, clears `_PENDING_TERMINAL_BATCHES` (the process
+  memory a restart would lose), and asserts `replay_stored_terminal_event`
+  recovers and POSTs it from the store alone;
+* `test_scaleout_redis_integration.py` — the same across **two different
+  `RedisTerminalReplayStore` instances** against one Redis, i.e. a genuinely
+  separate process reading what the dead one wrote.
+
+The contract detail below is what those tests do *not* cover: which store you get.
 
 Terminal lifecycle batches are persisted before the POST is attempted
 (`forwarder._store_terminal_batch`, called from `_run` *before* `_post`) into
@@ -247,12 +263,33 @@ untouched here.
 ### 4.8 Out-of-order resume
 
 Lesson frames carry `assignmentId`/`sessionId` and the runtime drops frames whose
-identity does not match the session. The remaining hole was the *socket*: before
-D1 an old socket could still deliver a late `hello` (or receive a nudge resolved
-against the stale handler) after the device had moved on. With supersession the
-old socket is closed and its handler refuses sends, so a late frame on it cannot
-be processed. `test_superseded_handler_teardown_never_evicts_its_replacement`
+identity does not match the session. The hole was the *socket*: an old socket
+could still deliver a late `hello` after the device had moved on.
+
+This one was initially marked PASS on a code-reading argument. It is now a test —
+`RealSocketSupersessionTest::test_a_late_hello_on_the_old_socket_is_never_processed`,
+which uses `conn.features` as the oracle (None until a hello is processed) and is
+**RED on the gate base for the right reason**:
+
+```
+>           self.assertIsNone(old_handler.features)
+E           AssertionError: {'lesson': True, 'mcp': False} is not None
+```
+
+i.e. before the fix the superseded handler really did process a hello from the
+socket the device had abandoned. `test_superseded_handler_teardown_never_evicts_its_replacement`
 pins the registry half — the loser's teardown must not unregister the winner.
+
+**Correction to the checklist wording.** The box says "rejected by
+epoch/handshake". There is no epoch rejection: T2.5's
+`WebSocketServer._issue_liveness_lease` stamps a monotonic
+`(session_epoch, seq, ttl_ms)` on every accepted connection and
+`liveness_lease.classify_lease` implements the whole ACCEPT/RESUME/RECOVER/ABORT
+verdict, but **nothing calls it on the receive path** — only `emit_disposition`
+and `Disposition` are imported anywhere in production code. What actually
+enforces this invariant today is closing the superseded socket. A stale
+`lessonLease` riding a *new* socket would be accepted. Routed to T2.5/T5.1 as a
+MED finding.
 
 ### 4.10 Duplicate progress POSTs after a WS flap
 
@@ -339,6 +376,15 @@ Appended to `LESSON_PRODUCTION_PLAN.md` §5:
   `lesson_prepare`; the mobile lesson-session state machine and the protocol docs
   do not state this, and no wire field carries a step cursor. Product decision +
   doc alignment needed before T5.4.
+* **F4 → T2.5/T5.1 (MED):** the T2.5 liveness lease is **issued but never
+  classified**. `_issue_liveness_lease` stamps `(session_epoch, seq, ttl_ms)` on
+  every accepted connection and `classify_lease` implements the whole
+  ACCEPT/RESUME/RECOVER/ABORT verdict, but no production caller invokes it — only
+  `emit_disposition` / `Disposition` are imported anywhere. So checklist box 8's
+  "rejected by epoch/handshake" is not literally true: closing the superseded
+  socket is what enforces it, and a stale `lessonLease` riding a *new* socket
+  would be accepted. Either wire the classifier into the inbound path or record
+  that the socket close is canonical and the lease is telemetry-only.
 
 Already-open findings owned by T2.4 that this task did **not** address, because
 both live outside its scope files:
@@ -401,7 +447,7 @@ Same repro on the branch tip: `2 passed`. Formal RED→GREEN row in
 
 ### New regression file
 
-`tests/test_ws_reconnect_lifecycle.py` — **24 passed**.
+`tests/test_ws_reconnect_lifecycle.py` — **25 passed**.
 
 ### Gate
 
@@ -484,4 +530,4 @@ reconnects. Rollback is `deploy/rollback-vps.sh`.
 | `core/lesson/forwarder.py` | bounded queue (`max_queue_size`), terminal batches exempt |
 | `core/http_server.py` | per-connection fault isolation in the three fan-out endpoints |
 | `config.yaml` | `lesson.peer_silence_timeout_sec` documented |
-| `tests/test_ws_reconnect_lifecycle.py` | new — 23 regression tests |
+| `tests/test_ws_reconnect_lifecycle.py` | new — 25 regression tests |

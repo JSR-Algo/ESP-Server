@@ -22,6 +22,7 @@ Plus the bounded-forwarder and tolerant-broadcast checks from the same matrix.
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import sys
@@ -744,6 +745,70 @@ class RealSocketSupersessionTest(unittest.IsolatedAsyncioTestCase):
             await new_handler.websocket.send(json.dumps({"type": "lesson_step"}))
             frame = json.loads(await asyncio.wait_for(second.recv(), timeout=5))
             self.assertEqual(frame["type"], "lesson_step")
+
+            await second.close()
+            await first.close()
+
+        await server.drain(timeout=5)
+
+    async def test_a_late_hello_on_the_old_socket_is_never_processed(self):
+        """Out-of-order resume: the device moved on, its old frames must not land.
+
+        `conn.features` is the oracle — it is None until a hello is processed
+        (`core/handle/textHandler/helloMessageHandler.py`), so a stale hello that
+        reached the superseded handler would show up there. There is no inbound
+        epoch check to lean on: T2.5's lease ledger issues `session_epoch` on
+        accept but nothing calls `classify_lease` on the receive path yet, so
+        closing the socket is what actually enforces this.
+        """
+        server = ws_mod.WebSocketServer(self._config())
+        headers = {"device-id": DEVICE_ID, "client-id": "client"}
+        hello = json.dumps(
+            {
+                "type": "hello",
+                "version": 1,
+                "transport": "websocket",
+                "audio_params": {
+                    "format": "opus",
+                    "sample_rate": 24000,
+                    "channels": 1,
+                    "frame_duration": 60,
+                },
+                "features": {"lesson": True, "mcp": False},
+            }
+        )
+
+        async with websockets.serve(
+            server._handle_connection,
+            "127.0.0.1",
+            0,
+            process_request=server._http_response,
+        ) as srv:
+            uri = f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}/tbot/v1/"
+
+            first = await websockets.connect(uri, additional_headers=headers)
+            old_handler = await self._await_registration(server)
+            self.assertIsNone(old_handler.features)
+
+            second = await websockets.connect(uri, additional_headers=headers)
+            new_handler = await self._await_registration(server, previous=old_handler)
+
+            # The device (or a retransmit) speaks on the socket it has abandoned.
+            with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                await first.send(hello)
+            await asyncio.sleep(0.2)
+
+            # Nothing was processed by the superseded handler, and it did not
+            # claw the device registration back from its replacement.
+            self.assertIsNone(old_handler.features)
+            self.assertTrue(old_handler.is_superseded)
+            self.assertIs(server.lesson_connections.get(DEVICE_ID), new_handler)
+
+            # The live socket still handshakes normally.
+            await second.send(hello)
+            ack = json.loads(await asyncio.wait_for(second.recv(), timeout=5))
+            self.assertEqual(ack["type"], "hello")
+            self.assertIsNotNone(new_handler.features)
 
             await second.close()
             await first.close()
