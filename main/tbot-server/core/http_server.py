@@ -365,15 +365,31 @@ class SimpleHttpServer:
             headers={"Cache-Control": "public, max-age=5"},
         )
 
+    @staticmethod
+    def _alarm_snapshot(alarm):
+        """Read one connection's alarm without letting it fail the whole sweep.
+
+        These endpoints fan out over every live connection, including ones being
+        torn down or superseded mid-request; one bad connection must degrade to a
+        missing row, not a 500 for every other device.
+        """
+        snapshot = getattr(alarm, "snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            candidate = snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        return candidate if isinstance(candidate, dict) else None
+
     def _preload_voice_alarm_snapshots(self):
         devices = []
         for device_id in sorted(str(device_id) for device_id in self.lesson_connections):
             connection = self.lesson_connections.get(device_id)
-            alarm = getattr(connection, "lesson_voice_alarm", None)
-            if alarm is None or not hasattr(alarm, "snapshot"):
-                continue
-            snapshot = alarm.snapshot()
-            if isinstance(snapshot, dict):
+            snapshot = self._alarm_snapshot(getattr(connection, "lesson_voice_alarm", None))
+            if snapshot is not None:
                 devices.append({"deviceId": device_id, **snapshot})
         return devices
 
@@ -392,12 +408,17 @@ class SimpleHttpServer:
 
     async def handle_preload_voice_alarm_reset(self, _request):
         reset_count = 0
-        for connection in self.lesson_connections.values():
+        for connection in tuple(self.lesson_connections.values()):
             alarm = getattr(connection, "lesson_voice_alarm", None)
             reset = getattr(alarm, "reset", None)
             if not callable(reset):
                 continue
-            reset()
+            try:
+                reset()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
             reset_count += 1
         payload = {
             "connections": len(self.lesson_connections),
@@ -435,14 +456,11 @@ class SimpleHttpServer:
             safety_dropped = self._counter_value(
                 getattr(safety_forwarder, "dropped_events_total", 0)
             )
-            alarm_payload = None
-            alarm = getattr(connection, "lesson_voice_alarm", None)
-            snapshot = getattr(alarm, "snapshot", None)
-            if callable(snapshot):
-                candidate = snapshot()
-                if isinstance(candidate, dict):
-                    alarm_payload = candidate
-                    alarms += 1
+            alarm_payload = self._alarm_snapshot(
+                getattr(connection, "lesson_voice_alarm", None)
+            )
+            if alarm_payload is not None:
+                alarms += 1
 
             forwarder_dropped_total += forwarder_dropped
             safety_forwarder_dropped_total += safety_dropped
