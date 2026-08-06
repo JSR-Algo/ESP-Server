@@ -445,7 +445,32 @@ above plus `test_manager_web_lesson_derivatives_runtime` — also a T0.1 baselin
 failure, in `manager-web`, which this task does not touch. No failure in any
 T2.4 scope file.
 
-<!-- VERIFY-RESULTS -->
+### Ship checklist
+
+| Step | State |
+|---|---|
+| 1. Re-verify at tip (rebased on main) | done — 14 failed / 3489 passed, subset of base |
+| 2. Merge to main via the gate | done — `gate.sh` VERIFIED, merged `b53d69e6` (conflict with T2.5 resolved above) |
+| 3. Deploy (VPS) | **not run — deferred to T7.3**, see below |
+| 4. Re-test on main | done — 15 failed / 3554 passed, all pre-existing |
+| 5. Remove the worktree | done — worktree clean, branch an ancestor of main, `worktrees/t24-esp-websocket` and `lesson-prod/t24-esp-websocket` deleted (branch was never pushed) |
+| 6. Close out | done — DONE in `LESSON_PRODUCTION_PLAN.md` §2 and in the task file |
+
+**Deploy was not run.** `origin/main` is still at `0f44fa6e`; local main is ~15
+commits ahead and now carries T2.2, T2.3, T2.5, T4.1 and T4.2 work as well, so a
+`deploy-vps.sh` here would ship those tasks' changes too, not just T2.4. That is
+why `lesson-prod/scripts/merge-task.sh` deliberately does not push — "pushing
+(and any deploy it triggers) stays a deliberate human step" — and why T2.2 and
+T2.3 both recorded "VPS deploy deferred to T7.3". The same call is taken here.
+The step also requires confirming no live lesson session is running on the real
+robot, which cannot be established from this session.
+
+To ship T2.4 to the VPS ahead of T7.3: push main, then
+`deploy/backup-db.sh` → confirm no live lesson → `deploy/deploy-vps.sh` →
+`deploy/smoke-vps.sh`, re-verify the MCP port pins after the restart (they go
+stale on every ESP server restart) and confirm the robot (MAC …`ac:20`)
+reconnects. Rollback is `deploy/rollback-vps.sh`.
+
 
 ---
 
