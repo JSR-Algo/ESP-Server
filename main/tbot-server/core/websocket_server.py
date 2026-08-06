@@ -138,6 +138,7 @@ class WebSocketServer:
         self._active_device_connections = 0
         self.is_draining = False
         self._connection_tasks = set()
+        self._supersede_tasks = set()
         self._server = None
         self._stop_event = None
 
@@ -170,7 +171,11 @@ class WebSocketServer:
             await self._server.wait_closed()
         if self._stop_event is not None:
             self._stop_event.set()
-        pending = [task for task in self._connection_tasks if not task.done()]
+        pending = [
+            task
+            for task in (*self._connection_tasks, *self._supersede_tasks)
+            if not task.done()
+        ]
         if pending:
             done, still_pending = await asyncio.wait(pending, timeout=timeout)
             for task in still_pending:
@@ -236,7 +241,14 @@ class WebSocketServer:
             )
             if device_id:
                 handler.device_id = device_id
-                await self.lesson_connections.replace(device_id, handler)
+                # Bind the socket before registering: from the moment the handler
+                # is reachable in the registry, a supersede must be able to find
+                # the socket to close. ``handle_connection`` re-binds the same
+                # object a moment later.
+                handler.websocket = websocket
+                displaced = await self.lesson_connections.replace(device_id, handler)
+                if displaced is not None:
+                    self._supersede_connection(device_id, displaced)
                 sessions = self.global_generation_sessions
                 if sessions is not None:
                     try:
@@ -289,6 +301,52 @@ class WebSocketServer:
         finally:
             if current_task is not None:
                 self._connection_tasks.discard(current_task)
+
+    def _supersede_connection(self, device_id, displaced):
+        """Retire the socket a reconnecting device just replaced.
+
+        Firmware reopens its passive lesson socket on any drop it detects itself
+        (pong timeout, Wi-Fi flap, `SchedulePassiveLessonReconnect`), so the new
+        socket routinely arrives while the old one is still registered and, from
+        the server's side, still open. Leaving it alive leaves a second lesson
+        runtime and a second event forwarder bound to the same assignment: the
+        abandoned socket keeps receiving lesson frames and the backend keeps
+        receiving progress from a session the child is no longer in.
+
+        Marking is synchronous so nothing can be dispatched to the old handler
+        after this returns; the close runs off the accept path because a
+        half-open peer drags the closing handshake out to its timeout, which must
+        never delay the socket that is actually alive.
+        """
+        websocket = getattr(displaced, "websocket", None)
+        mark = getattr(displaced, "mark_superseded", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    "Superseded connection mark failed device_id={} errorType={}",
+                    device_id,
+                    type(exc).__name__,
+                )
+        self.logger.bind(tag=TAG).info(
+            "Superseding previous websocket for device_id={}", device_id
+        )
+        task = asyncio.create_task(self._close_superseded_connection(device_id, websocket))
+        self._supersede_tasks.add(task)
+        task.add_done_callback(self._supersede_tasks.discard)
+
+    async def _close_superseded_connection(self, device_id, websocket):
+        if websocket is None:
+            return
+        try:
+            await websocket.close(code=1001, reason="superseded by newer connection")
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                "Superseded websocket close failed device_id={} errorType={}",
+                device_id,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _copy_query_identity_headers(websocket):

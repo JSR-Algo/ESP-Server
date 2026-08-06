@@ -471,6 +471,12 @@ lesson:
   sample_mode: interactive
   # Default child quiet-window when a step omits responseTimeoutSec (sample overrides).
   child_response_timeout_sec: 12.0
+  # Inbound-silence budget while a lesson runtime is RUNNING/PRELOADING. The
+  # firmware pings the passive lesson channel every 2s (pong probe fails at 10s)
+  # and refuses the silent SD-sync window while a lesson runs, so silence past
+  # this budget means the peer is gone — close instead of leaving the runtime
+  # parked in LISTENING until the 61-minute idle timeout. 0 disables.
+  peer_silence_timeout_sec: 60.0
   max_no_answer_attempts: 2
   api_base: "https://tbot-backend-8wmh.onrender.com/v1"
   # device_token: ""   # optional device-scoped bearer; backend authorizes on device_id claim

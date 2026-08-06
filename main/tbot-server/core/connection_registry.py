@@ -34,9 +34,17 @@ class ConnectionRegistry(dict):
             if entry.users == 0 and self._device_locks.get(device_id) is entry:
                 self._device_locks.pop(device_id, None)
 
-    async def replace(self, device_id: str, connection) -> None:
+    async def replace(self, device_id: str, connection):
+        """Bind ``device_id`` to ``connection`` and return the entry it displaced.
+
+        The registry owns the mapping, never a socket lifecycle: the caller is
+        responsible for superseding whatever comes back (``None`` when the device
+        had no live entry, or when it was already bound to this connection).
+        """
         async with self._hold_lock(device_id):
+            previous = self.get(device_id)
             super().__setitem__(device_id, connection)
+            return previous if previous is not connection else None
 
     async def remove_if_current(self, device_id: str, connection) -> bool:
         async with self._hold_lock(device_id):
