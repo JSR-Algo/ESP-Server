@@ -183,6 +183,10 @@ export default {
         'FAILED',
         'CANCELLED',
       ],
+      // Monotonic request tokens. The console refreshes while lessons are live, so
+      // two in-flight reads can settle out of order; only the newest may paint.
+      listRequestId: 0,
+      eventsRequestId: 0,
       eventsVisible: false,
       eventsLoading: false,
       events: [],
@@ -218,7 +222,14 @@ export default {
       if (Number.isNaN(d.getTime())) return value;
       return d.toLocaleString();
     },
+    isListRequestCurrent(requestId) {
+      return requestId === this.listRequestId;
+    },
+    isEventsRequestCurrent(requestId) {
+      return requestId === this.eventsRequestId && this.eventsVisible;
+    },
     fetchList() {
+      const requestId = ++this.listRequestId;
       this.loading = true;
       Api.monitoring.listAssignments(
         {
@@ -230,16 +241,22 @@ export default {
           limit: this.limit,
         },
         (rows) => {
+          // A superseded refresh must never repaint the table with the rows of an
+          // older filter set — that is exactly the stale-state lie this view exists
+          // to avoid.
+          if (!this.isListRequestCurrent(requestId)) return;
           this.loading = false;
           this.list = rows;
         },
         (msg) => {
+          if (!this.isListRequestCurrent(requestId)) return;
           this.loading = false;
           this.$message.error(msg || this.$t('monitoring.loadFail'));
         },
       );
     },
     openEvents(row) {
+      const requestId = ++this.eventsRequestId;
       this.eventsSource = row;
       this.eventsVisible = true;
       this.eventsLoading = true;
@@ -247,16 +264,22 @@ export default {
       Api.monitoring.getAssignmentEvents(
         row.assignmentId,
         (rows) => {
+          // Timeline of a previously opened (or closed) assignment must not land in
+          // the dialog now showing a different assignment.
+          if (!this.isEventsRequestCurrent(requestId)) return;
           this.eventsLoading = false;
           this.events = rows;
         },
         (msg) => {
+          if (!this.isEventsRequestCurrent(requestId)) return;
           this.eventsLoading = false;
           this.$message.error(msg || this.$t('monitoring.eventsLoadFail'));
         },
       );
     },
     resetEvents() {
+      this.eventsRequestId += 1;
+      this.eventsLoading = false;
       this.events = [];
       this.eventsSource = {};
     },
