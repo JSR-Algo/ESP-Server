@@ -32,6 +32,17 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- Owning the household is not enough: POST /v1/admin/lesson-assignments rejects with
+-- 404 "Robot household has no active parent membership" unless the parent is also an
+-- explicit member.
+INSERT INTO household_memberships (parent_id, household_id, role)
+VALUES (
+  '22222222-2222-4222-8222-222222222222',
+  '33333333-3333-4333-8333-333333333333',
+  'owner'
+)
+ON CONFLICT (parent_id, household_id) DO NOTHING;
+
 INSERT INTO child_profiles (id, household_id, display_name, birth_year, age_gate_passed)
 VALUES (
   '44444444-4444-4444-8444-444444444444',
