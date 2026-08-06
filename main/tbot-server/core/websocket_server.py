@@ -337,6 +337,10 @@ class WebSocketServer:
         that guard rather than in front of it.
         """
         from core.lesson.liveness_lease import Disposition, emit_disposition
+        from core.lesson.runtime_counters import CONNECTION_SUPERSEDED, increment
+
+        # T6.2 (T2.4 finding): a reconnect storm was visible only as log lines.
+        increment(CONNECTION_SUPERSEDED)
 
         # Capture the real socket BEFORE marking: ``mark_superseded`` swaps
         # ``superseded.websocket`` for a stand-in whose close() is a no-op, so
