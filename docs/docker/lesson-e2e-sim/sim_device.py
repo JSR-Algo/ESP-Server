@@ -24,7 +24,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -35,6 +40,25 @@ RENDERER = "teebot-lesson-renderer.v1"
 DEFAULT_DEVICE_ID = "14:c1:9f:d1:a8:48"
 DEFAULT_CLIENT_ID = "9a645494-b0ae-4b69-ae0e-4b20eec4c383"
 START_PHRASE = "bắt đầu bài học"
+
+
+def mint_token(auth_key: str, client_id: str, device_id: str) -> str:
+    """Mint the WS bearer token the ESP server expects (mirrors core/auth.py).
+
+    The server's device allowlist lives under ``server.auth.allowed_devices`` in the
+    LOCAL config file, but manager-api config is merged OVER the local file, so the
+    allowlist arrives as an empty set and every device falls through to token auth.
+    A simulated device therefore has to present a real token like production firmware
+    does, rather than relying on being allowlisted.
+
+    Token layout: ``<urlsafe-b64 HMAC-SHA256>.<ts>.<nonce>`` over ``client|user|ts|nonce``.
+    """
+    ts = int(time.time())
+    nonce = secrets.token_urlsafe(18)
+    content = f"{client_id}|{device_id}|{ts}|{nonce}"
+    sig = hmac.new(auth_key.encode(), content.encode(), hashlib.sha256).digest()
+    signature = base64.urlsafe_b64encode(sig).decode().rstrip("=")
+    return f"{signature}.{ts}.{nonce}"
 
 
 class SerialLog:
@@ -122,9 +146,15 @@ async def run(args: argparse.Namespace) -> int:
     steps_rendered = 0
 
     try:
+        headers = {"device-id": args.device_id, "client-id": args.client_id}
+        if args.auth_key:
+            headers["authorization"] = (
+                "Bearer " + mint_token(args.auth_key, args.client_id, args.device_id)
+            )
+
         async with websockets.connect(
             uri,
-            additional_headers={"device-id": args.device_id, "client-id": args.client_id},
+            additional_headers=headers,
             open_timeout=args.timeout,
         ) as client:
             hello = {
@@ -234,6 +264,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ws-url", default="ws://127.0.0.1:8010/tbot/v1/")
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID)
     parser.add_argument("--client-id", default=DEFAULT_CLIENT_ID)
+    parser.add_argument(
+        "--auth-key",
+        default=os.environ.get("LESSON_SIM_AUTH_KEY", ""),
+        help="Manager-api server.secret; the ESP server signs WS tokens with it. "
+        "It rotates on every clean manager-api deploy, so up.sh reads it live.",
+    )
     parser.add_argument("--serial-log", default="sim-firmware-serial.log")
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--timeout", type=float, default=15.0)

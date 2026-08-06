@@ -9,6 +9,17 @@
 -- Real robots get these rows from the OTA activation/claim flow. Simulation has no
 -- firmware to activate, so the device is provisioned directly and deterministically.
 
+-- ---------------------------------------------------------------------------
+-- F-T53-05 workaround: the hello-ack param is still named `xiaozhi` in a freshly
+-- migrated manager-api database, but the ESP server reads `config["tbot"]`
+-- unguarded (core/connection.py:411). Every device connection therefore dies with
+-- `KeyError: 'tbot'` on a clean deployment. The long-lived lab database works only
+-- because the row was renamed there by hand. Values are byte-identical; only the
+-- key differs. The real fix is a manager-api migration and is routed in §5 --
+-- this rename only makes the simulated stack bootable.
+-- ---------------------------------------------------------------------------
+UPDATE sys_params SET param_code = 'tbot' WHERE param_code = 'xiaozhi';
+
 SET @sim_user   := 9000001;                    -- lesson_admin_e2e, from seed-mysql.sql
 SET @sim_agent  := 'agent_e2e_sim_0001';
 SET @sim_device := 'device_e2e_sim_0001';

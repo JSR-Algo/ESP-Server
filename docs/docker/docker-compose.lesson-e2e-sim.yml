@@ -28,7 +28,10 @@ services:
     environment:
       TZ: Asia/Ho_Chi_Minh
       # The ESP server talks to the Nest backend over the compose network, never to prod.
-      COURSE_BACKEND_URL: http://backend:3000
+      # The /v1 suffix is REQUIRED: this env overrides lesson.api_base, and the client
+      # appends bare paths to it (`{base}/internal/devices/mint-token`). Without /v1 the
+      # device-token mint 404s and the lesson dies at "backend identity unavailable".
+      COURSE_BACKEND_URL: http://backend:3000/v1
       LESSON_RUNTIME_ENABLED: "true"
       LESSON_RENDERER_V4_ENABLED: "true"
       LESSON_MOTION_PRESETS_ENABLED: "true"

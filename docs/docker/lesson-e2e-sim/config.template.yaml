@@ -26,6 +26,19 @@ manager-api:
 
 prompt_template: agent-base-prompt.txt
 
+# Hello-ack template returned to the device on connect. Mirrors the `tbot:` block in
+# the packaged config.yaml. Required: ConnectionHandler reads self.config["tbot"]
+# unguarded, so a config without it kills every connection with KeyError: 'tbot'.
+tbot:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
 # The lesson-admission path ("bắt đầu bài học") is a pure string classifier and never
 # dials the Live client, so simulation runs with no Gemini key. Keeping the declared
 # voice_mode at google_live preserves parity with the lab/production robot — the
