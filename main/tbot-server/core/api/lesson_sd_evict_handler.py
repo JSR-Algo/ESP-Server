@@ -102,7 +102,6 @@ class LessonSdEvictHandler:
             )
         return web.json_response({"data": normalized}, status=200)
 
-
     async def _cancel_pending_retry(self, device_id: str, cache_key: str) -> None:
         """Drop queued fanout work for a key the robot no longer holds.
 
