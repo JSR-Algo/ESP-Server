@@ -36,6 +36,17 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
                 await conn.close()
         return
 
+    # Output-queue discipline (T2.3): while a lesson owns the speaker, the firmware
+    # is playing lesson audio off the SD pack. Classic voice-pipeline audio streamed
+    # now would MIX with it on the device. Google Live enforces the same rule further
+    # upstream (audio_bridge._should_drop_lesson_model_output); this branch is reached
+    # only by classic connections because google_live returns above.
+    if _lesson_blocks_classic_voice_output(conn):
+        conn.logger.bind(tag=TAG).info(
+            f"Lesson owns audio output; classic voice audio suppressed: {sentenceType}"
+        )
+        return
+
     has_audio = audios is not None and len(audios) > 0
 
     if conn.tts.tts_audio_first_sentence:
@@ -362,6 +373,32 @@ def _is_google_live_connection(conn: "ConnectionHandler"):
     provider = getattr(conn, "voice_provider", None)
     provider_name = provider.__class__.__name__ if provider is not None else ""
     return "GoogleLive" in provider_name
+
+def _lesson_owns_audio_output(conn: "ConnectionHandler"):
+    """True while a lesson is the authoritative owner of the device speaker.
+
+    Mirrors GoogleLiveProvider._lesson_runtime_active / the bridge's lesson gate so
+    both pipelines agree on *when* a lesson owns output, without either enforcing
+    the other's rule.
+    """
+    if _is_lesson_session(conn):
+        return True
+    runtime = getattr(conn, "lesson_runtime", None)
+    return str(getattr(runtime, "state", "")).upper() in {"PRELOADING", "RUNNING"}
+
+
+def _lesson_blocks_classic_voice_output(conn: "ConnectionHandler"):
+    """Output-queue discipline for the classic pipeline.
+
+    Not a hard mute: the lesson layer opens the gate with
+    ``conn.lesson_prompt_output_allowed`` for server-authored lesson narration, the
+    same escape hatch ``google_live_lesson_prompt_output_allowed`` provides on the
+    Live side.
+    """
+    if not _lesson_owns_audio_output(conn):
+        return False
+    return not bool(getattr(conn, "lesson_prompt_output_allowed", False))
+
 
 def _is_lesson_session(conn: "ConnectionHandler"):
     try:

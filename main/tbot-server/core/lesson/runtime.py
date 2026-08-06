@@ -407,6 +407,12 @@ def _has_observable_child_response_value(value: Any) -> bool:
 
 def _matching_tokens(value: Any) -> List[str]:
     normalized = unicodedata.normalize("NFKD", str(value or "").lower())
+    # The Vietnamese letter đ/Đ (U+0111/U+0110) has no combining-mark decomposition,
+    # so NFKD does NOT fold it to 'd'. Without this map an accent-stripped STT
+    # transcript ("bat dau bai hoc", "doc lai") misses every marker phrase that the
+    # accented form matches. GoogleLiveProvider._normalize_intent_text already folds
+    # it for the lesson *trigger*; the in-lesson *answer* classifier must agree.
+    normalized = normalized.replace("đ", "d").replace("Đ", "d")
     tokens: List[str] = []
     current: List[str] = []
     for char in normalized:
