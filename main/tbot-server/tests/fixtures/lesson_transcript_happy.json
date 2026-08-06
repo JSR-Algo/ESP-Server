@@ -1,0 +1,31 @@
+{
+  "_source": "robot/docs/stories/US-006-learning-course-runtime/fixtures/lesson-protocol.v1.json happyThread",
+  "_note": "Server-originated rows (stream S->F and ESP-synth) of the canonical happy thread, vendored so the storm runs in a single-repo checkout. Parity-pinned by tests/test_reconnect_storm.py::test_transcript_matches_canonical_happy_thread.",
+  "frames": [
+    {
+      "type": "lesson_prepare",
+      "sequence": 1,
+      "stepId": null
+    },
+    {
+      "type": "lesson_preload_status",
+      "sequence": 1,
+      "stepId": null
+    },
+    {
+      "type": "lesson_start",
+      "sequence": 2,
+      "stepId": null
+    },
+    {
+      "type": "lesson_step",
+      "sequence": 3,
+      "stepId": "s4"
+    },
+    {
+      "type": "lesson_stop",
+      "sequence": 4,
+      "stepId": null
+    }
+  ]
+}

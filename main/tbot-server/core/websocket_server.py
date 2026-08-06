@@ -236,7 +236,10 @@ class WebSocketServer:
             )
             if device_id:
                 handler.device_id = device_id
-                await self.lesson_connections.replace(device_id, handler)
+                await self._issue_liveness_lease(handler, device_id)
+                superseded = await self.lesson_connections.replace(device_id, handler)
+                if superseded is not None:
+                    self._scrap_superseded_connection(superseded, handler, device_id)
                 sessions = self.global_generation_sessions
                 if sessions is not None:
                     try:
@@ -289,6 +292,73 @@ class WebSocketServer:
         finally:
             if current_task is not None:
                 self._connection_tasks.discard(current_task)
+
+    async def _issue_liveness_lease(self, handler, device_id):
+        """T2.5 — stamp the accepted connection with a monotonic liveness lease.
+
+        Best-effort: a ledger outage must never refuse a device. Without a lease
+        the connection behaves exactly as it did pre-rollout (see
+        ``core/lesson/liveness_lease.classify_lease``: absent lease = accept).
+        """
+        from core.lesson.liveness_lease import get_lease_ledger
+
+        try:
+            handler.liveness_lease = await get_lease_ledger().issue(device_id)
+        except Exception as exc:
+            handler.liveness_lease = None
+            self.logger.bind(tag=TAG).warning(
+                "Liveness lease issue failed device={} errorType={}",
+                device_id,
+                type(exc).__name__,
+            )
+
+    def _scrap_superseded_connection(self, superseded, winner, device_id):
+        """A newer socket took the device: retire the old one and say so.
+
+        Ordering matters. ``superseded_by`` is set **synchronously**, before this
+        function returns and therefore before the new connection can emit
+        anything, so the stale handler's lesson runtime is already refusing to
+        write to its dead socket by the time the winner starts. The actual
+        ``close()`` is slow (voice provider teardown, forwarder drain) and is
+        scheduled behind that guard rather than in front of it.
+        """
+        from core.lesson.liveness_lease import Disposition, emit_disposition
+
+        try:
+            superseded.superseded_by = getattr(winner, "session_id", None) or True
+        except Exception:  # pragma: no cover - exotic handler object
+            pass
+
+        winner_lease = getattr(winner, "liveness_lease", None)
+        emit_disposition(
+            self.logger,
+            disposition=Disposition.SCRAP,
+            reason="duplicate_connect_superseded",
+            device_id=device_id,
+            session_id=str(getattr(superseded, "session_id", "") or ""),
+            session_epoch=getattr(winner_lease, "session_epoch", None),
+            extra={"winnerSessionId": str(getattr(winner, "session_id", "") or "")},
+        )
+
+        close = getattr(superseded, "close", None)
+        if not callable(close):
+            return
+        try:
+            task = asyncio.create_task(self._close_superseded(superseded, device_id))
+        except RuntimeError:  # pragma: no cover - no running loop (sync test call)
+            return
+        self._connection_tasks.add(task)
+        task.add_done_callback(self._connection_tasks.discard)
+
+    async def _close_superseded(self, superseded, device_id):
+        try:
+            await superseded.close(getattr(superseded, "websocket", None))
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                "Superseded connection close failed device={} errorType={}",
+                device_id,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _copy_query_identity_headers(websocket):

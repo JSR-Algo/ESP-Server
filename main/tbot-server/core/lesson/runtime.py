@@ -1335,8 +1335,49 @@ class LessonRuntime:
             return
         await self._emit("lesson_prepare", body=self._prepare_body())
 
+    def _teardown_disposition(self):
+        """T2.5 — classify this teardown in RMA terms (see failure-path-matrix.md).
+
+        ``restock``   the run reached a terminal state and its ledger is closed;
+                      nothing downstream needs repair.
+        ``refurbish`` the run had not started yet — assignment state is still
+                      recoverable by re-pulling on the next connect.
+        ``scrap``     the run died mid-flight: this connection's session is gone
+                      while the backend assignment is still non-terminal. This is
+                      the case that becomes stale state in production, and the
+                      only reason it is worth counting.
+        """
+        from core.lesson.liveness_lease import Disposition
+
+        state = self.state
+        if state in (S_COMPLETED, S_FAILED):
+            return Disposition.RESTOCK, f"terminal_{str(state).lower()}"
+        if state in (S_IDLE, S_PRELOADING, S_READY):
+            return Disposition.REFURBISH, f"closed_before_start_{str(state).lower()}"
+        return Disposition.SCRAP, f"closed_mid_flight_{str(state).lower()}"
+
+    def _emit_teardown_disposition(self) -> None:
+        from core.lesson.liveness_lease import emit_disposition
+
+        try:
+            disposition, reason = self._teardown_disposition()
+            lease = getattr(self.conn, "liveness_lease", None)
+            emit_disposition(
+                self.logger,
+                disposition=disposition,
+                reason=reason,
+                device_id=str(getattr(self.conn, "device_id", "") or ""),
+                assignment_id=str(self.assignment_id or ""),
+                session_id=str(self.session_id or ""),
+                session_epoch=getattr(lease, "session_epoch", None),
+                extra={"runtimeState": self.state},
+            )
+        except Exception:  # pragma: no cover - telemetry must never break teardown
+            pass
+
     async def close(self) -> None:
         self._closed = True
+        self._emit_teardown_disposition()
         self._clear_conversation_fallback_ack()
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
         visual_transition_task = self._visual_transition_task
@@ -5115,6 +5156,15 @@ class LessonRuntime:
         await self._send(json.dumps(frame, ensure_ascii=False))
 
     async def _default_send(self, payload: str) -> None:
+        # T2.5 stale-socket invariant: once a newer websocket has taken this
+        # device, this runtime's ``conn.websocket`` is a ghost. Writing to it
+        # either lands on a half-open socket the robot has already abandoned, or
+        # — after the device reconnects — races lesson frames from the live
+        # session. Drop instead of sending; the superseded connection is being
+        # torn down behind us.
+        if getattr(self.conn, "superseded_by", None):
+            self._log("warning", "lesson frame suppressed: connection superseded")
+            return
         ws = getattr(self.conn, "websocket", None)
         if ws is not None:
             await ws.send(payload)
