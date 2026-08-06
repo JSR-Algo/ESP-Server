@@ -234,6 +234,12 @@ class ConnectionHandler:
         # Holds the per-device lesson session state when a lesson is in flight.
         self.lesson_runtime = None
         self.lesson_runtime_candidate = None
+        # T2.5 liveness lease. ``liveness_lease`` is stamped by the websocket
+        # server on accept; ``superseded_by`` is set the moment a newer socket
+        # takes this device, and is the hard gate that stops this connection's
+        # lesson runtime from writing to a stale socket.
+        self.liveness_lease = None
+        self.superseded_by = None
         self.lesson_pull_task = None
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None

@@ -34,9 +34,22 @@ class ConnectionRegistry(dict):
             if entry.users == 0 and self._device_locks.get(device_id) is entry:
                 self._device_locks.pop(device_id, None)
 
-    async def replace(self, device_id: str, connection) -> None:
+    async def replace(self, device_id: str, connection):
+        """Install ``connection`` as current and return whoever it displaced.
+
+        T2.5: the displaced handler is a *stale socket* — its lesson runtime
+        still points at the old websocket and would keep emitting frames meant
+        for the session that just superseded it. Returning it (instead of
+        dropping it on the floor) is what lets the caller scrap it.
+        """
         async with self._hold_lock(device_id):
+            previous = self.get(device_id)
             super().__setitem__(device_id, connection)
+            return previous if previous is not connection else None
+
+    def is_current(self, device_id: str, connection) -> bool:
+        """Lock-free read of "does this connection still own the device?"."""
+        return self.get(device_id) is connection
 
     async def remove_if_current(self, device_id: str, connection) -> bool:
         async with self._hold_lock(device_id):
