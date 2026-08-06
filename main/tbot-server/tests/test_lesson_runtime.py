@@ -1799,16 +1799,20 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "sessionId": rt.session_id,
                 "sequence": 3,
                 "body": {
+                    # NON-retryable: this test asserts the TERMINAL path. A
+                    # retryable inbound error is deferred to the in-flight
+                    # bounded recovery timer instead (T2.1 — see
+                    # test_lesson_runtime_state_machine_t21.py).
                     "code": "DISPLAY_FAULT",
                     "message": "renderer stopped",
-                    "retryable": True,
+                    "retryable": False,
                 },
             }
         )
 
         self.assertEqual(rt.state, "FAILED")
         self.assertEqual(rt.last_error.code, "DISPLAY_FAULT")
-        self.assertTrue(rt.last_error.retryable)
+        self.assertFalse(rt.last_error.retryable)
         self.assertEqual(released, ["lesson_error"])
 
     async def test_successful_completion_routes_to_finish_lesson_mode(self):
@@ -1901,7 +1905,8 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "assignmentId": rt.assignment_id,
                 "sessionId": rt.session_id,
                 "sequence": 3,
-                "body": {"code": "DISPLAY_FAULT", "message": "renderer stopped", "retryable": True},
+                # NON-retryable: this test asserts the TERMINAL path (T2.1).
+                "body": {"code": "DISPLAY_FAULT", "message": "renderer stopped", "retryable": False},
             }
         )
 

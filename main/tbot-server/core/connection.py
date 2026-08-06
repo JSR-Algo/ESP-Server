@@ -778,7 +778,12 @@ class ConnectionHandler:
             "sessionId": session_id,
             "sequence": 1,
             "stepId": None,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            # T2.1: the lesson_* envelope defines `timestamp` as epoch MILLISECONDS
+            # (protocol §3; every frame built by LessonRuntime._envelope complies).
+            # This frame is hand-built outside _envelope and previously put an
+            # RFC3339 string here — the one lesson_* frame type that broke any
+            # consumer parsing `timestamp` as a number.
+            "timestamp": int(time.time() * 1000),
             "body": {
                 "assignmentVersion": 0,
                 "profile": profile,
@@ -2317,6 +2322,24 @@ class ConnectionHandler:
                     )
                 except Exception:
                     pass
+        # T2.1: LEAVE LESSON MODE TOO. Detaching + closing the runtime stops lesson
+        # frames, but `session_mode` stayed LESSON for the rest of the connection —
+        # and every voice output path gates on exactly that (the Live audio bridge
+        # drops all model output while session_mode == LESSON, regardless of whether
+        # a runtime exists). The breaker therefore left the child in permanent
+        # silence. A tripped breaker is a lesson-terminal event, so route it through
+        # the same finish hook every other terminal uses.
+        if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
+            try:
+                asyncio.get_running_loop().create_task(
+                    self.finish_lesson_mode(reason="lesson_runtime_auto_disabled")
+                )
+            except RuntimeError:
+                # No running loop (sync/test context) — fall back to a direct mode
+                # flip so the connection can still speak.
+                self._set_session_mode(
+                    SessionMode.CONVERSATION, reason="lesson_runtime_auto_disabled"
+                )
         try:
             self.logger.bind(tag=TAG).error(
                 "LESSON_RUNTIME_ENABLED auto-disabled (voice-latency-during-preload alarm)"
