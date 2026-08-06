@@ -23,6 +23,14 @@ from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
     validate_flattened_cinematic_cache_asset,
 )
+from core.lesson.cache_key_contract import (
+    CACHE_KEY_MAX_BYTES,
+    MAX_ENCODED_BASENAME_BYTES as CONTRACT_MAX_ENCODED_BASENAME_BYTES,
+    AssetBasenameRefused,
+    CacheEvictionRefused,
+    compose_cache_key,
+    encode_asset_basename,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -34,8 +42,12 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 2
 MAX_SAFE_INTEGER = (1 << 53) - 1
 MAX_ASSETS = 64
-MAX_ENCODED_BASENAME_BYTES = 200
-MAX_CACHE_KEY_BYTES = 200
+# T5.1: both limits now come from THE contract module. They used to be local
+# copies, and MAX_CACHE_KEY_BYTES was 200 while the canonical cap is 205 — a
+# maximal-but-legal key was rejected here as cms_cache_key_too_long while the
+# materializer accepted it.
+MAX_ENCODED_BASENAME_BYTES = CONTRACT_MAX_ENCODED_BASENAME_BYTES
+MAX_CACHE_KEY_BYTES = CACHE_KEY_MAX_BYTES
 
 _ENVELOPE_FIELDS = frozenset({"data"})
 _DATA_FIELDS = frozenset(
@@ -430,11 +442,12 @@ def _validate_pack(value: Any, allowed_origins: set[tuple[str, str, int]]) -> di
         value.get("manifestChecksum"), "cms_invalid_manifest_checksum"
     )
     cache_key = value.get("cacheKey")
-    expected_cache_key = f"{lesson_id}/v{version}-{manifest_checksum}"
+    try:
+        expected_cache_key = compose_cache_key(lesson_id, version, manifest_checksum)
+    except CacheEvictionRefused:
+        raise _PollRejected("cms_cache_key_too_long") from None
     if cache_key != expected_cache_key:
         raise _PollRejected("cms_cache_key_mismatch")
-    if len(expected_cache_key.encode("ascii")) > MAX_CACHE_KEY_BYTES:
-        raise _PollRejected("cms_cache_key_too_long")
     classification = value.get("classification")
     if classification not in {"curriculum", "demo"}:
         raise _PollRejected("cms_invalid_classification")
@@ -481,24 +494,16 @@ def _validate_asset(
             raise _PollRejected("cms_invalid_renderer_v4_mp4")
         raise _PollRejected("cms_unknown_field")
     key = value.get("key")
-    if not isinstance(key, str) or not key or _CONTROL_RE.search(key):
-        raise _PollRejected("cms_invalid_asset_key")
-    try:
-        encoded = quote(key, safe="-_.!~*'()", encoding="utf-8", errors="strict")
-    except UnicodeEncodeError:
-        raise _PollRejected("cms_invalid_asset_key") from None
-    if len(encoded.encode("ascii")) > MAX_ENCODED_BASENAME_BYTES:
+    # T5.1: this used to encode with safe="-_.!~*'()" — the OLD encodeURIComponent
+    # semantics — while the materializer, the sync path and the pack store all
+    # use quote(key, safe=""). The two ESP ingress paths disagreed with each
+    # other on any key containing ! ' ( ) *.
+    if isinstance(key, str) and len(quote(key, safe="").encode("ascii", "replace")) > MAX_ENCODED_BASENAME_BYTES:
         raise _PollRejected("cms_asset_key_too_long")
-    lower = encoded.lower()
-    if (
-        not encoded
-        or _FAT_FORBIDDEN_RE.search(encoded)
-        or encoded.endswith(".")
-        or lower in _RESERVED_BASENAMES
-        or _FAT_DEVICE_RE.match(lower)
-        or lower.endswith(_RESERVED_SUFFIXES)
-    ):
-        raise _PollRejected("cms_invalid_asset_key")
+    try:
+        encoded = encode_asset_basename(key)
+    except AssetBasenameRefused:
+        raise _PollRejected("cms_invalid_asset_key") from None
     expected_path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
     if value.get("sdPath") != value.get("localPath"):
         raise _PollRejected("cms_asset_alias_mismatch")

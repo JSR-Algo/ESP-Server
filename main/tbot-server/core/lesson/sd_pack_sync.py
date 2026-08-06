@@ -30,6 +30,11 @@ from core.lesson.sd_pack_mcp_payload import (
     validate_renderer_v4_flattened_mp4,
 )
 from core.lesson.shared_asset_store import SharedAssetStore
+from core.lesson.cache_key_contract import (
+    AssetBasenameRefused,
+    compose_asset_sd_path,
+    encode_asset_basename,
+)
 from core.utils.util import get_vision_url
 
 SD_PACK_SYNC_TOOL = "self.lesson_assets.sync_to_sd"
@@ -507,6 +512,13 @@ def _ready_rich_asset_pack(pack_dir: Path, cache_key: str) -> dict[str, Any] | N
         "assets": sorted(assets, key=lambda asset: asset["key"]),
     }
 
+def _expected_sd_path(cache_key: str, key: str) -> str | None:
+    """The canonical SD path, or None when the key cannot form one (T5.1)."""
+    try:
+        return compose_asset_sd_path(cache_key, key)
+    except (AssetBasenameRefused, Exception):  # noqa: B014 - any refusal means "no path"
+        return None
+
 def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -530,10 +542,10 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
         or not isinstance(online_url, str)
         or not online_url
         or not isinstance(sd_path, str)
-        or sd_path != f"/sdcard/tbot/lesson-assets/{cache_key}/{quote(key, safe='')}"
+        or sd_path != _expected_sd_path(cache_key, key)
     ):
         return None
-    source_path = pack_dir / quote(key, safe="")
+    source_path = pack_dir / encode_asset_basename(key)
     try:
         if (
             not source_path.is_file()

@@ -10,14 +10,20 @@ from contextlib import suppress
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from core.activity_lease import ActivityOperation, ExclusiveDisposition
-
-CACHE_KEY_RE = re.compile(
-    r"(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)/"
-    r"v(?P<version>[1-9][0-9]*)-(?P<checksum>[0-9a-f]{64})"
+# T5.1: this module used to carry a byte-for-byte COPY of the cache-key
+# validator, its constants, and its own CacheEvictionRefused class. Two classes
+# with one name meant `except CacheEvictionRefused` in one importer could not
+# catch the other's raise. Re-exported here so existing importers
+# (sd_pack_mcp_payload) keep working against THE one contract.
+from core.lesson.cache_key_contract import (  # noqa: F401 - re-exported contract surface
+    CACHE_KEY_MAX_BYTES,
+    CACHE_KEY_RE,
+    CACHE_KEY_SLUG_MAX_BYTES,
+    CACHE_KEY_VERSION_MAX_DIGITS,
+    CacheEvictionRefused,
+    validate_cache_key,
 )
-CACHE_KEY_MAX_BYTES = 205
-CACHE_KEY_SLUG_MAX_BYTES = 128
-CACHE_KEY_VERSION_MAX_DIGITS = 10
+
 EVICT_TOOL = "self.lesson_assets.evict_cache_key"
 EVICT_TIMEOUT_SEC = 30
 
@@ -35,39 +41,6 @@ _FIRMWARE_REFUSALS = frozenset(
         "rmdir_failed",
     }
 )
-
-
-class CacheEvictionRefused(RuntimeError):
-    def __init__(self, code: str):
-        super().__init__(code)
-        self.code = code
-
-
-def validate_cache_key(value: Any) -> str:
-    if not isinstance(value, str):
-        raise CacheEvictionRefused("invalid_cache_key")
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError:
-        raise CacheEvictionRefused("invalid_cache_key") from None
-    if not encoded or len(encoded) > CACHE_KEY_MAX_BYTES:
-        raise CacheEvictionRefused("invalid_cache_key")
-    match = CACHE_KEY_RE.fullmatch(value)
-    if match is None:
-        raise CacheEvictionRefused("invalid_cache_key")
-    if (
-        len(match.group("slug")) > CACHE_KEY_SLUG_MAX_BYTES
-        or len(match.group("version")) > CACHE_KEY_VERSION_MAX_DIGITS
-    ):
-        raise CacheEvictionRefused("invalid_cache_key")
-    reconstructed = "{}/v{}-{}".format(
-        match.group("slug"),
-        match.group("version"),
-        match.group("checksum"),
-    )
-    if reconstructed != value:
-        raise CacheEvictionRefused("invalid_cache_key")
-    return reconstructed
 
 
 def protected_cache_keys(conn: Any) -> Dict[str, str]:

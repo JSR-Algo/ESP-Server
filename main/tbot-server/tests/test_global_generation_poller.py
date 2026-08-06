@@ -1014,11 +1014,16 @@ async def test_requires_unique_js_utf16_sorted_packs_and_assets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sd_path_uses_javascript_encode_uri_component_and_200_byte_boundary() -> None:
+async def test_sd_path_uses_rfc3986_strict_encoding_and_the_200_byte_boundary() -> None:
+    # T5.1: this used to assert JavaScript encodeURIComponent semantics
+    # (safe="-_.!~*'()"), which disagreed with the materializer, the sync path
+    # and SharedAssetStore._pack_asset_name — all of which use
+    # quote(key, safe=""). The store writes the file under the strict name, so
+    # the strict name is the contract.
     payload = _payload()
     asset = payload["data"]["index"][0]["assets"][0]
     asset["key"] = "bang!~'()"
-    encoded = "bang!~'()"
+    encoded = "bang%21~%27%28%29"
     cache_key = payload["data"]["index"][0]["cacheKey"]
     path = f"/sdcard/tbot/lesson-assets/{cache_key}/{encoded}"
     asset["sdPath"] = asset["localPath"] = path
@@ -1068,10 +1073,16 @@ async def test_malformed_asset_sha256_is_a_stable_non_retryable_poll_rejection(v
 
 
 @pytest.mark.asyncio
-async def test_cache_key_over_200_bytes_fails_with_stable_sanitized_code() -> None:
+async def test_cache_key_over_the_canonical_cap_fails_with_stable_sanitized_code() -> None:
+    # T5.1: the canonical cap is CACHE_KEY_MAX_BYTES = 205, exactly saturated by
+    # a 128-byte slug + a 10-digit version. This test used to assert a local
+    # 200-byte cap, so it rejected a maximal-but-legal key the materializer
+    # accepted. 205 is now accepted; the 11-digit version that pushes it to 206
+    # is the rejection boundary.
     lesson_id = "a" * 128
     version = 1_234_567_890
     cache_key = f"{lesson_id}/v{version}-{HASH_B}"
+    assert len(cache_key.encode("ascii")) == 205
     pack = _pack(lesson_id=lesson_id)
     pack["lessonVersion"] = version
     pack["cacheKey"] = cache_key
@@ -1082,8 +1093,24 @@ async def test_cache_key_over_200_bytes_fails_with_stable_sanitized_code() -> No
     result = await GlobalGenerationPoller(
         _config(), FakeStore(), lambda data: None, http=client, clock=lambda: NOW
     ).run_once()
-    assert len(cache_key.encode("ascii")) == 205
-    assert result == {"state": "rejected", "errorCode": "cms_cache_key_too_long"}
+    assert result["state"] == "accepted"
+
+    over_version = 12_345_678_901
+    over_key = f"{lesson_id}/v{over_version}-{HASH_B}"
+    assert len(over_key.encode("ascii")) == 206
+    over_pack = _pack(lesson_id=lesson_id)
+    over_pack["lessonVersion"] = over_version
+    over_pack["cacheKey"] = over_key
+    over_pack["assets"] = [_asset(cache_key=over_key)]
+    over_payload = _payload(index=[over_pack])
+    over_checksum = over_payload["data"]["indexChecksum"]
+    over_client = _client(
+        lambda request: _response(over_payload, etag=f'"lesson-assets-g8-{over_checksum}"')
+    )
+    over_result = await GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: None, http=over_client, clock=lambda: NOW
+    ).run_once()
+    assert over_result == {"state": "rejected", "errorCode": "cms_cache_key_too_long"}
 
 
 @pytest.mark.asyncio

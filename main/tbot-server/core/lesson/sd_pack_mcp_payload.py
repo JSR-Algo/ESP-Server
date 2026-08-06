@@ -13,6 +13,10 @@ from core.lesson.flattened_cinematic_contract import (
     validate_flattened_cinematic_cache_asset,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.cache_key_contract import (
+    AssetBasenameRefused,
+    encode_asset_basename,
+)
 from core.lesson.sd_pack_evict import CacheEvictionRefused, validate_cache_key
 
 FIRMWARE_LESSON_ASSET_ROOT = "/sdcard/tbot/lesson-assets"
@@ -99,25 +103,17 @@ def _canonical_cache_key(value: Any) -> str:
 
 
 def _encoded_basename(asset_key: Any) -> str:
-    if not isinstance(asset_key, str) or not asset_key:
-        _refuse()
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in asset_key):
-        _refuse()
+    """Delegates to THE canonical encoder (T5.1).
+
+    This used to carry its own copy of the rules with a 255-byte cap and no FAT
+    device-name check — a third policy alongside the materializer's and the
+    backend's. Every key reaching here has already passed the materializer, so
+    the stricter shared rule cannot reject anything a real pack contains.
+    """
     try:
-        encoded = quote(asset_key, safe="")
-        encoded_bytes = encoded.encode("ascii")
-    except UnicodeEncodeError:
+        return encode_asset_basename(asset_key)
+    except AssetBasenameRefused:
         _refuse()
-    lowered = encoded.lower()
-    if (
-        not encoded_bytes
-        or len(encoded_bytes) > MAX_FAT_BASENAME_BYTES
-        or encoded.endswith(".")
-        or lowered in _RESERVED_BASENAMES
-        or lowered.endswith(_RESERVED_SUFFIXES)
-    ):
-        _refuse()
-    return encoded
 
 def _matching_alias(asset: dict[str, Any], primary: str, legacy: str) -> str:
     primary_present = primary in asset
