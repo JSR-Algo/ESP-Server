@@ -468,10 +468,34 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         "durationMs": phase["timing"]["durationMs"],
         "fps": metadata["fps"],
         "frameCount": metadata["frameCount"],
-        "asset": {
-            "derivativeId": source["derivativeId"],
-            "cueId": entry_id,
-            **common_asset,
-            "compatibilityMetadata": dict(metadata),
-        },
+        # Firmware HEAD validates the prepare-frame `asset` with ExactObjectKeys
+        # (lesson_handler.cc kV2TrgbAssetKeys / kV2AssetKeys): a TRGB v2 cue MUST
+        # carry the flat container fields (no width/height/compatibilityMetadata),
+        # an MP4 v2 cue MUST carry width/height and NO compatibilityMetadata.
+        "asset": (
+            {
+                "derivativeId": source["derivativeId"],
+                "cueId": entry_id,
+                "sdPath": sd_path,
+                "sha256": source["sha256"],
+                "bytes": source["bytes"],
+                "mediaType": source["mediaType"],
+                "containerVersion": metadata["containerVersion"],
+                "storedWidth": metadata["storedWidth"],
+                "storedHeight": metadata["storedHeight"],
+                "orientation": metadata["orientation"],
+                "frameBytes": metadata["frameBytes"],
+            }
+            if source["mediaType"] == "application/vnd.tbot.rgb565-indexed"
+            else {
+                "derivativeId": source["derivativeId"],
+                "cueId": entry_id,
+                "sdPath": sd_path,
+                "sha256": source["sha256"],
+                "bytes": source["bytes"],
+                "mediaType": source["mediaType"],
+                "width": source["width"],
+                "height": source["height"],
+            }
+        ),
     }
