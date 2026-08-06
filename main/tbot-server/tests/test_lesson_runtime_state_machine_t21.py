@@ -665,5 +665,31 @@ class LessonPreloadResetEnvelopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(frame["timestamp"], 1_600_000_000_000)
 
 
+class LessonRuntimeAutoDisableTest(unittest.IsolatedAsyncioTestCase):
+    """T2.1 finding (plan §5, routed in by T2.3): the S13 voice-latency breaker
+    detached the runtime but left ``session_mode`` pinned to LESSON, and every
+    voice output path gates on exactly that — so tripping the breaker mid-lesson
+    left the child in permanent silence."""
+
+    async def test_auto_disable_leaves_lesson_mode_so_voice_can_speak_again(self):
+        import test_connection_edges as C
+        from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+
+        handler = C._build_handler()
+        handler.session_mode = SessionMode.LESSON
+        handler.audio_channel_owner = SessionMode.LESSON
+        handler.lesson_runtime = None
+
+        handler._disable_lesson_runtime()
+        # The finish hook is scheduled on the running loop; let it run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertIs(handler.config["lesson"]["runtime_enabled"], False)
+        self.assertNotEqual(
+            normalize_session_mode(handler.session_mode), SessionMode.LESSON
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
