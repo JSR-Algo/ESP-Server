@@ -45,7 +45,7 @@ becomes measurable — but the `lesson_assignments.state` transition is backend-
 ## What was checked (cross-component grep inventory)
 
 Every site that sets or clears listening / session-active state, in all four components.
-Full table with line numbers: [matrix §2](../../failure-path-matrix.md). Headlines:
+Full table with line numbers: `robot/docs/failure-path-matrix.md` §2. Headlines:
 
 | Component | Sites | What the inventory showed |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ Full log: `lesson-prod/repros/t25.red.log`.
 | File | Change |
 | --- | --- |
 | `core/connection_registry.py:37` | `replace()` returns the displaced handler instead of discarding it; adds `is_current()`. |
-| `core/websocket_server.py:239` | Mint a liveness lease on accept; on displacement call `_scrap_superseded_connection`. |
+| `core/websocket_server.py:239` | Issue a liveness lease on accept; on displacement call `_scrap_superseded_connection`. (Named `issue`, not `mint` — see the naming note below.) |
 | `core/websocket_server.py:315` | Sets `superseded_by` **synchronously** — before the function returns, therefore before the winning connection can emit anything — then emits a `scrap` disposition and schedules the slow teardown *behind* that guard. Ordering is the point: `close()` awaits voice-provider teardown and a forwarder drain, which is far too slow to be the barrier. |
 | `core/lesson/runtime.py:5158` | `_default_send` refuses to write from a superseded connection. **The asserted invariant.** |
 | `core/lesson/runtime.py:1338` | `_teardown_disposition()` / `_emit_teardown_disposition()` — classify every runtime teardown as restock / refurbish / scrap. |
@@ -120,7 +120,7 @@ $ python3 -m pytest tests/test_websocket_server_edges.py tests/test_connection_e
 386 passed in 43.44s
 ```
 
-Full-suite result is recorded in "Full suite" below.
+Full-suite attribution is in "Full suite — delta analysis" below.
 
 ---
 
@@ -235,8 +235,13 @@ rate of F-T25-01. Emission is exception-safe by construction
 | Lease design documented, epoch-persistence decision made | **Met.** Redis, with the rejected alternatives and the residual risk written down. |
 | Stale-socket invariant has a failing-then-passing regression test | **Met.** Behavioural RED at base, GREEN at tip, gate VERIFIED. |
 
-Eleven findings were routed to `LESSON_PRODUCTION_PLAN.md` §5 rather than fixed here, per
-the surgical-scope rule. Two are HIGH and both are the same shape — backend and robot
+Eleven rows were appended to `LESSON_PRODUCTION_PLAN.md` §5 rather than fixed here, per the
+surgical-scope rule: nine new findings (F-T25-01, -04, -06 … -12), one behaviour-change note
+for T2.4, and one campaign-tooling finding for T0.4. Three further matrix cells (F-T25-02,
+-03, -05) are pre-existing findings already in the log from T0.2 / T1.4 — cross-referenced
+by the matrix, not duplicated.
+
+Two of the new findings are HIGH and both are the same shape — backend and robot
 disagreeing about whether a lesson is running, in opposite directions:
 
 * **F-T25-01** — a lesson that dies after `lesson_started` never reaches a terminal state.
@@ -303,8 +308,57 @@ passed in the final run — both are docker/nginx runtime tests, also environmen
    **Deferral risk, stated:** the stale-socket fix is a *production* behaviour change —
    until it ships, a duplicate connect still leaves a zombie handler emitting lesson frames
    on the abandoned socket. That is the live bug, and it stays live until T7.3.
-4. **Re-test on main.** Storm suite **51 passed**; repro **2 passed** (`REPRO PASS`); full
-   suite result recorded below.
-5. **Remove the worktree.** Done after main verified — see below.
+4. **Re-test on main.** At main `efb4fbe3` (immediately after the T2.5 merge, before any
+   sibling lane touched the checkout): storm suite **51 passed**, repro **2 passed**
+   (`REPRO PASS`). Those are the valid main-tip results for this task.
+
+   A subsequent full-suite run on main is **not attributable** and is recorded here only
+   for completeness: it reported *16 failed / 3517 passed*, but the shared `main` checkout
+   moved under it — the T2.2 merge (`c9a48f35`) and a T2.3 doc commit landed mid-run, and
+   by the end the T2.4 session had an **in-progress, unresolved merge** of
+   `lesson-prod/t24-esp-websocket` sitting in the working tree (`UU` on
+   `core/connection_registry.py` and `core/websocket_server.py`, conflict markers in the
+   file). One of the 16,
+   `test_public_global_generation_acceptance_contract`, fails on main purely because
+   `ast.parse` chokes on `<<<<<<< HEAD` in `websocket_server.py`. Not a T2.5 regression, and
+   not T2.4's final state either — that merge was still being resolved. The authoritative
+   delta for this task is the **branch-tip** full suite above, which ran against a stable
+   tree.
+
+   **Resolved — T2.4 merged on top, cleanly and additively.** `lesson-prod/t24-esp-websocket`
+   conflicted with T2.5 in exactly the two files T2.5 changed; the T2.4 session resolved it
+   at `b53d69e6`. Verified at main `e39c7a34` (after T2.4 *and* T4.1 merged):
+
+   | Check | Result |
+   | --- | --- |
+   | `tests/test_reconnect_storm.py` + `tests/test_ws_reconnect_lifecycle.py` + `tests/test_public_global_generation_acceptance_contract.py` | **77 passed** |
+   | `lesson-prod/repros/t25.sh` | **2 passed** — `REPRO PASS` |
+   | Adjacent suites (the 5 above) | **386 passed** |
+
+   All three T2.5 load-bearing pieces survived: `replace()` still returns the displaced
+   handler (`connection_registry.py:48`), `superseded_by` is still set synchronously
+   (`websocket_server.py:347`), and the `_default_send` guard is intact
+   (`runtime.py:5288`).
+
+   The resolution also **widened** the guard rather than merely preserving it. T2.4 added
+   `ConnectionHandler.mark_superseded()`, which swaps `self.websocket` for a
+   `_SupersededWebSocket` stand-in. T2.5's `superseded_by` gates the *lesson* path; T2.4's
+   stand-in catches every other writer on that handler — TTS, ping, admin nudge. Both land
+   synchronously in `_scrap_superseded_connection` before the winner can emit. The two
+   mechanisms compose; neither is redundant.
+5. **Remove the worktree.** Verified clean, verified `lesson-prod/t25-failure-path-rma` is
+   an ancestor of `main`, then `git worktree remove`. The branch ref was kept while T2.4 was
+   mid-merge against these files, then deleted once that merge landed. There is no remote to
+   delete from — nothing in this campaign has been pushed.
 6. **Close out.** Status set to DONE here, in `lesson-prod/t25-failure-path-rma.md`, and in
    `LESSON_PRODUCTION_PLAN.md` §2.
+
+### Incident during the ship checklist (filed as a finding)
+
+The T2.5 evidence file was silently destroyed mid-session and had to be recovered from
+`stash@{0}^3`. Cause: `merge-task.sh:33`'s every-5-merges integration re-gate runs
+`git stash --include-untracked -q` in each repro's declared repo. A sibling lane's merge
+fired that re-gate and stashed this session's untracked file out of the shared checkout,
+with no indication to either session. Routed to **T0.4** — the re-gate should run in a
+throwaway worktree, as `gate.sh` already does, rather than mutating a checkout that other
+lanes are working in.
