@@ -1128,6 +1128,8 @@ class LessonRuntime:
         self._motion_generation = 0
         self._semantic_step_sequence = 0
         self._step_seq: Optional[int] = None
+        # Resolved timeoutSec of the step currently on the wire; re-armed on resume.
+        self._step_timeout_sec: float = float(default_step_timeout_sec)
         self._step_id: Optional[str] = None
         self._step: Optional[Dict[str, Any]] = None  # the in-flight step row
         self._step_passive = False  # cached _is_passive_step(self._step)
@@ -2521,7 +2523,67 @@ class LessonRuntime:
                 return False
         return True
 
+    async def _contain_state_machine_fault(self, entry: str, exc: BaseException) -> None:
+        """T2.1 fault containment: an unexpected exception raised inside the state
+        machine must FAIL THE LESSON TERMINALLY, not wedge it.
+
+        ``lessonMessageHandler`` already swallows handler exceptions so a lesson
+        fault can never tear down the WS/voice path — the process survives either
+        way. But swallowing alone left the runtime in RUNNING with its step timer
+        already cancelled (``_on_frame_acked`` clears it before dispatching), i.e.
+        no timer, no terminal event, and a backend assignment stuck in its active
+        slot forever. Project the fault as a terminal ``lesson_failed`` instead.
+        """
+        self._log(
+            "error",
+            f"lesson runtime fault in {entry}: {type(exc).__name__}: {exc}",
+        )
+        if self.state in (S_FAILED, S_COMPLETED):
+            return
+        self.last_error = LessonError(
+            "LESSON_RUNTIME_FAULT",
+            f"unhandled {type(exc).__name__} in {entry}",
+            retryable=False,
+        )
+        self.state = S_FAILED
+        try:
+            self._cancel_step_timeout()
+            self._cancel_passive_dwell()
+            self._cancel_child_response_timeout()
+            self._cancel_visual_waiters(increment_generation=True, reason="runtimeFault")
+            await self._emit_error(self.last_error)
+            await self._notify_lesson_terminal("runtime_fault")
+        except Exception as teardown_exc:  # pragma: no cover - teardown is best-effort
+            self._log(
+                "warning",
+                f"lesson runtime fault teardown failed: {type(teardown_exc).__name__}",
+            )
+
     async def on_lesson_ack(self, msg_json: Dict[str, Any]) -> None:
+        try:
+            await self._on_lesson_ack_impl(msg_json)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - contained into a terminal failure
+            await self._contain_state_machine_fault("on_lesson_ack", exc)
+
+    async def on_lesson_progress(self, msg_json: Dict[str, Any]) -> None:
+        try:
+            await self._on_lesson_progress_impl(msg_json)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - contained into a terminal failure
+            await self._contain_state_machine_fault("on_lesson_progress", exc)
+
+    async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
+        try:
+            await self._on_lesson_error_impl(msg_json)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - contained into a terminal failure
+            await self._contain_state_machine_fault("on_lesson_error", exc)
+
+    async def _on_lesson_ack_impl(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
             return
         if await self._resolve_visual_ack(msg_json):
@@ -2893,7 +2955,7 @@ class LessonRuntime:
         self._log("info", f"legacy empty lesson_ack correlated seq={seq}")
         return seq
 
-    async def on_lesson_progress(self, msg_json: Dict[str, Any]) -> None:
+    async def _on_lesson_progress_impl(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
             return
         if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
@@ -3360,7 +3422,7 @@ class LessonRuntime:
 
         self._motion_task = asyncio.create_task(run_serialized_motion())
 
-    async def on_lesson_error(self, msg_json: Dict[str, Any]) -> None:
+    async def _on_lesson_error_impl(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
             return
         if not self._matches_runtime_identity(msg_json):
@@ -3379,6 +3441,20 @@ class LessonRuntime:
             code or "LESSON_ERROR", body.get("message") or "", retryable=bool(body.get("retryable"))
         )
         self._log("warning", f"inbound lesson_error code={code}")
+        # T2.1: HONOR THE WIRE `retryable` FLAG. The firmware flags transient
+        # conditions (LESSON_ASSET_MUTATION_ACTIVE, LESSON_SESSION_CONFLICT, ...)
+        # as retryable: true; killing the run on the first such report throws away
+        # a recoverable lesson. Defer to whichever bounded recovery mechanism is
+        # ALREADY in flight (frame-ack retry/timeout, step timeout, passive dwell,
+        # child-response timeout) — each of those ends in a terminal verdict, so
+        # the state machine can never be wedged by deferring here. With NOTHING in
+        # flight there is no bound, so a retryable report still fails terminally.
+        if self.last_error.retryable and self._bounded_recovery_in_flight():
+            self._log(
+                "warning",
+                f"retryable inbound lesson_error deferred to in-flight recovery code={code}",
+            )
+            return
         # A firmware-reported error on the active step fails the run (slice scope).
         if self.state in (S_RUNNING, S_PRELOADING):
             self.state = S_FAILED
@@ -3386,6 +3462,22 @@ class LessonRuntime:
             self._cancel_step_timeout()
             self._cancel_child_response_timeout()
             await self._notify_lesson_terminal("lesson_error")
+
+    def _bounded_recovery_in_flight(self) -> bool:
+        """True when a timer that ALWAYS ends in a terminal verdict is armed.
+
+        Used by :meth:`on_lesson_error` to decide whether a ``retryable`` inbound
+        error can be deferred without risking a run that hangs forever.
+        """
+        for task in (
+            self._frame_ack_timeout_task,
+            self._step_timeout_task,
+            self._passive_dwell_task,
+            self._child_response_timeout_task,
+        ):
+            if task is not None and not task.done():
+                return True
+        return False
 
     # ── state machine ──────────────────────────────────────────────────────────
 
@@ -3898,6 +3990,9 @@ class LessonRuntime:
         self._step_seq = await self._emit("lesson_step", step_id=self._step_id, body=body)
         if self.state == S_FAILED:
             return
+        # Remembered so resume() can re-arm the SAME deadline for a step whose
+        # pause outlived its original timer (see resume()).
+        self._step_timeout_sec = timeout_sec
         self._start_step_timeout(self._step_seq, self._step_id, timeout_sec)
 
     async def _speak_step_prompt(self, step: Dict[str, Any]) -> bool:
@@ -4834,6 +4929,20 @@ class LessonRuntime:
             )
         self.state = S_RUNNING
         self._forward_phase("resumed")
+        # T2.1: a pause that outlives ``timeoutSec`` retires the step timer — the
+        # task wakes, sees a non-RUNNING state and returns WITHOUT a verdict. The
+        # resumed step would then have no ack deadline at all and the run would
+        # wedge in RUNNING forever. Re-arm the same deadline for a step that is
+        # still un-acked; an already-acked step is past the ack gate and keeps its
+        # own (child-response / dwell) timers.
+        if (
+            self._step is not None
+            and not self._step_acked
+            and self._step_timeout_task is None
+        ):
+            self._start_step_timeout(
+                self._step_seq, self._step_id, self._step_timeout_sec
+            )
         self._visual_generation += 1
         request = self._current_visual_request
         if request is None:
@@ -4912,7 +5021,15 @@ class LessonRuntime:
         else:
             self._cancel_visual_waiters(increment_generation=True, reason="stopped")
         if self.state not in (S_FAILED, S_COMPLETED):
-            body: Dict[str, Any] = {"reason": "STOPPED"}
+            # T2.1: the reason MUST stay inside the documented lesson_stop enum
+            # (COMPLETED | CANCELLED | FAILED, protocol §4.6). The firmware
+            # classifies ANY reason that is not COMPLETED/SUCCEEDED/CANCELLED as a
+            # FAILURE (lesson_handler.cc), so the previous "STOPPED" showed the
+            # child the sad-face "Bài học bị gián đoạn." UI + error sound for what
+            # is a graceful/administrative stop. CANCELLED is the enum member with
+            # exactly those semantics, and still projects lesson_abandoned (not
+            # lesson_failed) on the ack path below.
+            body: Dict[str, Any] = {"reason": "CANCELLED"}
             if self._cinematic_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {
                     "command": "stop",

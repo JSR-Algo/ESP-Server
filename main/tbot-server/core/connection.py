@@ -778,7 +778,12 @@ class ConnectionHandler:
             "sessionId": session_id,
             "sequence": 1,
             "stepId": None,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            # T2.1: the lesson_* envelope defines `timestamp` as epoch MILLISECONDS
+            # (protocol §3; every frame built by LessonRuntime._envelope complies).
+            # This frame is hand-built outside _envelope and previously put an
+            # RFC3339 string here — the one lesson_* frame type that broke any
+            # consumer parsing `timestamp` as a number.
+            "timestamp": int(time.time() * 1000),
             "body": {
                 "assignmentVersion": 0,
                 "profile": profile,
