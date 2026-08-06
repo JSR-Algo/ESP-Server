@@ -40,6 +40,9 @@ after `lesson_started` never reaches a terminal state anywhere** (F-T25-01). The
 *classifies* that teardown as `scrap` and emits it as telemetry, so the production rate
 becomes measurable — but the `lesson_assignments.state` transition is backend-owned.
 
+All matrix cells were re-verified against the four repos at close-out; one claim had gone
+stale mid-session and is corrected in place (see the F-T25-01 note below).
+
 ---
 
 ## What was checked (cross-component grep inventory)
@@ -50,7 +53,7 @@ Full table with line numbers: `robot/docs/failure-path-matrix.md` §2. Headlines
 | Component | Sites | What the inventory showed |
 | --- | --- | --- |
 | `robot/esp32-server` | 10 state families | Registry install/release was identity-guarded on *release* but not on *displacement*. `LessonRuntime.on_replaced()` exists with **zero production callers** (F-T25-09). Terminal events and pending SD work are already Redis-durable. |
-| `tbot-backend` | 5 | `lesson_assignments.state` transitions are **entirely event-driven** — no timer, no reaper. The watchdog only logs, and excludes started lessons. `lesson_sessions` is durable and monotonic — the natural deep home for the epoch. |
+| `tbot-backend` | 5 | `lesson_assignments.state` transitions are **entirely event-driven** — no timer, no reaper. The watchdog detects stalls but only logs them. `lesson_sessions` is durable and monotonic — the natural deep home for the epoch. |
 | `tbot-mobile` | 4 | Holds no authoritative child-session state (`lesson-session.api.ts` is all throw-stubs). The parent projection's `projectionRevision` is already a monotonic freshness token — the closest existing analogue to the lease. |
 | `TBOT-Firmware` | 4 | `lesson_runtime_active_` is cleared **only** by lesson protocol frames, never by a websocket close — deliberate, so passive reconnect can resume, but it means the robot holds lesson state the server has forgotten. `LessonTransportEpochGate` is already an epoch gate, but RAM-local and server-blind. |
 
@@ -81,17 +84,20 @@ Full log: `lesson-prod/repros/t25.red.log`.
 
 ## Fix
 
+Line numbers are as they stand on `main` at close-out (`e39c7a34`), after T2.4's merge
+shifted them.
+
 | File | Change |
 | --- | --- |
 | `core/connection_registry.py:37` | `replace()` returns the displaced handler instead of discarding it; adds `is_current()`. |
-| `core/websocket_server.py:239` | Issue a liveness lease on accept; on displacement call `_scrap_superseded_connection`. (Named `issue`, not `mint` — see the naming note below.) |
-| `core/websocket_server.py:315` | Sets `superseded_by` **synchronously** — before the function returns, therefore before the winning connection can emit anything — then emits a `scrap` disposition and schedules the slow teardown *behind* that guard. Ordering is the point: `close()` awaits voice-provider teardown and a forwarder drain, which is far too slow to be the barrier. |
-| `core/lesson/runtime.py:5158` | `_default_send` refuses to write from a superseded connection. **The asserted invariant.** |
-| `core/lesson/runtime.py:1338` | `_teardown_disposition()` / `_emit_teardown_disposition()` — classify every runtime teardown as restock / refurbish / scrap. |
+| `core/websocket_server.py:244` | Issue a liveness lease on accept; on displacement call `_scrap_superseded_connection`. (Named `issue`, not `mint` — see the naming note below.) |
+| `core/websocket_server.py:320` | Sets `superseded_by` **synchronously** (`:347`) — before the function returns, therefore before the winning connection can emit anything — then emits a `scrap` disposition and schedules the slow teardown *behind* that guard. Ordering is the point: `close()` awaits voice-provider teardown and a forwarder drain, which is far too slow to be the barrier. |
+| `core/lesson/runtime.py:5281` | `_default_send` refuses to write from a superseded connection. **The asserted invariant.** |
+| `core/lesson/runtime.py:1346` | `_teardown_disposition()` / `_emit_teardown_disposition()` — classify every runtime teardown as restock / refurbish / scrap. |
 | `core/lesson/liveness_lease.py` | New. Epoch ledgers (Redis + in-memory), `Lease`, `classify_lease`, `attach_lease` / `read_lease`, `emit_disposition`. |
-| `core/connection.py:241` | Initialise `liveness_lease` / `superseded_by`. |
+| `core/connection.py:272` | Initialise `liveness_lease` / `superseded_by`. |
 
-**Behaviour change T2.4 should keep:** a superseded connection is now actively closed
+**Behaviour change (T2.4 kept and extended it):** a superseded connection is now actively closed
 rather than lingering until its socket closes or `_check_timeout` fires. Side benefit:
 `_active_device_connections` no longer stays inflated against the audio-admission accept
 cap for the zombie's whole lifetime. Filed in §5 of the plan.
@@ -245,7 +251,11 @@ Two of the new findings are HIGH and both are the same shape — backend and rob
 disagreeing about whether a lesson is running, in opposite directions:
 
 * **F-T25-01** — a lesson that dies after `lesson_started` never reaches a terminal state.
-  Backend says `RUNNING` forever; the robot and the ESP session are gone.
+  Backend says `RUNNING` forever; the robot and the ESP session are gone. Re-verified at
+  backend `f6e63c3` on close-out: a concurrent backend lane narrowed this while T2.5 was in
+  flight — the watchdog's old `NOT EXISTS … lesson_started` filter became a latest-event
+  LATERAL join, so the stall is now *detected*. It is still only `logger.warn` (zero `UPDATE`
+  statements in the file), so nothing transitions. The remediation half stands.
 * **F-T25-12** — the admin assignment cancel is DB-only and never reaches the device
   (`admin-lesson-assignment-operation.service.ts` imports no websocket/ESP dependency).
   Backend says `CANCELLED`; the robot keeps teaching the child.
