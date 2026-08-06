@@ -1,0 +1,49 @@
+# T5.3 simulated-run ESP server config.
+#
+# Rendered to lesson-e2e-sim/esp-data/.config.yaml by scripts/lesson_e2e_sim_up.sh,
+# which substitutes __MANAGER_SECRET__ with the live sys_params `server.secret` read
+# from the seeded manager-api database (it rotates on every clean deploy, so it must
+# never be committed as a literal).
+#
+# Everything points inside the compose network: no prod backend, no lab robot, no
+# Gemini. Only the lesson path is exercised.
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  websocket: ws://esp-server:8000/tbot/v1/
+  api_url: http://backend:3000/v1
+  factory_test_claimed_all: false
+  auth:
+    enabled: true
+    # The simulated device connects without a WS token.
+    allowed_devices:
+      - "__SIM_DEVICE_ID__"
+
+manager-api:
+  url: http://web:8002/tbot
+  secret: __MANAGER_SECRET__
+
+prompt_template: agent-base-prompt.txt
+
+# The lesson-admission path ("bắt đầu bài học") is a pure string classifier and never
+# dials the Live client, so simulation runs with no Gemini key. Keeping the declared
+# voice_mode at google_live preserves parity with the lab/production robot — the
+# classic_pipeline path is a separate surface and is deliberately not swapped in here.
+voice_mode:
+  type: google_live
+  fallback_to_classic_on_error: false
+google_live:
+  api_key: ""
+  model: gemini-3.1-flash-live-preview
+  native_voice: true
+  voice_name: Kore
+  language_code: vi-VN
+
+lesson:
+  runtime_enabled: true
+  api_base: http://backend:3000/v1
+  asset_public_base_url: http://web:8002/tvideo-demo
+  asset_delivery_mode: sd_pack
+  sd_asset_pack_enabled: true
+  supported_profiles: ['espTft']

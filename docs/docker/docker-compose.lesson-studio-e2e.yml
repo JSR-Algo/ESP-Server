@@ -65,7 +65,10 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?export JWT_PUBLIC_KEY with the local backend public PEM}
       TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
-      LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin}
+      # MUST include the /tvideo-demo path prefix (e.g. http://127.0.0.1:8102/tvideo-demo).
+      # A bare origin makes the backend emit asset URLs without the prefix; those fall through
+      # to the SPA index.html and the canonical spec then sha256-hashes HTML instead of media.
+      LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin, including the /tvideo-demo path prefix}
       ROBOT_ESP_BASE_URL: ${ROBOT_ESP_BASE_URL:?export the live robot ESP fan-out URL}
       TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}
       LESSON_SHARED_VISUAL_AUTHORING_ENABLED: "true"
@@ -138,10 +141,10 @@ services:
     ports:
       - "${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
     volumes:
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend/production-lesson-studio}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
-      - ${TBOT_FIRMWARE_WORKTREE:-../../../../TBOT-Firmware/production-lesson-studio}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
+      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
+      - ${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
       interval: 3s

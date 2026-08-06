@@ -1,0 +1,3 @@
+# Rendered at bring-up from config.template.yaml; carries the live manager-api
+# server.secret, so it must never be committed.
+esp-data/

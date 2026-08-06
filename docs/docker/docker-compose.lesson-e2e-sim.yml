@@ -1,0 +1,67 @@
+# T5.3 — E2E simulated run (docker, no hardware).
+#
+# Overlay for docker-compose.lesson-studio-e2e.yml that adds the realtime ESP lesson
+# server, so the stack covers the FULL lesson path (backend + ESP server) instead of
+# only the admin lesson-studio surface. Drive it with a simulated device client
+# (scripts/lesson_e2e_sim_device.py) and verify with scripts/lesson_e2e_log_verify.py.
+#
+# Usage (from robot/esp32-server/docs/docker):
+#   docker compose -f docker-compose.lesson-studio-e2e.yml \
+#                  -f docker-compose.lesson-e2e-sim.yml up -d
+#
+# Host ports are deliberately offset from the lab stack (8000/8003) so this can run
+# alongside a live tbot-esp32-server container without a port clash.
+
+services:
+  esp-server:
+    image: ${TBOT_LESSON_SIM_ESP_IMAGE:-local/tbot-server:latest}
+    container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-esp
+    depends_on:
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      # The ESP server talks to the Nest backend over the compose network, never to prod.
+      COURSE_BACKEND_URL: http://backend:3000
+      LESSON_RUNTIME_ENABLED: "true"
+      LESSON_RENDERER_V4_ENABLED: "true"
+      LESSON_MOTION_PRESETS_ENABLED: "true"
+      # Shared with the backend so minted device JWTs validate on both sides.
+      TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
+      # The simulated device's MAC must be allowlisted or lesson rollout refuses it.
+      LESSON_ROLLOUT_DEVICE_ALLOWLIST: ${LESSON_SIM_DEVICE_ID:-14:c1:9f:d1:a8:48}
+      LESSON_STORAGE_HIL_DEVICE_ALLOWLIST: ${LESSON_SIM_DEVICE_ID:-14:c1:9f:d1:a8:48}
+      LESSON_ASSET_PUBLIC_BASE_URL: http://web:8002/tvideo-demo
+      LESSON_ASSET_ORIGIN_BASE: http://web:8002/tvideo-demo
+      LESSON_ASSET_ALLOWED_ORIGINS: http://web:8002
+      LESSON_ASSET_DELIVERY_MODE: sd_pack
+      # sd_pack mode refuses to boot without this: it is where verified packs are
+      # materialized before firmware reads sd:// paths. In simulation it stands in
+      # for the robot's SD card.
+      LESSON_ASSET_PACK_MOUNT_ROOT: /opt/tbot-esp32-server/data/lesson_asset_packs
+      LESSON_SD_FANOUT_CONCURRENCY: "4"
+      LESSON_SD_LEGACY_DEVICE_WORKER_ENABLED: "false"
+      # No hardware and no Gemini in simulation: the lesson-admission text path is a
+      # pure string classifier, so the Live client is never dialled.
+      LESSON_SAMPLE_ENABLED: "false"
+      GOOGLE_API_KEY: ""
+      GEMINI_API_KEY: ""
+      GOOGLE_GEMINI_API_KEY: ""
+    ports:
+      - "${LESSON_SIM_ESP_WS_HOST_PORT:-8010}:8000"
+      - "${LESSON_SIM_ESP_HTTP_HOST_PORT:-8013}:8003"
+    volumes:
+      - ./lesson-e2e-sim/esp-data:/opt/tbot-esp32-server/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',8000))==0 else 1)\""]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [lesson-studio-e2e]
