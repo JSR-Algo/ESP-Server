@@ -154,6 +154,24 @@ REPRO PASS: T5.1 ESP cache-key/basename contract is single-sourced and consisten
 At the pre-patch base `de6471b7`: **11 failed, 1 passed** (the 201-byte case
 already failed correctly there, since the materializer alone had the 200 cap).
 
+## Ship verification (on main)
+
+Gate `t51` VERIFIED (RED@`de6471b7` rc=1, GREEN@`f69fe7a6` rc=0), merge #23, main
+`eda89fae`. Backend half: gate `t51-backend` VERIFIED, merge #22, main `2d02985`
+(then `f34d555`, a follow-up that fixed the vitest cross-repo path — see the
+backend evidence). Re-run on the main checkout:
+
+```text
+$ python3 -m pytest -q tests/test_lesson_contract_vectors_parity.py
+128 passed          <- the cross-repo byte comparison now runs (no skip)
+$ python3 -m pytest -q
+13 failed, 3715 passed, 7 skipped in 114.58s   <- the same 13 pre-existing
+                                                  failures; zero new
+```
+
+Worktrees removed and both `lesson-prod/t51-contract-parity` branches deleted
+after main was verified.
+
 ## Deploy safety
 
 No behavior changes for any pack that works today; see the backend evidence.
