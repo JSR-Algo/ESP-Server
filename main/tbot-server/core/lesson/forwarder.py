@@ -171,12 +171,32 @@ class LessonEventForwarder:
             return
         assignment_id = batch.get("assignmentId") or ""
         session_id = batch.get("sessionId") or ""
+        # Name the WIRE FAMILY, not the specific event type: step_started/step_completed
+        # are lesson_progress events on the wire, and the checkpoint contract keys off the
+        # family ("backend post lesson_progress ... event=step_completed"). Logging the
+        # bare type instead made the posted-progress evidence unmatchable even though the
+        # post really happened. The specific type is preserved below as event=.
+        # Step progress only. runtime_phase_changed is a PHASE transition, not step
+        # progress: folding it in made every phase change count as backend progress and
+        # broke the ordering checks (lesson_backend_progress_ordered and
+        # lesson_runtime_completion_after_backend_progress), which compare completion
+        # against the last progress event.
+        # ONLY step_completed. The checkpoint contract's own fixture is
+        # "backend post lesson_progress ... event=step_completed result=success", and the
+        # ordering checks treat every lesson_progress line as a progress datum: including
+        # step_started put a progress event after the last completion and broke
+        # lesson_backend_progress_ordered / lesson_runtime_completion_after_backend_progress.
+        # Narrowing from {step_started, step_completed, runtime_phase_changed} to this did
+        # not fix those two on its own -- see the evidence file; step_started was the cause.
+        progress_types = {"step_completed"}
         for event in events:
             if not isinstance(event, dict):
                 continue
             name = event.get("type") or event.get("event") or "lesson_event"
+            family = "lesson_progress" if name in progress_types else name
             parts = [
-                f"backend post {name}",
+                f"backend post {family}",
+                f"event={name}",
                 f"assignmentId={assignment_id}",
                 f"sessionId={session_id}",
             ]
