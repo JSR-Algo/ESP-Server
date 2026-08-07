@@ -209,6 +209,11 @@ def test_projects_repeated_v2_effects_by_unique_cue_identity() -> None:
         "durationMs": 1300,
         "fps": 10,
         "frameCount": 13,
+        # Firmware validates this object with ExactObjectKeys against
+        # kV2TrgbAssetKeys (TBOT-Firmware/main/lesson_handler.cc:2204): a TRGB v2
+        # cue carries the FLAT container fields and must NOT carry width/height
+        # or compatibilityMetadata — extra keys are rejected outright. This
+        # expectation had drifted back to the pre-v2 nested shape.
         "asset": {
             "derivativeId": DERIVATIVE_ID,
             "cueId": "barn-listen",
@@ -216,9 +221,11 @@ def test_projects_repeated_v2_effects_by_unique_cue_identity() -> None:
             "sha256": ASSET_SHA,
             "bytes": _trgb_bytes(13),
             "mediaType": TRGB_MEDIA_TYPE,
-            "width": 480,
-            "height": 320,
-            "compatibilityMetadata": _trgb_metadata(1300),
+            "containerVersion": 1,
+            "storedWidth": 320,
+            "storedHeight": 480,
+            "orientation": "panelNativeClockwise",
+            "frameBytes": 307200,
         },
     }
     assert project_flattened_cinematic_phase(second, pack)["asset"]["sdPath"].endswith(
@@ -547,3 +554,49 @@ def test_rejects_non_exact_v4_manifest_protocol_and_feature_identity(mutate) -> 
     with pytest.raises(FlattenedCinematicContractError) as exc_info:
         validate_flattened_cinematic_manifest(manifest)
     assert exc_info.value.code == "CINEMATIC_IDENTITY_UNSUPPORTED"
+
+
+# ── cross-repo parity: the v2 TRGB asset key set is owned by the firmware ─────
+
+
+def _firmware_lesson_handler() -> "pathlib.Path | None":
+    """`TBOT-Firmware/main/lesson_handler.cc`, when this checkout has it.
+
+    Neither CI can check out the other repo (F-T51-03), so this degrades to a
+    skip rather than a failure; it still runs in dev, in `gate.sh`, and in the
+    docker E2E, which is where drift is actually introduced.
+    """
+    import pathlib
+
+    here = pathlib.Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "TBOT-Firmware" / "main" / "lesson_handler.cc"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def test_v2_trgb_asset_keys_match_the_firmware_exactly() -> None:
+    """The firmware validates this object with ExactObjectKeys, so an extra or
+    missing key is a hard device-side rejection, not a tolerated difference.
+
+    This is the check that would have caught the stale nested-``compatibilityMetadata``
+    expectation above the moment the v2 shape landed.
+    """
+    import re
+
+    handler = _firmware_lesson_handler()
+    if handler is None:
+        pytest.skip("TBOT-Firmware checkout not present next to this repo")
+
+    source = handler.read_text(errors="replace")
+    match = re.search(
+        r"kV2TrgbAssetKeys\s*=\s*\{(.*?)\}", source, re.DOTALL
+    )
+    assert match, "kV2TrgbAssetKeys not found in lesson_handler.cc"
+    firmware_keys = set(re.findall(r'"([A-Za-z0-9_]+)"', match.group(1)))
+
+    projected = project_flattened_cinematic_phase(_cue("barn-listen"), _v2_pack("barn-listen"))
+    assert set(projected["asset"]) == firmware_keys, (
+        "ESP v2 TRGB asset keys have drifted from the firmware's ExactObjectKeys set"
+    )
