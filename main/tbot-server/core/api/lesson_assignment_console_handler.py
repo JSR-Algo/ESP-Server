@@ -5,11 +5,37 @@ import os
 
 from aiohttp import web
 
+# Reused rather than reimplemented on purpose: a second production predicate that
+# drifts from the first is the F-T64-03 failure mode (auth.guard vs auth.service
+# disagreeing about what "production" meant let a committed key sign tokens).
+from core.api.lesson_sd_fanout_handler import _production_environment
+
+CONSOLE_ENABLED_ENV = "LESSON_ASSIGN_CONSOLE_ENABLED"
+
 
 class LessonAssignmentConsoleHandler:
     def __init__(self, config: dict, lesson_connections=None):
         self.config = config
         self.lesson_connections = lesson_connections if lesson_connections is not None else {}
+
+    @staticmethod
+    def _console_served() -> bool:
+        """Whether to serve the operator console at all.
+
+        F-T64-05 / T6.4 deep-dive box 5 ("console requires auth — none anonymously
+        callable"). The page cannot be gated by a header: an operator opens it in a
+        browser to paste a parent JWT, and a browser cannot send X-Mint-Secret. It
+        also cannot be gated by Nginx, because cloudflared routes the esp.tjbot.vn
+        catch-all straight to :8003 and never traverses Nginx at all
+        (deploy/cloudflared/config.yml.example).
+
+        So in production it is not served unless someone deliberately turns it on.
+        Outside production it is always available, which keeps local operator and
+        e2e workflows unchanged.
+        """
+        if not _production_environment():
+            return True
+        return os.environ.get(CONSOLE_ENABLED_ENV, "").strip().lower() == "true"
 
     @staticmethod
     def _inventory_authorized(request) -> bool:
@@ -78,6 +104,11 @@ class LessonAssignmentConsoleHandler:
         )
 
     async def handle_get(self, request):
+        if not self._console_served():
+            # 404, not 403: a 403 would confirm the route exists on every
+            # production robot server to anyone who probes for it.
+            return web.Response(status=404, text="Not Found", content_type="text/plain")
+
         api_url = html.escape(self._backend_api_url(), quote=True)
         devices_json = self._script_safe_json(
             self._connected_devices() if self._inventory_authorized(request) else []

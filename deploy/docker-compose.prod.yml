@@ -78,6 +78,11 @@ services:
       LESSON_PRELOAD_TIMEOUT_SEC: ${LESSON_PRELOAD_TIMEOUT_SEC:-240}
       LESSON_STEP_TIMEOUT_FLOOR_SEC: ${LESSON_STEP_TIMEOUT_FLOOR_SEC:-}
       LESSON_VOICE_RT_P95_DISABLE_MS: ${LESSON_VOICE_RT_P95_DISABLE_MS:-}
+      # F-T64-05: the operator assignment console at /tbot/assign/ is NOT served
+      # in production unless this is exactly "true". cloudflared routes the
+      # esp.tjbot.vn catch-all straight to :8003, so Nginx cannot gate it and a
+      # browser cannot present X-Mint-Secret.
+      LESSON_ASSIGN_CONSOLE_ENABLED: ${LESSON_ASSIGN_CONSOLE_ENABLED:-false}
       LESSON_MAX_ASSET_BYTES: ${LESSON_MAX_ASSET_BYTES:-}
       LESSON_MAX_TOTAL_ASSET_BYTES: ${LESSON_MAX_TOTAL_ASSET_BYTES:-}
     expose:

@@ -246,3 +246,81 @@ class LessonAssignmentConsoleScriptInjectionTest(unittest.IsolatedAsyncioTestCas
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LessonAssignmentConsoleProductionGateTest(unittest.IsolatedAsyncioTestCase):
+    """T6.4 deep-dive box 5 / F-T64-05 — the console must not be anonymously
+    callable in production.
+
+    It cannot be gated by a header (an operator opens it in a browser to paste a
+    parent JWT) and it cannot be gated by Nginx, because cloudflared routes the
+    esp.tjbot.vn catch-all straight to :8003 without traversing Nginx. So in
+    production it is simply not served unless explicitly enabled.
+    """
+
+    ENV_KEYS = ("NODE_ENV", "ENV", "APP_ENV", "PYTHON_ENV", "LESSON_ASSIGN_CONSOLE_ENABLED")
+
+    def setUp(self):
+        self._saved = {key: os.environ.get(key) for key in self.ENV_KEYS}
+        for key in self.ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    async def _get(self):
+        from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
+
+        handler = LessonAssignmentConsoleHandler({"server": {"api_url": "https://backend.test/v1"}}, {})
+        return await handler.handle_get(_StubRequest())
+
+    async def test_production_does_not_serve_the_console_by_default(self):
+        os.environ["NODE_ENV"] = "production"
+
+        response = await self._get()
+
+        self.assertEqual(response.status, 404)
+        self.assertNotIn("TBOT Lesson Assignment", response.text)
+
+    async def test_production_serves_it_when_deliberately_enabled(self):
+        os.environ["NODE_ENV"] = "production"
+        os.environ["LESSON_ASSIGN_CONSOLE_ENABLED"] = "true"
+
+        response = await self._get()
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("TBOT Lesson Assignment", response.text)
+
+    async def test_the_flag_must_say_true_not_merely_be_present(self):
+        os.environ["NODE_ENV"] = "production"
+        for value in ("", "1", "yes", "false", "TRUE "):
+            with self.subTest(value=value):
+                os.environ["LESSON_ASSIGN_CONSOLE_ENABLED"] = value
+                response = await self._get()
+                expected = 200 if value.strip().lower() == "true" else 404
+                self.assertEqual(response.status, expected, value)
+
+    async def test_non_production_still_serves_it(self):
+        for value in ("development", "test", ""):
+            with self.subTest(value=value):
+                if value:
+                    os.environ["NODE_ENV"] = value
+                else:
+                    os.environ.pop("NODE_ENV", None)
+                response = await self._get()
+                self.assertEqual(response.status, 200)
+
+    async def test_every_production_alias_closes_the_console(self):
+        # _production_environment() reads ENV/APP_ENV/PYTHON_ENV/NODE_ENV; a gate
+        # that only checked NODE_ENV would leave the others open.
+        for key in ("ENV", "APP_ENV", "PYTHON_ENV", "NODE_ENV"):
+            with self.subTest(key=key):
+                for other in self.ENV_KEYS:
+                    os.environ.pop(other, None)
+                os.environ[key] = "production"
+                response = await self._get()
+                self.assertEqual(response.status, 404, key)
