@@ -7203,6 +7203,56 @@ def _first_after(
     return start_index, None
 
 
+WIRE_SEQUENCE_PATTERNS = (
+    re.compile(r'"sequence"\s*:\s*(\d+)'),
+    re.compile(r"\bsequence=(\d+)"),
+    re.compile(r"\bseq=(\d+)"),
+    re.compile(r"\backs=(\d+)"),
+)
+
+
+def _wire_sequence(line: str):
+    """Return the lesson wire sequence a line names, if any.
+
+    ``acks=N`` counts: a device ack of frame N belongs immediately after frame N,
+    which is exactly the ordering being reconstructed.
+    """
+    for pattern in WIRE_SEQUENCE_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def order_lines_by_wire_sequence(lines: list[str]) -> list[str]:
+    """Re-order a capture by lesson wire sequence instead of by log position.
+
+    The ordered checkpoints walk a monotonic cursor, which assumes the input is in
+    event order. Captures are not: the ESP stamps whole seconds, and one real capture
+    put 111 lines into 6 distinct timestamps with 51 inside a single second, so log
+    position cannot express order and merging two streams by timestamp cannot recover
+    it (F-T53-15).
+
+    The ``lesson_*`` frames carry a monotonic ``sequence`` and the device echoes it as
+    ``seq=``/``acks=`` -- an ordering signal immune to timestamp resolution. Lines that
+    name no sequence inherit the last one seen, so boot/wifi/manifest lines stay ahead
+    of the first frame and per-step render lines stay attached to their step. The sort
+    is stable, so same-sequence lines keep their original relative order.
+    """
+    keyed = []
+    carried = -1
+    for index, line in enumerate(lines):
+        sequence = _wire_sequence(line)
+        if sequence is not None:
+            carried = sequence
+        keyed.append((carried, index, line))
+    keyed.sort(key=lambda row: (row[0], row[1]))
+    return [row[2] for row in keyed]
+
+
 def _device_scope(device_id: str, aliases: Iterable[str]) -> Callable[[str], bool]:
     identities = {_norm(identity) for identity in [device_id, *aliases] if identity}
 
@@ -7448,8 +7498,11 @@ def evaluate_lesson_logs(
     require_assignment_version: bool = False,
     require_story: bool = False,
     require_cp7_sidecar_evidence: bool = False,
+    order_by_wire_sequence: bool = False,
 ) -> dict[str, Any]:
     materialized = [line.rstrip("\n") for line in lines]
+    if order_by_wire_sequence:
+        materialized = order_lines_by_wire_sequence(materialized)
     aliases = list(device_aliases or [])
     scoped = _device_scope(device_id, aliases)
     checks: list[dict[str, Any]] = []
@@ -8042,6 +8095,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require captured lesson evidence to include story/storyBeat/narrative metadata.",
     )
     parser.add_argument(
+        "--order-by-wire-sequence",
+        action="store_true",
+        help="Order the capture by lesson wire sequence instead of log position. Use for "
+        "real captures: the ESP log stamps whole seconds, so log position cannot express "
+        "event order (F-T53-15).",
+    )
+    parser.add_argument(
         "--require-cp7-sidecar-evidence",
         action="store_true",
         help="Require CP-7 panel, conversation/idle restore, CP-8 snapshot, and render/audio sidecar evidence.",
@@ -8105,6 +8165,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_assignment_version=args.require_assignment_version,
                 require_story=args.require_story,
                 require_cp7_sidecar_evidence=args.require_cp7_sidecar_evidence,
+                order_by_wire_sequence=args.order_by_wire_sequence,
             )
             report["sources"] = args.log_file
         report["scenario"] = args.scenario
