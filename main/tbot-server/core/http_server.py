@@ -395,7 +395,21 @@ class SimpleHttpServer:
                 devices.append({"deviceId": device_id, **snapshot})
         return devices
 
-    async def handle_preload_voice_alarm_snapshot(self, _request):
+    def _authorize_internal(self, request):
+        """X-Mint-Secret gate shared by every /internal/ route.
+
+        The lesson_* handlers each authorize through LessonNudgeHandler._authorize
+        (see LessonSdMaterializeHandler / GenerationRetryHandler); the routes served
+        directly off this class must use the same gate or they sit unauthenticated
+        in an otherwise authenticated namespace.
+        """
+        return self.lesson_nudge_handler._authorize(request)
+
+    async def handle_preload_voice_alarm_snapshot(self, request):
+        auth_error = self._authorize_internal(request)
+        if auth_error is not None:
+            return auth_error
+
         devices = self._preload_voice_alarm_snapshots()
         payload = {
             "connections": len(self.lesson_connections),
@@ -408,7 +422,11 @@ class SimpleHttpServer:
             content_type="application/json",
         )
 
-    async def handle_preload_voice_alarm_reset(self, _request):
+    async def handle_preload_voice_alarm_reset(self, request):
+        auth_error = self._authorize_internal(request)
+        if auth_error is not None:
+            return auth_error
+
         reset_count = 0
         for connection in tuple(self.lesson_connections.values()):
             alarm = getattr(connection, "lesson_voice_alarm", None)
@@ -493,7 +511,11 @@ class SimpleHttpServer:
             "devices": devices,
         }
 
-    async def handle_lesson_runtime_metrics(self, _request):
+    async def handle_lesson_runtime_metrics(self, request):
+        auth_error = self._authorize_internal(request)
+        if auth_error is not None:
+            return auth_error
+
         return web.Response(
             status=200,
             text=json.dumps(self._runtime_forwarder_metrics(), sort_keys=True),
