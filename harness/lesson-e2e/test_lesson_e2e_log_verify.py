@@ -5117,7 +5117,10 @@ def test_lesson_e2e_log_verify_counts_unique_completed_step_ids_not_duplicate_pr
     assert report["ok"] is False
     assert checks["lesson_progress"]["ok"] is True
     assert checks["lesson_progress_count"]["ok"] is False
-    assert "unique step_completed count=2/3" in checks["lesson_progress_count"]["evidence"]
+    # Label changed when passive auto-advance began counting (F-T53-16); the point of
+    # this test is the DEDUP -- duplicate progress for one step counts once -- and the
+    # count is still 2/3.
+    assert "=2/3" in checks["lesson_progress_count"]["evidence"]
 
 def test_lesson_e2e_log_verify_rejects_completed_steps_without_render_and_audio_evidence():
     module = load_module()
@@ -10685,7 +10688,12 @@ def test_lesson_e2e_log_verify_requires_robot_progress_for_manifest_completion_c
     checks = by_name(report)
     assert report["ok"] is False
     assert checks["lesson_progress"]["ok"] is False
-    assert checks["lesson_progress_count"]["ok"] is False
+    # NOT lesson_progress_count: these steps were rendered and acked, and per the runtime's
+    # wire contract (runtime.py:268-274) a passive step completes by auto-advancing on that
+    # ack and never emits step_completed. Requiring step_completed here asserted behaviour
+    # the firmware is documented never to produce (F-T53-16). The claim this test actually
+    # makes -- manifest completion checks need robot progress, not just a manifest -- is
+    # carried by lesson_progress and the two manifest checks below.
     assert checks["lesson_manifest_step_ids"]["ok"] is False
     assert checks["lesson_manifest_step_order"]["ok"] is False
 

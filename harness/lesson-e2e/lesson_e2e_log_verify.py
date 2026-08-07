@@ -5949,8 +5949,32 @@ def _lesson_progress_count_check(lines: list[str], scoped: Callable[[str], bool]
     progress_step_ids: set[str] = set()
     for line in success_lines:
         progress_step_ids.update(_step_ids_from_evidence(line))
-    successes = len(progress_step_ids) if progress_step_ids else len(success_lines)
-    count_label = "unique step_completed count" if progress_step_ids else "successful step_completed count"
+    # A PASSIVE step never reports step_completed: per the runtime's own wire contract
+    # (core/lesson/runtime.py:268-274) "the FIRMWARE NEVER emits a step_completed
+    # progress for it. It AUTO-ADVANCES once the firmware acks the lesson_step". Only
+    # interactive steps, where the child actually answers, produce one. Counting
+    # step_completed alone therefore demanded an event the firmware is documented never
+    # to send, and could not pass for ANY real lesson, simulated or live: a clean 9-step
+    # run yields 9 step_started and 4 step_completed (the four interactive steps).
+    #
+    # A step is complete if it was answered (step_completed) OR rendered and acked,
+    # which is exactly what auto-advance means on the wire.
+    # _first_indices_matching keys on whatever token it can extract, which for an ack line
+    # includes correlation tokens like "acks=12" as well as the real step id. Counting those
+    # inflated the total past the manifest step count (observed 12/9), so keep only real
+    # step ids -- a key carrying "=" is a correlation token, not a step.
+    rendered_step_ids = {
+        step_id
+        for step_id in _first_indices_matching(lines, scoped, _lesson_step_rendered_ack)
+        if "=" not in step_id
+    }
+    completed_step_ids = progress_step_ids | rendered_step_ids
+    successes = len(completed_step_ids) if completed_step_ids else len(success_lines)
+    count_label = (
+        "completed step count (step_completed or render-ack)"
+        if completed_step_ids
+        else "successful step_completed count"
+    )
     if expected is None:
         return _check("lesson_progress_count", f"{count_label}={successes}; expected not declared", "")
     if expected < 1:
