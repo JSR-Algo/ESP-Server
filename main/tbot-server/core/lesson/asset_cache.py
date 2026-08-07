@@ -438,6 +438,17 @@ class AssetCache:
             token = base64.urlsafe_b64encode(self.cache_key.encode("utf-8")).decode("ascii").rstrip("=")
             # Keep '@' literal in the HTTP path. Some firmware HTTP stacks escape
             # an existing "%40" again, while '@' is valid inside a path segment.
+            #
+            # DO NOT "unify" this with cache_key_contract.encode_asset_basename (F-T51-02).
+            # That helper is the shared BACKEND<->ESP wire contract for the pack BASENAME —
+            # the name the file is written under on the SD card — and it uses safe="".
+            # This line is a different thing: the ESP's own HTTP fetch URL, served locally by
+            # core/http_server.py's /tbot/lesson-assets/{cacheToken}/{assetKey} route. It is
+            # ESP-local, not a wire contract, and the deliberate safe='@' divergence exists
+            # for the firmware constraint above. Shared-visual keys are exactly
+            # "<sharedKey>@v<N>", so this is the key shape where it actually matters.
+            # Pinned by test_lesson_asset_cache.py's ".../object.robot@v1" expectation —
+            # if you change this, that test fails, and that failure is correct.
             download_url = f"{self.public_base_url}/tbot/lesson-assets/{token}/{quote(asset.key, safe='@')}"
         record = {
             "key": asset.key,
