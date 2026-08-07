@@ -21,6 +21,7 @@ from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS, prod
 from core.voice.live_admission import AdmissionDecision, AdmissionReason, LiveAdmissionGate
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 from plugins_func.register import Action
+from core.lesson.log_context import with_lesson_log_context
 
 
 LESSON_LIVE_TEXT_INSTRUCTION = (
@@ -660,7 +661,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._has_active_output():
             self.conn.client_abort = False
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_child_audio_deferred reason=robot_speaking"
+                with_lesson_log_context(
+                    "Google Live lesson_child_audio_deferred reason=robot_speaking",
+                    self.conn,
+                )
             )
             return True
         try:
@@ -692,14 +696,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if output_blocked:
                 self.conn.client_abort = False
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_child_audio_deferred reason=output_blocked"
+                    with_lesson_log_context(
+                        "Google Live lesson_child_audio_deferred reason=output_blocked",
+                        self.conn,
+                    )
                 )
                 return True
             for frame in frames_to_forward:
                 await bridge.forward_decoded_input_audio(frame)
                 self._mark_lesson_asset_audio_activity()
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_child_audio_forwarded bytes={} rms={}",
+                    with_lesson_log_context(
+                        "Google Live lesson_child_audio_forwarded bytes={} rms={}",
+                        self.conn,
+                    ),
                     len(frame),
                     rms if frame is decoded and rms is not None else "n/a",
                 )
@@ -800,7 +810,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception as exc:
             await self._close_live_resources()
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live sample_lesson_prepare failed: {}",
+                with_lesson_log_context(
+                    "Google Live sample_lesson_prepare failed: {}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
             return False
@@ -1530,7 +1543,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._cancel_lesson_child_transcript_timeout_task()
             self._record_lesson_conversation_recognized_text(transcript_text)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_conversation_transcript_ignored source=user chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_conversation_transcript_ignored source=user chars={}",
+                    self.conn,
+                ),
                 len(str(transcript_text or "")),
             )
             return True
@@ -1580,15 +1596,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
         # (that cancelled s1 greeting and left the robot silent).
         if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent_suppressed reason=duplicate_window "
-                "chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent_suppressed reason=duplicate_window "
+                    "chars={}",
+                    self.conn,
+                ),
                 len(str(transcript_text or "")),
             )
             return True
         if self._lesson_runtime_active():
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent_suppressed reason=lesson_already_active "
-                "chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent_suppressed reason=lesson_already_active "
+                    "chars={}",
+                    self.conn,
+                ),
                 len(str(transcript_text or "")),
             )
             self._suppress_start_lesson_tool_call_until = (
@@ -1630,14 +1652,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except Exception:
                 pass
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent tool={} chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent tool={} chars={}",
+                    self.conn,
+                ),
                 payload.get("name"),
                 len(str(transcript_text or "")),
             )
             return True
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_start_intent failed tool={} error={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent failed tool={} error={}",
+                    self.conn,
+                ),
                 payload.get("name"),
                 self._safe_error_message(exc),
             )
@@ -1676,7 +1704,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         try:
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_intent miss normalized_chars={} chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent miss normalized_chars={} chars={}",
+                    self.conn,
+                ),
                 len(text),
                 len(str(transcript_text or "")),
             )
@@ -1808,7 +1839,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         self._force_lesson_session_mode("lesson_child_response_window")
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_response_window_open delay_sec={:.2f} window_sec={:.1f}",
+            with_lesson_log_context(
+                "Google Live lesson_child_response_window_open delay_sec={:.2f} window_sec={:.1f}",
+                self.conn,
+            ),
             delay,
             window_sec,
         )
@@ -1863,7 +1897,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 # can resend instead of burning the full timeout mute.
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_wait_interrupted_for_resend remaining_sec={:.1f}",
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_wait_interrupted_for_resend remaining_sec={:.1f}",
+                        self.conn,
+                    ),
                     remaining,
                 )
                 return False
@@ -1871,7 +1908,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.google_live_lesson_prompt_output_inferred_idle = True
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_output_inferred_idle idle_sec={:.1f}",
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_output_inferred_idle idle_sec={:.1f}",
+                        self.conn,
+                    ),
                     self._get_lesson_prompt_inferred_idle_sec(config),
                 )
                 break
@@ -1881,7 +1921,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             ):
                 self.conn.google_live_lesson_prompt_output_allowed = False
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_no_audio_deadline_sec={:.1f}",
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_no_audio_deadline_sec={:.1f}",
+                        self.conn,
+                    ),
                     no_audio_deadline,
                 )
                 return False
@@ -1919,7 +1962,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await asyncio.sleep(playback_tail)
         except asyncio.TimeoutError:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_prompt_playback_guard_timeout timeout_sec={:.1f} queue_len={}",
+                with_lesson_log_context(
+                    "Google Live lesson_prompt_playback_guard_timeout timeout_sec={:.1f} queue_len={}",
+                    self.conn,
+                ),
                 playback_timeout,
                 queue_len,
             )
@@ -2008,7 +2054,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             time.monotonic() + 0.1,
         )
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_response_pending_transcript_window_opened"
+            with_lesson_log_context(
+                "Google Live lesson_child_response_pending_transcript_window_opened",
+                self.conn,
+            )
         )
         return True
 
@@ -2102,7 +2151,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not str(transcript_text or "").strip():
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_response_consumed_unhandled chars={}",
+            with_lesson_log_context(
+                "Google Live lesson_child_response_consumed_unhandled chars={}",
+                self.conn,
+            ),
             len(str(transcript_text or "").strip()),
         )
         return True
@@ -2217,7 +2269,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not text:
             return False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_prompt_resend reason={} chars={}",
+            with_lesson_log_context(
+                "Google Live lesson_prompt_resend reason={} chars={}",
+                self.conn,
+            ),
             reason,
             len(text),
         )
@@ -2305,7 +2360,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if decision.decision == AdmissionDecision.DEGRADE_TTS_ONLY:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_text_open degraded reason={}",
+                with_lesson_log_context(
+                    "Google Live lesson_text_open degraded reason={}",
+                    self.conn,
+                ),
                 decision.reason.value,
             )
             return False
@@ -2325,7 +2383,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     return False
             await self._close_live_resources()
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_text_open failed: {}",
+                with_lesson_log_context(
+                    "Google Live lesson_text_open failed: {}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
             return False
@@ -2980,7 +3041,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             context = snapshot()
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_context_snapshot_failed error={}",
+                with_lesson_log_context(
+                    "Google Live lesson_context_snapshot_failed error={}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
             return False
@@ -3869,7 +3933,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._start_lesson_asr_fallback_disabled = True
                 self._start_lesson_asr_fallback_audio.clear()
                 self.conn.logger.bind(tag="GoogleLive").warning(
-                    "Google Live lesson_start_asr_fallback disabled reason=asr_auth_failure"
+                    with_lesson_log_context(
+                        "Google Live lesson_start_asr_fallback disabled reason=asr_auth_failure",
+                        self.conn,
+                    )
                 )
                 return
             transcript = self._extract_asr_transcript_text(text)
@@ -3877,12 +3944,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             if self._classify_lesson_start_intent(transcript) is None:
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_start_asr_fallback miss chars={}",
+                    with_lesson_log_context(
+                        "Google Live lesson_start_asr_fallback miss chars={}",
+                        self.conn,
+                    ),
                     len(transcript),
                 )
                 return
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_start_asr_fallback transcript chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_asr_fallback transcript chars={}",
+                    self.conn,
+                ),
                 len(transcript),
             )
             self._start_lesson_asr_fallback_audio.clear()
@@ -3894,7 +3967,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._start_lesson_asr_fallback_disabled = True
                 self._start_lesson_asr_fallback_audio.clear()
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_start_asr_fallback failed: {}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_asr_fallback failed: {}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
 
@@ -3920,7 +3996,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return asr
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_start_asr_fallback init failed: {}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_asr_fallback init failed: {}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
             return None
@@ -4292,7 +4371,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_user_stream()
         self.conn.client_abort = False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_child_audio_finalized reason={} state={} response_id={}",
+            with_lesson_log_context(
+                "Google Live lesson_child_audio_finalized reason={} state={} response_id={}",
+                self.conn,
+            ),
             reason,
             self._interaction.state.value,
             self._response_generation,
@@ -4347,7 +4429,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "stt_unavailable"
             )
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_child_transcript_timeout reopened_audio timeout_sec={} reprompted={}",
+                with_lesson_log_context(
+                    "Google Live lesson_child_transcript_timeout reopened_audio timeout_sec={} reprompted={}",
+                    self.conn,
+                ),
                 timeout,
                 reprompted,
             )
@@ -4374,7 +4459,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_user_stream()
         self.conn.client_abort = False
         self.conn.logger.bind(tag="GoogleLive").info(
-            "Google Live lesson_audio_finalized_no_model reason={} state={} response_id={}",
+            with_lesson_log_context(
+                "Google Live lesson_audio_finalized_no_model reason={} state={} response_id={}",
+                self.conn,
+            ),
             reason,
             self._interaction.state.value,
             self._response_generation,
@@ -4735,7 +4823,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._cancel_lesson_child_transcript_timeout_task()
             self._record_lesson_conversation_recognized_text(transcript_text)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_conversation_transcript_barge_in_ignored chars={}",
+                with_lesson_log_context(
+                    "Google Live lesson_conversation_transcript_barge_in_ignored chars={}",
+                    self.conn,
+                ),
                 len(str(transcript_text or "")),
             )
             return
@@ -5540,7 +5631,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 and time.monotonic() < self._suppress_start_lesson_tool_call_until
             ):
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live duplicate_start_lesson_tool_call_suppressed id={}",
+                    with_lesson_log_context(
+                        "Google Live duplicate_start_lesson_tool_call_suppressed id={}",
+                        self.conn,
+                    ),
                     call_id,
                 )
                 responses.append(
@@ -5701,7 +5795,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             try:
                 if name in LESSON_CONVERSATION_TOOLS:
                     self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live lesson tool dispatch name={} argument_keys=[{}]",
+                        with_lesson_log_context(
+                            "Google Live lesson tool dispatch name={} argument_keys=[{}]",
+                            self.conn,
+                        ),
                         name,
                         ",".join(sorted(str(key) for key in args)),
                     )
@@ -5733,7 +5830,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 action_name = getattr(getattr(result, "action", None), "name", "?")
                 if name in LESSON_CONVERSATION_TOOLS:
                     self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live lesson tool returned name={} action={}",
+                        with_lesson_log_context(
+                            "Google Live lesson tool returned name={} action={}",
+                            self.conn,
+                        ),
                         name,
                         action_name,
                     )
@@ -5980,13 +6080,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
                 await self.publish_lesson_conversation_context(context)
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live lesson_conversation_interrupted accepted={} code={}",
+                with_lesson_log_context(
+                    "Google Live lesson_conversation_interrupted accepted={} code={}",
+                    self.conn,
+                ),
                 bool(getattr(decision, "accepted", False)),
                 getattr(decision, "code", "UNKNOWN"),
             )
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_conversation_interrupt_failed error={}",
+                with_lesson_log_context(
+                    "Google Live lesson_conversation_interrupt_failed error={}",
+                    self.conn,
+                ),
                 self._safe_error_message(exc),
             )
 
@@ -6001,7 +6107,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             raise
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "lesson_live_fallback_failed diagnostic=RUNTIME_EXCEPTION error_class={}",
+                with_lesson_log_context(
+                    "lesson_live_fallback_failed diagnostic=RUNTIME_EXCEPTION error_class={}",
+                    self.conn,
+                ),
                 type(exc).__name__,
             )
             return False
@@ -6010,7 +6119,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         window_id = getattr(directive, "window_id", None)
         reconnect_allowed = bool(getattr(directive, "reconnect_allowed", False))
         self.conn.logger.bind(tag="GoogleLive").info(
-            "lesson_live_fallback diagnostic={} reason={} reconnect_allowed={}",
+            with_lesson_log_context(
+                "lesson_live_fallback diagnostic={} reason={} reconnect_allowed={}",
+                self.conn,
+            ),
             code,
             reason,
             reconnect_allowed,
@@ -6112,7 +6224,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     return False
                 self.conn.voice_provider = self
                 self.conn.logger.bind(tag="GoogleLive").info(
-                    "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
+                    with_lesson_log_context(
+                        "lesson_live_reconnect diagnostic=SUCCEEDED reason={} attempts=1",
+                        self.conn,
+                    ),
                     reason,
                 )
                 return True
@@ -6122,7 +6237,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except Exception as exc:
                 await self._close_live_resources()
                 self.conn.logger.bind(tag="GoogleLive").warning(
-                    "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
+                    with_lesson_log_context(
+                        "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
+                        self.conn,
+                    ),
                     reason,
                     self._classify_error(exc),
                 )

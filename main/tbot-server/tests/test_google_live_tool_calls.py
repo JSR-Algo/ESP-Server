@@ -1709,9 +1709,14 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
         messages = [
             args
             for level, args, _kwargs in provider.conn.logger.messages
-            if level == "info" and args and args[0] == "Google Live lesson_child_audio_forwarded bytes={} rms={}"
+            # T6.2: lesson log lines now carry an assignment/session correlation
+            # suffix, so match the stable prefix rather than the whole message.
+            if level == "info"
+            and args
+            and str(args[0]).startswith("Google Live lesson_child_audio_forwarded bytes={} rms={}")
         ]
-        self.assertEqual(messages, [("Google Live lesson_child_audio_forwarded bytes={} rms={}", 8, 2500)])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0][1:], (8, 2500))
         self.assertEqual(provider._bridge.forwarded, [b"pcm:barn"])
         self.assertEqual(handler.calls, [])
 
@@ -1753,7 +1758,8 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             for level, args, _kwargs in provider.conn.logger.messages
             if level == "info"
             and args
-            and args[0] == "Google Live lesson_child_audio_deferred reason=output_blocked"
+            # T6.2: see the correlation-suffix note above.
+            and str(args[0]).startswith("Google Live lesson_child_audio_deferred reason=output_blocked")
         ]
         self.assertEqual(len(deferred_logs), 1)
         self.assertEqual(provider._bridge.forwarded, [])
