@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
 import sys
 import types
 import unittest
@@ -32,6 +33,7 @@ from pathlib import Path
 
 import pytest
 import websockets
+from aiohttp.test_utils import make_mocked_request
 
 import core.connection as conn_mod
 import core.http_server as http_mod
@@ -586,6 +588,26 @@ class _HealthyAlarm:
 
 
 class BroadcastResilienceTest(unittest.IsolatedAsyncioTestCase):
+    # These exercise the sweep's resilience to a broken connection, not auth —
+    # but /internal/lesson-runtime/* now shares the X-Mint-Secret gate every other
+    # /internal/ route uses (T6.4), so they have to authenticate to reach it.
+    MINT_SECRET = "t64-ws-lifecycle-secret"
+
+    def setUp(self):
+        self._saved_secret = os.environ.get("TBOT_DEVICE_MINT_SECRET")
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = self.MINT_SECRET
+
+    def tearDown(self):
+        if self._saved_secret is None:
+            os.environ.pop("TBOT_DEVICE_MINT_SECRET", None)
+        else:
+            os.environ["TBOT_DEVICE_MINT_SECRET"] = self._saved_secret
+
+    def _request(self, method="GET", path="/internal/lesson-runtime/metrics"):
+        return make_mocked_request(
+            method, path, headers={"X-Mint-Secret": self.MINT_SECRET}
+        )
+
     def _server(self):
         return http_mod.SimpleHttpServer(
             {
@@ -605,20 +627,24 @@ class BroadcastResilienceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_alarm_snapshot_sweep_skips_the_broken_connection(self):
         server = self._server()
-        response = await server.handle_preload_voice_alarm_snapshot(None)
+        response = await server.handle_preload_voice_alarm_snapshot(
+            self._request(path="/internal/lesson-runtime/preload-voice-alarm")
+        )
         payload = json.loads(response.text)
         self.assertEqual(payload["alarms"], 1)
         self.assertEqual([d["deviceId"] for d in payload["devices"]], ["good"])
 
     async def test_alarm_reset_sweep_skips_the_broken_connection(self):
         server = self._server()
-        response = await server.handle_preload_voice_alarm_reset(None)
+        response = await server.handle_preload_voice_alarm_reset(
+            self._request("POST", "/internal/lesson-runtime/preload-voice-alarm/reset")
+        )
         payload = json.loads(response.text)
         self.assertEqual(payload["reset"], 1)
 
     async def test_runtime_metrics_sweep_skips_the_broken_connection(self):
         server = self._server()
-        response = await server.handle_lesson_runtime_metrics(None)
+        response = await server.handle_lesson_runtime_metrics(self._request())
         payload = json.loads(response.text)
         self.assertEqual(payload["alarms"], 1)
 

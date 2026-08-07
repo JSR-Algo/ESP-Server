@@ -17,6 +17,24 @@ from core.lesson.global_generation_status import (
 )
 
 
+# T6.4 — /internal/lesson-runtime/* now share the X-Mint-Secret gate that every
+# other /internal/ route already used, so these tests must authenticate.
+INTERNAL_MINT_SECRET = "t64-http-server-internal-secret"
+
+
+@pytest.fixture(autouse=True)
+def _internal_mint_secret(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", INTERNAL_MINT_SECRET)
+
+
+def _authed_request(method="GET", path="/internal/lesson-runtime/metrics"):
+    return make_mocked_request(method, path, headers={"X-Mint-Secret": INTERNAL_MINT_SECRET})
+
+
+def _anonymous_request(method="GET", path="/internal/lesson-runtime/metrics"):
+    return make_mocked_request(method, path)
+
+
 class _Logger:
     def __init__(self):
         self.messages = []
@@ -85,7 +103,9 @@ async def test_preload_voice_alarm_snapshot_aggregates_connection_alarms():
         },
     )
 
-    response = await server.handle_preload_voice_alarm_snapshot(None)
+    response = await server.handle_preload_voice_alarm_snapshot(
+        _authed_request(path="/internal/lesson-runtime/preload-voice-alarm")
+    )
 
     assert response.status == 200
     body = response.text
@@ -106,7 +126,9 @@ async def test_preload_voice_alarm_reset_resets_each_connection_alarm():
         },
     )
 
-    response = await server.handle_preload_voice_alarm_reset(None)
+    response = await server.handle_preload_voice_alarm_reset(
+        _authed_request("POST", "/internal/lesson-runtime/preload-voice-alarm/reset")
+    )
 
     assert response.status == 200
     assert resets == ["reset"]
@@ -147,7 +169,7 @@ async def test_lesson_runtime_metrics_exposes_forwarder_drops_and_alarm_snapshot
         },
     )
 
-    response = await server.handle_lesson_runtime_metrics(None)
+    response = await server.handle_lesson_runtime_metrics(_authed_request())
 
     assert response.status == 200
     body = json.loads(response.text)
@@ -162,6 +184,84 @@ async def test_lesson_runtime_metrics_exposes_forwarder_drops_and_alarm_snapshot
     assert body["devices"][0]["alarm"]["tripped"] is True
     assert body["devices"][1]["clientId"] == "client-2"
     assert body["devices"][2]["clientId"] == "client-3"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name,method,path",
+    [
+        ("handle_preload_voice_alarm_snapshot", "GET", "/internal/lesson-runtime/preload-voice-alarm"),
+        ("handle_preload_voice_alarm_reset", "POST", "/internal/lesson-runtime/preload-voice-alarm/reset"),
+        ("handle_lesson_runtime_metrics", "GET", "/internal/lesson-runtime/metrics"),
+    ],
+)
+async def test_internal_lesson_runtime_routes_reject_anonymous_callers(handler_name, method, path):
+    """T6.4 — these three sat unauthenticated in the /internal/ namespace.
+
+    deploy/docker-compose.prod.yml publishes 8003 on the host with no loopback
+    bind, so an unauthenticated route here is reachable from off-box; the reset
+    one also CLEARS the preload voice-alarm latch that auto-disables the lesson
+    runtime, i.e. anonymous mutation of a safety guard.
+    """
+    alarm = types.SimpleNamespace(reset=lambda: None, snapshot=lambda: {"tripped": True})
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={"device-1": types.SimpleNamespace(lesson_voice_alarm=alarm)},
+    )
+
+    response = await getattr(server, handler_name)(_anonymous_request(method, path))
+
+    assert response.status == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name,method,path",
+    [
+        ("handle_preload_voice_alarm_snapshot", "GET", "/internal/lesson-runtime/preload-voice-alarm"),
+        ("handle_preload_voice_alarm_reset", "POST", "/internal/lesson-runtime/preload-voice-alarm/reset"),
+        ("handle_lesson_runtime_metrics", "GET", "/internal/lesson-runtime/metrics"),
+    ],
+)
+async def test_internal_lesson_runtime_routes_reject_a_wrong_secret(handler_name, method, path):
+    alarm = types.SimpleNamespace(reset=lambda: None, snapshot=lambda: {"tripped": True})
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={"device-1": types.SimpleNamespace(lesson_voice_alarm=alarm)},
+    )
+    request = make_mocked_request(method, path, headers={"X-Mint-Secret": "wrong-secret"})
+
+    response = await getattr(server, handler_name)(request)
+
+    assert response.status == 401
+
+
+@pytest.mark.asyncio
+async def test_anonymous_reset_cannot_clear_the_voice_alarm_latch():
+    """The reset route is the mutating one — prove the latch survives a 401."""
+    resets = []
+    alarm = types.SimpleNamespace(reset=lambda: resets.append("reset"))
+    server = SimpleHttpServer(
+        _config(),
+        lesson_connections={"device-1": types.SimpleNamespace(lesson_voice_alarm=alarm)},
+    )
+
+    response = await server.handle_preload_voice_alarm_reset(
+        _anonymous_request("POST", "/internal/lesson-runtime/preload-voice-alarm/reset")
+    )
+
+    assert response.status == 401
+    assert resets == []
+
+
+@pytest.mark.asyncio
+async def test_internal_lesson_runtime_routes_fail_closed_without_a_configured_secret(monkeypatch):
+    monkeypatch.delenv("TBOT_DEVICE_MINT_SECRET", raising=False)
+    server = SimpleHttpServer(_config(), lesson_connections={})
+
+    response = await server.handle_lesson_runtime_metrics(_authed_request())
+
+    assert response.status == 503
+
 
 @pytest.mark.asyncio
 async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):

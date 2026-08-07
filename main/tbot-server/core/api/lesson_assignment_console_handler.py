@@ -1,5 +1,7 @@
+import hmac
 import html
 import json
+import os
 
 from aiohttp import web
 
@@ -8,6 +10,24 @@ class LessonAssignmentConsoleHandler:
     def __init__(self, config: dict, lesson_connections=None):
         self.config = config
         self.lesson_connections = lesson_connections if lesson_connections is not None else {}
+
+    @staticmethod
+    def _inventory_authorized(request) -> bool:
+        """True when the caller proved the internal mint secret.
+
+        The console shell itself stays reachable — an operator has to load the page
+        in a browser before they can paste their parent JWT, and a browser cannot
+        send X-Mint-Secret. The CONNECTED-ROBOT INVENTORY is a different matter: it
+        pairs every live robot's MAC with its backend device UUID, and nginx proxies
+        /tbot/ with no auth, so serving it unconditionally publishes the fleet to
+        anyone who can reach the vhost.
+        """
+        expected = os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
+        if not expected:
+            return False
+        headers = getattr(request, "headers", None)
+        provided = headers.get("X-Mint-Secret", "") if hasattr(headers, "get") else ""
+        return bool(provided) and hmac.compare_digest(provided, expected)
 
     def _backend_api_url(self) -> str:
         config = self.config if isinstance(self.config, dict) else {}
@@ -40,9 +60,28 @@ class LessonAssignmentConsoleHandler:
             devices.append({"mac": key, "deviceId": cached_device_uuid(key) or ""})
         return devices
 
-    async def handle_get(self, _request):
+    @staticmethod
+    def _script_safe_json(payload) -> str:
+        """json.dumps for embedding inside a <script> block.
+
+        json.dumps does NOT escape '<' or '/', so a device id containing
+        ``</script>`` would close the block and inject markup. The websocket
+        registry is keyed by the device-supplied ``device-id`` header, so those
+        keys are untrusted input. Escaping the three HTML-significant characters
+        as \\uXXXX keeps the value a valid JSON string while making it inert.
+        """
+        return (
+            json.dumps(payload)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+
+    async def handle_get(self, request):
         api_url = html.escape(self._backend_api_url(), quote=True)
-        devices_json = json.dumps(self._connected_devices())
+        devices_json = self._script_safe_json(
+            self._connected_devices() if self._inventory_authorized(request) else []
+        )
         return web.Response(
             text=self._html(api_url=api_url, devices_json=devices_json),
             content_type="text/html",
