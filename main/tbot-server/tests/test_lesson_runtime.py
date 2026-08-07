@@ -8193,6 +8193,79 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.lesson_start_status["code"], "ASSIGNMENT_TERMINAL")
         self.assertEqual(conn.websocket.sent, [])
 
+    async def test_rollback_cancelled_assignment_is_refused_cleanly(self):
+        """T6.3: CANCELLED is the state a staged rollback actually produces.
+
+        The backend refuses to assign the previous published version while the bad one is
+        still active (409 ASSIGNMENT_CONFLICT via ux_one_active_assignment_per_device), so
+        the operator must terminalize it first. The robot must then decline to restart it
+        without wedging — status set, nothing emitted. COMPLETED is covered above; this
+        pins the two states a rollback and an incident stop really go through.
+        """
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        for state in ("CANCELLED", "FAILED"):
+            with self.subTest(state=state):
+                conn = _RepublishConn()
+                undo = self._patch_backend(
+                    self._assignment(lesson_version=3, assignment_version=1, state=state),
+                    _build_manifest(),
+                )
+                try:
+                    result = await maybe_start_lesson_on_connect(conn)
+                finally:
+                    undo()
+
+                self.assertIsNone(result)
+                self.assertEqual(conn.lesson_start_status["code"], "ASSIGNMENT_TERMINAL")
+                self.assertEqual(conn.websocket.sent, [])
+
+    async def test_assignment_is_read_once_per_start_so_a_running_lesson_is_not_revoked(self):
+        """T6.3: pins the cross-component mid-assignment rollback policy.
+
+        The backend rollout gate runs only on assignment CREATION and never mutates rows,
+        and the robot reads the assignment exactly once — at start. Together that is the
+        policy `docs/lesson-studio-rollout-runbook.md` documents: a lesson already RUNNING
+        when an operator flips a rollout flag runs to completion rather than being torn
+        down mid-step, and the rolled-back version is picked up on the next start.
+
+        If a mid-lesson re-poll is ever added, that policy changes and this test should
+        fail loudly rather than the runbook quietly becoming wrong.
+        """
+        import config.manage_api_client as mac
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        patched = mac.get_current_assignment
+        calls = []
+
+        async def _counting(*args, **kwargs):
+            calls.append(1)
+            return await patched(*args, **kwargs)
+
+        mac.get_current_assignment = _counting
+        try:
+            result = await maybe_start_lesson_on_connect(conn)
+        finally:
+            mac.get_current_assignment = patched
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(calls), 1)
+
+    # NOTE (T6.3): "re-enable after rollback starts cleanly" is deliberately NOT tested
+    # here. The shared fixture carries a single lesson version, so an older-version
+    # assignment is correctly refused with MANIFEST_IDENTITY_MISMATCH (the manifest fetched
+    # is still v3) — proving the identity guard, not the rollback. That guard already has
+    # four dedicated tests above, and on the robot a rolled-back assignment is an ordinary
+    # start with no residue from the cancelled one. The backend half of the box is covered
+    # by lesson-rollout.drill.spec.ts stage 4. Testing it properly here needs a second
+    # seeded lesson version in the fixture — the same gap F-T53-09 blocks T5.3 on.
+
     async def test_empty_manifest_sets_status_and_does_not_start(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
