@@ -28,6 +28,25 @@ from pathlib import Path
 
 TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 
+WIRE_SEQUENCE_PATTERNS = (
+    re.compile(r'"sequence"\s*:\s*(\d+)'),
+    re.compile(r"\bsequence=(\d+)"),
+    re.compile(r"\bseq=(\d+)"),
+    re.compile(r"\backs=(\d+)"),
+)
+
+
+def _wire_sequence(line: str):
+    """The lesson wire sequence a line names, if any (mirrors the verifier's helper)."""
+    for pattern in WIRE_SEQUENCE_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
 
 def read_stamped(path: Path, strip_prefix: bool) -> list[tuple[str, int, str]]:
     """Return (timestamp, ordinal, line). Ordinal keeps same-second lines stable."""
@@ -57,16 +76,33 @@ def main(argv: list[str] | None = None) -> int:
     # sees byte-faithful firmware serial lines.
     device = read_stamped(Path(args.device_timeline), strip_prefix=True)
 
-    # Sort by (timestamp, source, ordinal): a stable sort keeps each file's internal
-    # order intact within the same second, which is the only ordering either file
-    # actually guarantees at one-second resolution.
+    # Ordering within a shared timestamp is the whole problem: both logs stamp whole
+    # seconds, so a naive (timestamp, ordinal) sort ZIPS the two files by line number --
+    # device line 12 lands beside server line 12 regardless of when either happened.
+    # That is what put the device's `serial RX lesson_prepare` ahead of the server's
+    # manifest fetch and broke the verifier's ordered cursor.
+    #
+    # The lesson wire sequence is the reliable tiebreak: frames carry a monotonic
+    # `sequence`, the server logs it on emit and the device echoes it as seq=/acks=.
+    # Lines naming no sequence inherit the last one seen, so setup lines stay ahead of
+    # frame 1 and per-step render lines stay with their step. Within one sequence the
+    # server comes first: it emits, then the device receives and acks.
+    def keyed(rows, source):
+        out = []
+        carried = -1
+        for ts, index, line in rows:
+            sequence = _wire_sequence(line)
+            if sequence is not None:
+                carried = sequence
+            out.append((ts, carried, source, index, line))
+        return out
+
     merged = sorted(
-        [(ts, 0, i, line) for ts, i, line in server]
-        + [(ts, 1, i, line) for ts, i, line in device],
-        key=lambda row: (row[0], row[2]),
+        keyed(server, 0) + keyed(device, 1),
+        key=lambda row: (row[0], row[1], row[2], row[3]),
     )
 
-    Path(args.out).write_text("\n".join(row[3] for row in merged) + "\n", encoding="utf-8")
+    Path(args.out).write_text("\n".join(row[4] for row in merged) + "\n", encoding="utf-8")
     print(f"merged {len(server)} server + {len(device)} device lines -> {args.out}")
     return 0
 
