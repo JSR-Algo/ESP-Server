@@ -722,7 +722,11 @@ def test_nginx_public_generation_locations_are_read_only_redacted_proxies():
     assert "location = /public/lesson-assets/generation" in nginx
     assert "proxy_pass http://127.0.0.1:8003" in nginx
     assert "location = /v1/public/lesson-assets/latest" in nginx
-    assert nginx.count("proxy_pass http://127.0.0.1:3003") == 2
+    # F-T64-08: the public lesson index moved from the CMS on :3003 to the local
+    # web container on :8002 (eed3672e "route public lesson index to local cms",
+    # d6536973 "harden public CMS proxy"). Two server blocks => one each.
+    assert nginx.count("proxy_pass http://127.0.0.1:3003") == 0
+    assert nginx.count("proxy_pass http://127.0.0.1:8002") == 3
     assert "proxy_pass http://127.0.0.1:3300" not in nginx
     assert "127.0.0.1:3000" not in nginx
     assert nginx.count('if ($request_method !~ ^(GET|HEAD)$) { return 405; }') >= 2
@@ -795,8 +799,19 @@ def test_nginx_public_generation_reads_use_bounded_uri_egress_and_cache_only_lat
     assert len(latest_locations) == 2
     assert len(status_locations) == 2
     for location in latest_locations:
-        assert "proxy_cache lesson_generation;" in location
-        assert 'proxy_cache_key "lesson-assets-latest";' in location
+        # F-T64-08: this route USED to be proxy_cached with a fixed key
+        # (`proxy_cache_key "lesson-assets-latest"`). d6536973 "harden public CMS
+        # proxy" removed it deliberately — proxy_cache_path needs writable host
+        # storage, and the conf now states that keeping the host layer
+        # storage-free stops a full root filesystem from turning these reads into
+        # 502s. Egress is still bounded by limit_req (asserted above), and the
+        # upstream sets its own ETag + Cache-Control.
+        #
+        # Pinned as an explicit ABSENCE so that re-adding a cache is a conscious
+        # decision: a fixed cache key across two server blocks and a shared
+        # upstream is exactly the shape that serves one tenant's body to another.
+        assert "proxy_cache " not in location
+        assert "proxy_cache_key " not in location
         assert "proxy_ignore_headers Vary;" in location
         assert "proxy_hide_header Vary;" in location
         assert "proxy_hide_header Access-Control-Allow-Origin;" in location

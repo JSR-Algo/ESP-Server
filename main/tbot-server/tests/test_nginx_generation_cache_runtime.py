@@ -53,6 +53,26 @@ class _GenerationHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(BODY)
 
+    def do_HEAD(self) -> None:
+        # F-T64-08: while the route was proxy_cached, HEAD was answered from the
+        # cache and never reached this upstream, so BaseHTTPRequestHandler's
+        # default 501 went unnoticed. With the cache gone HEAD egresses for real.
+        with self.server.lock:
+            self.server.request_count += 1
+            self.server.accept_encodings.append(self.headers.get("Accept-Encoding"))
+            self.server.origins.append(self.headers.get("Origin"))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.send_header("ETag", ETAG)
+        self.send_header("Vary", "Origin")
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            self.headers.get("Origin", "https://upstream.invalid"),
+        )
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.end_headers()
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
@@ -101,7 +121,7 @@ def _request(
 
 
 @pytest.mark.skipif(not _docker_ready(), reason="Docker daemon is required for executable nginx coverage")
-def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semantics(tmp_path):
+def test_public_generation_reads_are_uncached_bounded_and_origin_isolated(tmp_path):
     upstream_port = _free_port()
     upstream = _CountingUpstream(("0.0.0.0", upstream_port), _GenerationHandler)
     upstream.request_count = 0
@@ -115,7 +135,12 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
     rendered_config.write_text(
         NGINX_CONFIG.read_text(encoding="utf-8")
         .replace("listen 80;", "listen 80 default_server;", 1)
+        # F-T64-08: the public lesson index moved off :3003 to the local web
+        # container on :8002. Without this third replacement the latest route
+        # proxies to a port nothing listens on inside the container and every
+        # assertion below fails as a 502.
         .replace("127.0.0.1:3003", f"host.docker.internal:{upstream_port}")
+        .replace("127.0.0.1:8002", f"host.docker.internal:{upstream_port}")
         .replace("127.0.0.1:8003", f"host.docker.internal:{upstream_port}"),
         encoding="utf-8",
     )
@@ -139,6 +164,12 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     try:
+        # The readiness poll must back off on a BAD STATUS too, not just on a
+        # connection error. nginx accepts connections as soon as it binds, so
+        # while the upstream is still coming up this returns 502 immediately —
+        # and without a sleep the loop burned all 50 attempts in a few
+        # milliseconds and handed a not-yet-ready proxy to the assertions below.
+        # Observed as an intermittent 502 on an otherwise passing test.
         for _attempt in range(50):
             try:
                 status, _headers, _body = _request(
@@ -147,7 +178,8 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
                 if status == 200:
                     break
             except OSError:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
         else:
             pytest.fail("nginx generation cache probe did not become ready")
 
@@ -195,10 +227,26 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         assert all(headers["access-control-allow-origin"] == "*" for _status, headers, _body in responses)
         assert all("access-control-allow-credentials" not in headers for _status, headers, _body in responses)
         assert all("vary" not in headers for _status, headers, _body in responses)
-        assert upstream.request_count == 1
-        assert upstream.accept_encodings == ["identity"]
-        assert upstream.origins == [None]
-        cache_files = subprocess.run(
+
+        # F-T64-08: this used to assert `upstream.request_count == 1` — 96 rotated
+        # Host/Origin variants collapsing into ONE upstream read via proxy_cache.
+        # d6536973 removed the cache deliberately (proxy_cache_path needs writable
+        # host storage; the conf now keeps the host layer storage-free so a full
+        # root filesystem cannot turn these reads into 502s), so every request now
+        # reaches the upstream and egress is bounded by limit_req instead.
+        #
+        # What must NOT regress is the isolation this route depends on: whatever
+        # the caller sends as Host or Origin, nginx strips Origin before egress,
+        # never varies, and always answers `*`. Those are asserted per-request
+        # above and per-upstream-hit below.
+        assert upstream.request_count == 1 + len(requests)
+        assert set(upstream.accept_encodings) == {"identity"}
+        assert set(upstream.origins) == {None}
+        # F-T64-08: assert the cache store is ABSENT rather than holding exactly
+        # one entry. The point of removing proxy_cache was to keep the host layer
+        # storage-free, so a cache directory reappearing means the storage-free
+        # property silently regressed.
+        cache_probe = subprocess.run(
             [
                 "docker",
                 "exec",
@@ -208,11 +256,15 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
                 "-type",
                 "f",
             ],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
-        ).stdout.splitlines()
-        assert len(cache_files) == 1
+        )
+        assert cache_probe.returncode != 0, (
+            "/var/cache/nginx/lesson-generation exists — the public lesson index "
+            "is being cached to host storage again"
+        )
+        assert cache_probe.stdout.strip() == ""
 
         head_status, head_headers, head_body = _request(
             nginx_port, "/v1/public/lesson-assets/latest?head=1", method="HEAD", host="admin.tjbot.vn"
@@ -230,7 +282,11 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         assert conditional_status == 304
         assert conditional_headers["etag"] == ETAG
         assert conditional_body == b""
-        assert upstream.request_count == 1
+        # F-T64-08: was `== 1` (cache served HEAD + the conditional). Uncached, the
+        # invariant is that each of those two egresses EXACTLY once — nginx must not
+        # amplify one client request into several upstream reads.
+        assert upstream.request_count == (1 + len(requests)) + 2
+        before_abuse = upstream.request_count
 
         # Let the valid burst drain before proving Host rotation cannot evade the cap.
         time.sleep(2)
@@ -252,7 +308,14 @@ def test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semanti
         assert set(abusive_statuses) <= {200, 429}
         assert 200 in abusive_statuses
         assert 429 in abusive_statuses
-        assert upstream.request_count == 1
+        # F-T64-08: was `== 1` — the cache absorbed the whole burst. With the cache
+        # gone, limit_req is the only thing standing between a Host-rotating flood
+        # and the upstream, so assert the property that actually matters now:
+        # every 429 was rejected at the edge and reached the upstream ZERO times.
+        served = abusive_statuses.count(200)
+        throttled = abusive_statuses.count(429)
+        assert throttled > 0
+        assert upstream.request_count == before_abuse + served
 
         assert _request(nginx_port, "/v1/public/lesson-assets/latest", method="POST")[0] == 405
     finally:

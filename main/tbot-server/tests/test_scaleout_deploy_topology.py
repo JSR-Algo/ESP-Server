@@ -17,6 +17,36 @@ def _assert_affinity_uses_normalized_device_key(haproxy: str):
     assert "balance hdr(device-id)" not in haproxy
 
 
+def _haproxy_backend(haproxy: str, name: str) -> list[str]:
+    """Directives inside `backend <name>`, up to the next top-level section.
+
+    These were asserted as one exact contiguous string, which broke the moment
+    an unrelated directive was inserted into the block — `timeout check 10s`
+    landed between `backend tbot_ws_backend` and `balance …`, and
+    `inter 5s fall 5 rise 1` inside the server-template line. Every property the
+    tests care about was still present; only the adjacency had changed. Match on
+    the block's CONTENTS so ordering and additions do not produce false failures.
+    """
+    lines = haproxy.splitlines()
+    start = next(
+        index for index, line in enumerate(lines) if line.strip() == f"backend {name}"
+    )
+    directives = []
+    for line in lines[start + 1 :]:
+        if line and not line[0].isspace():
+            break
+        if line.strip():
+            directives.append(line.strip())
+    return directives
+
+
+def _assert_device_affinity_backend(haproxy: str, name: str) -> list[str]:
+    directives = _haproxy_backend(haproxy, name)
+    assert "balance hdr(x-tbot-affinity-key)" in directives, name
+    assert "hash-type consistent" in directives, name
+    return directives
+
+
 def test_prod_compose_exposes_redis_to_python_ws_replicas():
     compose = (REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
 
@@ -39,15 +69,28 @@ def test_prod_compose_fronts_ws_with_hash_affinity_lb_and_multiple_replicas():
 def test_vps_ws_backend_health_checks_http_readiness_before_routing():
     haproxy = (REPO_ROOT / "deploy" / "haproxy.cfg").read_text(encoding="utf-8")
 
-    assert "backend tbot_ws_backend\n    balance hdr(x-tbot-affinity-key)\n    hash-type consistent\n    option httpchk GET /tbot/ota/" in haproxy
-    assert "server-template tbot 10 tbot-esp32-server:8000 check port 8003 resolvers docker resolve-prefer ipv4 init-addr libc,none" in haproxy
+    directives = _assert_device_affinity_backend(haproxy, "tbot_ws_backend")
+    assert "option httpchk GET /tbot/ota/" in directives
+    # The WS backend must health-check the HTTP port, not the WS port: a replica
+    # that accepts sockets before its HTTP surface is ready would otherwise take
+    # device traffic. Match the directive's PARTS, so adding tuning knobs
+    # (`inter 5s fall 5 rise 1`) does not fail the test.
+    template = next(d for d in directives if d.startswith("server-template tbot "))
+    for fragment in (
+        "tbot-esp32-server:8000",
+        "check port 8003",
+        "resolvers docker",
+        "resolve-prefer ipv4",
+        "init-addr libc,none",
+    ):
+        assert fragment in template, fragment
 
 def test_vps_internal_http_routes_share_device_affinity_with_ws_routes():
     haproxy = (REPO_ROOT / "deploy" / "haproxy.cfg").read_text(encoding="utf-8")
 
     _assert_affinity_uses_normalized_device_key(haproxy)
-    assert "backend tbot_ws_backend\n    balance hdr(x-tbot-affinity-key)\n    hash-type consistent" in haproxy
-    assert "backend tbot_http_backend\n    balance hdr(x-tbot-affinity-key)\n    hash-type consistent" in haproxy
+    _assert_device_affinity_backend(haproxy, "tbot_ws_backend")
+    _assert_device_affinity_backend(haproxy, "tbot_http_backend")
     assert "balance roundrobin" not in haproxy
 
 
@@ -284,8 +327,8 @@ def test_render_edge_haproxy_keeps_internal_device_routes_on_same_backend_as_ws(
     haproxy = (REPO_ROOT / "deploy" / "render-haproxy.cfg").read_text(encoding="utf-8")
 
     _assert_affinity_uses_normalized_device_key(haproxy)
-    assert "backend tbot_ws_backend\n    balance hdr(x-tbot-affinity-key)\n    hash-type consistent" in haproxy
-    assert "backend tbot_http_backend\n    balance hdr(x-tbot-affinity-key)\n    hash-type consistent" in haproxy
+    _assert_device_affinity_backend(haproxy, "tbot_ws_backend")
+    _assert_device_affinity_backend(haproxy, "tbot_http_backend")
 
 
 def test_shipped_config_requires_auth_keepalive_and_gemini_reconnect():
@@ -591,3 +634,33 @@ def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides,
 
     assert result.returncode == 1
     assert expected_error in result.stderr
+
+
+def test_prod_compose_publishes_every_port_on_loopback_only():
+    """F-T64-05 — a bare "8003:8003" publishes on 0.0.0.0.
+
+    On a VPS without a host firewall that makes the entire ESP HTTP surface —
+    including /internal/*, which the backend drives — reachable directly, around
+    both cloudflared and Nginx. Nothing legitimate needs the wildcard bind:
+    cloudflared runs as a host systemd service and reaches these on 127.0.0.1
+    (deploy/cloudflared/config.yml.example), as does deploy/nginx/tjbot.vn.conf.
+    """
+    compose = yaml.safe_load(
+        (REPO_ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    )
+
+    published = [
+        (name, entry)
+        for name, service in compose["services"].items()
+        for entry in (service.get("ports") or [])
+    ]
+    assert published, "expected at least one published port to guard"
+
+    offenders = [
+        f"{name}: {entry}"
+        for name, entry in published
+        if not str(entry).startswith("127.0.0.1:")
+    ]
+    assert offenders == [], (
+        "these ports publish on 0.0.0.0 and bypass cloudflared/Nginx: " f"{offenders}"
+    )
