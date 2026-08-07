@@ -65,12 +65,30 @@ def mint_token(auth_key: str, client_id: str, device_id: str) -> str:
 
 
 class SerialLog:
-    """Firmware-style serial sink, mirroring real ESP-IDF ``I (ticks) Tag:`` output."""
+    """Firmware-style serial sink, mirroring real ESP-IDF ``I (ticks) Tag:`` output.
 
-    def __init__(self, path: Path) -> None:
+    Real firmware serial carries only boot-relative ticks, which cannot be interleaved
+    with the server's wall-clock log. `lesson_e2e_log_verify.py` walks a monotonic
+    cursor over the concatenated files, so without a time-merged timeline the two
+    streams are compared in FILE order rather than EVENT order and its verdict depends
+    on the order the files are passed (F-T53-15). ``timeline_path`` therefore records
+    the same lines with a wall-clock prefix so a correct timeline can be built, while
+    the serial log itself stays byte-faithful to firmware output.
+    """
+
+    def __init__(self, path: Path, timeline_path: Path | None = None) -> None:
         self._path = path
         self._start = time.monotonic()
         self._fh = path.open("w", encoding="utf-8")
+        self._timeline = timeline_path.open("w", encoding="utf-8") if timeline_path else None
+
+    def _stamp(self, line: str) -> None:
+        if self._timeline is None:
+            return
+        self._timeline.write(
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + " " + line + "\n"
+        )
+        self._timeline.flush()
 
     def _ticks(self) -> int:
         return int((time.monotonic() - self._start) * 1000)
@@ -79,15 +97,19 @@ class SerialLog:
         line = f"I ({self._ticks()}) {tag}: {message}"
         self._fh.write(line + "\n")
         self._fh.flush()
+        self._stamp(line)
         print(f"[serial] {line}", flush=True)
 
     def raw(self, line: str) -> None:
         self._fh.write(line + "\n")
         self._fh.flush()
+        self._stamp(line)
         print(f"[serial] {line}", flush=True)
 
     def close(self) -> None:
         self._fh.close()
+        if self._timeline is not None:
+            self._timeline.close()
 
 
 def boot_banner(serial: SerialLog, device_id: str) -> None:
@@ -193,7 +215,10 @@ def inject_child_response(args, device_id: str, text: str) -> bool:
 
 
 async def run(args: argparse.Namespace) -> int:
-    serial = SerialLog(Path(args.serial_log))
+    serial = SerialLog(
+        Path(args.serial_log),
+        Path(args.timeline_log) if args.timeline_log else None,
+    )
     uri = args.ws_url
     boot_banner(serial, args.device_id)
 
@@ -384,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
         default=10.0,
         help="Seconds to hold the socket open after acking lesson_stop so the runtime "
         "can complete and forward progress to the backend.",
+    )
+    parser.add_argument(
+        "--timeline-log",
+        help="Write the serial lines with a wall-clock prefix so they can be "
+        "time-merged with the server log into a single ordered timeline.",
     )
     parser.add_argument("--esp-http-base", default="http://127.0.0.1:8013")
     parser.add_argument(
