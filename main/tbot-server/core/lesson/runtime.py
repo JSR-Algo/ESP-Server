@@ -5171,7 +5171,16 @@ class LessonRuntime:
                 f"storyBeat={_compact_json(story_beat) if story_beat is not None else '{}'}",
             )
         elif frame_type in ("lesson_prepare", "lesson_start", "lesson_stop"):
-            self._log("info", f"emit {frame_type} stepId={step_id or ''}")
+            # The wire sequence is the only ordering signal immune to log-timestamp
+            # resolution. The ESP log stamps whole seconds (one capture put 51 lines in
+            # a single second), so log position cannot express event order and any
+            # ordered verification of a capture is guessing without this (F-T53-15).
+            # The device side already reports it as seq=/acks=; this makes the server
+            # side correlatable too.
+            self._log(
+                "info",
+                f"emit {frame_type} stepId={step_id or ''} sequence={frame.get('sequence')}",
+            )
         payload = json.dumps(frame, ensure_ascii=False)
         if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
             await self._fail_oversized_frame(frame_type, step_id)
