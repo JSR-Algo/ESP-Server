@@ -151,6 +151,41 @@ class LessonEventForwarder:
         if self._post_fn is None:
             await self._ensure_client()
         await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+        self._log_forwarded(batch)
+
+    def _log_forwarded(self, batch: Dict[str, Any]) -> None:
+        """Record every event a backend 2xx accepted.
+
+        Failures were already logged; success was completely silent, which made the
+        whole backend-forwarding leg unobservable: a lesson could post progress and
+        completion, drive the assignment to COMPLETED, and leave no log evidence that
+        it ever happened. `scripts/lesson_e2e_log_verify.py` verifies that leg purely
+        from logs, so its lesson_progress_posted / lesson_completion_posted checkpoints
+        could never pass for a simulated OR a live capture.
+
+        The wording matches the checkpoint contract ("backend post <event> ...") so the
+        evidence is machine-checkable rather than merely human-readable.
+        """
+        events = batch.get("events")
+        if not isinstance(events, list):
+            return
+        assignment_id = batch.get("assignmentId") or ""
+        session_id = batch.get("sessionId") or ""
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            name = event.get("type") or event.get("event") or "lesson_event"
+            parts = [
+                f"backend post {name}",
+                f"assignmentId={assignment_id}",
+                f"sessionId={session_id}",
+            ]
+            for key in ("stepId", "event", "result", "outcome"):
+                value = event.get(key)
+                if value is not None:
+                    parts.append(f"{key}={value}")
+            parts.append("persisted=true")
+            self._log("info", " ".join(parts))
 
     async def replay_pending_terminal_event(self) -> bool:
         """Re-send a terminal lifecycle event until a backend 2xx clears it.
