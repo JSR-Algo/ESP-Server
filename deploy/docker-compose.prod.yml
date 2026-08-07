@@ -5,9 +5,15 @@ services:
     restart: unless-stopped
     depends_on:
       - tbot-esp32-server
+    # F-T64-05: bind to loopback. Without the 127.0.0.1 prefix Docker publishes on
+    # 0.0.0.0, so on a VPS without a host firewall the whole ESP surface — including
+    # /internal/* — is reachable directly, bypassing the tunnel and Nginx.
+    # Nothing legitimate needs the wildcard bind: cloudflared runs as a host systemd
+    # service and reaches these over 127.0.0.1 (see deploy/cloudflared/config.yml.example,
+    # `service: http://127.0.0.1:8003` / `:8000`), and Nginx proxies to 127.0.0.1 too.
     ports:
-      - "${TBOT_WS_PORT:-8000}:8000"
-      - "${TBOT_HTTP_PORT:-8003}:8003"
+      - "127.0.0.1:${TBOT_WS_PORT:-8000}:8000"
+      - "127.0.0.1:${TBOT_HTTP_PORT:-8003}:8003"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     networks:
@@ -131,8 +137,11 @@ services:
       CHILD_PROFILE_JWT_PUBLIC_KEY: ${TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY:?set TBOT_PROFILE_SYNC_JWT_PUBLIC_KEY}
       CHILD_PROFILE_JWT_ISSUER: ${TBOT_PROFILE_SYNC_JWT_ISSUER:-tbot-backend}
       CHILD_PROFILE_JWT_AUDIENCE: ${TBOT_PROFILE_SYNC_JWT_AUDIENCE:-tbot-manager-api}
+    # F-T64-05: loopback-bound for the same reason as the LB ports above — host
+    # Nginx (deploy/nginx/tjbot.vn.conf) and cloudflared both reach this on
+    # 127.0.0.1:8002; a 0.0.0.0 publish only adds a way around them.
     ports:
-      - "${TBOT_ADMIN_PORT:-8002}:8002"
+      - "127.0.0.1:${TBOT_ADMIN_PORT:-8002}:8002"
     volumes:
       - ${TBOT_REMOTE_ROOT:-/opt/tbot}/uploadfile:/uploadfile
     networks:
