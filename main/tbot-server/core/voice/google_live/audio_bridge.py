@@ -18,6 +18,7 @@ from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS  # noqa: E402
+from core.lesson.log_context import with_lesson_log_context
 
 
 EMOTION_EMOJI = {
@@ -357,7 +358,10 @@ class GoogleLiveAudioBridge:
             # wait_lesson_step_prompt_idle close it via inferred idle / timeout.
             if self._is_lesson_prompt_output_allowed():
                 self.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_audio_end_keep_gate chunks={} bytes={}",
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_audio_end_keep_gate chunks={} bytes={}",
+                        self.conn,
+                    ),
                     chunks,
                     byte_count,
                 )
@@ -383,7 +387,10 @@ class GoogleLiveAudioBridge:
                                 for call in calls
                             ):
                                 self.logger.bind(tag="GoogleLive").warning(
-                                    "Google Live lesson_tool_call_dropped reason=missing_origin_generation"
+                                    with_lesson_log_context(
+                                        "Google Live lesson_tool_call_dropped reason=missing_origin_generation",
+                                        self.conn,
+                                    )
                                 )
                                 return True
                         else:
@@ -431,7 +438,10 @@ class GoogleLiveAudioBridge:
                 )
                 self.conn.google_live_lesson_prompt_needs_resend = True
                 self.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_prompt_interruption_ignored had_audio={} resend=1",
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_interruption_ignored had_audio={} resend=1",
+                        self.conn,
+                    ),
                     int(bool(had_audio)),
                 )
                 return True
@@ -513,7 +523,10 @@ class GoogleLiveAudioBridge:
     def force_allow_model_output(self):
         if self._unblock_model_output():
             self.logger.bind(tag="GoogleLive").info(
-                "model_output_unblock_trigger source=lesson_prompt_force"
+                with_lesson_log_context(
+                    "model_output_unblock_trigger source=lesson_prompt_force",
+                    self.conn,
+                )
             )
 
     def is_model_output_blocked(self):
@@ -1063,7 +1076,10 @@ class GoogleLiveAudioBridge:
             if include_preroll:
                 self._output_preroll_sent = True
                 self.logger.bind(tag="GoogleLive").info(
-                    "Google Live lesson_output_preroll silence_ms={}",
+                    with_lesson_log_context(
+                        "Google Live lesson_output_preroll silence_ms={}",
+                        self.conn,
+                    ),
                     self._LESSON_OUTPUT_PREROLL_SILENCE_MS,
                 )
             packets = await self._run_audio_cpu(

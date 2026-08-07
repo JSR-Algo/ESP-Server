@@ -129,14 +129,19 @@ def test_runtime_and_forwarder_delegate_to_the_shared_helper():
 
 # ── 3. grep audit: no bare lesson log lines left on the lesson surface ───────
 
-# Files whose lesson log lines must route through a correlation helper. The
-# Google Live voice provider is deliberately excluded: it is a separate flow from
-# classic_pipeline, its lesson-adjacent lines are voice-interaction diagnostics,
-# and T6.2 does not touch it (routed to §5 instead).
+# Files whose lesson log lines must route through a correlation helper.
+#
+# The Google Live voice provider was originally excluded (T6.2 kept to the lesson
+# runtime surface under ground rule 1) and is now included: F-T62-02 closed it,
+# because those are the lines a live-run investigation reads first — F-T54-02 was
+# diagnosed from exactly this family. The change there is message-text only; no
+# voice behaviour is touched.
 CORRELATED_FILES = (
     "core/lesson/runtime.py",
     "core/lesson/forwarder.py",
     "core/handle/textHandler/lessonMessageHandler.py",
+    "core/voice/session_provider/google_live.py",
+    "core/voice/google_live/audio_bridge.py",
 )
 
 _LOG_CALL = re.compile(
@@ -145,11 +150,34 @@ _LOG_CALL = re.compile(
 
 
 def _lesson_log_statements(path: Path):
+    """Yield (line_no, source) for each logger call whose OWN arguments mention a
+    lesson.
+
+    The statement is read to its closing paren rather than over a fixed window:
+    a window spills into the following code and flags calls whose neighbours
+    merely happen to mention lessons (e.g. "tool_call dropped (no handler)"
+    sitting above lesson handling), which is a false positive that would push
+    correlation onto log lines that have nothing to do with a lesson.
+    """
     lines = path.read_text().splitlines()
     for index, line in enumerate(lines):
-        if not _LOG_CALL.search(line):
+        match = _LOG_CALL.search(line)
+        if not match:
             continue
-        statement = " ".join(part.strip() for part in lines[index : index + 8])
+        depth = 0
+        collected = []
+        for offset in range(index, min(index + 40, len(lines))):
+            current = lines[offset]
+            collected.append(current.strip())
+            start = match.end() - 1 if offset == index else 0
+            for char in current[start:]:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+            if depth <= 0:
+                break
+        statement = " ".join(collected)
         if "lesson" in statement.lower():
             yield index + 1, statement
 
