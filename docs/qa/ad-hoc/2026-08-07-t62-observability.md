@@ -109,3 +109,60 @@ REPRO PASS
 | Box | Verdict |
 | --- | --- |
 | Every ESP lesson log line carries assignmentId+sessionId | **PARTIAL — PASS on the lesson runtime surface** (`core/lesson/`, the lesson message handler, and the lesson lifecycle lines in `core/connection.py`), enforced by a grep-audit regression test. Session-less background workers carry `device_id`; the Google Live voice path is out of scope by ground rule 1. |
+
+
+---
+
+## Follow-up pass — F-T62-02 closed (gate `t62b-esp` VERIFIED, main `8f3f7eaa`)
+
+The first pass deliberately left the Google Live voice path alone under ground rule 1. The
+follow-up closed it: those are the lines a live-run investigation reads first — **F-T54-02 was
+diagnosed from exactly this family** — so joining them to a session is worth more than the
+isolation was buying.
+
+- **44** lesson log statements in `core/voice/session_provider/google_live.py` and **5** in
+  `core/voice/google_live/audio_bridge.py` had their MESSAGE argument wrapped in
+  `with_lesson_log_context(..., self.conn)`.
+- Applied via an **AST pass**, not a regex: only `Call` nodes whose own source mentions a lesson
+  and whose first argument is a string literal are touched, so loguru's brace-formatting
+  arguments are never disturbed (the helper appends plain `k=v` text containing no braces).
+- **Message text only** — no voice behaviour, ordering or control flow changed.
+
+### What the change caught
+
+Two Google Live tests pinned a log message by equality
+(`test_lesson_child_response_audio_forward_logs_diagnostic`,
+`test_blocked_output_lesson_child_audio_logs_aec_marker`) and went to zero matches once the
+correlation suffix was appended — i.e. the correlation was working. They now match the stable
+prefix instead of the whole message.
+
+### The audit itself was wrong
+
+Adding the two files to `CORRELATED_FILES` surfaced four false positives in `audio_bridge.py`
+(`"Google Live tool_call dropped (no handler)"` and friends). The audit read a fixed **8-line
+window** after each logger call, which spills into the *following* code — so it judged a call by
+its neighbourhood rather than its own arguments, and would have pushed correlation onto log lines
+that have nothing to do with a lesson. It now reads each statement to its **closing paren**.
+
+### Re-run
+
+```
+$ python3 -m pytest tests/test_lesson_observability_t62.py -q
+20 passed
+
+$ python3 -m pytest tests/test_google_live_tool_calls.py -q
+76 passed
+
+$ python3 -m pytest tests/ -q
+14 failed, 3734 passed, 7 skipped
+```
+
+The 14 failures are pre-existing: verified identical at `adaac386`, the merge's pre-merge parent
+(`test_nginx_generation_cache_runtime.py::test_generation_cache_collapses_cloudflared_burst_and_preserves_http_semantics`
+fails 3/3 in isolation there, and this merge touches no nginx or cache file).
+
+### Deep-dive box — now closed
+
+| Box | Verdict |
+| --- | --- |
+| Every ESP lesson log line carries assignmentId+sessionId | **PASS** across the lesson runtime surface **and** the Google Live voice path, enforced by the grep audit. Session-less background workers (SD-pack fanout/GC/retry, nudge identity resolution) carry `device_id` — no session exists there by construction. |
