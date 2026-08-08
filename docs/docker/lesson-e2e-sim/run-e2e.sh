@@ -125,6 +125,7 @@ VERIFY_RC=0
 python3 "${TBOT_ROOT}/robot/scripts/lesson_e2e_log_verify.py" \
   --device-id "${DEVICE_MAC}" \
   --device-alias "${DEVICE_UUID}" \
+  --order-by-wire-sequence \
   --log-file "${OUT_DIR}/timeline.log" \
   > "${OUT_DIR}/lesson-e2e-report.json" 2>&1 || VERIFY_RC=$?
 

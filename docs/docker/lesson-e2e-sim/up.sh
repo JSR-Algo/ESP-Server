@@ -90,6 +90,27 @@ docker cp "${HERE}/seed-sim-device.sql" tbot-ls-e2e-mysql:/tmp/seed-sim-device.s
 docker exec tbot-ls-e2e-mysql sh -lc \
   'MYSQL_PWD=123456 mysql -u root tbot_esp32_server < /tmp/seed-sim-device.sql'
 
+# Google Live credential. The agent's key lives in manager-api
+# (ai_agent.google_live_config_json.api_key) -- that is where a real claimed robot
+# reads it from, NOT an env var on the server. Seeding it is what lets the sim
+# exercise the Live path for real: without it the provider initialises and then
+# fails `Google Live unavailable type=auth`, so the robot never SPEAKS, and every
+# checkpoint that needs audible output (the spoken start acknowledgement, the
+# per-step prompt handoff) is unprovable in simulation.
+#
+# Never commit the key. Export it for the run:
+#   export LESSON_SIM_GEMINI_API_KEY=...   # then ./up.sh
+if [[ -n "${LESSON_SIM_GEMINI_API_KEY:-}" ]]; then
+  echo "[up] seeding Google Live API key for the simulated agent"
+  docker exec -i tbot-ls-e2e-mysql sh -lc \
+    "MYSQL_PWD=123456 mysql -u root tbot_esp32_server -e \
+     \"update ai_agent set google_live_config_json = json_set(google_live_config_json, '\\\$.api_key', '${LESSON_SIM_GEMINI_API_KEY}') where id='agent_e2e_sim_0001';\""
+else
+  echo "[up] WARNING: LESSON_SIM_GEMINI_API_KEY unset — Google Live will fail auth."
+  echo "[up]          The lesson still runs, but the robot never speaks, so the"
+  echo "[up]          audible-acknowledgement and step-prompt checkpoints cannot pass."
+fi
+
 echo "[up] provisioning simulated device (backend / Postgres)"
 # Role is `tbot`, not `postgres` — the image is created with POSTGRES_USER=tbot.
 docker exec -i tbot-ls-e2e-pg psql -U tbot -d tbot -v ON_ERROR_STOP=1 \

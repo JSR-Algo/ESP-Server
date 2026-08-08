@@ -254,6 +254,42 @@ def _manifest_story_log_summary(manifest: Dict[str, Any]) -> List[Dict[str, Any]
             summary.append(item)
     return summary
 
+def _manifest_steps_log_summary(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """The served step roster: every step's id, order and completion class.
+
+    Deliberately covers EVERY step, unlike `_manifest_story_log_summary`, which keeps
+    only the steps carrying story content. A roster with holes cannot answer "did the
+    robot run the lesson it was served", which is the question the completed-step
+    checkpoints exist to answer.
+    """
+    steps: List[Dict[str, Any]] = []
+    for order, step in enumerate(manifest.get("steps", []) or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        item: Dict[str, Any] = {"id": step.get("id"), "order": order}
+        if step.get("completionClass") is not None:
+            item["completionClass"] = step.get("completionClass")
+        story_beat = step.get("storyBeat")
+        if isinstance(story_beat, dict) and story_beat.get("waitForChild") is not None:
+            item["waitForChild"] = bool(story_beat.get("waitForChild"))
+        steps.append(item)
+    return {"steps": steps}
+
+
+def _lesson_step_media_log_summary(scene: Dict[str, Any]) -> str:
+    """Comma-joined media srcs a lesson_step frame declares (background, teaching object)."""
+    urls: List[str] = []
+    for layer in ("backgroundScene", "teachingObject", "robotOverlay"):
+        node = scene.get(layer)
+        if not isinstance(node, dict):
+            continue
+        for holder in ("video", "poster", "asset"):
+            candidate = node.get(holder)
+            if isinstance(candidate, dict) and isinstance(candidate.get("src"), str):
+                urls.append(candidate["src"])
+    return ",".join(urls) if urls else "none"
+
+
 # Runtime states (a slice subset of the assignment state machine).
 S_IDLE = "IDLE"
 S_PRELOADING = "PRELOADING"
@@ -5160,12 +5196,32 @@ class LessonRuntime:
             story_beat = frame["body"].get("storyBeat")
             self._log(
                 "info",
+                # `type=<frame>` is the shared checkpoint contract for "the server sent
+                # this frame" (lesson_e2e_log_verify.py `_positive_frame`). Without it
+                # the only *_sent evidence in a capture is the DEVICE's `serial RX`
+                # line, which is necessarily later — so an ordered verification credits
+                # the send to the receive, and every server-side event that happened
+                # in between (preload_ready, lesson_started) falls behind the cursor
+                # and reports as missing. The `emit lesson_step` prose stays: it is the
+                # contract `scripts/physical_smoke_audit.py` matches on.
                 "emit lesson_step "
+                f"type=lesson_step "
                 f"stepId={step_id} "
+                # The wire sequence of THIS frame. Without it nothing can pair a
+                # lesson_step with the device ack that acknowledges it: the device
+                # reports acks=/seq=, the server reported neither, so
+                # lesson_ack_sequence_match could only ever see the prepare/start
+                # pair and every step ack looked unmatched.
+                f"sequence={frame.get('sequence')} "
                 f"stepType={frame['body'].get('stepType')} "
                 f"backgroundScene={int(bool(scene.get('backgroundScene')))} "
                 f"teachingObject={int(bool(scene.get('teachingObject')))} "
                 f"robotOverlay={int(bool(scene.get('robotOverlay')))} "
+                # The media the frame actually points the renderer at. The device logs
+                # a URL when it DRAWS one, but nothing recorded what the server told it
+                # to draw -- so a frame that shipped a null/placeholder background was
+                # indistinguishable from one the device simply failed to render.
+                f"media={_lesson_step_media_log_summary(scene)} "
                 f"prompt={int(bool(frame['body'].get('audio')))} "
                 f"completionClass={frame['body'].get('completionClass', '')} "
                 f"storyBeat={_compact_json(story_beat) if story_beat is not None else '{}'}",
@@ -5179,7 +5235,8 @@ class LessonRuntime:
             # side correlatable too.
             self._log(
                 "info",
-                f"emit {frame_type} stepId={step_id or ''} sequence={frame.get('sequence')}",
+                f"emit {frame_type} type={frame_type} "
+                f"stepId={step_id or ''} sequence={frame.get('sequence')}",
             )
         payload = json.dumps(frame, ensure_ascii=False)
         if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
@@ -6457,6 +6514,14 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"childId={assignment.get('childId', '')} "
         f"stepCount={len(manifest.get('steps', []) or [])} "
         f"assetCount={len(manifest.get('assets', []) or [])} "
+        # The step ROSTER, as a `{"steps":[...]}` object. `stepCount` alone says how
+        # many steps were served but not which, in what order, or which of them the
+        # child has to answer — so nothing downstream can tell "the robot completed
+        # every step" from "the robot completed nine of something". The shared
+        # checkpoint contract reads exactly this shape (steps[].id +
+        # steps[].completionClass), which is also what makes a truncated or reordered
+        # manifest detectable rather than merely undercounted.
+        f"manifestSteps={_compact_json(_manifest_steps_log_summary(manifest))} "
         f"storyBeat={_compact_json(_manifest_story_log_summary(manifest))}",
     )
     republish_previous = None

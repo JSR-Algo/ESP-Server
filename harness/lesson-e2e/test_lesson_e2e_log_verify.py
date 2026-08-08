@@ -15789,3 +15789,50 @@ def test_lesson_e2e_log_verify_preload_recovery_redacts_sensitive_tokens():
 
     assert report["ok"] is True
     assert "secret-token" not in json.dumps(report)
+
+
+DEVICE_MAC = "14:c1:9f:d1:a8:48"
+
+
+def _cursor_report(lines: list[str], **kwargs):
+    module = load_module()
+    report = module.evaluate_lesson_logs(lines, device_id=DEVICE_MAC, **kwargs)
+    return {check["name"]: check["ok"] for check in report["checks"]}
+
+
+def test_same_wire_sequence_lines_are_not_forced_into_log_order():
+    """preload_ready belongs to the prepare exchange but is logged before the ack lands.
+
+    The two streams are stamped by different clocks and each line is written AFTER the
+    work it describes, so a merged capture routinely shows the server processing an ack
+    before the device finished logging that it sent one. Under a positional cursor that
+    reads as "preload never happened" -- measured on a real green run.
+    """
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-emit lesson_prepare type=lesson_prepare stepId= sequence=1",
+        "LessonRuntime-INFO-LessonRuntime event preload_ready assignmentId=a1 sessionId=s-1",
+        "serial TX lesson_ack lesson_prepare assignmentId=a1 sessionId=s-1 acks=1 seq=1 rendered=true",
+    ]
+    assert _cursor_report(lines)["lesson_preload_ready"] is False
+    assert _cursor_report(lines, order_by_wire_sequence=True)["lesson_preload_ready"] is True
+
+
+def test_ordering_between_wire_sequences_is_still_enforced():
+    """The guarantee that must NOT be lost when position stops being the cursor.
+
+    Evidence from an EARLIER sequence must not satisfy a later checkpoint: here the ack
+    claims seq 1, i.e. it acknowledges the prepare, not the start frame at sequence 2.
+    """
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-emit lesson_start type=lesson_start stepId= sequence=2",
+        "serial TX lesson_ack lesson_prepare assignmentId=a1 sessionId=s-1 acks=1 seq=1 rendered=true",
+    ]
+    assert _cursor_report(lines, order_by_wire_sequence=True)["lesson_start_ack"] is False
