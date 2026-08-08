@@ -17,11 +17,19 @@ set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ESP_REPO="$(cd -- "${HERE}/../../.." && pwd)"
-TBOT_ROOT="${ESP_REPO}"
+# Walking up finds the umbrella from the canonical checkout and from .worktrees/, but NOT
+# from a throwaway worktree under /tmp — which is exactly where Ship-checklist step 4 says
+# to re-test main from (F-T63-09). TBOT_ROOT is therefore overridable.
+TBOT_ROOT="${TBOT_ROOT:-${ESP_REPO}}"
 while [[ "${TBOT_ROOT}" != "/" && ! ( -d "${TBOT_ROOT}/tbot-backend" && -d "${TBOT_ROOT}/robot" ) ]]; do
   TBOT_ROOT="$(dirname "${TBOT_ROOT}")"
 done
-[[ "${TBOT_ROOT}" == "/" ]] && { echo "[run] FATAL: cannot locate TBOT root" >&2; exit 1; }
+if [[ "${TBOT_ROOT}" == "/" ]]; then
+  echo "[run] FATAL: cannot locate the TBOT root (a dir holding tbot-backend/ and robot/)." >&2
+  echo "[run]        Running from a detached worktree? Pass it explicitly:" >&2
+  echo "[run]          TBOT_ROOT=/Users/…/TBOT $0 …" >&2
+  exit 1
+fi
 
 LABEL="sim"
 OUT_DIR=""
