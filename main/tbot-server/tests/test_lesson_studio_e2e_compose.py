@@ -37,7 +37,11 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro" in compose
     assert "/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro" in compose
-    assert "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin}" in compose
+    # The hint MUST demand the /tvideo-demo prefix: a bare origin answers 200 with the
+    # SPA index.html, which the canonical spec then sha256-hashes as if it were media
+    # (F-T41E-05, fixed under T5.3). This assertion pinned the pre-fix wording and had
+    # been failing on main ever since.
+    assert "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?export a browser-and-robot reachable lesson asset origin, including the /tvideo-demo path prefix}" in compose
     assert "TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}" in compose
     assert "ROBOT_ESP_BASE_URL: ${ROBOT_ESP_BASE_URL:?export the live robot ESP fan-out URL}" in compose
     assert "TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}" in compose
