@@ -53,6 +53,15 @@ google_live:
   voice_name: Kore
   language_code: vi-VN
 
+# Millisecond stamps on stdout. The verifier walks a monotonic cursor, so the two log
+# streams (server + device serial) have to be interleaved by EVENT order; the packaged
+# format stamps whole seconds, and one busy second in a real capture held 51 lines, whose
+# relative order is then undefined. No merge can recover an order the logs never recorded
+# (session 6), so the fix is to record it. `.SSS` is a loguru format token — no code
+# change, and only this simulated stack is affected.
+log:
+  log_format: "<green>{time:YYMMDD HH:mm:ss.SSS}</green>[{version}_{selected_module}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{message}</light-green>"
+
 lesson:
   runtime_enabled: true
   api_base: http://backend:3000/v1

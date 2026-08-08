@@ -7227,6 +7227,69 @@ def _first_after(
     return start_index, None
 
 
+def wire_sequence_ranks(lines: list[str]) -> tuple[list[int], dict[int, int]]:
+    """Per-line lesson wire sequence, plus where each sequence first appears.
+
+    Lines naming no sequence inherit the last one seen, so setup lines sit at rank -1
+    (ahead of frame 1) and a step's render/ack lines stay attached to their frame.
+    """
+    ranks: list[int] = []
+    carried = -1
+    for line in lines:
+        sequence = _wire_sequence(line)
+        if sequence is not None:
+            carried = sequence
+        ranks.append(carried)
+    first_of_rank: dict[int, int] = {}
+    for index, rank in enumerate(ranks):
+        first_of_rank.setdefault(rank, index)
+    return ranks, first_of_rank
+
+
+class _SequenceCursor:
+    """An ordered-checkpoint cursor that advances by WIRE SEQUENCE, not log position.
+
+    Log position cannot order a lesson capture. The two streams are stamped by two
+    different clocks (the ESP server in its container, the device on its own board or
+    host), and each line is written *after* the work it describes — so a merged capture
+    routinely shows the server processing an ack before the device has finished logging
+    that it sent one. Measured on a real green run: `preload_ready` and `lesson_started`
+    were reported missing purely because the device's ack line landed a few hundred
+    microseconds "late", and the same capture scored 81/78/77 across identical runs.
+
+    The `lesson_*` frames already carry a monotonic `sequence`; the server logs it on
+    emit and the device echoes it as `seq=`/`acks=`. That is a causal ordering signal,
+    immune to clock skew and to which file a line happens to live in.
+
+    Rule: a checkpoint may match any line whose sequence is at or after the current one.
+    Matching inside the CURRENT sequence does not push the cursor forward past its other
+    lines — within one frame exchange the relative order of two log lines is genuinely
+    not recorded, and pretending otherwise is what produced the flapping verdicts.
+    Ordering BETWEEN sequences stays strict, which is the ordering the gate is for.
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        self._ranks, self._first_of_rank = wire_sequence_ranks(lines)
+        self._rank = self._ranks[0] if self._ranks else -1
+        self._floor = 0
+
+    def first_after(
+        self, lines: list[str], predicate: Callable[[str], bool]
+    ) -> str | None:
+        for index in range(self._floor, len(lines)):
+            if self._ranks[index] < self._rank:
+                continue
+            if not predicate(lines[index]):
+                continue
+            self._rank = self._ranks[index]
+            # Back to the start of THIS sequence, not past the matched line: the rank
+            # guard above is what enforces ordering, and everything inside one sequence
+            # must stay reachable.
+            self._floor = self._first_of_rank[self._rank]
+            return redact_line(lines[index].strip())
+        return None
+
+
 WIRE_SEQUENCE_PATTERNS = (
     re.compile(r'"sequence"\s*:\s*(\d+)'),
     re.compile(r"\bsequence=(\d+)"),
@@ -7525,8 +7588,6 @@ def evaluate_lesson_logs(
     order_by_wire_sequence: bool = False,
 ) -> dict[str, Any]:
     materialized = [line.rstrip("\n") for line in lines]
-    if order_by_wire_sequence:
-        materialized = order_lines_by_wire_sequence(materialized)
     aliases = list(device_aliases or [])
     scoped = _device_scope(device_id, aliases)
     checks: list[dict[str, Any]] = []
@@ -7670,12 +7731,16 @@ def evaluate_lesson_logs(
     ]
 
     cursor = 0
+    sequence_cursor = _SequenceCursor(materialized) if order_by_wire_sequence else None
     for name, predicate, missing in ordered_checks:
         if name == "lesson_audio_played":
             _, evidence = _first_after(materialized, 0, predicate)
             checks.append(_check(name, evidence, missing))
             continue
-        cursor, evidence = _first_after(materialized, cursor, predicate)
+        if sequence_cursor is not None:
+            evidence = sequence_cursor.first_after(materialized, predicate)
+        else:
+            cursor, evidence = _first_after(materialized, cursor, predicate)
         checks.append(_check(name, evidence, missing))
     checks.append(_assignment_consistency_check(checks, materialized, scoped))
     checks.append(_session_consistency_check(checks, materialized, scoped))
