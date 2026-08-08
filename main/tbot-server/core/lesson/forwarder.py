@@ -130,6 +130,7 @@ class LessonEventForwarder:
     async def _handle_post_failure(
         self, batch: Dict[str, Any], attempt: int, exc: Exception
     ) -> None:
+        detail = f"{type(exc).__name__}{self._failure_detail(exc)} {self._batch_events(batch)}"
         if attempt < self.max_reenqueue_attempts and self._is_retryable(exc):
             delay = self.retry_backoff_sec * (self.retry_backoff_multiplier ** attempt)
             if delay > 0:
@@ -138,13 +139,46 @@ class LessonEventForwarder:
             self._log(
                 "warning",
                 "lesson-events POST failed; re-enqueued "
-                f"attempt={attempt + 1}/{self.max_reenqueue_attempts}: {type(exc).__name__}",
+                f"attempt={attempt + 1}/{self.max_reenqueue_attempts}: {detail}",
                 batch,
             )
             return
 
         self._dead_letter(batch)
-        self._log("warning", f"lesson-events POST dead-lettered: {type(exc).__name__}", batch)
+        self._log("warning", f"lesson-events POST dead-lettered: {detail}", batch)
+
+    @staticmethod
+    def _failure_detail(exc: Exception) -> str:
+        """HTTP status + a short body snippet, when the exception carries a response.
+
+        `type(exc).__name__` alone ("HTTPStatusError") says only that the backend said
+        no — not which status, and not why. That is the difference between a retryable
+        502 and a permanently rejected payload, and neither the operator nor
+        `lesson_e2e_log_verify.py` could tell them apart from the log.
+        """
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is None:
+            return ""
+        body = ""
+        try:
+            body = (response.text or "")[:160].replace("\n", " ")
+        except Exception:  # pragma: no cover - body may be unread/streamed
+            body = ""
+        return f" status={status}" + (f" body={body}" if body else "")
+
+    @staticmethod
+    def _batch_events(batch: Dict[str, Any]) -> str:
+        """Name the events that were rejected — a batch may carry several."""
+        events = batch.get("events")
+        if not isinstance(events, list):
+            return "events=?"
+        names = [
+            str(e.get("type") or e.get("event") or "lesson_event")
+            for e in events
+            if isinstance(e, dict)
+        ]
+        return "events=" + (",".join(names) if names else "none")
 
     async def _post(self, batch: Dict[str, Any]) -> None:
         post_fn = self._post_fn or _backend_api.post_lesson_event
