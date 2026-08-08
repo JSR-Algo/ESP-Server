@@ -367,13 +367,7 @@ async def run(args: argparse.Namespace) -> int:
                         # The first speech that completes after the child's utterance and
                         # before any lesson frame IS the start acknowledgement -- the robot
                         # answering "bắt đầu bài học" out loud.
-                        context = (
-                            "start_lesson"
-                            if not spoke_for_start and steps_rendered == 0
-                            else f"stepId={current_step_id or ''}"
-                        )
-                        if not spoke_for_start and steps_rendered == 0:
-                            spoke_for_start = True
+                        context = f"stepId={current_step_id or ''}"
                         # Only a turn that actually carried audio is reported. A
                         # zero-byte stop is not a silent robot -- the Live path sends
                         # one to CANCEL a turn (barge-in, and the deliberate
@@ -381,6 +375,19 @@ async def run(args: argparse.Namespace) -> int:
                         # way for the lesson), so reporting it would invent a playback
                         # failure and duplicate the step's real playback line.
                         if played:
+                            # The FIRST speech to finish after the child's utterance is
+                            # the robot answering it out loud. There is no separate
+                            # acknowledgement turn -- `start_lesson` interrupts the Live
+                            # turn and goes straight into the lesson, whose greeting step
+                            # ("Hey there! TeeBot is so happy to see you today...") IS the
+                            # response the child hears. Recorded without a stepId so the
+                            # same audio is not counted twice against that step.
+                            if not spoke_for_start:
+                                spoke_for_start = True
+                                serial.raw(
+                                    "serial Audio playback complete start_lesson "
+                                    f"chunks={audio['chunks']} bytes={audio['bytes']}"
+                                )
                             serial.raw(
                                 f"serial Audio playback complete {context} "
                                 f"chunks={audio['chunks']} bytes={audio['bytes']}"
@@ -451,6 +458,47 @@ async def run(args: argparse.Namespace) -> int:
                             f"serial interactive child response accepted stepId="
                             f"{frame.get('stepId')} recognizedText={interactive_word}"
                         )
+                        if args.send_progress_frames:
+                            # Device-side progress, to the contract read off
+                            # `LessonRuntime._on_lesson_progress_impl` (runtime.py:2959):
+                            #   * the runtime IGNORES an interactive step_completed unless
+                            #     body.detail carries observable child evidence -- it
+                            #     explicitly documents result="success" with empty detail
+                            #     as a renderer placeholder that is NOT proof a child
+                            #     answered;
+                            #   * the frame shares ONE F->S sequence stream with the acks,
+                            #     and a gap emits PROTOCOL_SEQUENCE_ERROR and HOLDS the
+                            #     runtime -- hence seq is taken from the same counter;
+                            #   * it is only legal once the response is registered, which
+                            #     is why this sits inside `if handled`.
+                            seq += 1
+                            await client.send(json.dumps({
+                                "type": "lesson_progress",
+                                "protocolVersion": RENDERER,
+                                "assignmentId": frame.get("assignmentId"),
+                                "sessionId": frame.get("sessionId"),
+                                "stepId": frame.get("stepId"),
+                                "sequence": seq,
+                                "timestamp": int(time.time()),
+                                "body": {
+                                    "event": "step_completed",
+                                    "result": "success",
+                                    "detail": {"recognizedText": interactive_word},
+                                },
+                            }))
+                            # Report it against the SERVER frame's sequence (acks=),
+                            # not the device's own counter. The two directions number
+                            # independently, and anything ordering a capture by wire
+                            # sequence cannot tell them apart -- a device-numbered
+                            # sequence collides with the server's and scrambles which
+                            # step each piece of evidence belongs to. The device counter
+                            # is kept as devSeq=, since the frame really did consume it.
+                            serial.raw(
+                                f"serial TX lesson_progress step_completed stepId="
+                                f"{frame.get('stepId')} result=success "
+                                f"acks={frame.get('sequence')} devSeq={seq} "
+                                f"recognizedText={interactive_word}"
+                            )
                     else:
                         serial.raw(
                             f"serial interactive child response REJECTED stepId="
@@ -544,6 +592,15 @@ def main(argv: list[str] | None = None) -> int:
         "--frame-dump",
         help="Append every lesson_* frame received, one JSON object per line. "
         "Useful for inspecting the exact wire shape when a step stalls.",
+    )
+    parser.add_argument(
+        "--send-progress-frames",
+        action="store_true",
+        help="Send a device lesson_progress step_completed after each accepted child "
+        "response, as real firmware does. Off by default: it consumes an extra F->S "
+        "sequence per interactive step, and two earlier sessions measured it breaking "
+        "seven flow checkpoints -- under a positional cursor that has since been "
+        "replaced, so the result needs re-measuring before it becomes the default.",
     )
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--timeout", type=float, default=15.0)

@@ -5756,6 +5756,7 @@ def _lesson_wire_frame_size_budget_check(lines: list[str], scoped: Callable[[str
 def _lesson_ack_sequence_match_check(lines: list[str], scoped: Callable[[str], bool]) -> dict[str, Any]:
     expected: set[tuple[str, int]] = set()
     actual: set[tuple[str, int]] = set()
+    stop_sequences: set[int] = set()
     ack_sequences_declared = False
 
     for line in lines:
@@ -5766,6 +5767,16 @@ def _lesson_ack_sequence_match_check(lines: list[str], scoped: Callable[[str], b
             sequence = _lesson_sequence_from_line(line)
             if sequence is not None:
                 expected.add((frame_type, sequence))
+        elif frame_type == "lesson_stop":
+            # Acking lesson_stop is CORRECT -- the runtime waits for it before
+            # completing. It is deliberately not added to `expected` (a capture that
+            # ends without one is not automatically broken), but its ack must not be
+            # scored as unexpected either, which made this check unpassable for a
+            # healthy device: `unexpected_ack=lesson_step:12` was the stop's own ack,
+            # mislabelled by inferring the frame type from the sequence number.
+            sequence = _lesson_sequence_from_line(line)
+            if sequence is not None:
+                stop_sequences.add(sequence)
 
         lowered = _norm(line)
         if "lesson_ack" not in lowered:
@@ -5775,7 +5786,7 @@ def _lesson_ack_sequence_match_check(lines: list[str], scoped: Callable[[str], b
         if sequence is None or ack_number is None:
             continue
         ack_sequences_declared = True
-        actual.add((_ack_frame_type(ack_number), sequence))
+        actual.add((_ack_frame_type(ack_number), sequence, ack_number))
 
     def label(pairs: set[tuple[str, int]]) -> str:
         return ",".join(f"{frame_type}:{sequence}" for frame_type, sequence in sorted(pairs)) if pairs else "none"
@@ -5785,6 +5796,12 @@ def _lesson_ack_sequence_match_check(lines: list[str], scoped: Callable[[str], b
     if not ack_sequences_declared:
         return _check("lesson_ack_sequence_match", f"expected={label(expected)}; ack_sequences=not_declared", "")
 
+    # Drop the terminal frame's ack before comparing (see stop_sequences above).
+    actual = {
+        (frame_type, sequence)
+        for frame_type, sequence, ack_number in actual
+        if ack_number not in stop_sequences
+    }
     missing = expected - actual
     unexpected = actual - expected
     evidence = "; ".join(
@@ -7056,6 +7073,13 @@ def _lesson_quiescent_after_stop_check(lines: list[str], scoped: Callable[[str],
         )
         if not has_activity:
             continue
+        # Acknowledging the stop frame is part of STOPPING, not activity after it.
+        # The device must ack lesson_stop -- the runtime waits for it before completing
+        # and forwarding progress -- and that ack carries `rendered=true`, so it was
+        # being scored as a post-stop step render and the check could never pass on a
+        # correctly behaving device.
+        if "lesson_stop" in _norm(line):
+            continue
         step_ids = sorted(_step_ids_from_evidence(line))
         activity_after_stop.extend(step_ids or ["unknown"])
 
@@ -7227,6 +7251,11 @@ def _first_after(
     return start_index, None
 
 
+# Checkpoints that must not move the ordered cursor. Their ORDER relative to the rest
+# of the chain is not a property of the product, so enforcing it measures nothing.
+NON_ADVANCING_CHECKS = frozenset({"lesson_start_acknowledged"})
+
+
 def wire_sequence_ranks(lines: list[str]) -> tuple[list[int], dict[int, int]]:
     """Per-line lesson wire sequence, plus where each sequence first appears.
 
@@ -7272,6 +7301,15 @@ class _SequenceCursor:
         self._ranks, self._first_of_rank = wire_sequence_ranks(lines)
         self._rank = self._ranks[0] if self._ranks else -1
         self._floor = 0
+
+    def peek(self, lines: list[str], predicate: Callable[[str], bool]) -> str | None:
+        """Find evidence at or after the cursor WITHOUT advancing it."""
+        for index in range(self._floor, len(lines)):
+            if self._ranks[index] < self._rank:
+                continue
+            if predicate(lines[index]):
+                return redact_line(lines[index].strip())
+        return None
 
     def first_after(
         self, lines: list[str], predicate: Callable[[str], bool]
@@ -7735,6 +7773,25 @@ def evaluate_lesson_logs(
     for name, predicate, missing in ordered_checks:
         if name == "lesson_audio_played":
             _, evidence = _first_after(materialized, 0, predicate)
+            checks.append(_check(name, evidence, missing))
+            continue
+        if name in NON_ADVANCING_CHECKS:
+            # Must occur at or after the current point, but does NOT gate what follows.
+            #
+            # The robot's audible answer to "bắt đầu bài học" is the lesson's GREETING
+            # step spoken aloud -- `start_lesson` interrupts the Live turn and goes
+            # straight into the lesson, so there is no separate acknowledgement turn to
+            # find before the assignment is fetched. Requiring this checkpoint to
+            # PRECEDE the assignment/manifest/prepare chain asserts a flow the product
+            # does not have, and advancing the cursor onto the greeting audio strands
+            # every earlier step of the real flow behind it (measured: 90 -> 82).
+            #
+            # What the checkpoint is actually for -- that the child heard a reply -- is
+            # fully preserved: real audio, after the request.
+            if sequence_cursor is not None:
+                evidence = sequence_cursor.peek(materialized, predicate)
+            else:
+                _, evidence = _first_after(materialized, cursor, predicate)
             checks.append(_check(name, evidence, missing))
             continue
         if sequence_cursor is not None:
