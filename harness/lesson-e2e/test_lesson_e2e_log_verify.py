@@ -15836,3 +15836,55 @@ def test_ordering_between_wire_sequences_is_still_enforced():
         "serial TX lesson_ack lesson_prepare assignmentId=a1 sessionId=s-1 acks=1 seq=1 rendered=true",
     ]
     assert _cursor_report(lines, order_by_wire_sequence=True)["lesson_start_ack"] is False
+
+
+def test_declared_session_bridge_is_treated_as_one_run():
+    """A capture carrying both identities is ONE run when the runtime says so.
+
+    The hello ack hands the device the connection session and a lesson run mints its
+    own on top of it, so every healthy capture legitimately contains two session ids.
+    `session_consistent` exists to catch evidence from genuinely different runs bleeding
+    together — not to fail the normal case. When the runtime has recorded the join
+    (`lesson session bound sessionId=... connectionSessionId=...`), the two ids describe
+    one run and must not be reported as a conflict.
+    """
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=conn-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-lesson session bound sessionId=lesson-1 connectionSessionId=conn-1",
+        "LessonRuntime-INFO-emit lesson_prepare type=lesson_prepare stepId= sequence=1 "
+        "assignmentId=a1 sessionId=lesson-1",
+        "serial TX lesson_ack lesson_prepare assignmentId=a1 sessionId=lesson-1 acks=1 seq=1 rendered=true",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["session_consistent"]
+    assert check["ok"], check
+
+
+def test_unbridged_second_session_is_still_a_conflict():
+    """The guarantee that must survive: two runs bleeding together still fail.
+
+    Without a recorded join, two lesson session ids in one capture are exactly what this
+    check is for.
+    """
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=conn-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-emit lesson_prepare type=lesson_prepare stepId= sequence=1 "
+        "assignmentId=a1 sessionId=lesson-1",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s1 sequence=2 "
+        "assignmentId=a1 sessionId=lesson-2 media=sd://x/bg.poster",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["session_consistent"]
+    assert not check["ok"], check

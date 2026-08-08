@@ -333,6 +333,17 @@ class LessonEventForwarder:
         )
         self._owns_client = True
 
+    async def drain(self) -> None:
+        """Wait for everything already enqueued to reach the backend.
+
+        Forwarding is asynchronous, so "the runtime reached COMPLETED" and "the backend
+        knows it" are separated by a queue. Anything that needs to observe the effect of
+        a forward -- rather than merely having requested it -- has to wait here first.
+        """
+        if self._worker is None:
+            return
+        await self._queue.join()
+
     async def aclose(self) -> None:
         if self._closed:
             return
