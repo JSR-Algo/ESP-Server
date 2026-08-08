@@ -254,6 +254,13 @@ def _manifest_story_log_summary(manifest: Dict[str, Any]) -> List[Dict[str, Any]
             summary.append(item)
     return summary
 
+def _norm_prompt_for_log(prompt: Any) -> str:
+    """One-line, quote-safe form of a spoken prompt for the log."""
+    text = str(prompt or "").replace('"', "'")
+    text = " ".join(text.split())
+    return text[:160]
+
+
 def _manifest_steps_log_summary(manifest: Dict[str, Any]) -> Dict[str, Any]:
     """The served step roster: every step's id, order and completion class.
 
@@ -3168,6 +3175,17 @@ class LessonRuntime:
             }
         )
         self._log("info", f"interactive child response accepted stepId={self._step_id}")
+        # The robot's OWN observation that the step completed, in the shared progress
+        # vocabulary -- the runtime is the robot side of the wire, which is exactly why
+        # the checkpoint contract rejects `backend` echoes as device-side evidence
+        # (F-T53-14). Logged AFTER the acceptance that causes it: the child answering is
+        # the event, this is its consequence, and recording them the other way round
+        # reads as progress that preceded the answer.
+        self._log(
+            "info",
+            "lesson_progress step_completed "
+            f"stepId={self._step_id} result=success stepType={step_type or ''}",
+        )
         self._close_child_response_window()
         self._step_completed = True
         if self._renderer_v2_enabled():
@@ -4080,7 +4098,21 @@ class LessonRuntime:
                 handed_off = bool(await speaker(prompt))
             self._log(
                 "info" if handed_off else "warning",
-                f"lesson step prompt handoff stepId={step_id or self._step_id or ''} handoff={int(handed_off)}",
+                f"lesson step prompt handoff stepId={step_id or self._step_id or ''} "
+                f"handoff={int(handed_off)} "
+                # The prompt TEXT, so what the robot actually asked is verifiable: a
+                # guiding question ("Can you say barn?") is pedagogically different from
+                # a bare command ("Say barn"), and with only a step id nothing
+                # downstream could tell which the child received. This is the robot's
+                # own scripted lesson content, never child speech.
+                f'text="{_norm_prompt_for_log(prompt)}" '
+                # The runtime KNOWS whether the device had acked the render when it
+                # spoke -- the handoff is gated on it. Nothing downstream could tell:
+                # the ack and the prompt share a wire sequence and come from different
+                # streams, and the device writes its serial line after sending, so the
+                # ack routinely lands after a prompt that in fact followed it. Recording
+                # the fact replaces an inference that could not be made.
+                f"afterRenderAck={int(bool(self._step_acked))}",
             )
             return handed_off
         except Exception as exc:  # pragma: no cover - voice prompt is best-effort
@@ -5237,7 +5269,15 @@ class LessonRuntime:
                 # indistinguishable from one the device simply failed to render.
                 f"media={_lesson_step_media_log_summary(scene)} "
                 f"prompt={int(bool(frame['body'].get('audio')))} "
-                f"completionClass={frame['body'].get('completionClass', '')} "
+                f"completionClass={frame['body'].get('completionClass', '')}",
+            )
+            # storyBeat on its OWN line: the three-layer declaration above is scanned by
+            # a check that skips any line carrying JSON (to avoid matching raw frame
+            # dumps), so embedding the beat here made the layer declaration invisible
+            # and every completed step looked as though it declared no scene at all.
+            self._log(
+                "info",
+                f"lesson_step storyBeat stepId={step_id} "
                 f"storyBeat={_compact_json(story_beat) if story_beat is not None else '{}'}",
             )
         elif frame_type in ("lesson_prepare", "lesson_start", "lesson_stop"):

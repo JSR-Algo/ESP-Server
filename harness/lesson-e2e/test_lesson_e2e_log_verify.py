@@ -10785,7 +10785,11 @@ def test_lesson_e2e_log_verify_rejects_duplicate_step_playback_for_same_step():
     assert report["ok"] is False
     assert checks["lesson_step_playback_unique"]["ok"] is False
     assert "duplicate_step=s1:2" in checks["lesson_step_playback_unique"]["evidence"]
-    assert "duplicate_audio=s1:2" in checks["lesson_step_playback_unique"]["evidence"]
+    # Audio is no longer counted: a step legitimately has several spoken turns (the
+    # question, then coaching or praise), so repeated audio is not evidence of a
+    # duplicated step. The duplication here is still caught by the frame-level families.
+    assert "duplicate_content=s1:2" in checks["lesson_step_playback_unique"]["evidence"]
+    assert "duplicate_ack=s1:2" in checks["lesson_step_playback_unique"]["evidence"]
 
 def test_lesson_e2e_log_verify_rejects_lesson_step_ack_false():
     module = load_module()
@@ -15994,3 +15998,146 @@ def test_interactive_step_is_completed_by_an_accepted_child_response():
     )
     check = by_name(report)["lesson_manifest_step_ids"]
     assert check["ok"], check
+
+
+def test_runtime_declaration_beats_log_position_for_prompt_ordering():
+    """The runtime KNOWS whether it had the render ack, so it says so.
+
+    The prompt handoff is gated on `_step_acked`, meaning it cannot precede the ack. But
+    the device writes its serial line AFTER sending, and the server can process the ack
+    faster than the device finishes logging it — so the ack line lands after the prompt
+    line and position reports a violation the code makes impossible. When the runtime
+    declares `afterRenderAck=1`, that fact wins over the inference.
+    """
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s3 sequence=5 "
+        "assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        # Logged before the device's ack line lands, but the runtime states it had
+        # already processed that ack.
+        "LessonRuntime-INFO-lesson step prompt handoff stepId=s3 handoff=1 afterRenderAck=1 assignmentId=a1 sessionId=s-1",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s3 acks=5 seq=5 rendered=true",
+        "serial Audio playback complete stepId=s3 chunks=60 bytes=9459",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_step_prompt_after_render_ack"]
+    assert "prompt_before_render_ack=none" in str(check["evidence"]), check
+
+
+def test_a_prompt_the_runtime_says_preceded_the_ack_is_still_a_violation():
+    """The guarantee that must survive: asking about a step the child cannot see yet."""
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-lesson step prompt handoff stepId=s3 handoff=1 afterRenderAck=0 assignmentId=a1 sessionId=s-1",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s3 sequence=5 "
+        "assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s3 acks=5 seq=5 rendered=true",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_step_prompt_after_render_ack"]
+    assert "prompt_before_render_ack=s3" in str(check["evidence"]), check
+
+
+def test_device_record_of_the_child_speaking_counts_as_the_response():
+    """The response happens when the CHILD SPEAKS, not when the server accepts it.
+
+    The device records the answer as it is sent, carrying the recognised text; the
+    runtime's acceptance follows. Recognising only the acceptance put the response after
+    the progress it caused, because acceptance and progress are logged together on the
+    server while the device's own record sits earlier.
+    """
+    module = load_module()
+    line = "serial interactive child response spoken stepId=s4 recognizedText=barn"
+    assert module._interactive_child_response_evidence(line)
+
+
+def test_a_spoken_record_with_nothing_recognised_is_not_a_response():
+    """The guarantee: an answer with no observable content proves nothing."""
+    module = load_module()
+    line = "serial interactive child response spoken stepId=s4 recognizedText="
+    assert not module._interactive_child_response_evidence(line)
+
+
+def _nine_step_capture(extra: list[str] | None = None) -> list[str]:
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s1 sequence=3 "
+        "assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        "I (1) Lesson: assignmentId=a1 sessionId=s-1 stepId=s1 lesson_step poster "
+        "fetched+drawn from URL url=sd://x/a.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s1 acks=3 seq=3 rendered=true",
+        "serial Audio playback complete stepId=s1 chunks=10 bytes=100",
+    ]
+    return lines + (extra or [])
+
+
+def test_first_progress_may_belong_to_a_later_step_than_the_first_render():
+    """A lesson that opens with a PASSIVE step can never have progress on step 1.
+
+    Passive steps auto-advance and emit no progress, so the first progress evidence in
+    any normal lesson names a later step than the first rendered one. Requiring the two
+    to match asserted a shape only a lesson whose very first step is interactive could
+    have.
+    """
+    module = load_module()
+    lines = _nine_step_capture([
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s4 sequence=4 "
+        "assignmentId=a1 sessionId=s-1 media=sd://x/b.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s4 acks=4 seq=4 rendered=true",
+        "serial interactive child response spoken stepId=s4 recognizedText=barn",
+        "LessonRuntime-INFO-lesson_progress step_completed stepId=s4 result=success",
+    ])
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    assert by_name(report)["step_consistent"]["ok"], by_name(report)["step_consistent"]
+
+
+def test_a_step_may_be_spoken_to_more_than_once():
+    """A step legitimately has several spoken turns: the question, then the praise.
+
+    Observed on a real run: `"What word do you see? You can say barn."` followed by
+    `"Đúng rồi! barn!"`. Treating the second as a duplicate playback flagged the robot
+    for teaching properly. Repeated RENDER or ACK evidence is still a duplicate.
+    """
+    module = load_module()
+    lines = _nine_step_capture([
+        "serial Audio playback complete stepId=s1 chunks=8 bytes=80",
+    ])
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_step_playback_unique"]
+    assert "duplicate_audio=none" in str(check["evidence"]), check
+
+
+def test_a_repeated_render_for_one_step_is_still_a_duplicate():
+    """The guarantee: the same step drawn twice is a real defect."""
+    module = load_module()
+    lines = _nine_step_capture([
+        "I (1) Lesson: assignmentId=a1 sessionId=s-1 stepId=s1 teachingObject rendered primaryWord=barn",
+        "I (2) Lesson: assignmentId=a1 sessionId=s-1 stepId=s1 teachingObject rendered primaryWord=barn",
+    ])
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_step_playback_unique"]
+    assert "duplicate_content=s1" in str(check["evidence"]), check
+
+
+
