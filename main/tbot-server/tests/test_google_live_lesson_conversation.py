@@ -2140,3 +2140,47 @@ def test_provider_echo_suppression_log_redacts_child_transcript(caplog):
 
     assert secret not in caplog.text
     assert f"chars={len(secret)}" in caplog.text
+
+
+class LessonPromptWaitsForLiveConnectTest(unittest.IsolatedAsyncioTestCase):
+    """The lesson's FIRST spoken prompt must not be lost to a half-open Live session.
+
+    `start_lesson` schedules a Live prewarm and then drives straight into the lesson, so
+    when step 1's prompt is sent the client OBJECT already exists while its session is
+    still connecting. `_ensure_live_open_for_lesson_text` only checked that a client with
+    `send_text` existed, so it reported ready, `send_text` raised
+    "Google Live client not connected", and the prompt was dropped with `handoff=0`.
+
+    Observed on every real-audio run: step s1 silently had no prompt while s2-s9 spoke
+    normally. On a real robot the child hears nothing at the start of the lesson.
+    """
+
+    async def test_prompt_waits_for_a_connecting_client_instead_of_dropping(self):
+        conn = _Conn()
+        provider = GoogleLiveProvider(conn)
+        provider._admit_live_open = lambda: asyncio.sleep(
+            0, result=SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=None)
+        )
+
+        class _ConnectingClient(_Client):
+            """Exists, but its session is not up yet — the prewarm is still in flight."""
+
+            def __init__(self):
+                super().__init__()
+                self.connected = False
+
+        client = _ConnectingClient()
+        provider._client = client
+
+        async def _finish_connect():
+            await asyncio.sleep(0.05)
+            client.connected = True
+
+        asyncio.ensure_future(_finish_connect())
+
+        ready = await provider._ensure_live_open_for_lesson_text()
+
+        self.assertTrue(
+            ready, "reported ready while the Live session was still connecting"
+        )
+        self.assertTrue(client.connected)

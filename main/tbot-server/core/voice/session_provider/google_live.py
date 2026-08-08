@@ -2348,10 +2348,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             return False
 
+    async def _await_live_connect(self, client, timeout_sec: float = 3.0) -> bool:
+        """Give an in-flight Live connect a moment to finish before giving up on it.
+
+        Bounded on purpose: a lesson prompt that arrives late is still spoken, but one
+        that waits indefinitely would stall the whole step.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while time.monotonic() < deadline:
+            if getattr(client, "connected", False):
+                return True
+            await asyncio.sleep(0.05)
+        return bool(getattr(client, "connected", False))
+
     async def _ensure_live_open_for_lesson_text(self):
         client = self._client
         if client is not None and hasattr(client, "send_text"):
-            return True
+            # Existing is not the same as CONNECTED. `start_lesson` schedules a Live
+            # prewarm and then drives straight into the lesson, so when step 1's prompt
+            # is sent the client object is already here while its session is still being
+            # established. Treating that as ready made send_text raise "client not
+            # connected" and the prompt was dropped (handoff=0) -- on a real robot the
+            # child hears nothing at the start of the lesson, every time.
+            if getattr(client, "connected", True):
+                return True
+            if await self._await_live_connect(client):
+                return True
+            # Still not up: fall through and open a session rather than drop the prompt.
         if not self._has_session_orchestrator():
             return False
         decision = await self._admit_live_open()
