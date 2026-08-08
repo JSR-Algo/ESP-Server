@@ -86,9 +86,16 @@ cp "${ESP_REPO}/main/tbot-server/agent-base-prompt.txt" "${HERE}/esp-data/" 2>/d
 # lesson dies at "backend identity unavailable" with no assignment ever pulled.
 # That was F-T53-01, and it cost a whole session to find — do not drop either.
 echo "[up] provisioning simulated device (manager-api / MySQL)"
+# The device seed rewrites google_live_config_json wholesale, which silently WIPES a
+# previously seeded API key on every re-run. Symptom: the stack comes up looking
+# identical and the robot simply stops speaking. Carry the existing key across.
+EXISTING_KEY="$(docker exec tbot-ls-e2e-mysql sh -lc \
+  'MYSQL_PWD=123456 mysql -u root tbot_esp32_server -N -e "select coalesce(json_unquote(json_extract(google_live_config_json, \"$.api_key\")), \"\") from ai_agent where id=\"agent_e2e_sim_0001\";"' \
+  2>/dev/null | tr -d '\r' || true)"
 docker cp "${HERE}/seed-sim-device.sql" tbot-ls-e2e-mysql:/tmp/seed-sim-device.sql
 docker exec tbot-ls-e2e-mysql sh -lc \
   'MYSQL_PWD=123456 mysql -u root tbot_esp32_server < /tmp/seed-sim-device.sql'
+LESSON_SIM_GEMINI_API_KEY="${LESSON_SIM_GEMINI_API_KEY:-${EXISTING_KEY}}"
 
 # Google Live credential. The agent's key lives in manager-api
 # (ai_agent.google_live_config_json.api_key) -- that is where a real claimed robot
@@ -119,9 +126,28 @@ docker exec -i tbot-ls-e2e-pg psql -U tbot -d tbot -v ON_ERROR_STOP=1 \
 echo "[up] starting ESP lesson server"
 "${COMPOSE[@]}" up -d esp-server
 
-until docker logs --since 5m tbot-ls-e2e-esp 2>&1 | grep -qE "WebsocketAddress|Traceback"; do
+# Wait for the boot banner FROM THIS START, not "some time in the last 5 minutes". The
+# banner is printed once at boot, so on a container that was already running (the
+# common case when re-seeding config) `--since 5m` never matches and this loop spins
+# forever. Anchor on the restart and give up loudly instead of hanging.
+docker restart tbot-ls-e2e-esp >/dev/null
+ESP_SINCE="$(date +%s)"
+for _ in $(seq 1 60); do
+  if docker logs --since "${ESP_SINCE}" tbot-ls-e2e-esp 2>&1 | grep -qE "WebsocketAddress|Traceback"; then
+    break
+  fi
   sleep 2
 done
+if ! docker logs --since "${ESP_SINCE}" tbot-ls-e2e-esp 2>&1 | grep -qE "WebsocketAddress|Traceback"; then
+  echo "[up] FATAL: ESP server did not report a websocket address within 120s" >&2
+  docker logs --tail 30 tbot-ls-e2e-esp >&2
+  exit 1
+fi
+
+# manager-api caches the differentiated config it serves, so a freshly seeded agent
+# (voice key, TTS model) is not visible to the ESP until the cache is dropped. This bit
+# already cost one session: a config rename "did not take" until `web` was restarted.
+docker restart tbot-ls-e2e-web >/dev/null
 
 echo "[up] ready"
 echo "  backend   http://127.0.0.1:3100/v1/health"

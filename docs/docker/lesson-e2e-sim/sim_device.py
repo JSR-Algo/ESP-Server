@@ -184,7 +184,11 @@ def render_step(serial: SerialLog, frame: dict) -> str:
     overlay = scene.get("robotOverlay") or {}
     state = overlay.get("robotState") or "talking"
     serial.write("Lesson", f"{prefix} robotOverlay rendered robotState={state} pose=teach")
-    serial.raw(f"serial Audio TTS played stepId={step} primaryWord={word}")
+    # No audio line here. This used to assert "Audio TTS played" purely because a step
+    # frame arrived -- a claim about the speaker made without a single byte of audio,
+    # and the exact kind of fabricated evidence that makes a green checkpoint worthless.
+    # Playback is now reported by the receive loop, from the audio frames that actually
+    # arrived, with the byte and chunk counts to prove it.
     return word
 
 
@@ -269,6 +273,7 @@ async def run(args: argparse.Namespace) -> int:
     seq = 0
     saw = {"prepare": False, "start": False, "stop": False}
     steps_rendered = 0
+    current_step_id = None
 
     try:
         headers = {"device-id": args.device_id, "client-id": args.client_id}
@@ -322,6 +327,16 @@ async def run(args: argparse.Namespace) -> int:
             )
 
             deadline = time.monotonic() + args.duration
+            # Speaker accounting. The robot's speech arrives as binary opus frames
+            # bracketed by {"type":"tts","state":"start"|"stop"}; real firmware opens the
+            # speaker on start, plays the frames, and finishes on stop. The simulator
+            # used to `continue` past every binary frame, so the robot could speak for
+            # 167 KB and the device-side log would not record a single byte of it --
+            # which is why an audible acknowledgement was unprovable no matter what the
+            # server did. These counters are the ONLY basis for the playback lines
+            # below: with no audio received, nothing positive is written.
+            audio = {"chunks": 0, "bytes": 0, "speaking": False}
+            spoke_for_start = False
             while time.monotonic() < deadline:
                 try:
                     raw = await asyncio.wait_for(client.recv(), timeout=5.0)
@@ -330,6 +345,11 @@ async def run(args: argparse.Namespace) -> int:
                         break
                     continue
                 if isinstance(raw, bytes):
+                    # Count unconditionally. The Live path does not reliably bracket a
+                    # turn with an explicit tts:start, so gating the counters on one
+                    # would silently discard the very audio being measured.
+                    audio["chunks"] += 1
+                    audio["bytes"] += len(raw)
                     continue
                 try:
                     frame = json.loads(raw)
@@ -337,6 +357,37 @@ async def run(args: argparse.Namespace) -> int:
                     continue
 
                 ftype = frame.get("type")
+                if ftype == "tts":
+                    state = frame.get("state")
+                    if state == "start":
+                        audio.update(chunks=0, bytes=0, speaking=True)
+                    elif state == "stop":
+                        audio["speaking"] = False
+                        played = audio["chunks"] > 0 and audio["bytes"] > 0
+                        # The first speech that completes after the child's utterance and
+                        # before any lesson frame IS the start acknowledgement -- the robot
+                        # answering "bắt đầu bài học" out loud.
+                        context = (
+                            "start_lesson"
+                            if not spoke_for_start and steps_rendered == 0
+                            else f"stepId={current_step_id or ''}"
+                        )
+                        if not spoke_for_start and steps_rendered == 0:
+                            spoke_for_start = True
+                        # Only a turn that actually carried audio is reported. A
+                        # zero-byte stop is not a silent robot -- the Live path sends
+                        # one to CANCEL a turn (barge-in, and the deliberate
+                        # `interrupt_started reason=lesson_start_intent` that clears the
+                        # way for the lesson), so reporting it would invent a playback
+                        # failure and duplicate the step's real playback line.
+                        if played:
+                            serial.raw(
+                                f"serial Audio playback complete {context} "
+                                f"chunks={audio['chunks']} bytes={audio['bytes']}"
+                            )
+                        audio.update(chunks=0, bytes=0)
+                    continue
+
                 if ftype not in {
                     "lesson_prepare",
                     "lesson_start",
@@ -355,6 +406,7 @@ async def run(args: argparse.Namespace) -> int:
                 )
 
                 if ftype == "lesson_step":
+                    current_step_id = frame.get("stepId")
                     word = render_step(serial, frame)
                     steps_rendered += 1
                     interactive_word = None

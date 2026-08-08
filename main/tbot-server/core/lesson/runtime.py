@@ -287,7 +287,9 @@ def _lesson_step_media_log_summary(scene: Dict[str, Any]) -> str:
             candidate = node.get(holder)
             if isinstance(candidate, dict) and isinstance(candidate.get("src"), str):
                 urls.append(candidate["src"])
-    return ",".join(urls) if urls else "none"
+    # SPACE-separated: the checkpoint contract scans a line for media URLs with a
+    # regex, and comma-joining them runs two URLs together into one unmatchable token.
+    return " ".join(urls) if urls else "none"
 
 
 # Runtime states (a slice subset of the assignment state machine).
