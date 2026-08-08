@@ -225,7 +225,9 @@ def inject_child_response(args, device_id: str, text: str) -> bool:
     return False
 
 
-async def answer_interactive_step(args, word: str, step_id) -> bool:
+async def answer_interactive_step(
+    args, word: str, step_id, prompt_done=None, on_send=None
+) -> bool:
     """Answer an interactive step, retrying until the runtime's window is actually open.
 
     A single fixed pause is not enough. `on_child_response` returns ``handled=false``
@@ -242,11 +244,23 @@ async def answer_interactive_step(args, word: str, step_id) -> bool:
     provider's prompt-guard delay instead of tuned to one particular value of it.
     """
     loop = asyncio.get_running_loop()
+    # Answer only after the robot has finished ASKING. A child responds to a question
+    # they have heard, and the runtime records that ordering -- the guided prompt and
+    # its audio precede the response, which precedes the step's progress. Answering on
+    # a fixed short offset lands mid-prompt and inverts all three.
+    if prompt_done is not None:
+        try:
+            await asyncio.wait_for(prompt_done.wait(), timeout=args.prompt_wait_timeout)
+        except asyncio.TimeoutError:
+            print(f"[warn] prompt audio for {step_id} never completed; answering anyway",
+                  flush=True)
     await asyncio.sleep(args.child_response_delay)
     deadline = time.monotonic() + max(args.child_response_timeout, 0.0)
     attempt = 0
     while True:
         attempt += 1
+        if attempt == 1 and on_send is not None:
+            on_send()
         handled = await loop.run_in_executor(
             None, inject_child_response, args, args.device_id, word
         )
@@ -337,6 +351,8 @@ async def run(args: argparse.Namespace) -> int:
             # below: with no audio received, nothing positive is written.
             audio = {"chunks": 0, "bytes": 0, "speaking": False}
             spoke_for_start = False
+            prompt_done: dict[str, asyncio.Event] = {}
+            answer_tasks: list[asyncio.Task] = []
             while time.monotonic() < deadline:
                 try:
                     raw = await asyncio.wait_for(client.recv(), timeout=5.0)
@@ -392,6 +408,10 @@ async def run(args: argparse.Namespace) -> int:
                                 f"serial Audio playback complete {context} "
                                 f"chunks={audio['chunks']} bytes={audio['bytes']}"
                             )
+                            # Release the child waiting on this step's question.
+                            waiter = prompt_done.get(current_step_id or "")
+                            if waiter is not None:
+                                waiter.set()
                         audio.update(chunks=0, bytes=0)
                     continue
 
@@ -446,64 +466,37 @@ async def run(args: argparse.Namespace) -> int:
                 # response window when it processes our render ack, so the utterance has to
                 # follow the ack, not precede it.
                 if ftype == "lesson_step" and interactive_word:
-                    serial.raw(
-                        f"LessonRuntime child response window opened stepId="
-                        f"{frame.get('stepId')} listening=true"
-                    )
-                    handled = await answer_interactive_step(
-                        args, interactive_word, frame.get("stepId")
-                    )
-                    if handled:
-                        serial.raw(
-                            f"serial interactive child response accepted stepId="
-                            f"{frame.get('stepId')} recognizedText={interactive_word}"
+                    # NO fabricated window line here. This asserted that the RUNTIME had
+                    # opened a response window, written the instant the step frame
+                    # arrived -- before the robot had even asked the question. The
+                    # runtime logs the real thing when it actually opens the window, and
+                    # this fake one landed ahead of the guided prompt, describing an
+                    # order that never happened.
+                    step_key = frame.get("stepId") or ""
+                    prompt_done.setdefault(step_key, asyncio.Event())
+
+                    async def _answer(word=interactive_word, key=step_key):
+                        # Record the child SPEAKING when the answer is sent, not when
+                        # the reply comes back. The child speaks first and the runtime
+                        # accepts it afterwards; logging on the reply put the device's
+                        # record of the answer after the completion it caused.
+                        ok = await answer_interactive_step(
+                            args, word, key, prompt_done=prompt_done[key],
+                            on_send=lambda: serial.raw(
+                                f"serial interactive child response spoken stepId={key} "
+                                f"recognizedText={word}"
+                            ),
                         )
-                        if args.send_progress_frames:
-                            # Device-side progress, to the contract read off
-                            # `LessonRuntime._on_lesson_progress_impl` (runtime.py:2959):
-                            #   * the runtime IGNORES an interactive step_completed unless
-                            #     body.detail carries observable child evidence -- it
-                            #     explicitly documents result="success" with empty detail
-                            #     as a renderer placeholder that is NOT proof a child
-                            #     answered;
-                            #   * the frame shares ONE F->S sequence stream with the acks,
-                            #     and a gap emits PROTOCOL_SEQUENCE_ERROR and HOLDS the
-                            #     runtime -- hence seq is taken from the same counter;
-                            #   * it is only legal once the response is registered, which
-                            #     is why this sits inside `if handled`.
-                            seq += 1
-                            await client.send(json.dumps({
-                                "type": "lesson_progress",
-                                "protocolVersion": RENDERER,
-                                "assignmentId": frame.get("assignmentId"),
-                                "sessionId": frame.get("sessionId"),
-                                "stepId": frame.get("stepId"),
-                                "sequence": seq,
-                                "timestamp": int(time.time()),
-                                "body": {
-                                    "event": "step_completed",
-                                    "result": "success",
-                                    "detail": {"recognizedText": interactive_word},
-                                },
-                            }))
-                            # Report it against the SERVER frame's sequence (acks=),
-                            # not the device's own counter. The two directions number
-                            # independently, and anything ordering a capture by wire
-                            # sequence cannot tell them apart -- a device-numbered
-                            # sequence collides with the server's and scrambles which
-                            # step each piece of evidence belongs to. The device counter
-                            # is kept as devSeq=, since the frame really did consume it.
-                            serial.raw(
-                                f"serial TX lesson_progress step_completed stepId="
-                                f"{frame.get('stepId')} result=success "
-                                f"acks={frame.get('sequence')} devSeq={seq} "
-                                f"recognizedText={interactive_word}"
-                            )
-                    else:
                         serial.raw(
-                            f"serial interactive child response REJECTED stepId="
-                            f"{frame.get('stepId')} recognizedText={interactive_word}"
+                            f"serial interactive child response "
+                            f"{'accepted' if ok else 'REJECTED'} stepId={key} "
+                            f"recognizedText={word}"
                         )
+
+                    # As a task: the prompt-complete signal it waits for only arrives by
+                    # continuing to READ the socket.
+                    answer_tasks.append(asyncio.create_task(_answer()))
+
 
                 if ftype == "lesson_stop":
                     # Do NOT drop the socket here. The runtime finishes the session and
@@ -514,6 +507,9 @@ async def run(args: argparse.Namespace) -> int:
                         f"serial lesson_stop acked; holding socket {args.post_stop_linger}s "
                         f"for completion + backend progress"
                     )
+                    for task in answer_tasks:
+                        if not task.done():
+                            task.cancel()
                     await asyncio.sleep(args.post_stop_linger)
                     break
     except Exception as exc:  # noqa: BLE001 - surface any wire failure to the caller
@@ -568,8 +564,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--child-response-delay",
         type=float,
-        default=0.4,
-        help="Pause before the simulated child's FIRST answer attempt on an interactive "
+        default=1.5,
+        help="Pause after the robot stops speaking before the simulated child answers. "
+        "Must outlast the runtime's own response-window delay (Google Live defers the "
+        "window ~0.8s past the prompt): answering into a window that is not open yet "
+        "means the runtime never records opening one. Also just realistic -- a child "
+        "does not reply the instant the question ends. Pause before the FIRST answer "
         "step. Keep it non-zero: an instant reply can beat the runtime's response "
         "window open.",
     )
@@ -601,6 +601,13 @@ def main(argv: list[str] | None = None) -> int:
         "sequence per interactive step, and two earlier sessions measured it breaking "
         "seven flow checkpoints -- under a positional cursor that has since been "
         "replaced, so the result needs re-measuring before it becomes the default.",
+    )
+    parser.add_argument(
+        "--prompt-wait-timeout",
+        type=float,
+        default=25.0,
+        help="How long to wait for the robot's spoken prompt to finish before the "
+        "simulated child answers. Must exceed the longest Live prompt.",
     )
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--timeout", type=float, default=15.0)

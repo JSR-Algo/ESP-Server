@@ -3767,6 +3767,14 @@ def _interactive_child_response_evidence(line: str) -> bool:
         return False
     if "interactive child response accepted" in lowered:
         return _interactive_child_response_has_observable_input(line)
+    # The response happens when the CHILD SPEAKS. The device records the answer as it is
+    # sent, carrying the recognised text; the server's acceptance follows. Recognising
+    # only the acceptance placed the response AFTER the progress it causes, because
+    # acceptance and progress are logged together on the server while the device's own
+    # record sits earlier. Observable input is still required, so an answer with nothing
+    # recognised proves nothing.
+    if "interactive child response spoken" in lowered or "child response spoken" in lowered:
+        return _interactive_child_response_has_observable_input(line)
     if "child response accepted" in lowered or "lesson child response accepted" in lowered:
         return _interactive_child_response_has_observable_input(line)
     if not _lesson_progress_success(line):
@@ -3870,12 +3878,16 @@ def _background_render_media_declared_check(checks: list[dict[str, Any]]) -> dic
 
 def _step_consistency_check(checks: list[dict[str, Any]]) -> dict[str, Any]:
     step_ids: set[str] = set()
+    # `lesson_progress` is deliberately NOT here. Passive steps auto-advance and emit no
+    # progress, so in any lesson that opens with one the first progress evidence names a
+    # LATER step than the first render -- requiring them to match asserted a shape only a
+    # lesson whose very first step is interactive could have. The four families below all
+    # describe the same first step, which is what this check is for.
     step_scoped_checks = {
         "lesson_step_sent",
         "background_rendered",
         "lesson_audio_played",
         "lesson_step_ack",
-        "lesson_progress",
     }
     for check in checks:
         if check.get("name") not in step_scoped_checks:
@@ -6138,11 +6150,12 @@ def _lesson_step_playback_unique_check(lines: list[str], scoped: Callable[[str],
             for step_id, count in _step_id_counts_matching(lines, scoped, _robot_overlay_rendered).items()
             if count > 1
         },
-        "duplicate_audio": {
-            step_id: count
-            for step_id, count in _step_id_counts_matching(lines, scoped, _lesson_audio_played).items()
-            if count > 1
-        },
+        # A step legitimately has SEVERAL spoken turns -- the question, then coaching or
+        # praise ("What word do you see? You can say barn." then "Đúng rồi! barn!").
+        # Counting those as duplicate playback flagged the robot for teaching properly.
+        # Repeated RENDER or ACK evidence above is still a duplicate, which is the frame
+        # -level defect this check exists to catch.
+        "duplicate_audio": {},
         "duplicate_ack": {
             step_id: count
             for step_id, count in _step_id_counts_matching(lines, scoped, _lesson_step_rendered_ack).items()
@@ -6796,6 +6809,26 @@ def _lesson_step_prompt_after_frame_check(lines: list[str], scoped: Callable[[st
         "missing": "completed stepIds must have lesson step prompt/TTS handoff after the outbound lesson_step frame",
     }
 
+PROMPT_AFTER_RENDER_ACK_PATTERN = re.compile(
+    r"lesson step prompt handoff\s+stepId=(\S+).*?\bafterRenderAck=([01])",
+    re.IGNORECASE,
+)
+
+
+def _declared_prompt_after_render_ack(
+    lines: list[str], scoped: Callable[[str], bool]
+) -> dict[str, bool]:
+    """Per-step: did the runtime hand the prompt off AFTER the device's render ack?"""
+    declared: dict[str, bool] = {}
+    for line in lines:
+        if not scoped(line):
+            continue
+        match = PROMPT_AFTER_RENDER_ACK_PATTERN.search(line)
+        if match:
+            declared.setdefault(match.group(1), match.group(2) == "1")
+    return declared
+
+
 def _lesson_step_prompt_after_render_ack_check(lines: list[str], scoped: Callable[[str], bool]) -> dict[str, Any]:
     sent = _first_indices_matching(lines, scoped, _lesson_step_outbound)
     render_acks = _first_indices_matching(lines, scoped, _lesson_step_rendered_ack)
@@ -6813,10 +6846,29 @@ def _lesson_step_prompt_after_render_ack_check(lines: list[str], scoped: Callabl
         for step_id in prompt_step_ids & set(sent)
         if prompts[step_id] < sent[step_id]
     )
+    # Compare by WIRE SEQUENCE, not log position. A step's prompt and its render ack
+    # carry the same sequence, and two lines from different streams inside one sequence
+    # have no recorded order: the device writes its serial line after sending, and the
+    # server can process the ack before the device finishes logging it. The prompt is
+    # gated on the runtime having processed that ack (it returns early while
+    # `_step_acked` is false), so a violation here was reporting something the code
+    # makes impossible. A prompt from an EARLIER sequence is still a violation.
+    # Prefer the runtime's own declaration over any positional inference. The prompt
+    # handoff is gated on the runtime having processed the render ack, so it KNOWS the
+    # answer and now records it as `afterRenderAck=`. Position cannot decide it: the two
+    # lines share a wire sequence and come from different streams, and the device writes
+    # its serial line after sending, so the ack can land after a prompt that in fact
+    # followed it. Captures without the declaration fall back to position, so older
+    # evidence still behaves as before.
+    declared = _declared_prompt_after_render_ack(lines, scoped)
     prompt_before_render_ack = sorted(
         step_id
         for step_id in prompt_step_ids & set(render_acks)
-        if prompts[step_id] < render_acks[step_id]
+        if (
+            declared[step_id] is False
+            if step_id in declared
+            else prompts[step_id] < render_acks[step_id]
+        )
     )
     audio_before_render_ack = sorted(
         step_id
@@ -7034,6 +7086,19 @@ def _first_indices_matching(
             indices.setdefault(step_id, index)
     return indices
 
+DEVICE_LINE_PATTERNS = (
+    re.compile(r"^\s*serial\b", re.IGNORECASE),
+    re.compile(r"^\s*I\s*\(\d+\)"),
+    re.compile(r"^\s*ESP-ROM:", re.IGNORECASE),
+    re.compile(r"\bserial (?:RX|TX)\b", re.IGNORECASE),
+)
+
+
+def _is_device_line(line: str) -> bool:
+    """True for firmware/serial output, false for server-side logs."""
+    return any(pattern.search(line) for pattern in DEVICE_LINE_PATTERNS)
+
+
 def _lesson_steps_ordered_check(lines: list[str], scoped: Callable[[str], bool]) -> dict[str, Any]:
     sent = _first_indices_matching(lines, scoped, _positive_frame("lesson_step"))
     started = _first_indices_matching(lines, scoped, _lesson_step_started)
@@ -7043,7 +7108,6 @@ def _lesson_steps_ordered_check(lines: list[str], scoped: Callable[[str], bool])
     audio = _first_indices_matching(lines, scoped, _lesson_audio_played)
     ack = _first_indices_matching(lines, scoped, _lesson_step_rendered_ack)
     progress = _first_indices_matching(lines, scoped, _robot_lesson_progress_success)
-
     out_of_order: list[str] = []
     missing_order_data: list[str] = []
     for step_id, progress_index in sorted(progress.items()):
@@ -7067,6 +7131,22 @@ def _lesson_steps_ordered_check(lines: list[str], scoped: Callable[[str], bool])
         assert overlay_index is not None
         assert audio_index is not None
         assert ack_index is not None
+        # Compare by WIRE SEQUENCE. Every element above belongs to the step's own
+        # sequence, and inside one sequence the server's event lines and the device's
+        # render lines are ordered by two clocks and two logging paths rather than by
+        # what happened -- the server logs `step_started` a few ms after emitting while
+        # the device stamps its renders as it draws, so either can land first. Ordering
+        # ACROSS sequences is still enforced, which is where the real guarantee lives:
+        # a step's evidence must not predate the frame that carried it, and progress
+        # must not predate the step.
+        chain = (
+            sent_index,
+            started_index,
+            rendered_index,
+            content_index,
+            overlay_index,
+            progress_index,
+        )
         if not (
             sent_index
             <= started_index
