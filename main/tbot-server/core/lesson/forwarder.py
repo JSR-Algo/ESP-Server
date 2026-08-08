@@ -130,6 +130,7 @@ class LessonEventForwarder:
     async def _handle_post_failure(
         self, batch: Dict[str, Any], attempt: int, exc: Exception
     ) -> None:
+        detail = f"{type(exc).__name__}{self._failure_detail(exc)} {self._batch_events(batch)}"
         if attempt < self.max_reenqueue_attempts and self._is_retryable(exc):
             delay = self.retry_backoff_sec * (self.retry_backoff_multiplier ** attempt)
             if delay > 0:
@@ -138,19 +139,87 @@ class LessonEventForwarder:
             self._log(
                 "warning",
                 "lesson-events POST failed; re-enqueued "
-                f"attempt={attempt + 1}/{self.max_reenqueue_attempts}: {type(exc).__name__}",
+                f"attempt={attempt + 1}/{self.max_reenqueue_attempts}: {detail}",
                 batch,
             )
             return
 
         self._dead_letter(batch)
-        self._log("warning", f"lesson-events POST dead-lettered: {type(exc).__name__}", batch)
+        self._log("warning", f"lesson-events POST dead-lettered: {detail}", batch)
+
+    @staticmethod
+    def _failure_detail(exc: Exception) -> str:
+        """HTTP status + a short body snippet, when the exception carries a response.
+
+        `type(exc).__name__` alone ("HTTPStatusError") says only that the backend said
+        no — not which status, and not why. That is the difference between a retryable
+        502 and a permanently rejected payload, and neither the operator nor
+        `lesson_e2e_log_verify.py` could tell them apart from the log.
+        """
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is None:
+            return ""
+        body = ""
+        try:
+            body = (response.text or "")[:160].replace("\n", " ")
+        except Exception:  # pragma: no cover - body may be unread/streamed
+            body = ""
+        return f" status={status}" + (f" body={body}" if body else "")
+
+    @staticmethod
+    def _batch_events(batch: Dict[str, Any]) -> str:
+        """Name the events that were rejected — a batch may carry several."""
+        events = batch.get("events")
+        if not isinstance(events, list):
+            return "events=?"
+        names = [
+            str(e.get("type") or e.get("event") or "lesson_event")
+            for e in events
+            if isinstance(e, dict)
+        ]
+        return "events=" + (",".join(names) if names else "none")
 
     async def _post(self, batch: Dict[str, Any]) -> None:
         post_fn = self._post_fn or _backend_api.post_lesson_event
         if self._post_fn is None:
             await self._ensure_client()
         await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+        self._log_forwarded(batch)
+
+    def _log_forwarded(self, batch: Dict[str, Any]) -> None:
+        """Record every event a backend 2xx accepted.
+
+        Failures were already logged; success was completely silent, which made the
+        whole backend-forwarding leg unobservable: a lesson could post progress and
+        completion, drive the assignment to COMPLETED, and leave no log evidence that
+        it ever happened. `scripts/lesson_e2e_log_verify.py` verifies that leg purely
+        from logs, so its lesson_progress_posted / lesson_completion_posted checkpoints
+        could never pass for a simulated OR a live capture.
+
+        The wording matches the checkpoint contract ("backend post <event> ...") so the
+        evidence is machine-checkable rather than merely human-readable.
+        """
+        events = batch.get("events")
+        if not isinstance(events, list):
+            return
+        assignment_id = batch.get("assignmentId") or ""
+        session_id = batch.get("sessionId") or ""
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            name = event.get("type") or event.get("event") or "lesson_event"
+            parts = [
+                f"backend post {name}",
+                f"assignmentId={assignment_id}",
+                f"sessionId={session_id}",
+            ]
+            for key in ("stepId", "event", "result", "outcome"):
+                value = event.get(key)
+                if value is not None:
+                    parts.append(f"{key}={value}")
+            parts.append("persisted=true")
+            self._log("info", " ".join(parts))
 
     async def replay_pending_terminal_event(self) -> bool:
         """Re-send a terminal lifecycle event until a backend 2xx clears it.

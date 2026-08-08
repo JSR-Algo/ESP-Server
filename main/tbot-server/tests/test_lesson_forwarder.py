@@ -197,6 +197,44 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
 
         await forwarder.aclose()
 
+    async def test_failure_log_names_the_status_and_the_rejected_events(self):
+        """A rejection must say WHICH events and WHAT status, not just the exception.
+
+        `HTTPStatusError` alone cannot distinguish a retryable 502 from a permanently
+        rejected payload, and it never says which event the backend refused — so a
+        completion silently missing from the parent dashboard is indistinguishable
+        from a transient blip in the log. Observed on a real T5.3 simulated run.
+        """
+        logger = _Logger()
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            raise _http_status_error(422)
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            post_fn=_post,
+            logger=logger,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=1,
+        )
+
+        forwarder.enqueue(
+            {
+                "assignmentId": "a1",
+                "sessionId": "s1",
+                "events": [{"type": "step_completed"}, {"type": "lesson_completed"}],
+            }
+        )
+        await forwarder._queue.join()
+
+        joined = " ".join(message for _level, message in logger.messages)
+        self.assertIn("status=422", joined)
+        self.assertIn("events=step_completed,lesson_completed", joined)
+        self.assertIn("dead-lettered", joined)
+
+        await forwarder.aclose()
+
     async def test_default_post_function_creates_private_http_client(self):
         calls = []
         created_clients = []

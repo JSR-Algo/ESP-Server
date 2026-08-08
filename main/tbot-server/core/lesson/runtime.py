@@ -5171,7 +5171,16 @@ class LessonRuntime:
                 f"storyBeat={_compact_json(story_beat) if story_beat is not None else '{}'}",
             )
         elif frame_type in ("lesson_prepare", "lesson_start", "lesson_stop"):
-            self._log("info", f"emit {frame_type} stepId={step_id or ''}")
+            # The wire sequence is the only ordering signal immune to log-timestamp
+            # resolution. The ESP log stamps whole seconds (one capture put 51 lines in
+            # a single second), so log position cannot express event order and any
+            # ordered verification of a capture is guessing without this (F-T53-15).
+            # The device side already reports it as seq=/acks=; this makes the server
+            # side correlatable too.
+            self._log(
+                "info",
+                f"emit {frame_type} stepId={step_id or ''} sequence={frame.get('sequence')}",
+            )
         payload = json.dumps(frame, ensure_ascii=False)
         if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
             await self._fail_oversized_frame(frame_type, step_id)
@@ -5983,6 +5992,7 @@ class LessonRuntime:
         if self.forwarder is None:
             return
         clean = {k: v for k, v in event.items() if v is not None}
+        self._log_runtime_event(clean)
         batch = {
             "assignmentId": self.assignment_id,
             "lessonId": self.lesson_id,
@@ -5992,6 +6002,36 @@ class LessonRuntime:
         }
         batch.update(self._trace_context)
         self.forwarder.enqueue(batch)
+
+    def _log_runtime_event(self, event: Dict[str, Any]) -> None:
+        """Record the runtime reaching a state, separately from forwarding it.
+
+        These are two different facts and only the runtime knows the first one:
+        "this runtime reached lesson_started" is device-side evidence, whereas
+        "the backend accepted a lesson_started event" is a statement about the
+        backend. `lesson_e2e_log_verify.py` relies on that distinction -- its
+        lesson_started / step_started / preload_ready checkpoints deliberately
+        REJECT any line containing "backend", so that a backend echo can never be
+        mistaken for the robot actually starting, while its *_posted checkpoints
+        require the "backend post ..." wording. Logging only the forward satisfied
+        the second family and silently broke the first.
+
+        So the state transition is logged here, by the component that owns it, with
+        no "backend" token; LessonEventForwarder logs the POST separately.
+        """
+        name = event.get("type") or event.get("event")
+        if not name:
+            return
+        parts = [
+            f"LessonRuntime event {name}",
+            f"assignmentId={self.assignment_id or ''}",
+            f"sessionId={self.session_id or ''}",
+        ]
+        for key in ("stepId", "result", "outcome", "state"):
+            value = event.get(key)
+            if value is not None:
+                parts.append(f"{key}={value}")
+        self._log("info", " ".join(parts))
 
     def _forward_phase(self, phase: str) -> None:
         if (
