@@ -112,20 +112,47 @@ tail -1 "${OUT_DIR}/sim-stdout.log"
 
 docker logs --since "${SINCE}" "${ESP_CONTAINER}" > "${OUT_DIR}/esp-server.log" 2>&1
 
+# Interleave by event time. The verifier walks a MONOTONIC cursor, so two files passed
+# separately are compared in file order, not event order, and the verdict changes with
+# the order they are given (F-T53-15). Both streams stamp milliseconds, so the merge is
+# decided by real time rather than by a tiebreak.
+python3 "${HERE}/merge_timeline.py" \
+  --server-log "${OUT_DIR}/esp-server.log" \
+  --device-timeline "${OUT_DIR}/timeline-serial.log" \
+  --out "${OUT_DIR}/timeline.log"
+
 VERIFY_RC=0
+python3 "${TBOT_ROOT}/robot/scripts/lesson_e2e_log_verify.py" \
+  --device-id "${DEVICE_MAC}" \
+  --device-alias "${DEVICE_UUID}" \
+  --log-file "${OUT_DIR}/timeline.log" \
+  > "${OUT_DIR}/lesson-e2e-report.json" 2>&1 || VERIFY_RC=$?
+
+# Kept for comparison only: the pre-merge, file-order score. If these two ever converge
+# it means the merge stopped mattering, which would itself be worth knowing.
 python3 "${TBOT_ROOT}/robot/scripts/lesson_e2e_log_verify.py" \
   --device-id "${DEVICE_MAC}" \
   --device-alias "${DEVICE_UUID}" \
   --log-file "${OUT_DIR}/esp-server.log" \
   --log-file "${OUT_DIR}/serial.log" \
-  > "${OUT_DIR}/lesson-e2e-report.json" 2>&1 || VERIFY_RC=$?
+  > "${OUT_DIR}/lesson-e2e-report.concatenated.json" 2>&1 || true
 
-python3 - "${OUT_DIR}/lesson-e2e-report.json" <<'PY'
+python3 - "${OUT_DIR}/lesson-e2e-report.json" "${OUT_DIR}/lesson-e2e-report.concatenated.json" <<'PY'
 import json, sys
-report = json.load(open(sys.argv[1]))
-checks = report["checks"]
-failed = [c for c in checks if not c["ok"]]
-print(f"[run] verifier {len(checks) - len(failed)}/{len(checks)}")
+
+
+def score(path):
+    checks = json.load(open(path))["checks"]
+    return checks, [c for c in checks if not c["ok"]]
+
+
+checks, failed = score(sys.argv[1])
+print(f"[run] verifier {len(checks) - len(failed)}/{len(checks)} (merged timeline)")
+try:
+    other, other_failed = score(sys.argv[2])
+    print(f"[run]          {len(other) - len(other_failed)}/{len(other)} (concatenated, for comparison)")
+except Exception:
+    pass
 for c in failed:
     print(f"       FAIL {c['name']}: {c['missing'][:90]}")
 PY

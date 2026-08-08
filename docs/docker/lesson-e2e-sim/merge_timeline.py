@@ -26,7 +26,30 @@ import argparse
 import re
 from pathlib import Path
 
-TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+# Two stamp shapes reach this script and they are NOT interchangeable:
+#   * the file sink  `YYYY-MM-DD HH:MM:SS` (config log_format_file), and
+#   * the stdout sink `YYMMDD HH:MM:SS.SSS` (config log_format) — which is what
+#     `docker logs` gives, and therefore what run-e2e.sh captures.
+# Matching only the first silently treated EVERY stdout line as "no timestamp of its
+# own", so the whole server log inherited one carried value and sorted as a single
+# block — the exact failure this script exists to prevent.
+ISO_TIMESTAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?")
+CONSOLE_TIMESTAMP = re.compile(r"^(\d{2})(\d{2})(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?")
+
+
+def _parse_timestamp(raw: str):
+    """Return (sortable 'YYYY-MM-DD HH:MM:SS.mmm', end offset) or (None, 0)."""
+    match = ISO_TIMESTAMP.match(raw)
+    if match:
+        year, month, day, hour, minute, second, frac = match.groups()
+    else:
+        match = CONSOLE_TIMESTAMP.match(raw)
+        if not match:
+            return None, 0
+        yy, month, day, hour, minute, second, frac = match.groups()
+        year = f"20{yy}"
+    millis = (frac or "0").ljust(3, "0")[:3]
+    return f"{year}-{month}-{day} {hour}:{minute}:{second}.{millis}", match.end()
 
 WIRE_SEQUENCE_PATTERNS = (
     re.compile(r'"sequence"\s*:\s*(\d+)'),
@@ -53,10 +76,10 @@ def read_stamped(path: Path, strip_prefix: bool) -> list[tuple[str, int, str]]:
     out: list[tuple[str, int, str]] = []
     last = ""
     for index, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines()):
-        match = TIMESTAMP.match(raw)
-        if match:
-            last = match.group(1).replace("T", " ")
-            line = raw[match.end():].lstrip() if strip_prefix else raw
+        stamp, end = _parse_timestamp(raw)
+        if stamp is not None:
+            last = stamp
+            line = raw[end:].lstrip() if strip_prefix else raw
         else:
             # No timestamp of its own: it belongs to whatever was logged last.
             line = raw
@@ -76,17 +99,18 @@ def main(argv: list[str] | None = None) -> int:
     # sees byte-faithful firmware serial lines.
     device = read_stamped(Path(args.device_timeline), strip_prefix=True)
 
-    # Ordering within a shared timestamp is the whole problem: both logs stamp whole
-    # seconds, so a naive (timestamp, ordinal) sort ZIPS the two files by line number --
-    # device line 12 lands beside server line 12 regardless of when either happened.
-    # That is what put the device's `serial RX lesson_prepare` ahead of the server's
-    # manifest fetch and broke the verifier's ordered cursor.
+    # Both streams now stamp MILLISECONDS (server via `log.log_format` in the sim
+    # config, device via the simulator's --timeline-log), so the timestamp itself
+    # carries the ordering and dominates this key. That is the difference from the
+    # session-6 attempt, where whole-second stamps left the true order unrecorded and
+    # the tiebreak below decided everything -- which is why merging reshuffled the
+    # verdict instead of converging it.
     #
-    # The lesson wire sequence is the reliable tiebreak: frames carry a monotonic
-    # `sequence`, the server logs it on emit and the device echoes it as seq=/acks=.
-    # Lines naming no sequence inherit the last one seen, so setup lines stay ahead of
-    # frame 1 and per-step render lines stay with their step. Within one sequence the
-    # server comes first: it emits, then the device receives and acks.
+    # The wire sequence remains the tiebreak WITHIN one millisecond: frames carry a
+    # monotonic `sequence`, the server logs it on emit and the device echoes it as
+    # seq=/acks=. Lines naming no sequence inherit the last one seen, so setup lines
+    # stay ahead of frame 1 and per-step render lines stay with their step. Within one
+    # sequence the server comes first: it emits, then the device receives and acks.
     def keyed(rows, source):
         out = []
         carried = -1

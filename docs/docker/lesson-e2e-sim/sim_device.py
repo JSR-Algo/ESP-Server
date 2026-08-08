@@ -85,8 +85,15 @@ class SerialLog:
     def _stamp(self, line: str) -> None:
         if self._timeline is None:
             return
+        # MILLISECONDS, not seconds. A whole lesson fits in a handful of seconds and one
+        # busy second held 51 server lines, so a second-resolution stamp cannot order the
+        # two streams at all and the merge falls back to tie-breaking — which is what
+        # made the merged verdict shuffle rather than converge (session 6). The ESP
+        # server is configured to millisecond stamps for the same reason.
+        now = time.time()
         self._timeline.write(
-            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + " " + line + "\n"
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+            + f".{int((now % 1) * 1000):03d} {line}\n"
         )
         self._timeline.flush()
 
