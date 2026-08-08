@@ -214,6 +214,43 @@ def inject_child_response(args, device_id: str, text: str) -> bool:
     return False
 
 
+async def answer_interactive_step(args, word: str, step_id) -> bool:
+    """Answer an interactive step, retrying until the runtime's window is actually open.
+
+    A single fixed pause is not enough. `on_child_response` returns ``handled=false``
+    whenever the response window is not open yet, and how long that takes is NOT a
+    constant of the lesson: with a voice provider present, the Google Live path defers
+    the window (`lesson_child_response_window_open delay_sec=...`) so the robot finishes
+    speaking the prompt before the mic opens. A simulator that answers once, at a fixed
+    offset, races that delay and silently loses the step — the runtime then reprompts,
+    then PAUSES the lesson (`child response inactive; pausing lesson`), and every
+    downstream checkpoint disappears.
+
+    Retrying is also the higher-fidelity behaviour: a real child keeps trying until the
+    robot is listening. The retry loop is what makes the interactive path robust to the
+    provider's prompt-guard delay instead of tuned to one particular value of it.
+    """
+    loop = asyncio.get_running_loop()
+    await asyncio.sleep(args.child_response_delay)
+    deadline = time.monotonic() + max(args.child_response_timeout, 0.0)
+    attempt = 0
+    while True:
+        attempt += 1
+        handled = await loop.run_in_executor(
+            None, inject_child_response, args, args.device_id, word
+        )
+        if handled:
+            if attempt > 1:
+                print(
+                    f"[sim] child response for {step_id} accepted on attempt {attempt}",
+                    flush=True,
+                )
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(args.child_response_retry_interval)
+
+
 async def run(args: argparse.Namespace) -> int:
     serial = SerialLog(
         Path(args.serial_log),
@@ -347,9 +384,8 @@ async def run(args: argparse.Namespace) -> int:
                         f"LessonRuntime child response window opened stepId="
                         f"{frame.get('stepId')} listening=true"
                     )
-                    await asyncio.sleep(args.child_response_delay)
-                    handled = await asyncio.get_running_loop().run_in_executor(
-                        None, inject_child_response, args, args.device_id, interactive_word
+                    handled = await answer_interactive_step(
+                        args, interactive_word, frame.get("stepId")
                     )
                     if handled:
                         serial.raw(
@@ -426,8 +462,24 @@ def main(argv: list[str] | None = None) -> int:
         "--child-response-delay",
         type=float,
         default=0.4,
-        help="Pause before the simulated child answers an interactive step. Keep it "
-        "non-zero: an instant reply can beat the runtime's response window open.",
+        help="Pause before the simulated child's FIRST answer attempt on an interactive "
+        "step. Keep it non-zero: an instant reply can beat the runtime's response "
+        "window open.",
+    )
+    parser.add_argument(
+        "--child-response-timeout",
+        type=float,
+        default=20.0,
+        help="Keep re-answering an interactive step until the runtime accepts it. The "
+        "response window opens on a provider-dependent delay (Google Live defers it "
+        "past the spoken prompt), so a single fixed-offset answer races it and the "
+        "lesson pauses. Must stay under the runtime's own inactivity timeout.",
+    )
+    parser.add_argument(
+        "--child-response-retry-interval",
+        type=float,
+        default=1.0,
+        help="Pause between child-response attempts while the window is not yet open.",
     )
     parser.add_argument(
         "--frame-dump",
