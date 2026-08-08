@@ -15888,3 +15888,109 @@ def test_unbridged_second_session_is_still_a_conflict():
     )
     check = by_name(report)["session_consistent"]
     assert not check["ok"], check
+
+
+def _manifest_with_classes() -> str:
+    return (
+        "LessonRuntime-INFO-lesson manifest fetched assignmentId=a1 lessonId=lesson-a "
+        "stepCount=3 manifestSteps="
+        + json.dumps(
+            {
+                "steps": [
+                    {"id": "s1", "order": 1, "completionClass": "passive"},
+                    {"id": "s2", "order": 2, "completionClass": "interactive"},
+                    {"id": "s3", "order": 3, "completionClass": "passive"},
+                ]
+            },
+            separators=(",", ":"),
+        )
+    )
+
+
+def test_passive_steps_are_completed_by_their_render_ack_not_by_progress():
+    """A passive step never sends step_completed — the runtime documents that.
+
+    `runtime.py`: a passive step's *"FIRMWARE NEVER emits a step_completed progress for
+    it. It AUTO-ADVANCES once the firmware acks the lesson_step"*. Requiring robot
+    progress for every manifest step therefore demands evidence the firmware is
+    specified never to produce, so the check could not pass for any correct run
+    (F-T53-16). A passive step is completed by its render ack; an interactive one still
+    has to report progress.
+    """
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        _manifest_with_classes(),
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s1 sequence=3 assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s1 acks=3 seq=3 rendered=true",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s2 sequence=4 assignmentId=a1 sessionId=s-1 media=sd://x/b.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s2 acks=4 seq=4 rendered=true",
+        "serial TX lesson_progress step_completed stepId=s2 result=success acks=4 recognizedText=barn",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s3 sequence=5 assignmentId=a1 sessionId=s-1 media=sd://x/c.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s3 acks=5 seq=5 rendered=true",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_manifest_step_ids"]
+    assert check["ok"], check
+
+
+def test_an_interactive_step_with_no_progress_is_still_incomplete():
+    """The guarantee that must survive: a step the child had to answer, and didn't,
+    is NOT completed by its render ack."""
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        _manifest_with_classes(),
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s1 sequence=3 assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s1 acks=3 seq=3 rendered=true",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s2 sequence=4 assignmentId=a1 sessionId=s-1 media=sd://x/b.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s2 acks=4 seq=4 rendered=true",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s3 sequence=5 assignmentId=a1 sessionId=s-1 media=sd://x/c.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s3 acks=5 seq=5 rendered=true",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_manifest_step_ids"]
+    assert not check["ok"], check
+
+
+def test_interactive_step_is_completed_by_an_accepted_child_response():
+    """An interactive step completes when the child's answer is ACCEPTED.
+
+    That is the runtime's own record (`interactive child response accepted stepId=…`) of
+    the condition the step was waiting on, and it is what actually advances the lesson.
+    Requiring a device `lesson_progress` frame *instead* means the check can only pass on
+    hardware, which leaves the simulated gate unable to verify step completion at all
+    (F-T53-16 / F-T53-21).
+    """
+    module = load_module()
+    lines = [
+        "I (0) Application: TBOT firmware boot complete",
+        "I (0) WiFi: connected ssid=x ip=127.0.0.1",
+        f"websocket hello device_id={DEVICE_MAC} session=s-1",
+        'voice intent start_lesson text="bat dau bai hoc" handled=true',
+        _manifest_with_classes(),
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s1 sequence=3 assignmentId=a1 sessionId=s-1 media=sd://x/a.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s1 acks=3 seq=3 rendered=true",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s2 sequence=4 assignmentId=a1 sessionId=s-1 media=sd://x/b.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s2 acks=4 seq=4 rendered=true",
+        # Carries WHAT the child said: the matcher requires observable input, so an
+        # "accepted" line with nothing behind it cannot complete a step.
+        "serial interactive child response accepted stepId=s2 recognizedText=barn",
+        "LessonRuntime-INFO-emit lesson_step type=lesson_step stepId=s3 sequence=5 assignmentId=a1 sessionId=s-1 media=sd://x/c.poster",
+        "serial TX lesson_ack lesson_step assignmentId=a1 sessionId=s-1 stepId=s3 acks=5 seq=5 rendered=true",
+    ]
+    report = module.evaluate_lesson_logs(
+        lines, device_id=DEVICE_MAC, order_by_wire_sequence=True
+    )
+    check = by_name(report)["lesson_manifest_step_ids"]
+    assert check["ok"], check

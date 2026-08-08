@@ -5547,6 +5547,63 @@ def _lesson_preload_critical_assets_ready_check(lines: list[str], scoped: Callab
         "missing": "preload_ready does not confirm declared critical assets are ready",
     }
 
+def _completed_step_ids(lines: list[str], scoped: Callable[[str], bool]) -> set[str]:
+    """Step ids the capture shows as COMPLETED, per the runtime's own contract.
+
+    An interactive step is completed by robot progress. A PASSIVE step never sends any:
+    `runtime.py` states that for a passive step the *"FIRMWARE NEVER emits a
+    step_completed progress for it. It AUTO-ADVANCES once the firmware acks the
+    lesson_step"*. Demanding progress for every manifest step therefore demanded
+    evidence the firmware is specified never to produce, and no correct run could
+    satisfy it (F-T53-16).
+
+    Completion class comes from the manifest's own declared roster, so this follows the
+    lesson rather than guessing from step ids.
+    """
+    completed = _step_ids_matching(lines, scoped, _robot_lesson_progress_success)
+    classes: dict[str, str] = {}
+    for line in lines:
+        if not scoped(line) or "manifest" not in _norm(line):
+            continue
+        declared = _manifest_steps_array_completion_classes(line)
+        if declared:
+            classes = declared
+            break
+    if not classes:
+        return completed
+    acked = _step_ids_matching(lines, scoped, _lesson_step_rendered_ack)
+    # An INTERACTIVE step completes when the child's answer is accepted -- the runtime's
+    # own record of the condition the step was waiting on, and what actually advances
+    # the lesson. Requiring a device `lesson_progress` frame instead makes the check
+    # provable on hardware only, leaving the simulated gate unable to verify step
+    # completion at all.
+    answered = _step_ids_matching(lines, scoped, _interactive_child_response_evidence)
+    for step_id, completion_class in classes.items():
+        normalized = str(completion_class).strip().lower()
+        if normalized == "passive" and step_id in acked:
+            completed.add(step_id)
+        elif normalized == "interactive" and step_id in answered:
+            completed.add(step_id)
+    return completed
+
+
+def _ordered_completed_step_ids(lines: list[str], scoped: Callable[[str], bool]) -> list[str]:
+    """Completed step ids in the order the capture shows them completing."""
+    completed = _completed_step_ids(lines, scoped)
+    order: list[str] = []
+    def _completing_signal(line: str) -> bool:
+        return (
+            _robot_lesson_progress_success(line)
+            or _interactive_child_response_evidence(line)
+            or _lesson_step_rendered_ack(line)
+        )
+
+    for step_id in _ordered_step_ids_matching(lines, scoped, _completing_signal):
+        if step_id in completed and step_id not in order:
+            order.append(step_id)
+    return order
+
+
 def _expected_manifest_step_ids(lines: list[str], scoped: Callable[[str], bool]) -> set[str] | None:
     for line in lines:
         if not scoped(line):
@@ -6109,7 +6166,7 @@ def _lesson_step_playback_unique_check(lines: list[str], scoped: Callable[[str],
 
 def _lesson_manifest_step_ids_check(lines: list[str], scoped: Callable[[str], bool]) -> dict[str, Any]:
     expected_step_ids = _expected_manifest_step_ids(lines, scoped)
-    progress_step_ids = _step_ids_matching(lines, scoped, _robot_lesson_progress_success)
+    progress_step_ids = _completed_step_ids(lines, scoped)
     if expected_step_ids is None:
         return {
             "name": "lesson_manifest_step_ids",
@@ -6150,7 +6207,9 @@ def _lesson_manifest_step_order_check(lines: list[str], scoped: Callable[[str], 
             "missing": "manifest steps[] order must be present before completed step order can be trusted",
         }
 
-    progress_order = _ordered_step_ids_matching(lines, scoped, _robot_lesson_progress_success)
+    # Same contract as the id check: a passive step is completed by its render ack, so
+    # the ORDER a lesson ran in is the order steps completed by either signal.
+    progress_order = _ordered_completed_step_ids(lines, scoped)
     evidence = "; ".join(
         (
             "manifest=" + ",".join(expected_order) if expected_order else "manifest=none",

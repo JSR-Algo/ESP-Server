@@ -34,6 +34,11 @@ except Exception:  # pragma: no cover
     httpx = None  # type: ignore
 
 
+# Events that ride the lesson_progress wire family (plan §6.4.2). Terminal and
+# lifecycle events are deliberately NOT here.
+LESSON_PROGRESS_FAMILY = frozenset({"step_started", "step_completed"})
+
+
 class LessonEventForwarder:
     """Dedicated outbound path for lesson progress events.
 
@@ -209,6 +214,16 @@ class LessonEventForwarder:
             if not isinstance(event, dict):
                 continue
             name = event.get("type") or event.get("event") or "lesson_event"
+            # Step progress goes out as the lesson_progress FAMILY, and the shared
+            # checkpoint contract keys on the family rather than the individual type --
+            # so logging only `backend post step_completed` left a successfully
+            # persisted progress post unrecognisable AS progress. The specific type is
+            # preserved below as `event=`, so naming the family loses nothing. Terminal
+            # events keep their own names: they are not progress, and other checkpoints
+            # match them directly.
+            if name in LESSON_PROGRESS_FAMILY:
+                event = {**event, "event": event.get("event") or name}
+                name = "lesson_progress"
             parts = [
                 f"backend post {name}",
                 f"assignmentId={assignment_id}",

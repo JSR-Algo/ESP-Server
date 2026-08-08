@@ -42,6 +42,11 @@ class _Logger:
             raise RuntimeError("warning failed")
         self.messages.append(("warning", message))
 
+    def info(self, message):
+        # The real logger has one; without it every info() raised AttributeError into
+        # `_log`'s swallow-all guard, so the success path looked silent to every test.
+        self.messages.append(("info", message))
+
 
 class _Client:
     def __init__(self, *, fail_close=False):
@@ -194,6 +199,47 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("re-enqueued attempt=1/1", logger.messages[0][1])
         self.assertIn("session_id=s1", logger.messages[0][1])
         self.assertIn("assignment_id=a1", logger.messages[0][1])
+
+        await forwarder.aclose()
+
+    async def test_progress_events_are_logged_under_their_wire_family(self):
+        """Step progress is posted as the lesson_progress FAMILY, and must read that way.
+
+        The E2E contract keys the posted-progress checkpoint off the family, not the
+        individual event type, so logging only `backend post step_completed` left a
+        successfully persisted progress post unrecognisable as progress. The specific
+        type is preserved as `event=` so nothing is lost.
+        """
+        logger = _Logger()
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            return {"accepted": 2}
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            post_fn=_post,
+            logger=logger,
+        )
+
+        forwarder.enqueue(
+            {
+                "assignmentId": "a1",
+                "sessionId": "s1",
+                "events": [
+                    {"type": "step_completed", "stepId": "s4", "result": "success"},
+                    {"type": "lesson_completed"},
+                ],
+            }
+        )
+        await forwarder._queue.join()
+
+        joined = " ".join(message for _level, message in logger.messages)
+        self.assertIn("backend post lesson_progress", joined)
+        self.assertIn("event=step_completed", joined)
+        # A terminal event is NOT progress and keeps its own name -- other checkpoints
+        # match on it directly.
+        self.assertIn("backend post lesson_completed", joined)
 
         await forwarder.aclose()
 
