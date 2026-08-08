@@ -4845,6 +4845,260 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stepId=s4", messages[prompt_index])
         self.assertIn("handoff=1", messages[prompt_index])
 
+    async def test_completion_reads_back_the_assignment_state_it_caused(self):
+        """The robot must observe the terminal state, not just report it.
+
+        The runtime pulls the assignment on connect and forwards the completion
+        afterwards, but never re-reads the state it just caused -- so the backend row
+        says COMPLETED while nothing on the device can show it, and the loop is never
+        closed from the robot's side. Same on hardware, so this is not a simulation
+        artefact.
+        """
+        import config.manage_api_client as mac
+
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        read_backs = []
+
+        # Mirrors the REAL signature: get_current_assignment returns the assignment
+        # dict itself, not a (payload, etag) tuple. An earlier version of this stub
+        # returned a tuple, which made the test pass against an interface that does not
+        # exist while the production path raised ValueError on every completion.
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            read_backs.append(device_id)
+            return {
+                "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                "state": "COMPLETED",
+            }
+
+        # A forwarder that carries the backend handle, as the real one does: the
+        # read-back reaches the backend through the same base_url/device/token the
+        # completion was forwarded to, rather than opening a second source of truth.
+        forwarder = _FakeForwarder()
+        forwarder.base_url = "http://backend.test/v1"
+        forwarder.device_id = "backend-device-1"
+        forwarder.token = "device-token"
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(
+            conn=conn, manifest=_build_multistep_manifest(), forwarder=forwarder
+        )
+
+        saved = mac.get_current_assignment
+        mac.get_current_assignment = _get_assignment
+        try:
+            # A NATURAL completion: every step answered, so the runtime emits
+            # lesson_stop itself. `stop()` is the administrative path and projects
+            # lesson_abandoned, which is a different terminal event.
+            await self._drive_to_running(conn, rt)
+            await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+            await rt.on_lesson_progress(
+                _progress(4, {"event": "step_completed", "stepType": "model",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s4")
+            )
+            await rt.on_lesson_ack(_ack(4, 5, step_id="s5"))
+            await rt.on_lesson_progress(
+                _progress(6, {"event": "step_completed", "stepType": "listen",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s5")
+            )
+            await rt.on_lesson_ack(_ack(5, 7))
+            await rt.drain_terminal_readback()
+        finally:
+            mac.get_current_assignment = saved
+
+        self.assertEqual(rt.state, "COMPLETED")
+        self.assertTrue(read_backs, "runtime never re-read assignment/current")
+        line = next(
+            (m for _l, m in events
+             if "assignment/current read-back completion observed" in m
+             and "state=COMPLETED" in m),
+            None,
+        )
+        self.assertIsNotNone(line, "terminal assignment state was never logged")
+
+    async def test_read_back_warns_when_the_completion_never_landed(self):
+        """The read-back's real job: catch a completion the backend never recorded.
+
+        F-T53-17 is exactly this failure — a rate-limited terminal batch was discarded,
+        the robot finished the lesson, and the assignment sat RUNNING forever with
+        nothing anywhere saying so. After a successful completion the slot is released,
+        so `assignment/current` answers "no active assignment"; an assignment that is
+        STILL ACTIVE after we completed it means our completion did not land, and that
+        must be loud rather than logged as a routine observation.
+        """
+        import config.manage_api_client as mac
+
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+            def warning(self, message, *args, **kwargs):
+                events.append(("warning", str(message)))
+                return None
+
+        forwarder = _FakeForwarder()
+        forwarder.base_url = "http://backend.test/v1"
+        forwarder.device_id = "backend-device-1"
+        forwarder.token = "device-token"
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            # Still active: the completion never reached the backend.
+            return {
+                "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                "state": "RUNNING",
+            }
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(
+            conn=conn, manifest=_build_multistep_manifest(), forwarder=forwarder
+        )
+
+        saved = mac.get_current_assignment
+        mac.get_current_assignment = _get_assignment
+        try:
+            await self._drive_to_running(conn, rt)
+            await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+            await rt.on_lesson_progress(
+                _progress(4, {"event": "step_completed", "stepType": "model",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s4")
+            )
+            await rt.on_lesson_ack(_ack(4, 5, step_id="s5"))
+            await rt.on_lesson_progress(
+                _progress(6, {"event": "step_completed", "stepType": "listen",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s5")
+            )
+            await rt.on_lesson_ack(_ack(5, 7))
+            await rt.drain_terminal_readback()
+        finally:
+            mac.get_current_assignment = saved
+
+        warnings = [m for level, m in events if level == "warning"]
+        self.assertTrue(
+            any("completion not observed" in m for m in warnings),
+            f"a lost completion was not surfaced; warnings={warnings}",
+        )
+
+    async def test_completion_read_back_waits_for_its_own_forward_to_land(self):
+        """Reading back immediately races the completion the robot just sent.
+
+        The forward is queued and drained asynchronously, so a read-back fired the
+        instant the runtime reaches COMPLETED reaches the backend BEFORE its own
+        completion does, and faithfully reports `state=RUNNING` -- worse than not
+        reading back at all, because it looks like the completion was rejected.
+        Observed on a real simulated run.
+        """
+        import config.manage_api_client as mac
+
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        # The backend only reports COMPLETED once the completion has been drained --
+        # exactly the ordering the production forwarder imposes.
+        forwarder = _FakeForwarder()
+        forwarder.base_url = "http://backend.test/v1"
+        forwarder.device_id = "backend-device-1"
+        forwarder.token = "device-token"
+        drained = {"done": False}
+
+        async def _drain():
+            drained["done"] = True
+
+        forwarder.drain = _drain
+
+        async def _get_assignment(client, base_url, device_id, *, token=None):
+            return {
+                "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+                "state": "COMPLETED" if drained["done"] else "RUNNING",
+            }
+
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(
+            conn=conn, manifest=_build_multistep_manifest(), forwarder=forwarder
+        )
+
+        saved = mac.get_current_assignment
+        mac.get_current_assignment = _get_assignment
+        try:
+            await self._drive_to_running(conn, rt)
+            await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+            await rt.on_lesson_progress(
+                _progress(4, {"event": "step_completed", "stepType": "model",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s4")
+            )
+            await rt.on_lesson_ack(_ack(4, 5, step_id="s5"))
+            await rt.on_lesson_progress(
+                _progress(6, {"event": "step_completed", "stepType": "listen",
+                              "result": "success", "detail": {"recognizedText": "barn"}}, step_id="s5")
+            )
+            await rt.on_lesson_ack(_ack(5, 7))
+            await rt.drain_terminal_readback()
+        finally:
+            mac.get_current_assignment = saved
+
+        states = [m for _l, m in events if "assignment/current read-back" in m]
+        self.assertTrue(states, "no read-back was logged")
+        self.assertIn("completion observed", states[-1])
+        self.assertIn("state=COMPLETED", states[-1])
+
+    async def test_lesson_session_is_joinable_to_the_connection_session(self):
+        """One run carries two session identities and nothing recorded the join.
+
+        The hello ack hands the device the CONNECTION session; a lesson run then mints
+        its own identity on purpose ("A lesson run owns its protocol/event identity ...
+        must not inherit the conversational websocket session"). Both are correct, but
+        with no line naming the pair, neither an operator nor the E2E gate can tell that
+        two ids describe one run — a capture reads as evidence from two sessions.
+        """
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        conn = _FakeConn(session_id="conn-session-abc")
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(conn=conn)
+
+        bridge = next(
+            (m for _l, m in events if "lesson session bound" in m),
+            None,
+        )
+        self.assertIsNotNone(bridge, "runtime never recorded the session join")
+        self.assertIn(f"sessionId={rt.session_id}", bridge)
+        self.assertIn("connectionSessionId=conn-session-abc", bridge)
+
     async def test_emitted_frame_logs_carry_the_shared_checkpoint_contract(self):
         """Every emitted frame must log the facts the E2E gate reads off it.
 

@@ -1106,6 +1106,17 @@ class LessonRuntime:
         # because a reconnect or republish starts a fresh sequence namespace.
         self.session_id = str(uuid.uuid4())
         self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
+        # Record the JOIN between the two identities this run carries. The hello ack
+        # handed the device the connection session; the line above deliberately mints a
+        # separate lesson identity. Both are correct, but without one line naming the
+        # pair nothing downstream can tell that two ids describe one run -- an operator
+        # reading a capture, or the E2E gate, sees evidence from "two sessions".
+        self._log(
+            "info",
+            "lesson session bound "
+            f"sessionId={self.session_id} "
+            f"connectionSessionId={getattr(conn, 'session_id', '') or ''}",
+        )
         self.manifest = manifest
         self.manifest_checksum = manifest_checksum
         # L3 P3 — the device's advertised renderer-capability SET (forward-modelled
@@ -3687,6 +3698,7 @@ class LessonRuntime:
                 }
             )
             await self._notify_lesson_terminal("lesson_completed")
+            self._start_terminal_readback()
 
     async def _continue_after_step_visuals(
         self,
@@ -6061,6 +6073,109 @@ class LessonRuntime:
         }
         batch.update(self._trace_context)
         self.forwarder.enqueue(batch)
+
+    def _start_terminal_readback(self) -> None:
+        """Re-read the assignment after completing it, and record what the backend says.
+
+        Reporting a completion and OBSERVING it are two different facts, and until now
+        the runtime only ever produced the first. The backend row could read COMPLETED
+        while nothing on the device could show it, which leaves the loop open exactly
+        where it matters -- a completion that never persisted looks identical to one
+        that did.
+
+        Fire-and-forget on purpose: the lesson is already complete and the child is
+        done, so a slow or failing backend must never delay or fail that. Tests await
+        `drain_terminal_readback()` to make it deterministic.
+        """
+        forwarder = self.forwarder
+        base_url = getattr(forwarder, "base_url", None)
+        device_id = getattr(forwarder, "device_id", None)
+        if not base_url or not device_id:
+            return
+        try:
+            self._terminal_readback_task = asyncio.create_task(
+                self._read_back_assignment_state(
+                    base_url, device_id, getattr(forwarder, "token", None)
+                )
+            )
+        except RuntimeError:  # pragma: no cover - no running loop (sync teardown)
+            self._terminal_readback_task = None
+
+    async def drain_terminal_readback(self) -> None:
+        """Await the post-completion read-back, if one was started."""
+        task = getattr(self, "_terminal_readback_task", None)
+        if task is not None:
+            await task
+
+    async def _read_back_assignment_state(self, base_url, device_id, token) -> None:
+        from config import manage_api_client as backend_api
+
+        # Wait for our OWN completion to land first. Forwarding is queued, so a
+        # read-back fired the instant the runtime reaches COMPLETED overtakes the
+        # completion it is trying to observe and faithfully reports the pre-completion
+        # state -- which reads as "the backend rejected it".
+        drain = getattr(self.forwarder, "drain", None)
+        if callable(drain):
+            try:
+                await drain()
+            except Exception:  # a stalled queue must not strand the read-back
+                pass
+
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Returns the assignment dict itself (or None) -- NOT a (payload, etag)
+                # tuple. Unpacking it raises ValueError, which the guard below then
+                # swallowed into a bare type name; that is exactly why the message is
+                # logged too.
+                assignment = await backend_api.get_current_assignment(
+                    client, base_url, device_id, token=token
+                )
+        except Exception as exc:  # never let a read-back disturb a finished lesson
+            self._log(
+                "warning",
+                f"assignment/current read-back failed: {type(exc).__name__}: {exc}",
+            )
+            return
+        if not isinstance(assignment, dict):
+            # The slot was released, which is what a recorded completion looks like:
+            # `assignment/current` only ever reports an ACTIVE assignment, so a
+            # completed one is absent by design (it cannot report state=COMPLETED).
+            self._log(
+                "info",
+                "assignment/current read-back completion observed: no active assignment",
+            )
+            return
+        state = str(assignment.get("state", "") or "")
+        assignment_id = assignment.get("assignmentId", "")
+        if state.upper() in ("COMPLETED", "CANCELLED", "FAILED"):
+            # A backend that reports the terminal state directly is the clearest
+            # possible confirmation.
+            self._log(
+                "info",
+                "assignment/current read-back completion observed: "
+                f"assignmentId={assignment_id} state={state}",
+            )
+            return
+        if assignment_id and assignment_id != self.assignment_id:
+            # A DIFFERENT assignment is already active -- ours is no longer the current
+            # one, so our completion did land.
+            self._log(
+                "info",
+                "assignment/current read-back completion observed: "
+                f"device moved on to assignmentId={assignment_id} state={state}",
+            )
+            return
+        # Our own assignment is STILL ACTIVE after we completed it. The lesson ran to
+        # the end on the robot and the backend does not know -- the exact shape of
+        # F-T53-17, where a rate-limited terminal batch was discarded and the
+        # assignment sat RUNNING with nothing anywhere saying so.
+        self._log(
+            "warning",
+            "assignment/current read-back completion not observed: "
+            f"assignmentId={assignment_id} still active state={state}",
+        )
 
     def _log_runtime_event(self, event: Dict[str, Any]) -> None:
         """Record the runtime reaching a state, separately from forwarding it.

@@ -2607,6 +2607,27 @@ def _session_ids_from_evidence(evidence: str) -> set[str]:
         session_ids.update(pattern.findall(evidence))
     return session_ids
 
+SESSION_BRIDGE_PATTERN = re.compile(
+    r"lesson session bound\s+sessionId=(\S+)\s+connectionSessionId=(\S+)",
+    re.IGNORECASE,
+)
+
+
+def _collapse_bridged_sessions(session_ids: set[str], lines: list[str]) -> set[str]:
+    """Fold each declared (lesson, connection) pair down to the lesson identity."""
+    aliases: dict[str, str] = {}
+    for line in lines:
+        match = SESSION_BRIDGE_PATTERN.search(line)
+        if not match:
+            continue
+        lesson_session, connection_session = match.group(1), match.group(2)
+        if lesson_session and connection_session:
+            aliases[_norm(connection_session)] = lesson_session
+    if not aliases:
+        return session_ids
+    return {aliases.get(_norm(session), session) for session in session_ids}
+
+
 def _session_consistency_check(
     checks: list[dict[str, Any]],
     lines: list[str] | None = None,
@@ -2639,6 +2660,14 @@ def _session_consistency_check(
             if not any(predicate(line) for predicate in session_predicates):
                 continue
             session_ids.update(_session_ids_from_evidence(line))
+
+    # Collapse identities the runtime has explicitly JOINED. A healthy capture always
+    # carries two: the hello ack hands the device the connection session, and a lesson
+    # run mints its own on top of it by design. This check exists to catch evidence from
+    # genuinely different runs bleeding together, not to fail the normal case -- so a
+    # recorded join means one run. An UNdeclared second session is still a conflict.
+    if lines is not None:
+        session_ids = _collapse_bridged_sessions(session_ids, lines)
 
     if len(session_ids) <= 1:
         evidence = "sessionIds=" + ",".join(sorted(session_ids)) if session_ids else "no sessionId evidence"
