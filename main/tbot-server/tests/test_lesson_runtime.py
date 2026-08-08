@@ -33,6 +33,7 @@ from core.lesson.runtime import (
     _child_response_coaching_prompt,
     _child_response_success_prompt,
     _classify_child_response_intent,
+    _manifest_steps_log_summary,
 )
 from core.lesson.sample import SampleAssetCache
 from core.lesson.sd_pack_sync import request_sd_pack_sync
@@ -4843,6 +4844,82 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(prompt_index, lesson_step_index)
         self.assertIn("stepId=s4", messages[prompt_index])
         self.assertIn("handoff=1", messages[prompt_index])
+
+    async def test_emitted_frame_logs_carry_the_shared_checkpoint_contract(self):
+        """Every emitted frame must log the facts the E2E gate reads off it.
+
+        `type=<frame>` is what identifies a line as "the SERVER sent this frame". Without
+        it the only send-evidence in a capture is the DEVICE's `serial RX` line, which is
+        necessarily later, so an ordered verification credits the send to the receive and
+        every server-side event in between (preload_ready, lesson_started) falls behind
+        the cursor and reports as missing. `sequence=` is what pairs a step frame with the
+        ack that acknowledges it; `media=` records what the renderer was actually pointed
+        at, so a frame shipping a placeholder is distinguishable from a device that failed
+        to draw. All three were absent, and all three are load-bearing for T5.3/T5.4.
+        """
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        conn = _FakeConn()
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(conn=conn)
+
+        await self._drive_to_running(conn, rt)
+
+        messages = [message for _level, message in events]
+        prepare = next(m for m in messages if "emit lesson_prepare" in m)
+        self.assertIn("type=lesson_prepare", prepare)
+        self.assertIn("sequence=", prepare)
+
+        start = next(m for m in messages if "emit lesson_start" in m)
+        self.assertIn("type=lesson_start", start)
+
+        step = next(m for m in messages if "emit lesson_step" in m)
+        self.assertIn("type=lesson_step", step)
+        self.assertIn("sequence=", step)
+        self.assertIn("media=", step)
+        # Space-separated, never comma-joined: the contract scans for media URLs with a
+        # regex, and commas run two URLs together into one unmatchable token.
+        self.assertNotIn("media=none", step)
+        self.assertNotIn(",sd://", step)
+
+    async def test_manifest_fetch_log_declares_the_full_step_roster(self):
+        """`stepCount` says how many steps were served, not which ones.
+
+        Without the roster, "the robot completed every step" is indistinguishable from
+        "the robot completed nine of something" — a truncated or reordered manifest is
+        then undetectable downstream.
+        """
+        events = []
+
+        class _CapturingLogger(_DummyLogger):
+            def bind(self, **kwargs):
+                self.bound = kwargs
+                return self
+
+            def info(self, message, *args, **kwargs):
+                events.append(("info", str(message)))
+                return None
+
+        conn = _FakeConn()
+        conn.logger = _CapturingLogger()
+        rt = self._runtime(conn=conn)
+        await self._drive_to_running(conn, rt)
+
+        summary = _manifest_steps_log_summary(rt.manifest)
+        self.assertIn("steps", summary)
+        self.assertTrue(summary["steps"])
+        for step in summary["steps"]:
+            self.assertIn("id", step)
+            self.assertIn("order", step)
 
     async def test_child_response_window_log_includes_step_id_after_prompt_handoff(self):
         events = []
