@@ -540,14 +540,27 @@ def _normalize_assignment_payload(assignment):
 
 
 async def get_current_assignment(
-    client, base_url: str, device_id: str, *, token: Optional[str] = None
+    client,
+    base_url: str,
+    device_id: str,
+    *,
+    token: Optional[str] = None,
+    include_terminal: bool = False,
 ) -> Optional[Dict]:
     """S6 pull-on-connect — GET /v1/devices/:deviceId/assignment/current.
 
     Returns the ``data.assignment`` object (or ``None`` when the device has no
     active assignment). The authoritative offline-catch-up hand-off (ADR 0013 §A/§B).
+
+    ``include_terminal`` asks the backend to answer with the most recent TERMINAL
+    assignment when none is active. It exists for the post-completion read-back only:
+    a released slot and a LOST completion are indistinguishable otherwise. It must stay
+    off for pull-on-connect, which asks what to run next and must never be handed a
+    finished lesson.
     """
     url = f"{_lesson_base(base_url)}/devices/{device_id}/assignment/current"
+    if include_terminal:
+        url = f"{url}?includeTerminal=true"
     payload = await _lesson_request_with_retry(
         client, "GET", url, headers=_lesson_auth_headers(token)
     )

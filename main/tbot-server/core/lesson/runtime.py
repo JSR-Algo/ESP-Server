@@ -6130,7 +6130,7 @@ class LessonRuntime:
                 # swallowed into a bare type name; that is exactly why the message is
                 # logged too.
                 assignment = await backend_api.get_current_assignment(
-                    client, base_url, device_id, token=token
+                    client, base_url, device_id, token=token, include_terminal=True
                 )
         except Exception as exc:  # never let a read-back disturb a finished lesson
             self._log(

@@ -4873,8 +4873,12 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # dict itself, not a (payload, etag) tuple. An earlier version of this stub
         # returned a tuple, which made the test pass against an interface that does not
         # exist while the production path raised ValueError on every completion.
-        async def _get_assignment(client, base_url, device_id, *, token=None):
-            read_backs.append(device_id)
+        async def _get_assignment(client, base_url, device_id, *, token=None,
+                                  include_terminal=False):
+            # The read-back MUST opt in: without it the backend answers with the ACTIVE
+            # assignment only, which is null once the lesson completes -- so a recorded
+            # completion and a lost one look identical.
+            read_backs.append((device_id, include_terminal))
             return {
                 "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
                 "state": "COMPLETED",
@@ -4918,6 +4922,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rt.state, "COMPLETED")
         self.assertTrue(read_backs, "runtime never re-read assignment/current")
+        self.assertEqual(read_backs[0][1], True, "read-back did not ask for the terminal state")
         line = next(
             (m for _l, m in events
              if "assignment/current read-back completion observed" in m
@@ -4958,7 +4963,8 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         forwarder.device_id = "backend-device-1"
         forwarder.token = "device-token"
 
-        async def _get_assignment(client, base_url, device_id, *, token=None):
+        async def _get_assignment(client, base_url, device_id, *, token=None,
+                                  include_terminal=False):
             # Still active: the completion never reached the backend.
             return {
                 "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
@@ -5031,7 +5037,8 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         forwarder.drain = _drain
 
-        async def _get_assignment(client, base_url, device_id, *, token=None):
+        async def _get_assignment(client, base_url, device_id, *, token=None,
+                                  include_terminal=False):
             return {
                 "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
                 "state": "COMPLETED" if drained["done"] else "RUNNING",
