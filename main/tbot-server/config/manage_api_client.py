@@ -1,5 +1,6 @@
 # ruff: noqa: B904, N818, SIM105, SIM108, UP006, UP035, UP045
 import base64
+import logging
 import os
 import re
 from typing import Dict, Optional
@@ -80,11 +81,14 @@ class ManageApiClient:
     @classmethod
     async def _async_request(cls, method: str, endpoint: str, **kwargs) -> Dict:
         """Send single async HTTP request and handle response"""
-        # Ensure client created
-        client = await cls._ensure_async_client()
-        endpoint = endpoint.lstrip("/")
+        client = None
         response = None
+        primary_exception = None
+        cleanup_exception = None
         try:
+            # Ensure client created
+            client = await cls._ensure_async_client()
+            endpoint = endpoint.lstrip("/")
             response = await client.request(method, endpoint, **kwargs)
             response.raise_for_status()
 
@@ -100,16 +104,41 @@ class ManageApiClient:
 
             # Return success data
             return result.get("data") if result.get("code") == 0 else None
+        except BaseException as exc:
+            primary_exception = exc
+            raise
         finally:
             # EnsureResponsewas closed (even ifExceptionalso execute)
-            try:
-                if response is not None:
+            if response is not None:
+                try:
                     await response.aclose()
-            finally:
+                except BaseException as exc:
+                    if primary_exception is not None:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API response after primary exception"
+                        )
+                    elif cleanup_exception is None:
+                        cleanup_exception = exc
+                    else:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API response after another cleanup exception"
+                        )
+            if client is not None:
                 try:
                     await client.aclose()
-                except Exception:
-                    pass
+                except BaseException as exc:
+                    if primary_exception is not None:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API client after primary exception"
+                        )
+                    elif cleanup_exception is None:
+                        cleanup_exception = exc
+                    else:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API client after another cleanup exception"
+                        )
+            if primary_exception is None and cleanup_exception is not None:
+                raise cleanup_exception
 
     @classmethod
     def _should_retry(cls, exception: Exception) -> bool:

@@ -37,10 +37,11 @@ class _Response:
 
 
 class _RequestClient:
-    def __init__(self, responses):
+    def __init__(self, responses, *, close_error=None):
         self.responses = list(responses)
         self.calls = []
         self.closed = False
+        self.close_error = close_error
 
     async def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -51,6 +52,8 @@ class _RequestClient:
 
     async def aclose(self):
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _CloseClient:
@@ -179,6 +182,43 @@ async def test_async_request_success_and_business_error_paths(monkeypatch):
             await mac.ManageApiClient._async_request("GET", "status")
         assert response.closed is True
         assert installed_clients[-1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_request_propagates_client_close_failure_after_success(monkeypatch):
+    mac = _load_module()
+    response = _Response({"code": 0, "data": {"ok": True}})
+    client = _RequestClient([response], close_error=RuntimeError("close failed"))
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert response.closed is True
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_request_preserves_primary_exception_when_client_close_fails(monkeypatch, caplog):
+    mac = _load_module()
+    primary = mac.httpx.ConnectError("offline")
+    client = _RequestClient([primary], close_error=RuntimeError("close failed"))
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(mac.httpx.ConnectError, match="offline"):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert client.closed is True
+    assert "Failed to close manager API client after primary exception" in caplog.text
+    assert "close failed" in caplog.text
 
 
 def test_should_retry_only_transient_failures():
