@@ -26,7 +26,7 @@ class ManageApiClientCleanupTest(unittest.IsolatedAsyncioTestCase):
         self.ManageApiClient._async_clients = {}
         self.ManageApiClient._instance = None
 
-    async def test_safe_close_closes_clients_when_called_inside_running_loop(self):
+    async def test_safe_close_closes_legacy_clients_when_called_inside_running_loop(self):
         client = _DummyAsyncClient()
         self.ManageApiClient._async_clients = {"loop-1": client}
 

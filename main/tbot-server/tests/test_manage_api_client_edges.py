@@ -37,9 +37,11 @@ class _Response:
 
 
 class _RequestClient:
-    def __init__(self, responses):
+    def __init__(self, responses, *, close_error=None):
         self.responses = list(responses)
         self.calls = []
+        self.closed = False
+        self.close_error = close_error
 
     async def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -47,6 +49,11 @@ class _RequestClient:
         if isinstance(item, Exception):
             raise item
         return item
+
+    async def aclose(self):
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _CloseClient:
@@ -108,7 +115,7 @@ def test_client_initialization_validation_singleton_and_service_wrappers(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_ensure_async_client_builds_one_client_per_loop(monkeypatch):
+async def test_ensure_async_client_builds_a_fresh_client_per_request(monkeypatch):
     mac = _load_module()
     created = []
 
@@ -125,8 +132,8 @@ async def test_ensure_async_client_builds_one_client_per_loop(monkeypatch):
     first = await mac.ManageApiClient._ensure_async_client()
     second = await mac.ManageApiClient._ensure_async_client()
 
-    assert first is second
-    assert len(created) == 1
+    assert first is not second
+    assert len(created) == 2
     assert first.kwargs["base_url"] == "http://manager.test"
     assert first.kwargs["timeout"] == 9
     assert first.kwargs["headers"]["Authorization"] == "Bearer secret"
@@ -147,12 +154,14 @@ def test_ensure_async_client_rejects_sync_context():
 @pytest.mark.asyncio
 async def test_async_request_success_and_business_error_paths(monkeypatch):
     mac = _load_module()
+    installed_clients = []
 
     async def install_client(client):
         async def _ensure(cls):
             return client
 
         monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+        installed_clients.append(client)
 
     success = _Response({"code": 0, "data": {"value": 3}})
     client = _RequestClient([success])
@@ -160,6 +169,7 @@ async def test_async_request_success_and_business_error_paths(monkeypatch):
     assert await mac.ManageApiClient._async_request("POST", "/demo", json={"x": 1}) == {"value": 3}
     assert client.calls == [("POST", "demo", {"json": {"x": 1}})]
     assert success.closed is True
+    assert installed_clients[-1].closed is True
 
     for payload, expected in (
         ({"code": 10041, "msg": "missing"}, mac.DeviceNotFoundException),
@@ -171,6 +181,61 @@ async def test_async_request_success_and_business_error_paths(monkeypatch):
         with pytest.raises(expected):
             await mac.ManageApiClient._async_request("GET", "status")
         assert response.closed is True
+        assert installed_clients[-1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_request_propagates_client_close_failure_after_success(monkeypatch):
+    mac = _load_module()
+    response = _Response({"code": 0, "data": {"ok": True}})
+    client = _RequestClient([response], close_error=RuntimeError("close failed"))
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert response.closed is True
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_request_preserves_primary_exception_when_client_close_fails(monkeypatch, caplog):
+    mac = _load_module()
+    primary = mac.httpx.ConnectError("offline")
+    client = _RequestClient([primary], close_error=RuntimeError("close failed"))
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(mac.httpx.ConnectError, match="offline"):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert client.closed is True
+    assert "Failed to close manager API client after primary exception" in caplog.text
+    assert "close failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_request_propagates_client_close_cancellation_over_primary_exception(monkeypatch):
+    mac = _load_module()
+    primary = mac.httpx.ConnectError("offline")
+    client = _RequestClient([primary], close_error=asyncio.CancelledError())
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(asyncio.CancelledError):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert client.closed is True
 
 
 def test_should_retry_only_transient_failures():

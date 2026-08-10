@@ -1,5 +1,7 @@
 # ruff: noqa: B904, N818, SIM105, SIM108, UP006, UP035, UP045
+import asyncio
 import base64
+import logging
 import os
 import re
 from typing import Dict, Optional
@@ -54,42 +56,40 @@ class ManageApiClient:
 
     @classmethod
     async def _ensure_async_client(cls):
-        """Ensure async client created (separate client per event loop)"""
+        """Ensure async context and create a request-scoped client"""
         import asyncio
 
         try:
-            loop = asyncio.get_running_loop()
-            loop_id = id(loop)
+            asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise Exception("Must be called in async context") from exc
 
-            # For eachEventLoop create independent client
-            if loop_id not in cls._async_clients:
-                # Server may actively close connection,httpx Connection pool cannot correctly detect and clean
-                limits = httpx.Limits(
-                    max_keepalive_connections=0,  # Disable keep-alive, create new connection each time
-                )
-                cls._async_clients[loop_id] = httpx.AsyncClient(
-                    base_url=cls.config.get("url"),
-                    headers={
-                        "User-Agent": f"PythonClient/2.0 (PID:{os.getpid()})",
-                        "Accept": "application/json",
-                        "Authorization": "Bearer " + cls._secret,
-                    },
-                    timeout=cls.config.get("timeout", 30),
-                    limits=limits,  # Usage Limit
-                )
-            return cls._async_clients[loop_id]
-        except RuntimeError:
-            # If no runningEventLoop, create temporary
-            raise Exception("Must be called in async context")
+        # Server may actively close connection,httpx Connection pool cannot correctly detect and clean
+        limits = httpx.Limits(
+            max_keepalive_connections=0,  # Disable keep-alive, create new connection each time
+        )
+        return httpx.AsyncClient(
+            base_url=cls.config.get("url"),
+            headers={
+                "User-Agent": f"PythonClient/2.0 (PID:{os.getpid()})",
+                "Accept": "application/json",
+                "Authorization": "Bearer " + cls._secret,
+            },
+            timeout=cls.config.get("timeout", 30),
+            limits=limits,  # Usage Limit
+        )
 
     @classmethod
     async def _async_request(cls, method: str, endpoint: str, **kwargs) -> Dict:
         """Send single async HTTP request and handle response"""
-        # Ensure client created
-        client = await cls._ensure_async_client()
-        endpoint = endpoint.lstrip("/")
+        client = None
         response = None
+        primary_exception = None
+        cleanup_exception = None
         try:
+            # Ensure client created
+            client = await cls._ensure_async_client()
+            endpoint = endpoint.lstrip("/")
             response = await client.request(method, endpoint, **kwargs)
             response.raise_for_status()
 
@@ -105,10 +105,45 @@ class ManageApiClient:
 
             # Return success data
             return result.get("data") if result.get("code") == 0 else None
+        except BaseException as exc:
+            primary_exception = exc
+            raise
         finally:
             # EnsureResponsewas closed (even ifExceptionalso execute)
             if response is not None:
-                await response.aclose()
+                try:
+                    await response.aclose()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if primary_exception is not None:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API response after primary exception"
+                        )
+                    elif cleanup_exception is None:
+                        cleanup_exception = exc
+                    else:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API response after another cleanup exception"
+                        )
+            if client is not None:
+                try:
+                    await client.aclose()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if primary_exception is not None:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API client after primary exception"
+                        )
+                    elif cleanup_exception is None:
+                        cleanup_exception = exc
+                    else:
+                        logging.getLogger(TAG).exception(
+                            "Failed to close manager API client after another cleanup exception"
+                        )
+            if primary_exception is None and cleanup_exception is not None:
+                raise cleanup_exception
 
     @classmethod
     def _should_retry(cls, exception: Exception) -> bool:

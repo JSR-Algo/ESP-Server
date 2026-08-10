@@ -55,7 +55,7 @@ class LessonAssignmentConsoleDeviceIdentityTest(unittest.IsolatedAsyncioTestCase
     async def test_connected_mac_is_published_as_its_backend_device_uuid(self):
         mac = "14:c1:9f:d1:ac:20"
         device_uuid = "22222222-2222-4222-8222-222222222222"
-        self.token_client._cache[mac] = (device_uuid, "jwt", time.time())
+        self.token_client._cache[mac] = (device_uuid, "jwt", time.monotonic())
 
         body = await self._body({mac: object()})
 
@@ -71,7 +71,7 @@ class LessonAssignmentConsoleDeviceIdentityTest(unittest.IsolatedAsyncioTestCase
 
     async def test_expired_mint_cache_entry_is_treated_as_unresolved(self):
         mac = "14:c1:9f:d1:ac:20"
-        stale = time.time() - (self.token_client._CACHE_TTL_S + 1)
+        stale = time.monotonic() - (self.token_client._CACHE_TTL_S + 1)
         self.token_client._cache[mac] = ("22222222-2222-4222-8222-222222222222", "jwt", stale)
 
         body = await self._body({mac: object()})
@@ -145,7 +145,7 @@ class LessonAssignmentConsoleInventoryAuthTest(unittest.IsolatedAsyncioTestCase)
         device_token_client._cache.clear()
         self.mac = "14:c1:9f:d1:ac:20"
         self.device_uuid = "22222222-2222-4222-8222-222222222222"
-        device_token_client._cache[self.mac] = (self.device_uuid, "jwt", time.time())
+        device_token_client._cache[self.mac] = (self.device_uuid, "jwt", time.monotonic())
         self._saved_secret = os.environ.get("TBOT_DEVICE_MINT_SECRET")
         os.environ["TBOT_DEVICE_MINT_SECRET"] = MINT_SECRET
 
