@@ -52,3 +52,17 @@ The product changes were previously RED->GREEN gated as `t62-esp` and
 `t62b-esp` in `lesson-prod/GATE_LOG.md`. This re-validation branch is evidence
 only, so its rebased base is already green and cannot produce a legitimate new
 RED phase. The historical verified gates remain the merge authority.
+
+## Final Ship result
+
+- Merged the evidence branch with a no-ff commit at ESP main `fea0faca`, retaining
+  the verified historical T6.2 gate lineage.
+- Deployment was not needed: the T6.2 branch and prerequisite repair changed only
+  tests, generated test provenance, and evidence.
+- `verify-on-main.sh` created a throwaway worktree at `fea0faca`; the 20-test
+  observability audit plus `t62-esp` and `t62b-esp` all passed.
+- Branch-tip standard verification passed before merge: 3,779 tests passed with
+  8 skipped.
+- The concurrent untracked T6.1 evidence file was preserved across both merges
+  and restored with unchanged SHA-256
+  `75e32a68350a7d70b657aea64df9136752b9093e95ee2d49b014581f8ccb3260`.
