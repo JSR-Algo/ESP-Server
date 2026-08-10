@@ -221,6 +221,23 @@ async def test_async_request_preserves_primary_exception_when_client_close_fails
     assert "close failed" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_async_request_propagates_client_close_cancellation_over_primary_exception(monkeypatch):
+    mac = _load_module()
+    primary = mac.httpx.ConnectError("offline")
+    client = _RequestClient([primary], close_error=asyncio.CancelledError())
+
+    async def _ensure(cls):
+        return client
+
+    monkeypatch.setattr(mac.ManageApiClient, "_ensure_async_client", classmethod(_ensure))
+
+    with pytest.raises(asyncio.CancelledError):
+        await mac.ManageApiClient._async_request("GET", "/status")
+
+    assert client.closed is True
+
+
 def test_should_retry_only_transient_failures():
     mac = _load_module()
     request = httpx.Request("GET", "http://manager.test")

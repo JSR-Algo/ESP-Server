@@ -1,4 +1,5 @@
 # ruff: noqa: B904, N818, SIM105, SIM108, UP006, UP035, UP045
+import asyncio
 import base64
 import logging
 import os
@@ -112,7 +113,9 @@ class ManageApiClient:
             if response is not None:
                 try:
                     await response.aclose()
-                except BaseException as exc:
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
                     if primary_exception is not None:
                         logging.getLogger(TAG).exception(
                             "Failed to close manager API response after primary exception"
@@ -126,7 +129,9 @@ class ManageApiClient:
             if client is not None:
                 try:
                     await client.aclose()
-                except BaseException as exc:
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
                     if primary_exception is not None:
                         logging.getLogger(TAG).exception(
                             "Failed to close manager API client after primary exception"
