@@ -273,7 +273,21 @@ def test_farm_fixture_projects_attested_sd_paths_and_exact_firmware_metadata() -
         assert command["asset"]["sha256"] == phase["asset"]["sha256"]
         assert command["asset"]["bytes"] == phase["asset"]["bytes"]
         assert command["asset"]["mediaType"] == TRGB_MEDIA_TYPE
-        assert command["asset"]["compatibilityMetadata"] == phase["asset"]["metadata"]
+        assert set(command["asset"]) == {
+            "derivativeId",
+            "cueId",
+            "sdPath",
+            "sha256",
+            "bytes",
+            "mediaType",
+            "containerVersion",
+            "storedWidth",
+            "storedHeight",
+            "orientation",
+            "frameBytes",
+        }
+        for key in ("containerVersion", "storedWidth", "storedHeight", "orientation", "frameBytes"):
+            assert command["asset"][key] == phase["asset"]["metadata"][key]
         assert command["asset"]["sdPath"].endswith(f"/flattenedCinematic.{phase['cueId']}")
 
 

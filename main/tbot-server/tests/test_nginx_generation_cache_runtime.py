@@ -20,6 +20,9 @@ DOCKER_INFO_TIMEOUT_SECONDS = 2
 
 
 class _CountingUpstream(ThreadingHTTPServer):
+    # Keep the fake origin above nginx's allowed burst so 502 cannot come from
+    # Python's small default listen backlog during the abuse probe.
+    request_queue_size = 512
     request_count: int
     accept_encodings: list[str | None]
     origins: list[str | None]
