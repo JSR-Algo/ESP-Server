@@ -140,6 +140,32 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["url"], "https://backend/internal/devices/mint-token")
 
+    async def test_refreshes_cached_token_after_whole_lesson_validity_margin(self):
+        client = _Client(_Response({"deviceUuid": "new-device", "token": "new-jwt"}))
+        device_token_client._cache.clear()
+        device_token_client._cache["mac"] = ("cached-device", "cached-jwt", 1000.0)
+
+        with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), patch.object(
+            device_token_client.time, "time", side_effect=[1000.0 + (11 * 60), 1000.0 + (11 * 60)]
+        ):
+            result = await device_token_client.resolve_device_identity(client, "https://backend", "mac")
+
+        self.assertEqual(result, ("new-device", "new-jwt"))
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_reuses_cached_token_at_whole_lesson_validity_boundary(self):
+        client = _Client(_Response({"deviceUuid": "new-device", "token": "new-jwt"}))
+        device_token_client._cache.clear()
+        device_token_client._cache["mac"] = ("cached-device", "cached-jwt", 1000.0)
+
+        with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), patch.object(
+            device_token_client.time, "time", return_value=1000.0 + (10 * 60)
+        ):
+            result = await device_token_client.resolve_device_identity(client, "https://backend", "mac")
+
+        self.assertEqual(result, ("cached-device", "cached-jwt"))
+        self.assertEqual(client.calls, [])
+
     async def test_missing_fields_and_post_failures_return_none_and_log_warning(self):
         logger = _Logger()
         device_token_client._cache.clear()

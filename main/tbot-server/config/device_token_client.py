@@ -24,9 +24,14 @@ from contextlib import suppress
 
 import httpx
 
-# {mac: (device_uuid, token, cached_at_epoch)} — cache for ~14 min (token TTL 15m).
+# Backend device JWTs are valid for 15 minutes. Keep a 5-minute validity
+# reserve so one resolved token can cover a whole lesson/readback path.
+_BACKEND_TOKEN_TTL_S = 15 * 60
+_RESERVED_MIN_VALIDITY_S = 5 * 60
+_CACHE_TTL_S = _BACKEND_TOKEN_TTL_S - _RESERVED_MIN_VALIDITY_S
+
+# {mac: (device_uuid, token, cached_at_epoch)}
 _cache = {}
-_CACHE_TTL_S = 14 * 60
 
 
 def _secret():
@@ -44,7 +49,7 @@ def cached_device_uuid(mac):
     entry = _cache.get(mac)
     if not entry:
         return None
-    if (time.time() - entry[2]) >= _CACHE_TTL_S:
+    if (time.time() - entry[2]) > _CACHE_TTL_S:
         return None
     return entry[0]
 
@@ -73,7 +78,7 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
 
     now = time.time()
     cached = _cache.get(mac)
-    if cached is not None and (now - cached[2]) < _CACHE_TTL_S:
+    if cached is not None and (now - cached[2]) <= _CACHE_TTL_S:
         return cached[0], cached[1]
 
     url = base_url.rstrip("/") + "/internal/devices/mint-token"
