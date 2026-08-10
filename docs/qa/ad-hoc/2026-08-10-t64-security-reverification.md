@@ -53,3 +53,8 @@ green. No security-surface failure occurred.
 
 Evidence only. No deployable ESP/admin-web code changed, so the standing T7.3
 deployment lane remains the owner and no T6.4 deployment is needed.
+
+The prior T6.4 RED-to-GREEN gate remains the behavioral gate. A new gate run is
+not valid for this evidence-only branch because the security repro is already
+green on current main; the evidence commit is merged with `--no-ff` under that
+existing verified result.
