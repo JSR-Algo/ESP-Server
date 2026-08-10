@@ -54,33 +54,28 @@ class ManageApiClient:
 
     @classmethod
     async def _ensure_async_client(cls):
-        """Ensure async client created (separate client per event loop)"""
+        """Ensure async context and create a request-scoped client"""
         import asyncio
 
         try:
-            loop = asyncio.get_running_loop()
-            loop_id = id(loop)
+            asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise Exception("Must be called in async context") from exc
 
-            # For eachEventLoop create independent client
-            if loop_id not in cls._async_clients:
-                # Server may actively close connection,httpx Connection pool cannot correctly detect and clean
-                limits = httpx.Limits(
-                    max_keepalive_connections=0,  # Disable keep-alive, create new connection each time
-                )
-                cls._async_clients[loop_id] = httpx.AsyncClient(
-                    base_url=cls.config.get("url"),
-                    headers={
-                        "User-Agent": f"PythonClient/2.0 (PID:{os.getpid()})",
-                        "Accept": "application/json",
-                        "Authorization": "Bearer " + cls._secret,
-                    },
-                    timeout=cls.config.get("timeout", 30),
-                    limits=limits,  # Usage Limit
-                )
-            return cls._async_clients[loop_id]
-        except RuntimeError:
-            # If no runningEventLoop, create temporary
-            raise Exception("Must be called in async context")
+        # Server may actively close connection,httpx Connection pool cannot correctly detect and clean
+        limits = httpx.Limits(
+            max_keepalive_connections=0,  # Disable keep-alive, create new connection each time
+        )
+        return httpx.AsyncClient(
+            base_url=cls.config.get("url"),
+            headers={
+                "User-Agent": f"PythonClient/2.0 (PID:{os.getpid()})",
+                "Accept": "application/json",
+                "Authorization": "Bearer " + cls._secret,
+            },
+            timeout=cls.config.get("timeout", 30),
+            limits=limits,  # Usage Limit
+        )
 
     @classmethod
     async def _async_request(cls, method: str, endpoint: str, **kwargs) -> Dict:
@@ -107,8 +102,14 @@ class ManageApiClient:
             return result.get("data") if result.get("code") == 0 else None
         finally:
             # EnsureResponsewas closed (even ifExceptionalso execute)
-            if response is not None:
-                await response.aclose()
+            try:
+                if response is not None:
+                    await response.aclose()
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
     @classmethod
     def _should_retry(cls, exception: Exception) -> bool:
