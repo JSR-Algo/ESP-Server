@@ -27,12 +27,18 @@ fresh verification.
 
 ## Standard-suite status and findings routing
 
-The full server suite reported 3,772 passed, 9 skipped, and 6 failures. All six
-match existing out-of-scope finding F-T64-09: the Google Live benchmark/client
-environment and four renderer cross-repo fixture drift checks. No T6.2 test
-failed, so those owners' files were not changed here.
+The first full server run reported 3,772 passed, 9 skipped, and 6 failures. All
+six match existing out-of-scope finding F-T64-09: the Google Live
+benchmark/client environment and four renderer cross-repo fixture drift checks.
+
+The fresh branch-tip run reported 3,771 passed, 9 skipped, and 7 failures. It
+repeated those six and intermittently failed the real-nginx public generation
+runtime test with an unexpected 502. That regression is routed as F-T62-09 to
+T6.4/T0.1. No T6.2 test failed, so those owners' files were not changed here.
 
 ## Ship checklist
 
-Final merge, main re-test, and worktree cleanup are recorded in the task file
-and plan after completion.
+Ship step 1 was repeated at branch tip `1706da08`. The scoped 20-test audit
+passed; the standard suite remained red as described above. The branch was not
+merged, deployed, or removed. T6.2 remains blocked until the standard-suite
+gate can pass.
