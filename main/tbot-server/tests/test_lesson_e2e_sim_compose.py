@@ -12,3 +12,4 @@ def test_lesson_e2e_sim_sets_sd_materialize_limit():
     environment = compose["services"]["esp-server"]["environment"]
 
     assert str(environment["LESSON_SD_MAX_FILE_BYTES"]) == "33554432"
+    assert str(environment["LESSON_SD_MAX_PACK_BYTES"]) == "134217728"
