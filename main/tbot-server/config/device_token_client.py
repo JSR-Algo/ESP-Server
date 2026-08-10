@@ -30,7 +30,7 @@ _BACKEND_TOKEN_TTL_S = 15 * 60
 _RESERVED_MIN_VALIDITY_S = 5 * 60
 _CACHE_TTL_S = _BACKEND_TOKEN_TTL_S - _RESERVED_MIN_VALIDITY_S
 
-# {mac: (device_uuid, token, cached_at_epoch)}
+# {mac: (device_uuid, token, cached_at_monotonic_s)}
 _cache = {}
 
 
@@ -49,7 +49,7 @@ def cached_device_uuid(mac):
     entry = _cache.get(mac)
     if not entry:
         return None
-    if (time.time() - entry[2]) > _CACHE_TTL_S:
+    if (time.monotonic() - entry[2]) > _CACHE_TTL_S:
         return None
     return entry[0]
 
@@ -76,7 +76,7 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
         _log(logger, "info", "mint skipped: TBOT_DEVICE_MINT_SECRET not set")
         return None, None
 
-    now = time.time()
+    now = time.monotonic()
     cached = _cache.get(mac)
     if cached is not None and (now - cached[2]) <= _CACHE_TTL_S:
         return cached[0], cached[1]
@@ -95,7 +95,7 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
             device_uuid = data.get("deviceUuid")
             token = data.get("token")
             if device_uuid and token:
-                _cache[mac] = (device_uuid, token, time.time())
+                _cache[mac] = (device_uuid, token, time.monotonic())
                 _log(logger, "info", f"minted device token for {mac} -> {device_uuid}")
                 return device_uuid, token
             _log(logger, "warning", f"mint response missing fields for {mac}")
