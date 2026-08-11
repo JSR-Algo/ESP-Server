@@ -33,6 +33,11 @@ class LayeredCinematicContractError(ValueError):
         self.message = message
 
 
+def is_layered_cinematic_generation_asset(asset: Any) -> bool:
+    metadata = asset.get("compatibilityMetadata") if isinstance(asset, dict) else None
+    return isinstance(metadata, dict) and "mediaKind" in metadata
+
+
 def _fail(code: str, message: str) -> NoReturn:
     raise LayeredCinematicContractError(code, message)
 

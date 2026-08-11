@@ -276,6 +276,35 @@ def test_renderer_v3_mp4_strips_fields_rejected_by_generic_firmware_validator():
     assert "cookie" not in {key.lower() for key in sent}
 
 
+def test_renderer_v5_robot_mp4_syncs_as_verified_base_media_without_rich_metadata():
+    render_pack = _pack("feelings.robot.flyIn@v1")
+    asset = render_pack["assets"][0]
+    asset.update({
+        "path": "feelings.robot.flyIn.mp4",
+        "url": "https://assets.example/feelings.robot.flyIn.mp4",
+        "onlineUrl": "https://assets.example/feelings.robot.flyIn.mp4",
+        "mediaType": "video/mp4",
+        "sharedAssetKey": "feelings.robot.flyIn", "sharedAssetVersion": 1,
+        "compatibilityMetadata": {
+            "mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
+            "hasAudio": False, "width": 200, "height": 200, "fps": 10,
+            "durationMs": 1000, "frameCount": 10,
+            "rect": {"x": 20, "y": 100, "width": 200, "height": 200},
+            "chromaKey": {"keyColor": "#00ff00", "tolerance": 24, "featherPx": 1},
+        },
+        "visualRefs": [{"stepKey": "s1", "phase": "flyIn", "slot": "robotOverlay"}],
+    })
+    asset["sdPath"] = f"sd://tbot/lesson-assets/{CACHE_KEY}/feelings.robot.flyIn%40v1"
+    asset["localPath"] = asset["sdPath"]
+
+    sent = build_firmware_sync_pack(render_pack)["assets"][0]
+
+    assert set(sent) == _NORMALIZED_BASE_FIELDS
+    assert sent["mediaType"] == "video/mp4"
+    assert "compatibilityMetadata" not in sent
+    assert "visualRefs" not in sent
+
+
 def test_renderer_v3_mp4_drops_stale_renderer_v4_effect():
     render_pack = _pack("scene.opening@v3")
     asset = render_pack["assets"][0]

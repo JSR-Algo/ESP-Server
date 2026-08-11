@@ -209,6 +209,50 @@ def _flattened_v2_mp4_manifest():
     }])
 
 
+def _renderer_v5_manifest():
+    assets = []
+    contents = {}
+
+    def add(key, media_type, slot, metadata, phase):
+        content = bytes([len(assets) + 1])
+        url = f"https://assets.example/layered/{quote(key, safe='')}"
+        asset = {
+            "key": key, "sha256": _sha(content), "size": len(content),
+            "mediaType": media_type, "critical": True,
+            "onlineUrl": url, "url": url,
+            "sdPath": _sd_path(key), "localPath": _sd_path(key),
+            "sharedAssetKey": key.removesuffix("@v1"), "sharedAssetVersion": 1,
+            "compatibilityMetadata": metadata,
+            "visualRefs": [{"stepKey": "s1", "phase": phase, "slot": slot}],
+        }
+        assets.append(asset)
+        contents[url] = [content]
+
+    add(
+        "feelings.background@v1", "image/jpeg", "backgroundScene",
+        {"mediaKind": "image", "mediaType": "image/jpeg", "width": 480, "height": 320,
+         "rect": {"x": 0, "y": 0, "width": 480, "height": 320}, "fit": "cover"},
+        "flyIn",
+    )
+    add(
+        "feelings.object@v1", "image/png", "teachingObject",
+        {"mediaKind": "image", "mediaType": "image/png", "width": 180, "height": 180,
+         "rect": {"x": 250, "y": 100, "width": 180, "height": 180}, "fit": "contain"},
+        "flyIn",
+    )
+    for phase in ("flyIn", "walk", "teach", "listen", "thinking", "celebrate", "exit"):
+        add(
+            f"feelings.robot.{phase}@v1", "video/mp4", "robotOverlay",
+            {"mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
+             "hasAudio": False, "width": 200, "height": 200, "fps": 10,
+             "durationMs": 1000, "frameCount": 10,
+             "rect": {"x": 20, "y": 100, "width": 200, "height": 200},
+             "chromaKey": {"keyColor": "#00ff00", "tolerance": 24, "featherPx": 1}},
+            phase,
+        )
+    return contents, _manifest(assets=assets)
+
+
 def _live_v35_trgb_asset(cue_id, effect, step_key, duration_ms):
     frame_count = duration_ms // 100
     derivative_id = hashlib.sha256(cue_id.encode()).hexdigest()
@@ -314,6 +358,29 @@ async def test_renderer_v4_v2_cue_materializes_with_exact_identity(tmp_path):
     assert {key: stored[key] for key in ("cueId", "effect", "stepKey", "playbackMode")} == {
         "cueId": "barn-listen", "effect": "listen", "stepKey": "barn", "playbackMode": "loop",
     }
+
+
+@pytest.mark.asyncio
+async def test_renderer_v5_generation_56_materializes_all_nine_mixed_media_assets(tmp_path):
+    contents, manifest = _renderer_v5_manifest()
+
+    result = await materialize_lesson_sd_pack(
+        manifest, config=_config(tmp_path), client=_Client(contents), resolver=_public_resolver,
+    )
+
+    assert result["ready"] is True
+    assert result["assetCount"] == 9
+    pack_path = tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json"
+    stored = json.loads(pack_path.read_text(encoding="utf-8"))
+    assert len(stored["assets"]) == 9
+    assert {asset["compatibilityMetadata"]["mediaKind"] for asset in stored["assets"]} == {
+        "image", "video",
+    }
+    assert [
+        asset["visualRefs"][0]["phase"]
+        for asset in stored["assets"]
+        if asset["compatibilityMetadata"]["mediaKind"] == "video"
+    ] == ["flyIn", "walk", "teach", "listen", "thinking", "celebrate", "exit"]
 
 
 @pytest.mark.asyncio

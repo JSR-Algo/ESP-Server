@@ -38,6 +38,11 @@ from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.layered_cinematic_contract import (
+    LayeredCinematicContractError,
+    is_layered_cinematic_generation_asset,
+    validate_layered_cinematic_generation_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -566,7 +571,12 @@ def _validate_asset(
     if sd_path != expected_sd_path:
         raise _bad("INVALID_SD_PATH", "Invalid asset sdPath")
     renderer_v3_fields: dict[str, Any] = {}
-    if media_type == TRGB_MEDIA_TYPE:
+    if is_layered_cinematic_generation_asset(dict(item)):
+        try:
+            renderer_v3_fields = validate_layered_cinematic_generation_asset(dict(item))
+        except LayeredCinematicContractError:
+            raise _bad("INVALID_RENDERER_V5_ASSET", "Invalid renderer-v5 mixed-media asset") from None
+    elif media_type == TRGB_MEDIA_TYPE:
         try:
             renderer_v3_fields = validate_pathless_flattened_cinematic_cache_asset(dict(item))
         except FlattenedCinematicContractError:

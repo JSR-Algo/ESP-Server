@@ -13,6 +13,11 @@ from core.lesson.flattened_cinematic_contract import (
     validate_flattened_cinematic_cache_asset,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.layered_cinematic_contract import (
+    LayeredCinematicContractError,
+    is_layered_cinematic_generation_asset,
+    validate_layered_cinematic_generation_asset,
+)
 from core.lesson.cache_key_contract import (
     AssetBasenameRefused,
     encode_asset_basename,
@@ -79,6 +84,7 @@ _FIRMWARE_ASSET_FIELDS = (
 )
 _FIRMWARE_ASSET_FIELDS_BY_KIND = {
     "base": _FIRMWARE_BASE_ASSET_FIELDS,
+    "renderer_v5_media": _FIRMWARE_BASE_ASSET_FIELDS,
     "renderer_v3_mp4": _FIRMWARE_BASE_ASSET_FIELDS,
     "renderer_v4_mp4": _FIRMWARE_ASSET_FIELDS,
     "renderer_v4_trgb": (
@@ -315,7 +321,13 @@ def _validate_asset_metadata(
     canonical_path = None
     asset_kind = "base"
     flattened_identity = "derivativeId" in asset or "phaseId" in asset or "cueId" in asset
-    if flattened_identity:
+    if is_layered_cinematic_generation_asset(asset):
+        try:
+            validate_layered_cinematic_generation_asset(asset)
+        except LayeredCinematicContractError:
+            _refuse()
+        asset_kind = "renderer_v5_media"
+    elif flattened_identity:
         if media_type == TRGB_MEDIA_TYPE:
             asset_kind = "renderer_v4_trgb"
             source_url = asset.get("sourceUrl")
