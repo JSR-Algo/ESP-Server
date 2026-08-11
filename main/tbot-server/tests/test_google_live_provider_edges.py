@@ -3498,6 +3498,42 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             google_live_module.product_tool_names = original_product_tool_names
 
+    async def test_lesson_transition_interrupts_waiting_model_and_releases_busy_state(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: provider._interaction.state not in {
+            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
+        }
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+        provider._begin_user_interrupt = AsyncMock()
+        conn.client_abort = True
+        conn.client_is_speaking = True
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertTrue(admitted)
+        provider._begin_user_interrupt.assert_awaited_once_with("lesson_start_intent")
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.client_abort)
+        self.assertFalse(conn.client_is_speaking)
+
+    async def test_lesson_transition_timeout_remains_retryable(self):
+        conn = _Conn()
+        conn.config["lesson"] = {"live_transition_timeout_sec": 0.05}
+        provider = self.make_provider(conn)
+        provider._begin_user_interrupt = AsyncMock()
+        conn.is_realtime_busy = lambda: True
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertFalse(admitted)
+        provider._begin_user_interrupt.assert_awaited_once_with("lesson_start_intent")
+
     async def test_audio_routing_private_branch_edges(self):
         conn = _Conn()
         provider = self.make_provider(conn)

@@ -2450,6 +2450,14 @@ class ConnectionHandler:
             return True
         return False
 
+    async def transition_to_lesson_start(self) -> bool:
+        """Interrupt Google Live and release realtime ownership before lesson I/O."""
+        provider = self.voice_provider
+        transition = getattr(provider, "transition_to_lesson_start", None)
+        if callable(transition):
+            return bool(await transition())
+        return not self.is_realtime_busy()
+
     def lesson_start_sd_sync_admission_token(self):
         marker = getattr(self, "_lesson_start_tool_dispatch_context", None)
         try:

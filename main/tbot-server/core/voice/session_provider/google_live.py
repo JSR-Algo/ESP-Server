@@ -1619,7 +1619,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         # User asked to start lesson: stop shielding residual mic from wake greeting.
         self._wake_greeting_protect_until = 0.0
-        await self._begin_user_interrupt("lesson_start_intent")
+        if not await self.transition_to_lesson_start():
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent retry reason=live-transition-timeout",
+                    self.conn,
+                )
+            )
+            return True
         # In dormant live mode the tool handler may not be bootstrapped yet. Only
         # bootstrap when the classified tool is actually admitted for this product
         # (product_tool_names), so a missing handler does not get spun up to run a
@@ -5959,6 +5966,37 @@ class GoogleLiveProvider(VoiceSessionProvider):
             "loud_input",
         }
     )
+
+    async def transition_to_lesson_start(self) -> bool:
+        """Bounded hard handoff from a Live turn into lesson runtime ownership."""
+        config = getattr(self.conn, "config", {})
+        lesson_config = config.get("lesson", {}) if isinstance(config, dict) else {}
+        if not isinstance(lesson_config, dict):
+            lesson_config = {}
+        try:
+            timeout_sec = max(
+                0.05,
+                float(lesson_config.get("live_transition_timeout_sec", 2.0)),
+            )
+        except (TypeError, ValueError):
+            timeout_sec = 2.0
+
+        await self._begin_user_interrupt("lesson_start_intent")
+        clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
+        if callable(clear_speaking):
+            clear_speaking()
+        self._interaction.transition(InteractionState.LISTENING)
+        self.conn.client_abort = False
+
+        busy = getattr(self.conn, "is_realtime_busy", None)
+        if not callable(busy):
+            return True
+        deadline = time.monotonic() + timeout_sec
+        while busy():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.01)
+        return True
 
     async def _begin_user_interrupt(self, reason):
         # Music-protection gate: keep ambient/raw audio from interrupting music,

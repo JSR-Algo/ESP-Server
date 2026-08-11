@@ -121,6 +121,57 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 202)
         pull.assert_awaited_once_with(conn)
 
+    async def test_interrupts_live_turn_before_assignment_pull(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.runtime as runtime
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        events = []
+
+        async def transition():
+            events.append("transition")
+            return True
+
+        async def pull_assignment(_conn):
+            events.append("pull")
+
+        conn = SimpleNamespace(transition_to_lesson_start=transition)
+        saved = runtime.maybe_start_lesson_on_connect
+        runtime.maybe_start_lesson_on_connect = pull_assignment
+        try:
+            response = await LessonNudgeHandler({}, {"device-1": conn}).handle_post(
+                _FakeRequest()
+            )
+        finally:
+            runtime.maybe_start_lesson_on_connect = saved
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(events, ["transition", "pull"])
+        self.assertEqual(json.loads(response.text)["data"], {"nudged": True})
+
+    async def test_live_transition_timeout_is_retryable_and_does_not_pull(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.runtime as runtime
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        conn = SimpleNamespace(transition_to_lesson_start=AsyncMock(return_value=False))
+        pull = AsyncMock()
+        saved = runtime.maybe_start_lesson_on_connect
+        runtime.maybe_start_lesson_on_connect = pull
+        try:
+            response = await LessonNudgeHandler({}, {"device-1": conn}).handle_post(
+                _FakeRequest()
+            )
+        finally:
+            runtime.maybe_start_lesson_on_connect = saved
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(
+            json.loads(response.text)["data"],
+            {"nudged": False, "reason": "live-transition-timeout"},
+        )
+        pull.assert_not_awaited()
+
     async def test_sample_nudge_reports_refused_when_sample_runtime_does_not_start(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler
         import core.lesson.sample as sample

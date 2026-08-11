@@ -133,6 +133,17 @@ class LessonNudgeHandler:
 
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
+        transition = getattr(conn, "transition_to_lesson_start", None)
+        if callable(transition) and not await transition():
+            return web.json_response(
+                {
+                    "data": {
+                        "nudged": False,
+                        "reason": "live-transition-timeout",
+                    }
+                },
+                status=202,
+            )
         await maybe_start_lesson_on_connect(conn)
         return web.json_response({"data": {"nudged": True}}, status=202)
 
