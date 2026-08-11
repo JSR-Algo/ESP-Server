@@ -51,7 +51,7 @@ from core.lesson.flattened_cinematic_contract import (
 from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
     is_layered_cinematic_generation_asset,
-    validate_layered_cinematic_generation_asset,
+    validate_layered_cinematic_runtime_asset,
 )
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
@@ -166,7 +166,7 @@ class AssetState:
         self.renderer_v5_media = False
         if is_layered_cinematic_generation_asset(asset):
             try:
-                validate_layered_cinematic_generation_asset(asset)
+                validate_layered_cinematic_runtime_asset(asset)
                 self.renderer_v5_media = True
             except LayeredCinematicContractError:
                 pass
