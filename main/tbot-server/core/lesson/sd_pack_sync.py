@@ -382,6 +382,18 @@ async def sync_cached_lesson_assets_to_sd(
                 synced += 1
             else:
                 failed += 1
+                _log(
+                    conn,
+                    "warning",
+                    "cached SD pack sync rejected "
+                    f"cache_key={cache_key} "
+                    f"downloaded={normalized['downloadedCount']} "
+                    f"reused={normalized['reusedCount']} "
+                    f"skipped={normalized['skippedCount']} "
+                    f"failed={normalized['failedCount']} "
+                    f"critical_failed={normalized['criticalFailedCount']} "
+                    f"error_code={normalized.get('errorCode', '')}",
+                )
             results_by_cache_key[cache_key] = normalized
         except asyncio.CancelledError:
             raise
