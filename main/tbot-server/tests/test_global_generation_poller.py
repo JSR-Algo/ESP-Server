@@ -68,6 +68,42 @@ def _renderer_v3_mp4_asset(*, cache_key: str = f"lesson-a/v3-{HASH_B}") -> dict:
     return asset
 
 
+def _renderer_v5_asset(
+    slot: str,
+    *,
+    cache_key: str = f"lesson-a/v5-{HASH_B}",
+) -> dict:
+    specs = {
+        "backgroundScene": ("scene.farm", "image/jpeg", {
+            "mediaKind": "image", "mediaType": "image/jpeg", "width": 480, "height": 320,
+            "rect": {"x": 0, "y": 0, "width": 480, "height": 320}, "fit": "cover",
+        }),
+        "teachingObject": ("object.robot", "image/png", {
+            "mediaKind": "image", "mediaType": "image/png", "width": 192, "height": 192,
+            "rect": {"x": 130, "y": 72, "width": 200, "height": 200}, "fit": "contain",
+        }),
+        "robotOverlay": ("robot.flyIn", "video/mp4", {
+            "mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
+            "hasAudio": False, "width": 240, "height": 240, "fps": 10,
+            "durationMs": 3000, "frameCount": 30,
+            "rect": {"x": 240, "y": 80, "width": 220, "height": 220},
+            "chromaKey": {"keyColor": "#00ff00", "tolerance": 20, "featherPx": 1},
+        }),
+    }
+    shared_key, media_type, metadata = specs[slot]
+    asset = _asset(f"{shared_key}@v1", size=900000, cache_key=cache_key)
+    asset.update({
+        "onlineUrl": f"https://cdn.example/visuals/{shared_key}/v1",
+        "url": f"https://cdn.example/visuals/{shared_key}/v1",
+        "mediaType": media_type,
+        "sharedAssetKey": shared_key,
+        "sharedAssetVersion": 1,
+        "compatibilityMetadata": metadata,
+        "visualRefs": [{"stepKey": "s1", "phase": "opening", "slot": slot}],
+    })
+    return asset
+
+
 def _renderer_v4_mp4_asset(*, cache_key: str = f"lesson-a/v4-{HASH_B}") -> dict:
     asset = _asset("flattenedCinematic.opening", size=900000, cache_key=cache_key)
     asset.update({
@@ -152,6 +188,49 @@ def _pack(*, lesson_id: str = "lesson-a", classification: str = "curriculum") ->
         "cacheKey": cache_key,
         "classification": classification,
         "assets": [_asset(cache_key=cache_key)],
+    }
+
+
+@pytest.mark.asyncio
+async def test_accepts_renderer_v5_mixed_media_generation_pack() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 5
+    pack["cacheKey"] = f"lesson-a/v5-{HASH_B}"
+    pack["assets"] = [
+        _renderer_v5_asset("backgroundScene", cache_key=pack["cacheKey"]),
+        _renderer_v5_asset("teachingObject", cache_key=pack["cacheKey"]),
+        _renderer_v5_asset("robotOverlay", cache_key=pack["cacheKey"]),
+    ]
+    pack["assets"].sort(key=lambda asset: asset["key"])
+    payload = _payload(index=[pack])
+    received = []
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda data: received.append(data),
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {"state": "accepted"}
+    assert received[0]["index"][0]["assets"] == pack["assets"]
+
+
+@pytest.mark.asyncio
+async def test_renderer_v5_generation_pack_rejects_invalid_chroma_contract() -> None:
+    pack = _pack()
+    pack["lessonVersion"] = 5
+    pack["cacheKey"] = f"lesson-a/v5-{HASH_B}"
+    asset = _renderer_v5_asset("robotOverlay", cache_key=pack["cacheKey"])
+    asset["compatibilityMetadata"]["chromaKey"]["keyColor"] = "#ff00ff"
+    pack["assets"] = [asset]
+    payload = _payload(index=[pack])
+    poller = GlobalGenerationPoller(
+        _config(), FakeStore(), lambda _data: None,
+        http=_client(lambda _request: _response(payload, etag=f'"lesson-assets-g8-{payload["data"]["indexChecksum"]}"')),
+        clock=lambda: NOW,
+    )
+
+    assert await poller.run_once() == {
+        "state": "rejected", "errorCode": "cms_invalid_renderer_v5_asset",
     }
 
 
