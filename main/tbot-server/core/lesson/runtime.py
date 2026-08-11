@@ -102,6 +102,14 @@ RENDERER_V2_VISUAL_STATES = frozenset(
         "incorrect", "retry", "celebrate", "completion",
     }
 )
+RENDERER_V2_DEFAULT_MOTION_SLOTS = {
+    "thinking": "thinking",
+    "retry": "incorrect",
+}
+RENDERER_V2_DEFAULT_MOTION_PRESETS = {
+    "thinking": "thinking",
+    "retry": "tryAgain",
+}
 VISUAL_DEGRADED_REASONS = frozenset(
     {
         "missingOverlay",
@@ -4750,8 +4758,6 @@ class LessonRuntime:
             )
         ):
             return False
-        if preset:
-            await self._dispatch_motion_once(preset, generation, step_id)
         current = self._visual_transition_is_current(
             generation,
             assignment_id=assignment_id,
@@ -4768,12 +4774,26 @@ class LessonRuntime:
         self, state: str, motion_slot: Optional[str]
     ) -> bool:
         motion = (self._step or {}).get("motion")
-        preset = motion.get(motion_slot) if isinstance(motion, dict) and motion_slot else None
-        if not isinstance(preset, str):
-            preset = None
+        resolved_slot = motion_slot or RENDERER_V2_DEFAULT_MOTION_SLOTS.get(state)
+        preset = motion.get(resolved_slot) if isinstance(motion, dict) and resolved_slot else None
+        if not isinstance(preset, str) or not preset:
+            preset = RENDERER_V2_DEFAULT_MOTION_PRESETS.get(state)
+            if not preset:
+                self._log(
+                    "warning",
+                    f"lesson_visual_state rejected missing motionPreset state={state} slot={resolved_slot}",
+                )
+                return False
+        overlay_key = self._authored_overlay_key()
+        if not overlay_key:
+            self._log(
+                "warning",
+                f"lesson_visual_state rejected missing overlayKey state={state}",
+            )
+            return False
         return await self._apply_visual_then_motion(
             state,
-            self._authored_overlay_key(),
+            overlay_key,
             preset,
         )
 
@@ -5053,9 +5073,6 @@ class LessonRuntime:
                 step_id=step_id,
             )
         ):
-            preset = request.get("motion_preset")
-            if isinstance(preset, str) and preset:
-                await self._dispatch_motion_once(preset, generation, step_id)
             if not self._visual_transition_is_current(
                 generation,
                 assignment_id=assignment_id,
@@ -5088,9 +5105,6 @@ class LessonRuntime:
                 step_id=step_id,
             )
         ):
-            preset = request.get("motion_preset")
-            if result.accepted and isinstance(preset, str) and preset:
-                await self._dispatch_motion_once(preset, generation, step_id)
             if self._visual_transition_is_current(
                 generation,
                 assignment_id=assignment_id,

@@ -297,6 +297,7 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         rt._step["scene"] = {
             "robotOverlay": {"asset": {"key": "robotOverlay.thinking"}}
         }
+        rt._step["motion"]["thinking"] = "thinking"
         transitions = []
 
         async def apply(state, overlay_key, preset):
@@ -311,9 +312,9 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transitions,
             [
-                ("thinking", "robotOverlay.thinking", None),
+                ("thinking", "robotOverlay.thinking", "thinking"),
                 ("incorrect", "robotOverlay.thinking", "tryAgain"),
-                ("retry", "robotOverlay.thinking", None),
+                ("retry", "robotOverlay.thinking", "tryAgain"),
             ],
         )
 
@@ -323,7 +324,7 @@ class SafeSpeakingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transitions[-2:],
             [
-                ("thinking", "robotOverlay.thinking", None),
+                ("thinking", "robotOverlay.thinking", "thinking"),
                 ("correct", "robotOverlay.thinking", "celebrate"),
             ],
         )
