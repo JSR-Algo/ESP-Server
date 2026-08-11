@@ -187,6 +187,40 @@ def validate_layered_cinematic_generation_asset(asset: Any) -> dict[str, Any]:
     }
 
 
+def validate_layered_cinematic_runtime_asset(asset: Any) -> dict[str, Any]:
+    """Validate one renderer-v5 asset projected from an authored manifest phase."""
+    if not isinstance(asset, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic runtime asset is invalid")
+    shared_key = asset.get("sharedAssetKey")
+    version = asset.get("sharedAssetVersion")
+    if (
+        not isinstance(shared_key, str)
+        or not shared_key
+        or not _positive_int(version)
+        or asset.get("key") != f"{shared_key}@v{version}"
+    ):
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic shared identity is invalid")
+    layer = asset.get("layer")
+    media_type = asset.get("mediaType")
+    if layer == "background" and media_type == "image/jpeg":
+        metadata = _image_metadata(asset.get("compatibilityMetadata"), background=True)
+    elif layer == "teachingObject" and media_type == "image/png":
+        metadata = _image_metadata(asset.get("compatibilityMetadata"), background=False)
+    elif layer == "robotOverlay" and media_type == "video/mp4":
+        source = asset.get("compatibilityMetadata")
+        duration_ms = source.get("durationMs") if isinstance(source, dict) else None
+        if not _positive_int(duration_ms):
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic Robot duration is invalid")
+        metadata = _video_metadata(source, duration_ms=duration_ms)
+    else:
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic runtime layer is invalid")
+    return {
+        "sharedAssetKey": shared_key,
+        "sharedAssetVersion": version,
+        "compatibilityMetadata": metadata,
+    }
+
+
 def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     """Validate and project one renderer-v5 phase using verified local media only."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:

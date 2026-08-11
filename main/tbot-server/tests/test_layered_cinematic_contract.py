@@ -8,6 +8,8 @@ from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
     project_layered_cinematic_phase,
 )
+from core.lesson.asset_cache import AssetState
+from core.lesson.runtime import _manifest_asset_cache_inputs
 
 
 SHA_BACKGROUND = "a" * 64
@@ -159,6 +161,19 @@ def test_projects_exact_mixed_media_phase_from_attested_pack() -> None:
             },
         ],
     }
+
+
+def test_runtime_manifest_projection_attests_renderer_v5_without_generation_visual_refs() -> None:
+    assets = _manifest_asset_cache_inputs({
+        "manifestVersion": "teebot-lesson-renderer.v5",
+        "assets": [],
+        "cinematicPhases": [_phase()],
+    })
+
+    assert len(assets) == 3
+    robot = next(asset for asset in assets if asset["layer"] == "robotOverlay")
+    assert "visualRefs" not in robot
+    assert AssetState(robot).renderer_v5_media is True
 
 
 @pytest.mark.parametrize(
