@@ -999,10 +999,14 @@ def _requested_renderer_capabilities(
         (RENDERER_V2, renderer_v2_enabled),
     )
     advertised_set = set(advertised)
-    for renderer, rollout_enabled in enabled:
-        if rollout_enabled and renderer in advertised_set:
-            return [renderer]
-    return [PROTOCOL_VERSION]
+    requested = [
+        renderer
+        for renderer, rollout_enabled in enabled
+        if rollout_enabled and renderer in advertised_set
+    ]
+    if PROTOCOL_VERSION in advertised_set:
+        requested.append(PROTOCOL_VERSION)
+    return requested or [PROTOCOL_VERSION]
 
 
 def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
