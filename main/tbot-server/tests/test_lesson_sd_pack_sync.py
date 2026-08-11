@@ -567,6 +567,19 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
         async def is_ready(self):
             return True
 
+    logged = []
+
+    class BoundLogger:
+        def warning(self, message):
+            logged.append(message)
+
+        def info(self, message):
+            logged.append(message)
+
+    class Logger:
+        def bind(self, **_kwargs):
+            return BoundLogger()
+
     class Conn:
         config = {
             "lesson": {
@@ -576,6 +589,7 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             }
         }
         mcp_client = Client()
+        logger = Logger()
 
     async def fake_call(_conn, _client, pack):
         if pack["cacheKey"] == first_key:
@@ -626,6 +640,12 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
             "errorCode": "sd_failed_token_secret",
         },
     }
+    assert logged == [
+        "cached SD pack sync rejected "
+        f"cache_key={second_key} downloaded=1 reused=0 skipped=0 failed=2 "
+        "critical_failed=1 error_code=sd_failed_token_secret",
+        "cached SD pack sync complete packs=2 synced=1 failed=1",
+    ]
 
 def test_normalize_firmware_sync_result_error_code_matches_backend_regex():
     cases = [
