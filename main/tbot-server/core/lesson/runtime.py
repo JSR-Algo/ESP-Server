@@ -541,7 +541,7 @@ def _near_miss_child_pronunciation_token(token: str, expected: str) -> bool:
 
 def _target_vocab_word(expected_responses: List[str], step: Optional[Dict[str, Any]] = None) -> str:
     if expected_responses:
-        return str(expected_responses[0]).strip() or "từ này"
+        return str(expected_responses[0]).strip() or "the word"
     if isinstance(step, dict):
         vocab = step.get("vocab")
         if isinstance(vocab, dict):
@@ -554,7 +554,7 @@ def _target_vocab_word(expected_responses: List[str], step: Optional[Dict[str, A
             primary = teaching.get("primaryWord")
             if primary not in (None, ""):
                 return str(primary).strip()
-    return "từ này"
+    return "the word"
 
 def _classify_child_response_intent(
     response: Any,
@@ -727,7 +727,7 @@ def _child_response_success_prompt(
     if isinstance(success, str) and success.strip():
         return success.strip()
     target = _target_vocab_word(list(expected_responses or []), step)
-    if target and target != "từ này":
+    if target and target != "the word":
         return f"Đúng rồi! {target}!"
     return "Giỏi lắm!"
 

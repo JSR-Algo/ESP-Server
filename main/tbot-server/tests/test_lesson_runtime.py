@@ -34,6 +34,7 @@ from core.lesson.runtime import (
     _child_response_success_prompt,
     _classify_child_response_intent,
     _manifest_steps_log_summary,
+    _target_vocab_word,
 )
 from core.lesson.sample import SampleAssetCache
 from core.lesson.sd_pack_sync import request_sd_pack_sync
@@ -216,6 +217,13 @@ def _assert_no_inline_media_payload(testcase, value, *, path="frame") -> None:
         testcase.assertLessEqual(len(value), 2048, f"oversized inline media-like string at {path}")
 
 class ChildResponseIntentClassifierTest(unittest.TestCase):
+    def test_missing_vocab_uses_neutral_english_fallback(self):
+        self.assertEqual(_target_vocab_word([], {}), "the word")
+        self.assertEqual(_target_vocab_word(["  "], {}), "the word")
+
+    def test_missing_vocab_success_prompt_does_not_name_placeholder(self):
+        self.assertEqual(_child_response_success_prompt({}, []), "Giỏi lắm!")
+
     def test_vietnamese_asr_alias_for_barn_is_accepted(self):
         self.assertEqual(
             _classify_child_response_intent("bóng bóng bóng", ["barn"]),
