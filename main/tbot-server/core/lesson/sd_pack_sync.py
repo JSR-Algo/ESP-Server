@@ -23,6 +23,11 @@ from core.lesson.flattened_cinematic_contract import (
     FlattenedCinematicContractError,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.layered_cinematic_contract import (
+    LayeredCinematicContractError,
+    is_layered_cinematic_generation_asset,
+    validate_layered_cinematic_generation_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     build_firmware_sync_pack,
@@ -556,7 +561,12 @@ def _rich_asset_record(item: Any, pack_dir: Path, cache_key: str) -> dict[str, A
     except OSError:
         return None
     rich_identity: dict[str, Any] = {}
-    if media_type == TRGB_MEDIA_TYPE:
+    if is_layered_cinematic_generation_asset(dict(item)):
+        try:
+            rich_identity = validate_layered_cinematic_generation_asset(dict(item))
+        except LayeredCinematicContractError:
+            return None
+    elif media_type == TRGB_MEDIA_TYPE:
         try:
             rich_identity = validate_pathless_flattened_cinematic_cache_asset(dict(item))
         except FlattenedCinematicContractError:

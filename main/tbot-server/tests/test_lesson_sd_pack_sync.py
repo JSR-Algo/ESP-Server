@@ -209,6 +209,56 @@ def test_cached_asset_packs_preserve_renderer_v4_v2_cue_identity(tmp_path):
     }
 
 
+def test_cached_asset_packs_preserve_renderer_v5_mixed_media_identity(tmp_path):
+    checksum = "7" * 64
+    cache_key = f"lesson-a/v5-{checksum}"
+    pack_root = tmp_path / "sd" / "tbot" / "lesson-assets"
+    store = SharedAssetStore(tmp_path / "sd" / "tbot", pack_root=pack_root)
+    specs = [
+        ("feelings.background@v1", b"background", "image/jpeg", "backgroundScene", {
+            "mediaKind": "image", "mediaType": "image/jpeg", "width": 480, "height": 320,
+            "rect": {"x": 0, "y": 0, "width": 480, "height": 320}, "fit": "cover",
+        }),
+        ("feelings.object@v1", b"object", "image/png", "teachingObject", {
+            "mediaKind": "image", "mediaType": "image/png", "width": 180, "height": 180,
+            "rect": {"x": 250, "y": 100, "width": 180, "height": 180}, "fit": "contain",
+        }),
+        ("feelings.robot.flyIn@v1", b"robot", "video/mp4", "robotOverlay", {
+            "mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
+            "hasAudio": False, "width": 200, "height": 200, "fps": 10,
+            "durationMs": 1000, "frameCount": 10,
+            "rect": {"x": 20, "y": 100, "width": 200, "height": 200},
+            "chromaKey": {"keyColor": "#00ff00", "tolerance": 24, "featherPx": 1},
+        }),
+    ]
+    assets = []
+    digests = {}
+    for key, content, media_type, slot, metadata in specs:
+        digest = hashlib.sha256(content).hexdigest()
+        store.put_bytes(content, digest)
+        digests[key] = digest
+        assets.append({
+            "key": key, "sha256": digest, "size": len(content), "mediaType": media_type,
+            "critical": True, "onlineUrl": f"https://assets.example/{key}",
+            "sdPath": _rich_sd_path(cache_key, key),
+            "sharedAssetKey": key.removesuffix("@v1"), "sharedAssetVersion": 1,
+            "compatibilityMetadata": metadata,
+            "visualRefs": [{"stepKey": "s1", "phase": "flyIn", "slot": slot}],
+        })
+    store.commit_pack(cache_key, digests, manifest={
+        "lessonId": "lesson-a", "lessonVersion": 5, "profile": "espTft",
+        "manifestChecksum": checksum, "cacheKey": cache_key, "assets": assets,
+    })
+
+    packs = list(sd_pack_sync.cached_asset_packs({"lesson": {"asset_pack_mount_root": str(pack_root)}}))
+
+    assert len(packs) == 1
+    assert [asset["compatibilityMetadata"]["mediaKind"] for asset in packs[0]["assets"]] == [
+        "image", "image", "video",
+    ]
+    assert packs[0]["assets"][2]["visualRefs"][0]["slot"] == "robotOverlay"
+
+
 def test_cached_asset_packs_preserve_pathless_admin_proxy_trgb_identity(tmp_path):
     checksum = "6" * 64
     cache_key = f"lesson-a/v7-{checksum}"

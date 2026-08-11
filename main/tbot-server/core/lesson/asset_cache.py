@@ -48,6 +48,11 @@ from core.lesson.flattened_cinematic_contract import (
     validate_flattened_cinematic_cache_asset,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.layered_cinematic_contract import (
+    LayeredCinematicContractError,
+    is_layered_cinematic_generation_asset,
+    validate_layered_cinematic_generation_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -113,7 +118,7 @@ class AssetState:
         "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
         "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
         "derivative_id", "phase_id", "cue_id", "effect", "step_key", "playback_mode",
-        "renderer_v3_mp4", "renderer_v4_mp4",
+        "renderer_v3_mp4", "renderer_v4_mp4", "renderer_v5_media",
         "state", "checksum_ok", "reason",
     )
 
@@ -158,6 +163,13 @@ class AssetState:
             self.renderer_v3_mp4 = True
         except FirmwareSyncPackError:
             self.renderer_v3_mp4 = False
+        self.renderer_v5_media = False
+        if is_layered_cinematic_generation_asset(asset):
+            try:
+                validate_layered_cinematic_generation_asset(asset)
+                self.renderer_v5_media = True
+            except LayeredCinematicContractError:
+                pass
         try:
             validate_renderer_v4_flattened_mp4(asset)
             self.renderer_v4_mp4 = True
@@ -581,7 +593,7 @@ class AssetCache:
             return
         for a in self.critical_assets:
             is_video = a.role == "video" or (a.media_type or "").lower().startswith("video/")
-            if is_video and not (a.renderer_v3_mp4 or a.renderer_v4_mp4):
+            if is_video and not (a.renderer_v3_mp4 or a.renderer_v4_mp4 or a.renderer_v5_media):
                 raise AssetProfileUnavailable(
                     "espTft only accepts validated lesson renderer MP4 assets",
                     context={"assetKey": a.key, "mediaType": a.media_type, "role": a.role},
@@ -1014,7 +1026,7 @@ class AssetCache:
     def _resolve_url(self, asset: AssetState) -> str:
         # assetOriginBase (one config value, D-ASSET-HOST) joined to the relative
         # path; fall back to a manifest-provided absolute url when no base is set.
-        if (asset.renderer_v3_mp4 or asset.renderer_v4_mp4) and asset.url:
+        if (asset.renderer_v3_mp4 or asset.renderer_v4_mp4 or asset.renderer_v5_media) and asset.url:
             return asset.url
         if self.asset_origin_base and asset.path:
             return f"{self.asset_origin_base}/{asset.path.lstrip('/')}"

@@ -557,6 +557,31 @@ class AssetCachePreloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.requested, [asset["url"]])
         self.assertEqual(client.request_headers, [{}])
 
+    async def test_renderer_v5_robot_mp4_is_profile_renderable_and_uses_attested_public_url(self):
+        content = b"renderer-v5-robot-fly-in"
+        asset = {
+            "key": "feelings.robot.flyIn@v1", "path": "wrong/origin-relative.mp4",
+            "url": "https://cdn.test/layered/feelings.robot.flyIn.mp4",
+            "sha256": _sha(content), "size": len(content), "critical": True,
+            "layer": "robotOverlay", "role": "flyIn", "mediaType": "video/mp4",
+            "sharedAssetKey": "feelings.robot.flyIn", "sharedAssetVersion": 1,
+            "compatibilityMetadata": {
+                "mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
+                "hasAudio": False, "width": 200, "height": 200, "fps": 10,
+                "durationMs": 1000, "frameCount": 10,
+                "rect": {"x": 20, "y": 100, "width": 200, "height": 200},
+                "chromaKey": {"keyColor": "#00ff00", "tolerance": 24, "featherPx": 1},
+            },
+            "visualRefs": [{"stepKey": "s1", "phase": "flyIn", "slot": "robotOverlay"}],
+        }
+        client = _FakeClient({asset["url"]: [content]})
+        cache = self._cache([asset], client=client)
+
+        self.assertTrue(await cache.preload())
+
+        self.assertTrue(cache.assets[0].renderer_v5_media)
+        self.assertEqual(client.requested, [asset["url"]])
+
     async def test_renderer_v3_mp4_truncation_never_commits_and_can_retry_cleanly(self):
         content = b"renderer-v3-exact-mp4-bytes"
         asset = {

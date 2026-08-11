@@ -46,6 +46,7 @@ _MATERIALIZATION_ERROR_CODES = {
     "INVALID_PROFILE": "invalid_profile",
     "INVALID_RENDERER_V3_MP4": "invalid_renderer_v3_mp4",
     "INVALID_RENDERER_V4_MP4": "invalid_renderer_v4_mp4",
+    "INVALID_RENDERER_V5_ASSET": "invalid_renderer_v5_asset",
     "INVALID_SD_PATH": "invalid_sd_path",
     "INVALID_URL": "invalid_url",
     "MISSING_FIELD": "missing_field",
