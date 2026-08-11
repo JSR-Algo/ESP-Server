@@ -3908,7 +3908,7 @@ class LessonRuntime:
             if dwell > 0:
                 self._start_passive_dwell(step_seq, step_id, dwell)
                 return
-            self._step_completed = True
+            self._complete_passive_step()
         else:
             if not self._renderer_v2_enabled():
                 self._dispatch_step_motion("listen")
@@ -4390,10 +4390,33 @@ class LessonRuntime:
                 or self._step_completed
             ):
                 return
-            self._step_completed = True
+            self._complete_passive_step()
             await self._maybe_finish_step()
 
         self._passive_dwell_task = asyncio.create_task(_dwell())
+
+    def _complete_passive_step(self) -> bool:
+        if not self._step_passive or self._step_completed or self._step is None:
+            return False
+        step_type = self._step.get("type")
+        self._forward(
+            {
+                "type": "step_completed",
+                "sequence": -self._step_seq if isinstance(self._step_seq, int) else None,
+                "stepId": self._step_id,
+                "stepType": step_type,
+                "result": "success",
+                "detail": {"source": "passive_runtime"},
+            }
+        )
+        self._log(
+            "info",
+            "lesson_progress step_completed "
+            f"stepId={self._step_id} result=success stepType={step_type or ''} "
+            "source=passive_runtime",
+        )
+        self._step_completed = True
+        return True
 
     def _cancel_passive_dwell(self) -> None:
         current = asyncio.current_task()
