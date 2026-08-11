@@ -41,6 +41,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
+import test_layered_cinematic_contract as L  # noqa: E402
 from core.lesson.errors import LessonError  # noqa: E402
 from core.lesson.flattened_cinematic_contract import trgb_container_bytes  # noqa: E402
 from core.lesson.runtime import (  # noqa: E402
@@ -53,12 +54,14 @@ from core.lesson.runtime import (  # noqa: E402
     VISUAL_DEGRADED_REASONS,
     VISUAL_REJECTED_REASONS,
     _renderer_v4_request_enabled,
+    _renderer_v5_request_enabled,
     _requested_renderer_capabilities,
 )
 
 
 RENDERER_V3 = "teebot-lesson-renderer.v3"
 RENDERER_V4 = "teebot-lesson-renderer.v4"
+RENDERER_V5 = "teebot-lesson-renderer.v5"
 
 
 def _cinematic_metadata(duration_ms, *, background=False):
@@ -363,6 +366,80 @@ def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
 
 
 class CinematicCapabilitySelectionTest(unittest.TestCase):
+    def test_requests_v5_before_older_enabled_renderer_lanes(self):
+        self.assertEqual(
+            _requested_renderer_capabilities(
+                [
+                    "teebot-lesson-renderer.v1",
+                    "teebot-lesson-renderer.v2",
+                    RENDERER_V3,
+                    RENDERER_V4,
+                    RENDERER_V5,
+                ],
+                renderer_v2_enabled=True,
+                renderer_v3_enabled=True,
+                renderer_v4_enabled=True,
+                renderer_v5_enabled=True,
+            ),
+            [
+                RENDERER_V5,
+                RENDERER_V4,
+                RENDERER_V3,
+                "teebot-lesson-renderer.v2",
+                "teebot-lesson-renderer.v1",
+            ],
+        )
+
+    def test_v5_requires_both_detailed_features_and_single_device_rollout(self):
+        conn = T._FakeConn(features={
+            "lesson": True,
+            "renderer": [RENDERER_V5],
+            "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
+        })
+        conn.device_id = "robot-layered"
+        conn.config = {"lesson": {
+            "renderer_v5_enabled": True,
+            "rollout_device_allowlist": ["robot-layered"],
+        }}
+        self.assertTrue(_renderer_v5_request_enabled(conn, [RENDERER_V5]))
+
+        conn.features["lessonRendererV5"] = {"layeredCinematic": True}
+        self.assertFalse(_renderer_v5_request_enabled(conn, [RENDERER_V5]))
+
+
+class LayeredCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_preloads_v5_and_emits_exact_fly_in_prepare(self):
+        manifest = T._build_manifest()
+        manifest.update({
+            "manifestVersion": RENDERER_V5,
+            "protocolVersion": RENDERER_V5,
+            "cinematicPhases": [L._phase()],
+        })
+        manifest["cinematicPhases"][0]["phaseId"] = "flyIn"
+
+        class AssetCache(T._FakeAssetCache):
+            def asset_pack_manifest(self, **_kwargs):
+                return L._pack()
+
+        conn = T._FakeConn(features={
+            "lesson": True,
+            "renderer": [RENDERER_V5],
+            "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
+        })
+        conn.device_id = "robot-layered"
+        conn.config = {"lesson": {
+            "renderer_v5_enabled": True,
+            "rollout_device_allowlist": ["robot-layered"],
+            "asset_delivery_mode": "sd_pack",
+        }}
+        runtime = _runtime(conn=conn, manifest=manifest, asset_cache=AssetCache())
+
+        self.assertTrue(await runtime.preload_only())
+        self.assertEqual(runtime._cinematic_phase["phaseId"], "flyIn")
+        body = runtime._prepare_body()
+        self.assertEqual(body["cinematicPhase"]["phaseId"], "flyIn")
+        self.assertEqual(body["cinematicPhase"]["templateId"], "layeredCinematic")
+
     def test_requests_only_enabled_exact_advertised_renderer_lanes(self):
         cases = (
             (

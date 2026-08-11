@@ -1162,7 +1162,7 @@ async def test_renderer_v3_replay_rejects_changed_rich_identity(tmp_path, mutate
 
 
 @pytest.mark.asyncio
-async def test_historical_digest_manifest_is_not_replayed_as_rich_pack(tmp_path):
+async def test_historical_digest_manifest_upgrades_to_rich_pack_without_download(tmp_path):
     store = SharedAssetStore(
         tmp_path / "sd" / "tbot",
         pack_root=tmp_path / "sd" / "tbot" / "lesson-assets",
@@ -1191,17 +1191,21 @@ async def test_historical_digest_manifest_is_not_replayed_as_rich_pack(tmp_path)
         resolver=_public_resolver,
     )
 
-    assert result["downloadedCount"] == 2
-    assert client.requests == [
-        "https://assets.example/poster.jpg?sig=secret",
-        "https://assets.example/barn.png",
-    ]
+    assert result["downloadedCount"] == 0
+    assert result["skippedCount"] == 2
+    assert client.requests == []
     rich = json.loads(
         (tmp_path / "sd" / "tbot" / "lesson-assets" / CACHE_KEY / "pack.json").read_text(
             encoding="utf-8"
         )
     )
     assert isinstance(rich["assets"], list)
+    assert [asset["key"] for asset in rich["assets"]] == [
+        "backgroundScene.poster",
+        "teachingObject.barn",
+    ]
+    assert rich["assets"][0]["onlineUrl"] == "https://assets.example/poster.jpg?sig=secret"
+    assert rich["assets"][1]["onlineUrl"] == "https://assets.example/barn.png"
 
 
 @pytest.mark.asyncio

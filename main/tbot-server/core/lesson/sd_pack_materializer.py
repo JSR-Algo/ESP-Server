@@ -233,6 +233,25 @@ async def materialize_lesson_sd_pack(
                 )
                 _log(log, "info", cache_key, 0, start, "replayed", None)
                 return result
+            if replay_status == "historical":
+                digests = {
+                    str(asset["key"]): str(asset["sha256"])
+                    for asset in normalized["assets"]
+                }
+                store.commit_pack(
+                    cache_key,
+                    digests,
+                    manifest=_public_pack_manifest(normalized),
+                )
+                _METRICS["replayed"] += 1
+                result = _result(
+                    cache_key,
+                    len(normalized["assets"]),
+                    0,
+                    len(normalized["assets"]),
+                )
+                _log(log, "info", cache_key, 0, start, "replayed", None)
+                return result
             if replay_status == "mismatch":
                 raise MaterializationError(
                     "PACK_REPLAY_MISMATCH",

@@ -34,6 +34,7 @@ from core.lesson.runtime import (
     _child_response_success_prompt,
     _classify_child_response_intent,
     _manifest_steps_log_summary,
+    _target_vocab_word,
 )
 from core.lesson.sample import SampleAssetCache
 from core.lesson.sd_pack_sync import request_sd_pack_sync
@@ -216,6 +217,13 @@ def _assert_no_inline_media_payload(testcase, value, *, path="frame") -> None:
         testcase.assertLessEqual(len(value), 2048, f"oversized inline media-like string at {path}")
 
 class ChildResponseIntentClassifierTest(unittest.TestCase):
+    def test_missing_vocab_uses_neutral_english_fallback(self):
+        self.assertEqual(_target_vocab_word([], {}), "the word")
+        self.assertEqual(_target_vocab_word(["  "], {}), "the word")
+
+    def test_missing_vocab_success_prompt_does_not_name_placeholder(self):
+        self.assertEqual(_child_response_success_prompt({}, []), "Giỏi lắm!")
+
     def test_vietnamese_asr_alias_for_barn_is_accepted(self):
         self.assertEqual(
             _classify_child_response_intent("bóng bóng bóng", ["barn"]),
@@ -5393,7 +5401,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     # 17) a single PASSIVE step auto-advances on its ack — no hang, no STEP_TIMEOUT --
 
-    async def test_passive_step_auto_advances_on_ack_without_step_completed(self):
+    async def test_passive_step_auto_advances_and_reports_step_completed(self):
         # A lesson whose ONLY step is passive narration (greeting). The firmware
         # acks the lesson_step but — by contract — NEVER sends a step_completed for
         # it. Pre-fix this hung forever in RUNNING (the per-step timeout is cancelled
@@ -5417,8 +5425,22 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
         types = [f["type"] for f in self._sent_frames(conn)]
         self.assertIn("lesson_stop", types)
-        # Crucially: NO step_completed was ever delivered, yet the step completed.
         self.assertEqual(rt._steps_completed, 1)
+        passive_completions = [
+            event
+            for batch in forwarder.batches
+            for event in batch["events"]
+            if event.get("type") == "step_completed"
+            and event.get("detail", {}).get("source") == "passive_runtime"
+        ]
+        self.assertEqual(passive_completions, [{
+            "type": "step_completed",
+            "sequence": -3,
+            "stepId": "s4",
+            "stepType": "greeting",
+            "result": "success",
+            "detail": {"source": "passive_runtime"},
+        }])
 
         # Let any leftover timeout timer elapse: it must NOT fail an acked passive step.
         await asyncio.sleep(0.1)
@@ -5439,6 +5461,33 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(completed)
         self.assertEqual(completed[0]["events"][0]["summary"]["stepsCompleted"], 1)
+
+    async def test_passive_dwell_reports_completion_once_after_dwell(self):
+        conn = _FakeConn()
+        forwarder = _FakeForwarder()
+        manifest = _build_steps_manifest([("s4", "greeting")])
+        manifest["steps"][0]["dwellSec"] = 0.01
+        rt = self._runtime(conn=conn, manifest=manifest, forwarder=forwarder)
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        def completions():
+            return [
+                event
+                for batch in forwarder.batches
+                for event in batch["events"]
+                if event.get("type") == "step_completed"
+                and event.get("detail", {}).get("source") == "passive_runtime"
+            ]
+
+        self.assertEqual(completions(), [])
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(completions()), 1)
+        self.assertFalse(rt._complete_passive_step())
+        self.assertEqual(len(completions()), 1)
 
     async def test_v2_passive_final_step_stops_when_completion_motion_is_missing(self):
         conn = _FakeConn(
@@ -10558,15 +10607,26 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(opened_windows), 5)
         self.assertEqual(rt.state, "COMPLETED")
         self.assertEqual(rt._steps_completed, 9)
-        child_response_events = [
+        step_completed_events = [
             batch["events"][0]
             for batch in forwarder.batches
             if batch["events"] and batch["events"][0].get("type") == "step_completed"
         ]
-        self.assertEqual([event["stepId"] for event in child_response_events], ["s1", "s4", "s5", "s6", "s7"])
-        self.assertEqual([event["sequence"] for event in child_response_events], [-3, -6, -7, -8, -9])
-        self.assertTrue(all(event["result"] == "success" for event in child_response_events))
-        for event in child_response_events:
+        self.assertEqual(
+            [event["stepId"] for event in step_completed_events],
+            [step["id"] for step in manifest["steps"]],
+        )
+        self.assertEqual([event["sequence"] for event in step_completed_events], list(range(-3, -12, -1)))
+        self.assertTrue(all(event["result"] == "success" for event in step_completed_events))
+        self.assertEqual(
+            [
+                event["stepId"]
+                for event in step_completed_events
+                if event.get("detail", {}).get("source") == "passive_runtime"
+            ],
+            ["s2", "s3", "s8", "s9"],
+        )
+        for event in step_completed_events:
             _assert_no_pronunciation_scoring_payload(self, event, path=f"step_completed[{event['stepId']}]")
         completed = [
             batch["events"][0]

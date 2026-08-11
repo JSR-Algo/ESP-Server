@@ -475,9 +475,9 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
             for ev in batch.get("events", [])
             if ev.get("type") == "step_completed"
         ]
-        self.assertEqual(step_completed[-1]["stepId"], "s4")
-        self.assertEqual(step_completed[-1]["result"], "success")
-        self.assertEqual(step_completed[-1]["detail"]["recognizedText"], secret_speech)
+        interactive_completed = next(ev for ev in step_completed if ev.get("stepId") == "s4")
+        self.assertEqual(interactive_completed["result"], "success")
+        self.assertEqual(interactive_completed["detail"]["recognizedText"], secret_speech)
 
         # POST-boundary: the body that 'left the ESP' has NO child speech anywhere
         # and renamed result->outcome. Scan every posted event recursively.
@@ -486,7 +486,7 @@ class LessonEndToEndFlowTest(unittest.IsolatedAsyncioTestCase):
         ]
         step_done_posted = [ev for ev in posted_events if ev.get("type") == "step_completed"]
         self.assertTrue(step_done_posted, "no step_completed reached the post boundary")
-        posted = step_done_posted[-1]
+        posted = next(ev for ev in step_done_posted if ev.get("stepId") == "s4")
         self.assertEqual(posted.get("outcome"), "success")
         self.assertNotIn("result", posted)
         self.assertNotIn(secret_speech, json.dumps(posted))
