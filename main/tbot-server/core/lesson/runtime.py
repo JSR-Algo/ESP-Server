@@ -4842,11 +4842,20 @@ class LessonRuntime:
 
         async def run() -> None:
             try:
-                await self._apply_authored_visual_then_motion(
+                visual_applied = await self._apply_authored_visual_then_motion(
                     "completion", "completion"
                 )
+                current_generation = expected_generation
+                if (
+                    not visual_applied
+                    and self._visual_generation == expected_generation - 1
+                ):
+                    # Authored completion visuals are best-effort. Missing motion or
+                    # overlay metadata is rejected before a visual generation starts,
+                    # but must not suppress the terminal lesson_stop frame.
+                    current_generation = self._visual_generation
                 if not self._visual_transition_is_current(
-                    expected_generation,
+                    current_generation,
                     assignment_id=assignment_id,
                     session_id=session_id,
                     step_id=step_id,
