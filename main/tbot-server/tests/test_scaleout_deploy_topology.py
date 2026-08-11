@@ -149,10 +149,13 @@ def test_prod_deploy_wires_renderer_flags_defaulting_disabled():
 
     assert environment["LESSON_RENDERER_V2_ENABLED"] == "${LESSON_RENDERER_V2_ENABLED:-false}"
     assert environment["LESSON_RENDERER_V4_ENABLED"] == "${LESSON_RENDERER_V4_ENABLED:-false}"
+    assert environment["LESSON_RENDERER_V5_ENABLED"] == "${LESSON_RENDERER_V5_ENABLED:-false}"
     assert "LESSON_RENDERER_V2_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V4_ENABLED=false" in env_example
+    assert "LESSON_RENDERER_V5_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V2_ENABLED" in script
     assert "LESSON_RENDERER_V4_ENABLED" in script
+    assert "LESSON_RENDERER_V5_ENABLED" in script
 
 
 def test_prod_compose_uses_voice_safe_lesson_preload_timeout_default():
@@ -608,6 +611,7 @@ def test_deploy_vps_preflight_rejects_unsafe_lesson_rollout(tmp_path, overrides,
         "LESSON_RUNTIME_ENABLED": "false",
         "LESSON_RENDERER_V2_ENABLED": "false",
         "LESSON_RENDERER_V4_ENABLED": "false",
+        "LESSON_RENDERER_V5_ENABLED": "false",
         "LESSON_MOTION_PRESETS_ENABLED": "false",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED": "false",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST": "",
