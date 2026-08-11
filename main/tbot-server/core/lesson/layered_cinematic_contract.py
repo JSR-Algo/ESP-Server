@@ -135,6 +135,53 @@ def _local_sd_path(asset: dict[str, Any], local_root: str) -> str:
     return path
 
 
+def validate_layered_cinematic_generation_asset(asset: Any) -> dict[str, Any]:
+    """Validate one shared renderer-v5 asset before generation materialization."""
+    if not isinstance(asset, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic generation asset is invalid")
+    shared_key = asset.get("sharedAssetKey")
+    version = asset.get("sharedAssetVersion")
+    if (
+        not isinstance(shared_key, str)
+        or not shared_key
+        or not _positive_int(version)
+        or asset.get("key") != f"{shared_key}@v{version}"
+    ):
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic shared identity is invalid")
+    refs = asset.get("visualRefs")
+    if not isinstance(refs, list) or not refs:
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic visual refs are invalid")
+    slots: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, dict) or set(ref) != {"stepKey", "phase", "slot"}:
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic visual ref is invalid")
+        if not all(isinstance(ref.get(key), str) and ref[key] for key in ref):
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic visual ref is invalid")
+        slots.add(ref["slot"])
+    if len(slots) != 1:
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic asset must use one layer slot")
+    slot = next(iter(slots))
+    media_type = asset.get("mediaType")
+    if slot == "backgroundScene" and media_type == "image/jpeg":
+        metadata = _image_metadata(asset.get("compatibilityMetadata"), background=True)
+    elif slot == "teachingObject" and media_type == "image/png":
+        metadata = _image_metadata(asset.get("compatibilityMetadata"), background=False)
+    elif slot == "robotOverlay" and media_type == "video/mp4":
+        source = asset.get("compatibilityMetadata")
+        duration_ms = source.get("durationMs") if isinstance(source, dict) else None
+        if not _positive_int(duration_ms):
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic Robot duration is invalid")
+        metadata = _video_metadata(source, duration_ms=duration_ms)
+    else:
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic slot media type is invalid")
+    return {
+        "sharedAssetKey": shared_key,
+        "sharedAssetVersion": version,
+        "compatibilityMetadata": metadata,
+        "visualRefs": copy.deepcopy(refs),
+    }
+
+
 def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     """Validate and project one renderer-v5 phase using verified local media only."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:

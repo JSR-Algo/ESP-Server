@@ -31,6 +31,10 @@ from core.lesson.cache_key_contract import (
     compose_cache_key,
     encode_asset_basename,
 )
+from core.lesson.layered_cinematic_contract import (
+    LayeredCinematicContractError,
+    validate_layered_cinematic_generation_asset,
+)
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -525,7 +529,17 @@ def _validate_asset(
     if type(value.get("critical")) is not bool:
         raise _PollRejected("cms_invalid_critical")
     media_type = value["mediaType"]
-    if media_type == TRGB_MEDIA_TYPE:
+    metadata = value.get("compatibilityMetadata")
+    if (
+        fields == _ASSET_FIELDS | _SHARED_IDENTITY_FIELDS | _RENDERER_V3_MP4_FIELDS
+        and isinstance(metadata, dict)
+        and "mediaKind" in metadata
+    ):
+        try:
+            validate_layered_cinematic_generation_asset(value)
+        except LayeredCinematicContractError:
+            raise _PollRejected("cms_invalid_renderer_v5_asset") from None
+    elif media_type == TRGB_MEDIA_TYPE:
         public_url = value["onlineUrl"]
         public_path = urlsplit(public_url).path
         if (
