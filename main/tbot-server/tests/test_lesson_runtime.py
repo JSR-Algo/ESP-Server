@@ -7459,6 +7459,66 @@ class LessonPullOnConnectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         prepare = json.loads(conn.websocket.sent[0])
         self.assertEqual(prepare["protocolVersion"], "teebot-lesson-renderer.v1")
 
+    async def test_v4_rollout_keeps_v2_and_v1_fallbacks_for_assigned_v2_manifest(self):
+        from core.lesson.runtime import maybe_start_lesson_on_connect
+
+        conn = _RepublishConn()
+        conn.features = {
+            "lesson": True,
+            "renderer": [
+                "teebot-lesson-renderer.v1",
+                "teebot-lesson-renderer.v2",
+                "teebot-lesson-renderer.v3",
+                "teebot-lesson-renderer.v4",
+            ],
+            "lessonRendererV3": {"directMp4Cinematic": True, "sdAssetPack": True},
+            "lessonRendererV4": {"flattenedMjpegCinematic": True, "sdAssetPack": True},
+        }
+        conn.config["lesson"].update({
+            "renderer_v2_enabled": True,
+            "renderer_v4_enabled": True,
+        })
+        assignment = {
+            "assignmentId": FIX["frames"]["lesson_prepare"]["assignmentId"],
+            "assignmentVersion": 1,
+            "lessonId": FIX["frames"]["lesson_prepare"]["lessonId"],
+            "lessonVersion": 3,
+            "manifestChecksum": _manifest_checksum(),
+            "profile": "espTft",
+            "state": "ASSIGNED",
+        }
+        manifest = _build_manifest()
+        manifest["manifestVersion"] = "teebot-lesson-renderer.v2"
+        manifest["openingEntrance"] = {
+            "template": "tvideoFlyWalk",
+            "preset": "flyLandWalkGreet",
+            "policy": "oncePerLessonSession",
+            "layoutPreset": "centerRoad",
+            "phases": [
+                "hidden", "flyIn", "landFar", "settle", "walkToward",
+                "arriveNear", "greetIdle", "revealTeachingContent",
+            ],
+            "backgroundAssetKey": "scene.farm",
+            "robotAssetKey": "robotOverlay.teach",
+            "fallback": "staticGreet",
+        }
+        undo = self._patch_backend(assignment, manifest)
+        try:
+            runtime = await maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(
+            self.manifest_calls[0]["renderer_capabilities"],
+            [
+                "teebot-lesson-renderer.v4",
+                "teebot-lesson-renderer.v2",
+                "teebot-lesson-renderer.v1",
+            ],
+        )
+        self.assertEqual(runtime.negotiated_version, "teebot-lesson-renderer.v2")
+
     async def test_manifest_fetch_is_pinned_to_assignment_lesson_version(self):
         from core.lesson.runtime import maybe_start_lesson_on_connect
 

@@ -365,10 +365,34 @@ def _runtime(conn=None, *, asset_cache=None, forwarder=None, manifest=None):
 class CinematicCapabilitySelectionTest(unittest.TestCase):
     def test_requests_only_enabled_exact_advertised_renderer_lanes(self):
         cases = (
-            ("v2 only", ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"], True, False, False, ["teebot-lesson-renderer.v2"]),
+            (
+                "v2 plus baseline",
+                ["teebot-lesson-renderer.v1", "teebot-lesson-renderer.v2"],
+                True,
+                False,
+                False,
+                ["teebot-lesson-renderer.v2", "teebot-lesson-renderer.v1"],
+            ),
             ("v3 only", [RENDERER_V3, RENDERER_V4], False, True, False, [RENDERER_V3]),
             ("v4 only", [RENDERER_V3, RENDERER_V4], False, False, True, [RENDERER_V4]),
-            ("highest cinematic", [RENDERER_V3, RENDERER_V4], False, True, True, [RENDERER_V4]),
+            (
+                "all compatible rollout lanes",
+                [
+                    "teebot-lesson-renderer.v1",
+                    "teebot-lesson-renderer.v2",
+                    RENDERER_V3,
+                    RENDERER_V4,
+                ],
+                True,
+                True,
+                True,
+                [
+                    RENDERER_V4,
+                    RENDERER_V3,
+                    "teebot-lesson-renderer.v2",
+                    "teebot-lesson-renderer.v1",
+                ],
+            ),
             ("disabled cinematic", [RENDERER_V3, RENDERER_V4], False, False, False, ["teebot-lesson-renderer.v1"]),
         )
         for label, advertised, v2, v3, v4, expected in cases:
