@@ -33,6 +33,15 @@ def test_sd_gc_settings_survive_manager_api_config_merge():
     assert api["lesson"] == local["lesson"]
 
 
+def test_renderer_v5_rollout_survives_manager_api_config_merge():
+    api = {"lesson": {}}
+    local = {"lesson": {"renderer_v5_enabled": True}}
+
+    _merge_local_lesson_asset_pack_settings(api, local)
+
+    assert api["lesson"]["renderer_v5_enabled"] is True
+
+
 def test_sd_gc_percent_boundaries_and_relationship(monkeypatch, tmp_path):
     monkeypatch.setenv("LESSON_SD_GC_FREE_PERCENT", "100")
     monkeypatch.setenv("LESSON_SD_PRELOAD_MIN_FREE_PERCENT", "1")
