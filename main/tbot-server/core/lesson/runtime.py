@@ -56,6 +56,12 @@ from core.lesson.flattened_cinematic_contract import (
     project_flattened_cinematic_phase,
     validate_flattened_cinematic_manifest,
 )
+from core.lesson.layered_cinematic_contract import (
+    KNOWN_PHASE_IDS as LAYERED_CINEMATIC_PHASE_IDS,
+    LayeredCinematicContractError,
+    RENDERER_V5,
+    project_layered_cinematic_phase,
+)
 from core.lesson.conversation_contract import (
     ConversationContractError,
     LessonToolIdentity,
@@ -994,14 +1000,34 @@ def _renderer_v4_request_enabled(conn: Any, renderer_capabilities: List[str]) ->
     )
 
 
+def _renderer_v5_request_enabled(conn: Any, renderer_capabilities: List[str]) -> bool:
+    config = getattr(conn, "config", {}) or {}
+    lesson_cfg = _lesson_config(config)
+    features = getattr(conn, "features", None)
+    detail = features.get("lessonRendererV5") if isinstance(features, dict) else None
+    allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+    device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
+    return (
+        lesson_cfg.get("renderer_v5_enabled") is True
+        and RENDERER_V5 in renderer_capabilities
+        and isinstance(detail, dict)
+        and detail.get("layeredCinematic") is True
+        and detail.get("sdAssetPack") is True
+        and len(allowlist) == 1
+        and device_id == str(allowlist[0]).strip().lower()
+    )
+
+
 def _requested_renderer_capabilities(
     advertised: List[str],
     *,
     renderer_v2_enabled: bool,
     renderer_v3_enabled: bool,
     renderer_v4_enabled: bool,
+    renderer_v5_enabled: bool = False,
 ) -> List[str]:
     enabled = (
+        (RENDERER_V5, renderer_v5_enabled),
         (RENDERER_V4, renderer_v4_enabled),
         (RENDERER_V3, renderer_v3_enabled),
         (RENDERER_V2, renderer_v2_enabled),
@@ -1033,7 +1059,33 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
         for asset in manifest.get("assets", [])
         if isinstance(asset, dict)
     ]
-    if manifest.get("manifestVersion") != RENDERER_V4:
+    manifest_version = manifest.get("manifestVersion")
+    if manifest_version == RENDERER_V5:
+        for phase in manifest.get("cinematicPhases", []):
+            if not isinstance(phase, dict):
+                continue
+            for layer in phase.get("layers", []):
+                if not isinstance(layer, dict):
+                    continue
+                metadata = layer.get("metadata")
+                if not isinstance(metadata, dict):
+                    continue
+                assets.append({
+                    "key": layer.get("assetVersionId"),
+                    "path": layer.get("path"),
+                    "url": layer.get("url"),
+                    "sha256": layer.get("sha256"),
+                    "size": layer.get("bytes"),
+                    "critical": True,
+                    "layer": layer.get("layer"),
+                    "role": phase.get("phaseId"),
+                    "mediaType": metadata.get("mediaType"),
+                    "sharedAssetKey": layer.get("assetKey"),
+                    "sharedAssetVersion": layer.get("version"),
+                    "compatibilityMetadata": copy.deepcopy(metadata),
+                })
+        return assets
+    if manifest_version != RENDERER_V4:
         return assets
     for phase in manifest.get("cinematicPhases", []):
         if not isinstance(phase, dict) or not isinstance(phase.get("asset"), dict):
@@ -1222,6 +1274,7 @@ class LessonRuntime:
         self._cinematic_deferred_step_ack: Optional[Dict[str, Any]] = None
         self._conversation_cues: dict[str, dict[str, Any]] = {}
         self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self._layered_cinematic_phases: dict[str, dict[str, Any]] = {}
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
@@ -1266,13 +1319,13 @@ class LessonRuntime:
         """Validate and materialize assets without sending ``lesson_prepare``."""
         features = getattr(self.conn, "features", None)
         manifest_version = self.manifest.get("manifestVersion")
-        if manifest_version in {RENDERER_V3, RENDERER_V4} and not self._cinematic_enabled():
+        if manifest_version in {RENDERER_V3, RENDERER_V4, RENDERER_V5} and not self._cinematic_enabled():
             self.last_error = LessonError(
                 CINEMATIC_CAPABILITY_UNSUPPORTED,
                 "device did not advertise the exact cinematic renderer capability",
             )
             raise self.last_error
-        if manifest_version not in {RENDERER_V3, RENDERER_V4} and not lesson_capability_ok(
+        if manifest_version not in {RENDERER_V3, RENDERER_V4, RENDERER_V5} and not lesson_capability_ok(
             features, renderer_v2_enabled=self._renderer_v2_rollout_enabled()
         ):
             # D-CAP-FLAG: absence = no support; MUST NOT send lesson_prepare.
@@ -1292,6 +1345,8 @@ class LessonRuntime:
             manifest_version == RENDERER_V3 and not self._renderer_v3_enabled()
         ) or (
             manifest_version == RENDERER_V4 and not self._renderer_v4_enabled()
+        ) or (
+            manifest_version == RENDERER_V5 and not self._renderer_v5_enabled()
         ):
             self.last_error = LessonError(
                 LESSON_VERSION_UNSUPPORTED, f"unsupported manifestVersion {manifest_version!r}"
@@ -1344,7 +1399,7 @@ class LessonRuntime:
             ready = await self._preload_sd_asset_pack_before_prepare()
             if not ready:
                 return False
-        if manifest_version in {RENDERER_V3, RENDERER_V4}:
+        if manifest_version in {RENDERER_V3, RENDERER_V4, RENDERER_V5}:
             try:
                 if manifest_version == RENDERER_V4:
                     validate_flattened_cinematic_manifest(self.manifest)
@@ -1366,6 +1421,16 @@ class LessonRuntime:
                 )
                 if manifest_version == RENDERER_V3:
                     self._cinematic_phase = project_cinematic_phase(phases[0], pack)
+                elif manifest_version == RENDERER_V5:
+                    projected = [
+                        project_layered_cinematic_phase(phase, pack) for phase in phases
+                    ]
+                    self._layered_cinematic_phases = {
+                        phase["phaseId"]: phase for phase in projected
+                    }
+                    self._cinematic_phase = self._layered_cinematic_phases.get(
+                        "flyIn", projected[0]
+                    )
                 else:
                     projected = [
                         project_flattened_cinematic_phase(phase, pack) for phase in phases
@@ -1402,7 +1467,11 @@ class LessonRuntime:
                         and isinstance(cue.get("cueId"), str)
                     }
                     self._validate_safe_speaking_cinematic_routes()
-            except (CinematicContractError, FlattenedCinematicContractError) as exc:
+            except (
+                CinematicContractError,
+                FlattenedCinematicContractError,
+                LayeredCinematicContractError,
+            ) as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error
         return True
@@ -1568,8 +1637,35 @@ class LessonRuntime:
             and detail.get("sdAssetPack") is True
         )
 
+    def _renderer_v5_rollout_enabled(self) -> bool:
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = _lesson_config(config)
+        if lesson_cfg.get("renderer_v5_enabled") is not True:
+            return False
+        allowlist = lesson_cfg.get("rollout_device_allowlist") or []
+        if len(allowlist) != 1:
+            return False
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip().lower()
+        return bool(device_id and device_id == str(allowlist[0]).strip().lower())
+
+    def _renderer_v5_enabled(self) -> bool:
+        features = getattr(self.conn, "features", None)
+        detail = features.get("lessonRendererV5") if isinstance(features, dict) else None
+        return (
+            self._renderer_v5_rollout_enabled()
+            and self.negotiated_version == RENDERER_V5
+            and RENDERER_V5 in self.renderer_capabilities
+            and isinstance(detail, dict)
+            and detail.get("layeredCinematic") is True
+            and detail.get("sdAssetPack") is True
+        )
+
     def _cinematic_enabled(self) -> bool:
-        return self._renderer_v3_enabled() or self._renderer_v4_enabled()
+        return (
+            self._renderer_v3_enabled()
+            or self._renderer_v4_enabled()
+            or self._renderer_v5_enabled()
+        )
 
     def _validate_conversation_contracts(self) -> bool:
         conversation = self.manifest.get("conversation")
@@ -2760,6 +2856,13 @@ class LessonRuntime:
         phase = self._cinematic_phase
         if not isinstance(phase, dict):
             return {}
+        if self._renderer_v5_enabled():
+            phase_id = phase.get("phaseId")
+            return (
+                {"phaseId": phase_id}
+                if isinstance(phase_id, str) and phase_id in LAYERED_CINEMATIC_PHASE_IDS
+                else {}
+            )
         identity = cinematic_identity_key(phase)
         return {"phaseId" if "phaseId" in phase else "cueId": identity}
 
@@ -2775,10 +2878,9 @@ class LessonRuntime:
             return False
         kind = command.get("command")
         try:
-            identity_key = cinematic_identity_key(command)
-        except FlattenedCinematicContractError:
+            identity_field, identity_key = self._cinematic_command_identity(command)
+        except (FlattenedCinematicContractError, LayeredCinematicContractError):
             return False
-        identity_field = "phaseId" if "phaseId" in command else "cueId"
         pending = self._cinematic_pending_command
         return bool(
             isinstance(pending, dict)
@@ -2795,10 +2897,9 @@ class LessonRuntime:
             return False
         kind = command.get("command")
         try:
-            identity_key = cinematic_identity_key(command)
-        except FlattenedCinematicContractError:
+            identity_field, identity_key = self._cinematic_command_identity(command)
+        except (FlattenedCinematicContractError, LayeredCinematicContractError):
             return False
-        identity_field = "phaseId" if "phaseId" in command else "cueId"
         common = {"event", "command", identity_field, "commandSequenceId", "accepted"}
         expected_event = "commandApplied"
         expected_keys = common
@@ -2851,6 +2952,23 @@ class LessonRuntime:
             and body.get("acks") == acked
             and self._cinematic_ack_payload_matches(command, body)
         )
+
+    def _cinematic_command_identity(self, command: dict[str, Any]) -> tuple[str, str]:
+        if self._renderer_v5_enabled():
+            if set(key for key in ("phaseId", "cueId") if key in command) != {"phaseId"}:
+                raise LayeredCinematicContractError(
+                    "CINEMATIC_IDENTITY_UNSUPPORTED",
+                    "layered cinematic command requires one phase identity",
+                )
+            phase_id = command.get("phaseId")
+            if not isinstance(phase_id, str) or phase_id not in LAYERED_CINEMATIC_PHASE_IDS:
+                raise LayeredCinematicContractError(
+                    "CINEMATIC_IDENTITY_UNSUPPORTED",
+                    "layered cinematic phase identity is invalid",
+                )
+            return "phaseId", phase_id
+        identity_key = cinematic_identity_key(command)
+        return ("phaseId" if "phaseId" in command else "cueId"), identity_key
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
         body = msg_json.get("body")
@@ -3259,6 +3377,16 @@ class LessonRuntime:
     def _cinematic_cue(
         self, effect: str, *, step_key: str | None = None
     ) -> dict[str, Any] | None:
+        if self._renderer_v5_enabled():
+            phase_id = {
+                "opening": "flyIn",
+                "greet": "walk",
+                "retry-level-1": "thinking",
+                "retry-level-2": "thinking",
+                "retry-level-3": "thinking",
+                "correct": "celebrate",
+            }.get(effect, effect)
+            return self._layered_cinematic_phases.get(phase_id)
         key = step_key if isinstance(step_key, str) and step_key else self._step_id
         if not isinstance(key, str):
             return None
@@ -3306,10 +3434,11 @@ class LessonRuntime:
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         sequence = self._seq + 1
         self._cinematic_phase = cue
+        identity_field = "phaseId" if "phaseId" in cue else "cueId"
         pending = {
             "stage": "prepare",
             "sequence": sequence,
-            "cueId": cue["cueId"],
+            identity_field: cue[identity_field],
             "stepId": self._step_id,
             "future": future,
         }
@@ -5170,6 +5299,7 @@ class LessonRuntime:
         self._cinematic_deferred_step_ack = None
         self._retire_authored_cinematic_pending()
         self._cinematic_phase = None
+        self._layered_cinematic_phases.clear()
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:
                 self._outstanding.pop(sequence, None)
@@ -6415,7 +6545,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     renderer_v2_enabled = _renderer_v2_request_enabled(conn, renderer_capabilities)
     renderer_v3_enabled = _renderer_v3_request_enabled(conn, renderer_capabilities)
     renderer_v4_enabled = _renderer_v4_request_enabled(conn, renderer_capabilities)
-    if not renderer_v3_enabled and not renderer_v4_enabled and not _cap_ok(
+    renderer_v5_enabled = _renderer_v5_request_enabled(conn, renderer_capabilities)
+    if not renderer_v3_enabled and not renderer_v4_enabled and not renderer_v5_enabled and not _cap_ok(
         getattr(conn, "features", None), renderer_v2_enabled=renderer_v2_enabled
     ):
         _set_lesson_start_status(conn, "LESSON_CAPABILITY_MISSING", "Robot chưa sẵn sàng hiển thị bài học.")
@@ -6431,6 +6562,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         renderer_v2_enabled=renderer_v2_enabled,
         renderer_v3_enabled=renderer_v3_enabled,
         renderer_v4_enabled=renderer_v4_enabled,
+        renderer_v5_enabled=renderer_v5_enabled,
     )
 
     async with httpx.AsyncClient(
