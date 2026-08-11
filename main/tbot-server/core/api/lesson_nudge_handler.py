@@ -133,19 +133,42 @@ class LessonNudgeHandler:
 
         from core.lesson.runtime import maybe_start_lesson_on_connect
 
-        transition = getattr(conn, "transition_to_lesson_start", None)
-        if callable(transition) and not await transition():
+        conn, transition_failure = await self._transition_current_connection(
+            device_id, conn
+        )
+        if transition_failure is not None:
             return web.json_response(
                 {
                     "data": {
                         "nudged": False,
-                        "reason": "live-transition-timeout",
+                        "reason": transition_failure,
                     }
                 },
                 status=202,
             )
         await maybe_start_lesson_on_connect(conn)
         return web.json_response({"data": {"nudged": True}}, status=202)
+
+    async def _transition_current_connection(self, device_id, conn):
+        # A reconnect can replace the map entry while a Google Live transition
+        # is awaiting its stop acknowledgement. Re-resolve before pulling so a
+        # stale socket never starts the assignment owned by its replacement.
+        for _attempt in range(3):
+            transition = getattr(conn, "transition_to_lesson_start", None)
+            if callable(transition) and not await transition():
+                return None, "live-transition-timeout"
+            if self._connection_is_active(conn):
+                return conn, None
+            current = await self._find_connection(device_id)
+            if current is None:
+                return None, "device-offline"
+            conn = current
+        return None, "connection-replaced"
+
+    def _connection_is_active(self, conn):
+        if self.connections is None:
+            return False
+        return any(candidate is conn for candidate in self.connections.values())
 
     async def handle_child_response_post(self, request: web.Request) -> web.Response:
         auth_error = self._authorize(request)

@@ -879,7 +879,7 @@ class VisualAckWaiterTest(unittest.IsolatedAsyncioTestCase):
     async def test_renderer_v2_resolves_thinking_and_retry_motion_without_mcp(self):
         self.rt.conn.config["lesson"]["motion_presets_enabled"] = True
         self.rt._step = {
-            "motion": {"thinking": "thinking", "incorrect": "tryAgain"},
+            "motion": {},
             "scene": {
                 "robotOverlay": {"asset": {"key": "robotOverlay.thinking"}}
             },
@@ -1376,7 +1376,6 @@ class StepVisualContinuationTest(unittest.IsolatedAsyncioTestCase):
         ):
             await self.rt._on_frame_acked({"type": "lesson_step"}, {})
             await asyncio.sleep(0)
-            teach = self._visual_frames()[-1]
             await self.rt.pause()
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -1420,7 +1419,6 @@ class StepVisualContinuationTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 if self._visual_frames()[-1]["body"]["state"] == "listen":
                     break
-            listen = self._visual_frames()[-1]
             await self.rt.pause()
             await asyncio.sleep(0)
             await asyncio.sleep(0)

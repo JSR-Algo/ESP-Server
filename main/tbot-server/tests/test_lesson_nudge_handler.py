@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -149,6 +150,51 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["transition", "pull"])
         self.assertEqual(json.loads(response.text)["data"], {"nudged": True})
 
+    async def test_reconnect_during_live_transition_pulls_on_replacement_connection(self):
+        from core.api.lesson_nudge_handler import LessonNudgeHandler
+        import core.lesson.runtime as runtime
+
+        os.environ["TBOT_DEVICE_MINT_SECRET"] = "secret"
+        old_transition_started = asyncio.Event()
+        release_old_transition = asyncio.Event()
+        events = []
+
+        async def old_transition():
+            events.append("old-transition")
+            old_transition_started.set()
+            await release_old_transition.wait()
+            return True
+
+        async def new_transition():
+            events.append("new-transition")
+            return True
+
+        old_conn = SimpleNamespace(transition_to_lesson_start=old_transition)
+        new_conn = SimpleNamespace(transition_to_lesson_start=new_transition)
+        connections = {"device-1": old_conn}
+
+        async def pull_assignment(conn):
+            events.append(("pull", conn))
+
+        saved = runtime.maybe_start_lesson_on_connect
+        runtime.maybe_start_lesson_on_connect = pull_assignment
+        try:
+            task = asyncio.create_task(
+                LessonNudgeHandler({}, connections).handle_post(_FakeRequest())
+            )
+            await old_transition_started.wait()
+            connections["device-1"] = new_conn
+            release_old_transition.set()
+            response = await task
+        finally:
+            runtime.maybe_start_lesson_on_connect = saved
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(
+            events,
+            ["old-transition", "new-transition", ("pull", new_conn)],
+        )
+
     async def test_live_transition_timeout_is_retryable_and_does_not_pull(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler
         import core.lesson.runtime as runtime
@@ -171,6 +217,16 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
             {"nudged": False, "reason": "live-transition-timeout"},
         )
         pull.assert_not_awaited()
+
+    async def test_non_google_provider_preserves_existing_nudge_pull_behavior(self):
+        from core.connection import ConnectionHandler
+
+        conn = SimpleNamespace(
+            voice_provider=SimpleNamespace(),
+            is_realtime_busy=lambda: True,
+        )
+
+        self.assertTrue(await ConnectionHandler.transition_to_lesson_start(conn))
 
     async def test_sample_nudge_reports_refused_when_sample_runtime_does_not_start(self):
         from core.api.lesson_nudge_handler import LessonNudgeHandler

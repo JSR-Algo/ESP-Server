@@ -106,6 +106,10 @@ RENDERER_V2_DEFAULT_MOTION_SLOTS = {
     "thinking": "thinking",
     "retry": "incorrect",
 }
+RENDERER_V2_DEFAULT_MOTION_PRESETS = {
+    "thinking": "thinking",
+    "retry": "tryAgain",
+}
 VISUAL_DEGRADED_REASONS = frozenset(
     {
         "missingOverlay",
@@ -4773,11 +4777,13 @@ class LessonRuntime:
         resolved_slot = motion_slot or RENDERER_V2_DEFAULT_MOTION_SLOTS.get(state)
         preset = motion.get(resolved_slot) if isinstance(motion, dict) and resolved_slot else None
         if not isinstance(preset, str) or not preset:
-            self._log(
-                "warning",
-                f"lesson_visual_state rejected missing motionPreset state={state} slot={resolved_slot}",
-            )
-            return False
+            preset = RENDERER_V2_DEFAULT_MOTION_PRESETS.get(state)
+            if not preset:
+                self._log(
+                    "warning",
+                    f"lesson_visual_state rejected missing motionPreset state={state} slot={resolved_slot}",
+                )
+                return False
         overlay_key = self._authored_overlay_key()
         if not overlay_key:
             self._log(
