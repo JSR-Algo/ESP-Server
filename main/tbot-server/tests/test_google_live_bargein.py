@@ -532,7 +532,7 @@ class _CapturingBridge(GoogleLiveAudioBridge):
     async def _send_tts_message(self, state):
         self.tts_states.append(state)
 
-    async def _send_tts_stop_now(self):
+    async def _send_tts_stop_now(self, *, continue_listening=True):
         self.tts_states.append("stop_now")
 
     async def _flush_output_audio(self):
