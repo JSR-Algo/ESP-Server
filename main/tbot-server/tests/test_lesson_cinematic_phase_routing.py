@@ -261,6 +261,31 @@ async def test_v5_authored_effect_prepares_and_starts_exact_phase() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v5_terminal_completion_emits_typed_cinematic_stop() -> None:
+    runtime = _v5_runtime()
+    last_step = len(runtime._steps) - 1
+    runtime.state = S_RUNNING
+    runtime._step_index = last_step
+    runtime._step = runtime._steps[last_step]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq = 20 + last_step
+    runtime._step_acked = True
+    runtime._cinematic_phase = runtime._layered_cinematic_phases["exit"]
+    runtime._step_completed = True
+
+    await runtime._maybe_finish_step()
+
+    stop = json.loads(runtime.conn.websocket.sent[-1])
+    assert stop["type"] == "lesson_stop"
+    assert stop["body"]["reason"] == "COMPLETED"
+    assert stop["body"]["cinematicPhase"] == {
+        "command": "stop",
+        "phaseId": "exit",
+        "commandSequenceId": stop["sequence"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_authored_safe_speaking_effect_prepares_and_starts_exact_cue() -> None:
     runtime = _runtime()
     await _activate(runtime, 1)

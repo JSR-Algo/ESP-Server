@@ -4442,8 +4442,15 @@ class LessonRuntime:
         elif self._renderer_v2_enabled():
             self._queue_completion_visual_then_stop()
         else:
+            body: Dict[str, Any] = {"reason": "COMPLETED"}
+            if self._renderer_v5_enabled() and self._cinematic_phase is not None:
+                body["cinematicPhase"] = {
+                    "command": "stop",
+                    **self._cinematic_identity_payload(),
+                }
+                self._cinematic_stop_sent = True
             self._completion_stop_sent = True
-            await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+            await self._emit("lesson_stop", body=body)
 
     def _interactive_progress_has_response(self, body: Dict[str, Any]) -> bool:
         detail = body.get("detail")
