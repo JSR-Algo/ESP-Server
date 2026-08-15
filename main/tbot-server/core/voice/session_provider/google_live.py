@@ -6065,7 +6065,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._auto_pause_music_for_interaction()
         if self._bridge is not None and hasattr(self._bridge, "stop_output"):
             try:
-                await self._bridge.stop_output()
+                lesson_stop = getattr(self._bridge, "stop_output_for_lesson", None)
+                if reason == "lesson_start_intent" and callable(lesson_stop):
+                    await lesson_stop()
+                else:
+                    await self._bridge.stop_output()
             except RuntimeError as exc:
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live stop_output skipped after disconnect: {}",

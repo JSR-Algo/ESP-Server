@@ -480,6 +480,12 @@ class GoogleLiveAudioBridge:
         return False
 
     async def stop_output(self):
+        await self._stop_output(continue_listening=True)
+
+    async def stop_output_for_lesson(self):
+        await self._stop_output(continue_listening=False)
+
+    async def _stop_output(self, *, continue_listening):
         output_age = self._current_output_age_sec()
         self.conn.google_live_audio_out_started_at = None
         self._mark_active_response_cancelled()
@@ -503,7 +509,7 @@ class GoogleLiveAudioBridge:
             round(output_age * 1000, 1) if output_age is not None else 0.0,
         )
         self._schedule_unblock_timeout()
-        await self._send_tts_stop_now()
+        await self._send_tts_stop_now(continue_listening=continue_listening)
 
     def current_response_id(self):
         return self._active_response_id
@@ -868,7 +874,7 @@ class GoogleLiveAudioBridge:
                 "tts_stop_sent continue_listening=true listen_mode=realtime"
             )
 
-    async def _send_tts_stop_now(self):
+    async def _send_tts_stop_now(self, *, continue_listening=True):
         if self.conn.websocket is None:
             return
         if hasattr(self.conn, "clearSpeakStatus"):
@@ -884,15 +890,16 @@ class GoogleLiveAudioBridge:
                     # stop so the device cuts playback immediately (ResetDecoder)
                     # instead of draining the queue like a normal end-of-turn stop.
                     "reason": "interrupt",
-                    "continue_listening": True,
-                    "listen_mode": "realtime",
+                    "continue_listening": bool(continue_listening),
+                    "listen_mode": "realtime" if continue_listening else "manual",
                     "session_id": self.conn.session_id,
                 }
             )
         )
         self.logger.bind(tag="GoogleLive").info(
-            "tts_stop_sent reason=interrupt continue_listening=true "
-            "listen_mode=realtime"
+            "tts_stop_sent reason=interrupt continue_listening={} listen_mode={}",
+            str(bool(continue_listening)).lower(),
+            "realtime" if continue_listening else "manual",
         )
 
     def _is_unsafe_model_output(self, text):

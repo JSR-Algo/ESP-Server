@@ -3522,6 +3522,24 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.client_abort)
         self.assertFalse(conn.client_is_speaking)
 
+    async def test_lesson_transition_uses_terminal_voice_stop(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        bridge = _Bridge()
+        bridge.stop_output_for_lesson = AsyncMock()
+        provider._bridge = bridge
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: provider._interaction.state not in {
+            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
+        }
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertTrue(admitted)
+        bridge.stop_output_for_lesson.assert_awaited_once_with()
+        self.assertEqual(bridge.stop_calls, 0)
+
     async def test_lesson_transition_timeout_remains_retryable(self):
         conn = _Conn()
         conn.config["lesson"] = {"live_transition_timeout_sec": 0.05}

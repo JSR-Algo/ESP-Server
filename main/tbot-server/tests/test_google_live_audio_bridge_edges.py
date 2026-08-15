@@ -296,6 +296,17 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(conn.websocket.sent), 1)
         self.assertIn('"reason": "interrupt"', conn.websocket.sent[0])
 
+    async def test_lesson_transition_stop_does_not_reopen_realtime_listening(self):
+        conn = _Conn(websocket=_WebSocket())
+        bridge = self.make_bridge(conn=conn)
+
+        await bridge.stop_output_for_lesson()
+
+        payload = json.loads(conn.websocket.sent[-1])
+        self.assertEqual(payload["reason"], "interrupt")
+        self.assertFalse(payload["continue_listening"])
+        self.assertEqual(payload["listen_mode"], "manual")
+
     async def test_send_helpers_noop_and_emotion_dedup_edges(self):
         bridge = self.make_bridge(conn=_Conn(websocket=None))
 
