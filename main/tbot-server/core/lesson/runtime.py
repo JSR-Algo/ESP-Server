@@ -3798,13 +3798,16 @@ class LessonRuntime:
                 authored_pending["stage"] = "start"
                 authored_pending["sequence"] = self._seq + 1
                 try:
+                    start_body = {
+                        "command": "start",
+                        authored_identity_field: prepare_command[authored_identity_field],
+                    }
                     await self._emit(
-                        "lesson_cinematic_control",
+                        "lesson_start" if self._renderer_v5_enabled() else "lesson_cinematic_control",
                         step_id=self._step_id,
-                        body={
-                            "command": "start",
-                            authored_identity_field: prepare_command[authored_identity_field],
-                        },
+                        body={"cinematicPhase": start_body}
+                        if self._renderer_v5_enabled()
+                        else start_body,
                     )
                 except asyncio.CancelledError:
                     self._retire_authored_cinematic_pending()
@@ -3850,6 +3853,26 @@ class LessonRuntime:
             # Prepare delivered -> begin the download+verify (D-PRELOAD-OWNER).
             self._preload_task = asyncio.create_task(self._run_preload())
         elif ftype == "lesson_start":
+            authored_pending = self._authored_cinematic_pending
+            frame_command = self._cinematic_frame_command(frame)
+            authored_identity_field = (
+                authored_pending.get("identityField")
+                if isinstance(authored_pending, dict)
+                else None
+            )
+            if (
+                isinstance(authored_pending, dict)
+                and authored_pending.get("stage") == "start"
+                and isinstance(frame_command, dict)
+                and authored_identity_field in {"cueId", "phaseId"}
+                and authored_pending.get("sequence")
+                == frame_command.get("commandSequenceId")
+                and authored_pending.get(authored_identity_field)
+                == frame_command.get(authored_identity_field)
+                and authored_pending.get("stepId") == self._step_id
+            ):
+                self._retire_authored_cinematic_pending(result=True)
+                return
             self.state = S_RUNNING
             self._forward({"type": "lesson_started", "startedAt": _wire_timestamp()})
             await self._emit_step()

@@ -253,8 +253,8 @@ async def test_v5_authored_effect_prepares_and_starts_exact_phase() -> None:
 
     await runtime.on_lesson_ack(_v5_ack(runtime, prepare, 1))
     start = json.loads(runtime.conn.websocket.sent[-1])
-    assert start["type"] == "lesson_cinematic_control"
-    assert start["body"]["phaseId"] == "thinking"
+    assert start["type"] == "lesson_start"
+    assert start["body"]["cinematicPhase"]["phaseId"] == "thinking"
     await runtime.on_lesson_ack(_v5_ack(runtime, start, 2))
 
     assert await task is True
