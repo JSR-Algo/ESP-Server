@@ -3540,6 +3540,42 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         bridge.stop_output_for_lesson.assert_awaited_once_with()
         self.assertEqual(bridge.stop_calls, 0)
 
+    async def test_lesson_transition_settles_stale_model_speaking_after_terminal_stop(self):
+        conn = _Conn()
+        conn.config["lesson"] = {"live_transition_timeout_sec": 0.1}
+        provider = self.make_provider(conn)
+        conn.voice_provider = provider
+        provider._begin_user_interrupt = AsyncMock()
+        provider._has_active_output = lambda: False
+        conn.client_is_speaking = False
+        conn.client_have_voice = False
+        busy_checks = 0
+
+        def busy():
+            nonlocal busy_checks
+            busy_checks += 1
+            if busy_checks == 1:
+                # An audio callback can publish the short stop echo-tail as model
+                # output after transition_to_lesson_start already selected LISTENING.
+                provider._interaction.transition(
+                    google_live_module.InteractionState.MODEL_SPEAKING
+                )
+            return provider._interaction.state not in {
+                google_live_module.InteractionState.IDLE,
+                google_live_module.InteractionState.LISTENING,
+            }
+
+        conn.is_realtime_busy = busy
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertTrue(admitted)
+        self.assertGreaterEqual(busy_checks, 2)
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+
     async def test_lesson_transition_timeout_remains_retryable(self):
         conn = _Conn()
         conn.config["lesson"] = {"live_transition_timeout_sec": 0.05}
