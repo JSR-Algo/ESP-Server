@@ -3443,6 +3443,36 @@ class LessonRuntime:
             self._renderer_v4_enabled() and bool(self._conversation_cues)
         )
 
+    def _layered_cinematic_phase_for_step(
+        self, step: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        step_id = step.get("id")
+        if isinstance(step_id, str):
+            authored = self._layered_cinematic_step_phases.get(step_id)
+            if isinstance(authored, dict):
+                return authored
+        scene = step.get("scene")
+        overlay = scene.get("robotOverlay") if isinstance(scene, dict) else None
+        asset = overlay.get("asset") if isinstance(overlay, dict) else None
+        source = asset.get("src") if isinstance(asset, dict) else None
+        if not isinstance(source, str) or not source:
+            atlas = overlay.get("atlas") if isinstance(overlay, dict) else None
+            source = atlas.get("image") if isinstance(atlas, dict) else None
+        if not isinstance(source, str) or not source:
+            return None
+        resolver = getattr(self.asset_cache, "local_pack_url_for_source", None)
+        resolved = resolver(source) if callable(resolver) else None
+        target_path = resolved or source
+        for phase in self._layered_cinematic_phases.values():
+            for layer in phase.get("layers", []) or []:
+                if (
+                    isinstance(layer, dict)
+                    and layer.get("slot") == "robotOverlay"
+                    and layer.get("sdPath") == target_path
+                ):
+                    return phase
+        return None
+
     def _validate_safe_speaking_cinematic_routes(self) -> None:
         safe_steps = [
             step
@@ -4254,7 +4284,7 @@ class LessonRuntime:
             self._step_visuals_ready = True
             self._bind_conversation_for_current_step()
             await self._publish_conversation_tool_context()
-            phase = self._layered_cinematic_step_phases.get(self._step_id or "")
+            phase = self._layered_cinematic_phase_for_step(step)
             if isinstance(phase, dict):
                 phase_id = phase.get("phaseId")
                 current_id = (

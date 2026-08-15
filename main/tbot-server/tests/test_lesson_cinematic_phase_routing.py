@@ -58,13 +58,23 @@ def _v5_runtime() -> LessonRuntime:
             "fps": 10,
             "frameCount": 10,
             "playbackMode": "once",
-            "layers": [],
+            "layers": [
+                {
+                    "slot": "robotOverlay",
+                    "sdPath": f"sd://tbot/lesson-assets/test/robot.{effect}%40v1",
+                }
+            ],
         }
         for effect in ("flyIn", "walk", "teach", "listen", "thinking", "celebrate", "exit")
     }
-    runtime._layered_cinematic_step_phases = {
-        runtime._steps[0]["id"]: runtime._layered_cinematic_phases["walk"]
+    runtime._steps[0]["scene"]["robotOverlay"]["asset"] = {
+        "src": "https://assets.test/robot.walk@v1"
     }
+    runtime.asset_cache.local_pack_url_for_source = lambda source: (
+        "sd://tbot/lesson-assets/test/robot.walk%40v1"
+        if source == "https://assets.test/robot.walk@v1"
+        else None
+    )
     runtime._cinematic_phase = runtime._layered_cinematic_phases["flyIn"]
     return runtime
 
