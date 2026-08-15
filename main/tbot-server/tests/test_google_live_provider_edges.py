@@ -3576,6 +3576,35 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             google_live_module.InteractionState.LISTENING,
         )
 
+    async def test_lesson_transition_late_echo_log_does_not_re_latch_busy_state(self):
+        conn = _Conn()
+        conn.config["lesson"] = {"live_transition_timeout_sec": 0.1}
+        provider = self.make_provider(conn)
+        conn.voice_provider = provider
+        provider._begin_user_interrupt = AsyncMock()
+        provider._has_active_output = lambda: False
+        conn.client_is_speaking = False
+        conn.client_have_voice = False
+        conn.is_realtime_busy = lambda: provider._interaction.state not in {
+            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
+        }
+
+        self.assertTrue(await provider.transition_to_lesson_start())
+
+        # A late echo frame is diagnostic MODEL_SPEAKING evidence only. Once the
+        # real output flag clears, logging that frame must not re-latch the
+        # authoritative interaction state and block SD maintenance forever.
+        provider._has_active_output = lambda: True
+        provider._log_audio_decision("suppress_echo", "robot_speaking", b"pcm")
+        provider._has_active_output = lambda: False
+
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.is_realtime_busy())
+
     async def test_lesson_transition_timeout_remains_retryable(self):
         conn = _Conn()
         conn.config["lesson"] = {"live_transition_timeout_sec": 0.05}
