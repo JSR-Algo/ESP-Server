@@ -5408,9 +5408,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return InteractionState.USER_STREAMING
 
     def _log_audio_decision(self, decision, reason, pcm_audio=None):
-        identity = self._interaction.next_audio_identity(
-            self._current_interaction_state_for_audio()
-        )
+        observed_state = self._current_interaction_state_for_audio()
+        identity = self._interaction.next_audio_identity()
+        # Audio-decision state describes this frame; it must not mutate the
+        # authoritative turn state used by the realtime busy guard.
+        identity["state"] = observed_state.value
         rms = "n/a"
         if pcm_audio and self._bridge is not None and hasattr(self._bridge, "input_rms"):
             try:
