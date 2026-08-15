@@ -1301,6 +1301,7 @@ class LessonRuntime:
         self._conversation_cues: dict[str, dict[str, Any]] = {}
         self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._layered_cinematic_phases: dict[str, dict[str, Any]] = {}
+        self._layered_cinematic_step_phases: dict[str, dict[str, Any]] = {}
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
@@ -1454,6 +1455,25 @@ class LessonRuntime:
                     self._layered_cinematic_phases = {
                         phase["phaseId"]: phase for phase in projected
                     }
+                    projected_by_asset = {
+                        source["layers"][2]["assetVersionId"]: target
+                        for source, target in zip(phases, projected)
+                    }
+                    self._layered_cinematic_step_phases = {}
+                    for asset in self.manifest.get("assets", []) or []:
+                        if not isinstance(asset, dict):
+                            continue
+                        asset_id = asset.get("id") or asset.get("assetId") or asset.get("key")
+                        target = projected_by_asset.get(asset_id)
+                        if target is None:
+                            continue
+                        for ref in asset.get("visualRefs", []) or []:
+                            if (
+                                isinstance(ref, dict)
+                                and ref.get("slot") == "robotOverlay"
+                                and isinstance(ref.get("stepKey"), str)
+                            ):
+                                self._layered_cinematic_step_phases[ref["stepKey"]] = target
                     self._cinematic_phase = self._layered_cinematic_phases.get(
                         "flyIn", projected[0]
                     )
@@ -3266,7 +3286,7 @@ class LessonRuntime:
             return False
         self._cancel_child_response_timeout()
         self._close_child_response_window()
-        if self._renderer_v4_enabled() and self._conversation_cues:
+        if self._uses_authored_cinematic_effects():
             if not await self._apply_authored_cinematic_effect("thinking"):
                 return False
         elif self._renderer_v2_enabled():
@@ -3418,6 +3438,11 @@ class LessonRuntime:
             return None
         return self._cinematic_cues_by_key.get((key, effect))
 
+    def _uses_authored_cinematic_effects(self) -> bool:
+        return self._renderer_v5_enabled() or (
+            self._renderer_v4_enabled() and bool(self._conversation_cues)
+        )
+
     def _validate_safe_speaking_cinematic_routes(self) -> None:
         safe_steps = [
             step
@@ -3464,6 +3489,7 @@ class LessonRuntime:
         pending = {
             "stage": "prepare",
             "sequence": sequence,
+            "identityField": identity_field,
             identity_field: cue[identity_field],
             "stepId": self._step_id,
             "future": future,
@@ -3524,7 +3550,7 @@ class LessonRuntime:
             "supported": "correct",
             "modeled": "retry",
         }.get(decision.outcome, "incorrect")
-        if self._renderer_v4_enabled() and self._conversation_cues:
+        if self._uses_authored_cinematic_effects():
             if decision.outcome in {"correct", "supported"}:
                 await self._apply_authored_cinematic_effect("correct")
             elif decision.outcome == "brave_try":
@@ -3556,8 +3582,7 @@ class LessonRuntime:
         self._step_completed = True
         await self._wait_lesson_prompt_idle()
         if (
-            self._renderer_v4_enabled()
-            and self._conversation_cues
+            self._uses_authored_cinematic_effects()
             and decision.outcome in {"correct", "supported"}
         ):
             await self._apply_authored_cinematic_effect("celebrate")
@@ -3723,14 +3748,21 @@ class LessonRuntime:
         if ftype == "lesson_prepare":
             prepare_command = self._cinematic_frame_command(frame)
             authored_pending = self._authored_cinematic_pending
+            authored_identity_field = (
+                authored_pending.get("identityField")
+                if isinstance(authored_pending, dict)
+                else None
+            )
             if (
                 isinstance(prepare_command, dict)
                 and prepare_command.get("command") == "prepare"
                 and isinstance(authored_pending, dict)
+                and authored_identity_field in {"cueId", "phaseId"}
                 and authored_pending.get("stage") == "prepare"
                 and authored_pending.get("sequence")
                 == prepare_command.get("commandSequenceId")
-                and authored_pending.get("cueId") == prepare_command.get("cueId")
+                and authored_pending.get(authored_identity_field)
+                == prepare_command.get(authored_identity_field)
                 and authored_pending.get("stepId") == self._step_id
             ):
                 authored_pending["stage"] = "start"
@@ -3739,7 +3771,10 @@ class LessonRuntime:
                     await self._emit(
                         "lesson_cinematic_control",
                         step_id=self._step_id,
-                        body={"command": "start", "cueId": prepare_command["cueId"]},
+                        body={
+                            "command": "start",
+                            authored_identity_field: prepare_command[authored_identity_field],
+                        },
                     )
                 except asyncio.CancelledError:
                     self._retire_authored_cinematic_pending()
@@ -3747,7 +3782,7 @@ class LessonRuntime:
                 except Exception as exc:
                     self._retire_authored_cinematic_pending()
                     await self._fail_conversation_start_send(
-                        cue_id=prepare_command["cueId"],
+                        cue_id=prepare_command[authored_identity_field],
                         step_id=self._step_id,
                         exc=exc,
                     )
@@ -3793,13 +3828,20 @@ class LessonRuntime:
             if command == "start":
                 authored_pending = self._authored_cinematic_pending
                 frame_command = self._cinematic_frame_command(frame)
+                authored_identity_field = (
+                    authored_pending.get("identityField")
+                    if isinstance(authored_pending, dict)
+                    else None
+                )
                 if (
                     isinstance(authored_pending, dict)
                     and authored_pending.get("stage") == "start"
                     and isinstance(frame_command, dict)
+                    and authored_identity_field in {"cueId", "phaseId"}
                     and authored_pending.get("sequence")
                     == frame_command.get("commandSequenceId")
-                    and authored_pending.get("cueId") == frame_command.get("cueId")
+                    and authored_pending.get(authored_identity_field)
+                    == frame_command.get(authored_identity_field)
                     and authored_pending.get("stepId") == self._step_id
                 ):
                     self._retire_authored_cinematic_pending(result=True)
@@ -4204,6 +4246,29 @@ class LessonRuntime:
                 if self._step_index == 0 and self._cinematic_cue("greet") is not None:
                     effects.insert(0, "greet")
                 self._queue_authored_cinematic_sequence(effects)
+            return
+        if self._renderer_v5_enabled():
+            self._semantic_step_sequence += 1
+            self._step_seq = self._semantic_step_sequence
+            self._step_acked = True
+            self._step_visuals_ready = True
+            self._bind_conversation_for_current_step()
+            await self._publish_conversation_tool_context()
+            phase = self._layered_cinematic_step_phases.get(self._step_id or "")
+            if isinstance(phase, dict):
+                phase_id = phase.get("phaseId")
+                current_id = (
+                    self._cinematic_phase.get("phaseId")
+                    if isinstance(self._cinematic_phase, dict)
+                    else None
+                )
+                if isinstance(phase_id, str) and not (
+                    self._step_index == 0 and phase_id == current_id
+                ):
+                    self._step_visuals_ready = False
+                    self._queue_authored_cinematic_sequence([phase_id])
+                    return
+            await self._continue_after_step_visuals(self._step_id, self._step_seq)
             return
         self._bind_conversation_for_current_step()
         await self._publish_conversation_tool_context()
@@ -5349,6 +5414,7 @@ class LessonRuntime:
         self._retire_authored_cinematic_pending()
         self._cinematic_phase = None
         self._layered_cinematic_phases.clear()
+        self._layered_cinematic_step_phases.clear()
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:
                 self._outstanding.pop(sequence, None)

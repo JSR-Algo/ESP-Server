@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_lesson_conversation_integration as conversation_fixtures
 import test_lesson_runtime as legacy
 
-from core.lesson.runtime import RENDERER_V4, S_RUNNING, LessonRuntime
+from core.lesson.runtime import RENDERER_V4, RENDERER_V5, S_RUNNING, LessonRuntime
 
 
 def _manifest() -> dict:
@@ -31,6 +31,42 @@ def _manifest() -> dict:
 
 def _runtime() -> LessonRuntime:
     return _runtime_from_manifest(_manifest())
+
+
+def _v5_runtime() -> LessonRuntime:
+    runtime = _runtime()
+    runtime.manifest["manifestVersion"] = RENDERER_V5
+    runtime.negotiated_version = RENDERER_V5
+    runtime.renderer_capabilities = [RENDERER_V5]
+    runtime.conn.device_id = "robot-v5"
+    runtime.conn.features = {
+        "lesson": True,
+        "renderer": [RENDERER_V5],
+        "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
+    }
+    runtime.conn.config["lesson"].update(
+        renderer_v4_enabled=False,
+        renderer_v5_enabled=True,
+        rollout_device_allowlist=["robot-v5"],
+    )
+    runtime._layered_cinematic_phases = {
+        effect: {
+            "templateId": "layeredCinematic",
+            "templateVersion": 1,
+            "phaseId": effect,
+            "durationMs": 1000,
+            "fps": 10,
+            "frameCount": 10,
+            "playbackMode": "once",
+            "layers": [],
+        }
+        for effect in ("flyIn", "walk", "teach", "listen", "thinking", "celebrate", "exit")
+    }
+    runtime._layered_cinematic_step_phases = {
+        runtime._steps[0]["id"]: runtime._layered_cinematic_phases["walk"]
+    }
+    runtime._cinematic_phase = runtime._layered_cinematic_phases["flyIn"]
+    return runtime
 
 
 def _runtime_from_manifest(manifest: dict) -> LessonRuntime:
@@ -80,6 +116,33 @@ async def _activate(runtime: LessonRuntime, step_index: int) -> None:
     runtime._step_visuals_ready = True
     runtime._step_completed = False
     runtime._child_response_window_open = True
+
+
+def _v5_ack(runtime: LessonRuntime, frame: dict, inbound_sequence: int) -> dict:
+    command = frame["body"].get("cinematicPhase", frame["body"])
+    event = "frameZeroReady" if command["command"] == "prepare" else "phaseReady"
+    return {
+        "type": "lesson_ack",
+        "protocolVersion": RENDERER_V5,
+        "assignmentId": runtime.assignment_id,
+        "sessionId": runtime.session_id,
+        "lessonId": runtime.lesson_id,
+        "lessonVersion": runtime.lesson_version,
+        "stepId": frame["stepId"],
+        "sequence": inbound_sequence,
+        "timestamp": 1,
+        "body": {
+            "acks": frame["sequence"],
+            "cinematicPhase": {
+                "event": event,
+                "command": command["command"],
+                "phaseId": command["phaseId"],
+                "commandSequenceId": command["commandSequenceId"],
+                "accepted": True,
+                event: True,
+            },
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -145,6 +208,46 @@ async def test_safe_speaking_step_entry_routes_greet_then_listen_and_next_word_l
         queue.reset_mock()
         await runtime._emit_step()
         queue.assert_called_once_with(["listen"])
+
+
+@pytest.mark.asyncio
+async def test_v5_step_entry_uses_typed_cinematic_frames_not_legacy_lesson_step() -> None:
+    runtime = _v5_runtime()
+    runtime.state = S_RUNNING
+
+    await runtime._emit_step()
+    await asyncio.sleep(0)
+
+    frames = [json.loads(payload) for payload in runtime.conn.websocket.sent]
+    assert all(frame["type"] != "lesson_step" for frame in frames)
+    assert frames[-1]["type"] == "lesson_prepare"
+    assert frames[-1]["body"]["cinematicPhase"]["phaseId"] == "walk"
+
+
+@pytest.mark.asyncio
+async def test_v5_authored_effect_prepares_and_starts_exact_phase() -> None:
+    runtime = _v5_runtime()
+    runtime.state = S_RUNNING
+    runtime._step_index = 1
+    runtime._step = runtime._steps[1]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq = 21
+    runtime._step_acked = True
+    runtime._step_visuals_ready = True
+    runtime._child_response_window_open = True
+
+    task = asyncio.create_task(runtime._apply_authored_cinematic_effect("thinking"))
+    await asyncio.sleep(0)
+    prepare = json.loads(runtime.conn.websocket.sent[-1])
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "thinking"
+
+    await runtime.on_lesson_ack(_v5_ack(runtime, prepare, 1))
+    start = json.loads(runtime.conn.websocket.sent[-1])
+    assert start["type"] == "lesson_cinematic_control"
+    assert start["body"]["phaseId"] == "thinking"
+    await runtime.on_lesson_ack(_v5_ack(runtime, start, 2))
+
+    assert await task is True
 
 
 @pytest.mark.asyncio

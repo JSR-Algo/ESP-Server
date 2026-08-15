@@ -416,6 +416,12 @@ class LayeredCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "cinematicPhases": [L._phase()],
         })
         manifest["cinematicPhases"][0]["phaseId"] = "flyIn"
+        manifest["assets"].append({
+            "id": "robot.teach@v1",
+            "visualRefs": [
+                {"stepKey": manifest["steps"][0]["id"], "phase": "opening", "slot": "robotOverlay"}
+            ],
+        })
 
         class AssetCache(T._FakeAssetCache):
             def asset_pack_manifest(self, **_kwargs):
@@ -436,6 +442,10 @@ class LayeredCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await runtime.preload_only())
         self.assertEqual(runtime._cinematic_phase["phaseId"], "flyIn")
+        self.assertEqual(
+            runtime._layered_cinematic_step_phases[manifest["steps"][0]["id"]]["phaseId"],
+            "flyIn",
+        )
         body = runtime._prepare_body()
         self.assertEqual(body["cinematicPhase"]["phaseId"], "flyIn")
         self.assertEqual(body["cinematicPhase"]["templateId"], "layeredCinematic")
