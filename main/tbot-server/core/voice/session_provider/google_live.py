@@ -5992,11 +5992,29 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not callable(busy):
             return True
         deadline = time.monotonic() + timeout_sec
-        while busy():
+        while True:
+            # A final audio callback can publish an echo-tail-derived state after
+            # the terminal stop selected LISTENING. With the microphone closed,
+            # no later callback exists to clear that transient state, so settle it
+            # from the real output/VAD flags before consulting the busy guard.
+            if (
+                self._interaction.state
+                in {
+                    InteractionState.USER_STREAMING,
+                    InteractionState.MODEL_SPEAKING,
+                    InteractionState.MUTED,
+                }
+                and not self._has_active_output()
+                and not getattr(self.conn, "client_is_speaking", False)
+                and not getattr(self.conn, "client_have_voice", False)
+            ):
+                self._interaction.transition(InteractionState.LISTENING)
+                self.conn.client_abort = False
+            if not busy():
+                return True
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.01)
-        return True
 
     async def _begin_user_interrupt(self, reason):
         # Music-protection gate: keep ambient/raw audio from interrupting music,
