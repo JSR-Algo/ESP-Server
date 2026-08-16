@@ -506,6 +506,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if await self._forward_lesson_child_audio(audio_bytes):
             return True
+        if self._spoken_lesson_start_pending():
+            self.conn.logger.bind(tag="GoogleLive").info(
+                with_lesson_log_context(
+                    "Google Live audio_dropped reason=lesson_start_pending",
+                    self.conn,
+                )
+            )
+            self.conn.client_abort = False
+            return True
         if self._should_hold_lesson_prompt_pending_audio():
             self._cancel_input_flush_task()
             self._cancel_waiting_model_timeout_task()
@@ -1635,12 +1644,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if payload is None:
             self._log_lesson_start_intent_miss(transcript_text)
             return False
-        pending_task = getattr(self.conn, "lesson_pull_task", None)
-        if (
-            pending_task is not None
-            and not pending_task.done()
-            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
-        ):
+        if self._spoken_lesson_start_pending():
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent_suppressed reason=start_pending "
@@ -1662,6 +1666,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 len(str(transcript_text or "")),
             )
             return True
+
         if self._lesson_runtime_active():
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
@@ -1735,6 +1740,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._safe_error_message(exc),
             )
             return False
+
+    def _spoken_lesson_start_pending(self):
+        pending_task = getattr(self.conn, "lesson_pull_task", None)
+        return (
+            pending_task is not None
+            and not pending_task.done()
+            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+        )
 
     @contextmanager
     def _lesson_start_tool_dispatch_scope(self):

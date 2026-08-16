@@ -2087,6 +2087,49 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider.transition_to_lesson_start.assert_not_awaited()
         self.assertEqual(conn.func_handler.calls, [])
 
+    async def test_pending_spoken_start_drops_repeat_audio_before_response_generation_changes(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        pending = asyncio.create_task(asyncio.Event().wait())
+        conn.lesson_pull_task = pending
+        conn.lesson_pull_task_origin = "spoken_start"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.rms = 6000
+        provider._interaction.transition(
+            google_live_module.InteractionState.MODEL_SPEAKING
+        )
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        provider._last_interrupt_at = time.monotonic() - 10.0
+        provider._should_drop_input_post_audio_start = lambda: False
+        provider._should_suppress_robot_output_echo = lambda _audio: False
+        provider._should_hold_interrupt_audio = lambda _audio: False
+        provider._is_wake_greeting_protected = lambda: False
+        provider._should_interrupt_for_input = lambda _audio: True
+        provider.transition_to_lesson_start = AsyncMock(return_value=True)
+        generation = provider._response_generation
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+
+        try:
+            handled = await provider.handle_audio_bytes(b"repeat trigger")
+            transcript_handled = await provider._dispatch_lesson_start_intent(
+                "bắt đầu bài học"
+            )
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+        self.assertTrue(handled)
+        self.assertTrue(transcript_handled)
+        self.assertEqual(provider._response_generation, generation)
+        self.assertEqual(provider._bridge.forwarded, [])
+        self.assertEqual(provider._client.interrupt_calls, 0)
+        provider.transition_to_lesson_start.assert_not_awaited()
+        self.assertEqual(conn.func_handler.calls, [])
+
     async def test_lesson_start_intent_marks_only_local_tool_dispatch_as_sd_sync_admissible(self):
         conn = _Conn()
         observed_depths = []

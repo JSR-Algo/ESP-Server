@@ -51,6 +51,12 @@ The T0.4 repro independently fails on base `603bbd52` with:
 AssertionError: duplicate replaced the active spoken startup
 ```
 
+Final branch review then reproduced a narrower preceding race: a loud repeated
+utterance could enter the audio barge-in path before its transcript was classified.
+That path advanced `_response_generation`, invalidating the active admission token
+before the transcript-level duplicate guard ran. The added audio-to-transcript
+regression failed on the reviewed tip with `AssertionError: 1 != 0`.
+
 ## Fix
 
 Commits:
@@ -64,10 +70,11 @@ Commits:
 tool call reuses that unfinished task instead of cancelling it. An unmarked
 connect-time/background pull remains replaceable by an explicit spoken start.
 
-Google Live checks the same pending spoken-start ownership immediately after intent
-classification and suppresses the duplicate before `transition_to_lesson_start`.
-Therefore a repeated transcript cannot mutate the response generation that owns the
-active foreground SD admission.
+Google Live checks the same pending spoken-start ownership both before conversation
+audio can enter barge-in and immediately after intent classification. Lesson child
+response audio retains priority once the runtime has opened its response window;
+otherwise repeated startup audio is dropped without interrupting Live, advancing the
+response generation, or dispatching a second tool call.
 
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
@@ -75,7 +82,8 @@ fallback contract changed.
 ## Passing Verification
 
 ```text
-RED tests after fix plus background-pull replacement: 3 passed
+RED tests after fix plus background-pull replacement: 4 passed
+audio-to-transcript review regression: PASS
 focused start/provider/runtime suites: 435 passed
 full ESP suite: 3856 passed, 3 skipped, 3 warnings
 python py_compile touched files: PASS
