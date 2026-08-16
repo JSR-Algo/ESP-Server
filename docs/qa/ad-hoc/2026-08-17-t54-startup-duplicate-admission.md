@@ -67,6 +67,11 @@ test_pending_spoken_start_token_still_blocks_unrelated_model_speech
   FAIL: AssertionError: False is not true
 ```
 
+The next review narrowed the boundary further: a mismatched generation may remain
+admissible while it is transiently `INTERRUPTING` for duplicate classification, but
+must not inherit admission after it becomes an unrelated `WAITING_MODEL` turn. The
+new regression failed before the fix with the same `False is not true` assertion.
+
 ## Fix
 
 Commits:
@@ -97,6 +102,10 @@ matched provider controller's actual state, so `INTERRUPTING`/`WAITING_MODEL` re
 the startup admission while unrelated `MODEL_SPEAKING` remains busy and pauses SD
 work.
 
+For a task-owned token whose response identity no longer matches, only the transient
+`INTERRUPTING` path remains admissible. A mismatched `WAITING_MODEL` returns to the
+ordinary realtime guard and stays busy until that model turn resolves.
+
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
 
@@ -108,8 +117,8 @@ audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
   duplicate recovery PASS
 pending-task admission and native-tool review regressions: 3 passed
 focused start/provider/runtime suites before review fix: 435 passed
-post-review provider/tool/voice-guard suite: 187 passed
-final post-review full ESP suite: 3861 passed, 3 skipped, 3 warnings
+post-review provider/tool/voice-guard suite: 188 passed
+final post-review full ESP suite: 3862 passed, 3 skipped, 3 warnings
 python py_compile touched files: PASS
 git diff --check: PASS
 T0.4 gate: VERIFIED

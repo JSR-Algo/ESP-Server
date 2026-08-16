@@ -2488,17 +2488,18 @@ class ConnectionHandler:
             controller = getattr(candidate, "_interaction", None)
             if controller is None:
                 return None
-            if not owns_admission:
-                if admission.get("responseId") != getattr(
-                    controller, "response_id", None
-                ):
-                    return None
-                if admission.get("responseGeneration") != getattr(
-                    candidate, "_response_generation", None
-                ):
-                    return None
+            response_matches = admission.get("responseId") == getattr(
+                controller, "response_id", None
+            ) and admission.get("responseGeneration") == getattr(
+                candidate, "_response_generation", None
+            )
+            if not owns_admission and not response_matches:
+                return None
             state = getattr(controller, "state", None)
-            return getattr(state, "value", state)
+            state = getattr(state, "value", state)
+            if owns_admission and not response_matches and state == "WAITING_MODEL":
+                return None
+            return state
         return None
 
     def is_lesson_sd_sync_busy(
