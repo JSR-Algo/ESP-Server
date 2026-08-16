@@ -208,6 +208,20 @@ def test_runtime_manifest_projection_replaces_generic_v5_assets_with_phase_attes
         }
         for layer in unique_layers.values()
     ]
+    generic_assets.extend(
+        {
+            "id": f"robotOverlay.{pose}",
+            "path": f"https://assets.test/robotOverlay.{pose}",
+            "url": f"https://assets.test/robotOverlay.{pose}",
+            "sha256": "f" * 64,
+            "bytes": 1000,
+            "critical": False,
+            "layer": "robotOverlay",
+            "role": "pose",
+            "mediaType": "image/png",
+        }
+        for pose in ("teach", "listening", "thinking", "celebrate")
+    )
 
     assets = _manifest_asset_cache_inputs({
         "manifestVersion": "teebot-lesson-renderer.v5",

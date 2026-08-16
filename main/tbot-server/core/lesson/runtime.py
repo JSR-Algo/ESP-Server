@@ -1106,11 +1106,10 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                         )
                     continue
                 layered_by_key[key] = projected
-        # Phase entries are the canonical renderer-v5 metadata source. Keeping
-        # generic duplicates creates critical MP4 shadows without attestation.
-        return [
-            asset for asset in assets if asset.get("key") not in layered_by_key
-        ] + list(layered_by_key.values())
+        # Cinematic phases define both metadata and membership for renderer v5.
+        # Bundle-era pose images are not renderer inputs and must not enter the
+        # firmware pack attestation under the v5 cache identity.
+        return list(layered_by_key.values())
     if manifest_version != RENDERER_V4:
         return assets
     for phase in manifest.get("cinematicPhases", []):
