@@ -84,14 +84,15 @@ fallback contract changed.
 ```text
 RED tests after fix plus background-pull replacement: 4 passed
 audio-to-transcript review regression: PASS
-focused start/provider/runtime suites: 435 passed
-full ESP suite: 3856 passed, 3 skipped, 3 warnings
+focused start/provider/runtime suites before review fix: 435 passed
+post-review provider/tool suite: 162 passed
+post-review full ESP suite: 3852 passed, 8 skipped, 12 warnings
 python py_compile touched files: PASS
 git diff --check: PASS
 T0.4 gate: VERIFIED
   base=603bbd52a6f37ca41505e30f254a4e3287b3409e
-  tip=04a3e2c0dae818ba146b86c6e10362505bdd0ab0
-  red=f46ebc608d18 green=c6e7e96c70b3
+  tip=72de6a149464e080246fb614049d3e6a445b4ac1
+  RED rc=1, GREEN rc=0
 ```
 
 ## Release Gate
