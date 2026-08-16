@@ -1,0 +1,95 @@
+# T5.4 Spoken Startup Duplicate Admission — 2026-08-17
+
+## Physical Reproduction
+
+Failed capture:
+
+```text
+/Users/manhhodinh/Documents/TBOT/.codex_tmp/lesson-live-20260816T180509Z-t54-final-main
+assignmentId=bfa76e9b-ba11-4059-933c-b7fe7494fe62
+lesson=w02-feelings v7
+manifestChecksum=418dfd660ef4254418229d86f8e77890d29573793b1a8b7a211d31dcfdf0ef27
+```
+
+The first normal-distance trigger was recognized at `01:12:07` and started the
+assignment. It fetched the manifest and bound session
+`59030846-11d2-4c3b-8e43-048380840b28`. A repeated recognized trigger arrived at
+`01:12:21`, after the fixed 12-second duplicate window but before the foreground
+15-second SD admission deadline:
+
+```text
+01:12:21 start_lesson: scheduled lesson start on live connection
+01:12:21 start_lesson: lesson pull task cancelled
+01:12:22 lesson session bound sessionId=fdd38f51-6127-4d93-9f0d-b2538325dab1
+01:12:24 robot SD sync realtime busy timeout timeoutSec=15.000 state=INTERRUPTING
+01:12:25 backend post lesson_failed persisted=true
+```
+
+The replacement pull used the same pack cache key and joined the coordinator
+operation already created by the first pull. That operation retained the first
+response-generation admission token and deadline. The repeated intent had already
+advanced Google Live to a new generation, so the old operation could no longer use
+its scoped admission and expired. This is the concrete F-T54-49 failure sequence.
+
+The finalized capture correctly fails its verifier and is retained as RED evidence.
+
+## Automated RED
+
+Two tests were written before production code:
+
+```text
+test_lesson_start_intent_suppresses_duplicate_while_spoken_start_is_pending
+  FAIL: transition_to_lesson_start awaited 1 time
+
+test_coalesces_duplicate_tool_call_while_spoken_start_is_pending
+  FAIL: replacement task is not the first active task; first task cancelling
+```
+
+The T0.4 repro independently fails on base `603bbd52` with:
+
+```text
+AssertionError: duplicate replaced the active spoken startup
+```
+
+## Fix
+
+Commits:
+
+```text
+98ba87b0 docs(lesson): design duplicate startup admission
+04a3e2c0 fix(lesson): coalesce duplicate spoken startup
+```
+
+`start_lesson` now marks the task it schedules as `spoken_start`. A repeated direct
+tool call reuses that unfinished task instead of cancelling it. An unmarked
+connect-time/background pull remains replaceable by an explicit spoken start.
+
+Google Live checks the same pending spoken-start ownership immediately after intent
+classification and suppresses the duplicate before `transition_to_lesson_start`.
+Therefore a repeated transcript cannot mutate the response generation that owns the
+active foreground SD admission.
+
+No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
+fallback contract changed.
+
+## Passing Verification
+
+```text
+RED tests after fix plus background-pull replacement: 3 passed
+focused start/provider/runtime suites: 435 passed
+full ESP suite: 3856 passed, 3 skipped, 3 warnings
+python py_compile touched files: PASS
+git diff --check: PASS
+T0.4 gate: VERIFIED
+  base=603bbd52a6f37ca41505e30f254a4e3287b3409e
+  tip=04a3e2c0dae818ba146b86c6e10362505bdd0ab0
+  red=f46ebc608d18 green=c6e7e96c70b3
+```
+
+## Release Gate
+
+The code branch is ready for final review, merge, VPS deployment, and a fresh no-PIN
+physical assignment. T5.4 remains `IN_PROGRESS` until the deployed robot passes the
+mid-lesson power cycle, completes all nine steps, and produces final CP-7/CP-8 and
+parent Progress evidence.
+
