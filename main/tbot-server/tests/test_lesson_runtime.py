@@ -8969,6 +8969,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(preload_calls, [])
         self.assertIsNone(conn.lesson_runtime)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
         self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
 
     async def test_connect_mcp_discovery_error_fails_closed(self):
@@ -9009,6 +9010,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(preload_calls, [])
         self.assertIsNone(conn.lesson_runtime)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
         self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
 
     async def test_start_protocol_crash_releases_lesson_mode_when_no_prior_runtime(self):
