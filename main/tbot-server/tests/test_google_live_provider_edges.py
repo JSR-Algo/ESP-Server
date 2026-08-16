@@ -284,6 +284,16 @@ class _ASR:
         self.calls.append((list(opus_data), session_id, audio_format))
         return self.text, None
 
+
+class _SequenceASR:
+    def __init__(self, texts):
+        self.texts = iter(texts)
+        self.calls = []
+
+    async def speech_to_text_wrapper(self, opus_data, session_id, audio_format="opus"):
+        self.calls.append((list(opus_data), session_id, audio_format))
+        return next(self.texts), None
+
 class _FailingASR:
     def __init__(self, message):
         self.message = message
@@ -1856,6 +1866,92 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             google_live_module.product_tool_names = original_product_tool_names
             provider._cancel_start_lesson_asr_fallback_task()
+
+    async def test_lesson_start_asr_fallback_combines_only_exact_marker_prefix_fragments(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        conn.asr = _SequenceASR(("bắt", "đầu", "bài", "học"))
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._start_lesson_asr_fallback_generation = 2
+            await provider._run_start_lesson_asr_fallback(0, 2, [b"turn-one"])
+            self.assertEqual(conn.func_handler.calls, [])
+            provider._start_lesson_asr_fallback_generation = 4
+            await provider._run_start_lesson_asr_fallback(0, 4, [b"turn-two"])
+            self.assertEqual(conn.func_handler.calls, [])
+            provider._start_lesson_asr_fallback_generation = 6
+            await provider._run_start_lesson_asr_fallback(0, 6, [b"turn-three"])
+            self.assertEqual(conn.func_handler.calls, [])
+            provider._start_lesson_asr_fallback_generation = 8
+            await provider._run_start_lesson_asr_fallback(0, 8, [b"turn-four"])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(
+            conn.func_handler.calls[-1][1],
+            {"name": "start_lesson", "arguments": {}},
+        )
+
+    async def test_lesson_start_asr_fallback_rejects_near_marker_fragment_chain(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        conn.asr = _SequenceASR(("bắt đầu", "bài hát", "bài học"))
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            await provider._run_start_lesson_asr_fallback(0, 0, [b"turn-one"])
+            await provider._run_start_lesson_asr_fallback(0, 0, [b"turn-two"])
+            await provider._run_start_lesson_asr_fallback(0, 0, [b"turn-three"])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(conn.func_handler.calls, [])
+
+    async def test_lesson_start_asr_fallback_does_not_combine_nonadjacent_turns(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        conn.asr = _SequenceASR(("bắt đầu", "bài học"))
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._start_lesson_asr_fallback_generation = 2
+            await provider._run_start_lesson_asr_fallback(0, 2, [b"turn-one"])
+            provider._start_lesson_asr_fallback_generation = 5
+            await provider._run_start_lesson_asr_fallback(0, 5, [b"turn-after-model-output"])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(conn.func_handler.calls, [])
+
+    async def test_lesson_start_asr_fallback_empty_transcript_breaks_fragment_chain(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        conn.asr = _SequenceASR(("bắt đầu", "", "bài học"))
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            for generation, frame in ((2, b"one"), (4, b"empty"), (6, b"three")):
+                provider._start_lesson_asr_fallback_generation = generation
+                await provider._run_start_lesson_asr_fallback(0, generation, [frame])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(conn.func_handler.calls, [])
+
+    def test_lesson_start_asr_fallback_expires_fragment_chain(self):
+        provider = self.make_provider(_Conn())
+
+        with patch.object(google_live_module.time, "monotonic", return_value=100.0):
+            self.assertIsNone(provider._combine_start_lesson_asr_fragment("bắt đầu", 2))
+        with patch.object(google_live_module.time, "monotonic", return_value=109.0):
+            self.assertIsNone(provider._combine_start_lesson_asr_fragment("bài học", 4))
+
+        self.assertEqual(provider._start_lesson_asr_fragment, "bai hoc")
 
     async def test_asr_fallback_auth_failure_disables_retries_for_session(self):
         conn = _Conn()
