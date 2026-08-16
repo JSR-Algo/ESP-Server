@@ -3894,11 +3894,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _record_start_lesson_asr_fallback_audio(self, audio_bytes, decoded_audio):
         if not self._start_lesson_asr_fallback_enabled():
             return
-        threshold = self._get_user_speech_rms_threshold()
-        if decoded_audio is not None and threshold is not None:
-            rms = self._input_rms(decoded_audio)
-            if not (isinstance(rms, (int, float)) and rms >= threshold):
-                return
         if audio_bytes:
             self._start_lesson_asr_fallback_audio.append(audio_bytes)
 
@@ -3938,6 +3933,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._start_lesson_asr_fallback_generation += 1
         generation = self._start_lesson_asr_fallback_generation
         frames = list(self._start_lesson_asr_fallback_audio)
+        self._start_lesson_asr_fallback_audio.clear()
         delay = self._get_start_lesson_asr_fallback_delay_sec()
         self._start_lesson_asr_fallback_task = asyncio.create_task(
             self._run_start_lesson_asr_fallback(delay, generation, frames)

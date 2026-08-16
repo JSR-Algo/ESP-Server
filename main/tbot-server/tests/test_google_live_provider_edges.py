@@ -1823,6 +1823,40 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             {"name": "start_lesson", "arguments": {}},
         )
 
+    async def test_lesson_start_asr_fallback_keeps_quiet_frames_inside_forwarded_turn(self):
+        conn = _Conn()
+        conn.config["google_live"]["input_speech_rms_threshold"] = 500
+        provider = self.make_provider(conn)
+        provider._bridge = _Bridge()
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._bridge.rms = 1800
+            provider._record_start_lesson_asr_fallback_audio(b"loud", b"pcm-loud")
+            provider._bridge.rms = 120
+            provider._record_start_lesson_asr_fallback_audio(b"quiet", b"pcm-quiet")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(
+            list(provider._start_lesson_asr_fallback_audio),
+            [b"loud", b"quiet"],
+        )
+
+    async def test_lesson_start_asr_fallback_detaches_each_turn_before_asr_delay(self):
+        conn = _Conn()
+        conn.config["google_live"]["lesson_start_asr_fallback_delay_sec"] = 60
+        provider = self.make_provider(conn)
+        provider._start_lesson_asr_fallback_audio.extend([b"turn-one-a", b"turn-one-b"])
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._schedule_start_lesson_asr_fallback_task()
+            self.assertEqual(list(provider._start_lesson_asr_fallback_audio), [])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+            provider._cancel_start_lesson_asr_fallback_task()
+
     async def test_asr_fallback_auth_failure_disables_retries_for_session(self):
         conn = _Conn()
         conn.asr = _EmptyAuthFailingASR("APIRequest failed: 401")
