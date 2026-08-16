@@ -6466,6 +6466,42 @@ class LessonRuntime:
         )
 
 
+async def _wait_for_mcp_reconnect_ready(
+    conn: Any, lesson_cfg: Dict[str, Any]
+) -> tuple[bool, Optional[str]]:
+    features = getattr(conn, "features", {}) or {}
+    if not isinstance(features, dict) or not bool(features.get("mcp")):
+        return True, None
+
+    is_ready = getattr(getattr(conn, "mcp_client", None), "is_ready", None)
+    if not callable(is_ready):
+        return False, "missing_is_ready"
+
+    timeout_sec = max(
+        0.0,
+        _finite_float_or_default(
+            lesson_cfg.get("mcp_reconnect_ready_timeout_sec", 20.0), 20.0
+        ),
+    )
+    poll_sec = max(
+        0.001,
+        _finite_float_or_default(
+            lesson_cfg.get("mcp_reconnect_ready_poll_sec", 0.05), 0.05
+        ),
+    )
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        try:
+            if await is_ready():
+                return True, None
+        except Exception as exc:
+            return False, type(exc).__name__
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, "timeout"
+        await asyncio.sleep(min(poll_sec, remaining))
+
+
 async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
     """Serialize concurrent lesson pulls (connect-time pull + spoken start_lesson) so
     they cannot create two runtimes / emit duplicate lesson_prepare (deep-audit). The
@@ -6946,6 +6982,19 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     # running lesson remains usable until the new assignment reaches READY.
     if republish_previous is None and getattr(conn, "lesson_runtime", None) is existing:
         republish_previous = existing
+
+    mcp_ready, mcp_failure_type = await _wait_for_mcp_reconnect_ready(conn, lesson_cfg)
+    if not mcp_ready:
+        _set_lesson_start_status(
+            conn,
+            "MCP_DISCOVERY_TIMEOUT",
+            "Robot chưa hoàn tất kết nối điều khiển bài học.",
+        )
+        _log(
+            "warning",
+            f"lesson MCP reconnect readiness failed: {mcp_failure_type}",
+        )
+        return republish_previous
 
     gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
     activation = None
