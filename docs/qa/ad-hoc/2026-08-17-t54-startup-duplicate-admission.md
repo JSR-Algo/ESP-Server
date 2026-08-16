@@ -94,7 +94,7 @@ audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
 pending-task admission and native-tool review regressions: 3 passed
 focused start/provider/runtime suites before review fix: 435 passed
 post-review provider/tool/voice-guard suite: 186 passed
-post-review full ESP suite: 3852 passed, 8 skipped, 12 warnings
+final post-review full ESP suite: 3855 passed, 8 skipped, 7 warnings
 python py_compile touched files: PASS
 git diff --check: PASS
 T0.4 gate: VERIFIED
