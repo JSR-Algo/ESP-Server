@@ -1635,6 +1635,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if payload is None:
             self._log_lesson_start_intent_miss(transcript_text)
             return False
+        if self._spoken_lesson_start_pending():
+            self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
+            self.conn.logger.bind(tag="GoogleLive").info(
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent_suppressed reason=start_pending "
+                    "chars={}",
+                    self.conn,
+                ),
+                len(str(transcript_text or "")),
+            )
+            return True
         # Delayed / re-emitted STT after a successful start must not restart the lesson
         # (that cancelled s1 greeting and left the robot silent).
         if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):
@@ -1647,6 +1659,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 len(str(transcript_text or "")),
             )
             return True
+
         if self._lesson_runtime_active():
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
@@ -1720,6 +1733,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._safe_error_message(exc),
             )
             return False
+
+    def _spoken_lesson_start_pending(self):
+        pending_task = getattr(self.conn, "lesson_pull_task", None)
+        return (
+            pending_task is not None
+            and not pending_task.done()
+            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+        )
 
     @contextmanager
     def _lesson_start_tool_dispatch_scope(self):
@@ -5727,9 +5748,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 name,
                 self._response_generation,
             )
-            if (
-                name == "start_lesson"
-                and time.monotonic() < self._suppress_start_lesson_tool_call_until
+            pending_spoken_start = (
+                name == "start_lesson" and self._spoken_lesson_start_pending()
+            )
+            if pending_spoken_start:
+                self._interaction.transition(InteractionState.LISTENING)
+                self.conn.client_abort = False
+            if name == "start_lesson" and (
+                pending_spoken_start
+                or time.monotonic() < self._suppress_start_lesson_tool_call_until
             ):
                 self.conn.logger.bind(tag="GoogleLive").info(
                     with_lesson_log_context(

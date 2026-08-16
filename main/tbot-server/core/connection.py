@@ -274,6 +274,7 @@ class ConnectionHandler:
         self.liveness_lease = None
         self.superseded_by = None
         self.lesson_pull_task = None
+        self.lesson_pull_task_origin = None
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
@@ -2479,11 +2480,12 @@ class ConnectionHandler:
             controller = getattr(candidate, "_interaction", None)
             if controller is None:
                 return None
-            if admission.get("responseId") != getattr(controller, "response_id", None):
-                return None
-            if admission.get("responseGeneration") != getattr(
+            response_matches = admission.get("responseId") == getattr(
+                controller, "response_id", None
+            ) and admission.get("responseGeneration") == getattr(
                 candidate, "_response_generation", None
-            ):
+            )
+            if not response_matches:
                 return None
             state = getattr(controller, "state", None)
             return getattr(state, "value", state)
