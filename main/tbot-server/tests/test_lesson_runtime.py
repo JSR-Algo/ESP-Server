@@ -9082,6 +9082,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         conn = _RepublishConn()
         sync_release = asyncio.Event()
+        preload_seen = asyncio.Event()
         order = []
 
         async def cached_sd_sync():
@@ -9091,6 +9092,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
 
         async def record_preload(_runtime):
             order.append("preloaded")
+            preload_seen.set()
             return True
 
         async def record_start(_runtime, *, preloaded=False):
@@ -9114,10 +9116,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
                 start_task = asyncio.create_task(
                     runtime_module.maybe_start_lesson_on_connect(conn)
                 )
-                for _ in range(100):
-                    if "preloaded" in order:
-                        break
-                    await asyncio.sleep(0)
+                await asyncio.wait_for(preload_seen.wait(), timeout=0.25)
 
                 self.assertIn("preloaded", order)
                 self.assertNotIn("started", order)
