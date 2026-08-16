@@ -53,7 +53,7 @@ GOOGLE_LIVE_DEFAULTS = {
     "lesson_prompt_playback_tail_sec": 0.5,
     # Soft speech still needs to pass start-noise gate; 900 was dropping quiet asks.
     "input_speech_rms_threshold": 650,
-    "lesson_child_input_speech_rms_threshold": 2000,
+    "lesson_child_input_speech_rms_threshold": 650,
     "input_gain": 3.5,
     # Live/TTS PCM is often under-normalized; boost before Opus→robot.
     # 2.0 clipped/distorted on ES8311+PA; 1.35 is a safer loudness tradeoff.
