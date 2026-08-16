@@ -8317,6 +8317,23 @@ class _RepublishConn:
         return None
 
 
+class _DelayedMcpClient:
+    def __init__(self, *, ready_after=None, readiness_error=None):
+        self.ready_after = ready_after
+        self.readiness_error = readiness_error
+        self.ready_checks = 0
+
+    @property
+    def ready(self):
+        return self.ready_after is not None and self.ready_checks >= self.ready_after
+
+    async def is_ready(self):
+        self.ready_checks += 1
+        if self.readiness_error is not None:
+            raise self.readiness_error
+        return self.ready
+
+
 class _RegistryStartLessonHandler:
     """Minimal real-tool handler: dispatches start_lesson through the registry."""
 
@@ -8870,6 +8887,129 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modes_seen_during_preload, ["CONVERSATION"])
         self.assertEqual(entered, [])
         self.assertEqual(conn.lesson_start_status["code"], "START_REFUSED")
+
+    async def test_connect_waits_for_mcp_discovery_before_sd_sync(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"].update({
+            "asset_delivery_mode": "sd_pack",
+            "mcp_reconnect_ready_timeout_sec": 0.1,
+            "mcp_reconnect_ready_poll_sec": 0.001,
+        })
+        conn.mcp_client = _DelayedMcpClient(ready_after=3)
+        ready_checks_at_preload = []
+        protocol_starts = []
+
+        async def record_preload(_runtime):
+            ready_checks_at_preload.append(conn.mcp_client.ready_checks)
+            return True
+
+        async def record_start(_runtime, *, preloaded=False):
+            protocol_starts.append(preloaded)
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=record_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=record_start,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(ready_checks_at_preload), 1)
+        self.assertGreaterEqual(ready_checks_at_preload[0], 3)
+        self.assertTrue(conn.mcp_client.ready)
+        self.assertEqual(protocol_starts, [True])
+        self.assertIs(conn.lesson_runtime, result)
+
+    async def test_connect_mcp_discovery_timeout_fails_closed_without_preload(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"].update({
+            "asset_delivery_mode": "sd_pack",
+            "mcp_reconnect_ready_timeout_sec": 0,
+            "mcp_reconnect_ready_poll_sec": 0.001,
+        })
+        conn.mcp_client = _DelayedMcpClient()
+        preload_calls = []
+
+        async def record_preload(runtime):
+            preload_calls.append(runtime)
+            return True
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=record_preload,
+            ):
+                result = await asyncio.wait_for(
+                    runtime_module.maybe_start_lesson_on_connect(conn),
+                    timeout=0.25,
+                )
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(preload_calls, [])
+        self.assertIsNone(conn.lesson_runtime)
+        self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
+
+    async def test_connect_mcp_discovery_error_fails_closed(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.config["lesson"].update({
+            "asset_delivery_mode": "sd_pack",
+            "mcp_reconnect_ready_timeout_sec": 0.1,
+            "mcp_reconnect_ready_poll_sec": 0.001,
+        })
+        conn.mcp_client = _DelayedMcpClient(
+            readiness_error=RuntimeError("MCP discovery failed")
+        )
+        preload_calls = []
+
+        async def record_preload(runtime):
+            preload_calls.append(runtime)
+            return True
+
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=record_preload,
+            ):
+                result = await asyncio.wait_for(
+                    runtime_module.maybe_start_lesson_on_connect(conn),
+                    timeout=0.25,
+                )
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(preload_calls, [])
+        self.assertIsNone(conn.lesson_runtime)
+        self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
 
     async def test_start_protocol_crash_releases_lesson_mode_when_no_prior_runtime(self):
         import core.lesson.runtime as runtime_module
