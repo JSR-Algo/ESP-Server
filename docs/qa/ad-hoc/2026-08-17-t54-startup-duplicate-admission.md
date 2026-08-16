@@ -70,11 +70,12 @@ Commits:
 tool call reuses that unfinished task instead of cancelling it. An unmarked
 connect-time/background pull remains replaceable by an explicit spoken start.
 
-Google Live checks the same pending spoken-start ownership both before conversation
-audio can enter barge-in and immediately after intent classification. Lesson child
-response audio retains priority once the runtime has opened its response window;
-otherwise repeated startup audio is dropped without interrupting Live, advancing the
-response generation, or dispatching a second tool call.
+Google Live checks the same pending spoken-start ownership immediately after intent
+classification. Normal microphone audio still follows the existing barge-in path, so
+stop commands and unrelated speech are not muted during a long preload. When that
+audio is classified as a repeated lesson start, the provider suppresses the second
+tool dispatch and returns the interaction controller to `LISTENING`; the stale
+generation no longer leaves the foreground SD busy guard wedged in `INTERRUPTING`.
 
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
@@ -83,9 +84,10 @@ fallback contract changed.
 
 ```text
 RED tests after fix plus background-pull replacement: 4 passed
-audio-to-transcript review regression: PASS
+audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
+  duplicate recovery PASS
 focused start/provider/runtime suites before review fix: 435 passed
-post-review provider/tool suite: 162 passed
+post-review provider/tool/voice-guard suite: 183 passed
 post-review full ESP suite: 3852 passed, 8 skipped, 12 warnings
 python py_compile touched files: PASS
 git diff --check: PASS

@@ -2087,7 +2087,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider.transition_to_lesson_start.assert_not_awaited()
         self.assertEqual(conn.func_handler.calls, [])
 
-    async def test_pending_spoken_start_drops_repeat_audio_before_response_generation_changes(self):
+    async def test_pending_spoken_start_recovers_after_repeat_audio_is_classified(self):
         conn = _Conn()
         conn.func_handler = _FuncHandler()
         pending = asyncio.create_task(asyncio.Event().wait())
@@ -2124,9 +2124,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertTrue(transcript_handled)
-        self.assertEqual(provider._response_generation, generation)
-        self.assertEqual(provider._bridge.forwarded, [])
-        self.assertEqual(provider._client.interrupt_calls, 0)
+        self.assertEqual(provider._response_generation, generation + 1)
+        self.assertEqual(provider._bridge.forwarded, [b"pcm:repeat trigger"])
+        self.assertEqual(provider._client.interrupt_calls, 1)
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.client_abort)
         provider.transition_to_lesson_start.assert_not_awaited()
         self.assertEqual(conn.func_handler.calls, [])
 

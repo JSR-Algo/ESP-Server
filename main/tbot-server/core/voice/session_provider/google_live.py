@@ -506,15 +506,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if await self._forward_lesson_child_audio(audio_bytes):
             return True
-        if self._spoken_lesson_start_pending():
-            self.conn.logger.bind(tag="GoogleLive").info(
-                with_lesson_log_context(
-                    "Google Live audio_dropped reason=lesson_start_pending",
-                    self.conn,
-                )
-            )
-            self.conn.client_abort = False
-            return True
         if self._should_hold_lesson_prompt_pending_audio():
             self._cancel_input_flush_task()
             self._cancel_waiting_model_timeout_task()
@@ -1645,6 +1636,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._log_lesson_start_intent_miss(transcript_text)
             return False
         if self._spoken_lesson_start_pending():
+            self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent_suppressed reason=start_pending "
