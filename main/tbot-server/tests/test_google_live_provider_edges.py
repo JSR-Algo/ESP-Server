@@ -1943,6 +1943,25 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(conn.func_handler.calls, [])
 
+    async def test_lesson_start_asr_fallback_live_close_breaks_fragment_chain(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        conn.asr = _ASR("bài học")
+        provider = self.make_provider(conn)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            self.assertIsNone(
+                provider._combine_start_lesson_asr_fragment("bắt đầu", 2)
+            )
+            await provider._close_live_resources()
+            provider._start_lesson_asr_fallback_generation = 4
+            await provider._run_start_lesson_asr_fallback(0, 4, [b"after-reopen"])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(conn.func_handler.calls, [])
+
     def test_lesson_start_asr_fallback_expires_fragment_chain(self):
         provider = self.make_provider(_Conn())
 
