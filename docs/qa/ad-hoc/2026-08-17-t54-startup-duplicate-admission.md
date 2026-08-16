@@ -57,6 +57,16 @@ That path advanced `_response_generation`, invalidating the active admission tok
 before the transcript-level duplicate guard ran. The added audio-to-transcript
 regression failed on the reviewed tip with `AssertionError: 1 != 0`.
 
+The final branch review found one more voice-priority regression. While the original
+spoken-start task remained pending, its saved admission token returned a synthetic
+`WAITING_MODEL` state even if an unrelated response had advanced the provider to
+`MODEL_SPEAKING`. The added regression reproduced this as:
+
+```text
+test_pending_spoken_start_token_still_blocks_unrelated_model_speech
+  FAIL: AssertionError: False is not true
+```
+
 ## Fix
 
 Commits:
@@ -82,6 +92,11 @@ signals (`client_have_voice`, speaking audio, and lesson asset audio) continue t
 and pause SD work. Native duplicate Google tool calls use the same provider-level
 coalescing and realtime-state recovery.
 
+Task ownership now relaxes only the stale response-ID/generation checks. It reads the
+matched provider controller's actual state, so `INTERRUPTING`/`WAITING_MODEL` retain
+the startup admission while unrelated `MODEL_SPEAKING` remains busy and pauses SD
+work.
+
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
 
@@ -93,13 +108,13 @@ audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
   duplicate recovery PASS
 pending-task admission and native-tool review regressions: 3 passed
 focused start/provider/runtime suites before review fix: 435 passed
-post-review provider/tool/voice-guard suite: 186 passed
-final post-review full ESP suite: 3855 passed, 8 skipped, 7 warnings
+post-review provider/tool/voice-guard suite: 187 passed
+final post-review full ESP suite: 3861 passed, 3 skipped, 3 warnings
 python py_compile touched files: PASS
 git diff --check: PASS
 T0.4 gate: VERIFIED
   base=603bbd52a6f37ca41505e30f254a4e3287b3409e
-  tip=72de6a149464e080246fb614049d3e6a445b4ac1
+  final rerun required before merge; authoritative tip recorded in GATE_LOG
   RED rc=1, GREEN rc=0
 ```
 
