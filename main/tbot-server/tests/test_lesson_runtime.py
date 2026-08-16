@@ -9077,6 +9077,63 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(protocol_starts, [True])
         self.assertIs(conn.lesson_runtime, result)
 
+    async def test_connect_waits_for_cached_sd_sync_before_start_protocol(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        sync_release = asyncio.Event()
+        order = []
+
+        async def cached_sd_sync():
+            order.append("sync_started")
+            await sync_release.wait()
+            order.append("sync_finished")
+
+        async def record_preload(_runtime):
+            order.append("preloaded")
+            return True
+
+        async def record_start(_runtime, *, preloaded=False):
+            order.append("started")
+
+        conn.sd_pack_sync_task = asyncio.create_task(cached_sd_sync())
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=record_preload,
+            ), patch.object(
+                runtime_module.LessonRuntime,
+                "start_protocol",
+                new=record_start,
+            ):
+                start_task = asyncio.create_task(
+                    runtime_module.maybe_start_lesson_on_connect(conn)
+                )
+                for _ in range(100):
+                    if "preloaded" in order:
+                        break
+                    await asyncio.sleep(0)
+
+                self.assertIn("preloaded", order)
+                self.assertNotIn("started", order)
+                sync_release.set()
+                result = await asyncio.wait_for(start_task, timeout=0.25)
+        finally:
+            undo()
+            sync_release.set()
+            if not conn.sd_pack_sync_task.done():
+                await conn.sd_pack_sync_task
+
+        self.assertIsNotNone(result)
+        self.assertLess(order.index("preloaded"), order.index("sync_finished"))
+        self.assertLess(order.index("sync_finished"), order.index("started"))
+        self.assertIs(conn.lesson_runtime, result)
+
     async def test_connect_mcp_discovery_timeout_fails_closed_without_preload(self):
         import core.lesson.runtime as runtime_module
 

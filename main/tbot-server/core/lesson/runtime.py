@@ -6653,6 +6653,24 @@ async def _wait_for_mcp_reconnect_ready(
         await asyncio.sleep(min(poll_sec, remaining))
 
 
+async def _wait_for_cached_sd_sync_before_start(conn: Any, log: Any) -> None:
+    # MCP marks itself ready immediately before scheduling the connection-owned sync.
+    # Yield once so the scheduler can publish that task before we inspect it.
+    await asyncio.sleep(0)
+    task = getattr(conn, "sd_pack_sync_task", None)
+    if task is None or task is asyncio.current_task() or task.done():
+        return
+    log("info", "lesson start waiting for cached SD sync")
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log("warning", f"cached SD sync wait failed: {type(exc).__name__}")
+    else:
+        log("info", "lesson start cached SD sync barrier completed")
+
+
 async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
     """Serialize concurrent lesson pulls (connect-time pull + spoken start_lesson) so
     they cannot create two runtimes / emit duplicate lesson_prepare (deep-audit). The
@@ -7420,6 +7438,8 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 release_connection=runtime.state != S_FAILED,
             )
             return republish_previous
+        if split_start:
+            await _wait_for_cached_sd_sync_before_start(conn, _log)
         if split_start and await _abort_candidate_for_fallback_terminal("post_preload"):
             return republish_previous
         if split_start:
