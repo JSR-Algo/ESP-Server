@@ -1635,6 +1635,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if payload is None:
             self._log_lesson_start_intent_miss(transcript_text)
             return False
+        pending_task = getattr(self.conn, "lesson_pull_task", None)
+        if (
+            pending_task is not None
+            and not pending_task.done()
+            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+        ):
+            self.conn.logger.bind(tag="GoogleLive").info(
+                with_lesson_log_context(
+                    "Google Live lesson_start_intent_suppressed reason=start_pending "
+                    "chars={}",
+                    self.conn,
+                ),
+                len(str(transcript_text or "")),
+            )
+            return True
         # Delayed / re-emitted STT after a successful start must not restart the lesson
         # (that cancelled s1 greeting and left the robot silent).
         if time.monotonic() < float(self._suppress_start_lesson_tool_call_until or 0.0):

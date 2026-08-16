@@ -418,6 +418,33 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prior.cancelled())
         self.assertEqual(conn.pull_calls, 1)
 
+    async def test_coalesces_duplicate_tool_call_while_spoken_start_is_pending(self):
+        release = asyncio.Event()
+
+        async def _pending_pull():
+            await release.wait()
+            return object()
+
+        conn = _Conn(
+            loop=asyncio.get_running_loop(),
+            enabled=True,
+            pull=_pending_pull,
+        )
+
+        first_response = start_lesson_module.start_lesson(conn)
+        first_task = conn.lesson_pull_task
+        await asyncio.sleep(0)
+        second_response = start_lesson_module.start_lesson(conn)
+
+        self.assertEqual(first_response.action, Action.RECORD)
+        self.assertEqual(second_response.action, Action.RECORD)
+        self.assertIs(conn.lesson_pull_task, first_task)
+        self.assertFalse(first_task.cancelled())
+        self.assertEqual(conn.pull_calls, 1)
+
+        release.set()
+        await first_task
+
     async def test_cancelled_lesson_pull_task_is_not_reported_as_unhandled_loop_error(self):
         loop = asyncio.get_running_loop()
         loop_errors = []

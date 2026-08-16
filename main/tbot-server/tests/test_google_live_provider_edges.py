@@ -2065,6 +2065,28 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(conn.client_abort)
 
+    async def test_lesson_start_intent_suppresses_duplicate_while_spoken_start_is_pending(self):
+        conn = _Conn()
+        conn.func_handler = _FuncHandler()
+        pending = asyncio.create_task(asyncio.Event().wait())
+        conn.lesson_pull_task = pending
+        conn.lesson_pull_task_origin = "spoken_start"
+        provider = self.make_provider(conn)
+        provider._suppress_start_lesson_tool_call_until = 0.0
+        provider.transition_to_lesson_start = AsyncMock(return_value=True)
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+        self.assertTrue(handled)
+        provider.transition_to_lesson_start.assert_not_awaited()
+        self.assertEqual(conn.func_handler.calls, [])
+
     async def test_lesson_start_intent_marks_only_local_tool_dispatch_as_sd_sync_admissible(self):
         conn = _Conn()
         observed_depths = []

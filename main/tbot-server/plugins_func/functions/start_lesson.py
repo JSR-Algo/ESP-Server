@@ -26,6 +26,7 @@ _FAILURE_STATUS_CODES = {
     "SAMPLE_SD_PACK_UNSUPPORTED",
 }
 _SAMPLE_FALLBACK_STATUS_CODES = {"NO_CURRENT_ASSIGNMENT", "BACKEND_UNAVAILABLE"}
+_SPOKEN_START_ORIGIN = "spoken_start"
 
 
 def _lesson_start_status(conn: "ConnectionHandler"):
@@ -157,6 +158,21 @@ def start_lesson(conn: "ConnectionHandler"):
                 response="Please try again in a moment.",
             )
 
+        prior_task = getattr(conn, "lesson_pull_task", None)
+        if (
+            prior_task is not None
+            and not prior_task.done()
+            and getattr(conn, "lesson_pull_task_origin", None) == _SPOKEN_START_ORIGIN
+        ):
+            conn.logger.bind(tag=TAG).info(
+                "start_lesson: lesson start already pending; coalescing duplicate"
+            )
+            return ActionResponse(
+                action=Action.RECORD,
+                result="Lesson start scheduled",
+                response="Okay, let's start the lesson.",
+            )
+
         # DISPATCH. The sample lesson is a FALLBACK, never an unconditional winner.
         #
         #   - runtime DISABLED + sample_on  -> pure demo: the only admitted path is the
@@ -189,10 +205,14 @@ def start_lesson(conn: "ConnectionHandler"):
         # after-close now that the lesson HTTP layer is restored). Supersede any
         # in-flight pull task first — the spoken trigger is the user's explicit
         # "start the lesson now".
-        prior_task = getattr(conn, "lesson_pull_task", None)
         if prior_task is not None and not prior_task.done():
             prior_task.cancel()
         conn.lesson_pull_task = task
+        conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
+
+        def _clear_spoken_start_origin(fut) -> None:
+            if getattr(conn, "lesson_pull_task", None) is fut:
+                conn.lesson_pull_task_origin = None
 
         def _handle_done(fut):
             try:
@@ -212,6 +232,7 @@ def start_lesson(conn: "ConnectionHandler"):
                     )
                     fallback_task = loop.create_task(start_sample_lesson(conn))
                     conn.lesson_pull_task = fallback_task
+                    conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
                     fallback_task.add_done_callback(_handle_sample_done)
                     return
                 if runtime is None and code in _FAILURE_STATUS_CODES:
@@ -223,6 +244,8 @@ def start_lesson(conn: "ConnectionHandler"):
                 conn.logger.bind(tag=TAG).warning(
                     f"start_lesson: lesson pull task error: {type(exc).__name__}: {exc}"
                 )
+            finally:
+                _clear_spoken_start_origin(fut)
 
         def _handle_sample_done(fut):
             try:
@@ -234,6 +257,8 @@ def start_lesson(conn: "ConnectionHandler"):
                 conn.logger.bind(tag=TAG).warning(
                     f"start_lesson: sample fallback task error: {type(exc).__name__}: {exc}"
                 )
+            finally:
+                _clear_spoken_start_origin(fut)
 
         task.add_done_callback(_handle_done)
 
