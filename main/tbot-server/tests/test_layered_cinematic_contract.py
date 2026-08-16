@@ -4,11 +4,11 @@ from copy import deepcopy
 
 import pytest
 
+from core.lesson.asset_cache import AssetCache, AssetState
 from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
     project_layered_cinematic_phase,
 )
-from core.lesson.asset_cache import AssetState
 from core.lesson.runtime import _manifest_asset_cache_inputs
 
 
@@ -174,6 +174,60 @@ def test_runtime_manifest_projection_attests_renderer_v5_without_generation_visu
     robot = next(asset for asset in assets if asset["layer"] == "robotOverlay")
     assert "visualRefs" not in robot
     assert AssetState(robot).renderer_v5_media is True
+
+
+def test_runtime_manifest_projection_replaces_generic_v5_assets_with_phase_attestations() -> None:
+    phases = []
+    for index, effect in enumerate(("flyIn", "walk", "teach", "listen", "thinking", "celebrate", "exit")):
+        phase = _phase()
+        phase["phaseId"] = effect
+        robot = phase["layers"][2]
+        robot["assetVersionId"] = f"robot.{effect}@v1"
+        robot["assetKey"] = f"robot.{effect}"
+        robot["sha256"] = f"{index + 1:x}" * 64
+        phases.append(phase)
+    unique_layers = {
+        layer["assetVersionId"]: layer
+        for phase in phases
+        for layer in phase["layers"]
+    }
+    generic_assets = [
+        {
+            "id": layer["assetVersionId"],
+            "assetId": layer["assetVersionId"],
+            "assetKey": layer["assetKey"],
+            "version": layer["version"],
+            "path": f"https://assets.test/{layer['assetVersionId']}",
+            "url": f"https://assets.test/{layer['assetVersionId']}",
+            "sha256": layer["sha256"],
+            "bytes": layer["bytes"],
+            "critical": True,
+            "layer": layer["slot"],
+            "role": "pose",
+            "mediaType": layer["metadata"]["mediaType"],
+        }
+        for layer in unique_layers.values()
+    ]
+
+    assets = _manifest_asset_cache_inputs({
+        "manifestVersion": "teebot-lesson-renderer.v5",
+        "assets": generic_assets,
+        "cinematicPhases": phases,
+    })
+
+    assert [asset["key"] for asset in assets] == [
+        "background.classroom@v1",
+        "object.happy@v1",
+        "robot.flyIn@v1",
+        "robot.walk@v1",
+        "robot.teach@v1",
+        "robot.listen@v1",
+        "robot.thinking@v1",
+        "robot.celebrate@v1",
+        "robot.exit@v1",
+    ]
+    assert all(AssetState(asset).renderer_v5_media for asset in assets)
+    AssetCache(assets=assets, profile="espTft").assert_profile_renderable()
 
 
 @pytest.mark.parametrize(
