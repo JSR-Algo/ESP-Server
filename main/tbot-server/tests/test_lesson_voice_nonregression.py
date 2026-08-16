@@ -314,6 +314,25 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
         )
 
+    def test_pending_spoken_start_token_still_blocks_unrelated_model_speech(self):
+        handler = _build_handler()
+        provider = _FakeStateProvider(InteractionState.MODEL_SPEAKING)
+        provider._response_generation = 8
+        provider._interaction.response_id = 12
+        handler.voice_provider = provider
+        admission = {
+            "providerId": id(provider),
+            "responseGeneration": 7,
+            "responseId": 11,
+        }
+        handler.lesson_pull_task = SimpleNamespace(done=lambda: False)
+        handler.lesson_pull_task_origin = "spoken_start"
+        handler.lesson_pull_task_admission = admission
+
+        self.assertTrue(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+
     # ---- Route 0: lesson control frames bypass early bind wait -----------
     async def test_route_message_lesson_control_bypasses_pending_bind_gate(self):
         handler = _build_handler()

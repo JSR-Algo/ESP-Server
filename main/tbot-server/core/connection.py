@@ -2475,13 +2475,12 @@ class ConnectionHandler:
         if not isinstance(admission, dict):
             return None
         pending_task = getattr(self, "lesson_pull_task", None)
-        if (
+        owns_admission = (
             pending_task is not None
             and not pending_task.done()
             and getattr(self, "lesson_pull_task_origin", None) == "spoken_start"
             and admission == getattr(self, "lesson_pull_task_admission", None)
-        ):
-            return "WAITING_MODEL"
+        )
         provider = self.voice_provider
         for candidate in (provider, getattr(provider, "_fallback_provider", None)):
             if candidate is None or admission.get("providerId") != id(candidate):
@@ -2489,12 +2488,15 @@ class ConnectionHandler:
             controller = getattr(candidate, "_interaction", None)
             if controller is None:
                 return None
-            if admission.get("responseId") != getattr(controller, "response_id", None):
-                return None
-            if admission.get("responseGeneration") != getattr(
-                candidate, "_response_generation", None
-            ):
-                return None
+            if not owns_admission:
+                if admission.get("responseId") != getattr(
+                    controller, "response_id", None
+                ):
+                    return None
+                if admission.get("responseGeneration") != getattr(
+                    candidate, "_response_generation", None
+                ):
+                    return None
             state = getattr(controller, "state", None)
             return getattr(state, "value", state)
         return None
