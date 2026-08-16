@@ -8888,6 +8888,149 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entered, [])
         self.assertEqual(conn.lesson_start_status["code"], "START_REFUSED")
 
+    async def test_terminal_startup_failure_clears_layers_before_release(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        assignment = self._assignment(lesson_version=3, assignment_version=1)
+        calls = []
+
+        async def reject_preload(_runtime):
+            return False
+
+        async def request_lesson_preload_reset(**kwargs):
+            calls.append(("reset", kwargs))
+            return True
+
+        async def release_lesson_mode(*, reason):
+            calls.append(("release", reason))
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(assignment, _build_manifest())
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=reject_preload,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertIsNone(conn.lesson_runtime)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "reset",
+                    {
+                        "assignment_id": assignment["assignmentId"],
+                        "lesson_id": assignment["lessonId"],
+                        "profile": assignment["profile"],
+                    },
+                ),
+                ("release", "lesson_start_refused"),
+            ],
+        )
+
+    async def test_failed_candidate_does_not_clear_previous_runtime_layers(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        prior = _PinnedRuntime(
+            assignment_id="old-assignment",
+            lesson_version=2,
+            assignment_version=1,
+        )
+        conn.lesson_runtime = prior
+        calls = []
+
+        async def reject_preload(_runtime):
+            return False
+
+        async def request_lesson_preload_reset(**kwargs):
+            calls.append(("reset", kwargs))
+            return True
+
+        async def release_lesson_mode(*, reason):
+            calls.append(("release", reason))
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(
+            self._assignment(lesson_version=3, assignment_version=1),
+            _build_manifest(),
+        )
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=reject_preload,
+            ):
+                result = await runtime_module.maybe_start_lesson_on_connect(conn)
+        finally:
+            undo()
+
+        self.assertIs(result, prior)
+        self.assertIs(conn.lesson_runtime, prior)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertFalse(prior.closed)
+        self.assertEqual(calls, [])
+
+    async def test_layer_cleanup_failure_still_releases_connection(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        assignment = self._assignment(lesson_version=3, assignment_version=1)
+        calls = []
+
+        async def reject_preload(_runtime):
+            return False
+
+        async def request_lesson_preload_reset(**kwargs):
+            calls.append(("reset", kwargs))
+            raise RuntimeError("firmware reset failed")
+
+        async def release_lesson_mode(*, reason):
+            calls.append(("release", reason))
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(assignment, _build_manifest())
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=reject_preload,
+            ):
+                result = await asyncio.wait_for(
+                    runtime_module.maybe_start_lesson_on_connect(conn),
+                    timeout=0.25,
+                )
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertIsNone(conn.lesson_runtime)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "reset",
+                    {
+                        "assignment_id": assignment["assignmentId"],
+                        "lesson_id": assignment["lessonId"],
+                        "profile": assignment["profile"],
+                    },
+                ),
+                ("release", "lesson_start_refused"),
+            ],
+        )
+
     async def test_connect_waits_for_mcp_discovery_before_sd_sync(self):
         import core.lesson.runtime as runtime_module
 
@@ -8973,6 +9116,68 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(conn.lesson_runtime)
         self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
         self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
+
+    async def test_mcp_discovery_timeout_clears_stale_layers_before_release(self):
+        import core.lesson.runtime as runtime_module
+
+        conn = _RepublishConn()
+        conn.features["mcp"] = True
+        conn.config["lesson"].update({
+            "asset_delivery_mode": "sd_pack",
+            "mcp_reconnect_ready_timeout_sec": 0,
+            "mcp_reconnect_ready_poll_sec": 0.001,
+        })
+        conn.mcp_client = _DelayedMcpClient()
+        assignment = self._assignment(lesson_version=3, assignment_version=1)
+        calls = []
+        preload_calls = []
+
+        async def record_preload(runtime):
+            preload_calls.append(runtime)
+            return True
+
+        async def request_lesson_preload_reset(**kwargs):
+            calls.append(("reset", kwargs))
+            return True
+
+        async def release_lesson_mode(*, reason):
+            calls.append(("release", reason))
+
+        conn.request_lesson_preload_reset = request_lesson_preload_reset
+        conn.release_lesson_mode = release_lesson_mode
+        undo = self._patch_backend(assignment, _build_manifest())
+        try:
+            with patch.object(
+                runtime_module.LessonRuntime,
+                "preload_only",
+                new=record_preload,
+            ):
+                result = await asyncio.wait_for(
+                    runtime_module.maybe_start_lesson_on_connect(conn),
+                    timeout=0.25,
+                )
+        finally:
+            undo()
+
+        self.assertIsNone(result)
+        self.assertEqual(conn.lesson_start_status["code"], "MCP_DISCOVERY_TIMEOUT")
+        self.assertEqual(preload_calls, [])
+        self.assertIsNone(conn.lesson_runtime)
+        self.assertIsNone(getattr(conn, "lesson_runtime_candidate", None))
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "reset",
+                    {
+                        "assignment_id": assignment["assignmentId"],
+                        "lesson_id": assignment["lessonId"],
+                        "profile": assignment["profile"],
+                    },
+                ),
+                ("release", "lesson_start_refused"),
+            ],
+        )
 
     async def test_connect_mcp_discovery_error_fails_closed(self):
         import core.lesson.runtime as runtime_module
