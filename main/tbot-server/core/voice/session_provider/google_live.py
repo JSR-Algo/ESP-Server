@@ -86,6 +86,45 @@ class GoogleLiveProvider(VoiceSessionProvider):
     # Residual noise while waiting for model: 2.8s felt laggy; 1.6s still
     # covers first audio arrival without long deaf windows.
     _WAITING_MODEL_RETRY_AUDIO_GRACE_SEC = 1.6
+    _START_LESSON_FRAGMENT_WINDOW_SEC = 8.0
+    _START_LESSON_FRAGMENT_MAX_PARTS = 4
+    _START_LESSON_MARKERS = (
+        "bat dau bai hoc",
+        "bat dau 1 bai hoc",
+        "bat dau mot bai hoc",
+        "bat dau tiet hoc",
+        "bat dau khoa hoc",
+        "bat dau hoc bai",
+        "quay dau bai hoc",
+        "dao ve hoc",
+        "vao bai hoc",
+        "vo bai hoc",
+        "vao hoc bai",
+        "vo hoc bai",
+        "vao khoa hoc",
+        "vo khoa hoc",
+        "mo bai hoc",
+        "mo bai hoc cua con",
+        "mo khoa hoc",
+        "mo khoa hoc cua con",
+        "chuyen sang bai hoc",
+        "hoc bai thoi",
+        "hoc bai di",
+        "con muon hoc bai",
+        "hoc tiep bai",
+        "tiep tuc bai hoc",
+        "tiep tuc khoa hoc",
+        "bai hoc cua con dau",
+        "start lesson",
+        "start the lesson",
+        "begin lesson",
+        "begin the class",
+        "open my lesson",
+        "switch to lesson",
+        "continue the lesson",
+        "resume lesson",
+        "resume my class",
+    )
     # Short: Live STT often re-emits the wake alias after firmware already handled Hi ESP.
     _WAKE_TRANSCRIPT_TAIL_SUPPRESS_SEC = 0.15
     _WAKE_GREETING_LIVE_INSTRUCTION = (
@@ -164,6 +203,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._start_lesson_asr_fallback_audio = deque(maxlen=96)
         self._start_lesson_asr_fallback_generation = 0
         self._start_lesson_asr_fallback_disabled = False
+        self._start_lesson_asr_fragment = ""
+        self._start_lesson_asr_fragment_parts = 0
+        self._start_lesson_asr_fragment_at = 0.0
+        self._start_lesson_asr_fragment_generation = -1
         self._last_expired_audio_window_drop_log_at = 0.0
         self._pending_interrupt_audio_response_id = None
         self._interrupt_capture_response_id = None
@@ -2476,46 +2519,54 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         if text in wake_prefixed_high_speed:
             return {"name": "start_lesson", "arguments": {}}
-        markers = (
-            "bat dau bai hoc",
-            "bat dau 1 bai hoc",
-            "bat dau mot bai hoc",
-            "bat dau tiet hoc",
-            "bat dau khoa hoc",
-            "bat dau hoc bai",
-            "quay dau bai hoc",
-            "dao ve hoc",
-            "vao bai hoc",
-            "vo bai hoc",
-            "vao hoc bai",
-            "vo hoc bai",
-            "vao khoa hoc",
-            "vo khoa hoc",
-            "mo bai hoc",
-            "mo bai hoc cua con",
-            "mo khoa hoc",
-            "mo khoa hoc cua con",
-            "chuyen sang bai hoc",
-            "hoc bai thoi",
-            "hoc bai di",
-            "con muon hoc bai",
-            "hoc tiep bai",
-            "tiep tuc bai hoc",
-            "tiep tuc khoa hoc",
-            "bai hoc cua con dau",
-            "start lesson",
-            "start the lesson",
-            "begin lesson",
-            "begin the class",
-            "open my lesson",
-            "switch to lesson",
-            "continue the lesson",
-            "resume lesson",
-            "resume my class",
-        )
-        if not any(marker in text for marker in markers):
+        if not any(marker in text for marker in self._START_LESSON_MARKERS):
             return None
         return {"name": "start_lesson", "arguments": {}}
+
+    def _clear_start_lesson_asr_fragment(self):
+        self._start_lesson_asr_fragment = ""
+        self._start_lesson_asr_fragment_parts = 0
+        self._start_lesson_asr_fragment_at = 0.0
+        self._start_lesson_asr_fragment_generation = -1
+
+    def _combine_start_lesson_asr_fragment(self, transcript, generation):
+        fragment = self._normalize_intent_text(transcript)
+        if not fragment:
+            self._clear_start_lesson_asr_fragment()
+            return None
+
+        now = time.monotonic()
+        if now - self._start_lesson_asr_fragment_at > self._START_LESSON_FRAGMENT_WINDOW_SEC:
+            self._clear_start_lesson_asr_fragment()
+        if (
+            self._start_lesson_asr_fragment
+            and generation != self._start_lesson_asr_fragment_generation + 2
+        ):
+            self._clear_start_lesson_asr_fragment()
+
+        pending = self._start_lesson_asr_fragment
+        combined = f"{pending} {fragment}".strip() if pending else fragment
+        parts = self._start_lesson_asr_fragment_parts + 1 if pending else 1
+        if combined in self._START_LESSON_MARKERS:
+            self._clear_start_lesson_asr_fragment()
+            return combined
+        if (
+            parts < self._START_LESSON_FRAGMENT_MAX_PARTS
+            and any(marker.startswith(f"{combined} ") for marker in self._START_LESSON_MARKERS)
+        ):
+            self._start_lesson_asr_fragment = combined
+            self._start_lesson_asr_fragment_parts = parts
+            self._start_lesson_asr_fragment_at = now
+            self._start_lesson_asr_fragment_generation = generation
+            return None
+
+        self._clear_start_lesson_asr_fragment()
+        if any(marker.startswith(f"{fragment} ") for marker in self._START_LESSON_MARKERS):
+            self._start_lesson_asr_fragment = fragment
+            self._start_lesson_asr_fragment_parts = 1
+            self._start_lesson_asr_fragment_at = now
+            self._start_lesson_asr_fragment_generation = generation
+        return None
 
     def _is_local_stop_word(self, text):
         normalized = self._normalize_intent_text(text)
@@ -2700,6 +2751,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._user_audio_window_task = None
         self._lesson_child_transcript_timeout_task = None
         self._start_lesson_asr_fallback_task = None
+        self._start_lesson_asr_fallback_generation += 1
+        self._start_lesson_asr_fallback_audio.clear()
+        self._clear_start_lesson_asr_fragment()
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         self._func_handler_bootstrap_task = None
@@ -3928,6 +3982,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         if not self._start_lesson_asr_fallback_enabled():
             self._start_lesson_asr_fallback_audio.clear()
+            self._clear_start_lesson_asr_fragment()
             return
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_generation += 1
@@ -3955,9 +4010,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 getattr(self.conn, "session_id", ""),
                 getattr(self.conn, "audio_format", "opus"),
             )
+            if generation != self._start_lesson_asr_fallback_generation:
+                return
             if self._is_asr_auth_failure(getattr(asr, "last_error", "")):
                 self._start_lesson_asr_fallback_disabled = True
                 self._start_lesson_asr_fallback_audio.clear()
+                self._clear_start_lesson_asr_fragment()
                 self.conn.logger.bind(tag="GoogleLive").warning(
                     with_lesson_log_context(
                         "Google Live lesson_start_asr_fallback disabled reason=asr_auth_failure",
@@ -3967,8 +4025,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return
             transcript = self._extract_asr_transcript_text(text)
             if not transcript:
+                self._clear_start_lesson_asr_fragment()
                 return
             if self._classify_lesson_start_intent(transcript) is None:
+                combined = self._combine_start_lesson_asr_fragment(transcript, generation)
+                if combined is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        with_lesson_log_context(
+                            "Google Live lesson_start_asr_fallback combined chars={}",
+                            self.conn,
+                        ),
+                        len(combined),
+                    )
+                    self._start_lesson_asr_fallback_audio.clear()
+                    await self._dispatch_lesson_start_intent(combined)
+                    return
                 self.conn.logger.bind(tag="GoogleLive").info(
                     with_lesson_log_context(
                         "Google Live lesson_start_asr_fallback miss chars={}",
@@ -3977,6 +4048,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     len(transcript),
                 )
                 return
+            self._clear_start_lesson_asr_fragment()
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
                     "Google Live lesson_start_asr_fallback transcript chars={}",
@@ -3992,6 +4064,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if self._is_asr_auth_failure(exc):
                 self._start_lesson_asr_fallback_disabled = True
                 self._start_lesson_asr_fallback_audio.clear()
+                self._clear_start_lesson_asr_fragment()
             self.conn.logger.bind(tag="GoogleLive").warning(
                 with_lesson_log_context(
                     "Google Live lesson_start_asr_fallback failed: {}",
