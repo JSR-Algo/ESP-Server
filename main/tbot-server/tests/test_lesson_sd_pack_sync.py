@@ -257,6 +257,10 @@ def test_cached_asset_packs_preserve_renderer_v5_mixed_media_identity(tmp_path):
         "image", "image", "video",
     ]
     assert packs[0]["assets"][2]["visualRefs"][0]["slot"] == "robotOverlay"
+    sent_assets = sd_pack_sync.build_firmware_sync_pack(packs[0])["assets"]
+    assert [asset["layer"] for asset in sent_assets] == [
+        "background", "teachingObject", "robotOverlay",
+    ]
 
 
 def test_cached_asset_packs_preserve_pathless_admin_proxy_trgb_identity(tmp_path):
