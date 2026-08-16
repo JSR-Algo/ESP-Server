@@ -67,10 +67,11 @@ test_pending_spoken_start_token_still_blocks_unrelated_model_speech
   FAIL: AssertionError: False is not true
 ```
 
-The next review narrowed the boundary further: a mismatched generation may remain
-admissible while it is transiently `INTERRUPTING` for duplicate classification, but
-must not inherit admission after it becomes an unrelated `WAITING_MODEL` turn. The
-new regression failed before the fix with the same `False is not true` assertion.
+The next reviews showed that no mismatched generation can be admitted safely. Both
+an unrelated `WAITING_MODEL` turn and the preceding `INTERRUPTING` state must remain
+behind the realtime busy gate until ASR confirms that the utterance is a duplicate.
+The stale-interrupt regression failed before the final fix with the same
+`False is not true` assertion.
 
 ## Fix
 
@@ -91,20 +92,15 @@ stop commands and unrelated speech are not muted during a long preload. When tha
 audio is classified as a repeated lesson start, the provider suppresses the second
 tool dispatch and returns the interaction controller to `LISTENING`; the stale
 generation no longer leaves the foreground SD busy guard wedged in `INTERRUPTING`.
-The original admission token is also stored with the owning spoken-start task, so it
-remains deadline-safe while unrelated audio is still being classified; live voice
-signals (`client_have_voice`, speaking audio, and lesson asset audio) continue to win
-and pause SD work. Native duplicate Google tool calls use the same provider-level
-coalescing and realtime-state recovery.
+Live voice signals (`client_have_voice`, speaking audio, and lesson asset audio) and
+response identity continue to win and pause SD work. Native duplicate Google tool
+calls use the same provider-level coalescing and realtime-state recovery.
 
-Task ownership now relaxes only the stale response-ID/generation checks. It reads the
-matched provider controller's actual state, so `INTERRUPTING`/`WAITING_MODEL` retain
-the startup admission while unrelated `MODEL_SPEAKING` remains busy and pauses SD
-work.
-
-For a task-owned token whose response identity no longer matches, only the transient
-`INTERRUPTING` path remains admissible. A mismatched `WAITING_MODEL` returns to the
-ordinary realtime guard and stays busy until that model turn resolves.
+The final design does not store or relax a stale admission token on the pending task.
+Any response-ID/generation mismatch stays busy during `INTERRUPTING`, `WAITING_MODEL`,
+or `MODEL_SPEAKING`. Once ASR or the native tool path confirms a duplicate, Google
+Live restores `LISTENING`; the ordinary realtime guard then permits the original
+foreground sync without weakening unrelated conversation turns.
 
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
@@ -115,10 +111,10 @@ fallback contract changed.
 RED tests after fix plus background-pull replacement: 4 passed
 audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
   duplicate recovery PASS
-pending-task admission and native-tool review regressions: 3 passed
+stale-token voice-priority and native-tool review regressions: PASS
 focused start/provider/runtime suites before review fix: 435 passed
-post-review provider/tool/voice-guard suite: 188 passed
-final post-review full ESP suite: 3862 passed, 3 skipped, 3 warnings
+post-review provider/tool/voice-guard suite: 187 passed
+final post-review full ESP suite: 3861 passed, 3 skipped, 3 warnings
 python py_compile touched files: PASS
 git diff --check: PASS
 T0.4 gate: VERIFIED

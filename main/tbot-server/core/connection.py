@@ -275,7 +275,6 @@ class ConnectionHandler:
         self.superseded_by = None
         self.lesson_pull_task = None
         self.lesson_pull_task_origin = None
-        self.lesson_pull_task_admission = None
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
@@ -2474,13 +2473,6 @@ class ConnectionHandler:
     def _lesson_start_sd_sync_admission_state(self, admission):
         if not isinstance(admission, dict):
             return None
-        pending_task = getattr(self, "lesson_pull_task", None)
-        owns_admission = (
-            pending_task is not None
-            and not pending_task.done()
-            and getattr(self, "lesson_pull_task_origin", None) == "spoken_start"
-            and admission == getattr(self, "lesson_pull_task_admission", None)
-        )
         provider = self.voice_provider
         for candidate in (provider, getattr(provider, "_fallback_provider", None)):
             if candidate is None or admission.get("providerId") != id(candidate):
@@ -2493,13 +2485,10 @@ class ConnectionHandler:
             ) and admission.get("responseGeneration") == getattr(
                 candidate, "_response_generation", None
             )
-            if not owns_admission and not response_matches:
+            if not response_matches:
                 return None
             state = getattr(controller, "state", None)
-            state = getattr(state, "value", state)
-            if owns_admission and not response_matches and state == "WAITING_MODEL":
-                return None
-            return state
+            return getattr(state, "value", state)
         return None
 
     def is_lesson_sd_sync_busy(

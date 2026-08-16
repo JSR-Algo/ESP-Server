@@ -173,12 +173,6 @@ def start_lesson(conn: "ConnectionHandler"):
                 response="Okay, let's start the lesson.",
             )
 
-        admission_reader = getattr(conn, "lesson_start_sd_sync_admission_token", None)
-        try:
-            task_admission = admission_reader() if callable(admission_reader) else None
-        except Exception:
-            task_admission = None
-
         # DISPATCH. The sample lesson is a FALLBACK, never an unconditional winner.
         #
         #   - runtime DISABLED + sample_on  -> pure demo: the only admitted path is the
@@ -215,12 +209,10 @@ def start_lesson(conn: "ConnectionHandler"):
             prior_task.cancel()
         conn.lesson_pull_task = task
         conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
-        conn.lesson_pull_task_admission = task_admission
 
         def _clear_spoken_start_origin(fut) -> None:
             if getattr(conn, "lesson_pull_task", None) is fut:
                 conn.lesson_pull_task_origin = None
-                conn.lesson_pull_task_admission = None
 
         def _handle_done(fut):
             try:
@@ -241,7 +233,6 @@ def start_lesson(conn: "ConnectionHandler"):
                     fallback_task = loop.create_task(start_sample_lesson(conn))
                     conn.lesson_pull_task = fallback_task
                     conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
-                    conn.lesson_pull_task_admission = task_admission
                     fallback_task.add_done_callback(_handle_sample_done)
                     return
                 if runtime is None and code in _FAILURE_STATUS_CODES:

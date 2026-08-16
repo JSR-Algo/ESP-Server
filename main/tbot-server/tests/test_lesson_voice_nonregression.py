@@ -285,7 +285,7 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
         )
 
-    def test_lesson_sd_sync_preserves_token_owned_by_pending_spoken_start(self):
+    def test_lesson_sd_sync_rejects_stale_token_during_pending_spoken_start(self):
         handler = _build_handler()
         provider = _FakeStateProvider(InteractionState.INTERRUPTING)
         provider._response_generation = 8
@@ -299,9 +299,8 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
         pending = SimpleNamespace(done=lambda: False)
         handler.lesson_pull_task = pending
         handler.lesson_pull_task_origin = "spoken_start"
-        handler.lesson_pull_task_admission = admission
 
-        self.assertFalse(
+        self.assertTrue(
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
         )
         handler.client_have_voice = True
@@ -327,7 +326,6 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
         }
         handler.lesson_pull_task = SimpleNamespace(done=lambda: False)
         handler.lesson_pull_task_origin = "spoken_start"
-        handler.lesson_pull_task_admission = admission
 
         self.assertTrue(
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
@@ -346,7 +344,6 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
         }
         handler.lesson_pull_task = SimpleNamespace(done=lambda: False)
         handler.lesson_pull_task_origin = "spoken_start"
-        handler.lesson_pull_task_admission = admission
 
         self.assertTrue(
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)

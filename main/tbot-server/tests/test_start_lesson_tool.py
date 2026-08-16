@@ -445,34 +445,6 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         release.set()
         await first_task
 
-    async def test_tracks_dispatch_admission_for_the_pending_spoken_task(self):
-        release = asyncio.Event()
-        admission = {
-            "providerId": 1,
-            "responseGeneration": 7,
-            "responseId": 11,
-        }
-
-        async def _pending_pull():
-            await release.wait()
-            return object()
-
-        conn = _Conn(
-            loop=asyncio.get_running_loop(),
-            enabled=True,
-            pull=_pending_pull,
-        )
-        conn.lesson_start_sd_sync_admission_token = lambda: dict(admission)
-
-        start_lesson_module.start_lesson(conn)
-        task = conn.lesson_pull_task
-
-        self.assertEqual(conn.lesson_pull_task_admission, admission)
-        release.set()
-        await task
-        await asyncio.sleep(0)
-        self.assertIsNone(conn.lesson_pull_task_admission)
-
     async def test_cancelled_lesson_pull_task_is_not_reported_as_unhandled_loop_error(self):
         loop = asyncio.get_running_loop()
         loop_errors = []
