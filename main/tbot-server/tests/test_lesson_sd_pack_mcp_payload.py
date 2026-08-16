@@ -284,6 +284,7 @@ def test_renderer_v5_robot_mp4_syncs_as_verified_base_media_without_rich_metadat
         "url": "https://assets.example/feelings.robot.flyIn.mp4",
         "onlineUrl": "https://assets.example/feelings.robot.flyIn.mp4",
         "mediaType": "video/mp4",
+        "layer": "robotOverlay",
         "sharedAssetKey": "feelings.robot.flyIn", "sharedAssetVersion": 1,
         "compatibilityMetadata": {
             "mediaKind": "video", "mediaType": "video/mp4", "codec": "mjpeg",
@@ -292,14 +293,13 @@ def test_renderer_v5_robot_mp4_syncs_as_verified_base_media_without_rich_metadat
             "rect": {"x": 20, "y": 100, "width": 200, "height": 200},
             "chromaKey": {"keyColor": "#00ff00", "tolerance": 24, "featherPx": 1},
         },
-        "visualRefs": [{"stepKey": "s1", "phase": "flyIn", "slot": "robotOverlay"}],
     })
     asset["sdPath"] = f"sd://tbot/lesson-assets/{CACHE_KEY}/feelings.robot.flyIn%40v1"
     asset["localPath"] = asset["sdPath"]
 
     sent = build_firmware_sync_pack(render_pack)["assets"][0]
 
-    assert set(sent) == _NORMALIZED_BASE_FIELDS
+    assert set(sent) == _NORMALIZED_BASE_FIELDS | {"layer"}
     assert sent["mediaType"] == "video/mp4"
     assert "compatibilityMetadata" not in sent
     assert "visualRefs" not in sent

@@ -1061,6 +1061,8 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
     ]
     manifest_version = manifest.get("manifestVersion")
     if manifest_version == RENDERER_V5:
+        generic_by_key = {asset["key"]: asset for asset in assets if asset.get("key")}
+        layered_by_key: dict[str, dict[str, Any]] = {}
         for phase in manifest.get("cinematicPhases", []):
             if not isinstance(phase, dict):
                 continue
@@ -1070,10 +1072,12 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                 metadata = layer.get("metadata")
                 if not isinstance(metadata, dict):
                     continue
-                assets.append({
-                    "key": layer.get("assetVersionId"),
-                    "path": layer.get("path"),
-                    "url": layer.get("url"),
+                key = layer.get("assetVersionId")
+                generic = generic_by_key.get(key, {})
+                projected = {
+                    "key": key,
+                    "path": generic.get("path") or layer.get("path"),
+                    "url": generic.get("url") or layer.get("url"),
                     "sha256": layer.get("sha256"),
                     "size": layer.get("bytes"),
                     "critical": True,
@@ -1083,8 +1087,30 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                     "sharedAssetKey": layer.get("assetKey"),
                     "sharedAssetVersion": layer.get("version"),
                     "compatibilityMetadata": copy.deepcopy(metadata),
-                })
-        return assets
+                }
+                existing = layered_by_key.get(key)
+                if existing is not None:
+                    comparable = {
+                        field: value
+                        for field, value in projected.items()
+                        if field != "role"
+                    }
+                    prior = {
+                        field: value
+                        for field, value in existing.items()
+                        if field != "role"
+                    }
+                    if comparable != prior:
+                        raise ValueError(
+                            f"renderer v5 asset {key!r} has conflicting phase identities"
+                        )
+                    continue
+                layered_by_key[key] = projected
+        # Phase entries are the canonical renderer-v5 metadata source. Keeping
+        # generic duplicates creates critical MP4 shadows without attestation.
+        return [
+            asset for asset in assets if asset.get("key") not in layered_by_key
+        ] + list(layered_by_key.values())
     if manifest_version != RENDERER_V4:
         return assets
     for phase in manifest.get("cinematicPhases", []):

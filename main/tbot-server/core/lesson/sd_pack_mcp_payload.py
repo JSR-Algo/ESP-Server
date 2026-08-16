@@ -16,7 +16,7 @@ from core.lesson.flattened_cinematic_contract import (
 from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
     is_layered_cinematic_generation_asset,
-    validate_layered_cinematic_generation_asset,
+    validate_layered_cinematic_runtime_asset,
 )
 from core.lesson.cache_key_contract import (
     AssetBasenameRefused,
@@ -323,7 +323,7 @@ def _validate_asset_metadata(
     flattened_identity = "derivativeId" in asset or "phaseId" in asset or "cueId" in asset
     if is_layered_cinematic_generation_asset(asset):
         try:
-            validate_layered_cinematic_generation_asset(asset)
+            validate_layered_cinematic_runtime_asset(asset)
         except LayeredCinematicContractError:
             _refuse()
         asset_kind = "renderer_v5_media"
