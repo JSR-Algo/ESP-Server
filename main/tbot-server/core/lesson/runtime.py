@@ -6983,6 +6983,48 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     if republish_previous is None and getattr(conn, "lesson_runtime", None) is existing:
         republish_previous = existing
 
+    async def _cleanup_failed_start(
+        reason: str, *, release_connection: bool = True
+    ) -> None:
+        if republish_previous is not None:
+            return
+        reset = getattr(conn, "request_lesson_preload_reset", None)
+        if callable(reset):
+            try:
+                reset_ok = await reset(
+                    assignment_id=assignment.get("assignmentId"),
+                    lesson_id=assignment.get("lessonId"),
+                    profile=profile,
+                )
+                if reset_ok:
+                    _log("info", "lesson startup stale-layer reset completed")
+                else:
+                    _log("warning", "lesson startup stale-layer reset was not acknowledged")
+            except Exception as exc:
+                _log(
+                    "warning",
+                    f"lesson startup stale-layer reset failed: {type(exc).__name__}",
+                )
+        else:
+            _log("warning", "lesson startup stale-layer reset unavailable")
+
+        if not release_connection:
+            _log("info", "lesson startup connection release already handled")
+            return
+
+        release_lesson = getattr(conn, "release_lesson_mode", None)
+        if callable(release_lesson):
+            try:
+                await release_lesson(reason=reason)
+                _log("info", "lesson startup connection release completed")
+            except Exception as exc:
+                _log(
+                    "warning",
+                    f"lesson startup connection release failed: {type(exc).__name__}",
+                )
+        else:
+            _log("warning", "lesson startup connection release unavailable")
+
     mcp_ready, mcp_failure_type = await _wait_for_mcp_reconnect_ready(conn, lesson_cfg)
     if not mcp_ready:
         _set_lesson_start_status(
@@ -6994,6 +7036,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             "warning",
             f"lesson MCP reconnect readiness failed: {mcp_failure_type}",
         )
+        await _cleanup_failed_start("lesson_start_refused")
         return republish_previous
 
     gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
@@ -7007,6 +7050,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 "Thẻ nhớ còn dưới ngưỡng an toàn để tải bài học mới.",
             )
             _log("warning", "lesson preload refused: SD free space below preload floor")
+            await _cleanup_failed_start("lesson_start_refused")
             return republish_previous
         candidate_cache_key = AssetCache._compose_cache_key(
             str(assignment.get("lessonId") or "lesson"),
@@ -7220,6 +7264,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 _log("warning", f"failed lesson runtime teardown failed: {type(exc).__name__}")
             if activation is not None:
                 activation.abort_candidate()
+            await _cleanup_failed_start(
+                "lesson_start_refused",
+                release_connection=runtime.state != S_FAILED,
+            )
             return republish_previous
         if split_start and await _abort_candidate_for_fallback_terminal("post_preload"):
             return republish_previous
@@ -7243,6 +7291,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                         conn.lesson_runtime_candidate = None
                     activation.abort_candidate()
                     await runtime.close()
+                    await _cleanup_failed_start("lesson_start_refused")
                     return republish_previous
             conn.lesson_runtime = runtime
             conn.lesson_runtime_candidate = None
@@ -7257,6 +7306,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                     conn.lesson_runtime_candidate = None
                 activation.abort_candidate()
                 await runtime.close()
+                await _cleanup_failed_start("lesson_start_refused")
                 return republish_previous
         _set_lesson_start_status(conn, "STARTED")
         if republish_previous is not None:
@@ -7272,10 +7322,6 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
     except LessonError as err:
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson start refused: {err.code}")
-        if republish_previous is None:
-            release_lesson = getattr(conn, "release_lesson_mode", None)
-            if callable(release_lesson):
-                await release_lesson(reason="lesson_start_refused")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
         if getattr(conn, "lesson_runtime", None) is runtime:
@@ -7288,14 +7334,11 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await runtime.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"refused lesson runtime teardown failed: {type(exc).__name__}")
+        await _cleanup_failed_start("lesson_start_refused")
         return republish_previous
     except Exception as exc:  # noqa: BLE001 - candidate failure must preserve active runtime
         _set_lesson_start_status(conn, "START_REFUSED", "Robot chưa hiển thị được bài học.")
         _log("warning", f"lesson candidate crashed: {type(exc).__name__}")
-        if republish_previous is None:
-            release_lesson = getattr(conn, "release_lesson_mode", None)
-            if callable(release_lesson):
-                await release_lesson(reason="lesson_start_failed")
         if getattr(conn, "lesson_runtime_candidate", None) is runtime:
             conn.lesson_runtime_candidate = None
         if getattr(conn, "lesson_runtime", None) is runtime:
@@ -7308,6 +7351,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await runtime.close()
         except Exception as close_exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"crashed lesson runtime teardown failed: {type(close_exc).__name__}")
+        await _cleanup_failed_start("lesson_start_failed")
         return republish_previous
     return runtime
 
