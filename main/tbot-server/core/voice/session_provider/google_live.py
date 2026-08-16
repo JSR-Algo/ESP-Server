@@ -2751,6 +2751,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._user_audio_window_task = None
         self._lesson_child_transcript_timeout_task = None
         self._start_lesson_asr_fallback_task = None
+        self._start_lesson_asr_fallback_generation += 1
+        self._start_lesson_asr_fallback_audio.clear()
+        self._clear_start_lesson_asr_fragment()
         self._proactive_reconnect_task = None
         self._idle_close_task = None
         self._func_handler_bootstrap_task = None
