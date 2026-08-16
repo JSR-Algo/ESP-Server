@@ -76,6 +76,11 @@ stop commands and unrelated speech are not muted during a long preload. When tha
 audio is classified as a repeated lesson start, the provider suppresses the second
 tool dispatch and returns the interaction controller to `LISTENING`; the stale
 generation no longer leaves the foreground SD busy guard wedged in `INTERRUPTING`.
+The original admission token is also stored with the owning spoken-start task, so it
+remains deadline-safe while unrelated audio is still being classified; live voice
+signals (`client_have_voice`, speaking audio, and lesson asset audio) continue to win
+and pause SD work. Native duplicate Google tool calls use the same provider-level
+coalescing and realtime-state recovery.
 
 No SD coordinator, busy-state, timeout, attestation, assignment-state, or renderer
 fallback contract changed.
@@ -86,8 +91,9 @@ fallback contract changed.
 RED tests after fix plus background-pull replacement: 4 passed
 audio-to-transcript review regressions: initial broad-drop fix REJECTED; scoped
   duplicate recovery PASS
+pending-task admission and native-tool review regressions: 3 passed
 focused start/provider/runtime suites before review fix: 435 passed
-post-review provider/tool/voice-guard suite: 183 passed
+post-review provider/tool/voice-guard suite: 186 passed
 post-review full ESP suite: 3852 passed, 8 skipped, 12 warnings
 python py_compile touched files: PASS
 git diff --check: PASS

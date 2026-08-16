@@ -5748,9 +5748,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 name,
                 self._response_generation,
             )
-            if (
-                name == "start_lesson"
-                and time.monotonic() < self._suppress_start_lesson_tool_call_until
+            pending_spoken_start = (
+                name == "start_lesson" and self._spoken_lesson_start_pending()
+            )
+            if pending_spoken_start:
+                self._interaction.transition(InteractionState.LISTENING)
+                self.conn.client_abort = False
+            if name == "start_lesson" and (
+                pending_spoken_start
+                or time.monotonic() < self._suppress_start_lesson_tool_call_until
             ):
                 self.conn.logger.bind(tag="GoogleLive").info(
                     with_lesson_log_context(

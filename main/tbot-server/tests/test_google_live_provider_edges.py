@@ -2791,6 +2791,39 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             [[{"id": "c1", "name": "start_lesson", "response": {"result": "Lesson already starting."}}]],
         )
 
+    async def test_native_start_lesson_tool_coalesces_pending_spoken_start_and_recovers_state(self):
+        conn = _Conn()
+        pending = asyncio.create_task(asyncio.Event().wait())
+        conn.lesson_pull_task = pending
+        conn.lesson_pull_task_origin = "spoken_start"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._interaction.transition(
+            google_live_module.InteractionState.INTERRUPTING
+        )
+        conn.client_abort = True
+        provider._suppress_start_lesson_tool_call_until = 0.0
+        provider._execute_tool_call_with_timeout = AsyncMock(return_value={"result": "ran"})
+
+        try:
+            await provider._handle_tool_call_event(
+                {"calls": [{"id": "c2", "name": "start_lesson", "args": {}}]}
+            )
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+        provider._execute_tool_call_with_timeout.assert_not_awaited()
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.client_abort)
+        self.assertEqual(
+            provider._client.tool_responses,
+            [[{"id": "c2", "name": "start_lesson", "response": {"result": "Lesson already starting."}}]],
+        )
+
     async def test_text_turn_arms_waiting_model_timeout_without_next_audio_frame(self):
         conn = _Conn()
         conn.config["google_live"]["waiting_model_timeout_sec"] = 0.01

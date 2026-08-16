@@ -23,6 +23,7 @@ ClassicPipelineProvider / connection_module the routing suite uses.
 import asyncio
 import unittest
 from contextvars import ContextVar
+from types import SimpleNamespace
 
 # Importing this module runs _install_connection_import_stubs() at import time,
 # which installs the sys.modules stubs and imports core.connection cleanly.
@@ -280,6 +281,35 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         provider._interaction.response_id = 12
+        self.assertTrue(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+
+    def test_lesson_sd_sync_preserves_token_owned_by_pending_spoken_start(self):
+        handler = _build_handler()
+        provider = _FakeStateProvider(InteractionState.INTERRUPTING)
+        provider._response_generation = 8
+        provider._interaction.response_id = 12
+        handler.voice_provider = provider
+        admission = {
+            "providerId": id(provider),
+            "responseGeneration": 7,
+            "responseId": 11,
+        }
+        pending = SimpleNamespace(done=lambda: False)
+        handler.lesson_pull_task = pending
+        handler.lesson_pull_task_origin = "spoken_start"
+        handler.lesson_pull_task_admission = admission
+
+        self.assertFalse(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+        handler.client_have_voice = True
+        self.assertTrue(
+            handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
+        )
+        handler.client_have_voice = False
+        pending.done = lambda: True
         self.assertTrue(
             handler.is_lesson_sd_sync_busy(start_lesson_admission=admission)
         )

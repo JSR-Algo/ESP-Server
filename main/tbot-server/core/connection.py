@@ -274,6 +274,8 @@ class ConnectionHandler:
         self.liveness_lease = None
         self.superseded_by = None
         self.lesson_pull_task = None
+        self.lesson_pull_task_origin = None
+        self.lesson_pull_task_admission = None
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
@@ -2472,6 +2474,14 @@ class ConnectionHandler:
     def _lesson_start_sd_sync_admission_state(self, admission):
         if not isinstance(admission, dict):
             return None
+        pending_task = getattr(self, "lesson_pull_task", None)
+        if (
+            pending_task is not None
+            and not pending_task.done()
+            and getattr(self, "lesson_pull_task_origin", None) == "spoken_start"
+            and admission == getattr(self, "lesson_pull_task_admission", None)
+        ):
+            return "WAITING_MODEL"
         provider = self.voice_provider
         for candidate in (provider, getattr(provider, "_fallback_provider", None)):
             if candidate is None or admission.get("providerId") != id(candidate):
