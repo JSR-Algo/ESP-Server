@@ -552,8 +552,14 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
             if level == "info" and args and "tts_stop_sent reason=interrupt" in args[0]
         ]
         self.assertEqual(len(stop_logs), 1)
-        self.assertIn("continue_listening=true", stop_logs[0][0])
-        self.assertIn("listen_mode=realtime", stop_logs[0][0])
+        self.assertEqual(
+            stop_logs[0],
+            (
+                "tts_stop_sent reason=interrupt continue_listening={} listen_mode={}",
+                "true",
+                "realtime",
+            ),
+        )
         latency_logs = [
             args
             for level, args, _kwargs in conn.logger.messages

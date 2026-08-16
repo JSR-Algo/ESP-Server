@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import os
 import time
 from typing import List, Optional, Tuple
@@ -92,7 +93,8 @@ class ASRProvider(ASRProviderBase):
 
             url = f"{self.api_base}/models/{self.model}:generateContent?key={self.api_key}"
             start_time = time.time()
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 url,
                 json=body,
                 timeout=self.timeout,

@@ -1823,6 +1823,40 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             {"name": "start_lesson", "arguments": {}},
         )
 
+    async def test_lesson_start_asr_fallback_keeps_quiet_frames_inside_forwarded_turn(self):
+        conn = _Conn()
+        conn.config["google_live"]["input_speech_rms_threshold"] = 500
+        provider = self.make_provider(conn)
+        provider._bridge = _Bridge()
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._bridge.rms = 1800
+            provider._record_start_lesson_asr_fallback_audio(b"loud", b"pcm-loud")
+            provider._bridge.rms = 120
+            provider._record_start_lesson_asr_fallback_audio(b"quiet", b"pcm-quiet")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertEqual(
+            list(provider._start_lesson_asr_fallback_audio),
+            [b"loud", b"quiet"],
+        )
+
+    async def test_lesson_start_asr_fallback_detaches_each_turn_before_asr_delay(self):
+        conn = _Conn()
+        conn.config["google_live"]["lesson_start_asr_fallback_delay_sec"] = 60
+        provider = self.make_provider(conn)
+        provider._start_lesson_asr_fallback_audio.extend([b"turn-one-a", b"turn-one-b"])
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            provider._schedule_start_lesson_asr_fallback_task()
+            self.assertEqual(list(provider._start_lesson_asr_fallback_audio), [])
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+            provider._cancel_start_lesson_asr_fallback_task()
+
     async def test_asr_fallback_auth_failure_disables_retries_for_session(self):
         conn = _Conn()
         conn.asr = _EmptyAuthFailingASR("APIRequest failed: 401")
@@ -3521,6 +3555,89 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(conn.client_abort)
         self.assertFalse(conn.client_is_speaking)
+
+    async def test_lesson_transition_uses_terminal_voice_stop(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        bridge = _Bridge()
+        bridge.stop_output_for_lesson = AsyncMock()
+        provider._bridge = bridge
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: provider._interaction.state not in {
+            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
+        }
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertTrue(admitted)
+        bridge.stop_output_for_lesson.assert_awaited_once_with()
+        self.assertEqual(bridge.stop_calls, 0)
+
+    async def test_lesson_transition_settles_stale_model_speaking_after_terminal_stop(self):
+        conn = _Conn()
+        conn.config["lesson"] = {"live_transition_timeout_sec": 0.1}
+        provider = self.make_provider(conn)
+        conn.voice_provider = provider
+        provider._begin_user_interrupt = AsyncMock()
+        provider._has_active_output = lambda: False
+        conn.client_is_speaking = False
+        conn.client_have_voice = False
+        busy_checks = 0
+
+        def busy():
+            nonlocal busy_checks
+            busy_checks += 1
+            if busy_checks == 1:
+                # An audio callback can publish the short stop echo-tail as model
+                # output after transition_to_lesson_start already selected LISTENING.
+                provider._interaction.transition(
+                    google_live_module.InteractionState.MODEL_SPEAKING
+                )
+            return provider._interaction.state not in {
+                google_live_module.InteractionState.IDLE,
+                google_live_module.InteractionState.LISTENING,
+            }
+
+        conn.is_realtime_busy = busy
+
+        admitted = await provider.transition_to_lesson_start()
+
+        self.assertTrue(admitted)
+        self.assertGreaterEqual(busy_checks, 2)
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+
+    async def test_lesson_transition_late_echo_log_does_not_re_latch_busy_state(self):
+        conn = _Conn()
+        conn.config["lesson"] = {"live_transition_timeout_sec": 0.1}
+        provider = self.make_provider(conn)
+        conn.voice_provider = provider
+        provider._begin_user_interrupt = AsyncMock()
+        provider._has_active_output = lambda: False
+        conn.client_is_speaking = False
+        conn.client_have_voice = False
+        conn.is_realtime_busy = lambda: provider._interaction.state not in {
+            google_live_module.InteractionState.IDLE,
+            google_live_module.InteractionState.LISTENING,
+        }
+
+        self.assertTrue(await provider.transition_to_lesson_start())
+
+        # A late echo frame is diagnostic MODEL_SPEAKING evidence only. Once the
+        # real output flag clears, logging that frame must not re-latch the
+        # authoritative interaction state and block SD maintenance forever.
+        provider._has_active_output = lambda: True
+        provider._log_audio_decision("suppress_echo", "robot_speaking", b"pcm")
+        provider._has_active_output = lambda: False
+
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.is_realtime_busy())
 
     async def test_lesson_transition_timeout_remains_retryable(self):
         conn = _Conn()

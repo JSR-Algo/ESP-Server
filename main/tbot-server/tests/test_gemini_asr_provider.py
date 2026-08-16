@@ -1,5 +1,7 @@
 import unittest
+import asyncio
 import sys
+import threading
 import types
 from enum import Enum
 from types import SimpleNamespace
@@ -60,6 +62,53 @@ class _Response:
 
 
 class GeminiASRProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gemini_asr_http_request_does_not_block_event_loop(self):
+        import tempfile
+        from pathlib import Path
+        _reset_asr_imports()
+        from core.utils.asr import create_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = Path(tmp) / "speech.wav"
+            audio_path.write_bytes(b"RIFF....WAVEfmt ")
+            provider = create_instance(
+                "gemini_asr",
+                {"api_key": "test-key", "output_dir": tmp},
+                True,
+            )
+            request_started = threading.Event()
+            release_request = threading.Event()
+            order = []
+
+            def fake_post(*_args, **_kwargs):
+                request_started.set()
+                release_request.wait(timeout=0.2)
+                order.append("request_done")
+                return _Response()
+
+            import core.providers.asr.gemini_asr as gemini_asr
+
+            original_post = gemini_asr.requests.post
+            gemini_asr.requests.post = fake_post
+            try:
+                task = asyncio.create_task(
+                    provider.speech_to_text(
+                        [],
+                        "session-id",
+                        artifacts=SimpleNamespace(file_path=str(audio_path)),
+                    )
+                )
+                await asyncio.sleep(0.01)
+                order.append("heartbeat")
+                release_request.set()
+                await task
+            finally:
+                release_request.set()
+                gemini_asr.requests.post = original_post
+
+            self.assertTrue(request_started.is_set())
+            self.assertEqual(order[:2], ["heartbeat", "request_done"])
+
     async def test_gemini_asr_transcribes_audio_file(self):
         import tempfile
         from pathlib import Path

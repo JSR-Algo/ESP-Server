@@ -3894,11 +3894,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _record_start_lesson_asr_fallback_audio(self, audio_bytes, decoded_audio):
         if not self._start_lesson_asr_fallback_enabled():
             return
-        threshold = self._get_user_speech_rms_threshold()
-        if decoded_audio is not None and threshold is not None:
-            rms = self._input_rms(decoded_audio)
-            if not (isinstance(rms, (int, float)) and rms >= threshold):
-                return
         if audio_bytes:
             self._start_lesson_asr_fallback_audio.append(audio_bytes)
 
@@ -3938,6 +3933,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._start_lesson_asr_fallback_generation += 1
         generation = self._start_lesson_asr_fallback_generation
         frames = list(self._start_lesson_asr_fallback_audio)
+        self._start_lesson_asr_fallback_audio.clear()
         delay = self._get_start_lesson_asr_fallback_delay_sec()
         self._start_lesson_asr_fallback_task = asyncio.create_task(
             self._run_start_lesson_asr_fallback(delay, generation, frames)
@@ -5408,9 +5404,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return InteractionState.USER_STREAMING
 
     def _log_audio_decision(self, decision, reason, pcm_audio=None):
-        identity = self._interaction.next_audio_identity(
-            self._current_interaction_state_for_audio()
-        )
+        observed_state = self._current_interaction_state_for_audio()
+        identity = self._interaction.next_audio_identity()
+        # Audio-decision state describes this frame; it must not mutate the
+        # authoritative turn state used by the realtime busy guard.
+        identity["state"] = observed_state.value
         rms = "n/a"
         if pcm_audio and self._bridge is not None and hasattr(self._bridge, "input_rms"):
             try:
@@ -5992,11 +5990,29 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if not callable(busy):
             return True
         deadline = time.monotonic() + timeout_sec
-        while busy():
+        while True:
+            # A final audio callback can publish an echo-tail-derived state after
+            # the terminal stop selected LISTENING. With the microphone closed,
+            # no later callback exists to clear that transient state, so settle it
+            # from the real output/VAD flags before consulting the busy guard.
+            if (
+                self._interaction.state
+                in {
+                    InteractionState.USER_STREAMING,
+                    InteractionState.MODEL_SPEAKING,
+                    InteractionState.MUTED,
+                }
+                and not self._has_active_output()
+                and not getattr(self.conn, "client_is_speaking", False)
+                and not getattr(self.conn, "client_have_voice", False)
+            ):
+                self._interaction.transition(InteractionState.LISTENING)
+                self.conn.client_abort = False
+            if not busy():
+                return True
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.01)
-        return True
 
     async def _begin_user_interrupt(self, reason):
         # Music-protection gate: keep ambient/raw audio from interrupting music,
@@ -6065,7 +6081,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._auto_pause_music_for_interaction()
         if self._bridge is not None and hasattr(self._bridge, "stop_output"):
             try:
-                await self._bridge.stop_output()
+                lesson_stop = getattr(self._bridge, "stop_output_for_lesson", None)
+                if reason == "lesson_start_intent" and callable(lesson_stop):
+                    await lesson_stop()
+                else:
+                    await self._bridge.stop_output()
             except RuntimeError as exc:
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live stop_output skipped after disconnect: {}",
