@@ -49,4 +49,3 @@ tracked task, preventing an older callback from clearing a newer task's marker.
 
 After RED-to-GREEN verification, gate and merge the ESP branch, deploy the ESP
 service, create a fresh no-PIN assignment, and repeat the physical power-cycle run.
-

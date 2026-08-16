@@ -92,4 +92,3 @@ The code branch is ready for final review, merge, VPS deployment, and a fresh no
 physical assignment. T5.4 remains `IN_PROGRESS` until the deployed robot passes the
 mid-lesson power cycle, completes all nine steps, and produces final CP-7/CP-8 and
 parent Progress evidence.
-

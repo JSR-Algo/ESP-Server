@@ -43,4 +43,3 @@
 - [ ] Run the gate, merge to main, push, deploy, smoke, and verify-on-main.
 - [ ] Create a fresh no-PIN assignment and repeat the physical lesson plus mid-step power cycle through completion.
 - [ ] Remove merged worktrees/branches only after main/deployed physical verification succeeds.
-
