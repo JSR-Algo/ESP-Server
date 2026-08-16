@@ -179,9 +179,11 @@ def validate_layered_cinematic_generation_asset(asset: Any) -> dict[str, Any]:
         metadata = _video_metadata(source, duration_ms=duration_ms)
     else:
         _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic slot media type is invalid")
+    layer = next(layer for layer, candidate_slot in LAYER_SLOTS if candidate_slot == slot)
     return {
         "sharedAssetKey": shared_key,
         "sharedAssetVersion": version,
+        "layer": layer,
         "compatibilityMetadata": metadata,
         "visualRefs": copy.deepcopy(refs),
     }
