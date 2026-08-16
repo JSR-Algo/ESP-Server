@@ -8892,6 +8892,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         import core.lesson.runtime as runtime_module
 
         conn = _RepublishConn()
+        conn.features["mcp"] = True
         conn.config["lesson"].update({
             "asset_delivery_mode": "sd_pack",
             "mcp_reconnect_ready_timeout_sec": 0.1,
@@ -8937,6 +8938,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         import core.lesson.runtime as runtime_module
 
         conn = _RepublishConn()
+        conn.features["mcp"] = True
         conn.config["lesson"].update({
             "asset_delivery_mode": "sd_pack",
             "mcp_reconnect_ready_timeout_sec": 0,
@@ -8976,6 +8978,7 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         import core.lesson.runtime as runtime_module
 
         conn = _RepublishConn()
+        conn.features["mcp"] = True
         conn.config["lesson"].update({
             "asset_delivery_mode": "sd_pack",
             "mcp_reconnect_ready_timeout_sec": 0.1,
