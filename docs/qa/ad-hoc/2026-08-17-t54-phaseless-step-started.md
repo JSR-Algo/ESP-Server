@@ -18,7 +18,7 @@ assert [] == [{"type": "step_started", "sequence": 2, ...}]
 Command:
 
 ```bash
-python -m pytest -q \
+python3 -m pytest -q \
   main/tbot-server/tests/test_lesson_cinematic_phase_routing.py \
   -k phase_less_later_step
 ```
@@ -47,16 +47,16 @@ git diff --check: PASS
 Commands:
 
 ```bash
-python -m pytest -q \
+python3 -m pytest -q \
   main/tbot-server/tests/test_lesson_cinematic_phase_routing.py \
   -k phase_less_later_step
-python -m pytest -q main/tbot-server/tests/test_lesson_cinematic_phase_routing.py
-python -m pytest -q \
+python3 -m pytest -q main/tbot-server/tests/test_lesson_cinematic_phase_routing.py
+python3 -m pytest -q \
   main/tbot-server/tests/test_lesson_cinematic_phase_routing.py \
   main/tbot-server/tests/test_lesson_conversation_integration.py \
   main/tbot-server/tests/test_lesson_runtime.py \
   main/tbot-server/tests/test_lesson_forwarder.py
-python -m py_compile \
+python3 -m py_compile \
   main/tbot-server/core/lesson/runtime.py \
   main/tbot-server/tests/test_lesson_cinematic_phase_routing.py
 git diff --check
