@@ -1283,6 +1283,7 @@ class LessonRuntime:
         self._step_visuals_ready = False
         self._step_completed = False
         self._completed_step_ids: set[str] = set()
+        self._started_step_ids: set[str] = set()
         self._child_response_window_open = False
         self._closed = False
         # Guards the single durable lesson_failed forward so re-entrant FAILED
@@ -3144,26 +3145,44 @@ class LessonRuntime:
         frame_body = frame.get("body")
         frame_body = frame_body if isinstance(frame_body, dict) else {}
         cinematic_phase = frame_body.get("cinematicPhase")
-        renderer_v5_start = (
+        renderer_v5_command_start = (
             frame_type == "lesson_start"
             and self._renderer_v5_enabled()
-            and isinstance(frame.get("stepId"), str)
-            and bool(frame.get("stepId"))
             and isinstance(cinematic_phase, dict)
             and cinematic_phase.get("command") == "start"
         )
+        telemetry_step = self._step
+        telemetry_step_id = frame.get("stepId")
+        if (
+            renderer_v5_command_start
+            and not (isinstance(telemetry_step_id, str) and telemetry_step_id)
+            and self._step_index < 0
+            and self._steps
+        ):
+            telemetry_step = self._steps[0]
+            telemetry_step_id = telemetry_step.get("id")
+        renderer_v5_start = (
+            renderer_v5_command_start
+            and isinstance(telemetry_step_id, str)
+            and bool(telemetry_step_id)
+        )
         if frame_type != "lesson_step" and not renderer_v5_start:
+            return
+        if (
+            isinstance(telemetry_step_id, str)
+            and telemetry_step_id in self._started_step_ids
+        ):
             return
         telemetry = ack_body.get("telemetry")
         telemetry = telemetry if isinstance(telemetry, dict) else {}
         event: Dict[str, Any] = {
             "type": "step_started",
             "sequence": inbound_sequence if isinstance(inbound_sequence, int) and not isinstance(inbound_sequence, bool) else None,
-            "stepId": frame.get("stepId"),
+            "stepId": telemetry_step_id,
             "retryCount": max(0, min(_int_or_default(frame.get("retryCount"), 0), 1000)),
         }
         if renderer_v5_start:
-            step_type = (self._step or {}).get("type")
+            step_type = (telemetry_step or {}).get("type")
             if isinstance(step_type, str) and step_type:
                 event["stepType"] = step_type
         degraded_reason = telemetry.get("degradedReason")
@@ -3188,6 +3207,8 @@ class LessonRuntime:
         motion_result = _operations_motion_result(telemetry.get("motionDispatch"))
         if motion_result is not None:
             event["motionDispatch"] = motion_result
+        if isinstance(telemetry_step_id, str):
+            self._started_step_ids.add(telemetry_step_id)
         self._forward(event)
 
     def _legacy_empty_ack_outstanding_seq(self, msg_json: Dict[str, Any], body: Dict[str, Any]) -> Optional[int]:
