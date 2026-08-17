@@ -261,6 +261,34 @@ async def test_v5_authored_effect_prepares_and_starts_exact_phase() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v5_initial_lesson_start_ack_forwards_first_step_started() -> None:
+    runtime = _v5_runtime()
+    runtime.state = S_RUNNING
+
+    await runtime._emit("lesson_start", body=runtime._start_body())
+    start = json.loads(runtime.conn.websocket.sent[-1])
+    assert start["stepId"] is None
+
+    await runtime.on_lesson_ack(_v5_ack(runtime, start, 1))
+
+    step_started = [
+        event
+        for batch in runtime.forwarder.batches
+        for event in batch.get("events", [])
+        if event.get("type") == "step_started"
+    ]
+    assert step_started == [
+        {
+            "type": "step_started",
+            "sequence": 1,
+            "stepId": runtime._steps[0]["id"],
+            "stepType": runtime._steps[0]["type"],
+            "retryCount": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v5_accepted_lesson_start_ack_forwards_step_started_once() -> None:
     runtime = _v5_runtime()
     runtime.state = S_RUNNING
@@ -287,6 +315,15 @@ async def test_v5_accepted_lesson_start_ack_forwards_step_started_once() -> None
     await runtime.on_lesson_ack(start_ack)
 
     assert await task is True
+
+    second_task = asyncio.create_task(runtime._apply_authored_cinematic_effect("listen"))
+    await asyncio.sleep(0)
+    second_prepare = json.loads(runtime.conn.websocket.sent[-1])
+    await runtime.on_lesson_ack(_v5_ack(runtime, second_prepare, 3))
+    second_start = json.loads(runtime.conn.websocket.sent[-1])
+    await runtime.on_lesson_ack(_v5_ack(runtime, second_start, 4))
+    assert await second_task is True
+
     step_started = [
         event
         for batch in runtime.forwarder.batches
