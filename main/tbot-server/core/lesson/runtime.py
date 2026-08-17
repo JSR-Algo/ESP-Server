@@ -4364,6 +4364,21 @@ class LessonRuntime:
                     self._step_visuals_ready = False
                     self._queue_authored_cinematic_sequence([phase_id])
                     return
+            elif (
+                isinstance(self._step_id, str)
+                and self._step_id not in self._started_step_ids
+            ):
+                self._started_step_ids.add(self._step_id)
+                event: Dict[str, Any] = {
+                    "type": "step_started",
+                    "sequence": self._step_seq,
+                    "stepId": self._step_id,
+                    "retryCount": 0,
+                }
+                step_type = step.get("type")
+                if isinstance(step_type, str) and step_type:
+                    event["stepType"] = step_type
+                self._forward(event)
             await self._continue_after_step_visuals(self._step_id, self._step_seq)
             return
         self._bind_conversation_for_current_step()
