@@ -261,6 +261,52 @@ async def test_v5_authored_effect_prepares_and_starts_exact_phase() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v5_accepted_lesson_start_ack_forwards_step_started_once() -> None:
+    runtime = _v5_runtime()
+    runtime.state = S_RUNNING
+    runtime._step_index = 1
+    runtime._step = runtime._steps[1]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq = 21
+    runtime._step_acked = True
+    runtime._step_visuals_ready = True
+    runtime._child_response_window_open = True
+
+    task = asyncio.create_task(runtime._apply_authored_cinematic_effect("thinking"))
+    await asyncio.sleep(0)
+    prepare = json.loads(runtime.conn.websocket.sent[-1])
+    await runtime.on_lesson_ack(_v5_ack(runtime, prepare, 1))
+    start = json.loads(runtime.conn.websocket.sent[-1])
+    start_ack = _v5_ack(runtime, start, 2)
+    start_ack["body"]["telemetry"] = {
+        "internalMinimumFreeBytes": 24_576,
+        "psramFreeBytes": 1_500_000,
+    }
+
+    await runtime.on_lesson_ack(start_ack)
+    await runtime.on_lesson_ack(start_ack)
+
+    assert await task is True
+    step_started = [
+        event
+        for batch in runtime.forwarder.batches
+        for event in batch.get("events", [])
+        if event.get("type") == "step_started"
+    ]
+    assert step_started == [
+        {
+            "type": "step_started",
+            "sequence": 2,
+            "stepId": runtime._step_id,
+            "stepType": runtime._step["type"],
+            "sramFreeBytes": 24_576,
+            "psramFreeBytes": 1_500_000,
+            "retryCount": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v5_terminal_completion_emits_typed_cinematic_stop() -> None:
     runtime = _v5_runtime()
     last_step = len(runtime._steps) - 1

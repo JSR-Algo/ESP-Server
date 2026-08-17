@@ -3133,7 +3133,19 @@ class LessonRuntime:
         ack_body: Dict[str, Any],
         inbound_sequence: Any,
     ) -> None:
-        if frame.get("type") != "lesson_step":
+        frame_type = frame.get("type")
+        frame_body = frame.get("body")
+        frame_body = frame_body if isinstance(frame_body, dict) else {}
+        cinematic_phase = frame_body.get("cinematicPhase")
+        renderer_v5_start = (
+            frame_type == "lesson_start"
+            and self._renderer_v5_enabled()
+            and isinstance(frame.get("stepId"), str)
+            and bool(frame.get("stepId"))
+            and isinstance(cinematic_phase, dict)
+            and cinematic_phase.get("command") == "start"
+        )
+        if frame_type != "lesson_step" and not renderer_v5_start:
             return
         telemetry = ack_body.get("telemetry")
         telemetry = telemetry if isinstance(telemetry, dict) else {}
@@ -3143,6 +3155,10 @@ class LessonRuntime:
             "stepId": frame.get("stepId"),
             "retryCount": max(0, min(_int_or_default(frame.get("retryCount"), 0), 1000)),
         }
+        if renderer_v5_start:
+            step_type = (self._step or {}).get("type")
+            if isinstance(step_type, str) and step_type:
+                event["stepType"] = step_type
         degraded_reason = telemetry.get("degradedReason")
         explicit_render_degraded = telemetry.get("renderDegraded")
         if isinstance(explicit_render_degraded, bool):
