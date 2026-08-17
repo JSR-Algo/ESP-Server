@@ -2857,6 +2857,13 @@ class LessonRuntime:
                 or frame_command.get("commandSequenceId") != pending.get("commandSequenceId")
             ):
                 return
+        if (
+            self._renderer_v5_enabled()
+            and frame.get("type") in {"lesson_prepare", "lesson_start"}
+            and frame_command is not None
+            and msg_json.get("stepId") != frame.get("stepId")
+        ):
+            return
         if not self._cinematic_ack_matches(frame, body):
             return
         if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":

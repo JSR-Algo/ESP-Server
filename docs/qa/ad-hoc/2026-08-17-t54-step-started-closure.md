@@ -29,18 +29,27 @@ The existing post-validation ACK telemetry boundary now accepts a renderer-v5
 the existing bounded renderer telemetry. Stale, mismatched, rejected, and duplicate
 ACKs remain behind `_cinematic_ack_matches()` and `_accept_inbound()`.
 
+Independent review found that renderer-v5 cinematic ACK correlation still trusted
+the ACK body while ignoring the envelope `stepId`. A second RED test showed a valid
+body with `stepId=different-step` consumed the outstanding start frame. The runtime
+now rejects renderer-v5 `lesson_prepare` / `lesson_start` ACKs whose envelope step
+does not equal the outstanding frame, before consuming inbound sequence or emitting
+telemetry.
+
 ## Passing Verification
 
 ```text
-test_lesson_cinematic_phase_routing.py: 20 passed
-test_lesson_runtime.py: 274 passed, 1 pre-existing deprecation warning
+cinematic + runtime + forwarder focused suites: 318 passed
+wrong-step ACK regression: 1 passed (20 deselected)
 ```
 
 Commands:
 
 ```bash
-python3 -m pytest main/tbot-server/tests/test_lesson_cinematic_phase_routing.py -q
-python3 -m pytest main/tbot-server/tests/test_lesson_runtime.py -q
+python3 -m pytest -q \
+  main/tbot-server/tests/test_lesson_cinematic_phase_routing.py \
+  main/tbot-server/tests/test_lesson_runtime.py \
+  main/tbot-server/tests/test_lesson_forwarder.py
 ```
 
 Production deployment and physical Parent Progress evidence are recorded in the

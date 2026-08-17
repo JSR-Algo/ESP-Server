@@ -307,6 +307,40 @@ async def test_v5_accepted_lesson_start_ack_forwards_step_started_once() -> None
 
 
 @pytest.mark.asyncio
+async def test_v5_cinematic_ack_rejects_wrong_envelope_step_id() -> None:
+    runtime = _v5_runtime()
+    runtime.state = S_RUNNING
+    runtime._step_index = 1
+    runtime._step = runtime._steps[1]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq = 21
+    runtime._step_acked = True
+    runtime._step_visuals_ready = True
+    runtime._child_response_window_open = True
+
+    task = asyncio.create_task(runtime._apply_authored_cinematic_effect("thinking"))
+    await asyncio.sleep(0)
+    prepare = json.loads(runtime.conn.websocket.sent[-1])
+    await runtime.on_lesson_ack(_v5_ack(runtime, prepare, 1))
+    start = json.loads(runtime.conn.websocket.sent[-1])
+    wrong_step_ack = _v5_ack(runtime, start, 2)
+    wrong_step_ack["stepId"] = "different-step"
+
+    await runtime.on_lesson_ack(wrong_step_ack)
+
+    assert start["sequence"] in runtime._outstanding
+    assert not task.done()
+    assert all(
+        event.get("type") != "step_started"
+        for batch in runtime.forwarder.batches
+        for event in batch.get("events", [])
+    )
+
+    await runtime.on_lesson_ack(_v5_ack(runtime, start, 2))
+    assert await task is True
+
+
+@pytest.mark.asyncio
 async def test_v5_terminal_completion_emits_typed_cinematic_stop() -> None:
     runtime = _v5_runtime()
     last_step = len(runtime._steps) - 1
