@@ -54,3 +54,16 @@ python3 -m pytest -q \
 
 Production deployment and physical Parent Progress evidence are recorded in the
 T5.4 final closeout report after both cross-repo fixes merge.
+
+## Review and Suite Baseline
+
+Independent re-review found no Critical, High, Medium, or Low issues and returned
+`APPROVE`. The full branch suite reported 3,854 passed, 8 skipped, and four failures.
+Running the same command through `verify-on-main.sh` reported the same four failures
+on pre-merge main: three unsupported `gemini_asr` factory tests and the
+cwd-sensitive `core/http_server.py` materializer assertion. The T5.4 focused suites
+remain 318/318 green, so the four full-suite failures are established main baseline,
+not regressions from this lane.
+
+The official T0.4 gate passed RED at `3c35b19f` and GREEN at `176bcc3c` for
+`t54-step-started-closure`.
