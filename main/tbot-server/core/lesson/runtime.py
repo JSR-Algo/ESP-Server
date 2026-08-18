@@ -6237,6 +6237,9 @@ class LessonRuntime:
                     state = "unknown"
             return _SdSyncRealtimeBusyTimeoutError(busy_timeout, state)
 
+        def is_transient_firmware_busy_error(exc: Exception) -> bool:
+            return "lesson asset sync busy or worker unavailable" in str(exc)
+
         async def call_sync() -> Any:
             foreground_started = asyncio.Event()
             deadline = time.monotonic() + busy_timeout
@@ -6258,14 +6261,23 @@ class LessonRuntime:
                 else:
                     busy_check = getattr(self.conn, "is_realtime_busy", None)
                 foreground_started.set()
-                while callable(busy_check) and busy_check():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                while True:
+                    while callable(busy_check) and busy_check():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise realtime_busy_timeout_error()
+                        await asyncio.sleep(min(busy_poll, remaining))
+                    if time.monotonic() >= deadline:
                         raise realtime_busy_timeout_error()
-                    await asyncio.sleep(min(busy_poll, remaining))
-                if time.monotonic() >= deadline:
-                    raise realtime_busy_timeout_error()
-                return await call_sync_once()
+                    try:
+                        return await call_sync_once()
+                    except Exception as exc:
+                        if not is_transient_firmware_busy_error(exc):
+                            raise
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise realtime_busy_timeout_error() from exc
+                        await asyncio.sleep(min(busy_poll, remaining))
 
             cache_key = str(
                 (mcp_pack or pack or {}).get("cacheKey")

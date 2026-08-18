@@ -3677,6 +3677,66 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(attempts, 1)
 
+    async def test_sd_asset_pack_sync_retries_transient_firmware_busy(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.1,
+                "sd_sync_foreground_busy_poll_sec": 0.001,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: False
+        asset_cache = _FirmwareSyncAssetCache(ready=True)
+        attempts = 0
+
+        async def transient_then_ready(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise Exception("lesson asset sync busy or worker unavailable")
+            return {
+                "ready": True,
+                "cacheKey": asset_cache.cache_key,
+                "manifestChecksum": _manifest_checksum(),
+                "downloadedCount": 3,
+                "skippedCount": 0,
+                "failedCount": 0,
+            }
+
+        rt = self._runtime(conn=conn, asset_cache=asset_cache)
+        with patch("core.lesson.runtime.call_mcp_tool", new=transient_then_ready):
+            self.assertTrue(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(attempts, 2)
+
+    async def test_sd_asset_pack_sync_does_not_retry_unrelated_mcp_error(self):
+        conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
+        conn.config = {
+            "lesson": {
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": "/sdcard/tbot/lesson-assets",
+                "sd_sync_foreground_busy_timeout_sec": 0.1,
+                "sd_sync_foreground_busy_poll_sec": 0.001,
+            }
+        }
+        conn.mcp_client = _ReadyLessonAssetMcpClient()
+        conn.is_realtime_busy = lambda: False
+        attempts = 0
+
+        async def unrelated_failure(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise Exception("unexpected sync failure")
+
+        rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+        with patch("core.lesson.runtime.call_mcp_tool", new=unrelated_failure):
+            self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+
+        self.assertEqual(attempts, 1)
+
     async def test_sd_asset_pack_sync_uses_start_lesson_scoped_busy_guard(self):
         conn = _FakeConn(session_id=FIX["frames"]["lesson_prepare"]["sessionId"])
         conn.config = {
