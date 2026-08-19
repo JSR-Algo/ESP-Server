@@ -250,6 +250,45 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_start_handoff_uses_generation_token_and_rejects_stale_release(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+
+        token = handler.begin_lesson_start_handoff(reason="spoken_start")
+
+        self.assertEqual(handler.lesson_start_handoff_token(), token)
+        self.assertTrue(handler.lesson_start_handoff_active())
+        self.assertFalse(
+            await handler.release_lesson_start_handoff(
+                token + 1,
+                outcome="stale",
+                restore_conversation=True,
+            )
+        )
+        self.assertTrue(handler.lesson_start_handoff_active())
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                token,
+                outcome="failed",
+                restore_conversation=True,
+            )
+        )
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_awaited_once_with(
+            outcome="failed"
+        )
+
+    async def test_lesson_start_handoff_consumes_late_microphone_audio(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(handle_audio_bytes=AsyncMock(return_value=True))
+        handler.begin_lesson_start_handoff(reason="spoken_start")
+
+        self.assertTrue(await handler._route_audio_message_impl(b"late-mic"))
+
+        handler.voice_provider.handle_audio_bytes.assert_not_awaited()
+
     async def test_activity_lease_drops_voice_ingress_but_dispatches_control_and_abort(self):
         handler = _build_handler()
         handler.bind_completed_event.set()

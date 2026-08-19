@@ -395,6 +395,25 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["response"]["errorCode"], "LESSON_MODE_TOOL_BLOCKED")
         self.assertIn("lesson", response["response"]["message"].lower())
 
+    async def test_provisional_lesson_handoff_blocks_unrelated_live_model_tool(self):
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.REQLLM, response="volume changed"),
+        )
+        provider.conn.lesson_start_handoff_active = lambda: True
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [
+                    {"id": "handoff-tool-1", "name": "change_volume", "args": {}}
+                ],
+            }
+        )
+
+        self.assertEqual(handler.calls, [])
+        response = provider._client.sent_responses[0][0]
+        self.assertEqual(response["response"]["errorCode"], "LESSON_MODE_TOOL_BLOCKED")
+
     async def test_tool_call_event_maps_error_action_to_error_payload(self):
         provider, _handler = self._make_provider(
             ActionResponse(action=Action.ERROR, response="rate limit"),

@@ -188,13 +188,22 @@ class GoogleLiveLessonAudioOverlapInvariantTest(unittest.IsolatedAsyncioTestCase
     lesson.
     """
 
-    def _drop(self, *, session_mode, runtime_state, prompt_allowed, event_type="audio"):
+    def _drop(
+        self,
+        *,
+        session_mode,
+        runtime_state,
+        prompt_allowed,
+        event_type="audio",
+        handoff_active=False,
+    ):
         from core.voice.google_live import audio_bridge as bridge_module
 
         conn = _Conn()
         conn.session_mode = session_mode
         conn.lesson_runtime = _Runtime(runtime_state) if runtime_state else None
         conn.google_live_lesson_prompt_output_allowed = prompt_allowed
+        conn.lesson_start_handoff_active = lambda: handoff_active
         # __new__ so the drop rule is exercised without a real Live connection.
         bridge = bridge_module.GoogleLiveAudioBridge.__new__(
             bridge_module.GoogleLiveAudioBridge
@@ -231,6 +240,16 @@ class GoogleLiveLessonAudioOverlapInvariantTest(unittest.IsolatedAsyncioTestCase
                 session_mode=SessionMode.CONVERSATION,
                 runtime_state=None,
                 prompt_allowed=False,
+            )
+        )
+
+    def test_live_model_audio_dropped_during_provisional_lesson_handoff(self):
+        self.assertTrue(
+            self._drop(
+                session_mode=SessionMode.CONVERSATION,
+                runtime_state=None,
+                prompt_allowed=False,
+                handoff_active=True,
             )
         )
 
