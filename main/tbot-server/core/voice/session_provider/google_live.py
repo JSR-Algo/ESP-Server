@@ -1696,6 +1696,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._ensure_func_handler()
         func_handler = getattr(self.conn, "func_handler", None)
         if func_handler is None:
+            await self._release_lesson_start_handoff(
+                outcome="tool_handler_unavailable",
+                restore_conversation=True,
+            )
             return False
         try:
             with self._lesson_start_tool_dispatch_scope():
@@ -1704,16 +1708,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
             )
             await self._send_lesson_start_ack(result)
-            # The local tool dispatch finished: release the realtime busy/interrupt
-            # latch set by _begin_user_interrupt so the controller does not stay
-            # stuck in INTERRUPTING with client_abort latched.
-            self._interaction.transition(InteractionState.LISTENING)
-            self.conn.client_abort = False
-            # Keep mic open so the child can answer after greeting without re-wake.
-            try:
-                await self._open_user_audio_window("lesson_start")
-            except Exception:
-                pass
+            if not self._spoken_lesson_start_pending():
+                await self._release_lesson_start_handoff(
+                    outcome="lesson_start_not_scheduled",
+                    restore_conversation=True,
+                )
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent tool={} chars={}",
@@ -1724,6 +1723,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             return True
         except Exception as exc:
+            await self._release_lesson_start_handoff(
+                outcome="lesson_start_dispatch_failed",
+                restore_conversation=True,
+            )
             self.conn.logger.bind(tag="GoogleLive").warning(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent failed tool={} error={}",
@@ -6093,6 +6096,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except (TypeError, ValueError):
             timeout_sec = 2.0
 
+        begin_handoff = getattr(self.conn, "begin_lesson_start_handoff", None)
+        handoff_token = (
+            begin_handoff(reason="lesson_start_intent")
+            if callable(begin_handoff)
+            else None
+        )
+        self._lesson_start_handoff_token = handoff_token
         await self._begin_user_interrupt("lesson_start_intent")
         clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
         if callable(clear_speaking):
@@ -6125,8 +6135,54 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if not busy():
                 return True
             if time.monotonic() >= deadline:
+                await self._release_lesson_start_handoff(
+                    outcome="live_transition_timeout",
+                    restore_conversation=True,
+                )
                 return False
             await asyncio.sleep(0.01)
+
+    async def _release_lesson_start_handoff(
+        self,
+        *,
+        outcome: str,
+        restore_conversation: bool,
+    ) -> bool:
+        token = getattr(self, "_lesson_start_handoff_token", None)
+        release = getattr(self.conn, "release_lesson_start_handoff", None)
+        if token is None or not callable(release):
+            return False
+        released = bool(
+            await release(
+                token,
+                outcome=outcome,
+                restore_conversation=restore_conversation,
+            )
+        )
+        if released:
+            self._lesson_start_handoff_token = None
+        return released
+
+    async def restore_after_lesson_start_handoff(self, *, outcome: str) -> None:
+        stop_event = getattr(self.conn, "stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return
+        client = self._client
+        if client is None or not getattr(client, "connected", False):
+            return
+        self._interaction.transition(InteractionState.LISTENING)
+        self.conn.client_abort = False
+        clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
+        if callable(clear_speaking):
+            clear_speaking()
+        try:
+            await self._open_user_audio_window("lesson_start_failed")
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                "Google Live lesson_start_handoff_restore_failed outcome={} error={}",
+                outcome,
+                self._safe_error_message(exc),
+            )
 
     async def _begin_user_interrupt(self, reason):
         # Music-protection gate: keep ambient/raw audio from interrupting music,
