@@ -2626,6 +2626,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     return
                 if (
                     isinstance(event, dict)
+                    and event.get("type") == "receive_timeout"
+                ):
+                    await self._handle_receive_timeout_event()
+                    continue
+                if (
+                    isinstance(event, dict)
                     and event.get("type") == "session_expiring"
                 ):
                     self.conn.logger.bind(tag="GoogleLive").warning(
@@ -2658,6 +2664,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._handle_runtime_failure(
                     RuntimeError("Google Live receive loop ended")
                 )
+
+    async def _handle_receive_timeout_event(self):
+        if normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        ) != SessionMode.LESSON:
+            return False
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        if runtime is None or getattr(runtime, "state", None) != "RUNNING":
+            return False
+        if self._lesson_conversation_tool_path_active():
+            return bool(await self._handle_lesson_live_interruption("timeout"))
+        handler = getattr(runtime, "on_google_live_receive_timeout", None)
+        if not callable(handler):
+            return False
+        try:
+            return bool(await handler())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                with_lesson_log_context(
+                    "Google Live lesson_receive_timeout_policy_failed error_class={}",
+                    self.conn,
+                ),
+                type(exc).__name__,
+            )
+            return False
 
     def _schedule_proactive_reconnect(self, event):
         if self._closing or self._reconnecting or self._fallback_activating:

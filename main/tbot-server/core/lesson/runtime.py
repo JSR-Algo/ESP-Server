@@ -3434,6 +3434,27 @@ class LessonRuntime:
         branch = "silence" if str(reason or "").lower() in {"silence", "no_speech", "timeout"} else "stt_failure"
         return await self._handle_safe_speaking_branch(branch)
 
+    async def on_google_live_receive_timeout(self) -> bool:
+        """Advance a stalled interactive step through its existing no-answer policy."""
+        if (
+            not self._is_active_runtime()
+            or self.state != S_RUNNING
+            or self._step is None
+            or self._step_passive
+            or not self._step_acked
+            or self._step_completed
+            or self.conversation is not None
+        ):
+            return False
+        if self._child_response_timeout_task is not None:
+            return True
+        if self._child_response_window_open:
+            self._start_child_response_timeout()
+            return True
+        self._child_response_window_open = True
+        await self._handle_child_response_timeout(self._step_id)
+        return True
+
     def _uses_safe_speaking(self) -> bool:
         interaction = (self._step or {}).get("interaction")
         return (
