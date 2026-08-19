@@ -12,6 +12,7 @@ import threading
 import traceback
 import subprocess
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import websockets
@@ -275,6 +276,11 @@ class ConnectionHandler:
         self.superseded_by = None
         self.lesson_pull_task = None
         self.lesson_pull_task_origin = None
+        self._lesson_start_handoff_generation = 0
+        self._lesson_start_handoff_active_token = None
+        self._lesson_start_handoff_context = ContextVar(
+            f"lesson_start_handoff_{id(self):x}", default=None
+        )
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
@@ -642,6 +648,8 @@ class ConnectionHandler:
         `DORMANT` lazily enters conversation mode before the selected voice
         provider handles audio.
         """
+        if self.lesson_start_handoff_active():
+            return True
         if self._lesson_runtime_active():
             if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
                 self._set_session_mode(SessionMode.LESSON, reason="lesson_runtime_active")
@@ -2459,6 +2467,74 @@ class ConnectionHandler:
             return bool(await transition())
         return True
 
+    def begin_lesson_start_handoff(self, *, reason: str) -> int:
+        token = self._lesson_start_handoff_active_token
+        if token is None:
+            self._lesson_start_handoff_generation += 1
+            token = self._lesson_start_handoff_generation
+            self._lesson_start_handoff_active_token = token
+            event = "acquired"
+        else:
+            event = "coalesced"
+        self._lesson_start_handoff_context.set(token)
+        try:
+            self.logger.bind(tag=TAG).info(
+                "lesson_start_handoff_{} token={} reason={}",
+                event,
+                token,
+                reason,
+            )
+        except Exception:
+            pass
+        return token
+
+    def lesson_start_handoff_token(self):
+        token = self._lesson_start_handoff_context.get()
+        return token if token == self._lesson_start_handoff_active_token else None
+
+    def lesson_start_handoff_active(self) -> bool:
+        return self._lesson_start_handoff_active_token is not None
+
+    async def release_lesson_start_handoff(
+        self,
+        token,
+        *,
+        outcome: str,
+        restore_conversation: bool,
+    ) -> bool:
+        if token is None or token != self._lesson_start_handoff_active_token:
+            try:
+                self.logger.bind(tag=TAG).info(
+                    "lesson_start_handoff_release_ignored token={} activeToken={} outcome={}",
+                    token,
+                    self._lesson_start_handoff_active_token,
+                    outcome,
+                )
+            except Exception:
+                pass
+            return False
+        self._lesson_start_handoff_active_token = None
+        if self._lesson_start_handoff_context.get() == token:
+            self._lesson_start_handoff_context.set(None)
+        try:
+            self.logger.bind(tag=TAG).info(
+                "lesson_start_handoff_released token={} outcome={} restoreConversation={}",
+                token,
+                outcome,
+                restore_conversation,
+            )
+        except Exception:
+            pass
+        if restore_conversation:
+            restore = getattr(
+                self.voice_provider,
+                "restore_after_lesson_start_handoff",
+                None,
+            )
+            if callable(restore):
+                await restore(outcome=outcome)
+        return True
+
     def lesson_start_sd_sync_admission_token(self):
         marker = getattr(self, "_lesson_start_tool_dispatch_context", None)
         try:
@@ -2636,6 +2712,13 @@ class ConnectionHandler:
 
     async def _close_connection_owned_mcp_callers(self):
         """Stop every connection-owned path that can use device/server MCP."""
+        handoff_token = self._lesson_start_handoff_active_token
+        if handoff_token is not None:
+            await self.release_lesson_start_handoff(
+                handoff_token,
+                outcome="connection_closed",
+                restore_conversation=False,
+            )
         await self._close_mcp_background_tasks()
 
         tasks = []

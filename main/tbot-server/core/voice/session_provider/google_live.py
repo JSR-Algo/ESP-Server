@@ -5688,6 +5688,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         calls = event.get("calls") if isinstance(event, Mapping) else None
         if not calls:
             return
+        handoff_active = getattr(self.conn, "lesson_start_handoff_active", None)
+        in_handoff = bool(callable(handoff_active) and handoff_active())
         in_lesson = (
             normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
             or self._lesson_runtime_active()
@@ -5707,6 +5709,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
         for call in calls:
             call_id = call.get("id") if isinstance(call, Mapping) else None
             name = call.get("name") if isinstance(call, Mapping) else None
+            if in_handoff and name != "start_lesson":
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "LESSON_MODE_TOOL_BLOCKED",
+                            "Tool calls are blocked while lesson startup owns the child interaction.",
+                        ),
+                    }
+                )
+                continue
             if in_lesson and name not in LESSON_CONVERSATION_TOOLS:
                 responses.append(
                     {
