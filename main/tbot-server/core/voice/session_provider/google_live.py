@@ -5712,6 +5712,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
         for call in calls:
             call_id = call.get("id") if isinstance(call, Mapping) else None
             name = call.get("name") if isinstance(call, Mapping) else None
+            if name == "start_lesson" and not in_lesson and not in_handoff:
+                if not await self.transition_to_lesson_start():
+                    responses.append(
+                        {
+                            "id": call_id,
+                            "name": name,
+                            "response": self._tool_error(
+                                "LESSON_START_TRANSITION_TIMEOUT",
+                                "Lesson start is waiting for the current voice turn to stop.",
+                            ),
+                        }
+                    )
+                    continue
+                in_handoff = True
             if in_handoff and name != "start_lesson":
                 responses.append(
                     {
@@ -5809,6 +5823,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 lesson_admission_generation=event_generation if in_lesson else None,
                 lesson_validation_receipt=validation_receipt,
             )
+            if name == "start_lesson" and not self._spoken_lesson_start_pending():
+                await self._release_lesson_start_handoff(
+                    outcome="lesson_start_not_scheduled",
+                    restore_conversation=True,
+                )
             latency_ms = (time.monotonic() - started_at) * 1000
             if call_id is not None and call_id in self._cancelled_tool_call_ids:
                 self._pending_tool_calls.discard(call_id)
