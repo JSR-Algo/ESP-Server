@@ -6196,6 +6196,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             clear_speaking()
         try:
             await self._open_user_audio_window("lesson_start_failed")
+            websocket = getattr(self.conn, "websocket", None)
+            if websocket is not None:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": getattr(self.conn, "session_id", None),
+                            "continue_listening": True,
+                            "listen_mode": "realtime",
+                        }
+                    )
+                )
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
                 "Google Live lesson_start_handoff_restore_failed outcome={} error={}",
