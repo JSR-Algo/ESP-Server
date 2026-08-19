@@ -328,6 +328,33 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(handler.lesson_start_handoff_active())
 
+    async def test_late_failed_holder_cannot_restore_realtime_after_lesson_transfer(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+        token = handler.begin_lesson_start_handoff(reason="spoken_start")
+        handler.begin_lesson_start_handoff(reason="protected_nudge")
+        handler.session_mode = connection_module.SessionMode.LESSON
+
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                token,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                token,
+                outcome="live_transition_timeout",
+                restore_conversation=True,
+            )
+        )
+
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
     async def test_activity_lease_drops_voice_ingress_but_dispatches_control_and_abort(self):
         handler = _build_handler()
         handler.bind_completed_event.set()
