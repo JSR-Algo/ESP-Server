@@ -634,6 +634,36 @@ async def start_sample_lesson(conn: Any) -> Optional[Any]:
     connect pull and a spoken sample start can never create two runtimes / emit
     duplicate lesson_prepare. The lazy-init is atomic under asyncio (no await between
     the getattr and the assignment), so racers share one lock."""
+    token_getter = getattr(conn, "lesson_start_handoff_token", None)
+    handoff_token = token_getter() if callable(token_getter) else None
+    release_handoff = getattr(conn, "release_lesson_start_handoff", None)
+    started = False
+    outcome = "sample_lesson_start_failed"
+    try:
+        runtime = await _start_sample_lesson_serialized(conn)
+        mode = getattr(conn, "session_mode", None)
+        mode_value = getattr(mode, "value", mode)
+        started = runtime is not None and str(mode_value or "").upper() == "LESSON"
+        status = getattr(conn, "lesson_start_status", None) or {}
+        outcome = (
+            "lesson_started"
+            if started
+            else str(status.get("code") or "sample_lesson_start_failed")
+        )
+        return runtime
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        if handoff_token is not None and callable(release_handoff):
+            await release_handoff(
+                handoff_token,
+                outcome=outcome,
+                restore_conversation=not started,
+            )
+
+
+async def _start_sample_lesson_serialized(conn: Any) -> Optional[Any]:
     from core.providers.tools.product_toolset import sample_lesson_config_enabled
 
     if not sample_lesson_config_enabled(conn):
