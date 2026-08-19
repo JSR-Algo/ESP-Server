@@ -256,13 +256,13 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
             restore_after_lesson_start_handoff=AsyncMock()
         )
 
-        token = handler.begin_lesson_start_handoff(reason="spoken_start")
+        lease = handler.begin_lesson_start_handoff(reason="spoken_start")
 
-        self.assertEqual(handler.lesson_start_handoff_token(), token)
+        self.assertEqual(handler.lesson_start_handoff_token(), lease)
         self.assertTrue(handler.lesson_start_handoff_active())
         self.assertFalse(
             await handler.release_lesson_start_handoff(
-                token + 1,
+                (lease[0] + 1, lease[1]),
                 outcome="stale",
                 restore_conversation=True,
             )
@@ -270,7 +270,7 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handler.lesson_start_handoff_active())
         self.assertTrue(
             await handler.release_lesson_start_handoff(
-                token,
+                lease,
                 outcome="failed",
                 restore_conversation=True,
             )
@@ -298,7 +298,8 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         first_token = handler.begin_lesson_start_handoff(reason="spoken_start")
         second_token = handler.begin_lesson_start_handoff(reason="protected_nudge")
 
-        self.assertEqual(second_token, first_token)
+        self.assertNotEqual(second_token, first_token)
+        self.assertEqual(second_token[0], first_token[0])
         self.assertTrue(
             await handler.release_lesson_start_handoff(
                 first_token,
@@ -333,20 +334,20 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = types.SimpleNamespace(
             restore_after_lesson_start_handoff=AsyncMock()
         )
-        token = handler.begin_lesson_start_handoff(reason="spoken_start")
-        handler.begin_lesson_start_handoff(reason="protected_nudge")
+        first_lease = handler.begin_lesson_start_handoff(reason="spoken_start")
+        second_lease = handler.begin_lesson_start_handoff(reason="protected_nudge")
         handler.session_mode = connection_module.SessionMode.LESSON
 
         self.assertTrue(
             await handler.release_lesson_start_handoff(
-                token,
+                first_lease,
                 outcome="lesson_started",
                 restore_conversation=False,
             )
         )
         self.assertTrue(
             await handler.release_lesson_start_handoff(
-                token,
+                second_lease,
                 outcome="live_transition_timeout",
                 restore_conversation=True,
             )

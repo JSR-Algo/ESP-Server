@@ -1708,7 +1708,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
             )
             await self._send_lesson_start_ack(result)
-            if not self._spoken_lesson_start_pending():
+            if not self._spoken_lesson_start_dispatched():
                 await self._release_lesson_start_handoff(
                     outcome="lesson_start_not_scheduled",
                     restore_conversation=True,
@@ -1743,6 +1743,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             pending_task is not None
             and not pending_task.done()
             and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+        )
+
+    def _spoken_lesson_start_dispatched(self):
+        token_getter = getattr(self.conn, "lesson_start_handoff_token", None)
+        current_token = token_getter() if callable(token_getter) else None
+        return (
+            getattr(self.conn, "lesson_pull_task", None) is not None
+            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+            and current_token is not None
+            and getattr(self.conn, "lesson_pull_task_handoff_token", None)
+            == current_token
         )
 
     @contextmanager
@@ -5823,7 +5834,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 lesson_admission_generation=event_generation if in_lesson else None,
                 lesson_validation_receipt=validation_receipt,
             )
-            if name == "start_lesson" and not self._spoken_lesson_start_pending():
+            if name == "start_lesson" and not self._spoken_lesson_start_dispatched():
                 await self._release_lesson_start_handoff(
                     outcome="lesson_start_not_scheduled",
                     restore_conversation=True,
@@ -6181,8 +6192,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         restore_conversation: bool,
     ) -> bool:
         token_getter = getattr(self.conn, "lesson_start_handoff_token", None)
-        token = token_getter() if callable(token_getter) else None
-        if token is None:
+        if callable(token_getter):
+            token = token_getter()
+        else:
             token = getattr(self, "_lesson_start_handoff_token", None)
         release = getattr(self.conn, "release_lesson_start_handoff", None)
         if token is None or not callable(release):
