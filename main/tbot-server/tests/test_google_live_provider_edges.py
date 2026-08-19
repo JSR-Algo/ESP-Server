@@ -3911,6 +3911,11 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._open_user_audio_window.assert_awaited_once_with(
             "lesson_start_failed"
         )
+        restored = json.loads(conn.websocket.sent[-1])
+        self.assertEqual(restored["type"], "tts")
+        self.assertEqual(restored["state"], "stop")
+        self.assertTrue(restored["continue_listening"])
+        self.assertEqual(restored["listen_mode"], "realtime")
 
     async def test_spoken_start_keeps_manual_handoff_while_pull_task_is_pending(self):
         conn = _Conn()
