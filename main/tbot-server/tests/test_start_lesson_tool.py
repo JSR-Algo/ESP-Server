@@ -63,6 +63,94 @@ class _VoiceProvider:
 
 
 class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_start_transfers_and_releases_inherited_handoff(self):
+        from core.lesson import sample as sample_module
+
+        releases = []
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)
+        conn.session_mode = "CONVERSATION"
+        conn.activity_leases = None
+        conn._lesson_pull_lock = asyncio.Lock()
+        conn.lesson_start_handoff_token = lambda: 17
+
+        async def release(token, *, outcome, restore_conversation):
+            releases.append((token, outcome, restore_conversation, conn.session_mode))
+            return True
+
+        async def start_impl(_conn):
+            conn.session_mode = "LESSON"
+            return object()
+
+        conn.release_lesson_start_handoff = release
+        with patch(
+            "core.providers.tools.product_toolset.sample_lesson_config_enabled",
+            return_value=True,
+        ), patch.object(sample_module, "_start_sample_lesson_impl", start_impl):
+            runtime = await sample_module.start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(releases, [(17, "lesson_started", False, "LESSON")])
+
+    async def test_assignment_to_sample_fallback_retains_handoff_without_restore_gap(self):
+        holder_count = 1
+        restore_events = []
+        sample_saw_active = []
+
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=True, sample=True)
+        conn.lesson_start_status = {}
+
+        def active():
+            return holder_count > 0
+
+        def token():
+            return 23 if active() else None
+
+        def begin(*, reason):
+            nonlocal holder_count
+            holder_count += 1
+            return 23
+
+        async def release(_token, *, outcome, restore_conversation):
+            nonlocal holder_count
+            holder_count -= 1
+            if holder_count == 0 and restore_conversation:
+                restore_events.append(outcome)
+            return True
+
+        async def pull_without_assignment():
+            conn.lesson_start_status = {
+                "code": "NO_CURRENT_ASSIGNMENT",
+                "message": "Robot chưa có bài học nào được giao.",
+            }
+            await release(23, outcome="NO_CURRENT_ASSIGNMENT", restore_conversation=True)
+            return None
+
+        async def sample_fallback(_conn):
+            sample_saw_active.append(active())
+            await release(23, outcome="lesson_started", restore_conversation=False)
+            return object()
+
+        conn._pull = pull_without_assignment
+        conn.lesson_start_handoff_active = active
+        conn.lesson_start_handoff_token = token
+        conn.begin_lesson_start_handoff = begin
+        conn.release_lesson_start_handoff = release
+
+        with patch("core.lesson.sample.start_sample_lesson", sample_fallback):
+            response = start_lesson_module.start_lesson(conn)
+            for _ in range(20):
+                task = conn.lesson_pull_task
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+                if sample_saw_active:
+                    break
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(sample_saw_active, [True])
+        self.assertEqual(restore_events, [])
+        self.assertEqual(holder_count, 0)
+
     async def test_sample_with_no_allowlist_is_blocked_even_when_runtime_is_off(self):
         from core.lesson import sample as sample_module
 
