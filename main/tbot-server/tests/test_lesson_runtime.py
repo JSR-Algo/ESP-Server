@@ -7938,9 +7938,15 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         assignment_calls = []
 
-        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+        identity_calls = []
+
+        async def _resolve_device_identity(
+            client, base_url, device_id, *, logger=None, force_refresh=False
+        ):
             self.assertEqual(device_id, "AA:BB:CC:DD:EE:FF")
-            return "backend-device-uuid", "device-token"
+            identity_calls.append((client, force_refresh))
+            token = "refreshed-device-token" if force_refresh else "device-token"
+            return "backend-device-uuid", token
 
         async def _get_child_name(client, base_url, device_id, *, token=None):
             return None
@@ -7975,6 +7981,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         mac.get_lesson_manifest = _get_manifest
         try:
             result = await maybe_start_lesson_on_connect(conn)
+            refreshed = await result.forwarder._token_refresh_fn(object(), "device-token")
         finally:
             (
                 dtc.resolve_device_identity,
@@ -7985,6 +7992,8 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(assignment_calls, [("backend-device-uuid", "device-token")])
+        self.assertEqual(refreshed, ("backend-device-uuid", "refreshed-device-token"))
+        self.assertEqual([force for _client, force in identity_calls], [False, True])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
 
     async def test_identity_and_manifest_logs_use_authoritative_normalized_fields(self):

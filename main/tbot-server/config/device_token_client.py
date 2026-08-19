@@ -61,13 +61,15 @@ def _log(logger, level, message):
         getattr(logger.bind(tag="DeviceToken"), level)(message)
 
 
-async def resolve_device_identity(client, base_url, mac, *, logger=None):
+async def resolve_device_identity(client, base_url, mac, *, logger=None, force_refresh=False):
     """Resolve a robot MAC -> (device_uuid, device_jwt), or (None, None).
 
     ``client`` is an httpx.AsyncClient already owned by the caller. Returns the
     backend device UUID + a short-lived device-scoped JWT to use for the lesson
-    pull/manifest/event-forward legs. Best-effort: returns (None, None) on any
-    failure so the caller keeps the legacy behaviour.
+    pull/manifest/event-forward legs. ``force_refresh`` bypasses the local reuse
+    window after the backend has authoritatively rejected a token as expired.
+    Best-effort: returns (None, None) on any failure so the caller keeps the
+    legacy behaviour.
     """
     if not mac or not base_url:
         return None, None
@@ -78,7 +80,7 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
 
     now = time.monotonic()
     cached = _cache.get(mac)
-    if cached is not None and (now - cached[2]) <= _CACHE_TTL_S:
+    if not force_refresh and cached is not None and (now - cached[2]) <= _CACHE_TTL_S:
         return cached[0], cached[1]
 
     url = base_url.rstrip("/") + "/internal/devices/mint-token"

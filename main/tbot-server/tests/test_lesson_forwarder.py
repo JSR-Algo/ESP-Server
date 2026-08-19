@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as L
 
+from config import device_token_client
 from core.lesson import forwarder as forwarder_module
 from core.lesson.forwarder import (
     LessonEventForwarder,
@@ -20,9 +21,10 @@ from core.lesson.forwarder import (
 )
 
 
-def _http_status_error(status_code=500):
+def _http_status_error(status_code=500, *, code=None):
     request = httpx.Request("POST", "http://backend.test/v1/devices/dev1/lesson-events")
-    response = httpx.Response(status_code, request=request)
+    payload = {"code": code, "error": {"code": code}} if code else None
+    response = httpx.Response(status_code, request=request, json=payload)
     return httpx.HTTPStatusError("backend hiccup", request=request, response=response)
 
 
@@ -157,6 +159,163 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [terminal])
         self.assertIsNone(forwarder.pending_terminal_batch)
         self.assertEqual(_PENDING_TERMINAL_BATCHES, {})
+
+        await forwarder.aclose()
+
+    async def test_expired_device_token_is_reminted_and_same_terminal_batch_retried_once(self):
+        clock = {"now": 0.0}
+        token_expiry = {}
+        minted_tokens = []
+        attempts = []
+        persisted = []
+        auth_errors = []
+
+        class _MintResponse:
+            def __init__(self, token):
+                self.token = token
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": {"deviceUuid": "dev1", "token": self.token}}
+
+        class _MintClient:
+            async def post(self, _url, **_kwargs):
+                token = f"jwt-{len(minted_tokens) + 1}"
+                minted_tokens.append(token)
+                token_expiry[token] = clock["now"] + 900.0
+                return _MintResponse(token)
+
+        mint_client = _MintClient()
+        device_token_client._cache.clear()
+
+        async def _refresh(_client, _rejected_token):
+            return await device_token_client.resolve_device_identity(
+                mint_client,
+                "http://backend.test/v1",
+                "AA:BB:CC:DD:EE:FF",
+                force_refresh=True,
+            )
+
+        async def _post(_client, _base_url, _device_id, batch, *, token=None):
+            attempts.append((token, batch))
+            if clock["now"] > token_expiry[token]:
+                auth_errors.append("AUTH_TOKEN_EXPIRED")
+                raise _http_status_error(401, code="AUTH_TOKEN_EXPIRED")
+            persisted.append(batch)
+            return {"accepted": len(batch["events"])}
+
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed"}],
+        }
+
+        with mock.patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), mock.patch.object(
+            device_token_client.time, "monotonic", side_effect=lambda: clock["now"]
+        ):
+            device_id, token = await device_token_client.resolve_device_identity(
+                mint_client, "http://backend.test/v1", "AA:BB:CC:DD:EE:FF"
+            )
+            forwarder = LessonEventForwarder(
+                device_id=device_id,
+                base_url="http://backend.test/v1",
+                token=token,
+                post_fn=_post,
+                token_refresh_fn=_refresh,
+                retry_backoff_sec=0,
+                max_reenqueue_attempts=0,
+            )
+
+            clock["now"] = 901.0
+            forwarder.enqueue(terminal)
+            await forwarder._queue.join()
+
+        self.assertEqual(auth_errors, ["AUTH_TOKEN_EXPIRED"])
+        self.assertEqual([attempt[0] for attempt in attempts], ["jwt-1", "jwt-2"])
+        self.assertIs(attempts[0][1], terminal)
+        self.assertIs(attempts[1][1], terminal)
+        self.assertEqual(persisted, [terminal])
+        self.assertEqual(forwarder.dead_letters, [])
+        self.assertIsNone(forwarder.pending_terminal_batch)
+
+        await forwarder.aclose()
+
+    async def test_non_expiry_401_fails_closed_without_refresh_or_retry(self):
+        attempts = 0
+        refreshes = 0
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            raise _http_status_error(401, code="AUTH_TOKEN_INVALID")
+
+        async def _refresh(_client, _rejected_token):
+            nonlocal refreshes
+            refreshes += 1
+            return "dev1", "new-token"
+
+        batch = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "step_completed"}],
+        }
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            token="bad-token",
+            post_fn=_post,
+            token_refresh_fn=_refresh,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=2,
+        )
+
+        forwarder.enqueue(batch)
+        await forwarder._queue.join()
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(refreshes, 0)
+        self.assertEqual(forwarder.dead_letters, [batch])
+
+        await forwarder.aclose()
+
+    async def test_refreshed_token_expiry_is_not_refreshed_or_retried_again(self):
+        attempts = 0
+        refreshes = 0
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            raise _http_status_error(401, code="AUTH_TOKEN_EXPIRED")
+
+        async def _refresh(_client, _rejected_token):
+            nonlocal refreshes
+            refreshes += 1
+            return "dev1", "still-expired-token"
+
+        terminal = {
+            "assignmentId": "a1",
+            "sessionId": "s1",
+            "events": [{"type": "lesson_completed"}],
+        }
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            token="expired-token",
+            post_fn=_post,
+            token_refresh_fn=_refresh,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=2,
+        )
+
+        forwarder.enqueue(terminal)
+        await forwarder._queue.join()
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(refreshes, 1)
+        self.assertEqual(forwarder.dead_letters, [terminal])
+        self.assertIs(forwarder.pending_terminal_batch, terminal)
 
         await forwarder.aclose()
 

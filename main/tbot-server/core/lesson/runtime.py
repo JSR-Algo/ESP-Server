@@ -7343,8 +7343,27 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         busy_check=getattr(conn, "is_realtime_busy", None),
         logger=logger,
     )
+
+    async def _refresh_event_token(refresh_client: Any, _rejected_token: Optional[str]):
+        from config.device_token_client import resolve_device_identity
+
+        refreshed_device_id, refreshed_token = await resolve_device_identity(
+            refresh_client,
+            base_url,
+            device_id,
+            logger=logger,
+            force_refresh=True,
+        )
+        if refreshed_device_id != backend_device_id or not refreshed_token:
+            return None
+        return refreshed_device_id, refreshed_token
+
     forwarder = LessonEventForwarder(
-        device_id=backend_device_id, base_url=base_url, token=token, logger=logger
+        device_id=backend_device_id,
+        base_url=base_url,
+        token=token,
+        token_refresh_fn=_refresh_event_token,
+        logger=logger,
     )
 
     async def _report_preload_status(report: Dict[str, Any]) -> None:

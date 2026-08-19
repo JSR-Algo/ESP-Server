@@ -140,6 +140,24 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["url"], "https://backend/internal/devices/mint-token")
 
+    async def test_force_refresh_bypasses_still_fresh_cached_token(self):
+        client = _Client(_Response({"deviceUuid": "device-1", "token": "new-jwt"}))
+        device_token_client._cache.clear()
+        device_token_client._cache["mac"] = ("device-1", "cached-jwt", 1000.0)
+
+        with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), patch.object(
+            device_token_client.time, "monotonic", return_value=1001.0
+        ):
+            refreshed = await device_token_client.resolve_device_identity(
+                client,
+                "https://backend",
+                "mac",
+                force_refresh=True,
+            )
+
+        self.assertEqual(refreshed, ("device-1", "new-jwt"))
+        self.assertEqual(len(client.calls), 1)
+
     async def test_refreshes_cached_token_after_whole_lesson_validity_margin(self):
         client = _Client(_Response({"deviceUuid": "new-device", "token": "new-jwt"}))
         device_token_client._cache.clear()
