@@ -4,6 +4,7 @@ import json
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from core.voice.google_live.client import GoogleLiveClient
 from core.voice.live_admission import AdmissionDecision, LiveAdmissionResult
@@ -413,6 +414,23 @@ class ProviderToolCallTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls, [])
         response = provider._client.sent_responses[0][0]
         self.assertEqual(response["response"]["errorCode"], "LESSON_MODE_TOOL_BLOCKED")
+
+    async def test_native_start_lesson_tool_acquires_handoff_before_dispatch(self):
+        provider, handler = self._make_provider(
+            ActionResponse(action=Action.RECORD, response="starting"),
+        )
+        provider.conn.lesson_start_handoff_active = lambda: False
+        provider.transition_to_lesson_start = AsyncMock(return_value=True)
+
+        await provider._handle_tool_call_event(
+            {
+                "type": "tool_call",
+                "calls": [{"id": "start-native-1", "name": "start_lesson", "args": {}}],
+            }
+        )
+
+        provider.transition_to_lesson_start.assert_awaited_once_with()
+        self.assertEqual(len(handler.calls), 1)
 
     async def test_tool_call_event_maps_error_action_to_error_payload(self):
         provider, _handler = self._make_provider(
