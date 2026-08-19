@@ -96,7 +96,7 @@ deploy/deploy-vps.sh \
 
 Remove `--dry-run` only after the lane has passed its review/release gate and the production owner authorizes deployment. The default remote free-space gate requires both 2 GiB and 5% free. Override them only with reviewed values using `--min-free-bytes` and `--min-free-percent`.
 
-If the gate is missed, cleanup considers only images in the configured server image repository. It always preserves the active server image and the newest distinct rollback image, and skips any image used by a container. The transaction fails before backup, image load, symlink switch, or Compose recreation if the threshold remains unmet.
+If the gate is missed, cleanup considers only images in the configured server image repository. It resolves every active scaled-server container through Compose, preserves every active image ID plus the newest distinct rollback image, and skips any image used by a container. The transaction fails before backup, image load, symlink switch, or Compose recreation if the threshold remains unmet.
 
 The remote transaction snapshots the database and web container IDs before mutation and compares them after server health recovery. Any ID change fails the deployment. The only recreate command is:
 

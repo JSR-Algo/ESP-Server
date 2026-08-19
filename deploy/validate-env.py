@@ -19,8 +19,12 @@ class EnvSyntaxError(ValueError):
         super().__init__(reason)
 
 
-def _has_command_syntax(value: str) -> bool:
-    return "$(" in value or "`" in value or "${" in value or any(char in value for char in ";|&<>")
+def _has_expansion(value: str) -> bool:
+    return "$" in value or "`" in value
+
+
+def _has_unquoted_shell_syntax(value: str) -> bool:
+    return _has_expansion(value) or any(char in value for char in ";|&<>")
 
 
 def _quoted_value(lines: list[str], start: int, key: str, raw: str) -> tuple[int, str]:
@@ -63,16 +67,19 @@ def validate(path: Path) -> dict[str, str]:
         key, raw = match.groups()
         if key in assignments:
             raise EnvSyntaxError(index + 1, key, "duplicate assignment")
-        if _has_command_syntax(raw):
-            raise EnvSyntaxError(index + 1, key, "executable shell syntax is not allowed")
         if raw.startswith(("'", '"')):
+            quote = raw[0]
+            if quote == '"' and _has_expansion(raw):
+                raise EnvSyntaxError(index + 1, key, "executable shell syntax is not allowed")
             end, value = _quoted_value(lines, index, key, raw)
             for continued in lines[index + 1 : end + 1]:
-                if _has_command_syntax(continued):
+                if quote == '"' and _has_expansion(continued):
                     raise EnvSyntaxError(index + 1, key, "executable shell syntax is not allowed")
             index = end
         else:
             before_comment = raw.split("#", 1)[0].rstrip()
+            if _has_unquoted_shell_syntax(before_comment):
+                raise EnvSyntaxError(index + 1, key, "executable shell syntax is not allowed")
             if any(char.isspace() for char in before_comment):
                 raise EnvSyntaxError(index + 1, key, "unquoted whitespace creates a shell command")
             if "\\" in before_comment:

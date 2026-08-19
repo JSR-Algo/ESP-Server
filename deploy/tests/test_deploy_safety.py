@@ -80,16 +80,16 @@ if [[ "$1 ${{2:-}}" == "compose version" ]]; then exit 0; fi
 if [[ "$1" == "inspect" && "${{2:-}}" == "--format" ]]; then
   target="${{4:-}}"
   case "$target" in
-    tbot-esp32-server) echo sha256:active ;;
     tbot-esp32-server-db) echo db-id ;;
     tbot-esp32-server-web) [[ "$state" == after && "{int(changed_web_id)}" == 1 ]] && echo web-id-new || echo web-id ;;
-    server-id) echo healthy ;;
+    server-a) echo sha256:active ;;
+    server-b) echo sha256:active-secondary ;;
     *) exit 1 ;;
   esac
   exit 0
 fi
 if [[ "$1 ${{2:-}}" == "image ls" ]]; then
-  printf '%s\\n' 'sha256:active 2026-08-20T00:00:00Z' 'sha256:rollback 2026-08-19T00:00:00Z' 'sha256:old 2026-08-18T00:00:00Z'
+  printf '%s\\n' 'sha256:active 2026-08-20T00:00:00Z' 'sha256:active-secondary 2026-08-20T00:00:00Z' 'sha256:rollback 2026-08-19T00:00:00Z' 'sha256:old 2026-08-18T00:00:00Z'
   exit 0
 fi
 if [[ "$1 ${{2:-}}" == "ps -aq" ]]; then
@@ -103,7 +103,7 @@ if [[ "$1" == "compose" && "$*" == *' up -d --no-deps tbot-esp32-server'* ]]; th
   echo after > {state!s}
   exit 0
 fi
-if [[ "$1" == "compose" && "$*" == *' ps -q tbot-esp32-server'* ]]; then echo server-id; exit 0; fi
+if [[ "$1" == "compose" && "$*" == *' ps -q tbot-esp32-server'* ]]; then printf '%s\\n' server-a server-b; exit 0; fi
 if [[ "$1" == "compose" && "$*" == *' ps tbot-esp32-server'* ]]; then exit 0; fi
 echo "unexpected docker command: $*" >&2
 exit 91
@@ -158,7 +158,27 @@ def test_env_validator_rejects_bare_trailing_token_without_printing_value() -> N
     assert "ESP PUBLIC endpoint" not in combined
 
 
-@pytest.mark.parametrize("payload", ["TOKEN=$(whoami)\n", "TOKEN=`whoami`\n", "export TOKEN=value\n"])
+def test_env_validator_accepts_shell_operators_inside_single_quoted_value(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("TOKEN='fixture;&|<>$value'\n", encoding="utf-8")
+    result = run("python3", DEPLOY_DIR / "validate-env.py", env_file)
+    assert result.returncode == 0, result.stderr
+    assert "fixture;&|<>$value" not in result.stdout
+
+
+def test_env_validator_rejects_double_quoted_expansion_without_echoing_value(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text('TOKEN="fixture-${EXPANSION}"\n', encoding="utf-8")
+    result = run("python3", DEPLOY_DIR / "validate-env.py", env_file)
+    assert result.returncode != 0
+    assert "TOKEN" in result.stderr
+    assert "fixture-${EXPANSION}" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["TOKEN=$(whoami)\n", "TOKEN=`whoami`\n", "TOKEN=$HOME\n", 'TOKEN="$HOME"\n', "export TOKEN=value\n"],
+)
 def test_env_validator_rejects_executable_shell_syntax(tmp_path: Path, payload: str) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(payload, encoding="utf-8")
@@ -269,6 +289,7 @@ def test_remote_transaction_preserves_active_and_one_rollback_and_protected_ids(
     commands = log.read_text(encoding="utf-8")
     assert "image rm sha256:old" in commands
     assert "image rm sha256:active" not in commands
+    assert "image rm sha256:active-secondary" not in commands
     assert "image rm sha256:rollback" not in commands
     assert "up -d --no-deps tbot-esp32-server" in commands
     assert "up -d tbot-esp32-server-db" not in commands

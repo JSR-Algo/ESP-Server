@@ -63,8 +63,28 @@ python3 "${VALIDATOR}" --expect TBOT_SERVER_IMAGE "${SERVER_IMAGE_REF}" "${DEPLO
   sha256sum -c checksums.sha256
 )
 
-active_image="$(docker inspect --format '{{.Image}}' "${SERVER_SERVICE}")"
-[[ -n "${active_image}" ]] || die "cannot resolve active server image"
+CURRENT_COMPOSE_FILE="${REMOTE_ROOT}/current/docker-compose.prod.yml"
+[[ -f "${CURRENT_COMPOSE_FILE}" ]] || die "current compose file is missing"
+server_container_ids="$(docker compose --env-file "${ENV_PATH}" -f "${CURRENT_COMPOSE_FILE}" ps -q "${SERVER_SERVICE}")"
+[[ -n "${server_container_ids}" ]] || die "cannot resolve active server containers"
+active_image_ids=""
+for container_id in ${server_container_ids}; do
+  image_id="$(docker inspect --format '{{.Image}}' "${container_id}")"
+  [[ -n "${image_id}" ]] || die "cannot resolve an active server image"
+  case " ${active_image_ids} " in
+    *" ${image_id} "*) ;;
+    *) active_image_ids="${active_image_ids:+${active_image_ids} }${image_id}" ;;
+  esac
+done
+
+is_active_image() {
+  local candidate active
+  candidate="$1"
+  for active in ${active_image_ids}; do
+    [[ "${candidate}" == "${active}" ]] && return 0
+  done
+  return 1
+}
 
 read_disk_space() {
   local disk_line free_kb used_percent
@@ -83,11 +103,11 @@ if (( free_bytes < MIN_FREE_BYTES || free_percent < MIN_FREE_PERCENT )); then
   image_ids="$(docker image ls --no-trunc --format '{{.ID}} {{.CreatedAt}}' "${SERVER_IMAGE_REPO}" | awk '!seen[$1]++ { print $1 }')"
   while IFS= read -r image_id; do
     [[ -n "${image_id}" ]] || continue
-    if [[ "${image_id}" != "${active_image}" && -z "${rollback_image}" ]]; then
+    if ! is_active_image "${image_id}" && [[ -z "${rollback_image}" ]]; then
       rollback_image="${image_id}"
       continue
     fi
-    if [[ "${image_id}" == "${active_image}" || "${image_id}" == "${rollback_image}" ]]; then
+    if is_active_image "${image_id}" || [[ "${image_id}" == "${rollback_image}" ]]; then
       continue
     fi
     if [[ -n "$(docker ps -aq --filter "ancestor=${image_id}")" ]]; then
