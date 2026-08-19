@@ -186,17 +186,6 @@ def start_lesson(conn: "ConnectionHandler"):
         # failure can never crash the connection or touch the voice path.
         sample_fallback_enabled = bool(sample_on) and runtime_admitted
         sample_fallback_handoff_token = None
-        if sample_fallback_enabled:
-            handoff_active = getattr(conn, "lesson_start_handoff_active", None)
-            begin_handoff = getattr(conn, "begin_lesson_start_handoff", None)
-            if (
-                callable(handoff_active)
-                and handoff_active()
-                and callable(begin_handoff)
-            ):
-                sample_fallback_handoff_token = begin_handoff(
-                    reason="sample_fallback_reserve"
-                )
         if runtime_disabled and sample_on:
             # runtime OFF -> the assignment pull is gated dark; the sample is the ONLY
             # admitted lesson path, so it runs directly (no real assignment to prefer).
@@ -211,6 +200,21 @@ def start_lesson(conn: "ConnectionHandler"):
                 from core.lesson.runtime import maybe_start_lesson_on_connect
 
                 task = loop.create_task(maybe_start_lesson_on_connect(conn))
+
+        # create_task cannot begin executing until this synchronous tool handler
+        # yields back to the loop. Reserve the optional sample-fallback holder only
+        # after scheduling succeeds, so a scheduling exception cannot strand it.
+        if sample_fallback_enabled:
+            handoff_active = getattr(conn, "lesson_start_handoff_active", None)
+            begin_handoff = getattr(conn, "begin_lesson_start_handoff", None)
+            if (
+                callable(handoff_active)
+                and handoff_active()
+                and callable(begin_handoff)
+            ):
+                sample_fallback_handoff_token = begin_handoff(
+                    reason="sample_fallback_reserve"
+                )
 
         # Track the task on the connection so close() cancels it (deep-audit #9: it
         # was a local var, so a disconnect mid-pull left it running -> leak / use-
