@@ -6122,44 +6122,57 @@ class GoogleLiveProvider(VoiceSessionProvider):
             else None
         )
         self._lesson_start_handoff_token = handoff_token
-        await self._begin_user_interrupt("lesson_start_intent")
-        clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
-        if callable(clear_speaking):
-            clear_speaking()
-        self._interaction.transition(InteractionState.LISTENING)
-        self.conn.client_abort = False
+        try:
+            await self._begin_user_interrupt("lesson_start_intent")
+            clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
+            if callable(clear_speaking):
+                clear_speaking()
+            self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
 
-        busy = getattr(self.conn, "is_realtime_busy", None)
-        if not callable(busy):
-            return True
-        deadline = time.monotonic() + timeout_sec
-        while True:
-            # A final audio callback can publish an echo-tail-derived state after
-            # the terminal stop selected LISTENING. With the microphone closed,
-            # no later callback exists to clear that transient state, so settle it
-            # from the real output/VAD flags before consulting the busy guard.
-            if (
-                self._interaction.state
-                in {
-                    InteractionState.USER_STREAMING,
-                    InteractionState.MODEL_SPEAKING,
-                    InteractionState.MUTED,
-                }
-                and not self._has_active_output()
-                and not getattr(self.conn, "client_is_speaking", False)
-                and not getattr(self.conn, "client_have_voice", False)
-            ):
-                self._interaction.transition(InteractionState.LISTENING)
-                self.conn.client_abort = False
-            if not busy():
+            busy = getattr(self.conn, "is_realtime_busy", None)
+            if not callable(busy):
                 return True
-            if time.monotonic() >= deadline:
-                await self._release_lesson_start_handoff(
-                    outcome="live_transition_timeout",
-                    restore_conversation=True,
-                )
-                return False
-            await asyncio.sleep(0.01)
+            deadline = time.monotonic() + timeout_sec
+            while True:
+                # A final audio callback can publish an echo-tail-derived state after
+                # the terminal stop selected LISTENING. With the microphone closed,
+                # no later callback exists to clear that transient state, so settle it
+                # from the real output/VAD flags before consulting the busy guard.
+                if (
+                    self._interaction.state
+                    in {
+                        InteractionState.USER_STREAMING,
+                        InteractionState.MODEL_SPEAKING,
+                        InteractionState.MUTED,
+                    }
+                    and not self._has_active_output()
+                    and not getattr(self.conn, "client_is_speaking", False)
+                    and not getattr(self.conn, "client_have_voice", False)
+                ):
+                    self._interaction.transition(InteractionState.LISTENING)
+                    self.conn.client_abort = False
+                if not busy():
+                    return True
+                if time.monotonic() >= deadline:
+                    await self._release_lesson_start_handoff(
+                        outcome="live_transition_timeout",
+                        restore_conversation=True,
+                    )
+                    return False
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            await self._release_lesson_start_handoff(
+                outcome="cancelled",
+                restore_conversation=True,
+            )
+            raise
+        except Exception:
+            await self._release_lesson_start_handoff(
+                outcome="live_transition_failed",
+                restore_conversation=True,
+            )
+            raise
 
     async def _release_lesson_start_handoff(
         self,
@@ -6167,7 +6180,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
         outcome: str,
         restore_conversation: bool,
     ) -> bool:
-        token = getattr(self, "_lesson_start_handoff_token", None)
+        token_getter = getattr(self.conn, "lesson_start_handoff_token", None)
+        token = token_getter() if callable(token_getter) else None
+        if token is None:
+            token = getattr(self, "_lesson_start_handoff_token", None)
         release = getattr(self.conn, "release_lesson_start_handoff", None)
         if token is None or not callable(release):
             return False

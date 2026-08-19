@@ -278,6 +278,7 @@ class ConnectionHandler:
         self.lesson_pull_task_origin = None
         self._lesson_start_handoff_generation = 0
         self._lesson_start_handoff_active_token = None
+        self._lesson_start_handoff_holders = 0
         self._lesson_start_handoff_context = ContextVar(
             f"lesson_start_handoff_{id(self):x}", default=None
         )
@@ -2473,8 +2474,10 @@ class ConnectionHandler:
             self._lesson_start_handoff_generation += 1
             token = self._lesson_start_handoff_generation
             self._lesson_start_handoff_active_token = token
+            self._lesson_start_handoff_holders = 1
             event = "acquired"
         else:
+            self._lesson_start_handoff_holders += 1
             event = "coalesced"
         self._lesson_start_handoff_context.set(token)
         try:
@@ -2503,6 +2506,7 @@ class ConnectionHandler:
         *,
         outcome: str,
         restore_conversation: bool,
+        force: bool = False,
     ) -> bool:
         if token is None or token != self._lesson_start_handoff_active_token:
             try:
@@ -2518,9 +2522,29 @@ class ConnectionHandler:
             except Exception:
                 pass
             return False
-        self._lesson_start_handoff_active_token = None
         if self._lesson_start_handoff_context.get() == token:
             self._lesson_start_handoff_context.set(None)
+        if force:
+            self._lesson_start_handoff_holders = 0
+        else:
+            self._lesson_start_handoff_holders = max(
+                0, self._lesson_start_handoff_holders - 1
+            )
+        if self._lesson_start_handoff_holders > 0:
+            try:
+                self.logger.bind(tag=TAG).info(
+                    with_lesson_log_context(
+                        "lesson_start_handoff_release_deferred token={} outcome={} holders={}",
+                        self,
+                    ),
+                    token,
+                    outcome,
+                    self._lesson_start_handoff_holders,
+                )
+            except Exception:
+                pass
+            return True
+        self._lesson_start_handoff_active_token = None
         try:
             self.logger.bind(tag=TAG).info(
                 with_lesson_log_context(
@@ -2726,6 +2750,7 @@ class ConnectionHandler:
                 handoff_token,
                 outcome="connection_closed",
                 restore_conversation=False,
+                force=True,
             )
         await self._close_mcp_background_tasks()
 
