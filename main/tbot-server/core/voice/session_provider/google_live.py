@@ -6211,7 +6211,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
         except Exception as exc:
             self.conn.logger.bind(tag="GoogleLive").warning(
-                "Google Live lesson_start_handoff_restore_failed outcome={} error={}",
+                with_lesson_log_context(
+                    "Google Live lesson_start_handoff_restore_failed outcome={} error={}",
+                    self.conn,
+                ),
                 outcome,
                 self._safe_error_message(exc),
             )

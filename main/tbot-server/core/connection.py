@@ -2479,7 +2479,9 @@ class ConnectionHandler:
         self._lesson_start_handoff_context.set(token)
         try:
             self.logger.bind(tag=TAG).info(
-                "lesson_start_handoff_{} token={} reason={}",
+                with_lesson_log_context(
+                    "lesson_start_handoff_{} token={} reason={}", self
+                ),
                 event,
                 token,
                 reason,
@@ -2505,7 +2507,10 @@ class ConnectionHandler:
         if token is None or token != self._lesson_start_handoff_active_token:
             try:
                 self.logger.bind(tag=TAG).info(
-                    "lesson_start_handoff_release_ignored token={} activeToken={} outcome={}",
+                    with_lesson_log_context(
+                        "lesson_start_handoff_release_ignored token={} activeToken={} outcome={}",
+                        self,
+                    ),
                     token,
                     self._lesson_start_handoff_active_token,
                     outcome,
@@ -2518,7 +2523,10 @@ class ConnectionHandler:
             self._lesson_start_handoff_context.set(None)
         try:
             self.logger.bind(tag=TAG).info(
-                "lesson_start_handoff_released token={} outcome={} restoreConversation={}",
+                with_lesson_log_context(
+                    "lesson_start_handoff_released token={} outcome={} restoreConversation={}",
+                    self,
+                ),
                 token,
                 outcome,
                 restore_conversation,
