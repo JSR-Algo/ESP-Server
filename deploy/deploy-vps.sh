@@ -13,6 +13,9 @@ REMOTE_ROOT="/opt/tbot"
 REMOTE_ROOT_SET=0
 DRY_RUN=0
 BOOTSTRAP=0
+SERVER_ONLY=0
+MIN_FREE_BYTES="2147483648"
+MIN_FREE_PERCENT="5"
 RELEASE_ROOT="${PROJECT_DIR}/dist/deploy"
 SMOKE_EXPECTED_WS_HOST=""
 SMOKE_OTA_URL=""
@@ -33,6 +36,9 @@ Options:
   --release-root <dir>     Local release root (default: esp32-server/dist/deploy).
   --remote-root <dir>      Remote app root (default: /opt/tbot).
   --bootstrap              Create remote dirs and verify Docker/Compose.
+  --server-only            Recreate only tbot-esp32-server with --no-deps.
+  --min-free-bytes <n>     Required free bytes before mutation (default: 2 GiB).
+  --min-free-percent <n>   Required free percent before mutation (default: 5).
   --dry-run                Print actions only; do not mutate remote host.
   -h, --help               Show help.
 
@@ -109,6 +115,27 @@ run_scp() {
     run_with_password "${cmd[@]}" "${src}" "${dest}"
   else
     "${cmd[@]}" "${src}" "${dest}"
+  fi
+}
+
+run_ssh_stdin() {
+  local stdin_file="$1"
+  shift
+  local target="${USER_NAME}@${HOST}"
+  local cmd=(ssh -p "${PORT}" -o StrictHostKeyChecking=accept-new)
+  if [[ -n "${KEY_FILE}" ]]; then
+    cmd+=(-i "${KEY_FILE}")
+  fi
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf '[dry-run] stream %s to ssh %s %q\n' "${stdin_file}" "${target}" "$*"
+    return 0
+  fi
+  if [[ -n "${SSH_PASSWORD:-}" && -z "${KEY_FILE}" && "$(command -v sshpass || true)" ]]; then
+    sshpass -e "${cmd[@]}" "${target}" "$@" <"${stdin_file}"
+  elif [[ -n "${SSH_PASSWORD:-}" && -z "${KEY_FILE}" ]]; then
+    die "streaming validation requires sshpass or key authentication"
+  else
+    "${cmd[@]}" "${target}" "$@" <"${stdin_file}"
   fi
 }
 
@@ -407,6 +434,20 @@ while (($#)); do
       BOOTSTRAP=1
       shift
       ;;
+    --server-only)
+      SERVER_ONLY=1
+      shift
+      ;;
+    --min-free-bytes)
+      [[ $# -ge 2 ]] || die "--min-free-bytes requires a value"
+      MIN_FREE_BYTES="$2"
+      shift 2
+      ;;
+    --min-free-percent)
+      [[ $# -ge 2 ]] || die "--min-free-percent requires a value"
+      MIN_FREE_PERCENT="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -426,8 +467,15 @@ done
 [[ -n "${TAG}" ]] || die "--tag is required"
 [[ -z "${KEY_FILE}" || -r "${KEY_FILE}" ]] || die "cannot read key file: ${KEY_FILE}"
 [[ -z "${ENV_FILE}" || -r "${ENV_FILE}" ]] || die "cannot read env file: ${ENV_FILE}"
+[[ "${MIN_FREE_BYTES}" =~ ^[0-9]+$ ]] || die "--min-free-bytes must be an integer"
+[[ "${MIN_FREE_PERCENT}" =~ ^[0-9]+$ ]] || die "--min-free-percent must be an integer"
 need_cmd ssh
 need_cmd scp
+need_cmd python3
+
+if [[ -n "${ENV_FILE}" ]]; then
+  python3 "${SCRIPT_DIR}/validate-env.py" "${ENV_FILE}"
+fi
 
 if [[ "${HOST}" == "160.187.240.56" && -z "${ENV_FILE}" ]]; then
   die "known Levcloud VPS deploy requires --env-file with TBOT_REMOTE_ROOT=/opt/tbot"
@@ -444,6 +492,11 @@ RELEASE_DIR="${RELEASE_ROOT}/${TAG}"
 [[ -d "${RELEASE_DIR}" ]] || die "missing release dir: ${RELEASE_DIR}"
 [[ -f "${RELEASE_DIR}/release.json" ]] || die "missing release.json in ${RELEASE_DIR}"
 [[ -f "${RELEASE_DIR}/checksums.sha256" ]] || die "missing checksums.sha256 in ${RELEASE_DIR}"
+if [[ "${SERVER_ONLY}" -eq 1 ]]; then
+  for helper in backup-db.sh validate-env.py server-only-remote.sh; do
+    [[ -f "${RELEASE_DIR}/${helper}" ]] || die "server-only release is missing ${helper}"
+  done
+fi
 
 REMOTE_RELEASES="${REMOTE_ROOT}/releases"
 REMOTE_RELEASE="${REMOTE_RELEASES}/${TAG}"
@@ -454,8 +507,38 @@ SMOKE_WS_PORT="$(env_value TBOT_WS_PORT 8000)"
 SMOKE_HTTP_PORT="$(env_value TBOT_ADMIN_PORT 8002)"
 SMOKE_OTA_PORT="$(env_value TBOT_HTTP_PORT 8003)"
 
-if [[ "${BOOTSTRAP}" -eq 1 ]]; then
+if [[ "${BOOTSTRAP}" -eq 1 && "${SERVER_ONLY}" -eq 0 ]]; then
   run_ssh "mkdir -p ${REMOTE_Q}/releases ${REMOTE_Q}/data ${REMOTE_Q}/models/SenseVoiceSmall ${REMOTE_Q}/mysql/data ${REMOTE_Q}/redis/data ${REMOTE_Q}/uploadfile && docker --version >/dev/null && (docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null)"
+fi
+
+if [[ "${SERVER_ONLY}" -eq 1 ]]; then
+  run_ssh_stdin "${RELEASE_DIR}/validate-env.py" "python3 - ${REMOTE_Q}/.env"
+  if [[ "${BOOTSTRAP}" -eq 1 ]]; then
+    run_ssh "mkdir -p ${REMOTE_Q}/releases ${REMOTE_Q}/data ${REMOTE_Q}/models/SenseVoiceSmall ${REMOTE_Q}/mysql/data ${REMOTE_Q}/redis/data ${REMOTE_Q}/uploadfile && docker --version >/dev/null && docker compose version >/dev/null"
+  fi
+  run_ssh "mkdir -p ${REMOTE_RELEASES_Q}"
+  run_ssh "rm -rf ${REMOTE_RELEASE_Q} && mkdir -p ${REMOTE_RELEASE_Q}"
+  run_scp "${RELEASE_DIR}/." "${USER_NAME}@${HOST}:${REMOTE_RELEASE}/"
+  candidate_arg=""
+  if [[ -n "${ENV_FILE}" ]]; then
+    candidate_remote="${REMOTE_RELEASE}/candidate.env"
+    candidate_env_source="${ENV_FILE}"
+    run_scp "${candidate_env_source}" "${USER_NAME}@${HOST}:${candidate_remote}"
+    candidate_arg=" --candidate-env $(remote_quote "${candidate_remote}")"
+  fi
+  printf '[plan] remote helper recreates only tbot-esp32-server with --no-deps\n'
+  run_ssh "bash ${REMOTE_RELEASE_Q}/server-only-remote.sh --remote-root ${REMOTE_Q} --release-dir ${REMOTE_RELEASE_Q} --tag $(remote_quote "${TAG}") --min-free-bytes ${MIN_FREE_BYTES} --min-free-percent ${MIN_FREE_PERCENT}${candidate_arg}"
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    if [[ -n "${SMOKE_OTA_URL}" && -n "${SMOKE_EXPECTED_WS_HOST}" ]]; then
+      "${SCRIPT_DIR}/smoke-vps.sh" --host "${HOST}" --port "${SMOKE_WS_PORT}" --http-port "${SMOKE_HTTP_PORT}" --ota-port "${SMOKE_OTA_PORT}" --ota-url "${SMOKE_OTA_URL}" --expected-ws-host "${SMOKE_EXPECTED_WS_HOST}"
+    else
+      "${SCRIPT_DIR}/smoke-vps.sh" --host "${HOST}" --port "${SMOKE_WS_PORT}" --http-port "${SMOKE_HTTP_PORT}" --ota-port "${SMOKE_OTA_PORT}"
+    fi
+  else
+    printf '[dry-run] skip smoke checks\n'
+  fi
+  printf 'Deployed server-only release %s to %s@%s:%s\n' "${TAG}" "${USER_NAME}" "${HOST}" "${REMOTE_ROOT}"
+  exit 0
 fi
 
 run_ssh "mkdir -p ${REMOTE_RELEASES_Q}"
