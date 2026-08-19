@@ -2545,6 +2545,12 @@ class ConnectionHandler:
                 pass
             return True
         self._lesson_start_handoff_active_token = None
+        durable_lesson_owner = (
+            normalize_session_mode(getattr(self, "session_mode", SessionMode.DORMANT))
+            == SessionMode.LESSON
+            or self._lesson_runtime_active()
+        )
+        restore_conversation = restore_conversation and not durable_lesson_owner
         try:
             self.logger.bind(tag=TAG).info(
                 with_lesson_log_context(
