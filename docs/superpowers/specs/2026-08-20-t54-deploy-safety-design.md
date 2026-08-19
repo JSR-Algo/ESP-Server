@@ -32,7 +32,7 @@ The validator accepts dotenv assignment syntax, comments, blank lines, quoted va
 
 ## Image Retention
 
-Cleanup is limited to the configured server image repository. The active image ID is always retained. One additional newest distinct image ID is retained as rollback. Images used by any container are skipped. The incoming archive is not loaded until the post-cleanup free-space gate passes.
+Cleanup is limited to the configured server image repository. Active container IDs are resolved through Compose so every image ID used by scaled server replicas is retained. One additional newest distinct image ID is retained as rollback. Images used by any container are skipped. The incoming archive is not loaded until the post-cleanup free-space gate passes.
 
 ## Verification
 
