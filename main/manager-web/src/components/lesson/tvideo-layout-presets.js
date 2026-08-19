@@ -8,13 +8,13 @@ const PHASES = Object.freeze([
 
 const shared = {
   safeZones: [{ left: 18, top: 238, width: 444, height: 68 }],
-  wordPill: { left: 150, top: 244, width: 180, height: 42 },
+  wordPill: { left: 15, top: 266, width: 100, height: 36 },
   prompt: { left: 26, top: 18, width: 428, height: 48 },
   progress: { left: 390, top: 286, width: 64, height: 16 },
 };
 
 const LAYOUT_PRESETS = Object.freeze({
-  centerRoad: Object.freeze({ ...shared, teachingObject: { left: 40, top: 104, width: 124, height: 124 }, entry: { left: 400, top: 22 }, land: { left: 284, top: 116 }, arrive: { left: 184, top: 184, width: 112, height: 56 }, walkCorridor: { left: 178, top: 112, width: 154, height: 132 } }),
+  centerRoad: Object.freeze({ ...shared, teachingObject: { left: 20, top: 168, width: 95, height: 95 }, entry: { left: 400, top: 22 }, land: { left: 284, top: 116 }, arrive: { left: 118, top: 160, width: 150, height: 150 }, walkCorridor: { left: 178, top: 112, width: 154, height: 132 } }),
   leftApproach: Object.freeze({ ...shared, teachingObject: { left: 240, top: 104, width: 124, height: 124 }, entry: { left: 24, top: 22 }, land: { left: 104, top: 116 }, arrive: { left: 42, top: 148, width: 108, height: 92 }, walkCorridor: { left: 38, top: 112, width: 150, height: 132 } }),
   rightApproach: Object.freeze({ ...shared, teachingObject: { left: 116, top: 104, width: 124, height: 124 }, entry: { left: 410, top: 22 }, land: { left: 326, top: 116 }, arrive: { left: 330, top: 148, width: 108, height: 92 }, walkCorridor: { left: 292, top: 112, width: 150, height: 132 } }),
 });

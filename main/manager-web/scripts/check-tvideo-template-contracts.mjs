@@ -129,6 +129,8 @@ assert.equal(layouts.SCREEN.width, 480);
 assert.equal(layouts.SCREEN.height, 320);
 assert.deepEqual(layouts.PHASES.map((phase) => phase.name), ['hidden', 'flyIn', 'landFar', 'settle', 'walkToward', 'arriveNear', 'greetIdle', 'revealTeachingContent']);
 for (const id of ['centerRoad', 'leftApproach', 'rightApproach']) assert.ok(layouts.LAYOUT_PRESETS[id]);
+assert.deepEqual(layouts.LAYOUT_PRESETS.centerRoad.teachingObject, { left: 20, top: 168, width: 95, height: 95 });
+assert.deepEqual(layouts.LAYOUT_PRESETS.centerRoad.arrive, { left: 118, top: 160, width: 150, height: 150 });
 for (const layout of Object.values(layouts.LAYOUT_PRESETS)) {
   assert.equal(layouts.rectOverlaps(layout.arrive, layout.teachingObject), false);
   assert.equal(layouts.rectOverlaps(layout.arrive, layout.wordPill), false);
@@ -139,7 +141,7 @@ assert.equal(layouts.validateProjection({
   phases: layouts.PHASES, revealPhase: 'revealTeachingContent', fallbackPolicy: 'snapToArriveNearAndReveal',
 }), true);
 assert.deepEqual(layouts.phaseRobotRect(layouts.LAYOUT_PRESETS.centerRoad, 'walkToward', 900, 1800), {
-  left: 234, top: 150, width: 112, height: 56,
+  left: 201, top: 138, width: 150, height: 150,
 });
 assert.equal(layouts.isTeachingContentVisible('arriveNear', 'revealTeachingContent', true), true);
 assert.equal(layouts.isTeachingContentVisible('arriveNear', 'revealTeachingContent', false), false);
