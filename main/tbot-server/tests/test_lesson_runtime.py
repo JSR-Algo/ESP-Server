@@ -11447,5 +11447,119 @@ class ActivityLeaseLessonMutationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.lesson_start_status["code"], "CACHE_EVICTION_RESERVED")
 
 
+class LessonStartHandoffLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_success_transfers_to_lesson_before_releasing_handoff(self):
+        from core.lesson import runtime as runtime_module
+        from core.voice.session_orchestrator import SessionMode
+
+        events = []
+
+        async def release(token, *, outcome, restore_conversation):
+            events.append(
+                (
+                    "release",
+                    token,
+                    outcome,
+                    restore_conversation,
+                    conn.session_mode,
+                )
+            )
+            return True
+
+        conn = SimpleNamespace(
+            _lesson_pull_lock=asyncio.Lock(),
+            activity_leases=None,
+            session_mode=SessionMode.CONVERSATION,
+            lesson_start_handoff_token=lambda: 7,
+            release_lesson_start_handoff=release,
+        )
+        started_runtime = object()
+
+        async def start(_conn):
+            events.append(("enter_lesson_mode",))
+            conn.session_mode = SessionMode.LESSON
+            return started_runtime
+
+        with patch(
+            "core.providers.tools.product_toolset.lesson_runtime_enabled",
+            return_value=True,
+        ), patch.object(runtime_module, "_maybe_start_lesson_on_connect_impl", start):
+            result = await runtime_module.maybe_start_lesson_on_connect(conn)
+
+        self.assertIs(result, started_runtime)
+        self.assertEqual(events[0], ("enter_lesson_mode",))
+        self.assertEqual(
+            events[1],
+            ("release", 7, "lesson_started", False, SessionMode.LESSON),
+        )
+
+    async def test_failed_start_releases_handoff_and_restores_conversation(self):
+        from core.lesson import runtime as runtime_module
+        from core.voice.session_orchestrator import SessionMode
+
+        releases = []
+
+        async def release(token, *, outcome, restore_conversation):
+            releases.append((token, outcome, restore_conversation))
+            return True
+
+        conn = SimpleNamespace(
+            _lesson_pull_lock=asyncio.Lock(),
+            activity_leases=None,
+            session_mode=SessionMode.CONVERSATION,
+            lesson_start_status={},
+            lesson_start_handoff_token=lambda: 8,
+            release_lesson_start_handoff=release,
+        )
+
+        async def refuse(_conn):
+            conn.lesson_start_status = {"code": "START_REFUSED"}
+            return None
+
+        with patch(
+            "core.providers.tools.product_toolset.lesson_runtime_enabled",
+            return_value=True,
+        ), patch.object(runtime_module, "_maybe_start_lesson_on_connect_impl", refuse):
+            result = await runtime_module.maybe_start_lesson_on_connect(conn)
+
+        self.assertIsNone(result)
+        self.assertEqual(releases, [(8, "START_REFUSED", True)])
+
+    async def test_cancelled_start_releases_handoff_and_propagates_cancellation(self):
+        from core.lesson import runtime as runtime_module
+        from core.voice.session_orchestrator import SessionMode
+
+        entered = asyncio.Event()
+        releases = []
+
+        async def release(token, *, outcome, restore_conversation):
+            releases.append((token, outcome, restore_conversation))
+            return True
+
+        conn = SimpleNamespace(
+            _lesson_pull_lock=asyncio.Lock(),
+            activity_leases=None,
+            session_mode=SessionMode.CONVERSATION,
+            lesson_start_handoff_token=lambda: 9,
+            release_lesson_start_handoff=release,
+        )
+
+        async def block(_conn):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch(
+            "core.providers.tools.product_toolset.lesson_runtime_enabled",
+            return_value=True,
+        ), patch.object(runtime_module, "_maybe_start_lesson_on_connect_impl", block):
+            task = asyncio.create_task(runtime_module.maybe_start_lesson_on_connect(conn))
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(releases, [(9, "cancelled", True)])
+
+
 if __name__ == "__main__":
     unittest.main()
