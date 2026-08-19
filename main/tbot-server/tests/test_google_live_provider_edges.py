@@ -3893,6 +3893,37 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.lesson_start_handoff_active())
         self.assertEqual(conn.handoff_releases, [(1, "live_transition_timeout", True)])
 
+    async def test_lesson_transition_exception_releases_handoff(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._begin_user_interrupt = AsyncMock(side_effect=RuntimeError("stop failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            await provider.transition_to_lesson_start()
+
+        self.assertFalse(conn.lesson_start_handoff_active())
+        self.assertEqual(conn.handoff_releases, [(1, "live_transition_failed", True)])
+
+    async def test_lesson_transition_cancellation_releases_handoff(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        interrupt_started = asyncio.Event()
+
+        async def block_interrupt(_reason):
+            interrupt_started.set()
+            await asyncio.Event().wait()
+
+        provider._begin_user_interrupt = block_interrupt
+        task = asyncio.create_task(provider.transition_to_lesson_start())
+        await interrupt_started.wait()
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertFalse(conn.lesson_start_handoff_active())
+        self.assertEqual(conn.handoff_releases, [(1, "cancelled", True)])
+
     async def test_failed_lesson_start_handoff_restores_connected_live_input(self):
         conn = _Conn()
         provider = self.make_provider(conn)

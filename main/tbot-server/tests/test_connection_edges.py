@@ -289,6 +289,45 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         handler.voice_provider.handle_audio_bytes.assert_not_awaited()
 
+    async def test_coalesced_lesson_start_handoff_stays_active_until_all_holders_release(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+
+        first_token = handler.begin_lesson_start_handoff(reason="spoken_start")
+        second_token = handler.begin_lesson_start_handoff(reason="protected_nudge")
+
+        self.assertEqual(second_token, first_token)
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                first_token,
+                outcome="START_REFUSED",
+                restore_conversation=True,
+            )
+        )
+        self.assertTrue(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                second_token,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
+    async def test_disconnect_force_clears_all_coalesced_handoff_holders(self):
+        handler = _build_handler()
+        handler.begin_lesson_start_handoff(reason="spoken_start")
+        handler.begin_lesson_start_handoff(reason="protected_nudge")
+
+        await handler._close_connection_owned_mcp_callers()
+
+        self.assertFalse(handler.lesson_start_handoff_active())
+
     async def test_activity_lease_drops_voice_ingress_but_dispatches_control_and_abort(self):
         handler = _build_handler()
         handler.bind_completed_event.set()
