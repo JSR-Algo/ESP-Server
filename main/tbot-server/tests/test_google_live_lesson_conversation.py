@@ -595,6 +595,32 @@ class LessonConversationPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_receive_timeout_is_routed_only_to_active_google_live_lesson(self):
+        class Runtime:
+            state = "RUNNING"
+
+            def __init__(self):
+                self.timeouts = 0
+
+            def conversation_tool_path_active(self):
+                return False
+
+            async def on_google_live_receive_timeout(self):
+                self.timeouts += 1
+                return True
+
+        conn = _Conn()
+        runtime = Runtime()
+        conn.lesson_runtime = runtime
+        provider = GoogleLiveProvider(conn)
+
+        self.assertTrue(await provider._handle_receive_timeout_event())
+        self.assertEqual(runtime.timeouts, 1)
+
+        conn.session_mode = SessionMode.CONVERSATION
+        self.assertFalse(await provider._handle_receive_timeout_event())
+        self.assertEqual(runtime.timeouts, 1)
+
     async def test_lesson_reconnect_cannot_resurrect_resources_after_close_begins(self):
         class ClosingClient(_Client):
             async def close(self):

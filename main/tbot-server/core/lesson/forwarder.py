@@ -53,6 +53,7 @@ class LessonEventForwarder:
         base_url: str,
         token: Optional[str] = None,
         post_fn: Optional[Callable[..., Awaitable[Optional[Dict[str, Any]]]]] = None,
+        token_refresh_fn: Optional[Callable[..., Awaitable[Optional[Tuple[str, str]]]]] = None,
         client: Any = None,
         logger: Any = None,
         retry_backoff_sec: float = 1.0,
@@ -66,6 +67,7 @@ class LessonEventForwarder:
         self.base_url = base_url
         self.token = token
         self._post_fn = post_fn
+        self._token_refresh_fn = token_refresh_fn
         self._client = client
         self._owns_client = False
         self._logger = logger
@@ -189,8 +191,38 @@ class LessonEventForwarder:
         post_fn = self._post_fn or _backend_api.post_lesson_event
         if self._post_fn is None:
             await self._ensure_client()
-        await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+        try:
+            await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+        except Exception as exc:
+            if not self._is_auth_token_expired(exc) or self._token_refresh_fn is None:
+                raise
+            refreshed = await self._token_refresh_fn(self._client, self.token)
+            if not refreshed or refreshed[0] != self.device_id or not refreshed[1]:
+                raise
+            self.token = refreshed[1]
+            self._log(
+                "warning",
+                "lesson-events token expired; reminted and retrying once",
+                batch,
+            )
+            await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
         self._log_forwarded(batch)
+
+    @staticmethod
+    def _is_auth_token_expired(exc: Exception) -> bool:
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 401:
+            return False
+        try:
+            payload = response.json()
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        nested = payload.get("error")
+        return payload.get("code") == "AUTH_TOKEN_EXPIRED" or (
+            isinstance(nested, dict) and nested.get("code") == "AUTH_TOKEN_EXPIRED"
+        )
 
     def _log_forwarded(self, batch: Dict[str, Any]) -> None:
         """Record every event a backend 2xx accepted.

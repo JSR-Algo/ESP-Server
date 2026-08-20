@@ -74,6 +74,48 @@ Keep `GOOGLE_API_KEY` empty in `.env` for this manager-driven setup. The Python 
    esp32-server/deploy/rollback-vps.sh --host <ip> --user <ssh-user> --tag <previous-tag>
    ```
 
+## Server-Only Safety Path
+
+Use this path when only the Python ESP server image changes. It packages the reviewed database backup helper and deploy-safety scripts with the release, validates `/opt/tbot/.env` without sourcing or printing values, and recreates only `tbot-esp32-server` with Compose `--no-deps`.
+
+```sh
+TAG=<reviewed-tag>
+
+deploy/package-release.sh \
+  --tag "$TAG" \
+  --server-only
+
+deploy/deploy-vps.sh \
+  --host <ip> \
+  --user <ssh-user> \
+  --tag "$TAG" \
+  --server-only \
+  --env-file deploy/production.env \
+  --dry-run
+
+deploy/rollback-vps.sh \
+  --host <ip> \
+  --user <ssh-user> \
+  --tag <previous-reviewed-tag> \
+  --server-only \
+  --env-file deploy/production.env \
+  --dry-run
+```
+
+Remove `--dry-run` only after the lane has passed its review/release gate and the production owner authorizes deployment or rollback. Server-only rollback validates the saved env before installing it, recreates only `tbot-esp32-server` with `--no-deps`, and verifies the database and web container IDs remain unchanged. The default remote free-space gate requires both 2 GiB and 5% free. Override them only with reviewed values using `--min-free-bytes` and `--min-free-percent`.
+
+If the gate is missed, cleanup considers only images in the configured server image repository. It resolves every active scaled-server container through Compose, preserves every active image ID plus the newest distinct rollback image, and skips any image used by a container. The transaction fails before backup, image load, symlink switch, or Compose recreation if the threshold remains unmet.
+
+The remote transaction snapshots the database and web container IDs before mutation and compares them after server health recovery. Any ID change fails the deployment. The only recreate command is:
+
+```sh
+docker compose --env-file /opt/tbot/.env \
+  -f /opt/tbot/current/docker-compose.prod.yml \
+  up -d --no-deps tbot-esp32-server
+```
+
+Dotenv files may contain blank lines, comments, `NAME=value`, and single- or double-quoted values, including quoted multiline public keys. Invalid identifiers, duplicate assignments, command substitution, shell operators, unquoted whitespace, and unterminated quotes fail closed. Diagnostics contain line/key metadata only, never values.
+
 ## DockerHub Fast Path
 
 Use this path when DockerHub credentials are available locally and the VPS can pull images. It avoids uploading tarballs and avoids builds on the VPS.
@@ -272,6 +314,7 @@ rolling back to per-user author login.
 TAG=<tag>
 TBOT_REMOTE_ROOT="${TBOT_REMOTE_ROOT:-/opt/tbot}"
 ENV_FILE="$TBOT_REMOTE_ROOT/.env"
+python3 "$TBOT_REMOTE_ROOT/current/validate-env.py" "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a            # load .env so the knobs below are populated
 
 : "${TBOT_SERVER_IMAGE:?set TBOT_SERVER_IMAGE in $ENV_FILE}"

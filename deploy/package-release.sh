@@ -7,6 +7,7 @@ TAG=""
 SERVER_IMAGE="local/tbot-server"
 WEB_IMAGE="local/tbot-server-web"
 OUT_ROOT="${PROJECT_DIR}/dist/deploy"
+SERVER_ONLY=0
 
 usage() {
   cat <<'USAGE'
@@ -19,6 +20,7 @@ Options:
   --server-image <name>    Server image repo (default: local/tbot-server).
   --web-image <name>       Web/admin image repo (default: local/tbot-server-web).
   --out-dir <dir>          Release output root (default: esp32-server/dist/deploy).
+  --server-only            Package only the ESP server image and deploy-safety helpers.
   -h, --help               Show help.
 USAGE
 }
@@ -191,6 +193,11 @@ copy_support_artifacts() {
   if [[ -f "${SCRIPT_DIR}/tjbot-prod-sys-params.sql" ]]; then
     cp "${SCRIPT_DIR}/tjbot-prod-sys-params.sql" "${RELEASE_DIR}/tjbot-prod-sys-params.sql"
   fi
+  for helper in backup-db.sh validate-env.py server-only-remote.sh; do
+    [[ -f "${SCRIPT_DIR}/${helper}" ]] || die "missing release helper: ${helper}"
+    cp "${SCRIPT_DIR}/${helper}" "${RELEASE_DIR}/${helper}"
+  done
+  chmod 755 "${RELEASE_DIR}/backup-db.sh" "${RELEASE_DIR}/validate-env.py" "${RELEASE_DIR}/server-only-remote.sh"
 }
 
 while (($#)); do
@@ -215,6 +222,10 @@ while (($#)); do
       OUT_ROOT="$2"
       shift 2
       ;;
+    --server-only)
+      SERVER_ONLY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -229,17 +240,24 @@ done
 need_cmd docker
 need_cmd gzip
 docker image inspect "${SERVER_IMAGE}:${TAG}" >/dev/null 2>&1 || die "missing image: ${SERVER_IMAGE}:${TAG}"
-docker image inspect "${WEB_IMAGE}:${TAG}" >/dev/null 2>&1 || die "missing image: ${WEB_IMAGE}:${TAG}"
+if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+  docker image inspect "${WEB_IMAGE}:${TAG}" >/dev/null 2>&1 || die "missing image: ${WEB_IMAGE}:${TAG}"
+fi
 
 RELEASE_DIR="${OUT_ROOT}/${TAG}"
 mkdir -p "${RELEASE_DIR}"
 
 SERVER_TAR="tbot-server-${TAG}.tar.gz"
 WEB_TAR="tbot-server-web-${TAG}.tar.gz"
+if [[ "${SERVER_ONLY}" -eq 1 ]]; then
+  rm -f "${RELEASE_DIR}/${WEB_TAR}"
+fi
 
 printf 'Saving images to %s\n' "${RELEASE_DIR}"
 docker save "${SERVER_IMAGE}:${TAG}" | gzip -c >"${RELEASE_DIR}/${SERVER_TAR}"
-docker save "${WEB_IMAGE}:${TAG}" | gzip -c >"${RELEASE_DIR}/${WEB_TAR}"
+if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+  docker save "${WEB_IMAGE}:${TAG}" | gzip -c >"${RELEASE_DIR}/${WEB_TAR}"
+fi
 
 if [[ -f "${SCRIPT_DIR}/docker-compose.prod.yml" ]]; then
   cp "${SCRIPT_DIR}/docker-compose.prod.yml" "${RELEASE_DIR}/docker-compose.prod.yml"
@@ -248,35 +266,40 @@ else
 fi
 write_env_example "${RELEASE_DIR}/.env.example"
 copy_support_artifacts
+printf '%s:%s\n' "${SERVER_IMAGE}" "${TAG}" >"${RELEASE_DIR}/server-image.ref"
 
 SERVER_SHA="$(checksum_file "${RELEASE_DIR}/${SERVER_TAR}")"
-WEB_SHA="$(checksum_file "${RELEASE_DIR}/${WEB_TAR}")"
+WEB_SHA=""
+if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+  WEB_SHA="$(checksum_file "${RELEASE_DIR}/${WEB_TAR}")"
+fi
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git_sha)"
 
 cat >"${RELEASE_DIR}/checksums.sha256" <<EOF
 ${SERVER_SHA}  ${SERVER_TAR}
-${WEB_SHA}  ${WEB_TAR}
 EOF
+if [[ "${SERVER_ONLY}" -eq 0 ]]; then
+  printf '%s  %s\n' "${WEB_SHA}" "${WEB_TAR}" >>"${RELEASE_DIR}/checksums.sha256"
+fi
+for release_file in docker-compose.prod.yml backup-db.sh validate-env.py server-only-remote.sh server-image.ref; do
+  printf '%s  %s\n' "$(checksum_file "${RELEASE_DIR}/${release_file}")" "${release_file}" >>"${RELEASE_DIR}/checksums.sha256"
+done
 
 cat >"${RELEASE_DIR}/release.json" <<EOF
 {
   "tag": "$(json_escape "${TAG}")",
+  "mode": "$([[ "${SERVER_ONLY}" -eq 1 ]] && printf 'server-only' || printf 'full-stack')",
   "gitSha": "$(json_escape "${GIT_SHA}")",
   "builtAt": "$(json_escape "${BUILD_TIME}")",
   "images": {
-    "server": "$(json_escape "${SERVER_IMAGE}:${TAG}")",
-    "web": "$(json_escape "${WEB_IMAGE}:${TAG}")"
+    "server": "$(json_escape "${SERVER_IMAGE}:${TAG}")"$([[ "${SERVER_ONLY}" -eq 0 ]] && printf ',\n    "web": "%s"' "$(json_escape "${WEB_IMAGE}:${TAG}")")
   },
   "artifacts": {
     "server": {
       "file": "$(json_escape "${SERVER_TAR}")",
       "sha256": "$(json_escape "${SERVER_SHA}")"
-    },
-    "web": {
-      "file": "$(json_escape "${WEB_TAR}")",
-      "sha256": "$(json_escape "${WEB_SHA}")"
-    }
+    }$([[ "${SERVER_ONLY}" -eq 0 ]] && printf ',\n    "web": {\n      "file": "%s",\n      "sha256": "%s"\n    }' "$(json_escape "${WEB_TAR}")" "$(json_escape "${WEB_SHA}")")
   }
 }
 EOF

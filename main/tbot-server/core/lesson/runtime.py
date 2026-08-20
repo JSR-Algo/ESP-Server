@@ -3320,8 +3320,7 @@ class LessonRuntime:
             return False
         if self._step_completed:
             return False
-        internal_probe = str(source or "") == "internal_dev_endpoint"
-        if not self._child_response_window_open and not internal_probe:
+        if not self._child_response_window_open:
             return False
         step_id = self._step_id
         step_seq = self._step_seq
@@ -3433,6 +3432,27 @@ class LessonRuntime:
             return False
         branch = "silence" if str(reason or "").lower() in {"silence", "no_speech", "timeout"} else "stt_failure"
         return await self._handle_safe_speaking_branch(branch)
+
+    async def on_google_live_receive_timeout(self) -> bool:
+        """Advance a stalled interactive step through its existing no-answer policy."""
+        if (
+            not self._is_active_runtime()
+            or self.state != S_RUNNING
+            or self._step is None
+            or self._step_passive
+            or not self._step_acked
+            or self._step_completed
+            or self.conversation is not None
+        ):
+            return False
+        if self._child_response_timeout_task is not None:
+            return True
+        if self._child_response_window_open:
+            self._start_child_response_timeout()
+            return True
+        self._child_response_window_open = True
+        await self._handle_child_response_timeout(self._step_id)
+        return True
 
     def _uses_safe_speaking(self) -> bool:
         interaction = (self._step or {}).get("interaction")
@@ -4497,9 +4517,13 @@ class LessonRuntime:
             self._steps_completed += 1
         if not last_step:
             await self._emit_step()  # next step in manifest order
-        elif self._renderer_v2_enabled():
-            self._queue_completion_visual_then_stop()
         else:
+            drain = getattr(self.forwarder, "drain", None)
+            if callable(drain):
+                await drain()
+            if self._renderer_v2_enabled():
+                self._queue_completion_visual_then_stop()
+                return
             body: Dict[str, Any] = {"reason": "COMPLETED"}
             if self._renderer_v5_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {
@@ -7343,8 +7367,27 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         busy_check=getattr(conn, "is_realtime_busy", None),
         logger=logger,
     )
+
+    async def _refresh_event_token(refresh_client: Any, _rejected_token: Optional[str]):
+        from config.device_token_client import resolve_device_identity
+
+        refreshed_device_id, refreshed_token = await resolve_device_identity(
+            refresh_client,
+            base_url,
+            device_id,
+            logger=logger,
+            force_refresh=True,
+        )
+        if refreshed_device_id != backend_device_id or not refreshed_token:
+            return None
+        return refreshed_device_id, refreshed_token
+
     forwarder = LessonEventForwarder(
-        device_id=backend_device_id, base_url=base_url, token=token, logger=logger
+        device_id=backend_device_id,
+        base_url=base_url,
+        token=token,
+        token_refresh_fn=_refresh_event_token,
+        logger=logger,
     )
 
     async def _report_preload_status(report: Dict[str, Any]) -> None:

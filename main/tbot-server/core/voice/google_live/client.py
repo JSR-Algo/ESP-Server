@@ -175,6 +175,7 @@ class GoogleLiveClient:
                         pending_message_task,
                     )
                     if message is None:
+                        yield {"type": "receive_timeout"}
                         continue
                     if message is False:
                         for event in self._finish_open_audio_turn("stream_end"):

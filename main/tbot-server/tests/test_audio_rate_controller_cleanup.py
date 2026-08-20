@@ -39,6 +39,28 @@ class AudioRateControllerCleanupTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.done())
         self.assertIsNone(controller.pending_send_task)
 
+    async def test_wait_until_empty_includes_in_flight_send_callback(self):
+        controller = AudioRateController(frame_duration=1)
+        callback_started = asyncio.Event()
+        release_callback = asyncio.Event()
+
+        async def send_audio(_packet):
+            callback_started.set()
+            await release_callback.wait()
+
+        controller.start_sending(send_audio)
+        controller.add_audio(b"final-packet")
+        await callback_started.wait()
+        self.assertEqual(list(controller.queue), [])
+
+        wait_task = asyncio.create_task(controller.wait_until_empty())
+        await asyncio.sleep(0)
+        self.assertFalse(wait_task.done())
+
+        release_callback.set()
+        await wait_task
+        await controller.stop_sending_and_wait()
+
     async def test_normal_websocket_close_drains_queue_and_stops_send_loop(self):
         controller = AudioRateController(frame_duration=1)
 

@@ -864,10 +864,21 @@ class GoogleLiveAudioBridge:
                 "continue_listening": True,
                 "listen_mode": "realtime",
             }
+            drain_id = getattr(
+                self.conn, "google_live_lesson_prompt_drain_id", None
+            )
+            if isinstance(drain_id, str) and drain_id:
+                extra_fields["drainId"] = drain_id
         await send_tts_message(self.conn, state, extra_fields=extra_fields)
         if state == "start":
             self.conn.client_is_speaking = True
         elif state == "stop":
+            if extra_fields.get("drainId"):
+                stop_sent_event = getattr(
+                    self.conn, "google_live_lesson_prompt_stop_sent_event", None
+                )
+                if stop_sent_event is not None:
+                    stop_sent_event.set()
             self.conn.client_is_speaking = False
             self._mark_echo_tail_suppression("tts_stop")
             self.logger.bind(tag="GoogleLive").info(

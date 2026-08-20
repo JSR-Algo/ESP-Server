@@ -16,3 +16,4 @@ class TextMessageType(Enum):
     LESSON_ACK = "lesson_ack"
     LESSON_PROGRESS = "lesson_progress"
     LESSON_ERROR = "lesson_error"
+    TTS_ACK = "tts_ack"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # TeeBot Database Backup Script
 # Usage: ./backup-db.sh [--dry-run]
-# Rollback: gunzip < backup.sql.gz | docker exec -i tbot-esp32-server-db mysql -uroot -p$MYSQL_ROOT_PASSWORD
+# Rollback uses the database container's own credentials; never place a password on the host command line.
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -27,9 +27,13 @@ BACKUP_FILE="$BACKUP_DIR/tbot_backup_$TIMESTAMP.sql.gz"
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would create: $BACKUP_FILE"
-    echo "[DRY RUN] Would run: docker exec $DB_CONTAINER mysqldump --single-transaction --quick -u$DB_USER -p\$MYSQL_ROOT_PASSWORD $DB_NAME | gzip > $BACKUP_FILE"
+    echo "[DRY RUN] Would stream a transaction-safe dump from $DB_CONTAINER to $BACKUP_FILE"
 else
-    docker exec "$DB_CONTAINER" mysqldump --single-transaction --quick -u"${DB_USER}" -p"${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD}}" "$DB_NAME" | gzip > "$BACKUP_FILE"
+    docker exec "$DB_CONTAINER" sh -c '
+        password=${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}
+        [ -n "$password" ] || { echo "database password is unavailable inside container" >&2; exit 64; }
+        exec mysqldump --single-transaction --quick -u"$1" -p"$password" "$2"
+    ' sh "$DB_USER" "$DB_NAME" | gzip > "$BACKUP_FILE"
     echo "Backup created: $BACKUP_FILE"
 fi
 

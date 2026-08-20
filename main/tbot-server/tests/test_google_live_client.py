@@ -1103,7 +1103,7 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.connected)
         self.assertFalse(context.entered)
 
-    async def test_receive_events_ignores_idle_timeouts_and_keeps_waiting(self):
+    async def test_receive_events_surfaces_idle_timeout_and_keeps_waiting(self):
         logger = _DummyLogger()
         session = _TimeoutThenMessageSession(
             timeout_count=1,
@@ -1127,12 +1127,13 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         events = []
         async for event in client.receive_events():
             events.append(event)
-            if events == [{"type": "transcript", "text": "hello", "source": "model"}]:
+            if event == {"type": "transcript", "text": "hello", "source": "model"}:
                 break
 
+        self.assertGreaterEqual(events.count({"type": "receive_timeout"}), 1)
         self.assertEqual(
-            events,
-            [{"type": "transcript", "text": "hello", "source": "model"}],
+            events[-1],
+            {"type": "transcript", "text": "hello", "source": "model"},
         )
         self.assertTrue(
             any(

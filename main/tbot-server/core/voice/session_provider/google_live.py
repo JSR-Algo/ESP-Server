@@ -1956,6 +1956,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         playback_tail = self._read_lesson_guard_float(
             config, "lesson_prompt_playback_tail_sec", 0.5
         )
+        device_drain_ack_timeout = self._read_lesson_guard_float(
+            config, "lesson_prompt_device_drain_ack_timeout_sec", 20.0
+        )
+        device_drain_ack_timeout = min(
+            30.0, max(0.01, device_drain_ack_timeout)
+        )
 
         remaining = max(0.0, output_timeout)
         wait_started = time.monotonic()
@@ -2012,6 +2018,55 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await asyncio.sleep(sleep_for)
             remaining -= sleep_for
 
+        drained_event = getattr(
+            self.conn, "google_live_lesson_prompt_drained_event", None
+        )
+        if (
+            drained_event is not None
+            and getattr(
+                self.conn, "google_live_lesson_prompt_audio_started", False
+            )
+        ):
+            stop_sent_event = getattr(
+                self.conn, "google_live_lesson_prompt_stop_sent_event", None
+            )
+            if stop_sent_event is not None:
+                try:
+                    await asyncio.wait_for(
+                        stop_sent_event.wait(),
+                        timeout=max(0.01, output_timeout),
+                    )
+                except asyncio.TimeoutError:
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        with_lesson_log_context(
+                            "Google Live lesson_prompt_stop_not_sent timeout_sec={:.1f}",
+                            self.conn,
+                        ),
+                        output_timeout,
+                    )
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = None
+                    self.conn.google_live_lesson_prompt_drained_event = None
+                    return False
+            try:
+                await asyncio.wait_for(
+                    drained_event.wait(),
+                    timeout=device_drain_ack_timeout,
+                )
+                return True
+            except asyncio.TimeoutError:
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_device_drain_timeout timeout_sec={:.1f}",
+                        self.conn,
+                    ),
+                    device_drain_ack_timeout,
+                )
+                self.conn.google_live_lesson_prompt_drain_id = None
+                self.conn.google_live_lesson_prompt_stop_sent_event = None
+                self.conn.google_live_lesson_prompt_drained_event = None
+                return False
+
         rate_controller = getattr(self.conn, "audio_rate_controller", None)
         wait_until_empty = getattr(rate_controller, "wait_until_empty", None)
         queue_obj = getattr(rate_controller, "queue", None)
@@ -2040,6 +2095,34 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 playback_timeout,
                 queue_len,
             )
+        return True
+
+    def accept_lesson_audio_drain_ack(self, message):
+        if not isinstance(message, Mapping):
+            return False
+        if message.get("type") != "tts_ack" or message.get("state") != "stop":
+            return False
+        drain_id = message.get("drainId")
+        expected = getattr(self.conn, "google_live_lesson_prompt_drain_id", None)
+        drained_event = getattr(
+            self.conn, "google_live_lesson_prompt_drained_event", None
+        )
+        if (
+            not isinstance(drain_id, str)
+            or not drain_id
+            or drain_id != expected
+            or drained_event is None
+            or drained_event.is_set()
+        ):
+            return False
+        drained_event.set()
+        self.conn.logger.bind(tag="GoogleLive").info(
+            with_lesson_log_context(
+                "Google Live lesson_prompt_device_drain_ack drain_id={}",
+                self.conn,
+            ),
+            drain_id,
+        )
         return True
 
     @staticmethod
@@ -2389,6 +2472,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if allow_lesson_output:
                 self.conn.google_live_lesson_prompt_output_allowed = True
                 self.conn.google_live_lesson_prompt_output_inferred_idle = False
+                self.conn.google_live_lesson_prompt_audio_started = False
+                features = getattr(self.conn, "features", None) or {}
+                if bool(features.get("lessonAudioDrainAck")):
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
+                    self.conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+                else:
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = None
+                    self.conn.google_live_lesson_prompt_drained_event = None
                 self._lesson_prompt_output_last_activity_at = None
                 self._last_lesson_prompt_text = str(text or "").strip()
                 self._last_lesson_prompt_len = len(self._last_lesson_prompt_text)
@@ -2626,6 +2719,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     return
                 if (
                     isinstance(event, dict)
+                    and event.get("type") == "receive_timeout"
+                ):
+                    await self._handle_receive_timeout_event()
+                    continue
+                if (
+                    isinstance(event, dict)
                     and event.get("type") == "session_expiring"
                 ):
                     self.conn.logger.bind(tag="GoogleLive").warning(
@@ -2658,6 +2757,33 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._handle_runtime_failure(
                     RuntimeError("Google Live receive loop ended")
                 )
+
+    async def _handle_receive_timeout_event(self):
+        if normalize_session_mode(
+            getattr(self.conn, "session_mode", SessionMode.DORMANT)
+        ) != SessionMode.LESSON:
+            return False
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        if runtime is None or getattr(runtime, "state", None) != "RUNNING":
+            return False
+        if self._lesson_conversation_tool_path_active():
+            return bool(await self._handle_lesson_live_interruption("timeout"))
+        handler = getattr(runtime, "on_google_live_receive_timeout", None)
+        if not callable(handler):
+            return False
+        try:
+            return bool(await handler())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                with_lesson_log_context(
+                    "Google Live lesson_receive_timeout_policy_failed error_class={}",
+                    self.conn,
+                ),
+                type(exc).__name__,
+            )
+            return False
 
     def _schedule_proactive_reconnect(self, event):
         if self._closing or self._reconnecting or self._fallback_activating:
@@ -4261,6 +4387,27 @@ class GoogleLiveProvider(VoiceSessionProvider):
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type is not None:
             self._touch_live_activity()
+        if (
+            event_type == "audio_start"
+            and getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
+        ):
+            self.conn.google_live_lesson_prompt_audio_started = True
+            if bool((getattr(self.conn, "features", None) or {}).get("lessonAudioDrainAck")):
+                generation = int(
+                    getattr(
+                        self.conn,
+                        "google_live_lesson_prompt_drain_generation",
+                        0,
+                    )
+                    or 0
+                ) + 1
+                self.conn.google_live_lesson_prompt_drain_generation = generation
+                self.conn.google_live_lesson_prompt_drain_id = f"lesson-{generation}"
+            drained_event = getattr(
+                self.conn, "google_live_lesson_prompt_drained_event", None
+            )
+            if drained_event is not None:
+                drained_event.clear()
         if (
             getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
             and self._is_model_output_event(event_type, event)

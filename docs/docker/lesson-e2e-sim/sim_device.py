@@ -172,6 +172,7 @@ def render_step(serial: SerialLog, frame: dict) -> str:
     scene = (frame.get("body") or {}).get("scene") or {}
     prefix = f"assignmentId={assignment} sessionId={session} stepId={step}"
 
+    serial.write("Lesson", f"{prefix} step_started")
     poster = (((scene.get("backgroundScene") or {}).get("poster")) or {}).get("src", "")
     serial.write("Lesson", f"{prefix} lesson_step poster fetched+drawn from URL url={poster}")
 
@@ -311,7 +312,12 @@ async def run(args: argparse.Namespace) -> int:
                     "channels": 1,
                     "frame_duration": 60,
                 },
-                "features": {"lesson": True, "renderer": RENDERER, "mcp": False},
+                "features": {
+                    "lesson": True,
+                    "renderer": RENDERER,
+                    "mcp": False,
+                    "lessonAudioDrainAck": True,
+                },
             }
             await client.send(json.dumps(hello))
 
@@ -349,7 +355,7 @@ async def run(args: argparse.Namespace) -> int:
             # which is why an audible acknowledgement was unprovable no matter what the
             # server did. These counters are the ONLY basis for the playback lines
             # below: with no audio received, nothing positive is written.
-            audio = {"chunks": 0, "bytes": 0, "speaking": False}
+            audio = {"chunks": 0, "bytes": 0, "speaking": False, "step_id": None}
             spoke_for_start = False
             prompt_done: dict[str, asyncio.Event] = {}
             answer_tasks: list[asyncio.Task] = []
@@ -364,6 +370,8 @@ async def run(args: argparse.Namespace) -> int:
                     # Count unconditionally. The Live path does not reliably bracket a
                     # turn with an explicit tts:start, so gating the counters on one
                     # would silently discard the very audio being measured.
+                    if audio["chunks"] == 0 and audio.get("step_id") is None:
+                        audio["step_id"] = current_step_id
                     audio["chunks"] += 1
                     audio["bytes"] += len(raw)
                     continue
@@ -377,13 +385,15 @@ async def run(args: argparse.Namespace) -> int:
                     state = frame.get("state")
                     if state == "start":
                         audio.update(chunks=0, bytes=0, speaking=True)
+                        audio["step_id"] = current_step_id
                     elif state == "stop":
                         audio["speaking"] = False
                         played = audio["chunks"] > 0 and audio["bytes"] > 0
                         # The first speech that completes after the child's utterance and
                         # before any lesson frame IS the start acknowledgement -- the robot
                         # answering "bắt đầu bài học" out loud.
-                        context = f"stepId={current_step_id or ''}"
+                        audio_step_id = audio.get("step_id")
+                        context = f"stepId={audio_step_id or ''}"
                         # Only a turn that actually carried audio is reported. A
                         # zero-byte stop is not a silent robot -- the Live path sends
                         # one to CANCEL a turn (barge-in, and the deliberate
@@ -409,10 +419,21 @@ async def run(args: argparse.Namespace) -> int:
                                 f"chunks={audio['chunks']} bytes={audio['bytes']}"
                             )
                             # Release the child waiting on this step's question.
-                            waiter = prompt_done.get(current_step_id or "")
+                            waiter = prompt_done.get(audio_step_id or "")
                             if waiter is not None:
                                 waiter.set()
-                        audio.update(chunks=0, bytes=0)
+                        drain_id = frame.get("drainId")
+                        if isinstance(drain_id, str) and drain_id:
+                            await client.send(
+                                json.dumps(
+                                    {
+                                        "type": "tts_ack",
+                                        "state": "stop",
+                                        "drainId": drain_id,
+                                    }
+                                )
+                            )
+                        audio.update(chunks=0, bytes=0, step_id=None)
                     continue
 
                 if ftype not in {
@@ -449,9 +470,10 @@ async def run(args: argparse.Namespace) -> int:
 
                 seq += 1
                 ack = device_ack(frame, seq)
-                await client.send(json.dumps(ack))
                 # The server logs only a truncated '{"type":"lesson_ack"}', so the device
                 # serial is the sole record of which frame was acked and in what state.
+                # Stamp this at the send boundary: awaiting websocket.send() can yield
+                # long enough for the server to consume the ack and log its transition.
                 robot_state = (
                     ((frame.get("body") or {}).get("scene") or {}).get("robotOverlay") or {}
                 ).get("robotState") or "talking"
@@ -461,6 +483,7 @@ async def run(args: argparse.Namespace) -> int:
                     f"acks={frame.get('sequence')} seq={seq} rendered=true degraded=false "
                     f"robotState={robot_state}"
                 )
+                await client.send(json.dumps(ack))
 
                 # An interactive step blocks until the child answers. The runtime opens the
                 # response window when it processes our render ack, so the utterance has to

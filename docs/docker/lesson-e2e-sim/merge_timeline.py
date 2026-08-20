@@ -71,6 +71,25 @@ def _wire_sequence(line: str):
     return None
 
 
+def _same_millisecond_causal_phase(line: str) -> int:
+    """Order the drain handshake when wall clocks collapse it to one millisecond."""
+    if "emit lesson_" in line:
+        return 5
+    if "tts_stop_sent" in line:
+        return 10
+    if "serial RX lesson_" in line or "Audio playback complete" in line:
+        return 20
+    if "serial TX lesson_ack" in line:
+        return 30
+    if "Received lesson_ack message" in line or "Received tts_ack message" in line:
+        return 40
+    if "lesson_prompt_device_drain_ack" in line:
+        return 50
+    if "LessonRuntime event lesson_" in line or "lesson_child_response_window_open" in line:
+        return 60
+    return 55
+
+
 def read_stamped(path: Path, strip_prefix: bool) -> list[tuple[str, int, str]]:
     """Return (timestamp, ordinal, line). Ordinal keeps same-second lines stable."""
     out: list[tuple[str, int, str]] = []
@@ -110,7 +129,10 @@ def main(argv: list[str] | None = None) -> int:
     # monotonic `sequence`, the server logs it on emit and the device echoes it as
     # seq=/acks=. Lines naming no sequence inherit the last one seen, so setup lines
     # stay ahead of frame 1 and per-step render lines stay with their step. Within one
-    # sequence the server comes first: it emits, then the device receives and acks.
+    # sequence the server normally comes first: it emits, then the device receives
+    # and acks. The drain handshake is the exception when both clocks round the
+    # causal chain into one millisecond; its explicit phase preserves stop ->
+    # playback -> ack receipt -> ack acceptance -> child-window ordering.
     def keyed(rows, source):
         out = []
         carried = -1
@@ -118,15 +140,24 @@ def main(argv: list[str] | None = None) -> int:
             sequence = _wire_sequence(line)
             if sequence is not None:
                 carried = sequence
-            out.append((ts, carried, source, index, line))
+            out.append(
+                (
+                    ts,
+                    carried,
+                    _same_millisecond_causal_phase(line),
+                    source,
+                    index,
+                    line,
+                )
+            )
         return out
 
     merged = sorted(
         keyed(server, 0) + keyed(device, 1),
-        key=lambda row: (row[0], row[1], row[2], row[3]),
+        key=lambda row: (row[0], row[1], row[2], row[3], row[4]),
     )
 
-    Path(args.out).write_text("\n".join(row[4] for row in merged) + "\n", encoding="utf-8")
+    Path(args.out).write_text("\n".join(row[5] for row in merged) + "\n", encoding="utf-8")
     print(f"merged {len(server)} server + {len(device)} device lines -> {args.out}")
     return 0
 

@@ -140,6 +140,24 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["url"], "https://backend/internal/devices/mint-token")
 
+    async def test_force_refresh_bypasses_still_fresh_cached_token(self):
+        client = _Client(_Response({"deviceUuid": "device-1", "token": "new-jwt"}))
+        device_token_client._cache.clear()
+        device_token_client._cache["mac"] = ("device-1", "cached-jwt", 1000.0)
+
+        with patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}), patch.object(
+            device_token_client.time, "monotonic", return_value=1001.0
+        ):
+            refreshed = await device_token_client.resolve_device_identity(
+                client,
+                "https://backend",
+                "mac",
+                force_refresh=True,
+            )
+
+        self.assertEqual(refreshed, ("device-1", "new-jwt"))
+        self.assertEqual(len(client.calls), 1)
+
     async def test_refreshes_cached_token_after_whole_lesson_validity_margin(self):
         client = _Client(_Response({"deviceUuid": "new-device", "token": "new-jwt"}))
         device_token_client._cache.clear()
@@ -194,6 +212,22 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
             device_token_client.time, "monotonic", return_value=1000.0 + device_token_client._CACHE_TTL_S + 0.001
         ):
             self.assertIsNone(device_token_client.cached_device_uuid("mac"))
+
+    async def test_cached_device_uuid_expires_legacy_wall_clock_entries(self):
+        device_token_client._cache.clear()
+        now = 1_800_000_000.0
+        device_token_client._cache["fresh"] = ("fresh-device", "jwt", now - 1)
+        device_token_client._cache["stale"] = (
+            "stale-device",
+            "jwt",
+            now - device_token_client._CACHE_TTL_S - 1,
+        )
+
+        with patch.object(device_token_client.time, "time", return_value=now), patch.object(
+            device_token_client.time, "monotonic", return_value=50_000.0
+        ):
+            self.assertEqual(device_token_client.cached_device_uuid("fresh"), "fresh-device")
+            self.assertIsNone(device_token_client.cached_device_uuid("stale"))
 
     async def test_missing_fields_and_post_failures_return_none_and_log_warning(self):
         logger = _Logger()

@@ -185,6 +185,7 @@ google_live:
   lesson_child_response_open_delay_sec: 0.1
   lesson_child_response_fast_reopen_sec: 0.8
   lesson_prompt_playback_tail_sec: 0.5
+  lesson_prompt_device_drain_ack_timeout_sec: 20.0
   # Soft speech still starts a turn; ambient under ~650 stays out.
   input_speech_rms_threshold: 650
   lesson_child_input_speech_rms_threshold: 650

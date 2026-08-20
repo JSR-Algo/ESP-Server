@@ -682,6 +682,9 @@ class _FakeForwarder:
     async def aclose(self):
         self.closed = True
 
+    async def drain(self):
+        return None
+
 
 class _FailingChildResponseWindowProvider:
     def __init__(self):
@@ -5462,6 +5465,35 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(completed)
         self.assertEqual(completed[0]["events"][0]["summary"]["stepsCompleted"], 1)
 
+    async def test_final_progress_is_drained_before_lesson_stop(self):
+        events = []
+
+        class _OrderedSocket(_FakeWebSocket):
+            async def send(self, payload):
+                frame = json.loads(payload)
+                if frame.get("type") == "lesson_stop":
+                    events.append("lesson_stop")
+                await super().send(payload)
+
+        class _OrderedForwarder(_FakeForwarder):
+            async def drain(self):
+                events.append("drain")
+
+        conn = _FakeConn()
+        conn.websocket = _OrderedSocket()
+        rt = self._runtime(
+            conn=conn,
+            manifest=_build_steps_manifest([("s4", "greeting")]),
+            forwarder=_OrderedForwarder(),
+        )
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        self.assertEqual(events, ["drain", "lesson_stop"])
+
     async def test_passive_dwell_reports_completion_once_after_dwell(self):
         conn = _FakeConn()
         forwarder = _FakeForwarder()
@@ -7938,9 +7970,15 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         conn.config["lesson"]["rollout_device_allowlist"] = [conn.device_id]
         assignment_calls = []
 
-        async def _resolve_device_identity(client, base_url, device_id, *, logger=None):
+        identity_calls = []
+
+        async def _resolve_device_identity(
+            client, base_url, device_id, *, logger=None, force_refresh=False
+        ):
             self.assertEqual(device_id, "AA:BB:CC:DD:EE:FF")
-            return "backend-device-uuid", "device-token"
+            identity_calls.append((client, force_refresh))
+            token = "refreshed-device-token" if force_refresh else "device-token"
+            return "backend-device-uuid", token
 
         async def _get_child_name(client, base_url, device_id, *, token=None):
             return None
@@ -7975,6 +8013,7 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
         mac.get_lesson_manifest = _get_manifest
         try:
             result = await maybe_start_lesson_on_connect(conn)
+            refreshed = await result.forwarder._token_refresh_fn(object(), "device-token")
         finally:
             (
                 dtc.resolve_device_identity,
@@ -7985,6 +8024,8 @@ class LessonPullAuthFailureSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(assignment_calls, [("backend-device-uuid", "device-token")])
+        self.assertEqual(refreshed, ("backend-device-uuid", "refreshed-device-token"))
+        self.assertEqual([force for _client, force in identity_calls], [False, True])
         self.assertEqual(conn.lesson_start_status["code"], "STARTED")
 
     async def test_identity_and_manifest_logs_use_authoritative_normalized_fields(self):

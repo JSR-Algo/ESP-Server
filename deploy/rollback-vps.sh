@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST=""
 USER_NAME=""
 TAG=""
@@ -10,6 +11,7 @@ ENV_FILE=""
 REMOTE_ROOT="/opt/tbot"
 REMOTE_ROOT_SET=0
 DRY_RUN=0
+SERVER_ONLY=0
 
 usage() {
   cat <<'USAGE'
@@ -25,6 +27,7 @@ Options:
   --key <file>             SSH private key.
   --env-file <file>        Read TBOT_REMOTE_ROOT from the same env file compose uses.
   --remote-root <dir>      Remote app root (default: /opt/tbot).
+  --server-only            Validate rollback env and recreate only the ESP server.
   --dry-run                Print actions only.
   -h, --help               Show help.
 
@@ -151,6 +154,10 @@ while (($#)); do
       REMOTE_ROOT_SET=1
       shift 2
       ;;
+    --server-only)
+      SERVER_ONLY=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -171,6 +178,11 @@ done
 [[ -z "${KEY_FILE}" || -r "${KEY_FILE}" ]] || die "cannot read key file: ${KEY_FILE}"
 [[ -z "${ENV_FILE}" || -r "${ENV_FILE}" ]] || die "cannot read env file: ${ENV_FILE}"
 need_cmd ssh
+need_cmd python3
+
+if [[ -n "${ENV_FILE}" ]]; then
+  python3 "${SCRIPT_DIR}/validate-env.py" "${ENV_FILE}"
+fi
 
 apply_env_remote_root
 
@@ -182,6 +194,12 @@ REMOTE_RELEASE="${REMOTE_ROOT}/releases/${TAG}"
 REMOTE_Q="$(remote_quote "${REMOTE_ROOT}")"
 REMOTE_RELEASE_Q="$(remote_quote "${REMOTE_RELEASE}")"
 
-run_ssh "test -d ${REMOTE_RELEASE_Q} && test -f ${REMOTE_RELEASE_Q}/docker-compose.prod.yml && if [ -e ${REMOTE_Q}/current ] && [ ! -L ${REMOTE_Q}/current ]; then echo 'error: refusing to replace non-symlink current directory; migrate it manually' >&2; exit 1; fi && env_backup=\$(cat ${REMOTE_Q}/current/env-backup-path 2>/dev/null || true) && case \"\$env_backup\" in ${REMOTE_Q}/.env.rollback-*/*|'') echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; ${REMOTE_Q}/.env.rollback-*) ;; *) echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; esac && if [ ! -f \"\$env_backup\" ] || [ -L \"\$env_backup\" ]; then echo 'error: invalid or unavailable env rollback backup' >&2; exit 1; fi && install -m 600 \"\$env_backup\" ${REMOTE_Q}/.env && switch_tmp=${REMOTE_Q}/.current.\$\$.tmp && rm -f \"\$switch_tmp\" && ln -s ${REMOTE_RELEASE_Q} \"\$switch_tmp\" && mv -Tf \"\$switch_tmp\" ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d; fi"
+# Python's os.replace is the portable macOS/Linux equivalent of GNU `mv -Tf` here.
+if [[ "${SERVER_ONLY}" -eq 1 ]]; then
+  printf '[plan] rollback recreates only tbot-esp32-server with up -d --no-deps tbot-esp32-server\n'
+  run_ssh "test -d ${REMOTE_RELEASE_Q} && test -f ${REMOTE_RELEASE_Q}/docker-compose.prod.yml && test -f ${REMOTE_RELEASE_Q}/validate-env.py && test -f ${REMOTE_RELEASE_Q}/server-image.ref && if [ -e ${REMOTE_Q}/current ] && [ ! -L ${REMOTE_Q}/current ]; then echo 'error: refusing to replace non-symlink current directory; migrate it manually' >&2; exit 1; fi && env_backup=\$(cat ${REMOTE_Q}/current/env-backup-path 2>/dev/null || true) && case \"\$env_backup\" in ${REMOTE_Q}/.env.rollback-*/*|'') echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; ${REMOTE_Q}/.env.rollback-*) ;; *) echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; esac && if [ ! -f \"\$env_backup\" ] || [ -L \"\$env_backup\" ]; then echo 'error: invalid or unavailable env rollback backup' >&2; exit 1; fi && target_ref=\$(tr -d '\\r\\n' < ${REMOTE_RELEASE_Q}/server-image.ref) && python3 ${REMOTE_RELEASE_Q}/validate-env.py --expect TBOT_SERVER_IMAGE \"\$target_ref\" \"\$env_backup\" && db_before=\$(docker inspect --format '{{.Id}}' tbot-esp32-server-db) && web_before=\$(docker inspect --format '{{.Id}}' tbot-esp32-server-web) && install -m 600 \"\$env_backup\" ${REMOTE_Q}/.env && switch_tmp=${REMOTE_Q}/.current.\$\$.tmp && rm -f \"\$switch_tmp\" && ln -s ${REMOTE_RELEASE_Q} \"\$switch_tmp\" && python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \"\$switch_tmp\" ${REMOTE_Q}/current && docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d --no-deps tbot-esp32-server && test \"\$(docker inspect --format '{{.Id}}' tbot-esp32-server-db)\" = \"\$db_before\" && test \"\$(docker inspect --format '{{.Id}}' tbot-esp32-server-web)\" = \"\$web_before\""
+else
+  run_ssh "test -d ${REMOTE_RELEASE_Q} && test -f ${REMOTE_RELEASE_Q}/docker-compose.prod.yml && if [ -e ${REMOTE_Q}/current ] && [ ! -L ${REMOTE_Q}/current ]; then echo 'error: refusing to replace non-symlink current directory; migrate it manually' >&2; exit 1; fi && env_backup=\$(cat ${REMOTE_Q}/current/env-backup-path 2>/dev/null || true) && case \"\$env_backup\" in ${REMOTE_Q}/.env.rollback-*/*|'') echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; ${REMOTE_Q}/.env.rollback-*) ;; *) echo 'error: invalid or unavailable env rollback backup' >&2; exit 1 ;; esac && if [ ! -f \"\$env_backup\" ] || [ -L \"\$env_backup\" ]; then echo 'error: invalid or unavailable env rollback backup' >&2; exit 1; fi && install -m 600 \"\$env_backup\" ${REMOTE_Q}/.env && switch_tmp=${REMOTE_Q}/.current.\$\$.tmp && rm -f \"\$switch_tmp\" && ln -s ${REMOTE_RELEASE_Q} \"\$switch_tmp\" && python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \"\$switch_tmp\" ${REMOTE_Q}/current && if docker compose version >/dev/null 2>&1; then docker compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d; else docker-compose --env-file ${REMOTE_Q}/.env -f ${REMOTE_Q}/current/docker-compose.prod.yml up -d; fi"
+fi
 
 printf 'Rolled back %s to release %s\n' "${HOST}" "${TAG}"
