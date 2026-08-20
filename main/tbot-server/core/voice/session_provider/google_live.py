@@ -2043,7 +2043,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self.conn.google_live_lesson_prompt_drained_event = None
                     return False
             try:
-                drain_ack_timeout = max(0.01, playback_timeout + output_timeout)
+                drain_ack_timeout = max(
+                    0.01, playback_timeout + output_timeout + playback_tail
+                )
                 await asyncio.wait_for(
                     drained_event.wait(),
                     timeout=drain_ack_timeout,

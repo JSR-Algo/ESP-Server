@@ -1303,6 +1303,34 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
 
+    async def test_device_ack_budget_includes_bounded_playback_tail(self):
+        conn = _Conn()
+        conn.google_live_lesson_prompt_output_allowed = False
+        conn.google_live_lesson_prompt_audio_started = True
+        conn.google_live_lesson_prompt_drain_id = "drain-13"
+        conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
+        conn.google_live_lesson_prompt_stop_sent_event.set()
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        provider = self.make_provider(conn)
+
+        async def delayed_ack():
+            await asyncio.sleep(0.07)
+            provider.accept_lesson_audio_drain_ack(
+                {"type": "tts_ack", "state": "stop", "drainId": "drain-13"}
+            )
+
+        ack_task = asyncio.create_task(delayed_ack())
+        result = await provider._wait_for_lesson_prompt_output_idle(
+            {
+                "lesson_prompt_output_guard_timeout_sec": 0.03,
+                "lesson_prompt_playback_guard_timeout_sec": 0.03,
+                "lesson_prompt_playback_tail_sec": 0.03,
+            }
+        )
+        await ack_task
+
+        self.assertTrue(result)
+
     async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
         conn = _Conn()
         conn.session_mode = SessionMode.LESSON
