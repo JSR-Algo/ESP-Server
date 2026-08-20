@@ -80,6 +80,7 @@ GOOGLE_LIVE_DEFAULTS = {
     # Passive steps use adaptive caps (~spoken length); 30s hung after Live interrupts.
     "lesson_prompt_output_guard_timeout_sec": 10.0,
     "lesson_prompt_playback_guard_timeout_sec": 6.0,
+    "lesson_prompt_device_drain_ack_timeout_sec": 20.0,
     # After model audio, advance passive steps once speech has settled.
     "lesson_prompt_inferred_idle_sec": 1.6,
     "interrupt_forced_flush_delay_sec": 0.8,

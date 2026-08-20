@@ -112,6 +112,10 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(merged["google_live"]["waiting_model_retry_prompt_after_sec"], 12.0)
         self.assertEqual(merged["google_live"]["lesson_prompt_output_guard_timeout_sec"], 10.0)
         self.assertEqual(merged["google_live"]["lesson_prompt_playback_guard_timeout_sec"], 6.0)
+        self.assertEqual(
+            merged["google_live"]["lesson_prompt_device_drain_ack_timeout_sec"],
+            20.0,
+        )
         self.assertEqual(merged["google_live"]["interrupt_rms_threshold"], 5000)
         self.assertEqual(
             merged["google_live"]["interrupt_min_input_duration_sec"],
@@ -198,6 +202,10 @@ class ConfigVoiceModeMergeTest(unittest.TestCase):
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["input_gain"], 3.5)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["output_gain"], 1.35)
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["waiting_model_timeout_sec"], 5.0)
+        self.assertEqual(
+            GOOGLE_LIVE_DEFAULTS["lesson_prompt_device_drain_ack_timeout_sec"],
+            20.0,
+        )
         self.assertEqual(GOOGLE_LIVE_DEFAULTS["interruption_min_output_age_sec"], 0.7)
         self.assertEqual(
             GOOGLE_LIVE_DEFAULTS["barge_in_transcript_min_output_age_sec"],
