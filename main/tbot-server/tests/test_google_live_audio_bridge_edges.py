@@ -312,12 +312,14 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.sentence_id = "sentence-1"
         conn.audio_flow_control = {}
         conn.google_live_lesson_prompt_drain_id = "drain-7"
+        conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
         conn.google_live_lesson_prompt_drained_event = asyncio.Event()
         bridge = self.make_bridge(conn=conn)
 
         await bridge._send_tts_message("stop")
 
         self.assertFalse(conn.google_live_lesson_prompt_drained_event.is_set())
+        self.assertTrue(conn.google_live_lesson_prompt_stop_sent_event.is_set())
         payload = json.loads(conn.websocket.sent[-1])
         self.assertEqual(payload["state"], "stop")
         self.assertEqual(payload["drainId"], "drain-7")

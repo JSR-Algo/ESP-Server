@@ -2021,6 +2021,27 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn, "google_live_lesson_prompt_audio_started", False
             )
         ):
+            stop_sent_event = getattr(
+                self.conn, "google_live_lesson_prompt_stop_sent_event", None
+            )
+            if stop_sent_event is not None:
+                try:
+                    await asyncio.wait_for(
+                        stop_sent_event.wait(),
+                        timeout=max(0.01, output_timeout),
+                    )
+                except asyncio.TimeoutError:
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        with_lesson_log_context(
+                            "Google Live lesson_prompt_stop_not_sent timeout_sec={:.1f}",
+                            self.conn,
+                        ),
+                        output_timeout,
+                    )
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = None
+                    self.conn.google_live_lesson_prompt_drained_event = None
+                    return False
             try:
                 await asyncio.wait_for(
                     drained_event.wait(),
@@ -2036,6 +2057,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     playback_timeout,
                 )
                 self.conn.google_live_lesson_prompt_drain_id = None
+                self.conn.google_live_lesson_prompt_stop_sent_event = None
                 self.conn.google_live_lesson_prompt_drained_event = None
                 return False
 
@@ -2448,9 +2470,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 features = getattr(self.conn, "features", None) or {}
                 if bool(features.get("lessonAudioDrainAck")):
                     self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
                     self.conn.google_live_lesson_prompt_drained_event = asyncio.Event()
                 else:
                     self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_stop_sent_event = None
                     self.conn.google_live_lesson_prompt_drained_event = None
                 self._lesson_prompt_output_last_activity_at = None
                 self._last_lesson_prompt_text = str(text or "").strip()

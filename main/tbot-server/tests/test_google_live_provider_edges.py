@@ -1221,6 +1221,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.google_live_lesson_prompt_output_allowed = False
         conn.google_live_lesson_prompt_audio_started = True
         conn.google_live_lesson_prompt_drain_id = "drain-10"
+        conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
+        conn.google_live_lesson_prompt_stop_sent_event.set()
         conn.google_live_lesson_prompt_drained_event = asyncio.Event()
         conn.audio_rate_controller = SimpleNamespace(
             queue=[],
@@ -1243,6 +1245,35 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 {"type": "tts_ack", "state": "stop", "drainId": "drain-10"}
             )
         )
+
+    async def test_device_drain_timeout_starts_after_tagged_stop_is_sent(self):
+        conn = _Conn()
+        conn.google_live_lesson_prompt_output_allowed = False
+        conn.google_live_lesson_prompt_audio_started = True
+        conn.google_live_lesson_prompt_drain_id = "drain-11"
+        conn.google_live_lesson_prompt_stop_sent_event = asyncio.Event()
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        provider = self.make_provider(conn)
+
+        wait_task = asyncio.create_task(
+            provider._wait_for_lesson_prompt_output_idle(
+                {
+                    "lesson_prompt_playback_guard_timeout_sec": 0.05,
+                    "lesson_prompt_playback_tail_sec": 0,
+                }
+            )
+        )
+        await asyncio.sleep(0.06)
+        self.assertFalse(wait_task.done())
+
+        conn.google_live_lesson_prompt_stop_sent_event.set()
+        await asyncio.sleep(0)
+        self.assertTrue(
+            provider.accept_lesson_audio_drain_ack(
+                {"type": "tts_ack", "state": "stop", "drainId": "drain-11"}
+            )
+        )
+        self.assertTrue(await wait_task)
 
     async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
         conn = _Conn()
