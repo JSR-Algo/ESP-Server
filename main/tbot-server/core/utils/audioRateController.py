@@ -83,7 +83,7 @@ class AudioRateController:
 
     async def wait_until_empty(self):
         self._ensure_loop_primitives()
-        if not self.queue:
+        if not self.queue and self.queue_empty_event.is_set():
             return
         self._active_empty_waiters += 1
         try:
