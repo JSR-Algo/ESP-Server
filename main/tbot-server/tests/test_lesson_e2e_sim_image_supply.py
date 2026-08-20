@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 UP_SCRIPT = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "up.sh"
 SIM_DEVICE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "sim_device.py"
+MERGE_TIMELINE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "merge_timeline.py"
 
 
 def _run_up_with_fake_docker(
@@ -127,3 +128,46 @@ def test_simulator_advertises_and_emits_device_drain_ack_after_playback_evidence
     playback = script.index("serial Audio playback complete {context}")
     ack = script.index('"type": "tts_ack"')
     assert playback < ack
+
+
+def test_timeline_merge_preserves_same_millisecond_drain_ack_causality(tmp_path: Path):
+    server = tmp_path / "server.log"
+    device = tmp_path / "device.log"
+    merged = tmp_path / "merged.log"
+    server.write_text(
+        "260821 04:26:08.458[GoogleLive]-INFO-tts_stop_sent\n"
+        "260821 04:26:08.458[core.handle]-INFO-Received tts_ack message\n"
+        "260821 04:26:08.458[GoogleLive]-INFO-Google Live lesson_prompt_device_drain_ack drain_id=lesson-4\n"
+        "260821 04:26:08.458[GoogleLive]-INFO-Google Live lesson_child_response_window_open\n"
+        "260821 04:26:08.458[LessonRuntime]-INFO-lesson_progress step_completed stepId=s4\n",
+        encoding="utf-8",
+    )
+    device.write_text(
+        "2026-08-21 04:26:08.458 serial Audio playback complete stepId=s4 chunks=58 bytes=9092\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            "python3",
+            str(MERGE_TIMELINE),
+            "--server-log",
+            str(server),
+            "--device-timeline",
+            str(device),
+            "--out",
+            str(merged),
+        ],
+        check=True,
+    )
+
+    lines = merged.read_text(encoding="utf-8").splitlines()
+    stop = next(i for i, line in enumerate(lines) if "tts_stop_sent" in line)
+    playback = next(i for i, line in enumerate(lines) if "Audio playback complete" in line)
+    received = next(i for i, line in enumerate(lines) if "Received tts_ack" in line)
+    accepted = next(i for i, line in enumerate(lines) if "device_drain_ack" in line)
+    window = next(i for i, line in enumerate(lines) if "response_window_open" in line)
+    progress = next(i for i, line in enumerate(lines) if "step_completed" in line)
+
+    assert stop < playback < received < accepted < window
+    assert playback < progress
