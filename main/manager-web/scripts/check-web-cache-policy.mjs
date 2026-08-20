@@ -37,8 +37,8 @@ function expectPublicLatestCmsUpstreams() {
     throw new Error(`${file} must define exactly two public latest-index locations`);
   }
   for (const block of blocks) {
-    if (!block.includes('proxy_pass http://127.0.0.1:3003;')) {
-      throw new Error(`${file} public latest-index locations must proxy to the local CMS`);
+    if (!block.includes('proxy_pass http://127.0.0.1:8002;')) {
+      throw new Error(`${file} public latest-index locations must proxy to the local web container`);
     }
     if (/onrender\.com|proxy_ssl_/.test(block)) {
       throw new Error(`${file} public latest-index locations must not retain the Render TLS upstream`);
