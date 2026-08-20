@@ -100,3 +100,12 @@ def test_corrupt_simulation_redis_aof_is_removed_before_single_retry(tmp_path: P
     assert "logs tbot-ls-e2e-redis" in commands
     assert "compose" in commands and " rm -sf redis" in commands
     assert "volume rm tbot-ls-e2e-redis-data" in commands
+
+
+def test_manager_cache_is_cleared_before_esp_boot_reads_base_config():
+    script = UP_SCRIPT.read_text(encoding="utf-8")
+
+    cache_clear = script.index("docker restart tbot-ls-e2e-web")
+    esp_start = script.index('echo "[up] starting ESP lesson server"')
+
+    assert cache_clear < esp_start

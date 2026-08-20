@@ -183,6 +183,11 @@ echo "[up] provisioning simulated device (backend / Postgres)"
 docker exec -i tbot-ls-e2e-pg psql -U tbot -d tbot -v ON_ERROR_STOP=1 \
   < "${HERE}/seed-sim-backend.sql"
 
+# manager-api caches the differentiated config it serves. Clear that cache after
+# seeding and before ESP boot, because the ESP process snapshots the manager's base
+# config at startup; restarting web afterwards leaves ESP holding stale handshake data.
+docker restart tbot-ls-e2e-web >/dev/null
+
 echo "[up] starting ESP lesson server"
 "${COMPOSE[@]}" up -d esp-server
 
@@ -203,11 +208,6 @@ if ! docker logs --since "${ESP_SINCE}" tbot-ls-e2e-esp 2>&1 | grep -qE "Websock
   docker logs --tail 30 tbot-ls-e2e-esp >&2
   exit 1
 fi
-
-# manager-api caches the differentiated config it serves, so a freshly seeded agent
-# (voice key, TTS model) is not visible to the ESP until the cache is dropped. This bit
-# already cost one session: a config rename "did not take" until `web` was restarted.
-docker restart tbot-ls-e2e-web >/dev/null
 
 echo "[up] ready"
 echo "  backend   http://127.0.0.1:3100/v1/health"
