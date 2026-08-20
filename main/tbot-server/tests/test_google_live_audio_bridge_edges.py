@@ -307,6 +307,18 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["continue_listening"])
         self.assertEqual(payload["listen_mode"], "manual")
 
+    async def test_normal_tts_stop_signals_lesson_prompt_device_drain(self):
+        conn = _Conn(websocket=_WebSocket())
+        conn.sentence_id = "sentence-1"
+        conn.audio_flow_control = {}
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        bridge = self.make_bridge(conn=conn)
+
+        await bridge._send_tts_message("stop")
+
+        self.assertTrue(conn.google_live_lesson_prompt_drained_event.is_set())
+        self.assertEqual(json.loads(conn.websocket.sent[-1])["state"], "stop")
+
     async def test_send_helpers_noop_and_emotion_dedup_edges(self):
         bridge = self.make_bridge(conn=_Conn(websocket=None))
 

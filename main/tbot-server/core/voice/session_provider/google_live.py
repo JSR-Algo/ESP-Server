@@ -2012,6 +2012,30 @@ class GoogleLiveProvider(VoiceSessionProvider):
             await asyncio.sleep(sleep_for)
             remaining -= sleep_for
 
+        drained_event = getattr(
+            self.conn, "google_live_lesson_prompt_drained_event", None
+        )
+        if (
+            drained_event is not None
+            and getattr(
+                self.conn, "google_live_lesson_prompt_audio_started", False
+            )
+        ):
+            try:
+                await asyncio.wait_for(
+                    drained_event.wait(),
+                    timeout=max(0.01, playback_timeout),
+                )
+                return True
+            except asyncio.TimeoutError:
+                self.conn.logger.bind(tag="GoogleLive").warning(
+                    with_lesson_log_context(
+                        "Google Live lesson_prompt_device_drain_timeout timeout_sec={:.1f}",
+                        self.conn,
+                    ),
+                    playback_timeout,
+                )
+
         rate_controller = getattr(self.conn, "audio_rate_controller", None)
         wait_until_empty = getattr(rate_controller, "wait_until_empty", None)
         queue_obj = getattr(rate_controller, "queue", None)
@@ -2389,6 +2413,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if allow_lesson_output:
                 self.conn.google_live_lesson_prompt_output_allowed = True
                 self.conn.google_live_lesson_prompt_output_inferred_idle = False
+                self.conn.google_live_lesson_prompt_audio_started = False
+                self.conn.google_live_lesson_prompt_drained_event = asyncio.Event()
                 self._lesson_prompt_output_last_activity_at = None
                 self._last_lesson_prompt_text = str(text or "").strip()
                 self._last_lesson_prompt_len = len(self._last_lesson_prompt_text)
@@ -4294,6 +4320,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type is not None:
             self._touch_live_activity()
+        if (
+            event_type == "audio_start"
+            and getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
+        ):
+            self.conn.google_live_lesson_prompt_audio_started = True
+            drained_event = getattr(
+                self.conn, "google_live_lesson_prompt_drained_event", None
+            )
+            if drained_event is not None:
+                drained_event.clear()
         if (
             getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
             and self._is_model_output_event(event_type, event)

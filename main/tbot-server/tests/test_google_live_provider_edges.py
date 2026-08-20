@@ -1157,6 +1157,44 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conn.google_live_lesson_prompt_output_allowed)
         self.assertLess(now, 1001.0)
 
+    async def test_lesson_prompt_guard_waits_for_normal_tts_stop_after_inferred_idle(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.google_live_lesson_prompt_output_allowed = True
+        conn.google_live_lesson_prompt_audio_started = True
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        provider = self.make_provider(conn)
+        provider._lesson_prompt_output_last_activity_at = time.monotonic() - 1.0
+
+        wait_task = asyncio.create_task(
+            provider._wait_for_lesson_prompt_output_idle(
+                {
+                    "lesson_prompt_output_poll_sec": 0.01,
+                    "lesson_prompt_output_guard_timeout_sec": 1.0,
+                    "lesson_prompt_inferred_idle_sec": 0.1,
+                    "lesson_prompt_playback_guard_timeout_sec": 1.0,
+                }
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertFalse(wait_task.done())
+
+        conn.google_live_lesson_prompt_drained_event.set()
+        self.assertTrue(await wait_task)
+
+    async def test_lesson_prompt_audio_start_clears_prior_segment_drain_signal(self):
+        conn = _Conn()
+        conn.google_live_lesson_prompt_output_allowed = True
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        conn.google_live_lesson_prompt_drained_event.set()
+        provider = self.make_provider(conn)
+
+        await provider._handle_live_event({"type": "audio_start"})
+
+        self.assertTrue(conn.google_live_lesson_prompt_audio_started)
+        self.assertFalse(conn.google_live_lesson_prompt_drained_event.is_set())
+
     async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
         conn = _Conn()
         conn.session_mode = SessionMode.LESSON
