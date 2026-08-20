@@ -470,9 +470,10 @@ async def run(args: argparse.Namespace) -> int:
 
                 seq += 1
                 ack = device_ack(frame, seq)
-                await client.send(json.dumps(ack))
                 # The server logs only a truncated '{"type":"lesson_ack"}', so the device
                 # serial is the sole record of which frame was acked and in what state.
+                # Stamp this at the send boundary: awaiting websocket.send() can yield
+                # long enough for the server to consume the ack and log its transition.
                 robot_state = (
                     ((frame.get("body") or {}).get("scene") or {}).get("robotOverlay") or {}
                 ).get("robotState") or "talking"
@@ -482,6 +483,7 @@ async def run(args: argparse.Namespace) -> int:
                     f"acks={frame.get('sequence')} seq={seq} rendered=true degraded=false "
                     f"robotState={robot_state}"
                 )
+                await client.send(json.dumps(ack))
 
                 # An interactive step blocks until the child answers. The runtime opens the
                 # response window when it processes our render ack, so the utterance has to

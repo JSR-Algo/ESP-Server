@@ -130,6 +130,15 @@ def test_simulator_advertises_and_emits_device_drain_ack_after_playback_evidence
     assert playback < ack
 
 
+def test_simulator_records_lesson_ack_at_send_boundary():
+    script = SIM_DEVICE.read_text(encoding="utf-8")
+
+    ack_log = script.index("serial TX lesson_ack {ftype}")
+    ack_send = script.index("await client.send(json.dumps(ack))")
+
+    assert ack_log < ack_send
+
+
 def test_timeline_merge_preserves_same_millisecond_drain_ack_causality(tmp_path: Path):
     server = tmp_path / "server.log"
     device = tmp_path / "device.log"
@@ -171,3 +180,45 @@ def test_timeline_merge_preserves_same_millisecond_drain_ack_causality(tmp_path:
 
     assert stop < playback < received < accepted < window
     assert playback < progress
+
+
+def test_timeline_merge_preserves_same_millisecond_lesson_start_ack_causality(
+    tmp_path: Path,
+):
+    server = tmp_path / "server.log"
+    device = tmp_path / "device.log"
+    merged = tmp_path / "merged.log"
+    server.write_text(
+        "260821 04:32:48.518[LessonRuntime]-INFO-emit lesson_start type=lesson_start sequence=2\n"
+        "260821 04:32:48.518[core.handle]-INFO-Received lesson_ack message\n"
+        "260821 04:32:48.518[LessonRuntime]-INFO-LessonRuntime event lesson_started\n",
+        encoding="utf-8",
+    )
+    device.write_text(
+        "2026-08-21 04:32:48.518 serial RX lesson_start seq=2\n"
+        "2026-08-21 04:32:48.518 serial TX lesson_ack lesson_start acks=2 seq=2\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            "python3",
+            str(MERGE_TIMELINE),
+            "--server-log",
+            str(server),
+            "--device-timeline",
+            str(device),
+            "--out",
+            str(merged),
+        ],
+        check=True,
+    )
+
+    lines = merged.read_text(encoding="utf-8").splitlines()
+    emit = next(i for i, line in enumerate(lines) if "emit lesson_start" in line)
+    received = next(i for i, line in enumerate(lines) if "serial RX lesson_start" in line)
+    sent = next(i for i, line in enumerate(lines) if "serial TX lesson_ack" in line)
+    accepted = next(i for i, line in enumerate(lines) if "Received lesson_ack" in line)
+    started = next(i for i, line in enumerate(lines) if "event lesson_started" in line)
+
+    assert emit < received < sent < accepted < started

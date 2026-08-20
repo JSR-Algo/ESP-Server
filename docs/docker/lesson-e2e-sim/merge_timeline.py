@@ -73,17 +73,21 @@ def _wire_sequence(line: str):
 
 def _same_millisecond_causal_phase(line: str) -> int:
     """Order the drain handshake when wall clocks collapse it to one millisecond."""
+    if "emit lesson_" in line:
+        return 5
     if "tts_stop_sent" in line:
         return 10
-    if "Audio playback complete" in line:
+    if "serial RX lesson_" in line or "Audio playback complete" in line:
         return 20
-    if "Received tts_ack message" in line:
+    if "serial TX lesson_ack" in line:
         return 30
-    if "lesson_prompt_device_drain_ack" in line:
+    if "Received lesson_ack message" in line or "Received tts_ack message" in line:
         return 40
-    if "lesson_child_response_window_open" in line:
+    if "lesson_prompt_device_drain_ack" in line:
         return 50
-    return 45
+    if "LessonRuntime event lesson_" in line or "lesson_child_response_window_open" in line:
+        return 60
+    return 55
 
 
 def read_stamped(path: Path, strip_prefix: bool) -> list[tuple[str, int, str]]:
