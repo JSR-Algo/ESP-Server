@@ -2043,9 +2043,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self.conn.google_live_lesson_prompt_drained_event = None
                     return False
             try:
+                drain_ack_timeout = max(0.01, playback_timeout + output_timeout)
                 await asyncio.wait_for(
                     drained_event.wait(),
-                    timeout=max(0.01, playback_timeout),
+                    timeout=drain_ack_timeout,
                 )
                 return True
             except asyncio.TimeoutError:
@@ -2054,7 +2055,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         "Google Live lesson_prompt_device_drain_timeout timeout_sec={:.1f}",
                         self.conn,
                     ),
-                    playback_timeout,
+                    drain_ack_timeout,
                 )
                 self.conn.google_live_lesson_prompt_drain_id = None
                 self.conn.google_live_lesson_prompt_stop_sent_event = None
