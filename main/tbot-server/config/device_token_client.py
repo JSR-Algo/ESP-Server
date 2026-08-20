@@ -38,6 +38,16 @@ def _secret():
     return os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
 
 
+def _cache_age_seconds(cached_at):
+    """Age a monotonic entry, with compatibility for pre-migration epoch entries."""
+    monotonic_age = time.monotonic() - cached_at
+    if monotonic_age < -_CACHE_TTL_S:
+        wall_age = time.time() - cached_at
+        if wall_age >= 0:
+            return wall_age
+    return monotonic_age
+
+
 def cached_device_uuid(mac):
     """Backend device UUID already minted for ``mac``, or None.
 
@@ -49,7 +59,7 @@ def cached_device_uuid(mac):
     entry = _cache.get(mac)
     if not entry:
         return None
-    if (time.monotonic() - entry[2]) > _CACHE_TTL_S:
+    if _cache_age_seconds(entry[2]) > _CACHE_TTL_S:
         return None
     return entry[0]
 
@@ -76,9 +86,8 @@ async def resolve_device_identity(client, base_url, mac, *, logger=None):
         _log(logger, "info", "mint skipped: TBOT_DEVICE_MINT_SECRET not set")
         return None, None
 
-    now = time.monotonic()
     cached = _cache.get(mac)
-    if cached is not None and (now - cached[2]) <= _CACHE_TTL_S:
+    if cached is not None and _cache_age_seconds(cached[2]) <= _CACHE_TTL_S:
         return cached[0], cached[1]
 
     url = base_url.rstrip("/") + "/internal/devices/mint-token"

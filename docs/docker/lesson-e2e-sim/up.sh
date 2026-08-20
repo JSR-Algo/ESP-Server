@@ -26,8 +26,11 @@ fi
 
 SIM_DEVICE_ID="${LESSON_SIM_DEVICE_ID:-14:c1:9f:d1:a8:48}"
 SIM_IMAGE="${TBOT_LESSON_SIM_ESP_IMAGE:-local/tbot-server:lesson-e2e-sim}"
-# Dependency layer only; application code is overlaid from this checkout below.
-BASE_IMAGE="${TBOT_SERVER_BASE_IMAGE:-local/tbot-server:main-dd48f39d-local-20260805}"
+BACKEND_IMAGE="${TBOT_LESSON_STUDIO_BACKEND_IMAGE:-local/tbot-backend:lesson-studio-e2e}"
+WEB_IMAGE="${TBOT_LESSON_STUDIO_WEB_IMAGE:-local/tbot-server-web:lesson-studio-e2e}"
+BASE_IMAGE_OVERRIDE="${TBOT_SERVER_BASE_IMAGE:-}"
+LOCAL_BASE_IMAGE="local/tbot-server-base:lesson-e2e-sim-$(git -C "${ESP_REPO}" rev-parse --short HEAD)"
+BASE_IMAGE="${BASE_IMAGE_OVERRIDE:-${LOCAL_BASE_IMAGE}}"
 
 export JWT_PUBLIC_KEY="${JWT_PUBLIC_KEY:-$(cat "${TBOT_ROOT}/tbot-backend/keys/dev-public.pem")}"
 export TBOT_DEVICE_MINT_SECRET="${TBOT_DEVICE_MINT_SECRET:-lab-mint-58b6712d872ccec8}"
@@ -40,21 +43,78 @@ export ROBOT_ESP_BASE_URL="${ROBOT_ESP_BASE_URL:-http://host.docker.internal:801
 export TBOT_BACKEND_WORKTREE="${TBOT_BACKEND_WORKTREE:-${TBOT_ROOT}/tbot-backend}"
 export TBOT_FIRMWARE_WORKTREE="${TBOT_FIRMWARE_WORKTREE:-${TBOT_ROOT}/robot/TBOT-Firmware}"
 export TBOT_LESSON_SIM_ESP_IMAGE="${SIM_IMAGE}"
+export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
+export TBOT_LESSON_STUDIO_WEB_IMAGE="${WEB_IMAGE}"
 export LESSON_SIM_DEVICE_ID="${SIM_DEVICE_ID}"
 
 COMPOSE=(docker compose
   -f "${DOCKER_DIR}/docker-compose.lesson-studio-e2e.yml"
   -f "${DOCKER_DIR}/docker-compose.lesson-e2e-sim.yml")
+RESOURCE_PREFIX="${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}"
+
+docker_build() {
+  local attempt
+  for attempt in 1 2 3; do
+    if docker build "$@"; then
+      return 0
+    fi
+    [[ "${attempt}" -lt 3 ]] || return 1
+    echo "[up] Docker build failed; retrying (${attempt}/3)" >&2
+    sleep 3
+  done
+}
+
+start_backend_tier() {
+  local redis_logs status
+  set +e
+  "${COMPOSE[@]}" up -d postgres redis mysql backend seed-postgres web seed-mysql
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    return 0
+  fi
+
+  redis_logs="$(docker logs "${RESOURCE_PREFIX}-redis" 2>&1 || true)"
+  if [[ "${redis_logs}" != *"Bad file format reading the append only file"* ]]; then
+    return "${status}"
+  fi
+
+  echo "[up] corrupted simulation Redis AOF detected; recreating only its local fixture volume" >&2
+  "${COMPOSE[@]}" rm -sf redis
+  docker volume rm "${RESOURCE_PREFIX}-redis-data"
+  "${COMPOSE[@]}" up -d postgres redis mysql backend seed-postgres web seed-mysql
+}
+
+if [[ "${1:-}" == "--rebuild" ]] || ! docker image inspect "${BACKEND_IMAGE}" >/dev/null 2>&1; then
+  echo "[up] building backend image ${BACKEND_IMAGE} from ${TBOT_BACKEND_WORKTREE}"
+  docker_build -q -f "${TBOT_BACKEND_WORKTREE}/Dockerfile" \
+    -t "${BACKEND_IMAGE}" "${TBOT_BACKEND_WORKTREE}" >/dev/null
+fi
+
+if [[ "${1:-}" == "--rebuild" ]] || ! docker image inspect "${WEB_IMAGE}" >/dev/null 2>&1; then
+  echo "[up] building manager web/API image ${WEB_IMAGE} from ${ESP_REPO}"
+  docker_build -q -f "${ESP_REPO}/Dockerfile-web" \
+    --build-arg "WEB_NODE_IMAGE=node:20" \
+    --build-arg "VUE_APP_NEST_AUTH_DISABLED=true" \
+    -t "${WEB_IMAGE}" "${ESP_REPO}" >/dev/null
+fi
 
 if [[ "${1:-}" == "--rebuild" ]] || ! docker image inspect "${SIM_IMAGE}" >/dev/null 2>&1; then
+  if [[ -z "${BASE_IMAGE_OVERRIDE}" ]]; then
+    echo "[up] building checkout-local dependency image ${BASE_IMAGE}"
+    docker_build -q -f "${ESP_REPO}/Dockerfile-server-base" \
+      --build-arg "REQUIREMENTS_FILE=main/tbot-server/requirements.txt" \
+      --build-arg "TBOT_FAST_GOOGLE_LIVE=1" \
+      -t "${BASE_IMAGE}" "${ESP_REPO}" >/dev/null
+  fi
   echo "[up] building ${SIM_IMAGE} from $(git -C "${ESP_REPO}" rev-parse --short HEAD)"
-  docker build -q -f "${ESP_REPO}/Dockerfile-server" \
+  docker_build -q -f "${ESP_REPO}/Dockerfile-server" \
     --build-arg "TBOT_SERVER_BASE_IMAGE=${BASE_IMAGE}" \
     -t "${SIM_IMAGE}" "${ESP_REPO}" >/dev/null
 fi
 
 echo "[up] starting backend tier"
-"${COMPOSE[@]}" up -d postgres redis mysql backend seed-postgres web seed-mysql
+start_backend_tier
 
 echo "[up] waiting for manager-api"
 until docker exec tbot-ls-e2e-mysql sh -lc \

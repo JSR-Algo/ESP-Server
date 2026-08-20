@@ -53,7 +53,3 @@ Results: checked-in example validated with 55 assignments; deployment-topology s
 ## Code Review
 
 Independent review of `a8072cab..9d2e5669` initially found two HIGH blockers: active server lookup assumed a fixed container name despite the scaled Compose service, and the env parser did not reject bare `$VAR` expansion. The follow-up resolves both with Compose-based multi-replica image discovery and fail-closed `$` handling outside single quotes. Focused re-review approved the delta with zero blocking findings; its local validation also reported 20 focused tests passed.
-
-## Production Status
-
-Not deployed. Physical and production mutation authority remains exclusively with H1. This branch is intended for post-H1 review and integration only.

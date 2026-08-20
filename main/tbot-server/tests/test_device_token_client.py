@@ -195,6 +195,22 @@ class DeviceTokenClientTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIsNone(device_token_client.cached_device_uuid("mac"))
 
+    async def test_cached_device_uuid_expires_legacy_wall_clock_entries(self):
+        device_token_client._cache.clear()
+        now = 1_800_000_000.0
+        device_token_client._cache["fresh"] = ("fresh-device", "jwt", now - 1)
+        device_token_client._cache["stale"] = (
+            "stale-device",
+            "jwt",
+            now - device_token_client._CACHE_TTL_S - 1,
+        )
+
+        with patch.object(device_token_client.time, "time", return_value=now), patch.object(
+            device_token_client.time, "monotonic", return_value=50_000.0
+        ):
+            self.assertEqual(device_token_client.cached_device_uuid("fresh"), "fresh-device")
+            self.assertIsNone(device_token_client.cached_device_uuid("stale"))
+
     async def test_missing_fields_and_post_failures_return_none_and_log_warning(self):
         logger = _Logger()
         device_token_client._cache.clear()
