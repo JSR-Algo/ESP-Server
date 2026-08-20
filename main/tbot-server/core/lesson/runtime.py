@@ -3320,8 +3320,7 @@ class LessonRuntime:
             return False
         if self._step_completed:
             return False
-        internal_probe = str(source or "") == "internal_dev_endpoint"
-        if not self._child_response_window_open and not internal_probe:
+        if not self._child_response_window_open:
             return False
         step_id = self._step_id
         step_seq = self._step_seq
@@ -4518,9 +4517,13 @@ class LessonRuntime:
             self._steps_completed += 1
         if not last_step:
             await self._emit_step()  # next step in manifest order
-        elif self._renderer_v2_enabled():
-            self._queue_completion_visual_then_stop()
         else:
+            drain = getattr(self.forwarder, "drain", None)
+            if callable(drain):
+                await drain()
+            if self._renderer_v2_enabled():
+                self._queue_completion_visual_then_stop()
+                return
             body: Dict[str, Any] = {"reason": "COMPLETED"}
             if self._renderer_v5_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {

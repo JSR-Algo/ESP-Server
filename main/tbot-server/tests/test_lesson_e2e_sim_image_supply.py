@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 UP_SCRIPT = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "up.sh"
+SIM_DEVICE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "sim_device.py"
 
 
 def _run_up_with_fake_docker(
@@ -109,3 +110,11 @@ def test_manager_cache_is_cleared_before_esp_boot_reads_base_config():
     esp_start = script.index('echo "[up] starting ESP lesson server"')
 
     assert cache_clear < esp_start
+
+
+def test_simulator_keeps_audio_bound_to_the_step_that_started_the_turn():
+    script = SIM_DEVICE.read_text(encoding="utf-8")
+
+    assert 'audio["step_id"] = current_step_id' in script
+    assert 'audio_step_id = audio.get("step_id")' in script
+    assert 'f"{prefix} step_started"' in script

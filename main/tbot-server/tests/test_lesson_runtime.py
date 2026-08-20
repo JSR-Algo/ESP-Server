@@ -682,6 +682,9 @@ class _FakeForwarder:
     async def aclose(self):
         self.closed = True
 
+    async def drain(self):
+        return None
+
 
 class _FailingChildResponseWindowProvider:
     def __init__(self):
@@ -5461,6 +5464,35 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(completed)
         self.assertEqual(completed[0]["events"][0]["summary"]["stepsCompleted"], 1)
+
+    async def test_final_progress_is_drained_before_lesson_stop(self):
+        events = []
+
+        class _OrderedSocket(_FakeWebSocket):
+            async def send(self, payload):
+                frame = json.loads(payload)
+                if frame.get("type") == "lesson_stop":
+                    events.append("lesson_stop")
+                await super().send(payload)
+
+        class _OrderedForwarder(_FakeForwarder):
+            async def drain(self):
+                events.append("drain")
+
+        conn = _FakeConn()
+        conn.websocket = _OrderedSocket()
+        rt = self._runtime(
+            conn=conn,
+            manifest=_build_steps_manifest([("s4", "greeting")]),
+            forwarder=_OrderedForwarder(),
+        )
+        await rt.start()
+        await rt.on_lesson_ack(_ack(1, 1))
+        await rt._preload_task
+        await rt.on_lesson_ack(_ack(2, 2))
+        await rt.on_lesson_ack(_ack(3, 3, step_id="s4"))
+
+        self.assertEqual(events, ["drain", "lesson_stop"])
 
     async def test_passive_dwell_reports_completion_once_after_dwell(self):
         conn = _FakeConn()

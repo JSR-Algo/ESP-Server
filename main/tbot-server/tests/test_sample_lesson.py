@@ -1364,14 +1364,14 @@ class InteractiveSampleSpeakingE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("barn", last_prompt)
         self.assertNotIn("chưa đúng", last_prompt)
 
-    async def test_internal_child_response_probe_can_drive_ready_interactive_step_when_voice_window_closed(self):
+    async def test_internal_child_response_probe_waits_for_voice_window(self):
         _conn, _provider, rt = await self._start_until_repeat_step()
         rt._child_response_window_open = False
 
         handled = await rt.on_child_response("barn", source="internal_dev_endpoint")
 
-        self.assertTrue(handled)
-        self.assertEqual(rt._step_id, "s4")
+        self.assertFalse(handled)
+        self.assertEqual(rt._step_id, "s3")
 
     async def test_retry_prompt_closes_child_window_until_reopened(self):
         conn = _RealProviderConn()
