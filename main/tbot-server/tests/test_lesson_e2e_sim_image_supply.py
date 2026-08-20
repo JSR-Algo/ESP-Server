@@ -118,3 +118,12 @@ def test_simulator_keeps_audio_bound_to_the_step_that_started_the_turn():
     assert 'audio["step_id"] = current_step_id' in script
     assert 'audio_step_id = audio.get("step_id")' in script
     assert 'f"{prefix} step_started"' in script
+
+
+def test_simulator_advertises_and_emits_device_drain_ack_after_playback_evidence():
+    script = SIM_DEVICE.read_text(encoding="utf-8")
+
+    assert '"lessonAudioDrainAck": True' in script
+    playback = script.index("serial Audio playback complete {context}")
+    ack = script.index('"type": "tts_ack"')
+    assert playback < ack

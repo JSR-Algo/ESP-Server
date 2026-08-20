@@ -94,3 +94,15 @@ class LessonErrorHandler(TextMessageHandler):
     @property
     def message_type(self) -> TextMessageType:
         return TextMessageType.LESSON_ERROR
+
+
+class TtsAckHandler(TextMessageHandler):
+    async def handle(self, conn, msg_json: Dict[str, Any]) -> None:
+        provider = getattr(conn, "voice_provider", None)
+        accept = getattr(provider, "accept_lesson_audio_drain_ack", None)
+        if callable(accept):
+            accept(msg_json)
+
+    @property
+    def message_type(self) -> TextMessageType:
+        return TextMessageType.TTS_ACK

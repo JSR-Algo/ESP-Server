@@ -1185,6 +1185,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_lesson_prompt_audio_start_clears_prior_segment_drain_signal(self):
         conn = _Conn()
+        conn.features = {"lessonAudioDrainAck": True}
         conn.google_live_lesson_prompt_output_allowed = True
         conn.google_live_lesson_prompt_drained_event = asyncio.Event()
         conn.google_live_lesson_prompt_drained_event.set()
@@ -1193,7 +1194,55 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await provider._handle_live_event({"type": "audio_start"})
 
         self.assertTrue(conn.google_live_lesson_prompt_audio_started)
+        self.assertEqual(conn.google_live_lesson_prompt_drain_id, "lesson-1")
         self.assertFalse(conn.google_live_lesson_prompt_drained_event.is_set())
+
+    async def test_matching_device_drain_ack_releases_prompt_wait_and_stale_ack_does_not(self):
+        conn = _Conn()
+        conn.google_live_lesson_prompt_drain_id = "drain-9"
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        provider = self.make_provider(conn)
+
+        self.assertFalse(
+            provider.accept_lesson_audio_drain_ack(
+                {"type": "tts_ack", "state": "stop", "drainId": "drain-old"}
+            )
+        )
+        self.assertFalse(conn.google_live_lesson_prompt_drained_event.is_set())
+        self.assertTrue(
+            provider.accept_lesson_audio_drain_ack(
+                {"type": "tts_ack", "state": "stop", "drainId": "drain-9"}
+            )
+        )
+        self.assertTrue(conn.google_live_lesson_prompt_drained_event.is_set())
+
+    async def test_ack_capable_peer_does_not_fall_back_when_device_drain_ack_times_out(self):
+        conn = _Conn()
+        conn.google_live_lesson_prompt_output_allowed = False
+        conn.google_live_lesson_prompt_audio_started = True
+        conn.google_live_lesson_prompt_drain_id = "drain-10"
+        conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+        conn.audio_rate_controller = SimpleNamespace(
+            queue=[],
+            pending_send_task=None,
+            wait_until_empty=AsyncMock(),
+        )
+        provider = self.make_provider(conn)
+
+        result = await provider._wait_for_lesson_prompt_output_idle(
+            {
+                "lesson_prompt_playback_guard_timeout_sec": 0.01,
+                "lesson_prompt_playback_tail_sec": 0,
+            }
+        )
+
+        self.assertFalse(result)
+        conn.audio_rate_controller.wait_until_empty.assert_not_awaited()
+        self.assertFalse(
+            provider.accept_lesson_audio_drain_ack(
+                {"type": "tts_ack", "state": "stop", "drainId": "drain-10"}
+            )
+        )
 
     async def test_lesson_child_transcript_routes_while_runtime_window_is_open_after_audio_timeout(self):
         conn = _Conn()

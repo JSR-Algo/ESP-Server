@@ -1034,6 +1034,7 @@ class ConnectionHandler:
             "lesson_ack",
             "lesson_progress",
             "lesson_error",
+            "tts_ack",
         }
 
     def _is_abort_message(self, message):

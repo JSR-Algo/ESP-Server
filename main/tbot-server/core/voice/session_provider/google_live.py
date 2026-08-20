@@ -2035,6 +2035,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     ),
                     playback_timeout,
                 )
+                self.conn.google_live_lesson_prompt_drain_id = None
+                self.conn.google_live_lesson_prompt_drained_event = None
+                return False
 
         rate_controller = getattr(self.conn, "audio_rate_controller", None)
         wait_until_empty = getattr(rate_controller, "wait_until_empty", None)
@@ -2064,6 +2067,34 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 playback_timeout,
                 queue_len,
             )
+        return True
+
+    def accept_lesson_audio_drain_ack(self, message):
+        if not isinstance(message, Mapping):
+            return False
+        if message.get("type") != "tts_ack" or message.get("state") != "stop":
+            return False
+        drain_id = message.get("drainId")
+        expected = getattr(self.conn, "google_live_lesson_prompt_drain_id", None)
+        drained_event = getattr(
+            self.conn, "google_live_lesson_prompt_drained_event", None
+        )
+        if (
+            not isinstance(drain_id, str)
+            or not drain_id
+            or drain_id != expected
+            or drained_event is None
+            or drained_event.is_set()
+        ):
+            return False
+        drained_event.set()
+        self.conn.logger.bind(tag="GoogleLive").info(
+            with_lesson_log_context(
+                "Google Live lesson_prompt_device_drain_ack drain_id={}",
+                self.conn,
+            ),
+            drain_id,
+        )
         return True
 
     @staticmethod
@@ -2414,7 +2445,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.google_live_lesson_prompt_output_allowed = True
                 self.conn.google_live_lesson_prompt_output_inferred_idle = False
                 self.conn.google_live_lesson_prompt_audio_started = False
-                self.conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+                features = getattr(self.conn, "features", None) or {}
+                if bool(features.get("lessonAudioDrainAck")):
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_drained_event = asyncio.Event()
+                else:
+                    self.conn.google_live_lesson_prompt_drain_id = None
+                    self.conn.google_live_lesson_prompt_drained_event = None
                 self._lesson_prompt_output_last_activity_at = None
                 self._last_lesson_prompt_text = str(text or "").strip()
                 self._last_lesson_prompt_len = len(self._last_lesson_prompt_text)
@@ -4325,6 +4362,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
         ):
             self.conn.google_live_lesson_prompt_audio_started = True
+            if bool((getattr(self.conn, "features", None) or {}).get("lessonAudioDrainAck")):
+                generation = int(
+                    getattr(
+                        self.conn,
+                        "google_live_lesson_prompt_drain_generation",
+                        0,
+                    )
+                    or 0
+                ) + 1
+                self.conn.google_live_lesson_prompt_drain_generation = generation
+                self.conn.google_live_lesson_prompt_drain_id = f"lesson-{generation}"
             drained_event = getattr(
                 self.conn, "google_live_lesson_prompt_drained_event", None
             )

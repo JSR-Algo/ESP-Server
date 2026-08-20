@@ -312,7 +312,12 @@ async def run(args: argparse.Namespace) -> int:
                     "channels": 1,
                     "frame_duration": 60,
                 },
-                "features": {"lesson": True, "renderer": RENDERER, "mcp": False},
+                "features": {
+                    "lesson": True,
+                    "renderer": RENDERER,
+                    "mcp": False,
+                    "lessonAudioDrainAck": True,
+                },
             }
             await client.send(json.dumps(hello))
 
@@ -417,6 +422,17 @@ async def run(args: argparse.Namespace) -> int:
                             waiter = prompt_done.get(audio_step_id or "")
                             if waiter is not None:
                                 waiter.set()
+                        drain_id = frame.get("drainId")
+                        if isinstance(drain_id, str) and drain_id:
+                            await client.send(
+                                json.dumps(
+                                    {
+                                        "type": "tts_ack",
+                                        "state": "stop",
+                                        "drainId": drain_id,
+                                    }
+                                )
+                            )
                         audio.update(chunks=0, bytes=0, step_id=None)
                     continue
 

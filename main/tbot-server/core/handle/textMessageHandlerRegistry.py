@@ -12,6 +12,7 @@ from core.handle.textHandler.lessonMessageHandler import (
     LessonAckHandler,
     LessonProgressHandler,
     LessonErrorHandler,
+    TtsAckHandler,
 )
 
 TAG = __name__
@@ -38,6 +39,7 @@ class TextMessageHandlerRegistry:
             LessonAckHandler(),
             LessonProgressHandler(),
             LessonErrorHandler(),
+            TtsAckHandler(),
         ]
 
         for handler in handlers:
